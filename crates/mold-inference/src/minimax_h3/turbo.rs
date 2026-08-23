@@ -302,6 +302,7 @@ pub(crate) fn load_reviewed_turbo_runtime(
     models_root: &std::path::Path,
     device: &candle_core::Device,
     dtype: candle_core::DType,
+    cancellation: std::sync::Arc<dyn mold_candle::minimax_h3::H3ComfyInt8Cancellation>,
 ) -> Result<H3TurboLoraRuntime> {
     let tier = parse_turbo_tier(authority.tier_stable_id())?;
     // Re-resolve the selection with the same rule admission used, keyed by the
@@ -356,14 +357,26 @@ pub(crate) fn load_reviewed_turbo_runtime(
             reviewed.video_shift
         )
     }
-    let runtime = H3TurboLoraRuntime::open(&path, tier, device, dtype, &H3ComfyNeverCancel)
-        .map_err(|error| anyhow!("{error}"))?;
+    let runtime = if device.is_metal() {
+        H3TurboLoraRuntime::open_metal_streamed(&path, tier, device, dtype, cancellation)
+    } else {
+        H3TurboLoraRuntime::open(&path, tier, device, dtype, cancellation.as_ref())
+    }
+    .map_err(|error| anyhow!("{error}"))?;
     if runtime.adapter_identity_sha256() != authority.adapter_identity_sha256()
         || runtime.content_sha256() != authority.adapter_content_sha256()
     {
         bail!("MiniMax H3 Turbo adapter changed between admission and transformer load")
     }
-    if runtime.device_bytes() != authority.resident_device_bytes()
+    let resident_cost_matches = if runtime.is_metal_streamed() {
+        runtime
+            .device_bytes()
+            .checked_add(runtime.streamed_main_block_device_bytes())
+            .is_some_and(|peak| peak <= authority.resident_device_bytes())
+    } else {
+        runtime.device_bytes() == authority.resident_device_bytes()
+    };
+    if !resident_cost_matches
         || runtime.device_staging_peak_bytes() != authority.device_staging_peak_bytes()
         || runtime.host_staging_peak_bytes() != authority.host_staging_peak_bytes()
     {

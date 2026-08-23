@@ -43,15 +43,10 @@
 //!
 //! # Residency
 //!
-//! Every delta is loaded to the execution device once at transformer
-//! construction and stays resident for the whole denoise. That is a
-//! deliberate choice over streaming the per-block slice alongside block
-//! streaming: the whole adapter is 1,956,118,528 bytes of BF16 (see
-//! [`H3TurboLoraRuntime::device_bytes`]), roughly a tenth of the 20.97 GB
-//! INT8 stack, while streaming it would add ~1.96 GB of host-to-device
-//! traffic on *every* transformer evaluation and would have to interleave
-//! with the "exactly one live main block" invariant. Residency costs a fixed
-//! ~1.82 GiB and keeps the streaming contract untouched.
+//! CUDA loads every delta once and keeps the 1,956,118,528-byte adapter
+//! resident. Metal shares memory with the host, so its correctness route keeps
+//! only the 75,235,328-byte token-refiner slice resident and reads one main-
+//! block slice through the same one-live-block lifetime as the INT8 base.
 //!
 //! Nothing here registers an inference engine, capability, catalog entry, or
 //! download.
@@ -60,10 +55,11 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use candle::{DType, Device, DeviceLocation, Tensor};
 
-use super::comfy_dit::{H3ComfyInt8Cancellation, FILE_READ_CHUNK_BYTES};
+use super::comfy_dit::{H3ComfyInt8Cancellation, H3OpenedFileIdentity, FILE_READ_CHUNK_BYTES};
 use super::turbo_lora::{
     authenticate_h3_turbo_lora_adapter_retaining, H3TurboLoraContract, H3TurboLoraError,
     H3TurboLoraErrorCode, H3TurboLoraExpectation, H3TurboLoraModule, H3TurboLoraModuleKind,
@@ -321,19 +317,54 @@ pub(super) fn validate_turbo_block_shapes(
     Ok(())
 }
 
-/// Every Turbo delta of one authenticated adapter, resident on the execution
-/// device for the whole denoise.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
+enum H3TurboMainBlocks {
+    Resident(Vec<H3TurboBlockDeltas>),
+    MetalStreamed(H3TurboMainBlockStream),
+}
+
+struct H3TurboMainBlockStream {
+    modules: Vec<[H3TurboLoraModule; 4]>,
+    data_start: u64,
+    device: Device,
+    dtype: DType,
+    cancellation: Arc<dyn H3ComfyInt8Cancellation>,
+    identity: H3OpenedFileIdentity,
+    state: Mutex<H3TurboMainBlockStreamState>,
+}
+
+#[derive(Debug)]
+struct H3TurboMainBlockStreamState {
+    file: File,
+}
+
+impl std::fmt::Debug for H3TurboMainBlockStream {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("H3TurboMainBlockStream")
+            .field("modules", &self.modules.len())
+            .field("data_start", &self.data_start)
+            .field("device", &self.device)
+            .field("dtype", &self.dtype)
+            .field("identity", &self.identity)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Authenticated Turbo deltas. CUDA keeps every block resident; Metal keeps
+/// token refiners resident and streams exactly one main-block slice at a time.
+#[derive(Debug)]
 pub struct H3TurboLoraRuntime {
     tier: H3TurboLoraTier,
     adapter_identity_sha256: String,
     content_sha256: String,
     scale: f32,
-    main_blocks: Vec<H3TurboBlockDeltas>,
+    main_blocks: H3TurboMainBlocks,
     token_refiner_blocks: Vec<H3TurboBlockDeltas>,
     device_bytes: u64,
     device_staging_peak_bytes: u64,
     host_staging_peak_bytes: u64,
+    streamed_main_block_device_bytes: u64,
 }
 
 impl H3TurboLoraRuntime {
@@ -357,7 +388,10 @@ impl H3TurboLoraRuntime {
     }
 
     pub fn block_count(&self) -> usize {
-        self.main_blocks.len()
+        match &self.main_blocks {
+            H3TurboMainBlocks::Resident(blocks) => blocks.len(),
+            H3TurboMainBlocks::MetalStreamed(stream) => stream.modules.len(),
+        }
     }
 
     pub fn token_refiner_block_count(&self) -> usize {
@@ -365,7 +399,24 @@ impl H3TurboLoraRuntime {
     }
 
     pub fn main_block(&self, index: usize) -> Option<&H3TurboBlockDeltas> {
-        self.main_blocks.get(index)
+        match &self.main_blocks {
+            H3TurboMainBlocks::Resident(blocks) => blocks.get(index),
+            H3TurboMainBlocks::MetalStreamed(_) => None,
+        }
+    }
+
+    /// Resolve one main-block slice. CUDA clones resident tensor handles;
+    /// Metal reads the exact authenticated block from its retained descriptor.
+    pub fn load_main_block(&self, index: usize) -> H3TurboLoraResult<H3TurboBlockDeltas> {
+        match &self.main_blocks {
+            H3TurboMainBlocks::Resident(blocks) => blocks.get(index).cloned().ok_or_else(|| {
+                failure(
+                    H3TurboLoraErrorCode::MissingModule,
+                    format!("MiniMax H3 Turbo adapter has no main block {index}"),
+                )
+            }),
+            H3TurboMainBlocks::MetalStreamed(stream) => stream.load_block(index),
+        }
     }
 
     pub fn token_refiner_block(&self, index: usize) -> Option<&H3TurboBlockDeltas> {
@@ -410,6 +461,15 @@ impl H3TurboLoraRuntime {
     /// Nothing else is staged, and the buffer is released per tensor.
     pub const fn host_staging_peak_bytes(&self) -> u64 {
         self.host_staging_peak_bytes
+    }
+
+    /// One streamed Metal main-block slice. Zero on the resident CUDA route.
+    pub const fn streamed_main_block_device_bytes(&self) -> u64 {
+        self.streamed_main_block_device_bytes
+    }
+
+    pub const fn is_metal_streamed(&self) -> bool {
+        matches!(&self.main_blocks, H3TurboMainBlocks::MetalStreamed(_))
     }
 
     /// Build from an authenticated contract plus the descriptor the digest was
@@ -483,7 +543,7 @@ impl H3TurboLoraRuntime {
             adapter_identity_sha256: contract.adapter_identity_sha256().to_owned(),
             content_sha256: contract.content_sha256().to_owned(),
             scale: inspection.scale,
-            main_blocks: collect_contiguous_blocks(main, "main")?,
+            main_blocks: H3TurboMainBlocks::Resident(collect_contiguous_blocks(main, "main")?),
             token_refiner_blocks: collect_contiguous_blocks(refiner, "token refiner")?,
             device_bytes,
             device_staging_peak_bytes: widest_module_bytes,
@@ -493,6 +553,154 @@ impl H3TurboLoraRuntime {
                     "H3 Turbo host staging byte count overflows",
                 )
             })?,
+            streamed_main_block_device_bytes: 0,
+        })
+    }
+
+    /// Metal-only constructor retaining the authenticated descriptor and only
+    /// the two token-refiner adapter blocks on the execution device.
+    pub fn open_metal_streamed(
+        path: &Path,
+        tier: H3TurboLoraTier,
+        device: &Device,
+        dtype: DType,
+        cancellation: Arc<dyn H3ComfyInt8Cancellation>,
+    ) -> H3TurboLoraResult<Self> {
+        Self::open_metal_streamed_against(
+            path,
+            &tier.expectation(),
+            tier,
+            device,
+            dtype,
+            cancellation,
+        )
+    }
+
+    fn open_metal_streamed_against(
+        path: &Path,
+        expectation: &H3TurboLoraExpectation,
+        tier: H3TurboLoraTier,
+        device: &Device,
+        dtype: DType,
+        cancellation: Arc<dyn H3ComfyInt8Cancellation>,
+    ) -> H3TurboLoraResult<Self> {
+        if !device.is_metal() {
+            return Err(failure(
+                H3TurboLoraErrorCode::ConfigMismatch,
+                "MiniMax H3 streamed Turbo adapters are Metal-only",
+            ));
+        }
+        let (contract, mut file) = authenticate_h3_turbo_lora_adapter_retaining(
+            path,
+            expectation,
+            tier,
+            cancellation.as_ref(),
+        )?;
+        disable_file_cache_on_macos(&file)?;
+        let identity = H3OpenedFileIdentity::from_metadata(
+            &file
+                .metadata()
+                .map_err(|error| failure(H3TurboLoraErrorCode::Io, error.to_string()))?,
+        );
+        let inspection = contract.inspection();
+        let data_start = 8u64.checked_add(inspection.header_len).ok_or_else(|| {
+            failure(
+                H3TurboLoraErrorCode::InvalidHeader,
+                "H3 Turbo adapter data offset overflows",
+            )
+        })?;
+        let mut refiner = BTreeMap::new();
+        let mut token_refiner_device_bytes = 0u64;
+        for module in inspection
+            .modules
+            .values()
+            .filter(|module| matches!(module.scope, H3TurboLoraModuleScope::TokenRefinerBlock(_)))
+        {
+            cancellation_boundary(cancellation.as_ref())?;
+            let delta = load_module_delta(
+                module,
+                &mut file,
+                data_start,
+                device,
+                dtype,
+                cancellation.as_ref(),
+            )?;
+            token_refiner_device_bytes = token_refiner_device_bytes
+                .checked_add(delta.device_bytes())
+                .ok_or_else(|| {
+                    failure(
+                        H3TurboLoraErrorCode::ConfigMismatch,
+                        "H3 Turbo token-refiner byte count overflows",
+                    )
+                })?;
+            let H3TurboLoraModuleScope::TokenRefinerBlock(index) = module.scope else {
+                unreachable!("filter retains token-refiner modules only")
+            };
+            if refiner
+                .entry(index)
+                .or_insert_with(BTreeMap::new)
+                .insert(module.kind, delta)
+                .is_some()
+            {
+                return Err(failure(
+                    H3TurboLoraErrorCode::ConfigMismatch,
+                    format!("H3 Turbo module {:?} was resolved twice", module.name),
+                ));
+            }
+        }
+        let modules = collect_streamed_main_modules(inspection)?;
+        let mut streamed_main_block_device_bytes = 0u64;
+        for block in &modules {
+            let block_bytes = block.iter().try_fold(0u64, |total, module| {
+                total
+                    .checked_add(module_delta_device_bytes(module, dtype)?)
+                    .ok_or_else(|| {
+                        failure(
+                            H3TurboLoraErrorCode::ConfigMismatch,
+                            "H3 Turbo streamed block byte count overflows",
+                        )
+                    })
+            })?;
+            streamed_main_block_device_bytes = streamed_main_block_device_bytes.max(block_bytes);
+        }
+        let widest_matrix_bytes = inspection
+            .modules
+            .values()
+            .flat_map(|module| [&module.lora_a, &module.lora_b])
+            .map(tensor_ref_bytes)
+            .max()
+            .unwrap_or(0);
+        let widest_module_bytes = inspection
+            .modules
+            .values()
+            .map(module_delta_bytes)
+            .max()
+            .unwrap_or(0);
+        verify_opened_file_identity(&file, &identity)?;
+        Ok(Self {
+            tier: contract.tier(),
+            adapter_identity_sha256: contract.adapter_identity_sha256().to_owned(),
+            content_sha256: contract.content_sha256().to_owned(),
+            scale: inspection.scale,
+            main_blocks: H3TurboMainBlocks::MetalStreamed(H3TurboMainBlockStream {
+                modules,
+                data_start,
+                device: device.clone(),
+                dtype,
+                cancellation,
+                identity,
+                state: Mutex::new(H3TurboMainBlockStreamState { file }),
+            }),
+            token_refiner_blocks: collect_contiguous_blocks(refiner, "token refiner")?,
+            device_bytes: token_refiner_device_bytes,
+            device_staging_peak_bytes: widest_module_bytes,
+            host_staging_peak_bytes: widest_matrix_bytes.checked_mul(2).ok_or_else(|| {
+                failure(
+                    H3TurboLoraErrorCode::ConfigMismatch,
+                    "H3 Turbo host staging byte count overflows",
+                )
+            })?,
+            streamed_main_block_device_bytes,
         })
     }
 
@@ -525,6 +733,155 @@ impl H3TurboLoraRuntime {
     }
 }
 
+impl H3TurboMainBlockStream {
+    fn load_block(&self, index: usize) -> H3TurboLoraResult<H3TurboBlockDeltas> {
+        cancellation_boundary(self.cancellation.as_ref())?;
+        let modules = self.modules.get(index).ok_or_else(|| {
+            failure(
+                H3TurboLoraErrorCode::MissingModule,
+                format!("MiniMax H3 Turbo adapter has no main block {index}"),
+            )
+        })?;
+        let mut state = self.state.lock().map_err(|_| {
+            failure(
+                H3TurboLoraErrorCode::Io,
+                "H3 Turbo stream lock was poisoned",
+            )
+        })?;
+        verify_opened_file_identity(&state.file, &self.identity)?;
+        let mut deltas = BTreeMap::new();
+        for module in modules {
+            cancellation_boundary(self.cancellation.as_ref())?;
+            let delta = load_module_delta(
+                module,
+                &mut state.file,
+                self.data_start,
+                &self.device,
+                self.dtype,
+                self.cancellation.as_ref(),
+            )?;
+            if deltas.insert(module.kind, delta).is_some() {
+                return Err(failure(
+                    H3TurboLoraErrorCode::ConfigMismatch,
+                    format!("H3 Turbo module {:?} was resolved twice", module.name),
+                ));
+            }
+        }
+        verify_opened_file_identity(&state.file, &self.identity)?;
+        collect_one_block_deltas(index, deltas, "streamed main")
+    }
+}
+
+fn collect_streamed_main_modules(
+    inspection: &super::turbo_lora::H3TurboLoraInspection,
+) -> H3TurboLoraResult<Vec<[H3TurboLoraModule; 4]>> {
+    let mut blocks = BTreeMap::<usize, BTreeMap<H3TurboLoraModuleKind, H3TurboLoraModule>>::new();
+    for module in inspection
+        .modules
+        .values()
+        .filter(|module| matches!(module.scope, H3TurboLoraModuleScope::MainBlock(_)))
+    {
+        let H3TurboLoraModuleScope::MainBlock(index) = module.scope else {
+            unreachable!("filter retains main-block modules only")
+        };
+        if blocks
+            .entry(index)
+            .or_default()
+            .insert(module.kind, module.clone())
+            .is_some()
+        {
+            return Err(failure(
+                H3TurboLoraErrorCode::ConfigMismatch,
+                format!("H3 Turbo module {:?} was indexed twice", module.name),
+            ));
+        }
+    }
+    let mut resolved = Vec::with_capacity(blocks.len());
+    for (expected, (index, mut modules)) in blocks.into_iter().enumerate() {
+        if index != expected {
+            return Err(failure(
+                H3TurboLoraErrorCode::MissingModule,
+                "H3 Turbo streamed main-block indices are not contiguous from zero",
+            ));
+        }
+        let mut take = |kind| {
+            modules.remove(&kind).ok_or_else(|| {
+                failure(
+                    H3TurboLoraErrorCode::MissingModule,
+                    format!("H3 Turbo streamed main block {index} is missing {kind:?}"),
+                )
+            })
+        };
+        resolved.push([
+            take(H3TurboLoraModuleKind::AttnQkvProj)?,
+            take(H3TurboLoraModuleKind::AttnOutProj)?,
+            take(H3TurboLoraModuleKind::MlpFc1)?,
+            take(H3TurboLoraModuleKind::MlpFc2)?,
+        ]);
+    }
+    Ok(resolved)
+}
+
+fn tensor_ref_bytes(reference: &H3TurboLoraTensorRef) -> u64 {
+    reference.data_offsets[1] - reference.data_offsets[0]
+}
+
+fn module_delta_bytes(module: &H3TurboLoraModule) -> u64 {
+    tensor_ref_bytes(&module.lora_a) + tensor_ref_bytes(&module.lora_b)
+}
+
+fn module_delta_device_bytes(module: &H3TurboLoraModule, dtype: DType) -> H3TurboLoraResult<u64> {
+    module_delta_bytes(module)
+        .checked_div(2)
+        .and_then(|elements| elements.checked_mul(dtype.size_in_bytes() as u64))
+        .ok_or_else(|| {
+            failure(
+                H3TurboLoraErrorCode::ConfigMismatch,
+                "H3 Turbo streamed module byte count overflows",
+            )
+        })
+}
+
+fn verify_opened_file_identity(
+    file: &File,
+    expected: &H3OpenedFileIdentity,
+) -> H3TurboLoraResult<()> {
+    let actual = H3OpenedFileIdentity::from_metadata(
+        &file
+            .metadata()
+            .map_err(|error| failure(H3TurboLoraErrorCode::Io, error.to_string()))?,
+    );
+    if &actual != expected {
+        return Err(failure(
+            H3TurboLoraErrorCode::FileIdentityChanged,
+            "opened H3 Turbo adapter changed during streamed execution",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn disable_file_cache_on_macos(file: &File) -> H3TurboLoraResult<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: F_NOCACHE reads the descriptor and integer enable flag only.
+    let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1) };
+    if result == -1 {
+        return Err(failure(
+            H3TurboLoraErrorCode::Io,
+            format!(
+                "failed to disable caching for streamed H3 Turbo adapter: {}",
+                std::io::Error::last_os_error()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn disable_file_cache_on_macos(_file: &File) -> H3TurboLoraResult<()> {
+    Ok(())
+}
+
 fn cancellation_boundary(cancellation: &dyn H3ComfyInt8Cancellation) -> H3TurboLoraResult<()> {
     if cancellation.is_cancelled() {
         return Err(failure(
@@ -540,29 +897,37 @@ fn collect_contiguous_blocks(
     label: &str,
 ) -> H3TurboLoraResult<Vec<H3TurboBlockDeltas>> {
     let mut resolved = Vec::with_capacity(blocks.len());
-    for (expected_index, (index, mut kinds)) in blocks.into_iter().enumerate() {
+    for (expected_index, (index, kinds)) in blocks.into_iter().enumerate() {
         if index != expected_index {
             return Err(failure(
                 H3TurboLoraErrorCode::MissingModule,
                 format!("H3 Turbo {label} block indices are not contiguous from zero"),
             ));
         }
-        let mut take = |kind: H3TurboLoraModuleKind| -> H3TurboLoraResult<H3TurboLoraDelta> {
-            kinds.remove(&kind).ok_or_else(|| {
-                failure(
-                    H3TurboLoraErrorCode::MissingModule,
-                    format!("H3 Turbo {label} block {index} is missing {:?}", kind),
-                )
-            })
-        };
-        resolved.push(H3TurboBlockDeltas {
-            qkv: take(H3TurboLoraModuleKind::AttnQkvProj)?,
-            out: take(H3TurboLoraModuleKind::AttnOutProj)?,
-            fc1: take(H3TurboLoraModuleKind::MlpFc1)?,
-            fc2: take(H3TurboLoraModuleKind::MlpFc2)?,
-        });
+        resolved.push(collect_one_block_deltas(index, kinds, label)?);
     }
     Ok(resolved)
+}
+
+fn collect_one_block_deltas(
+    index: usize,
+    mut kinds: BTreeMap<H3TurboLoraModuleKind, H3TurboLoraDelta>,
+    label: &str,
+) -> H3TurboLoraResult<H3TurboBlockDeltas> {
+    let mut take = |kind: H3TurboLoraModuleKind| -> H3TurboLoraResult<H3TurboLoraDelta> {
+        kinds.remove(&kind).ok_or_else(|| {
+            failure(
+                H3TurboLoraErrorCode::MissingModule,
+                format!("H3 Turbo {label} block {index} is missing {kind:?}"),
+            )
+        })
+    };
+    Ok(H3TurboBlockDeltas {
+        qkv: take(H3TurboLoraModuleKind::AttnQkvProj)?,
+        out: take(H3TurboLoraModuleKind::AttnOutProj)?,
+        fc1: take(H3TurboLoraModuleKind::MlpFc1)?,
+        fc2: take(H3TurboLoraModuleKind::MlpFc2)?,
+    })
 }
 
 fn load_module_delta(
@@ -1027,6 +1392,65 @@ mod tests {
                 assert!((value - want).abs() < 1e-5, "{value} vs {want}");
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_streams_one_authenticated_main_block_and_keeps_refiners_resident() {
+        let (_directory, path, pinned) = fixtures::pinned();
+        let device = Device::new_metal(0).unwrap();
+        let runtime = H3TurboLoraRuntime::open_metal_streamed_against(
+            &path,
+            &pinned,
+            H3TurboLoraTier::Fl2v8StepV10,
+            &device,
+            DType::F32,
+            Arc::new(H3ComfyNeverCancel),
+        )
+        .unwrap();
+
+        assert!(runtime.is_metal_streamed());
+        assert_eq!(runtime.block_count(), 2);
+        assert_eq!(runtime.token_refiner_block_count(), 1);
+        assert!(runtime.main_block(0).is_none());
+        assert_eq!(
+            runtime.device_bytes(),
+            runtime.token_refiner_block(0).unwrap().device_bytes()
+        );
+
+        let block = runtime.load_main_block(1).unwrap();
+        assert_eq!(
+            block.device_bytes(),
+            runtime.streamed_main_block_device_bytes()
+        );
+        let x = ramp(3, 256, 77, &device);
+        let observed = block
+            .fc2
+            .delta(&x)
+            .unwrap()
+            .to_device(&Device::Cpu)
+            .unwrap();
+        let name = "diffusion_model.blocks.1.mlp.fc2";
+        let down = expected_matrix(&format!("{name}.lora_A.weight"), 4, 256);
+        let up = expected_matrix(&format!("{name}.lora_B.weight"), 256, 4);
+        let reference = H3TurboLoraDelta::new(&down, &up, 0.0625).unwrap();
+        let expected = reference
+            .delta(&x.to_device(&Device::Cpu).unwrap())
+            .unwrap();
+        let observed = observed.to_vec2::<f32>().unwrap();
+        let expected = expected.to_vec2::<f32>().unwrap();
+        for (row, expected_row) in observed.iter().zip(expected.iter()) {
+            for (value, want) in row.iter().zip(expected_row.iter()) {
+                assert!((value - want).abs() < 1e-4, "{value} vs {want}");
+            }
+        }
+
+        // Random access remains valid after a completed block so a base-block
+        // construction failure can retry without desynchronizing the adapter.
+        assert_eq!(
+            runtime.load_main_block(0).unwrap().device_bytes(),
+            runtime.streamed_main_block_device_bytes()
+        );
     }
 
     #[test]

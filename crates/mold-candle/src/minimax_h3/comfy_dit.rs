@@ -1661,18 +1661,13 @@ impl H3ComfyInt8BlockLoader {
             out: linear("attn.out_proj")?,
             fc1: linear("mlp.fc1")?,
             fc2: linear("mlp.fc2")?,
-            // The adapter is device-resident for the whole denoise, so the
-            // streamed block only clones four handles here; the one-live-block
-            // invariant is untouched.
             turbo: self
                 .turbo
                 .as_ref()
                 .map(|turbo| {
-                    turbo.main_block(index).cloned().ok_or_else(|| {
-                        candle::Error::Msg(format!(
-                            "MiniMax H3 Turbo adapter has no delta for main block {index}"
-                        ))
-                    })
+                    turbo
+                        .load_main_block(index)
+                        .map_err(|error| candle::Error::Msg(error.to_string()))
                 })
                 .transpose()?,
         };

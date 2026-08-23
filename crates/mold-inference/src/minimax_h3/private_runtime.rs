@@ -657,6 +657,7 @@ pub(crate) fn load_and_pair_private_comfy_stream(
     // The adapter's deltas become device-resident here, inside the phase whose
     // budget charges `turbo_adapter_device_bytes`. Loading it at admission
     // instead would hold ~1.82 GiB across every earlier phase for nothing.
+    let cancellation_for_candle: Arc<dyn H3ComfyInt8Cancellation> = Arc::new(cancellation.clone());
     let turbo_runtime = turbo
         .as_ref()
         .map(|authority| {
@@ -669,11 +670,11 @@ pub(crate) fn load_and_pair_private_comfy_stream(
                     .strategy
                     .dense_compute_precision
                     .compute_dtype(),
+                cancellation_for_candle.clone(),
             )
             .map(Arc::new)
         })
         .transpose()?;
-    let cancellation_for_candle: Arc<dyn H3ComfyInt8Cancellation> = Arc::new(cancellation.clone());
     let (transformer, loader) = cancellation.run_candle_operation(|| {
         opened.load_with_turbo_adapter(&device, attention, cancellation_for_candle, turbo_runtime)
     })?;
