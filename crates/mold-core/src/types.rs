@@ -8076,6 +8076,41 @@ pub struct EventsCapabilities {
     pub available: bool,
 }
 
+/// Restart-safe encrypted request-media support for the durable generation
+/// queue. Presence of this record is the availability signal: servers must
+/// omit it until the owner-scoped media store has passed startup validation
+/// and reconciliation for the queue owner they actually claimed.
+///
+/// The version is intentionally independent from [`QueueCapabilities`]. A
+/// client may continue using ordinary media-free durability when this record
+/// is absent, while requiring an exact media protocol before submitting a
+/// request whose replay depends on captured bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DurableMediaCapabilities {
+    pub protocol_version: u32,
+    pub encrypted_at_rest: bool,
+    pub generate_request_media: bool,
+    pub identity: bool,
+    pub h3_references: bool,
+    pub private_h3: bool,
+}
+
+impl DurableMediaCapabilities {
+    /// The first queue-media wire contract. MiniMax H3 remains outside this
+    /// authority: encrypted bytes do not make an authenticated ingress grant
+    /// replayable.
+    pub const fn v1() -> Self {
+        Self {
+            protocol_version: 1,
+            encrypted_at_rest: true,
+            generate_request_media: true,
+            identity: true,
+            h3_references: false,
+            private_h3: false,
+        }
+    }
+}
+
 /// Whether the server exposes queue-wide controls. `can_pause` covers
 /// `POST /api/queue/pause` and `POST /api/queue/resume`; `can_cancel_all`
 /// covers `DELETE /api/queue`; `can_reorder` covers moving a queued job with
@@ -10320,6 +10355,19 @@ mod queue_plan_wire_tests {
             serde_json::from_str(r#"{"can_pause":true,"can_cancel_all":true}"#).unwrap();
         assert!(!legacy_queue.durable_queue);
         assert!(!legacy_queue.cooperative_cancellation);
+
+        let durable_media = serde_json::to_value(DurableMediaCapabilities::v1()).unwrap();
+        assert_eq!(
+            durable_media,
+            serde_json::json!({
+                "protocol_version": 1,
+                "encrypted_at_rest": true,
+                "generate_request_media": true,
+                "identity": true,
+                "h3_references": false,
+                "private_h3": false,
+            })
+        );
 
         let legacy_metadata: OutputMetadata = serde_json::from_value(serde_json::json!({
             "prompt": "a cat",

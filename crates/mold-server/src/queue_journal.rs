@@ -441,6 +441,11 @@ fn owner_row_counts(db: Option<&MetadataDb>, owner_uuid: &str) -> (usize, usize)
 pub struct QueueJournal {
     db: Arc<Option<MetadataDb>>,
     owner_uuid: Option<String>,
+    /// Becomes true only after the claimed owner's key, store, and DB/file
+    /// obligations have passed the startup coordinator. It is deliberately
+    /// independent from `owner_uuid`: a broken media store must not disable
+    /// ordinary media-free queue durability.
+    durable_media_ready: AtomicBool,
     #[cfg(test)]
     fail_completion_lookup: AtomicBool,
     #[cfg(test)]
@@ -489,6 +494,7 @@ impl QueueJournal {
         Self {
             db,
             owner_uuid: claim.as_ref().map(|claim| claim.owner_uuid.clone()),
+            durable_media_ready: AtomicBool::new(false),
             _owner_claim: claim,
             #[cfg(test)]
             fail_completion_lookup: AtomicBool::new(false),
@@ -511,6 +517,7 @@ impl QueueJournal {
         Self {
             db: Arc::new(None),
             owner_uuid: None,
+            durable_media_ready: AtomicBool::new(false),
             _owner_claim: None,
             #[cfg(test)]
             fail_completion_lookup: AtomicBool::new(false),
@@ -532,6 +539,23 @@ impl QueueJournal {
 
     pub fn owner_uuid(&self) -> Option<&str> {
         self.owner_uuid.as_deref()
+    }
+
+    /// Advertise encrypted queue-media durability only after the claimed
+    /// owner's startup reconciliation reached a clean fixed point. Absence is
+    /// intentionally independent from [`Self::is_enabled`], so key/store
+    /// failures do not turn off media-free durable generations.
+    pub fn durable_media_capabilities(&self) -> Option<mold_core::DurableMediaCapabilities> {
+        self.durable_media_ready
+            .load(Ordering::Acquire)
+            .then_some(mold_core::DurableMediaCapabilities::v1())
+    }
+
+    // Called by the default-dark startup coordinator once its independently
+    // reviewed concrete DB/store adapter is integrated.
+    #[allow(dead_code)]
+    pub(crate) fn set_durable_media_ready(&self, ready: bool) {
+        self.durable_media_ready.store(ready, Ordering::Release);
     }
 
     pub fn max_dispatch_attempts(&self) -> u32 {
@@ -1970,6 +1994,7 @@ mod tests {
         Arc::new(QueueJournal {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
+            durable_media_ready: AtomicBool::new(false),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
             fail_claim_release: AtomicBool::new(false),
@@ -2474,6 +2499,7 @@ mod tests {
         let journal = Arc::new(QueueJournal {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
+            durable_media_ready: AtomicBool::new(false),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
             fail_claim_release: AtomicBool::new(false),
@@ -2499,6 +2525,7 @@ mod tests {
         let journal = Arc::new(QueueJournal {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
+            durable_media_ready: AtomicBool::new(false),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
             fail_claim_release: AtomicBool::new(false),
