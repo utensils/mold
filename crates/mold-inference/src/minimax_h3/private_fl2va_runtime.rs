@@ -2325,6 +2325,15 @@ where
         // removed from the transformer's own peak rather than added to it.
         self.validate_continuing_authority()?;
         drop(self.vae.take());
+        // Candle's memoized Metal device retains freed allocations in its
+        // buffer pool until a synchronized sweep. H3 reloads both VAEs for
+        // decode, so keeping their old buffers cached here defeats the phase
+        // boundary on unified memory and can overlap ~5.8 GiB with the
+        // transformer. CUDA owns a different allocator and keeps its existing
+        // lifecycle unchanged.
+        if self.continuing_execution.device().is_metal() {
+            crate::device::release_pooled_metal_memory(self.authority.device_ordinal());
+        }
         self.ledger.vaes_parked()?;
         self.validate_continuing_authority()
     }
