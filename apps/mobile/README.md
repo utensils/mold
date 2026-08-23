@@ -9,8 +9,8 @@ queue, downloads, generation work, and gallery media. Both native shells reuse
 this crate and the same Vue product frontend. The iPhone app is shipped through
 TestFlight. The Android app has native secure credentials, QR pairing, NSD
 discovery, media actions, inset-aware system chrome, and an emulator-backed CI
-gate. Relevant `main` changes also produce a downloadable nightly APK. Play
-signing and store publication remain release work.
+gate. Every `main` and tagged release publishes a raw, signed, directly
+installable APK. Play Store publication remains release work.
 
 The app is designed for iPhone first and supports iOS 17 or later. iPad is a
 responsive secondary target.
@@ -596,15 +596,27 @@ builds must retain Xcode's ad-hoc signature so Keychain access works.
 ## CI and distribution
 
 `.github/workflows/android.yml` runs for Android and shared-mobile changes. It
-classifies the changed paths before spending Android build time. Relevant pull
-requests build the ARM64 debug APK with the pinned NDK; the Android 15 emulator
-and native credential, discovery, MediaStore, clipboard, content-URI, and
-authenticated-share instrumentation tests run only when the Kotlin/generated
-Android surface changed. Relevant `main` pushes build an unsigned ARM64/ARMv7
-release APK and retain it for 14 days as the `mold-android-nightly-apk` workflow
-artifact. `./scripts/android.sh build` separately proves the local Play artifact
-path by producing the unsigned ARM64/ARMv7 release AAB. Repository keystore
-secrets and Play Console publishing are intentionally not configured yet.
+classifies the changed paths before spending Android build time and builds an
+ARM64 debug validation APK. The Android 15 emulator and native credential,
+discovery, MediaStore, clipboard, content-URI, and authenticated-share
+instrumentation tests run only when the Kotlin/generated Android surface
+changed.
+
+`.github/workflows/release.yml` builds the signed ARM64/ARMv7 universal APK on
+every non-scheduled `main` and `v*` run. It verifies the APK signature, publishes
+the uncompressed file as `Mold-android.apk`, and includes it in `SHA256SUMS`.
+The public URLs are:
+
+- Stable: `https://github.com/utensils/mold/releases/latest/download/Mold-android.apk`
+- Nightly: `https://github.com/utensils/mold/releases/download/latest/Mold-android.apk`
+
+Both channels use the same long-lived signing identity and a monotonically
+increasing CI version code, allowing in-place upgrades. CI requires
+`ANDROID_KEY_BASE64`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`; keep the
+keystore private and retain a controlled offline backup because losing it
+strands existing sideload installs. `./scripts/android.sh build` separately
+proves the local Play artifact path by producing an unsigned ARM64/ARMv7 release
+AAB. Play Console publishing remains release work.
 
 `.github/workflows/ios.yml` runs for mobile-relevant pull requests and `main`
 changes, including shared component changes imported by the mobile entry. It

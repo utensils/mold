@@ -519,13 +519,14 @@ require_text "$android" '"ndk;27.0.12077973"' \
 require_text "$android" \
   'run: cargo tauri android build --debug --apk --target aarch64 --ci' \
   "Android workflow does not build the ARM64 APK"
-require_text "$android" \
-  'run: cargo tauri android build --apk --target aarch64 --target armv7 --ci' \
-  "Android workflow does not build the ARM64/ARMv7 nightly APK"
-require_text "$android" 'name: mold-android-nightly-apk' \
-  "Android workflow does not retain its nightly APK"
-require_text "$android" 'retention-days: 14' \
-  "Android nightly artifact retention is not bounded"
+require_text "$release_workflow" 'build-android-apk:' \
+  "Release workflow does not build the signed Android APK"
+require_text "$release_workflow" 'targets: aarch64-linux-android,armv7-linux-androideabi' \
+  "Release workflow does not install both universal APK Rust targets"
+require_text "$release_workflow" 'artifacts/Mold-android.apk' \
+  "Release workflow does not publish a raw Android APK"
+require_text "$release_workflow" 'verify --verbose --print-certs' \
+  "Release workflow does not verify the Android APK signature"
 require_text "$android" 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' \
   "Android emulator CI does not enable KVM"
 require_text "$android" 'api-level: 35' \

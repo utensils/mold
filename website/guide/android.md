@@ -6,9 +6,21 @@ Models, Machines, and Settings surface as the iPhone app. Model execution stays
 on the remote machine; per-host API keys are encrypted by an app-owned,
 non-exportable Android Keystore key.
 
-Android development builds and the current nightly APK are documented in the
-[mobile maintainer guide](https://github.com/utensils/mold/blob/main/apps/mobile/README.md#android).
-Google Play publishing remains release work.
+## Download and install
+
+- **[Stable APK](https://github.com/utensils/mold/releases/latest/download/Mold-android.apk)** — the newest tagged release.
+- **[Nightly APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk)** — the newest build from `main`.
+
+Both links download the signed universal `Mold-android.apk` file directly, not
+a compressed archive. Open the downloaded APK on an Android 7.0 or newer
+device and approve installation from your browser or file manager when Android
+asks. Later APKs from either channel use the same signing identity, so they can
+upgrade the installed app in place.
+
+Mold is not yet published through Google Play. Android may therefore ask you to
+allow **Install unknown apps** for the app that opened the download. Keep that
+permission limited to a browser or file manager you trust, and turn it off
+after installation if you do not sideload other apps.
 
 ## Connect a machine
 

@@ -13,6 +13,12 @@
   invited internal and external TestFlight groups; there is not yet a public
   App Store listing. See the [iPhone App guide](/guide/iphone) for supported
   workflows and host setup.
+- **Android:** download the raw signed
+  [stable APK](https://github.com/utensils/mold/releases/latest/download/Mold-android.apk)
+  or [nightly APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk)
+  directly to an Android 7.0 or newer device. No archive extraction is needed;
+  follow the [Android App guide](/guide/android#download-and-install) for the
+  one-time sideload permission.
 
 Mold is CLI-native. The command-line installation below installs the primary
 Mold interface and the same engine/server used by both native apps, scripts,
