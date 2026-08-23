@@ -373,6 +373,7 @@ mod tests {
 
     fn remote_model(name: &str, remaining_download_bytes: Option<u64>) -> ModelInfoExtended {
         ModelInfoExtended {
+            runtime_available: None,
             info: ModelInfo {
                 name: name.to_string(),
                 family: "flux".to_string(),

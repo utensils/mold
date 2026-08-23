@@ -248,11 +248,22 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
     catalog
 }
 
+/// Drop rows whose profile lost every recipe to this binary's delivery
+/// encoders, except the ones that must stay listed as downloads.
+///
+/// Two kinds of H3 row survive an empty profile. A reviewed compact identity
+/// is runnable on a qualified build and must remain pullable from a build
+/// that merely cannot mux MP4. A row that advertises
+/// `runtime_available: Some(false)` is download-only on *every* build — the
+/// pruned NVFP4 layout and the official BF16 references — so the absence of
+/// a deliverable recipe is not a reason to hide it; the row's whole point is
+/// to be pulled, inventoried, and removed ahead of a runtime.
 fn retain_deliverable_generation_profiles(catalog: &mut Vec<ModelInfoExtended>) {
     catalog.retain(|entry| {
         entry.generation_profile.as_ref().is_none_or(|profile| {
             !profile.recipes.is_empty()
                 || mold_core::model_policy::is_reviewed_minimax_h3_model(&entry.info.name)
+                || entry.runtime_available == Some(false)
         })
     });
 }
@@ -796,6 +807,9 @@ fn installed_catalog_models(
         let resolution = mold_core::catalog::resolution_defaults_from_profile(&generation_profile);
         out.push(ModelInfoExtended {
             downloaded: true,
+            // Sidecar-installed catalog rows are never H3 manifest
+            // identities; H3 is manifest-pinned only.
+            runtime_available: None,
             defaults: ModelDefaults {
                 default_width: w,
                 default_height: h,
@@ -3343,6 +3357,9 @@ mod tests {
             .filter(|entry| entry.info.family == mold_core::minimax_h3::FAMILY)
             .map(|entry| entry.info.name.as_str())
             .collect::<std::collections::BTreeSet<_>>();
+        // Reviewed rows survive because they are runnable elsewhere; the
+        // download-only rows survive because `runtime_available: false` says
+        // a recipe was never the point. Nothing else does.
         assert_eq!(
             h3,
             std::collections::BTreeSet::from([
@@ -3350,8 +3367,23 @@ mod tests {
                 mold_core::minimax_h3::REF2VA_COMFY,
                 mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
                 mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
+                mold_core::minimax_h3::FL2VA_COMFY_NVFP4,
+                mold_core::minimax_h3::REF2VA_COMFY_NVFP4,
+                mold_core::minimax_h3::FL2VA_OFFICIAL,
+                mold_core::minimax_h3::REF2VA_OFFICIAL,
             ])
         );
+        for entry in &catalog {
+            if matches!(
+                entry.info.name.as_str(),
+                mold_core::minimax_h3::FL2VA_COMFY_NVFP4
+                    | mold_core::minimax_h3::REF2VA_COMFY_NVFP4
+                    | mold_core::minimax_h3::FL2VA_OFFICIAL
+                    | mold_core::minimax_h3::REF2VA_OFFICIAL
+            ) {
+                assert_eq!(entry.runtime_available, Some(false), "{}", entry.info.name);
+            }
+        }
     }
 
     #[test]

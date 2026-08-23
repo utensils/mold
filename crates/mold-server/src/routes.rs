@@ -64,11 +64,21 @@ pub struct ApiError {
 
 impl ApiError {
     pub fn model_activation(error: mold_core::ModelActivationError) -> Self {
-        Self::with_code(
-            error.to_string(),
-            mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED,
-            StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS,
-        )
+        // A licensing refusal and a missing engine arm are different answers
+        // and must not share a status code. 451 asserts a legal obstacle;
+        // returning it because mold has not written the loader tells the user
+        // to go read a license about a problem that is ours.
+        let (code, status) = match error.refusal() {
+            mold_core::ActivationRefusal::ComplianceGated => (
+                mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED,
+                StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS,
+            ),
+            mold_core::ActivationRefusal::RuntimeUnavailable => (
+                mold_core::MINIMAX_H3_RUNTIME_UNAVAILABLE,
+                StatusCode::NOT_IMPLEMENTED,
+            ),
+        };
+        Self::with_code(error.to_string(), code, status)
     }
 
     pub fn validation(msg: impl Into<String>) -> Self {

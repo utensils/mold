@@ -195,6 +195,13 @@ VAE, and an FP32 AudioVAE. The Comfy deployment layout uses one pruned task
 transformer, INT8 ConvRot-eligible block matrices, an NVFP4/AWQ layer-50 Qwen
 conditioner, an FP16 video VAE, and an FP32 AudioVAE.
 
+A third layout, added in #1319, swaps that pruned task transformer for a
+third-party pruned NVFP4 one (`Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot`)
+while keeping the same NVFP4/AWQ Qwen conditioner and VAEs; it is
+downloadable-only (`runtime_available: false`) and carries none of the
+artifact-identity, numerical-parity, or block-execution evidence this section
+records for the INT8 layout above.
+
 The sampler is also layout-specific. Official BF16 follows the pinned
 Diffusers terminal-inclusive rectified-flow Euler path with 50 grid points (49
 transformer evaluations). The released ComfyUI workflow pairs the compact

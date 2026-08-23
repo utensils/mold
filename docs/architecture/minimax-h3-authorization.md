@@ -118,6 +118,44 @@ The current decision does not permit Mold to:
 - [MiniMax license Q&A and authorization process, pinned revision](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/bfc8ed0353f5a9733be73e6b2c98ec0948195b86/docs/QA-about-License.md)
 - [Official implementation, pinned revision](https://github.com/MiniMax-AI/MiniMax-H3/tree/8d8824efaf94586c0cc9ac7ad8d0723d4d6420ea)
 - [Authorization tracking issue](https://github.com/utensils/mold/issues/831)
+- [Third-party pruned NVFP4 transformers, pinned revision](https://huggingface.co/Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot/tree/908eccad7e68751190d04c171956f163bfeed741)
+
+### The pruned NVFP4 third-party source
+
+This is the first pinned H3 source that is neither MiniMaxAI nor Comfy-Org,
+and three facts about it are load-bearing.
+
+**Only the transformer comes from it.** The conditioner, both VAEs, the task
+config, and every runtime support file still resolve to `Comfy-Org/MiniMax-H3`
+and `MiniMaxAI/MiniMax-H3` at their existing pinned revisions, byte for byte.
+Comfy-Org publishes no NVFP4 diffusion model at all, so there is no
+first-party artifact to prefer.
+
+**The repository declares the reviewed license but does not ship its text.**
+Its card records `license: other`, `license_name:
+minimax-h3-community-license-agreement`, `license_link: LICENSE`, and
+`base_model: MiniMaxAI/MiniMax-H3`, and its README describes itself as "a
+community-compiled collection of quantized and pruned weights". At the pinned
+revision, `GET /resolve/908eccad…/LICENSE` returns **404** — the declared
+license file is absent. Mold's own artifact contract stamps the canonical
+MiniMaxAI license URL and `LICENSE_SHA256` on every H3 artifact, so the
+authoritative text is unchanged and unaffected; this is recorded as a gap in
+the re-uploader's packaging, not a different licence.
+
+**Every object in the repository carries an appended marker**, of the form
+`\nL2P_bypass_<filename>_<unix_ts>\n`, past the end of the safetensors
+payload. It is content-dedup defeat rather than tampering, and that is
+checkable: the same repository's INT8 copy has its payload end at exactly
+`20,970,379,616` — the byte count mold already pins for the Comfy-Org
+object — and its header hashes to exactly the pinned
+`H3_COMFY_PUBLISHED_INT8_HEADER_SHA256`. The marker is **inside** the pinned
+size and digest, so it is part of the reviewed content identity: a future
+re-upload without it is a different artifact and must be re-pinned, never
+silently accepted.
+
+Because a personal namespace can be deleted or relicensed without notice —
+a risk that does not exist for MiniMaxAI or Comfy-Org — the release checklist
+below requires re-confirming this source before every release that ships it.
 
 ## Decision record
 
@@ -131,13 +169,14 @@ not the private correspondence itself.
 | Decision               | All territories, users, Mold surfaces, local/remote/hosted execution, outputs, distribution, and redistribution are authorized; technical support remains capability-gated                               |
 | Decision owner         | James Brink, `utensils/mold` maintainer                                                                                                                                                                  |
 | Revocation owner       | James Brink, `utensils/mold` maintainer                                                                                                                                                                  |
-| Last review            | 2026-08-14                                                                                                                                                                                               |
+| Last review            | 2026-08-22                                                                                                                                                                                               |
 | License revision       | `bfc8ed0353f5a9733be73e6b2c98ec0948195b86`; LICENSE SHA-256 `59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44`                                                                           |
 | Authorization evidence | Maintainer attestation that MiniMax authorized H3 integration with Mold; corroborating image SHA-256 `8cd4d6e52cff34d7d39721ebab13b8c1187aa87aafc1c4ae2a16609186f22f1d`; direct grant retained privately |
 | Scope approval         | Maintainer legal/compliance determination on 2026-08-14 that use is permitted everywhere and that the README plus H3 user guide satisfy the remaining obligations                                        |
 | Upstream review        | At upstream HEAD `42ed227ee7df40d41602854ae760620d6eb651fe`, LICENSE and Q&A hashes still match the pinned review; Q&A SHA-256 `c39dcfc5dc3e546918509b57709db826a9b1945311bffaa01e80501101b8abe4`        |
 | Qualification root     | Owner-only `/Volumes/ExternalStorage/mold/uat-h3`; validated external authorization record under its `compliance` directory; no evidence or model payload committed                                      |
 | Permitted artifacts    | Mold code/docs/manifests, upstream or transformed H3 artifacts, and generated outputs; private correspondence and owner-only qualification evidence remain confidential                                  |
+| Third-party sources    | `Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot` @ `908eccad7e68751190d04c171956f163bfeed741`, pruned NVFP4 transformers only. Declares the reviewed MiniMax H3 Community License and `base_model: MiniMaxAI/MiniMax-H3`; ships no LICENSE file (404 at the pinned revision). Reviewed 2026-08-22; downloadable, no runtime arm |
 | Permitted users        | Any person or organization in every territory, using local, remote-client, shared-server, hosted, or redistributed Mold/H3 paths                                                                         |
 | Prohibited scope       | Claiming technical support for an unimplemented runtime/task/device/envelope; publication of private correspondence or owner-only qualification evidence                                                 |
 | Expiry/revocation      | Immediate on MiniMax revocation, narrowed authority, license/Q&A change, loss of access control, or maintainer decision                                                                                  |
@@ -177,6 +216,11 @@ run, release, or hosted deployment.
       payload, private checkpoint header, authorization correspondence, or
       generated qualification fixture. Public compact manifests and upstream
       Hugging Face URLs are expected.
+- [ ] Confirm every pinned third-party H3 source still exists at its pinned
+      revision and still declares the license recorded in the decision table.
+      A personal-namespace re-upload can be deleted or relicensed without
+      notice, and a reviewed source that has vanished blocks the release. This
+      does not apply to `MiniMaxAI/MiniMax-H3` or `Comfy-Org/MiniMax-H3`.
 - [ ] Prove that public SM89 H3 binaries retain consistent H3-scoped attention
       provenance while omitting global FlashAttention, qualification/capture
       executables, private evidence producers, and every private marker.

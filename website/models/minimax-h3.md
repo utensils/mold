@@ -36,6 +36,16 @@ a portability path, not a speed one.
 | `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`      | FL2VA + reviewed Turbo 8-step LoRA (9 steps)      |  44.438 GB | CUDA generation; first-frame profile |
 | `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p` | FL2VA + reviewed Turbo 4-step 768p LoRA (5 steps) |  44.438 GB | CUDA generation; first-frame profile |
 | `minimax-h3-ref2va:comfy-pruned-int8`                 | Reference media to video with audio               |  42.482 GB | Downloadable; execution unavailable  |
+| `minimax-h3-fl2va:comfy-pruned-nvfp4`                 | First/last-frame conditioning with audio          |  34.040 GB | Downloadable; execution unavailable  |
+| `minimax-h3-ref2va:comfy-pruned-nvfp4`                | Reference media to video with audio               |  34.040 GB | Downloadable; execution unavailable  |
+
+The two NVFP4 rows pin a pruned NVFP4 transformer in place of the INT8 one.
+Mold has no engine arm that reads that weight layout yet, so they download,
+verify, appear in **Models → Installed**, and remove like any other model,
+while generation is refused up front — before any weights are loaded — and
+`GET /api/models` reports `"runtime_available": false` on the row. They share
+the whole rest of the compact stack with the INT8 variants, so if you already
+have one installed the pull is only the 12.529 GB transformer.
 
 Every H3 render carries synchronized generated audio, and no request can turn
 it off. `GET /api/models` says so directly: each H3 entry reports
@@ -48,6 +58,7 @@ Studio:
 
 ```bash
 mold pull minimax-h3-fl2va:comfy-pruned-int8
+mold pull minimax-h3-fl2va:comfy-pruned-nvfp4
 mold pull minimax-h3-fl2va:comfy-pruned-int8-turbo-8step
 mold pull minimax-h3-ref2va:comfy-pruned-int8
 ```
@@ -97,12 +108,14 @@ transformer:
 
 | Component                                              |              Bytes |  Decimal size | Upstream source                                                                                                     |
 | ------------------------------------------------------ | -----------------: | ------------: | ------------------------------------------------------------------------------------------------------------------- |
-| Task transformer                                       |     20,970,379,616 |     20.970 GB | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/eb8a16107c595128b3a578f82d2ce2f75920c355) |
+| Task transformer (INT8 ConvRot)                        |     20,970,379,616 |     20.970 GB | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/eb8a16107c595128b3a578f82d2ce2f75920c355) |
+| Task transformer (pruned NVFP4)                        |     12,528,636,865 |     12.529 GB | [`Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot`](https://huggingface.co/Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot/tree/908eccad7e68751190d04c171956f163bfeed741) |
 | Qwen3-VL NVFP4-AWQ text encoder                        |     15,687,142,551 |     15.687 GB | `Comfy-Org/MiniMax-H3`                                                                                              |
 | FP16 video VAE                                         |      5,207,808,496 |      5.208 GB | `Comfy-Org/MiniMax-H3`                                                                                              |
 | FP32 audio VAE                                         |        605,254,808 |      0.605 GB | `Comfy-Org/MiniMax-H3`                                                                                              |
 | Tokenizer, processor, scheduler, and component configs |         11,504,847 |      0.012 GB | [`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/bfc8ed0353f5a9733be73e6b2c98ec0948195b86) |
-| **One complete variant**                               | **42,482,090,318** | **42.482 GB** | Both pinned repositories                                                                                            |
+| **One complete INT8 variant**                          | **42,482,090,318** | **42.482 GB** | Both pinned repositories                                                                                            |
+| **One complete NVFP4 variant**                         | **34,040,347,567** | **34.040 GB** | All three pinned repositories                                                                                       |
 
 A Turbo tag adds one adapter to this graph:
 [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/dc559027db79c174125df4d827db55cd11178860)
@@ -111,9 +124,11 @@ A Turbo tag adds one adapter to this graph:
 `-turbo-4step-768p`), bringing one complete Turbo variant to 44,438,283,318 or
 44,438,283,310 bytes (44.438 GB).
 
-The encoder, VAEs, and common support files are shared between the variants.
-After one complete variant is installed, adding the other downloads its 20.970
-GB transformer and 546-byte task config. Both variants together occupy 63.452
+The encoder, VAEs, and common support files are shared between every compact
+variant, INT8 and NVFP4 alike. After one complete variant is installed, adding
+another downloads only its transformer — 20.970 GB for an INT8 tag, 12.529 GB
+for an NVFP4 one — plus a 546-byte task config when the task differs. Removing
+one variant keeps the shared graph and names the variants still using it. Both variants together occupy 63.452
 GB (63,452,470,480 bytes) of model payloads, excluding filesystem and Hugging
 Face cache overhead.
 

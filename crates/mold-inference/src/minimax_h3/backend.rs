@@ -708,6 +708,13 @@ where
         match self.plan.layout() {
             Layout::OfficialBf16 => H3SamplerKind::OfficialEuler,
             Layout::ComfyPrunedInt8ConvrotNvfp4Awq => H3SamplerKind::ComfyResMultistep,
+            // No backend for this layout can be constructed: the components
+            // check below refuses it, and `base_compact_model` already
+            // refused it at admission. Naming a sampler here would be a
+            // guess about a checkpoint mold cannot read.
+            Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq => unreachable!(
+                "MiniMax H3 pruned NVFP4 has no runtime; validate_components refuses it first"
+            ),
         }
     }
 
@@ -907,6 +914,9 @@ where
         }
         Layout::ComfyPrunedInt8ConvrotNvfp4Awq => {
             bail!("MiniMax H3 Comfy quantized execution is not yet qualified")
+        }
+        Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq => {
+            bail!("MiniMax H3 pruned NVFP4 execution is not implemented in this build")
         }
     }
     components
@@ -1171,6 +1181,9 @@ fn backend_plan_identity(plan: &FrozenH3Fl2VaCandlePlan) -> String {
     digest.update(match plan.layout {
         Layout::OfficialBf16 => b"official-bf16".as_slice(),
         Layout::ComfyPrunedInt8ConvrotNvfp4Awq => b"comfy-pruned-int8".as_slice(),
+        // A distinct domain tag. Sharing the INT8 tag would hash two
+        // different weight layouts to one plan identity.
+        Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq => b"comfy-pruned-nvfp4".as_slice(),
     });
     digest.update([0]);
     digest.update(plan.device_id.as_bytes());

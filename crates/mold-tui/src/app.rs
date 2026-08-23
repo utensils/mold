@@ -15096,6 +15096,7 @@ mod tests {
         desc: &str,
     ) -> ModelInfoExtended {
         ModelInfoExtended {
+            runtime_available: None,
             info: mold_core::ModelInfo {
                 name: name.to_string(),
                 family: "flux".to_string(),
@@ -16971,6 +16972,7 @@ mod tests {
     ) -> mold_core::ModelInfoExtended {
         use mold_core::types::{ModelDefaults, ModelInfo, ModelInfoExtended};
         ModelInfoExtended {
+            runtime_available: None,
             info: ModelInfo {
                 name: name.to_string(),
                 family: family.to_string(),

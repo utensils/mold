@@ -93,6 +93,34 @@ describe("model access policy", () => {
     expect(filterRestrictedModels(models, undefined)).toEqual([models[0]]);
   });
 
+  it("hides a pruned NVFP4 row on its runtime contract, not only on identity", () => {
+    // Two independent mechanisms would hide this row: the server's
+    // `runtime_available: false`, and the fail-closed H3 identity check that
+    // rejects a partition `minimaxH3TaskForModel` does not know. Pin the
+    // runtime one on its own, with a name the identity check DOES accept, so
+    // a future release that teaches the client this partition cannot
+    // silently start offering a model the server refuses to run.
+    const recognised = {
+      name: "minimax-h3-fl2va:comfy-pruned-int8",
+      family: "minimax-h3",
+      runtime_available: false,
+    };
+    expect(filterRestrictedModels([recognised], undefined)).toEqual([]);
+    expect(
+      filterRestrictedModels(
+        [{ ...recognised, runtime_available: true }],
+        undefined,
+      ),
+    ).toHaveLength(1);
+    // Absent stays runnable: an older server sends no such field.
+    expect(
+      filterRestrictedModels(
+        [{ name: "minimax-h3-fl2va:comfy-pruned-int8", family: "minimax-h3" }],
+        undefined,
+      ),
+    ).toHaveLength(1);
+  });
+
   it("opens only the exact fully authenticated private FL2VA row", () => {
     const exact = {
       name: "minimax-h3-fl2va:comfy-pruned-int8",

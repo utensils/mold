@@ -108,9 +108,11 @@ redistribution — with no separate acceptance step; review the linked terms for
 your use. The reviewed FL2VA Turbo distillations are ordinary model tags
 (`minimax-h3-fl2va:comfy-pruned-int8-turbo-8step` and
 `…-turbo-4step-768p`) that pull the same compact stack plus one pinned LoRA
-adapter and render at their tier's fixed step count. Current capability limits
-(FL2VA on SM89 CUDA only) are documented in the
-[H3 model guide](https://utensils.io/mold/models/minimax-h3).
+adapter and render at their tier's fixed step count. The compact NVFP4
+transformer tags (`minimax-h3-fl2va:comfy-pruned-nvfp4` and
+`minimax-h3-ref2va:comfy-pruned-nvfp4`) download and verify but have no
+runtime yet. Current capability limits (FL2VA on SM89 CUDA only) are
+documented in the [H3 model guide](https://utensils.io/mold/models/minimax-h3).
 
 ## Mold Studio
 

@@ -1128,6 +1128,7 @@ mod tests {
     #[test]
     fn model_list_with_models() {
         let models = vec![ModelInfoExtended {
+            runtime_available: None,
             info: mold_core::ModelInfo {
                 name: "flux-schnell:q8".to_string(),
                 family: "flux".to_string(),
@@ -1171,6 +1172,7 @@ mod tests {
     fn model_list_groups_families_and_shows_all_variants() {
         let models = vec![
             ModelInfoExtended {
+                runtime_available: None,
                 info: mold_core::ModelInfo {
                     name: "flux-schnell:q8".to_string(),
                     family: "flux".to_string(),
@@ -1204,6 +1206,7 @@ mod tests {
                 supports_identity: None,
             },
             ModelInfoExtended {
+                runtime_available: None,
                 info: mold_core::ModelInfo {
                     name: "flux-dev:q4".to_string(),
                     family: "flux".to_string(),
@@ -1237,6 +1240,7 @@ mod tests {
                 supports_identity: None,
             },
             ModelInfoExtended {
+                runtime_available: None,
                 info: mold_core::ModelInfo {
                     name: "wuerstchen-v2:fp16".to_string(),
                     family: "wuerstchen".to_string(),

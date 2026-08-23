@@ -301,6 +301,7 @@ mod tests {
 
     fn model(name: &str, supports_identity: Option<bool>, downloaded: bool) -> ModelInfoExtended {
         ModelInfoExtended {
+            runtime_available: None,
             info: mold_core::ModelInfo {
                 name: name.to_string(),
                 family: "flux".to_string(),

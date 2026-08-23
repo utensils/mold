@@ -2385,6 +2385,7 @@ mod tests {
 
     fn mk_model(name: &str, family: &str, downloaded: bool) -> ModelInfoExtended {
         ModelInfoExtended {
+            runtime_available: None,
             info: mold_core::ModelInfo {
                 name: name.to_string(),
                 family: family.to_string(),
@@ -2555,6 +2556,7 @@ mod tests {
     #[test]
     fn family_for_model_lookup() {
         let models = vec![ModelInfoExtended {
+            runtime_available: None,
             info: mold_core::ModelInfo {
                 name: "ltx-2-19b-distilled:fp8".to_string(),
                 family: "ltx2".to_string(),
@@ -2593,6 +2595,7 @@ mod tests {
     fn resolve_default_prefers_loaded() {
         let models = vec![
             ModelInfoExtended {
+                runtime_available: None,
                 info: mold_core::ModelInfo {
                     name: "flux-dev:q4".to_string(),
                     family: "flux".to_string(),
@@ -2619,6 +2622,7 @@ mod tests {
                 supports_identity: None,
             },
             ModelInfoExtended {
+                runtime_available: None,
                 info: mold_core::ModelInfo {
                     name: "flux2-klein:q8".to_string(),
                     family: "flux".to_string(),
@@ -2651,6 +2655,7 @@ mod tests {
     #[test]
     fn resolve_default_falls_back_to_downloaded() {
         let models = vec![ModelInfoExtended {
+            runtime_available: None,
             info: mold_core::ModelInfo {
                 name: "flux-dev:q4".to_string(),
                 family: "flux".to_string(),
@@ -2688,6 +2693,7 @@ mod tests {
     fn resolve_default_skips_utility_models() {
         let models = vec![
             ModelInfoExtended {
+                runtime_available: None,
                 info: mold_core::ModelInfo {
                     name: "qwen3-expand:q8".to_string(),
                     family: "qwen3-expand".to_string(),
@@ -2714,6 +2720,7 @@ mod tests {
                 supports_identity: None,
             },
             ModelInfoExtended {
+                runtime_available: None,
                 info: mold_core::ModelInfo {
                     name: "flux2-klein:q8".to_string(),
                     family: "flux".to_string(),
@@ -2747,6 +2754,7 @@ mod tests {
     fn resolve_default_skips_controlnet() {
         let models = vec![
             ModelInfoExtended {
+                runtime_available: None,
                 info: mold_core::ModelInfo {
                     name: "controlnet-canny-sd15:fp16".to_string(),
                     family: "controlnet".to_string(),
@@ -2773,6 +2781,7 @@ mod tests {
                 supports_identity: None,
             },
             ModelInfoExtended {
+                runtime_available: None,
                 info: mold_core::ModelInfo {
                     name: "flux2-klein:q8".to_string(),
                     family: "flux".to_string(),

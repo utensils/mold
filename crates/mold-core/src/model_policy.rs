@@ -8,6 +8,15 @@ use serde::{Deserialize, Serialize};
 /// Stable machine-readable reason returned while MiniMax H3 authorization is absent.
 pub const MINIMAX_H3_AUTHORIZATION_REQUIRED: &str = "MINIMAX_H3_AUTHORIZATION_REQUIRED";
 
+/// Stable machine-readable reason returned for a model mold may download and
+/// store but has no engine arm for.
+///
+/// Deliberately distinct from [`MINIMAX_H3_AUTHORIZATION_REQUIRED`]: that one
+/// is a licensing statement carrying a license URL and an authorization
+/// record, and reporting it for unwritten code tells the user to go read a
+/// legal document about a problem that is ours.
+pub const MINIMAX_H3_RUNTIME_UNAVAILABLE: &str = "MINIMAX_H3_RUNTIME_UNAVAILABLE";
+
 /// Repository record that owns the authorization decision.
 pub const MINIMAX_H3_AUTHORIZATION_ISSUE_URL: &str = "https://github.com/utensils/mold/issues/831";
 
@@ -24,10 +33,25 @@ pub const MINIMAX_H3_LICENSE_SHA256: &str =
 pub enum ModelActivation {
     Available,
     ComplianceGated,
+    /// Acquirable and storable, but this build has no runtime for it.
+    ///
+    /// The pinned `official-bf16` references and the pruned NVFP4 compact
+    /// layout are both in this state: `mold pull`, inventory, repair, and
+    /// `mold rm` all work, and only execution is refused.
+    RuntimeUnavailable,
+}
+
+/// Why an activation was refused. Carried by [`ModelActivationError`] so the
+/// message and the HTTP status can tell a licensing refusal apart from a
+/// missing implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationRefusal {
+    ComplianceGated,
+    RuntimeUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ModelActivationError;
+pub struct ModelActivationError(pub ActivationRefusal);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ModelAccessCapabilities {
@@ -46,19 +70,43 @@ pub struct ModelAccessRestriction {
 
 impl fmt::Display for ModelActivationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "MiniMax H3 support is compliance-gated and is not activated in this build \
-             ({MINIMAX_H3_AUTHORIZATION_REQUIRED}). See {MINIMAX_H3_AUTHORIZATION_ISSUE_URL}"
-        )
+        match self.0 {
+            // Byte-for-byte the message this type has always produced.
+            ActivationRefusal::ComplianceGated => write!(
+                formatter,
+                "MiniMax H3 support is compliance-gated and is not activated in this build \
+                 ({MINIMAX_H3_AUTHORIZATION_REQUIRED}). See {MINIMAX_H3_AUTHORIZATION_ISSUE_URL}"
+            ),
+            // Deliberately carries no license or authorization URL: nothing
+            // about this refusal is the user's to resolve.
+            ActivationRefusal::RuntimeUnavailable => write!(
+                formatter,
+                "MiniMax H3 has no runtime for this model's weight layout in this build \
+                 ({MINIMAX_H3_RUNTIME_UNAVAILABLE}). The checkpoint downloads and verifies \
+                 normally; only generation is unavailable"
+            ),
+        }
     }
 }
 
 impl std::error::Error for ModelActivationError {}
 
 impl ModelActivationError {
-    pub fn restriction(self) -> ModelAccessRestriction {
-        minimax_h3_restriction()
+    pub const fn refusal(self) -> ActivationRefusal {
+        self.0
+    }
+
+    /// The family-wide access restriction this refusal publishes, if any.
+    ///
+    /// `None` for [`ActivationRefusal::RuntimeUnavailable`]: a missing engine
+    /// arm is a per-identity fact about this build, and
+    /// [`ModelAccessRestriction`] is family-scoped. Publishing one would gate
+    /// every H3 identity in every client.
+    pub fn restriction(self) -> Option<ModelAccessRestriction> {
+        match self.0 {
+            ActivationRefusal::ComplianceGated => Some(minimax_h3_restriction()),
+            ActivationRefusal::RuntimeUnavailable => None,
+        }
     }
 }
 
@@ -72,7 +120,7 @@ fn minimax_h3_restriction() -> ModelAccessRestriction {
     ModelAccessRestriction {
         code: MINIMAX_H3_AUTHORIZATION_REQUIRED.to_string(),
         family: "minimax-h3".to_string(),
-        message: ModelActivationError.to_string(),
+        message: ModelActivationError(ActivationRefusal::ComplianceGated).to_string(),
         license_url: MINIMAX_H3_LICENSE_URL.to_string(),
         authorization_url: MINIMAX_H3_AUTHORIZATION_ISSUE_URL.to_string(),
     }
@@ -85,6 +133,12 @@ fn minimax_h3_restriction() -> ModelAccessRestriction {
 pub fn model_activation(identifier: &str, family: Option<&str>) -> ModelActivation {
     if is_reviewed_minimax_h3_model(identifier) {
         ModelActivation::Available
+    } else if is_pinned_unrunnable_minimax_h3_identity(identifier) {
+        // A pinned H3 manifest identity mold may download but cannot execute:
+        // the `official-bf16` qualification references and the pruned NVFP4
+        // compact layout. Refusing these as compliance-gated would hand the
+        // user a license URL for a missing engine arm.
+        ModelActivation::RuntimeUnavailable
     } else if is_minimax_h3_identity(identifier) || family.is_some_and(is_minimax_h3_identity) {
         ModelActivation::ComplianceGated
     } else {
@@ -131,7 +185,12 @@ pub fn require_model_acquisition(
 ) -> Result<(), ModelActivationError> {
     match model_acquisition(identifier, family) {
         ModelActivation::Available => Ok(()),
-        ModelActivation::ComplianceGated => Err(ModelActivationError),
+        ModelActivation::ComplianceGated => {
+            Err(ModelActivationError(ActivationRefusal::ComplianceGated))
+        }
+        ModelActivation::RuntimeUnavailable => {
+            Err(ModelActivationError(ActivationRefusal::RuntimeUnavailable))
+        }
     }
 }
 
@@ -141,7 +200,12 @@ pub fn require_model_activation(
 ) -> Result<(), ModelActivationError> {
     match model_activation(identifier, family) {
         ModelActivation::Available => Ok(()),
-        ModelActivation::ComplianceGated => Err(ModelActivationError),
+        ModelActivation::ComplianceGated => {
+            Err(ModelActivationError(ActivationRefusal::ComplianceGated))
+        }
+        ModelActivation::RuntimeUnavailable => {
+            Err(ModelActivationError(ActivationRefusal::RuntimeUnavailable))
+        }
     }
 }
 
@@ -175,7 +239,7 @@ pub fn require_registered_manifest_activation(
     if is_reviewed_minimax_h3_model(&manifest.name) && is_exact_registered_manifest(manifest) {
         Ok(())
     } else {
-        Err(ModelActivationError)
+        Err(ModelActivationError(ActivationRefusal::ComplianceGated))
     }
 }
 
@@ -216,7 +280,14 @@ pub fn require_model_artifact_activation(
 ) -> Result<(), ModelActivationError> {
     match model_artifact_activation(path, artifact_root, family) {
         ModelActivation::Available => Ok(()),
-        ModelActivation::ComplianceGated => Err(ModelActivationError),
+        ModelActivation::ComplianceGated => {
+            Err(ModelActivationError(ActivationRefusal::ComplianceGated))
+        }
+        // `model_artifact_activation` classifies a path, never a model
+        // identity, so it has no way to observe a missing engine arm.
+        ModelActivation::RuntimeUnavailable => {
+            Err(ModelActivationError(ActivationRefusal::RuntimeUnavailable))
+        }
     }
 }
 
@@ -240,6 +311,20 @@ fn is_minimax_h3_identity(value: &str) -> bool {
             && after.is_none_or(|ch| !ch.is_ascii_alphanumeric())
     });
     separated_alias || normalized.split('-').any(is_minimax_h3_compact_alias)
+}
+
+/// Whether this is an exact pinned H3 manifest identity that mold cannot run.
+///
+/// Exactness is the point. `is_reviewed_minimax_h3_acquisition_identity`
+/// resolves aliases, so `minimax-h3` answers `true` there — but that alias
+/// names the reviewed, runnable compact FL2VA model, and reporting it as
+/// "no runtime" would be false. Requiring the normalized input to equal its
+/// own canonical form keeps aliases on the existing compliance path, which
+/// is the same not-alias-resolving rule `is_reviewed_compact_model` uses.
+fn is_pinned_unrunnable_minimax_h3_identity(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    minimax_h3::resolve_model_name(&normalized).is_some_and(|canonical| canonical == normalized)
+        && !is_reviewed_minimax_h3_model(&normalized)
 }
 
 fn is_reviewed_minimax_h3_acquisition_identity(value: &str) -> bool {
@@ -348,21 +433,47 @@ mod tests {
             );
         }
 
+        // An alias names the reviewed compact model, so it stays on the
+        // compliance path rather than claiming mold has no runtime for it.
         assert_eq!(
             model_activation("minimax-h3", Some("minimax-h3")),
             ModelActivation::ComplianceGated
         );
 
-        for official in [minimax_h3::FL2VA_OFFICIAL, minimax_h3::REF2VA_OFFICIAL] {
+        // Pinned identities mold may download and store but has no engine
+        // arm for. They are refused as `RuntimeUnavailable`, never as a
+        // licensing problem: nothing about the refusal is the user's to
+        // resolve, and the message carries no license or authorization URL.
+        for unrunnable in [
+            minimax_h3::FL2VA_OFFICIAL,
+            minimax_h3::REF2VA_OFFICIAL,
+            minimax_h3::FL2VA_COMFY_NVFP4,
+            minimax_h3::REF2VA_COMFY_NVFP4,
+        ] {
             assert_eq!(
-                model_acquisition(official, Some("minimax-h3")),
+                model_acquisition(unrunnable, Some("minimax-h3")),
                 ModelActivation::Available,
-                "{official}"
+                "{unrunnable}"
             );
             assert_eq!(
-                model_activation(official, Some("minimax-h3")),
-                ModelActivation::ComplianceGated,
-                "{official}"
+                model_activation(unrunnable, Some("minimax-h3")),
+                ModelActivation::RuntimeUnavailable,
+                "{unrunnable}"
+            );
+            let error = require_model_activation(unrunnable, Some("minimax-h3"))
+                .expect_err("execution must be refused");
+            assert_eq!(error.refusal(), ActivationRefusal::RuntimeUnavailable);
+            assert!(error.restriction().is_none(), "{unrunnable}");
+            let message = error.to_string();
+            assert!(
+                message.contains(MINIMAX_H3_RUNTIME_UNAVAILABLE),
+                "{unrunnable}: {message}"
+            );
+            assert!(
+                !message.contains(MINIMAX_H3_AUTHORIZATION_REQUIRED)
+                    && !message.contains(MINIMAX_H3_LICENSE_URL)
+                    && !message.contains(MINIMAX_H3_AUTHORIZATION_ISSUE_URL),
+                "a missing engine arm must not be reported as a licensing refusal: {message}"
             );
         }
 

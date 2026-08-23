@@ -7802,7 +7802,11 @@ mod tests {
         // files-only bundle. It carries the SAME four extraction artifacts as
         // `pulid-flux` at the SAME `shared/pulid/` paths and differs by one
         // file, the PuLID v1.1 adapter.
-        assert_eq!(known_manifests().len(), 161);
+        // H3 NVFP4 bump (#1319): +minimax-h3-{fl2va,ref2va}:comfy-pruned-nvfp4
+        // — the pruned NVFP4 transformers on the same shared compact graph.
+        // Acquirable and storable; execution is refused because mold has no
+        // engine arm for the layout.
+        assert_eq!(known_manifests().len(), 163);
     }
 
     #[test]

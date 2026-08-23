@@ -83,6 +83,13 @@
       "authority": "deployment"
     },
     {
+      "id": "nvfp4-checkpoints",
+      "repository": "https://huggingface.co/Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot",
+      "revision": "908eccad7e68751190d04c171956f163bfeed741",
+      "role": "third-party pruned NVFP4 transformer; downloadable, no runtime arm",
+      "authority": "deployment"
+    },
+    {
       "id": "sglang",
       "repository": "https://github.com/sgl-project/sglang",
       "revision": "0c3a76fa0a5bfab410b645f4143e7e8e3cc25c77",

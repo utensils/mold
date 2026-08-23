@@ -2824,6 +2824,7 @@ fn artifact_plan_identity(
     digest.update(match layout {
         Layout::OfficialBf16 => b"official-bf16".as_slice(),
         Layout::ComfyPrunedInt8ConvrotNvfp4Awq => b"comfy-pruned-int8".as_slice(),
+        Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq => b"comfy-pruned-nvfp4".as_slice(),
     });
     for artifact in artifacts {
         digest.update([0]);
