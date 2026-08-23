@@ -89,6 +89,8 @@ impl ProcessPrivateAuthorities {
 pub enum QueueMediaError {
     #[error("process-private generation authority cannot be durably rehydrated: {0:?}")]
     UnsupportedProcessPrivateAuthority(ProcessPrivateAuthority),
+    #[error("request authority must be available before deferred media hydration: {0:?}")]
+    UnsupportedPreDispatchAuthority(QueueMediaRole),
     #[error("durable request JSON serialization failed: {0}")]
     Serialize(#[source] serde_json::Error),
     #[error("durable request JSON deserialization failed: {0}")]
@@ -182,28 +184,17 @@ impl std::fmt::Debug for OpaqueQueueMediaRecord {
 /// nor serializable: callers cannot accidentally create a content-addressed
 /// cross-job cache or write the payloads as ordinary JSON.
 pub struct OpaqueQueueMedia {
-    job_id: String,
-    records: Vec<OpaqueQueueMediaRecord>,
+    pub(crate) job_id: String,
+    pub(crate) records: Vec<OpaqueQueueMediaRecord>,
 }
 
 impl OpaqueQueueMedia {
+    pub fn job_id(&self) -> &str {
+        &self.job_id
+    }
+
     pub fn records(&self) -> &[OpaqueQueueMediaRecord] {
         &self.records
-    }
-
-    pub fn into_records(self) -> Vec<OpaqueQueueMediaRecord> {
-        self.records
-    }
-
-    pub fn from_records(
-        job_id: impl Into<String>,
-        records: Vec<OpaqueQueueMediaRecord>,
-    ) -> Result<Self, QueueMediaError> {
-        let job_id = job_id.into();
-        if job_id.trim().is_empty() {
-            return Err(QueueMediaError::InvalidJobScope);
-        }
-        Ok(Self { job_id, records })
     }
 }
 
@@ -315,6 +306,26 @@ pub fn extract_request_media(
     if request.references.is_some() {
         return Err(QueueMediaError::UnsupportedProcessPrivateAuthority(
             ProcessPrivateAuthority::ResolvedReferenceStaging,
+        ));
+    }
+    // Scheduler V2 resolves exact adapter paths/scales before the worker lease,
+    // while durable media hydration is intentionally deferred. HDR likewise
+    // carries a local output authority rather than replayable input media.
+    // Keep their lossless field mapping covered below, but do not advertise a
+    // public durable path until admission owns a safe pre-dispatch projection.
+    if request.lora.is_some() {
+        return Err(QueueMediaError::UnsupportedPreDispatchAuthority(
+            QueueMediaRole::Lora,
+        ));
+    }
+    if request.loras.is_some() {
+        return Err(QueueMediaError::UnsupportedPreDispatchAuthority(
+            QueueMediaRole::Loras,
+        ));
+    }
+    if request.hdr_exr_dir.is_some() {
+        return Err(QueueMediaError::UnsupportedPreDispatchAuthority(
+            QueueMediaRole::HdrExrDir,
         ));
     }
 
@@ -953,6 +964,47 @@ mod tests {
     }
 
     #[test]
+    fn pre_dispatch_lora_and_hdr_authority_remain_non_durable() {
+        let base = serde_json::json!({
+            "prompt": "pre-dispatch authority",
+            "model": "mock",
+            "width": 64,
+            "height": 64,
+            "steps": 1
+        });
+        for (field, value, expected) in [
+            (
+                "lora",
+                serde_json::json!({ "path": "/private/one.safetensors", "scale": 0.5 }),
+                QueueMediaRole::Lora,
+            ),
+            (
+                "loras",
+                serde_json::json!([{ "path": "/private/two.safetensors", "scale": 0.7 }]),
+                QueueMediaRole::Loras,
+            ),
+            (
+                "hdr_exr_dir",
+                serde_json::json!("/private/hdr"),
+                QueueMediaRole::HdrExrDir,
+            ),
+        ] {
+            let mut value_request = base.clone();
+            value_request[field] = value;
+            let request: mold_core::GenerateRequest =
+                serde_json::from_value(value_request).unwrap();
+            assert!(matches!(
+                extract_request_media(
+                    format!("job-{field}"),
+                    request,
+                    &ProcessPrivateAuthorities::none()
+                ),
+                Err(QueueMediaError::UnsupportedPreDispatchAuthority(actual)) if actual == expected
+            ));
+        }
+    }
+
+    #[test]
     fn job_scope_must_be_non_empty() {
         let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
             "prompt": "scoped",
@@ -970,7 +1022,7 @@ mod tests {
     }
 
     #[test]
-    fn crate_storage_seam_can_reconstitute_opaque_records_without_serializing_them() {
+    fn opaque_container_keeps_its_job_binding_through_the_storage_handoff() {
         let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
             "prompt": "storage seam",
             "model": "mock",
@@ -985,8 +1037,7 @@ mod tests {
             extract_request_media("job-store", request, &ProcessPrivateAuthorities::none())
                 .unwrap();
         let (request_json, media) = extracted.into_parts();
-        let records = media.into_records();
-        let media = OpaqueQueueMedia::from_records("job-store", records).unwrap();
+        assert_eq!(media.job_id(), "job-store");
 
         let restored = rehydrate_request_media("job-store", &request_json, media).unwrap();
         assert_eq!(serde_json::to_value(restored).unwrap(), expected);
@@ -1003,7 +1054,10 @@ mod tests {
             "source_image": null
         })
         .to_string();
-        let media = OpaqueQueueMedia::from_records("job-contaminated", Vec::new()).unwrap();
+        let media = OpaqueQueueMedia {
+            job_id: "job-contaminated".to_string(),
+            records: Vec::new(),
+        };
 
         assert!(matches!(
             rehydrate_request_media("job-contaminated", &contaminated, media),
