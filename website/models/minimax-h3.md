@@ -106,16 +106,16 @@ disagree.
 Each compact variant has the same component graph except for its task-specific
 transformer:
 
-| Component                                              |              Bytes |  Decimal size | Upstream source                                                                                                     |
-| ------------------------------------------------------ | -----------------: | ------------: | ------------------------------------------------------------------------------------------------------------------- |
-| Task transformer (INT8 ConvRot)                        |     20,970,379,616 |     20.970 GB | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/eb8a16107c595128b3a578f82d2ce2f75920c355) |
+| Component                                              |              Bytes |  Decimal size | Upstream source                                                                                                                                               |
+| ------------------------------------------------------ | -----------------: | ------------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Task transformer (INT8 ConvRot)                        |     20,970,379,616 |     20.970 GB | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/eb8a16107c595128b3a578f82d2ce2f75920c355)                                           |
 | Task transformer (pruned NVFP4)                        |     12,528,636,865 |     12.529 GB | [`Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot`](https://huggingface.co/Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot/tree/908eccad7e68751190d04c171956f163bfeed741) |
-| Qwen3-VL NVFP4-AWQ text encoder                        |     15,687,142,551 |     15.687 GB | `Comfy-Org/MiniMax-H3`                                                                                              |
-| FP16 video VAE                                         |      5,207,808,496 |      5.208 GB | `Comfy-Org/MiniMax-H3`                                                                                              |
-| FP32 audio VAE                                         |        605,254,808 |      0.605 GB | `Comfy-Org/MiniMax-H3`                                                                                              |
-| Tokenizer, processor, scheduler, and component configs |         11,504,847 |      0.012 GB | [`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/bfc8ed0353f5a9733be73e6b2c98ec0948195b86) |
-| **One complete INT8 variant**                          | **42,482,090,318** | **42.482 GB** | Both pinned repositories                                                                                            |
-| **One complete NVFP4 variant**                         | **34,040,347,567** | **34.040 GB** | All three pinned repositories                                                                                       |
+| Qwen3-VL NVFP4-AWQ text encoder                        |     15,687,142,551 |     15.687 GB | `Comfy-Org/MiniMax-H3`                                                                                                                                        |
+| FP16 video VAE                                         |      5,207,808,496 |      5.208 GB | `Comfy-Org/MiniMax-H3`                                                                                                                                        |
+| FP32 audio VAE                                         |        605,254,808 |      0.605 GB | `Comfy-Org/MiniMax-H3`                                                                                                                                        |
+| Tokenizer, processor, scheduler, and component configs |         11,504,847 |      0.012 GB | [`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/bfc8ed0353f5a9733be73e6b2c98ec0948195b86)                                           |
+| **One complete INT8 variant**                          | **42,482,090,318** | **42.482 GB** | Both pinned repositories                                                                                                                                      |
+| **One complete NVFP4 variant**                         | **34,040,347,567** | **34.040 GB** | All three pinned repositories                                                                                                                                 |
 
 A Turbo tag adds one adapter to this graph:
 [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/dc559027db79c174125df4d827db55cd11178860)
