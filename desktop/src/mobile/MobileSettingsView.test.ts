@@ -500,8 +500,12 @@ describe("MobileSettingsView", () => {
     await vi.advanceTimersByTimeAsync(5_000);
     await flushPromises();
 
-    expect(wrapper.find("[role='alert']").exists()).toBe(false);
-    expect(wrapper.text()).toContain("RECOVERED GPU");
+    // The recovery poll settles through several microtask turns; a single
+    // flush races it under CI load (#1334), so wait for the DOM to settle.
+    await vi.waitFor(() => {
+      expect(wrapper.find("[role='alert']").exists()).toBe(false);
+      expect(wrapper.text()).toContain("RECOVERED GPU");
+    });
     wrapper.unmount();
   });
 
