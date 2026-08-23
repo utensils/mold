@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use candle::{DType, Device, Shape, Tensor};
+use candle::{DType, Device, DeviceLocation, Shape, Tensor};
 use candle_nn::var_builder::SimpleBackend;
 use candle_nn::VarBuilder;
 use serde::de::{DeserializeOwned, Error as _, MapAccess, SeqAccess, Visitor};
@@ -1499,6 +1499,34 @@ struct H3ComfyOpenedBackend {
     cancellation: Arc<dyn H3ComfyInt8Cancellation>,
 }
 
+fn resident_load_requires_synchronization(location: DeviceLocation) -> bool {
+    matches!(location, DeviceLocation::Metal { .. })
+}
+
+impl H3ComfyOpenedBackend {
+    fn load_dense_tensor(
+        &self,
+        name: &str,
+        dtype: DType,
+        device: &Device,
+    ) -> candle::Result<Tensor> {
+        let tensor =
+            self.source
+                .load_dense_tensor(name, dtype, device, self.cancellation.as_ref())?;
+        // `to_device` is asynchronous on Metal. Without a fence here, each
+        // completed resident-core upload keeps its host read buffer and any
+        // dtype-conversion source alive in the command queue while the next
+        // tensor is loaded. The fixed H3 core then accumulates every staging
+        // allocation and can consume the machine before denoise begins. One
+        // tensor is the memory-evidence boundary, so commit that upload before
+        // its temporary sources leave scope. CUDA and CPU stay asynchronous.
+        if resident_load_requires_synchronization(device.location()) {
+            device.synchronize()?;
+        }
+        Ok(tensor)
+    }
+}
+
 impl SimpleBackend for H3ComfyOpenedBackend {
     fn get(
         &self,
@@ -1508,9 +1536,7 @@ impl SimpleBackend for H3ComfyOpenedBackend {
         dtype: DType,
         device: &Device,
     ) -> candle::Result<Tensor> {
-        let tensor =
-            self.source
-                .load_dense_tensor(name, dtype, device, self.cancellation.as_ref())?;
+        let tensor = self.load_dense_tensor(name, dtype, device)?;
         if tensor.shape() != &shape {
             return Err(candle::Error::UnexpectedShape {
                 msg: format!("H3 Comfy opened-file backend shape mismatch for {name}"),
@@ -1523,8 +1549,7 @@ impl SimpleBackend for H3ComfyOpenedBackend {
     }
 
     fn get_unchecked(&self, name: &str, dtype: DType, device: &Device) -> candle::Result<Tensor> {
-        self.source
-            .load_dense_tensor(name, dtype, device, self.cancellation.as_ref())
+        self.load_dense_tensor(name, dtype, device)
     }
 
     fn contains_tensor(&self, name: &str) -> bool {
@@ -2773,6 +2798,17 @@ mod tests {
     use candle::{Device, Tensor};
 
     use super::*;
+
+    #[test]
+    fn resident_load_fences_only_metal_uploads() {
+        assert!(resident_load_requires_synchronization(
+            DeviceLocation::Metal { gpu_id: 0 }
+        ));
+        assert!(!resident_load_requires_synchronization(DeviceLocation::Cpu));
+        assert!(!resident_load_requires_synchronization(
+            DeviceLocation::Cuda { gpu_id: 0 }
+        ));
+    }
     use crate::minimax_h3::interpolate_h3_adaln_curve;
 
     /// The published INT8 quantization policy and the Turbo LoRA adapter

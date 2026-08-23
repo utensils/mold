@@ -61,7 +61,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use candle::{DType, Device, Tensor};
+use candle::{DType, Device, DeviceLocation, Tensor};
 
 use super::comfy_dit::{H3ComfyInt8Cancellation, FILE_READ_CHUNK_BYTES};
 use super::turbo_lora::{
@@ -590,6 +590,23 @@ fn load_module_delta(
         cancellation,
     )?;
     let delta = H3TurboLoraDelta::new(&down, &up, module.scale)?;
+    // Each constructor transposes both source matrices into the retained
+    // layout. Metal queues those copies asynchronously and otherwise keeps
+    // every module's read/conversion/transpose sources alive until the entire
+    // 208-module adapter finishes loading. Fence at the declared one-module
+    // staging boundary so peak memory matches admission. CUDA and CPU retain
+    // their existing asynchronous path.
+    if turbo_load_requires_synchronization(device.location()) {
+        device.synchronize().map_err(|error| {
+            failure(
+                H3TurboLoraErrorCode::Io,
+                format!(
+                    "failed to synchronize H3 Turbo module {:?}: {error}",
+                    module.name
+                ),
+            )
+        })?;
+    }
     if delta.rank() != module.rank
         || delta.in_features() != module.in_features
         || delta.out_features() != module.out_features
@@ -609,6 +626,10 @@ fn load_module_delta(
         ));
     }
     Ok(delta)
+}
+
+fn turbo_load_requires_synchronization(location: DeviceLocation) -> bool {
+    matches!(location, DeviceLocation::Metal { .. })
 }
 
 fn read_delta_tensor(
@@ -694,6 +715,17 @@ mod tests {
     use super::super::comfy_dit::H3ComfyNeverCancel;
     use super::super::turbo_lora::fixtures;
     use super::*;
+
+    #[test]
+    fn turbo_load_fences_only_metal_uploads() {
+        assert!(turbo_load_requires_synchronization(DeviceLocation::Metal {
+            gpu_id: 0
+        }));
+        assert!(!turbo_load_requires_synchronization(DeviceLocation::Cpu));
+        assert!(!turbo_load_requires_synchronization(DeviceLocation::Cuda {
+            gpu_id: 0
+        }));
+    }
 
     #[test]
     fn a_delta_computes_the_low_rank_product_with_its_scale() {
