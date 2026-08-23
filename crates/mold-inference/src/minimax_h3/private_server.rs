@@ -681,12 +681,22 @@ fn precheck_private_h3_admission_capacity(
         }
         return Ok(());
     }
-    if device_floor > available_device_bytes || host_floor > available_host_headroom_bytes {
+    // Two independent resources, two independent refusals (#1214). The host arm
+    // is additionally typed, because a host shortfall is the one a caller can
+    // act on by releasing its own model cache (#1289).
+    if device_floor > available_device_bytes {
         bail!(
-            "private H3 admission needs at least {device_floor} device and {host_floor} host \
-             bytes before any request-specific term, exceeding the {available_device_bytes} \
-             device and {available_host_headroom_bytes} host admission sample"
+            "private H3 admission needs at least {device_floor} device bytes before any \
+             request-specific term, exceeding the {available_device_bytes} byte device \
+             admission sample"
         )
+    }
+    if host_floor > available_host_headroom_bytes {
+        return Err(anyhow!(H3PrivateHostHeadroomShortfall {
+            context: "private H3 admission",
+            required_host_bytes: host_floor,
+            available_host_headroom_bytes,
+        }));
     }
     Ok(())
 }
@@ -771,10 +781,11 @@ fn check_private_h3_target_budget_fits(
         )
     }
     if predicted_host_increment_bytes > available_host_headroom_bytes {
-        bail!(
-            "private H3 canonical target needs {predicted_host_increment_bytes} host bytes but \
-             the admission headroom sample offers {available_host_headroom_bytes}"
-        )
+        return Err(anyhow!(H3PrivateHostHeadroomShortfall {
+            context: "private H3 canonical target",
+            required_host_bytes: predicted_host_increment_bytes,
+            available_host_headroom_bytes,
+        }));
     }
     Ok(())
 }
@@ -1121,10 +1132,39 @@ pub struct H3PrivateFl2VaRunOutput {
     pub identity_echo: H3PrivateFl2VaTerminalIdentityEcho,
 }
 
+/// A refusal that turns on HOST memory alone.
+///
+/// It is a type rather than a sentence because the caller has an action for
+/// exactly this case and no other: mold's own model cache may be holding the
+/// bytes, and it can hand them back and retry (#1289). Recovering that from
+/// prose is the mistake #1272 already paid for — the opaque revalidation
+/// sentence a host block used to be sniffed from never contained the word
+/// "host" at all, so every H3 job blocked on host RAM was filed as a VRAM
+/// shortfall it did not have.
+///
+/// The message deliberately names no device number: #1214 requires a refusal to
+/// name WHICH resource fell short, and a device figure beside a host shortfall
+/// is what made the two indistinguishable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error(
+    "{context} needs at least {required_host_bytes} host bytes, exceeding the \
+     {available_host_headroom_bytes} byte host admission sample"
+)]
+pub struct H3PrivateHostHeadroomShortfall {
+    /// Which gate refused, so the sentence still reads as prose.
+    pub context: &'static str,
+    pub required_host_bytes: u64,
+    pub available_host_headroom_bytes: u64,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum H3PrivateFl2VaPrepareError {
     #[error("private H3 runtime has no reviewed runtime qualification")]
     MissingReviewedRuntimeQualification,
+    /// Host memory alone was short. Carried typed so a caller can release its
+    /// own reclaimable cache and retry before refusing the request.
+    #[error("{0}")]
+    InsufficientHostHeadroom(H3PrivateHostHeadroomShortfall),
     #[error("private H3 preparation evidence was rejected: {0}")]
     InvalidEvidence(String),
 }
@@ -1554,8 +1594,14 @@ pub fn prepare_h3_private_fl2va_admission(
     }
     #[cfg(feature = "mp4")]
     {
-        prepare_reviewed_h3_private_fl2va_admission(input, progress)
-            .map_err(|error| H3PrivateFl2VaPrepareError::InvalidEvidence(error.to_string()))
+        prepare_reviewed_h3_private_fl2va_admission(input, progress).map_err(|error| {
+            // Preserve the one refusal a caller can act on. Everything else
+            // keeps the existing opaque evidence wording.
+            match error.downcast::<H3PrivateHostHeadroomShortfall>() {
+                Ok(shortfall) => H3PrivateFl2VaPrepareError::InsufficientHostHeadroom(shortfall),
+                Err(error) => H3PrivateFl2VaPrepareError::InvalidEvidence(error.to_string()),
+            }
+        })
     }
 }
 
@@ -8824,6 +8870,64 @@ mod tests {
         assert!(metal.contains("9000000001"), "{metal}");
         assert!(metal.contains("9000000000"), "{metal}");
         assert!(metal.contains("unified-memory"), "{metal}");
+    }
+
+    /// A host-headroom refusal is the one a caller can act on: mold's own model
+    /// cache may be holding the bytes, and it can release them and retry
+    /// (#1289). That decision must read a type, never a sentence — the
+    /// substring test #1272 relied on is exactly what filed every host block as
+    /// a VRAM shortfall.
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn a_host_only_shortfall_is_typed_at_both_gates_and_names_no_device() {
+        // Mirror production's own bounds selection so this test asks the gate
+        // exactly what a real admission asks it.
+        #[cfg(feature = "h3")]
+        let bounds = public_runtime_bounds();
+        #[cfg(not(feature = "h3"))]
+        let bounds = capture_runtime_bounds();
+        let host_floor = private_h3_admission_host_floor_bytes(&bounds).unwrap();
+
+        let floor_error = precheck_private_h3_admission_capacity(
+            &bounds,
+            Some((8, 9)),
+            u64::MAX,
+            host_floor.saturating_sub(1),
+        )
+        .unwrap_err();
+        assert!(!floor_error.to_string().contains("device"), "{floor_error}");
+        let floor_shortfall = floor_error
+            .downcast::<H3PrivateHostHeadroomShortfall>()
+            .expect("the admission floor refuses host memory with a type");
+        assert_eq!(floor_shortfall.required_host_bytes, host_floor);
+        assert_eq!(
+            floor_shortfall.available_host_headroom_bytes,
+            host_floor.saturating_sub(1)
+        );
+
+        let target_shortfall = check_private_h3_target_budget_fits(
+            9_000_000_000,
+            15_300_615_032,
+            Some((8, 9)),
+            9_000_000_000,
+            12_659_979_674,
+        )
+        .unwrap_err()
+        .downcast::<H3PrivateHostHeadroomShortfall>()
+        .expect("the exact target budget refuses host memory with a type");
+        assert_eq!(target_shortfall.required_host_bytes, 15_300_615_032);
+        assert_eq!(
+            target_shortfall.available_host_headroom_bytes,
+            12_659_979_674
+        );
+
+        // A device shortfall must NOT be classified as one, or a reclaim would
+        // evict the cache for memory eviction cannot supply.
+        let device_error =
+            precheck_private_h3_admission_capacity(&bounds, Some((8, 9)), 0, u64::MAX).unwrap_err();
+        assert!(device_error
+            .downcast::<H3PrivateHostHeadroomShortfall>()
+            .is_err());
     }
 
     #[cfg(feature = "mp4")]

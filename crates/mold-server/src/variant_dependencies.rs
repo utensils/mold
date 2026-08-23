@@ -1781,6 +1781,69 @@ mod preparation_cancellation_tests {
     }
 }
 
+/// Shorthand for the one refusal an H3 admission caller can act on.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+type HostShortfall = mold_inference::H3PrivateHostHeadroomShortfall;
+
+/// How much host headroom a reclaim has to reach for this attempt to be worth
+/// retrying, or `None` when it must not run at all.
+///
+/// Three rules, and every one is a refusal rather than an optimization.
+///
+/// A placement PREVIEW never reclaims. `ExistingOnly` is the read-only probe
+/// (AGENTS.md, "Placement preview is an authority boundary"): it starts no
+/// downloads and must change no state, and automatic routing fans it across
+/// every candidate machine — so a preview that evicted would flush the warm
+/// cache of every host in the fleet to answer a question about one print.
+///
+/// Only a HOST shortfall qualifies: a device shortfall would evict the model
+/// cache for memory eviction cannot supply.
+///
+/// And only the first attempt qualifies: the reclaim it ran already released
+/// everything it could, so a second would re-ask a question whose answer cannot
+/// have changed.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+fn h3_reclaim_requirement(
+    policy: DependencyMaterializationPolicy,
+    attempt: usize,
+    shortfall: Option<HostShortfall>,
+) -> Option<u64> {
+    if policy != DependencyMaterializationPolicy::Admission || attempt > 0 {
+        return None;
+    }
+    Some(shortfall?.required_host_bytes)
+}
+
+/// Why one device's H3 admission attempt did not produce evidence.
+///
+/// The two arms fail for unrelated reasons — a staged reference could not be
+/// bound, or the admission itself refused — and only the second can carry a
+/// host-memory shortfall. Keeping them apart preserves both sentences exactly
+/// as they read today while letting the caller ask the typed question (#1289)
+/// instead of searching the prose for it.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+enum H3AdmissionAttemptError {
+    Bindings(String),
+    Prepare(mold_inference::H3PrivateFl2VaPrepareError),
+}
+
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+impl H3AdmissionAttemptError {
+    fn host_shortfall(&self) -> Option<HostShortfall> {
+        match self {
+            Self::Bindings(_) => None,
+            Self::Prepare(error) => crate::h3_private_bridge::private_prepare_host_shortfall(error),
+        }
+    }
+
+    fn message(self) -> String {
+        match self {
+            Self::Bindings(reason) => reason,
+            Self::Prepare(error) => crate::h3_private_bridge::private_prepare_error_message(error),
+        }
+    }
+}
+
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 #[allow(clippy::too_many_arguments)]
 async fn prepare_h3_private_inputs_for_devices(
@@ -1790,7 +1853,7 @@ async fn prepare_h3_private_inputs_for_devices(
     config: &Config,
     devices: Vec<DeviceFact>,
     progress: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
-    _policy: DependencyMaterializationPolicy,
+    policy: DependencyMaterializationPolicy,
     ingress_grant: crate::h3_private_bridge::H3PrivateIngressGrant,
     resolved_references: Option<crate::reference_uploads::ResolvedReferenceAdmissionView>,
 ) -> Result<PreparedExecutionInputs, String> {
@@ -1801,7 +1864,7 @@ async fn prepare_h3_private_inputs_for_devices(
     if devices.is_empty() {
         return Err("request placement has no eligible schedulable device".into());
     }
-    let available_host_headroom_bytes =
+    let mut available_host_headroom_bytes =
         crate::h3_admission::current_h3_host_memory().headroom_bytes();
     let uat_paths =
         crate::h3_private_bridge::H3PrivateUatPathSet::resolve(config.resolved_models_dir());
@@ -1817,136 +1880,205 @@ async fn prepare_h3_private_inputs_for_devices(
     let mut evidence_by_device = BTreeMap::new();
     let mut failures = BTreeMap::new();
 
-    for mut device in devices {
-        #[cfg(not(feature = "h3"))]
-        if device.backend != mold_core::GpuBackend::Cuda {
-            failures.insert(
-                device.id,
-                "MiniMax H3 private UAT requires a CUDA device".to_string(),
-            );
-            continue;
-        }
-        #[cfg(feature = "h3")]
-        if !matches!(
-            device.backend,
-            mold_core::GpuBackend::Cuda | mold_core::GpuBackend::Metal
-        ) {
-            failures.insert(device.id, "MiniMax H3 requires CUDA or Metal".to_string());
-            continue;
-        }
-        let compute_capability = device.compute_capability;
-        if device.backend == mold_core::GpuBackend::Cuda && compute_capability.is_none() {
-            failures.insert(
-                device.id,
-                "MiniMax H3 CUDA requires exact compute capability".to_string(),
-            );
-            continue;
-        }
-        if device.backend == mold_core::GpuBackend::Metal && compute_capability.is_some() {
-            failures.insert(
-                device.id,
-                "MiniMax H3 Metal route carried a CUDA compute capability".to_string(),
-            );
-            continue;
-        }
-        if device.backend == mold_core::GpuBackend::Metal {
-            device.available_vram_bytes =
-                mold_inference::device::metal_unified_capacity_with_safety_floor(
-                    device.available_vram_bytes,
+    // A host-headroom refusal is asked one more question before it becomes an
+    // answer: is mold's own model cache holding the memory? If it is, the cache
+    // is released least-recently-used first and admission is retried exactly
+    // once against a fresh sample (#1289). Two attempts, never more — the first
+    // reclaim already released everything it could, so a third pass would only
+    // re-ask a question whose answer cannot have changed.
+    let mut host_shortfall: Option<mold_inference::H3PrivateHostHeadroomShortfall> = None;
+    let mut reclaim = crate::host_reclaim::HostReclaimOutcome::default();
+    for attempt in 0..2 {
+        evidence_by_device.clear();
+        failures.clear();
+        host_shortfall = None;
+        for mut device in devices.clone() {
+            #[cfg(not(feature = "h3"))]
+            if device.backend != mold_core::GpuBackend::Cuda {
+                failures.insert(
+                    device.id,
+                    "MiniMax H3 private UAT requires a CUDA device".to_string(),
                 );
-        }
-        let admission_request = resolved_request.clone();
-        let paths = uat_paths.clone();
-        // Each device's admission mints its own descriptors rather than
-        // sharing one set: a binding owns an open file, and re-opening per
-        // attempt is what keeps descriptor identity fenced to the attempt that
-        // verified it.
-        let references = resolved_references.clone();
-        let cancellation = preparation_cancellation.token();
-        let device_id = device.id.clone();
-        let device_ordinal = device.ordinal;
-        let available_device_bytes = device.available_vram_bytes;
-        let progress_tx = progress.cloned();
-        let evidence = tokio::task::spawn_blocking(move || {
-            let mut reporter = mold_inference::progress::ProgressReporter::default();
-            // The decode checkpoints through this reporter, so the token has
-            // to live here — bindings retain none, and consulting it only
-            // while hashing would leave the media decode uninterruptible.
-            reporter.set_cancellation_token(cancellation.clone());
-            if let Some(progress_tx) = progress_tx {
-                reporter.set_callback(Box::new(move |event| {
-                    crate::gpu_worker::record_h3_progress(event, Some(&progress_tx));
-                }));
-            }
-            // Cooperative abort: a cancelled preparation stops decoding at
-            // the next checkpoint instead of burning CPU on media whose job is
-            // already gone. The staging and its quota stay alive regardless,
-            // because the view shares the resolved set's hold.
-            let bindings = match references
-                .as_ref()
-                .map(|references| {
-                    references.inference_bindings(&admission_request, Some(&cancellation))
-                })
-                .transpose()
-            {
-                Ok(bindings) => bindings.unwrap_or_default(),
-                Err(error) => {
-                    return Err(format!(
-                        "MiniMax H3 admission could not bind its staged references: {error}"
-                    ))
-                }
-            };
-            mold_inference::prepare_h3_private_fl2va_admission(
-                mold_inference::H3PrivateFl2VaAdmissionInput {
-                    request: &admission_request,
-                    paths: paths.inference_paths(),
-                    references: &bindings,
-                    device_id: &device_id,
-                    device_ordinal,
-                    compute_capability,
-                    available_device_bytes,
-                    available_host_headroom_bytes,
-                },
-                &reporter,
-            )
-            .map_err(crate::h3_private_bridge::private_prepare_error_message)
-        })
-        .await
-        .map_err(|error| format!("MiniMax H3 admission worker failed: {error}"))?;
-        let evidence = match evidence {
-            Ok(evidence) => evidence,
-            Err(error) => {
-                failures.insert(device.id, error);
                 continue;
             }
+            #[cfg(feature = "h3")]
+            if !matches!(
+                device.backend,
+                mold_core::GpuBackend::Cuda | mold_core::GpuBackend::Metal
+            ) {
+                failures.insert(device.id, "MiniMax H3 requires CUDA or Metal".to_string());
+                continue;
+            }
+            let compute_capability = device.compute_capability;
+            if device.backend == mold_core::GpuBackend::Cuda && compute_capability.is_none() {
+                failures.insert(
+                    device.id,
+                    "MiniMax H3 CUDA requires exact compute capability".to_string(),
+                );
+                continue;
+            }
+            if device.backend == mold_core::GpuBackend::Metal && compute_capability.is_some() {
+                failures.insert(
+                    device.id,
+                    "MiniMax H3 Metal route carried a CUDA compute capability".to_string(),
+                );
+                continue;
+            }
+            if device.backend == mold_core::GpuBackend::Metal {
+                device.available_vram_bytes =
+                    mold_inference::device::metal_unified_capacity_with_safety_floor(
+                        device.available_vram_bytes,
+                    );
+            }
+            let admission_request = resolved_request.clone();
+            let paths = uat_paths.clone();
+            // Each device's admission mints its own descriptors rather than
+            // sharing one set: a binding owns an open file, and re-opening per
+            // attempt is what keeps descriptor identity fenced to the attempt that
+            // verified it.
+            let references = resolved_references.clone();
+            let cancellation = preparation_cancellation.token();
+            let device_id = device.id.clone();
+            let device_ordinal = device.ordinal;
+            let available_device_bytes = device.available_vram_bytes;
+            let progress_tx = progress.cloned();
+            let evidence = tokio::task::spawn_blocking(move || {
+                let mut reporter = mold_inference::progress::ProgressReporter::default();
+                // The decode checkpoints through this reporter, so the token has
+                // to live here — bindings retain none, and consulting it only
+                // while hashing would leave the media decode uninterruptible.
+                reporter.set_cancellation_token(cancellation.clone());
+                if let Some(progress_tx) = progress_tx {
+                    reporter.set_callback(Box::new(move |event| {
+                        crate::gpu_worker::record_h3_progress(event, Some(&progress_tx));
+                    }));
+                }
+                // Cooperative abort: a cancelled preparation stops decoding at
+                // the next checkpoint instead of burning CPU on media whose job is
+                // already gone. The staging and its quota stay alive regardless,
+                // because the view shares the resolved set's hold.
+                let bindings = match references
+                    .as_ref()
+                    .map(|references| {
+                        references.inference_bindings(&admission_request, Some(&cancellation))
+                    })
+                    .transpose()
+                {
+                    Ok(bindings) => bindings.unwrap_or_default(),
+                    Err(error) => {
+                        return Err(H3AdmissionAttemptError::Bindings(format!(
+                            "MiniMax H3 admission could not bind its staged references: {error}"
+                        )))
+                    }
+                };
+                mold_inference::prepare_h3_private_fl2va_admission(
+                    mold_inference::H3PrivateFl2VaAdmissionInput {
+                        request: &admission_request,
+                        paths: paths.inference_paths(),
+                        references: &bindings,
+                        device_id: &device_id,
+                        device_ordinal,
+                        compute_capability,
+                        available_device_bytes,
+                        available_host_headroom_bytes,
+                    },
+                    &reporter,
+                )
+                .map_err(H3AdmissionAttemptError::Prepare)
+            })
+            .await
+            .map_err(|error| format!("MiniMax H3 admission worker failed: {error}"))?;
+            let evidence = match evidence {
+                Ok(evidence) => evidence,
+                Err(error) => {
+                    // Keep the largest host requirement any device asked for:
+                    // that is the number a reclaim has to meet, and refusing
+                    // with a smaller one would promise a retry that fails.
+                    if let Some(shortfall) = error.host_shortfall() {
+                        if host_shortfall.is_none_or(|held: HostShortfall| {
+                            held.required_host_bytes < shortfall.required_host_bytes
+                        }) {
+                            host_shortfall = Some(shortfall);
+                        }
+                    }
+                    failures.insert(device.id, error.message());
+                    continue;
+                }
+            };
+            let next_request = evidence
+                .resolve_request(&resolved_request)
+                .map_err(|error| {
+                    format!("MiniMax H3 admission seed resolution failed: {error:#}")
+                })?;
+            evidence
+                .validate_for(
+                    &next_request,
+                    &device.id,
+                    device.ordinal,
+                    compute_capability,
+                    device.available_vram_bytes,
+                    available_host_headroom_bytes,
+                )
+                .map_err(|error| {
+                    format!("MiniMax H3 admission evidence did not revalidate: {error:#}")
+                })?;
+            resolved_request = next_request;
+            evidence_by_device.insert(device.id.clone(), (device, evidence));
+        }
+        if !evidence_by_device.is_empty() {
+            break;
+        }
+        let (Some(required_host_bytes), Some(state)) = (
+            h3_reclaim_requirement(policy, attempt, host_shortfall),
+            state,
+        ) else {
+            break;
         };
-        let next_request = evidence
-            .resolve_request(&resolved_request)
-            .map_err(|error| format!("MiniMax H3 admission seed resolution failed: {error:#}"))?;
-        evidence
-            .validate_for(
-                &next_request,
-                &device.id,
-                device.ordinal,
-                compute_capability,
-                device.available_vram_bytes,
-                available_host_headroom_bytes,
-            )
-            .map_err(|error| {
-                format!("MiniMax H3 admission evidence did not revalidate: {error:#}")
-            })?;
-        resolved_request = next_request;
-        evidence_by_device.insert(device.id.clone(), (device, evidence));
+        // The eviction is awaited and its host memory handed back before the
+        // sample is re-taken: an OS sample can no more prove an unfinished
+        // release than it can prove an unsettled allocation.
+        reclaim = crate::host_reclaim::reclaim_host_headroom(
+            state,
+            &resolved_request.model,
+            required_host_bytes,
+            &|| crate::h3_admission::current_h3_host_memory().headroom_bytes(),
+        )
+        .await;
+        if !reclaim.released_anything() {
+            break;
+        }
+        available_host_headroom_bytes =
+            crate::h3_admission::current_h3_host_memory().headroom_bytes();
     }
     if evidence_by_device.is_empty() {
-        return Err(format!(
+        let mut message = format!(
             "no request-eligible device passed MiniMax H3 private admission: {}",
             failures
                 .iter()
                 .map(|(device, error)| format!("{device}: {error}"))
                 .collect::<Vec<_>>()
                 .join("; ")
-        ));
+        );
+        // Only say what was released when something was: the per-device
+        // sentence already carries the untouched case, and an empty clause
+        // would read as mold having tried nothing.
+        match (host_shortfall, reclaim.released_anything()) {
+            (Some(shortfall), true) => message.push_str(&format!(
+                "; {}",
+                crate::host_reclaim::host_shortfall_message(
+                    &reclaim,
+                    shortfall.required_host_bytes,
+                    shortfall.available_host_headroom_bytes,
+                )
+            )),
+            (_, true) => {
+                if let Some(summary) = reclaim.release_summary() {
+                    message.push_str(&format!("; {summary}"));
+                }
+            }
+            _ => {}
+        }
+        return Err(message);
     }
 
     #[cfg(feature = "h3")]
@@ -2155,6 +2287,93 @@ const H3_PUBLIC_LOCAL_INSTANCE_ID: &str = "mold-public-forced-local";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a HOST shortfall may be answered by releasing the model cache, only
+    /// once, and never from a placement preview (#1289). A device shortfall
+    /// would evict engines for memory eviction cannot supply; a second reclaim
+    /// would re-ask a question the first already answered; and a preview is the
+    /// read-only probe automatic routing fans across the whole fleet, so one
+    /// that evicted would flush every candidate machine's warm cache to answer
+    /// a question about one print.
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    #[test]
+    fn only_a_first_attempt_host_shortfall_under_admission_asks_for_a_reclaim() {
+        let shortfall = HostShortfall {
+            context: "private H3 admission",
+            required_host_bytes: 15_300_615_032,
+            available_host_headroom_bytes: 12_659_979_674,
+        };
+        assert_eq!(
+            h3_reclaim_requirement(
+                DependencyMaterializationPolicy::Admission,
+                0,
+                Some(shortfall)
+            ),
+            Some(15_300_615_032)
+        );
+        assert_eq!(
+            h3_reclaim_requirement(
+                DependencyMaterializationPolicy::Admission,
+                1,
+                Some(shortfall)
+            ),
+            None
+        );
+        assert_eq!(
+            h3_reclaim_requirement(DependencyMaterializationPolicy::Admission, 0, None),
+            None
+        );
+        assert_eq!(
+            h3_reclaim_requirement(
+                DependencyMaterializationPolicy::ExistingOnly,
+                0,
+                Some(shortfall)
+            ),
+            None,
+            "a read-only placement preview must never evict a model cache"
+        );
+    }
+
+    /// A staged-reference binding failure and an admission refusal fail for
+    /// unrelated reasons, and only the second can be a host shortfall. Both
+    /// sentences must survive the split unchanged.
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    #[test]
+    fn an_admission_attempt_error_classifies_only_the_host_arm() {
+        let bindings = H3AdmissionAttemptError::Bindings(
+            "MiniMax H3 admission could not bind its staged references: gone".to_string(),
+        );
+        assert!(bindings.host_shortfall().is_none());
+        assert_eq!(
+            bindings.message(),
+            "MiniMax H3 admission could not bind its staged references: gone"
+        );
+
+        let evidence = H3AdmissionAttemptError::Prepare(
+            mold_inference::H3PrivateFl2VaPrepareError::InvalidEvidence("nope".to_string()),
+        );
+        assert!(evidence.host_shortfall().is_none());
+        assert_eq!(
+            evidence.message(),
+            "MiniMax H3 preparation evidence was rejected: nope"
+        );
+
+        let host = H3AdmissionAttemptError::Prepare(
+            mold_inference::H3PrivateFl2VaPrepareError::InsufficientHostHeadroom(HostShortfall {
+                context: "private H3 admission",
+                required_host_bytes: 15_300_615_032,
+                available_host_headroom_bytes: 12_659_979_674,
+            }),
+        );
+        let shortfall = host
+            .host_shortfall()
+            .expect("a host refusal is classified, never searched for in its prose");
+        assert_eq!(shortfall.required_host_bytes, 15_300_615_032);
+        let message = host.message();
+        assert!(message.contains("15300615032"), "{message}");
+        assert!(message.contains("12659979674"), "{message}");
+        assert!(!message.contains("device"), "{message}");
+    }
 
     #[cfg(feature = "h3")]
     #[test]
