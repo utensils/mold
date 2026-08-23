@@ -37,6 +37,8 @@ vi.mock("../lib/galleryMedia", () => ({ fetchGalleryBlob }));
 
 import { __testing__, useGenerateStream, type Job } from "./useGenerateStream";
 
+const nativeStorageSetItem = localStorage.setItem;
+
 function request(prompt = "a patient red fox"): GenerateRequestWire {
   return {
     prompt,
@@ -198,30 +200,73 @@ describe("web durable generation lifecycle", () => {
     expect(admitGenerationBatch.mock.calls[1]![1].requests).toHaveLength(3);
   });
 
-  it("recovers an ambiguous POST only through its persisted client UUID", async () => {
-    admitGenerationBatch.mockRejectedValue(new TypeError("connection closed"));
-    lookupGenerationBatchByClientId.mockImplementation(
-      (_target: unknown, clientBatchId: string) =>
-        Promise.resolve({ kind: "found", batch: batch(clientBatchId) }),
-    );
-    const stream = useGenerateStream();
-    const id = stream.submit(request(), { kind: "single" }, route);
+  it("fails closed before admission when the durable recovery fence cannot persist", async () => {
+    const storage = vi
+      .spyOn(localStorage, "setItem")
+      .mockImplementation(function (key, value) {
+        if (key === "mold.generate.jobs") {
+          throw new DOMException("quota exceeded", "QuotaExceededError");
+        }
+        return Reflect.apply(nativeStorageSetItem, localStorage, [key, value]);
+      });
+    try {
+      const stream = useGenerateStream();
 
-    await vi.waitFor(() =>
-      expect(stream.jobs.value.find((job) => job.id === id)?.serverId).toMatch(
-        /^job-/,
-      ),
-    );
-    const persisted = localStorage.getItem("mold.generate.jobs")!;
-    const clientBatchId = stream.jobs.value.find((job) => job.id === id)!
-      .durableBatch!.clientBatchId;
-    expect(persisted).toContain(clientBatchId);
-    expect(persisted).not.toContain("secret");
-    expect(lookupGenerationBatchByClientId).toHaveBeenCalledWith(
-      expect.anything(),
-      clientBatchId,
-    );
-    expect(generateStream).not.toHaveBeenCalled();
+      const id = stream.submit(request(), { kind: "single" }, route);
+      await Promise.resolve();
+
+      const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+      expect(job.state).toBe("error");
+      expect(job.error).toMatch(/Nothing was submitted/);
+      expect(job.durableBatch).toBeUndefined();
+      expect(admitGenerationBatch).not.toHaveBeenCalled();
+      expect(generateStream).not.toHaveBeenCalled();
+      expect(lookupGenerationBatchByClientId).not.toHaveBeenCalled();
+      expect(fetchEventSource).not.toHaveBeenCalled();
+    } finally {
+      storage.mockRestore();
+    }
+  });
+
+  it("recovers an ambiguous POST only by UUID and never falls back after dispatch", async () => {
+    let generationWrites = 0;
+    const storage = vi
+      .spyOn(localStorage, "setItem")
+      .mockImplementation(function (key, value) {
+        if (key === "mold.generate.jobs" && generationWrites++ > 0) {
+          throw new DOMException("quota exceeded", "QuotaExceededError");
+        }
+        return Reflect.apply(nativeStorageSetItem, localStorage, [key, value]);
+      });
+    try {
+      admitGenerationBatch.mockRejectedValue(
+        new TypeError("connection closed"),
+      );
+      lookupGenerationBatchByClientId.mockImplementation(
+        (_target: unknown, clientBatchId: string) =>
+          Promise.resolve({ kind: "found", batch: batch(clientBatchId) }),
+      );
+      const stream = useGenerateStream();
+      const id = stream.submit(request(), { kind: "single" }, route);
+
+      await vi.waitFor(() =>
+        expect(
+          stream.jobs.value.find((job) => job.id === id)?.serverId,
+        ).toMatch(/^job-/),
+      );
+      const persisted = localStorage.getItem("mold.generate.jobs")!;
+      const clientBatchId = stream.jobs.value.find((job) => job.id === id)!
+        .durableBatch!.clientBatchId;
+      expect(persisted).toContain(clientBatchId);
+      expect(persisted).not.toContain("secret");
+      expect(lookupGenerationBatchByClientId).toHaveBeenCalledWith(
+        expect.anything(),
+        clientBatchId,
+      );
+      expect(generateStream).not.toHaveBeenCalled();
+    } finally {
+      storage.mockRestore();
+    }
   });
 
   it("keeps recovery-record media redaction as defense in depth", () => {

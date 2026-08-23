@@ -837,45 +837,54 @@ function initializePersistedState(raw: string | null): LoadedJobsState {
   return loaded;
 }
 
+function persistedJobsJson(jobs: Job[]): string {
+  // Always keep running jobs (the user is watching them); cap the number of
+  // settled jobs persisted so localStorage doesn't grow unbounded across
+  // sessions. Order is preserved because submit prepends new jobs.
+  const settledCount = { n: 0 };
+  const filtered = jobs.filter((j) => {
+    if (j.state === "running") return true;
+    settledCount.n += 1;
+    return settledCount.n <= SETTLED_HISTORY_CAP;
+  });
+  const serializable: PersistedJob[] = filtered.map((j) => ({
+    id: j.id,
+    request: j.durableBatch
+      ? durablePersistenceSafeRequest(j.request)
+      : persistenceSafeRequest(j.request),
+    startedAt: j.startedAt,
+    progress: j.progress,
+    result: stripHeavyResult(j.result),
+    error: j.error,
+    state: j.state,
+    settledAt: j.settledAt,
+    chain: j.chain,
+    lastProgressAt: j.lastProgressAt,
+    workStarted: j.workStarted,
+    hostId: j.hostId,
+    hostLabel: j.hostLabel,
+    serverId: j.serverId,
+    detached: j.detached === true,
+    durableBatch: j.durableBatch,
+  }));
+  const payload: PersistedJobs = {
+    version: JOB_STORAGE_VERSION,
+    jobs: serializable,
+  };
+  return JSON.stringify(payload);
+}
+
+/** The durable admission fence is intentionally strict: failure must reach
+ * the submitter before any POST can create server-owned work. */
+function persistDurableRecoveryFence(jobs: Job[]): void {
+  localStorage.setItem(STORAGE_KEY, persistedJobsJson(jobs));
+}
+
 function persistJobs(jobs: Job[]) {
   try {
-    // Always keep running jobs (the user is watching them); cap the
-    // number of settled jobs persisted so localStorage doesn't grow
-    // unbounded across sessions. Order is preserved — `submit` prepends
-    // new jobs, so the cap takes the most recent settled entries.
-    const settledCount = { n: 0 };
-    const filtered = jobs.filter((j) => {
-      if (j.state === "running") return true;
-      settledCount.n += 1;
-      return settledCount.n <= SETTLED_HISTORY_CAP;
-    });
-    const serializable: PersistedJob[] = filtered.map((j) => ({
-      id: j.id,
-      request: j.durableBatch
-        ? durablePersistenceSafeRequest(j.request)
-        : persistenceSafeRequest(j.request),
-      startedAt: j.startedAt,
-      progress: j.progress,
-      result: stripHeavyResult(j.result),
-      error: j.error,
-      state: j.state,
-      settledAt: j.settledAt,
-      chain: j.chain,
-      lastProgressAt: j.lastProgressAt,
-      workStarted: j.workStarted,
-      hostId: j.hostId,
-      hostLabel: j.hostLabel,
-      serverId: j.serverId,
-      detached: j.detached === true,
-      durableBatch: j.durableBatch,
-    }));
-    const payload: PersistedJobs = {
-      version: JOB_STORAGE_VERSION,
-      jobs: serializable,
-    };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    persistDurableRecoveryFence(jobs);
   } catch {
-    /* quota / privacy mode — silently drop */
+    /* Ordinary history is best-effort in quota / privacy mode. */
   }
 }
 
@@ -1021,6 +1030,7 @@ export const __testing__ = {
   STORAGE_KEY,
   durableRequestIneligibility,
   durablePersistenceSafeRequest,
+  persistDurableRecoveryFence,
   reconcileDurableHost,
   handleDurableEvent,
   resetDurableLifecycleForTests,
@@ -1420,11 +1430,6 @@ function submitDurableJobs(
     clientBatchId,
     submittedAtMs: Date.now(),
   });
-  durableTrackers.set(clientBatchId, tracker);
-  durableRoutes.set(route.hostId, {
-    ...route,
-    target: { ...route.target },
-  });
   const admitted = requests.map((request, offset) =>
     createJobRecord(request, decision, route, {
       clientBatchId,
@@ -1436,7 +1441,24 @@ function submitDurableJobs(
   jobs.value = [...admitted, ...jobs.value];
   // This synchronous write is the pre-POST recovery fence. It contains only
   // redacted request data and public authority IDs; the route/key stay memory-only.
-  persistJobs(jobs.value);
+  try {
+    persistDurableRecoveryFence(jobs.value);
+  } catch {
+    const message =
+      "Durable queueing could not start because this browser could not save its recovery record. Free browser storage or allow site storage, then try again. Nothing was submitted.";
+    for (const job of admitted) {
+      job.durable = undefined;
+      job.durableBatch = undefined;
+      job.error = message;
+      recordFailedSettlement(job);
+    }
+    return admitted.map((job) => job.id);
+  }
+  durableTrackers.set(clientBatchId, tracker);
+  durableRoutes.set(route.hostId, {
+    ...route,
+    target: { ...route.target },
+  });
   ensureDurableEventSession(route);
   void admitDurableBatch(route, clientBatchId, requests);
   return admitted.map((job) => job.id);
