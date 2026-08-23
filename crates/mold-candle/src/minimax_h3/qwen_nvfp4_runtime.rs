@@ -14,7 +14,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
-use super::comfy_quant::{H3ComfyInt8TensorwiseEmbedding, H3ComfyNvfp4AwqLinear};
+use super::comfy_quant::{
+    h3_nvfp4_weight_staging_bytes, H3ComfyInt8TensorwiseEmbedding, H3ComfyNvfp4AwqLinear,
+    H3Nvfp4LinearKind,
+};
 use super::config::{H3ConditionerConfig, H3_SELECTED_LANGUAGE_LAYERS};
 use super::model::{
     ConditionerCheckpoint, H3QwenNvfp4Layer50Conditioner, H3QwenNvfp4StreamingLayer50Conditioner,
@@ -25,6 +28,7 @@ use super::qwen_nvfp4::{
     H3QwenNvfp4AwqMemoryAccounting, H3SafetensorsTensorHeader, OpenedH3QwenNvfp4AwqArtifact,
     H3_QWEN_NVFP4_AWQ_FILE_BYTES, H3_QWEN_NVFP4_AWQ_HEADER_BYTES, H3_QWEN_NVFP4_AWQ_PAYLOAD_BYTES,
 };
+use super::qwen_quant::H3QwenTensorDType;
 use super::text::{Qwen3VlNvfp4LayerLoader, Qwen3VlNvfp4LayerWeights, Qwen3VlNvfp4Weights};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -230,6 +234,69 @@ pub fn released_h3_qwen_nvfp4_runtime_memory_facts(
     } else {
         H3QwenNvfp4RuntimePlacement::Accelerated
     })
+}
+
+/// Widest per-output-row-chunk weight-staging charge any one released Qwen
+/// NVFP4 projection incurs, taken over BOTH dequantization arms.
+///
+/// A memory authority must charge the larger arm, because which one runs is a
+/// property of the device the conditioner forward lands on and not of the
+/// plan: the portable host loop uploads a dense `f32` row block, while CUDA's
+/// device arm (#1317) uploads packed bytes and widens them through
+/// `index_select` lookup tables, staging more device scratch for far less
+/// traffic. `h3_nvfp4_weight_staging_bytes` owns the arithmetic; this walks
+/// the released schema's own packed-weight shapes so it can never describe a
+/// projection the artifact does not contain.
+///
+/// This is a per-linear transient, not a retained parameter, so it is
+/// deliberately NOT a field of [`H3QwenNvfp4RuntimeMemoryFacts`]: those facts
+/// are hashed into the authenticated-authority identity and compared field for
+/// field by the private loader, and `H3QwenNvfp4RuntimeMemoryFacts`'s own
+/// contract already excludes backend workspaces. The conditioner's transient
+/// device demand is charged instead by the measured
+/// `qwen_activation_workspace_bytes` grant, whose FL2VA observation
+/// (4,168,069,120 bytes) bounds the whole `QwenEncode` phase; the released
+/// figure below is 2.37% of it, so the device arm is absorbed with no change
+/// to any `H3PrivateRuntimeBoundRecord` observation.
+pub fn released_h3_qwen_nvfp4_max_weight_staging_bytes(
+    rows_per_chunk: usize,
+) -> Result<u64, H3QwenNvfp4RuntimeError> {
+    let config = released_config()?;
+    let (tensors, markers) = expected_h3_qwen_nvfp4_awq_schema(&config)?;
+    validate_h3_qwen_nvfp4_awq_schema(&config, &tensors, &markers)?;
+    let mut widest = 0u64;
+    for (name, spec) in &tensors {
+        // The packed NVFP4 projections: `U8`, rank two, and not the INT8
+        // tensorwise embedding, which shares the dtype but not the arm.
+        if spec.dtype != H3QwenTensorDType::U8
+            || !name.ends_with(".weight")
+            || name == "model.embed_tokens.weight"
+            || spec.shape.len() != 2
+        {
+            continue;
+        }
+        let out_features = spec.shape[0];
+        let in_features = spec.shape[1].checked_mul(2).ok_or_else(|| {
+            H3QwenNvfp4RuntimeError::Contract(format!("Qwen packed width overflows for {name:?}"))
+        })?;
+        for kind in [
+            H3Nvfp4LinearKind::PortableHostDequantize,
+            H3Nvfp4LinearKind::DeviceLookupDequantize,
+        ] {
+            let bytes =
+                h3_nvfp4_weight_staging_bytes(kind, out_features, in_features, rows_per_chunk)
+                    .map_err(H3QwenNvfp4RuntimeError::Candle)?;
+            widest = widest.max(u64::try_from(bytes).map_err(|_| {
+                H3QwenNvfp4RuntimeError::Contract("Qwen staging bytes overflow u64".into())
+            })?);
+        }
+    }
+    if widest == 0 {
+        return Err(H3QwenNvfp4RuntimeError::Contract(
+            "the released Qwen schema contains no packed NVFP4 projection".into(),
+        ));
+    }
+    Ok(widest)
 }
 
 /// Derive the exact released facts for admission before a concrete CUDA
@@ -1213,6 +1280,7 @@ const _: () = assert!(H3_SELECTED_LANGUAGE_LAYERS == 50);
 
 #[cfg(test)]
 mod tests {
+    use super::super::comfy_quant::H3_COMFY_PORTABLE_ROW_CHUNK;
     use super::super::qwen_nvfp4::tests::sparse_published_fixture;
     use super::*;
 
@@ -1390,5 +1458,42 @@ mod tests {
         .expect("frozen config drift must fail");
         assert!(matches!(error, H3QwenNvfp4RuntimeError::Contract(_)));
         assert!(!missing.exists());
+    }
+
+    /// Pin the released weight-staging charge for both arms at the default row
+    /// chunk, and the relationship between them.
+    ///
+    /// The widest released projection is `mlp.down_proj`, `[5120, 25600]`. At
+    /// `H3_COMFY_PORTABLE_ROW_CHUNK` rows the portable arm stages
+    /// `256 * 25600 * 4` = 26,214,400 bytes; the device arm's sum of transients
+    /// is 98,716,676. The larger is what a memory authority charges, and it is
+    /// 2.37% of the 4,168,069,120-byte measured `qwen_activation_workspace`
+    /// grant that bounds the whole `QwenEncode` phase — so #1317's device arm
+    /// is absorbed by the existing observation rather than moving it.
+    #[test]
+    fn released_qwen_nvfp4_weight_staging_charges_the_larger_arm() {
+        let portable = h3_nvfp4_weight_staging_bytes(
+            H3Nvfp4LinearKind::PortableHostDequantize,
+            5_120,
+            25_600,
+            H3_COMFY_PORTABLE_ROW_CHUNK,
+        )
+        .unwrap();
+        let device = h3_nvfp4_weight_staging_bytes(
+            H3Nvfp4LinearKind::DeviceLookupDequantize,
+            5_120,
+            25_600,
+            H3_COMFY_PORTABLE_ROW_CHUNK,
+        )
+        .unwrap();
+        assert_eq!(portable, 26_214_400);
+        assert_eq!(device, 98_716_676);
+        let widest =
+            released_h3_qwen_nvfp4_max_weight_staging_bytes(H3_COMFY_PORTABLE_ROW_CHUNK).unwrap();
+        assert_eq!(widest, device as u64);
+        assert!(widest > portable as u64);
+        // The measured FL2VA `qwen_activation_workspace_bytes` grant.
+        assert!(widest * 40 < 4_168_069_120);
+        assert!(released_h3_qwen_nvfp4_max_weight_staging_bytes(0).is_err());
     }
 }

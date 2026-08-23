@@ -219,6 +219,18 @@ whose only alternative to the device arm is exactly the 102 ms single-threaded
 host scalar loop above, per linear, on every prompt encode. End to end, the
 shipped path costs 298 ms per linear against the prototype's 101 ms — 2.9x.
 
+> **Re-running this example after #1317 part 2 measures something else.** The
+> `nvfp4_forward_ms` figure above is `H3ComfyNvfp4AwqLinear::forward_dequantized`
+> on a CUDA device, which was the host arm when this run was captured and is the
+> DEVICE arm now that `select_h3_nvfp4_linear_kind` dispatches. The numbers in
+> this section are the pre-part-2 baseline and are kept as such; the post-change
+> comparison lives in
+> `comfy_quant::tests::nvfp4_device_dequantize_benchmark`, which drives both
+> arms explicitly on one device so neither can drift out from under the other.
+> Note also that 101 ms is the BF16-GEMM prototype: part 2 shipped the device
+> dequantize with the F32 GEMM unchanged, because changing the matmul dtype is a
+> numerical change to every H3 render and belongs to its own issue.
+
 ## Blocking finding for part 2 — U8 `index_select` ids cannot address entry 255
 
 #1317 part 2 proposes two 256-entry F32 nibble lookup tables driven by
@@ -249,6 +261,67 @@ gate part 2 asks for.
 The cheaper alternative — keeping U8 ids and adding a `packed == 0xff`
 correction term — is left to part 2 to evaluate; it trades one 4x-wide cast for
 two extra elementwise passes.
+
+### Part 2 measurement
+
+`comfy_quant::tests::nvfp4_device_dequantize_benchmark` drives both arms
+through the same chunk loop and the same F32 matmul on one CUDA device, so
+neither can drift out from under the other. On hal9000 (RTX 4090, SM89), at the
+default 256-row chunk, best of ten after two warmups, four independent runs.
+
+Measurement conditions: the box's production `mold serve` holds `flux-dev:q8`
+resident between prints, so ~12 GB of the card is occupied by an IDLE
+co-resident model that never releases. Runs were taken with that server
+reporting `busy: false` and the GPU at 0% utilization, and the benchmark's own
+footprint peaks at 1.26 GB, leaving ~11 GB free. Co-residency is therefore an
+allocation, not contention; the figures below reproduced within 1.5% across
+four runs spread over the session, which is what rules it out as a factor.
+
+The second shape is the one that matters: `mlp.down_proj` is the widest
+released Qwen conditioner projection, and 6,065 rows is the sequence an FL2VA
+render actually encodes (2,033 output-text plus 4,032 vision — the same pair
+the `qwen_activation_workspace_bytes` grant was measured over).
+
+| shape / rows                 | host arm    | device, U32 ids | device, U8 + repair |
+| ---------------------------- | ----------- | --------------- | ------------------- |
+| `[21504, 5376]` x 4,096      | 139.1-144.0 | **36.3-36.5**   | 38.9-39.0           |
+| `[5120, 25600]` x 6,065      | 283.1-286.8 | **40.7-41.0**   | 43.9-44.5           |
+
+That is **3.82-3.96x** at the probe's shape and **6.94-7.05x** at the real
+conditioner projection, per linear, on every prompt encode.
+
+Do not read the saving as a constant. The host arm's scalar unpack and dense
+`f32` upload are functions of the WEIGHT alone, so their absolute cost does not
+move with the activation count — but CUDA overlaps chunk `N+1`'s host work with
+chunk `N`'s GEMM, so a large GEMM hides much of it and a small one does not.
+Verdict 3's 2.9x was measured at 37,296 rows, where the GEMM is large enough to
+hide most of the host loop; the conditioner never runs there. Its own 6,065-row
+regime is the 7x row above.
+
+Per-chunk weight staging is 5,505,024 / 20,732,932 bytes at the first shape and
+26,214,400 / 98,716,676 at the second (host / device). The device figure is the
+SUM of every transient the arm materializes, so it is an upper bound rather than
+an observed peak. Its worst case, 98,716,676 bytes, is 2.37% of the measured
+4,168,069,120-byte `qwen_activation_workspace_bytes` grant that already bounds
+the whole `QwenEncode` phase, so no pinned observation moves.
+
+### Part 2 resolution: the correction cannot be an addition
+
+Part 2 kept the U32 ids. The additive correction is not merely slower, it is
+**wrong**: `index_select` zeroes the sentinel, so every non-sentinel byte would
+receive a `+0.0`, and `-0.0 + 0.0` is `+0.0` under every IEEE rounding mode.
+E2M1 entry 8 IS `-0.0`, so an additive repair flips the sign of every negative
+zero in the weight — a difference no tolerance test can see, which is the exact
+failure mode the bit-for-bit gate exists for. A correct U8 repair has to be a
+`where_cond` select, so it costs an `eq`, a broadcast, a materialized
+correction tensor, and a select, against the U32 cast's single kernel over
+buffers of the same size. Pinned by
+`comfy_quant::tests::nvfp4_u8_id_repair_by_addition_loses_negative_zero`.
+
+Measured, that correct U8 repair is 6.8% slower than the U32 cast (39.0 ms vs
+36.4 ms above), so the alternative loses on both counts: it is the slower of
+the two AND the one whose correctness depends on a second place remembering
+what the sentinel decodes to.
 
 ## Scope
 
