@@ -457,7 +457,7 @@ pub const ALL_MODES: &[Mode] = &[
 ];
 
 pub const fn capabilities(task: Task) -> Capabilities {
-    let fl2va_runtime = cfg!(feature = "h3") && matches!(task, Task::Fl2va);
+    let fl2va_runtime = engine_is_built() && task_runtime_available(task);
     Capabilities {
         runtime_available: fl2va_runtime,
         backends: BackendApplicability {
@@ -526,8 +526,122 @@ pub struct ModelCapabilityContract {
 /// `runtime_available: true` on a build whose route refuses it.
 pub const fn layout_runtime_available(layout: Layout) -> bool {
     match layout {
-        Layout::OfficialBf16 | Layout::ComfyPrunedInt8ConvrotNvfp4Awq => true,
-        Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq => false,
+        Layout::ComfyPrunedInt8ConvrotNvfp4Awq => true,
+        // `official-bf16` is a qualification reference, not a runnable
+        // checkpoint: `base_compact_model` answers `None` for it, so nothing
+        // ever reaches the loader arms that name it. Saying `true` here was a
+        // latent contradiction that only stayed invisible because the catalog
+        // asked `base_compact_model` instead of this authority (#1276).
+        Layout::OfficialBf16 | Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq => false,
+    }
+}
+
+/// Whether this binary links the MiniMax H3 engine at all.
+///
+/// Split out of [`capabilities`] so a refusal can name *which* of the three
+/// obstacles applies. Only the sm89 Linux release recipe enables `h3`; macOS,
+/// sm86, sm100, and sm120 ship the catalog rows without the engine, which is
+/// the case #1276 exists for.
+pub const fn engine_is_built() -> bool {
+    cfg!(feature = "h3")
+}
+
+/// Whether mold implements an execution path for this task partition.
+///
+/// Ref2VA has no reviewed bounds and no qualified route on any released
+/// binary — `mold_inference`'s own gate says a shipping build must keep
+/// refusing it — so the answer is a property of the task, not of the host.
+pub const fn task_runtime_available(task: Task) -> bool {
+    matches!(task, Task::Fl2va)
+}
+
+/// Why this build cannot execute an H3 identity.
+///
+/// Ordered from most to least permanent by [`runtime_availability_for`], so a
+/// reason never over-promises: telling a macOS user "this build has no H3
+/// engine" about Ref2VA would imply the sm89 artifact runs it, which it does
+/// not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeUnavailableReason {
+    /// Mold has no engine arm that reads this checkpoint's weight layout.
+    UnsupportedLayout,
+    /// The task partition has no qualified runtime on any released build.
+    UnsupportedTask,
+    /// This binary was compiled without the H3 engine.
+    EngineNotBuilt,
+}
+
+impl RuntimeUnavailableReason {
+    /// One sentence naming the obstacle. Deliberately carries no license or
+    /// authorization URL: nothing about any of these is the user's to resolve.
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::UnsupportedLayout => {
+                "MiniMax H3 has no runtime for this model's weight layout in this build. The \
+                 checkpoint downloads and verifies normally; only generation is unavailable"
+            }
+            Self::UnsupportedTask => {
+                "MiniMax H3 reference-to-audio-video (Ref2VA) execution is not available in any \
+                 released build. The checkpoint downloads and verifies normally; only generation \
+                 is unavailable"
+            }
+            Self::EngineNotBuilt => {
+                "This mold build was compiled without the MiniMax H3 engine. The checkpoint \
+                 downloads and verifies normally; only generation is unavailable"
+            }
+        }
+    }
+}
+
+/// Whether this build can execute one H3 identity, and why not when it cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeAvailability {
+    Available,
+    Unavailable(RuntimeUnavailableReason),
+}
+
+impl RuntimeAvailability {
+    pub const fn is_available(self) -> bool {
+        matches!(self, Self::Available)
+    }
+
+    pub const fn reason(self) -> Option<RuntimeUnavailableReason> {
+        match self {
+            Self::Available => None,
+            Self::Unavailable(reason) => Some(reason),
+        }
+    }
+}
+
+/// The single authority for "can *this build* execute this H3 task/layout".
+///
+/// [`capabilities`] and [`generation_capabilities`] answer the same question
+/// as one bool; this one names the obstacle. A test pins the two together so
+/// a row, an activation refusal, and an engine registration can never
+/// disagree.
+pub const fn runtime_availability_for(task: Task, layout: Layout) -> RuntimeAvailability {
+    if !layout_runtime_available(layout) {
+        return RuntimeAvailability::Unavailable(RuntimeUnavailableReason::UnsupportedLayout);
+    }
+    if !task_runtime_available(task) {
+        return RuntimeAvailability::Unavailable(RuntimeUnavailableReason::UnsupportedTask);
+    }
+    if !engine_is_built() {
+        return RuntimeAvailability::Unavailable(RuntimeUnavailableReason::EngineNotBuilt);
+    }
+    RuntimeAvailability::Available
+}
+
+/// The single authority for "can *this build* execute this H3 model identity".
+///
+/// Callers must already have established that the identity is H3 (the catalog
+/// asks [`is_family`] of the manifest family first). It fails closed for an
+/// identity this build cannot resolve to a task and layout: an unresolvable
+/// H3 name has no engine arm by definition.
+pub fn model_runtime_availability(model: &str) -> RuntimeAvailability {
+    match capability_contract_for_model(model) {
+        Some(contract) => runtime_availability_for(contract.task, contract.layout),
+        None => RuntimeAvailability::Unavailable(RuntimeUnavailableReason::UnsupportedLayout),
     }
 }
 
@@ -3830,13 +3944,18 @@ mod tests {
             assert_eq!(contract.task, task);
             assert_eq!(contract.layout, layout);
             assert_eq!(contract.generation.modes, modes);
-            let runnable = cfg!(feature = "h3") && task == Task::Fl2va;
+            // `backends` is keyed on the task partition mold implements;
+            // `runtime_available` narrows that by the layout this build can
+            // actually load, so a qualification reference reports a CUDA
+            // contract target and no runtime at once.
+            let task_runnable = engine_is_built() && task_runtime_available(task);
+            let runnable = task_runnable && layout_runtime_available(layout);
             assert_eq!(contract.generation.runtime_available, runnable);
             assert_eq!(contract.generation.native_batch_sizes, &[1]);
             assert_eq!(
                 contract.generation.backends,
                 BackendApplicability {
-                    cuda: if runnable {
+                    cuda: if task_runnable {
                         BackendQualification::Supported
                     } else {
                         BackendQualification::ContractTarget
@@ -4537,6 +4656,128 @@ mod tests {
     }
 
     #[test]
+    fn runtime_availability_agrees_with_the_capability_bool_for_every_task_and_layout() {
+        // One authority, two shapes. `generation_capabilities` is what
+        // `/api/models`, admission, and the engine registry have always read;
+        // `runtime_availability_for` is the same conjunction with the
+        // obstacle named. They must never disagree.
+        for task in [Task::Fl2va, Task::Ref2va] {
+            for layout in [
+                Layout::OfficialBf16,
+                Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
+                Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq,
+            ] {
+                assert_eq!(
+                    runtime_availability_for(task, layout).is_available(),
+                    generation_capabilities(task, layout).runtime_available,
+                    "{task:?}/{layout:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_availability_names_the_most_permanent_obstacle_first() {
+        // A layout with no loader is unrunnable on every build and for every
+        // task, so it outranks the task answer, which in turn outranks "this
+        // binary was not compiled with the engine" — otherwise a macOS user
+        // asking about Ref2VA would be told the sm89 artifact runs it.
+        assert_eq!(
+            runtime_availability_for(Task::Fl2va, Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq),
+            RuntimeAvailability::Unavailable(RuntimeUnavailableReason::UnsupportedLayout)
+        );
+        assert_eq!(
+            runtime_availability_for(Task::Ref2va, Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq),
+            RuntimeAvailability::Unavailable(RuntimeUnavailableReason::UnsupportedLayout)
+        );
+        assert_eq!(
+            runtime_availability_for(Task::Ref2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq),
+            RuntimeAvailability::Unavailable(RuntimeUnavailableReason::UnsupportedTask)
+        );
+        assert_eq!(
+            runtime_availability_for(Task::Fl2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq),
+            if engine_is_built() {
+                RuntimeAvailability::Available
+            } else {
+                RuntimeAvailability::Unavailable(RuntimeUnavailableReason::EngineNotBuilt)
+            }
+        );
+    }
+
+    #[test]
+    fn official_bf16_is_a_qualification_reference_and_never_runnable() {
+        // No engine arm ever reads it: `base_compact_model` answers `None`,
+        // which is the gate admission consults. Advertising a runtime for it
+        // was a latent contradiction (#1276).
+        assert!(!layout_runtime_available(Layout::OfficialBf16));
+        for name in [FL2VA_OFFICIAL, REF2VA_OFFICIAL] {
+            assert_eq!(layout_for_model(name), Some(Layout::OfficialBf16), "{name}");
+            assert!(base_compact_model(name).is_none(), "{name}");
+            assert!(!model_runtime_availability(name).is_available(), "{name}");
+            assert_eq!(
+                model_runtime_availability(name).reason(),
+                Some(RuntimeUnavailableReason::UnsupportedLayout),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_reviewed_ref2va_identity_reports_the_task_obstacle() {
+        // Ref2VA is a reviewed *acquisition* identity with ordinary policy
+        // availability, so it downloads; execution is refused on every
+        // shipping build and the reason must say so rather than blaming the
+        // weight layout or the build recipe.
+        assert_eq!(
+            model_runtime_availability(REF2VA_COMFY).reason(),
+            Some(RuntimeUnavailableReason::UnsupportedTask)
+        );
+        assert!(!task_runtime_available(Task::Ref2va));
+        assert!(task_runtime_available(Task::Fl2va));
+    }
+
+    #[test]
+    fn every_visible_h3_manifest_resolves_to_a_runtime_answer() {
+        // The catalog asks this of every H3 manifest row. An identity that
+        // did not resolve would silently fall to the fail-closed arm, so pin
+        // that none does.
+        for manifest in crate::manifest::known_manifests()
+            .iter()
+            .filter(|manifest| is_family(&manifest.family))
+        {
+            let contract = capability_contract_for_model(&manifest.name)
+                .unwrap_or_else(|| panic!("{} has no capability contract", manifest.name));
+            assert_eq!(
+                model_runtime_availability(&manifest.name),
+                runtime_availability_for(contract.task, contract.layout),
+                "{}",
+                manifest.name
+            );
+        }
+    }
+
+    #[test]
+    fn every_runtime_unavailable_reason_has_a_distinct_non_empty_message() {
+        let messages = [
+            RuntimeUnavailableReason::UnsupportedLayout.message(),
+            RuntimeUnavailableReason::UnsupportedTask.message(),
+            RuntimeUnavailableReason::EngineNotBuilt.message(),
+        ];
+        for message in messages {
+            assert!(!message.trim().is_empty());
+            // Nothing here is a licensing statement.
+            assert!(!message.to_ascii_lowercase().contains("licen"), "{message}");
+        }
+        assert_eq!(
+            messages
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            messages.len()
+        );
+    }
+
+    #[test]
     fn pruned_nvfp4_is_downloadable_and_never_runnable() {
         for (name, task) in [
             (FL2VA_COMFY_NVFP4, Task::Fl2va),
@@ -4740,7 +4981,24 @@ mod tests {
             Mode::TextToAudioVideo
         );
 
-        crate::validate_generate_request_with_family(&parsed, Some(FAMILY)).unwrap();
+        // Admission still consults the activation authority, which since
+        // #1276 answers for this build rather than for the family: a binary
+        // compiled without the engine refuses the reviewed compact model it
+        // happily downloads.
+        let admitted = crate::validate_generate_request_with_family(&parsed, Some(FAMILY));
+        if engine_is_built() {
+            admitted.unwrap();
+        } else {
+            let message = admitted.unwrap_err();
+            assert!(
+                message.contains(crate::MINIMAX_H3_RUNTIME_UNAVAILABLE),
+                "{message}"
+            );
+            assert!(
+                message.contains(RuntimeUnavailableReason::EngineNotBuilt.message()),
+                "{message}"
+            );
+        }
     }
 
     #[test]

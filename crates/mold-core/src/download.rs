@@ -2884,7 +2884,10 @@ mod tests {
     fn reviewed_h3_manifest_is_accepted_for_upstream_acquisition() {
         let manifest = crate::manifest::find_manifest(crate::minimax_h3::FL2VA_COMFY).unwrap();
         require_manifest_acquisition(manifest).unwrap();
-        crate::require_model_activation(&manifest.name, Some(&manifest.family)).unwrap();
+        // Acquisition, deliberately not activation: this build has no engine
+        // (#1276), and the whole point of the reviewed manifest is that it
+        // still downloads, verifies, and stores.
+        crate::require_model_acquisition(&manifest.name, Some(&manifest.family)).unwrap();
     }
 
     #[test]

@@ -810,6 +810,7 @@ fn installed_catalog_models(
             // Sidecar-installed catalog rows are never H3 manifest
             // identities; H3 is manifest-pinned only.
             runtime_available: None,
+            runtime_unavailable_reason: None,
             defaults: ModelDefaults {
                 default_width: w,
                 default_height: h,

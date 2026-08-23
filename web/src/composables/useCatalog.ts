@@ -489,6 +489,10 @@ function build() {
     page,
     entries,
     manifestEntries,
+    // Not-yet-installed manifest rows. Discover synthesizes its H3 entries
+    // from these, and their `runtime_available` answer is what lets a surface
+    // warn BEFORE a 21-42 GB pull (#1276).
+    availableManifests,
     visibleEntries,
     resultCount,
     total,

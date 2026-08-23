@@ -442,9 +442,16 @@ impl FrozenH3Fl2VaCandlePlan {
 
     fn missing_requirements(&self) -> Vec<H3BackendRequirement> {
         let mut missing = Vec::new();
-        if mold_core::require_model_activation(&self.canonical_model, Some(contract::FAMILY))
-            .is_err()
-        {
+        // ONLY a genuine compliance refusal. Since #1276 the activation
+        // authority also refuses a reviewed identity this build simply has no
+        // engine for, and reporting that as `LicenseAuthorization` would tell
+        // the operator to go read a licence about a problem that is ours —
+        // the exact conflation `ActivationRefusal` exists to prevent. The
+        // runtime half is already reported as `RunnableCapabilityContract`.
+        if matches!(
+            mold_core::require_model_activation(&self.canonical_model, Some(contract::FAMILY)),
+            Err(error) if error.refusal() == mold_core::ActivationRefusal::ComplianceGated
+        ) {
             missing.push(H3BackendRequirement::LicenseAuthorization);
         }
         if contract::runnable_capability_contract_for_model(&self.canonical_model).is_none() {
@@ -1717,9 +1724,13 @@ mod tests {
             let H3BackendActivationError::Unavailable { requirements } = error else {
                 panic!("unexpected activation error: {error}");
             };
-            assert_eq!(
-                requirements.contains(&H3BackendRequirement::LicenseAuthorization),
-                !mold_core::model_policy::is_reviewed_minimax_h3_model(model)
+            // No pinned H3 identity is a licensing refusal any more: #1319
+            // made the unrunnable ones `RuntimeUnavailable`, and #1276 made
+            // the reviewed ones answer for this build. A missing engine is
+            // reported as `RunnableCapabilityContract`, never as a licence.
+            assert!(
+                !requirements.contains(&H3BackendRequirement::LicenseAuthorization),
+                "{model} must not be reported as a licensing refusal"
             );
             assert!(requirements.contains(&H3BackendRequirement::RunnableCapabilityContract));
             assert!(requirements.contains(&H3BackendRequirement::QualifiedLosslessPackedAttention));

@@ -517,6 +517,12 @@ export interface ModelInfoExtended extends ModelDefaults {
   frame_offset?: number | null;
   /** Explicit runnable-contract boundary for future gated families. */
   runtime_available?: boolean | null;
+  /** One sentence naming why `runtime_available` is false — a missing engine
+   * arm for the weight layout, a task with no qualified route, or a build
+   * compiled without the engine. Present exactly when `runtime_available` is
+   * false; absent on servers that predate it (#1276). Read it through
+   * `@studio/lib/modelRuntimeAvailability`, never by matching the text. */
+  runtime_unavailable_reason?: string | null;
 }
 
 export interface GpuInfo {

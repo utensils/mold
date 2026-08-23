@@ -245,15 +245,23 @@ pub fn build_model_catalog(
                 default_frames,
             ));
 
+        // `minimax_h3::model_runtime_availability` is the same authority
+        // `model_activation` consults before generation, so a row can never
+        // advertise runnable while the route refuses it — and, since #1276,
+        // it answers the whole question rather than only the layout half:
+        // Ref2VA has no qualified route on any released build, and only the
+        // sm89 recipe compiles the engine at all. Scoped to H3: no other
+        // family has a pinned identity it cannot execute, and `None` keeps
+        // every other row byte-identical on the wire.
+        let h3_runtime = crate::minimax_h3::is_family(&manifest.family)
+            .then(|| crate::minimax_h3::model_runtime_availability(&manifest.name));
+
         models.push(ModelInfoExtended {
             downloaded,
-            // `base_compact_model` is the same authority admission consults
-            // for an engine partition, so a row can never advertise runnable
-            // while the route refuses it. Scoped to H3: no other family has a
-            // pinned identity it cannot execute, and `None` keeps every other
-            // row byte-identical on the wire.
-            runtime_available: crate::minimax_h3::is_family(&manifest.family)
-                .then(|| crate::minimax_h3::base_compact_model(&manifest.name).is_some()),
+            runtime_available: h3_runtime.map(crate::minimax_h3::RuntimeAvailability::is_available),
+            runtime_unavailable_reason: h3_runtime
+                .and_then(crate::minimax_h3::RuntimeAvailability::reason)
+                .map(|reason| reason.message().to_string()),
             defaults: ModelDefaults {
                 default_steps,
                 default_guidance,
@@ -465,6 +473,7 @@ pub fn build_model_catalog(
             // Catalog-installed `cv:`/`hf:` rows are never H3 manifest
             // identities; H3 is manifest-pinned only.
             runtime_available: None,
+            runtime_unavailable_reason: None,
             defaults: ModelDefaults {
                 default_steps,
                 default_guidance,
@@ -1147,7 +1156,11 @@ mod tests {
             crate::minimax_h3::REF2VA_COMFY,
         ] {
             assert!(catalog.iter().any(|entry| entry.name == model));
-            crate::require_model_activation(model, Some("minimax-h3")).unwrap();
+            // Acquisition is the authority that puts a row in the catalog.
+            // Execution is a separate question this build may well answer
+            // "no" to (#1276): only the sm89 recipe compiles the engine, and
+            // Ref2VA runs on no released build at all.
+            crate::require_model_acquisition(model, Some("minimax-h3")).unwrap();
         }
     }
 
@@ -1228,6 +1241,7 @@ mod tests {
         fn stub(name: &str) -> ModelInfoExtended {
             ModelInfoExtended {
                 runtime_available: None,
+                runtime_unavailable_reason: None,
                 info: ModelInfo {
                     name: name.to_string(),
                     family: "flux".to_string(),

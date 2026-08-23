@@ -39,6 +39,29 @@ beforeEach(() => {
 });
 
 describe("CatalogTableRow", () => {
+  it("badges a row this machine cannot run, without disabling its Pull (#1276)", async () => {
+    const reason = "This mold build was compiled without the MiniMax H3 engine.";
+    const wrapper = mount(CatalogTableRow, {
+      props: {
+        entry: entry(),
+        pulling: false,
+        runtimeNotice: { message: reason, fromServer: true },
+      },
+    });
+    await flushPromises();
+
+    const badge = wrapper.get("[data-test='runtime-unavailable-badge']");
+    expect(badge.text()).toContain("Download only");
+    expect(badge.attributes("title")).toBe(reason);
+    expect(wrapper.get("[data-test='pull']").attributes("disabled")).toBeUndefined();
+  });
+
+  it("badges nothing without a notice", async () => {
+    const wrapper = mount(CatalogTableRow, { props: { entry: entry(), pulling: false } });
+    await flushPromises();
+    expect(wrapper.find("[data-test='runtime-unavailable-badge']").exists()).toBe(false);
+  });
+
   it("renders the shared row shape with no thumbnail — source glyph, name, family, counts", async () => {
     const wrapper = mount(CatalogTableRow, { props: { entry: entry(), pulling: false } });
     await flushPromises();

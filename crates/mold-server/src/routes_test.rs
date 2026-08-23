@@ -6417,11 +6417,14 @@ mod tests {
 
     #[tokio::test]
     async fn list_models_surfaces_every_pinned_h3_download_and_marks_runnability() {
-        // Every pinned H3 manifest is a download, so every one lists — the
-        // four reviewed compact identities that run, and the four that only
-        // download (the official BF16 references and the pruned NVFP4
-        // transformers). What tells them apart on the wire is the additive
-        // `runtime_available`, never their absence from the list.
+        // Every pinned H3 manifest is a download, so every one lists. What
+        // tells them apart on the wire is the additive `runtime_available`
+        // plus, since #1276, the `runtime_unavailable_reason` naming the
+        // obstacle — never their absence from the list. Runnability is a
+        // property of THIS BUILD, not of the family: only a binary compiled
+        // with the `h3` feature runs anything at all, Ref2VA runs on no
+        // released build, and the official BF16 references and pruned NVFP4
+        // transformers have no engine arm anywhere.
         let app = app_with(MockEngine::ready());
         let resp = app
             .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
@@ -6442,27 +6445,141 @@ mod tests {
                     model["downloaded"].as_bool().unwrap(),
                     model["hf_repo"].as_str().unwrap(),
                     model["runtime_available"].as_bool().unwrap(),
+                    model["runtime_unavailable_reason"].as_str(),
                 )
             })
             .collect::<std::collections::BTreeSet<_>>();
         use mold_core::minimax_h3::{
-            COMFY_REPO, FL2VA_COMFY, FL2VA_COMFY_NVFP4, FL2VA_COMFY_TURBO_4STEP_768P,
-            FL2VA_COMFY_TURBO_8STEP, FL2VA_OFFICIAL, NVFP4_REPO, OFFICIAL_REPO, REF2VA_COMFY,
-            REF2VA_COMFY_NVFP4, REF2VA_OFFICIAL,
+            RuntimeUnavailableReason, COMFY_REPO, FL2VA_COMFY, FL2VA_COMFY_NVFP4,
+            FL2VA_COMFY_TURBO_4STEP_768P, FL2VA_COMFY_TURBO_8STEP, FL2VA_OFFICIAL, NVFP4_REPO,
+            OFFICIAL_REPO, REF2VA_COMFY, REF2VA_COMFY_NVFP4, REF2VA_OFFICIAL,
         };
+        // The FL2VA compact tier is the only one whose answer depends on how
+        // this binary was compiled.
+        let fl2va = if mold_core::minimax_h3::engine_is_built() {
+            (true, None)
+        } else {
+            (
+                false,
+                Some(RuntimeUnavailableReason::EngineNotBuilt.message()),
+            )
+        };
+        let ref2va = (
+            false,
+            Some(RuntimeUnavailableReason::UnsupportedTask.message()),
+        );
+        let no_loader = (
+            false,
+            Some(RuntimeUnavailableReason::UnsupportedLayout.message()),
+        );
         assert_eq!(
             h3,
             std::collections::BTreeSet::from([
-                (FL2VA_COMFY, false, COMFY_REPO, true),
-                (REF2VA_COMFY, false, COMFY_REPO, true),
-                (FL2VA_COMFY_TURBO_8STEP, false, COMFY_REPO, true),
-                (FL2VA_COMFY_TURBO_4STEP_768P, false, COMFY_REPO, true),
-                (FL2VA_OFFICIAL, false, OFFICIAL_REPO, false),
-                (REF2VA_OFFICIAL, false, OFFICIAL_REPO, false),
-                (FL2VA_COMFY_NVFP4, false, NVFP4_REPO, false),
-                (REF2VA_COMFY_NVFP4, false, NVFP4_REPO, false),
+                (FL2VA_COMFY, false, COMFY_REPO, fl2va.0, fl2va.1),
+                (REF2VA_COMFY, false, COMFY_REPO, ref2va.0, ref2va.1),
+                (FL2VA_COMFY_TURBO_8STEP, false, COMFY_REPO, fl2va.0, fl2va.1),
+                (
+                    FL2VA_COMFY_TURBO_4STEP_768P,
+                    false,
+                    COMFY_REPO,
+                    fl2va.0,
+                    fl2va.1
+                ),
+                (
+                    FL2VA_OFFICIAL,
+                    false,
+                    OFFICIAL_REPO,
+                    no_loader.0,
+                    no_loader.1
+                ),
+                (
+                    REF2VA_OFFICIAL,
+                    false,
+                    OFFICIAL_REPO,
+                    no_loader.0,
+                    no_loader.1
+                ),
+                (
+                    FL2VA_COMFY_NVFP4,
+                    false,
+                    NVFP4_REPO,
+                    no_loader.0,
+                    no_loader.1
+                ),
+                (
+                    REF2VA_COMFY_NVFP4,
+                    false,
+                    NVFP4_REPO,
+                    no_loader.0,
+                    no_loader.1
+                ),
             ])
         );
+    }
+
+    /// #1276: whatever the row says is unrunnable, generation refuses with
+    /// HTTP 501 and the SAME sentence. A user who reads "Ref2VA execution is
+    /// not available in any released build" on the model card must not then
+    /// get a licensing refusal at submit.
+    #[tokio::test]
+    async fn every_unrunnable_h3_row_is_refused_at_generation_with_its_own_reason() {
+        let app = app_with(MockEngine::ready());
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+
+        let mut refused = 0;
+        for model in models
+            .iter()
+            .filter(|model| model["family"] == mold_core::minimax_h3::FAMILY)
+            .filter(|model| model["runtime_available"] == serde_json::json!(false))
+        {
+            let name = model["name"].as_str().unwrap();
+            let reason = model["runtime_unavailable_reason"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{name} reports no reason"));
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::post("/api/generate")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "prompt": "a cat",
+                                "model": name,
+                                "width": mold_core::minimax_h3::DEFAULT_WIDTH,
+                                "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
+                                "steps": mold_core::minimax_h3::DEFAULT_STEPS,
+                                "guidance": 0.0,
+                                "batch_size": 1,
+                                "frames": mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
+                                "fps": mold_core::minimax_h3::FIXED_FPS,
+                                "output_format": "mp4"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED, "{name}");
+            let error = json_body(resp).await;
+            assert_eq!(
+                error["code"],
+                mold_core::MINIMAX_H3_RUNTIME_UNAVAILABLE,
+                "{name}"
+            );
+            let message = error["error"].as_str().unwrap();
+            assert!(message.contains(reason), "{name}: {message} != {reason}");
+            refused += 1;
+        }
+        assert!(refused > 0, "no unrunnable H3 row was listed");
     }
 
     /// Sequence capability is advertised per model, so a picker never has to
@@ -7559,15 +7676,20 @@ mod tests {
                 identity: "test-key".to_string(),
             });
         let created = app.oneshot(request).await.unwrap();
-        assert_eq!(created.status(), StatusCode::OK);
+        // Authenticated, and still refused before anything is staged: Ref2VA
+        // has no qualified route on any released build, so uploading its
+        // reference media would only buy the user a refusal one step later
+        // (#1276). The refusal names the task, never a licence.
+        assert_eq!(created.status(), StatusCode::NOT_IMPLEMENTED);
         let created = json_body(created).await;
-        assert_eq!(created["uploads"].as_array().unwrap().len(), 1);
-        assert!(state.reference_uploads.staging_exists());
-        state
-            .reference_uploads
-            .cancel_session("test-key", created["session_handle"].as_str().unwrap())
-            .await
-            .unwrap();
+        assert_eq!(created["code"], mold_core::MINIMAX_H3_RUNTIME_UNAVAILABLE);
+        assert!(
+            created["error"].as_str().unwrap().contains(
+                mold_core::minimax_h3::RuntimeUnavailableReason::UnsupportedTask.message()
+            ),
+            "{created}"
+        );
+        assert!(!state.reference_uploads.staging_exists());
     }
 
     #[tokio::test]

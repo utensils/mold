@@ -10,6 +10,8 @@ import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
 import Icon from "@ui/components/Icon.vue";
 import { useModelInstallTargets } from "../composables/useModelInstallTargets";
+import { RUNTIME_UNAVAILABLE_BADGE } from "@studio/lib/modelRuntimeAvailability";
+import type { ModelRuntimeNotice } from "@studio/lib/modelRuntimeAvailability";
 import type { CatalogEntryWire } from "../types";
 import { formatGB } from "../util/format";
 
@@ -19,8 +21,17 @@ const props = withDefaults(
     layout?: "grid" | "list";
     selectable?: boolean;
     checked?: boolean;
+    /** The host's own answer for this row, resolved by the page through
+     *  `@studio/lib/modelRuntimeAvailability`. `null` means runnable or
+     *  unknown; the card never derives it from the family (#1276). */
+    runtimeNotice?: ModelRuntimeNotice | null;
   }>(),
-  { layout: "grid", selectable: true, checked: false },
+  {
+    layout: "grid",
+    selectable: true,
+    checked: false,
+    runtimeNotice: null,
+  },
 );
 const emit = defineEmits<{
   open: [];
@@ -236,6 +247,16 @@ const pullLabel = computed(() =>
       </span>
     </button>
 
+    <!-- Downloadable, not runnable here. The badge never disables Pull: the
+         model really is installable, it just cannot generate (#1276). -->
+    <span
+      v-if="props.runtimeNotice"
+      class="card__runtime"
+      data-test="runtime-unavailable-badge"
+      :title="props.runtimeNotice.message"
+    >
+      {{ RUNTIME_UNAVAILABLE_BADGE }}
+    </span>
     <button
       type="button"
       class="card__pull"
@@ -251,6 +272,16 @@ const pullLabel = computed(() =>
 </template>
 
 <style scoped>
+.card__runtime {
+  align-self: flex-start;
+  margin-top: 8px;
+  padding: 2px 6px;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-chip, 4px);
+  color: var(--ink-2);
+  font-size: var(--text-caption, 11px);
+}
+
 .card {
   display: flex;
   flex-direction: column;

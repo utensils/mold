@@ -6,6 +6,8 @@ import ModelTableRow from "./ModelTableRow.vue";
 import { catalogPageUrl, catalogSizeInfo } from "../../lib/catalog";
 import { resolveEntrySize } from "../../lib/catalogSizes";
 import { formatCount, formatGB } from "../../lib/format";
+import { RUNTIME_UNAVAILABLE_BADGE } from "@studio/lib/modelRuntimeAvailability";
+import type { ModelRuntimeNotice } from "@studio/lib/modelRuntimeAvailability";
 import type { ModelSource } from "../../lib/modelSource";
 import type { CatalogEntry } from "../../lib/api/types";
 
@@ -31,9 +33,20 @@ const props = withDefaults(
     selected?: boolean;
     selectable?: boolean;
     checked?: boolean;
+    /** This machine's own answer for the model behind the row, resolved by
+     *  the parent through `@studio/lib/modelRuntimeAvailability`. `null`
+     *  means runnable or unknown; nothing here derives it from the family,
+     *  and it never disables Pull — the model is downloadable (#1276). */
+    runtimeNotice?: ModelRuntimeNotice | null;
   }>(),
   // Explicit so Vue's boolean casting doesn't turn "not supplied" into false.
-  { installable: undefined, selected: false, selectable: true, checked: false },
+  {
+    installable: undefined,
+    selected: false,
+    selectable: true,
+    checked: false,
+    runtimeNotice: null,
+  },
 );
 const emit = defineEmits<{
   (e: "pull", entry: CatalogEntry): void;
@@ -138,6 +151,14 @@ const counts = computed(() => {
     </template>
     <template #actions>
       <span v-if="entry.installed" class="data-mono text-caption text-halide">● installed</span>
+      <span
+        v-if="props.runtimeNotice"
+        data-test="runtime-unavailable-badge"
+        class="data-mono text-caption text-ink-3"
+        :title="props.runtimeNotice.message"
+      >
+        {{ RUNTIME_UNAVAILABLE_BADGE }}
+      </span>
       <button
         v-if="showAction"
         type="button"

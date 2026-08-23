@@ -1707,9 +1707,20 @@ fn has_remote_reference_handles(request: &GenerateRequest) -> bool {
     })
 }
 
-fn require_remote_auto_pull_activation(request: &GenerateRequest, config: &Config) -> Result<()> {
+/// Gate the SERVER-side auto-pull the remote path triggers when a generate
+/// comes back "model missing".
+///
+/// This is deliberately the ACQUISITION authority, not the activation one:
+/// the machine being asked to download and then run the model is the remote
+/// server, which enforces its own activation on the resubmitted request. A
+/// laptop CLI compiled without the `h3` engine talking to an sm89 host must
+/// still be able to trigger that pull — asking the local binary whether IT
+/// could run the model is the same category error as reading a Discover
+/// badge off the wrong machine (#1276). Unreviewed H3 identities stay refused
+/// here exactly as before, because acquisition fails closed for them.
+fn require_remote_auto_pull_acquisition(request: &GenerateRequest, config: &Config) -> Result<()> {
     let family = resolve_family(&request.model, config);
-    mold_core::require_model_activation(&request.model, family.as_deref())
+    mold_core::require_model_acquisition(&request.model, family.as_deref())
         .map_err(anyhow::Error::new)
 }
 
@@ -2017,7 +2028,7 @@ async fn generate_remote_inner(
             }
             match classify_generate_error(&e) {
                 GenerateServerAction::PullModelAndRetry => {
-                    require_remote_auto_pull_activation(req, config)
+                    require_remote_auto_pull_acquisition(req, config)
                         .map_err(|error| tag_remote(client, error))?;
                     print_server_pull_missing_model(model);
                     stream_server_pull(client, model, &[])
@@ -2136,7 +2147,7 @@ async fn generate_remote_blocking(
             pb.finish_and_clear();
             match classify_generate_error(&e) {
                 GenerateServerAction::PullModelAndRetry => {
-                    require_remote_auto_pull_activation(req, config)
+                    require_remote_auto_pull_acquisition(req, config)
                         .map_err(|error| tag_remote(client, error))?;
                     print_server_pull_missing_model(model);
                     stream_server_pull(client, model, &[])
@@ -4445,10 +4456,32 @@ mod tests {
     }
 
     #[test]
-    fn h3_remote_auto_pull_respects_compiled_activation_policy() {
+    fn h3_remote_auto_pull_respects_compiled_acquisition_policy() {
+        // The remote server is the machine that will download and run it, so
+        // this gate must not consult the local binary's engine (#1276) —
+        // otherwise a CLI built without `h3` could not ask an sm89 host to
+        // pull the very model that host runs.
         let request = h3_request(mold_core::minimax_h3::FL2VA_COMFY);
-        require_remote_auto_pull_activation(&request, &Config::default())
+        require_remote_auto_pull_acquisition(&request, &Config::default())
             .expect("the reviewed FL2VA model is an ordinary auto-pull identity");
+        require_remote_auto_pull_acquisition(
+            &h3_request(mold_core::minimax_h3::FL2VA_COMFY_NVFP4),
+            &Config::default(),
+        )
+        .expect("a pinned download-only identity is still acquirable");
+
+        // Acquisition still fails closed for anything unreviewed, which is
+        // the refusal this gate has always existed for.
+        let mut unreviewed = h3_request(mold_core::minimax_h3::FL2VA_COMFY);
+        unreviewed.model = "hf:MiniMaxAI/MiniMax-H3".to_string();
+        let error = require_remote_auto_pull_acquisition(&unreviewed, &Config::default())
+            .expect_err("an unreviewed H3 identity may not be auto-pulled");
+        assert!(
+            error
+                .to_string()
+                .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED),
+            "{error}"
+        );
     }
 
     #[tokio::test]

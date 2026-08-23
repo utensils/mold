@@ -111,8 +111,15 @@ your use. The reviewed FL2VA Turbo distillations are ordinary model tags
 adapter and render at their tier's fixed step count. The compact NVFP4
 transformer tags (`minimax-h3-fl2va:comfy-pruned-nvfp4` and
 `minimax-h3-ref2va:comfy-pruned-nvfp4`) download and verify but have no
-runtime yet. Current capability limits (FL2VA on SM89 CUDA; the Apple Metal
-route is shipped but not yet hardware-qualified) are documented in the
+runtime yet. Which H3 models a given build can actually *run* is advertised
+per row: `GET /api/models` carries `runtime_available` plus a
+`runtime_unavailable_reason` naming the obstacle, and Mold Studio shows that
+on Discover before the 21-42 GB pull rather than after it. The macOS and Linux
+sm89 releases carry the H3 engine; sm86, sm100, sm120, and Windows do not.
+Ref2VA executes on no released build, and every H3 model still downloads,
+verifies, inventories, and removes everywhere.
+Current capability limits (FL2VA on SM89 CUDA; the Apple Metal route is
+shipped but not yet hardware-qualified) are documented in the
 [H3 model guide](https://utensils.io/mold/models/minimax-h3).
 
 ## Mold Studio

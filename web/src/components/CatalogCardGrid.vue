@@ -9,14 +9,31 @@ import { useModelInstallTargets } from "../composables/useModelInstallTargets";
 import { toast } from "../lib/toasts";
 import type { CatalogEntryWire } from "../types";
 import CatalogCard from "./CatalogCard.vue";
+import { modelRuntimeNoticeAcrossHosts } from "@studio/lib/modelRuntimeAvailability";
+import { useHostRouting } from "../composables/useHostRouting";
 
 const cat = useCatalog();
+const routing = useHostRouting();
 const installTargets = useModelInstallTargets();
 const sentinel = ref<HTMLElement | null>(null);
 const selected = ref(new Map<string, CatalogEntryWire>());
 const selectedTargetId = ref("");
 const batchStarting = ref(false);
 let observer: IntersectionObserver | null = null;
+
+/** Whether the fleet can run the model behind a Discover row, from each
+ *  machine's own `/api/models` listing — knowable before the pull, which for
+ *  the affected checkpoints is 21-42 GB (#1276). A Pull may land on any
+ *  reachable machine, so `targetModels` (the pinned host's list, or the union
+ *  under Auto) answers beside the origin's manifest rows; one machine that
+ *  can run it withdraws the warning, and an id nobody lists is unknown and
+ *  gets no badge. */
+function runtimeNoticeFor(id: string) {
+  return modelRuntimeNoticeAcrossHosts(id, [
+    cat.availableManifests.value,
+    routing.targetModels.value,
+  ]);
+}
 
 function detach() {
   observer?.disconnect();
@@ -290,6 +307,7 @@ async function startBatch(): Promise<void> {
           :layout="cat.layout.value"
           :selectable="!batchStarting && selectable(entry)"
           :checked="selected.has(entry.id)"
+          :runtime-notice="runtimeNoticeFor(entry.id)"
           @open="openCard(entry.id)"
           @pull="pullCard(entry)"
           @toggle-select="toggleSelection(entry, $event)"
