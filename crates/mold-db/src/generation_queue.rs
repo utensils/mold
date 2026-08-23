@@ -47,13 +47,15 @@ const COMPLETED_OUTPUT_LOOKUP_SQL: &str = "SELECT filename FROM generations
 const COMPLETED_OUTPUT_INVALID_METADATA_SQL: &str = "SELECT 1 FROM generations
       WHERE output_dir = ?1
         AND queue_job_metadata_state = 0
+        AND created_at_ms >= ?2
       LIMIT 1";
 
 const COMPLETED_OUTPUT_UNKNOWN_METADATA_SQL: &str =
     "SELECT filename, metadata_json FROM generations
       WHERE output_dir = ?1
         AND queue_job_metadata_state IS NULL
-      ORDER BY id";
+        AND created_at_ms >= ?2
+      ORDER BY created_at_ms, id";
 
 fn parse_queue_job_id(metadata_json: &str) -> Result<Option<String>> {
     let metadata: serde_json::Value = serde_json::from_str(metadata_json)
@@ -1103,17 +1105,17 @@ pub fn find_completed_output(
     owner_uuid: &str,
     job_id: &str,
 ) -> std::result::Result<Option<CompletedGenerationOutput>, CompletedOutputLookupError> {
-    let output_dir: Option<String> = db.with_conn_typed(|conn| {
+    let queue_authority: Option<(String, i64)> = db.with_conn_typed(|conn| {
         conn.query_row(
-            "SELECT output_dir FROM generation_queue
+            "SELECT output_dir, created_at FROM generation_queue
               WHERE id = ?1 AND owner_uuid = ?2",
             params![job_id, owner_uuid],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(CompletedOutputLookupError::from)
     })?;
-    let Some(output_dir) = output_dir else {
+    let Some((output_dir, queue_created_at_ms)) = queue_authority else {
         return Ok(None);
     };
     // Canonicalization may touch the filesystem. Keep it outside the DB mutex
@@ -1123,7 +1125,7 @@ pub fn find_completed_output(
         let invalid: Option<i64> = conn
             .query_row(
                 COMPLETED_OUTPUT_INVALID_METADATA_SQL,
-                params![output_dir],
+                params![output_dir, queue_created_at_ms],
                 |row| row.get(0),
             )
             .optional()?;
@@ -1134,7 +1136,7 @@ pub fn find_completed_output(
         }
         let mut filenames = Vec::new();
         let mut unknown = conn.prepare(COMPLETED_OUTPUT_UNKNOWN_METADATA_SQL)?;
-        let unknown_rows = unknown.query_map(params![output_dir], |row| {
+        let unknown_rows = unknown.query_map(params![output_dir, queue_created_at_ms], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
         })?;
         for row in unknown_rows {
@@ -1833,7 +1835,10 @@ mod tests {
                 ),
                 (
                     format!("EXPLAIN QUERY PLAN {COMPLETED_OUTPUT_INVALID_METADATA_SQL}"),
-                    vec![rusqlite::types::Value::Text("/gallery".to_string())],
+                    vec![
+                        rusqlite::types::Value::Text("/gallery".to_string()),
+                        rusqlite::types::Value::Integer(1),
+                    ],
                     "generations_output_invalid_queue_metadata",
                 ),
                 (
@@ -1843,7 +1848,10 @@ mod tests {
                 ),
                 (
                     format!("EXPLAIN QUERY PLAN {COMPLETED_OUTPUT_UNKNOWN_METADATA_SQL}"),
-                    vec![rusqlite::types::Value::Text("/gallery".to_string())],
+                    vec![
+                        rusqlite::types::Value::Text("/gallery".to_string()),
+                        rusqlite::types::Value::Integer(1),
+                    ],
                     "generations_output_unknown_queue_metadata",
                 ),
             ];
@@ -1976,6 +1984,72 @@ mod tests {
                 original_filename: None,
             })
         );
+    }
+
+    #[test]
+    fn completed_output_ignores_malformed_rows_that_predate_the_claimed_job() {
+        for legacy_projection_state in [Some(0_i64), None] {
+            let db = MetadataDb::open_in_memory().unwrap();
+            let gallery = tempfile::tempdir().unwrap();
+            let gallery_key = crate::canonical_dir_string(gallery.path());
+            let mut queued = row("done", "owner-a", 100);
+            queued.output_dir = gallery.path().to_path_buf();
+            insert(&db, &queued).unwrap();
+
+            db.with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO generations
+                        (filename, output_dir, created_at_ms, format, model, metadata_json,
+                         queue_job_id, queue_job_metadata_state)
+                     VALUES ('historical-broken.png', ?1, 99, 'png', 'legacy', ?2, NULL, ?3)",
+                    params![
+                        gallery_key,
+                        r#"{"job_id":"unparseable""#,
+                        legacy_projection_state
+                    ],
+                )?;
+                conn.execute(
+                    "INSERT INTO generations
+                        (filename, output_dir, created_at_ms, format, model, metadata_json,
+                         queue_job_id, queue_job_metadata_state)
+                     VALUES ('done.png', ?1, 101, 'png', 'model', ?2, 'done', 1)",
+                    params![gallery_key, r#"{"job_id":"done"}"#],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+            assert_eq!(
+                find_completed_output(&db, "owner-a", "done").unwrap(),
+                Some(CompletedGenerationOutput {
+                    filename: "done.png".to_string(),
+                    original_filename: None,
+                }),
+                "an unrelated malformed row from before admission cannot poison this job"
+            );
+
+            db.with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO generations
+                        (filename, output_dir, created_at_ms, format, model, metadata_json,
+                         queue_job_id, queue_job_metadata_state)
+                     VALUES ('possible-broken.png', ?1, 100, 'png', 'legacy', ?2, NULL, ?3)",
+                    params![
+                        gallery_key,
+                        r#"{"job_id":"unparseable""#,
+                        legacy_projection_state
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+            assert!(
+                find_completed_output(&db, "owner-a", "done")
+                    .unwrap_err()
+                    .is_invalid_authority(),
+                "a malformed row in the job's possible publication window stays fail-closed"
+            );
+        }
     }
 
     #[test]

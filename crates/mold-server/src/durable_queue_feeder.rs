@@ -728,6 +728,7 @@ mod tests {
         let dead_claim = state.queue_journal.claim_next_feeder().unwrap().unwrap();
         assert_eq!(dead_claim.row.id, "job-0");
         let output_dir = mold_db::canonical_dir_string(&dead_claim.row.output_dir);
+        let published_at_ms = dead_claim.row.created_at_ms;
         state
             .metadata_db
             .as_ref()
@@ -741,10 +742,11 @@ mod tests {
                     conn.execute(
                         "INSERT INTO generations
                             (filename, output_dir, created_at_ms, format, model, metadata_json)
-                         VALUES (?1, ?2, 1, 'png', 'mock-model', ?3)",
+                         VALUES (?1, ?2, ?3, 'png', 'mock-model', ?4)",
                         (
                             filename,
                             output_dir.as_str(),
+                            published_at_ms,
                             r#"{"job_id":"job-0","seed":7}"#,
                         ),
                     )?;

@@ -757,7 +757,7 @@ fn add_generation_job_lookup_indexes(tx: &Transaction<'_>) -> Result<()> {
         WHERE queue_job_metadata_state = 0;
 
         CREATE INDEX generations_output_invalid_queue_metadata
-        ON generations(output_dir, queue_job_metadata_state, id)
+        ON generations(output_dir, queue_job_metadata_state, created_at_ms, id)
         WHERE queue_job_metadata_state = 0;
 
         CREATE INDEX generations_unknown_queue_metadata
@@ -765,7 +765,7 @@ fn add_generation_job_lookup_indexes(tx: &Transaction<'_>) -> Result<()> {
         WHERE queue_job_metadata_state IS NULL;
 
         CREATE INDEX generations_output_unknown_queue_metadata
-        ON generations(output_dir, queue_job_metadata_state, id)
+        ON generations(output_dir, queue_job_metadata_state, created_at_ms, id)
         WHERE queue_job_metadata_state IS NULL;
 
         CREATE TRIGGER generations_queue_job_projection_dirty
