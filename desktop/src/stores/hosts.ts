@@ -292,7 +292,10 @@ export const useHostsStore = defineStore("hosts", {
      *  instance-id dedupe stay hostname-qualified while a host is down. */
     hostnames: {} as Record<string, string>,
     refreshGenerations: {} as Record<string, number>,
-    pollTimer: null as ReturnType<typeof setInterval> | null,
+    refreshInFlight: null as Promise<void> | null,
+    pollTimer: null as ReturnType<typeof setTimeout> | null,
+    polling: false,
+    pollGeneration: 0,
     initializing: false,
     initialized: false,
   }),
@@ -476,7 +479,7 @@ export const useHostsStore = defineStore("hosts", {
               live.error = null;
               live.instanceId = instanceId;
               await this.persist(twin.id, url, name, instanceId);
-              void this.refresh();
+              void this.refreshAfterCurrent();
             }
           }
           return this.all.find((h) => h.id === twin.id) ?? twin;
@@ -496,7 +499,7 @@ export const useHostsStore = defineStore("hosts", {
       if (test.hostname) this.hostnames[id] = test.hostname;
       if (apiKey) await ipc.secretSet(`remote-api-key.${id}`, apiKey);
       await this.persist(id, url, name, instanceId);
-      void this.refresh();
+      void this.refreshAfterCurrent();
       return this.all.find((h) => h.id === id)!;
     },
     /** Drop a live extra host. Its saved entry and key stay for later. */
@@ -561,7 +564,7 @@ export const useHostsStore = defineStore("hosts", {
       const test = await ipc.testRemoteHost(extra.url, extra.apiKey);
       extra.status = test.ok ? "ready" : "error";
       extra.error = test.ok ? null : test.error;
-      if (test.ok) void this.refresh();
+      if (test.ok) void this.refreshAfterCurrent();
       else delete this.capabilities[id];
     },
     /**
@@ -1079,8 +1082,37 @@ export const useHostsStore = defineStore("hosts", {
       const result = await this.resolveFeasible(selection, request, copies, options);
       return result.kind === "route" ? result.route : null;
     },
-    /** Pull queue depth/capacity from every live host. */
-    async refresh() {
+    /** Pull queue depth/capacity from every live host. Concurrent callers join
+     * the same wave so a slow server cannot accumulate status/device/queue/
+     * capability requests behind the browser's transport limit. */
+    refresh(): Promise<void> {
+      if (this.refreshInFlight) return this.refreshInFlight;
+      const run = this.refreshOnce().finally(() => {
+        if (this.refreshInFlight === run) this.refreshInFlight = null;
+      });
+      this.refreshInFlight = run;
+      return run;
+    },
+    /** Host connection state changed and needs a wave that sees the new
+     * snapshot. Join an active wave, then run once more after it settles;
+     * otherwise refresh immediately. */
+    async refreshAfterCurrent() {
+      const active = this.refreshInFlight;
+      if (active) {
+        try {
+          await active;
+        } catch {
+          // The follow-up wave still needs the changed host snapshot.
+        }
+      }
+      try {
+        await this.refresh();
+      } catch {
+        // This is a background refresh after a successful connect/reconnect;
+        // the normal polling loop owns later recovery.
+      }
+    },
+    async refreshOnce() {
       /** hostId → instanceId learned this poll, to reconcile saved entries once. */
       const learned = new Map<string, string>();
       await Promise.all(
@@ -1255,13 +1287,30 @@ export const useHostsStore = defineStore("hosts", {
           prefs.settings = { ...prefs.settings, savedHosts, connectedHostIds, generateTargetHost };
       });
     },
+    async runPoll(generation: number) {
+      try {
+        await this.refresh();
+      } catch {
+        // Background polling is self-healing. Direct refresh callers still
+        // receive reconciliation failures, but one failed cycle must not stop
+        // future connectivity checks.
+      }
+      if (!this.polling || this.pollGeneration !== generation) return;
+      this.pollTimer = setTimeout(() => {
+        this.pollTimer = null;
+        void this.runPoll(generation);
+      }, POLL_INTERVAL_MS);
+    },
     startPolling() {
-      if (this.pollTimer) return;
-      void this.refresh();
-      this.pollTimer = setInterval(() => void this.refresh(), POLL_INTERVAL_MS);
+      if (this.polling) return;
+      this.polling = true;
+      const generation = ++this.pollGeneration;
+      void this.runPoll(generation);
     },
     stopPolling() {
-      if (this.pollTimer) clearInterval(this.pollTimer);
+      this.polling = false;
+      this.pollGeneration += 1;
+      if (this.pollTimer) clearTimeout(this.pollTimer);
       this.pollTimer = null;
     },
     /** Remember the host across launches (MRU list + reconnect set). */

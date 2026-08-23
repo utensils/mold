@@ -1674,12 +1674,10 @@ describe("hosts store", () => {
     expect(hosts.telemetry["hal9000-7680"]?.devices).toHaveLength(1);
   });
 
-  it("ignores an older same-host telemetry refresh after a newer refresh settles", async () => {
-    const older = deferred<Record<string, unknown>>();
-    const newer = deferred<Record<string, unknown>>();
-    let statusCall = 0;
+  it("coalesces overlapping refreshes into one request wave", async () => {
+    const status = deferred<Record<string, unknown>>();
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
-      if (path === "/api/status") return statusCall++ === 0 ? older.promise : newer.promise;
+      if (path === "/api/status") return status.promise;
       if (path === "/api/capabilities") return Promise.resolve({});
       return Promise.reject(new Error(`unexpected path ${path}`));
     });
@@ -1692,21 +1690,108 @@ describe("hosts store", () => {
 
     const first = hosts.refresh();
     const second = hosts.refresh();
-    newer.resolve({
+    expect(apiJsonTo.mock.calls.filter(([, path]) => path === "/api/status")).toHaveLength(1);
+
+    status.resolve({
       queue_depth: 9,
       queue_capacity: 16,
-      version: "newer",
+      version: "current",
     });
-    await second;
-    older.resolve({
-      queue_depth: 1,
-      queue_capacity: 16,
-      version: "older",
-    });
-    await first;
+    await Promise.all([first, second]);
 
     expect(hosts.telemetry.local?.queueDepth).toBe(9);
-    expect(hosts.telemetry.local?.version).toBe("newer");
+    expect(hosts.telemetry.local?.version).toBe("current");
+  });
+
+  it("runs a non-overlapping follow-up wave when host connection state changes", async () => {
+    const firstStatus = deferred<Record<string, unknown>>();
+    const secondStatus = deferred<Record<string, unknown>>();
+    let statusCalls = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") {
+        statusCalls += 1;
+        return statusCalls === 1 ? firstStatus.promise : secondStatus.promise;
+      }
+      if (path === "/api/capabilities") return Promise.resolve({});
+      return Promise.reject(new Error(`unexpected path ${path}`));
+    });
+    listDevices.mockResolvedValue({ plan_version: 1, devices: [device(0)] });
+    listQueue.mockResolvedValue({ entries: [], plan: null });
+    const hosts = useHostsStore();
+
+    const current = hosts.refresh();
+    const latest = hosts.refreshAfterCurrent();
+    expect(statusCalls).toBe(1);
+
+    firstStatus.resolve({ queue_depth: 1, queue_capacity: 8, version: "first" });
+    await current;
+    await Promise.resolve();
+    expect(statusCalls).toBe(2);
+
+    secondStatus.resolve({ queue_depth: 2, queue_capacity: 8, version: "second" });
+    await latest;
+    expect(hosts.telemetry.local?.version).toBe("second");
+  });
+
+  it("schedules the next poll only after the current refresh settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const firstStatus = deferred<Record<string, unknown>>();
+      const secondStatus = deferred<Record<string, unknown>>();
+      let statusCalls = 0;
+      apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+        if (path === "/api/status") {
+          statusCalls += 1;
+          return statusCalls === 1 ? firstStatus.promise : secondStatus.promise;
+        }
+        if (path === "/api/capabilities") return Promise.resolve({});
+        return Promise.reject(new Error(`unexpected path ${path}`));
+      });
+      listDevices.mockResolvedValue({ plan_version: 1, devices: [device(0)] });
+      listQueue.mockResolvedValue({ entries: [], plan: null });
+      const hosts = useHostsStore();
+
+      const current = hosts.refresh();
+      hosts.startPolling();
+      expect(statusCalls).toBe(1);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(statusCalls).toBe(1);
+
+      firstStatus.resolve({ queue_depth: 0, queue_capacity: 8, version: "first" });
+      await current;
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(statusCalls).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(statusCalls).toBe(2);
+      secondStatus.resolve({ queue_depth: 0, queue_capacity: 8, version: "second" });
+      await Promise.resolve();
+    } finally {
+      useHostsStore().stopPolling();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps polling after a refresh-level reconciliation failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const hosts = useHostsStore();
+      const refresh = vi
+        .spyOn(hosts, "refresh")
+        .mockRejectedValueOnce(new Error("settings unavailable"))
+        .mockResolvedValue(undefined);
+
+      hosts.startPolling();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(refresh).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(refresh).toHaveBeenCalledTimes(2);
+    } finally {
+      useHostsStore().stopPolling();
+      vi.useRealTimers();
+    }
   });
 
   it("always refreshes predicted completion so Auto can refine equal-depth hosts", async () => {
