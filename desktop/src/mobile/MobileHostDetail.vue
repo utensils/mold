@@ -105,11 +105,14 @@ const emptyTrashArmed = ref(false);
 const emptyingTrash = ref(false);
 let loadEpoch = 0;
 let queueRequestGeneration = 0;
+let queueLoadMoreGeneration = 0;
 let deviceRequestGeneration = 0;
 let resourceAbort: AbortController | null = null;
 let downloadsAbort: AbortController | null = null;
 let deviceEventsAbort: AbortController | null = null;
 let livePollTimer: ReturnType<typeof setTimeout> | null = null;
+let queueRefreshPromise: Promise<void> | null = null;
+let queueRefreshQueued = false;
 let deviceRefreshPromise: Promise<void> | null = null;
 let deviceRefreshQueued = false;
 
@@ -171,6 +174,8 @@ function stopLiveServices(): void {
   deviceEventsAbort = null;
   if (livePollTimer) clearTimeout(livePollTimer);
   livePollTimer = null;
+  queueRefreshPromise = null;
+  queueRefreshQueued = false;
   deviceRefreshPromise = null;
   deviceRefreshQueued = false;
 }
@@ -193,23 +198,14 @@ async function refreshQueue(epoch = loadEpoch): Promise<void> {
         listing.entries,
         listing.live_only_entries ?? [],
       ) as QueueEntry[];
-      const seen = new Set<string>();
-      queue.value = [...head, ...(listing.page ? queueTail.value : [])].filter(({ id }) => {
-        if (seen.has(id)) return false;
-        seen.add(id);
-        return true;
-      });
+      queue.value = head;
       queuePlan.value = listing.plan;
       queuePageLimit.value = listing.page?.limit ?? null;
-      queueNextCursor.value = listing.page
-        ? queueContinued.value && queueNextCursor.value
-          ? queueNextCursor.value
-          : (listing.page.next_cursor ?? null)
-        : null;
-      if (!listing.page) {
-        queueTail.value = [];
-        queueContinued.value = false;
-      }
+      queueNextCursor.value = listing.page?.next_cursor ?? null;
+      queueTail.value = [];
+      queueContinued.value = false;
+      loadingMoreQueue.value = false;
+      queueLoadMoreGeneration += 1;
       queueApiAvailable.value = true;
     }
   } catch {
@@ -228,6 +224,24 @@ async function refreshQueue(epoch = loadEpoch): Promise<void> {
   }
 }
 
+function requestQueueRefresh(epoch = loadEpoch): Promise<void> {
+  if (queueRefreshPromise) {
+    queueRefreshQueued = true;
+    queueRequestGeneration += 1;
+    return queueRefreshPromise;
+  }
+  const refresh = (async () => {
+    do {
+      queueRefreshQueued = false;
+      await refreshQueue(epoch);
+    } while (queueRefreshQueued && epoch === loadEpoch);
+  })();
+  queueRefreshPromise = refresh;
+  return refresh.finally(() => {
+    if (queueRefreshPromise === refresh) queueRefreshPromise = null;
+  });
+}
+
 async function loadMoreQueue(): Promise<void> {
   const cursor = queueNextCursor.value;
   const limit = queuePageLimit.value;
@@ -236,9 +250,11 @@ async function loadMoreQueue(): Promise<void> {
   loadMoreQueueError.value = "";
   const epoch = loadEpoch;
   const requestTarget = target.value;
+  const generation = ++queueLoadMoreGeneration;
   try {
     const listing = await listQueue(requestTarget, { limit, cursor });
     if (
+      generation !== queueLoadMoreGeneration ||
       epoch !== loadEpoch ||
       queueNextCursor.value !== cursor ||
       requestTarget.baseUrl !== target.value.baseUrl ||
@@ -262,9 +278,21 @@ async function loadMoreQueue(): Promise<void> {
     queueContinued.value = listing.page !== undefined;
     queuePlan.value = listing.plan ?? queuePlan.value;
   } catch (error) {
-    loadMoreQueueError.value = describeTransportError(error, props.host.name);
+    if (
+      generation === queueLoadMoreGeneration &&
+      epoch === loadEpoch &&
+      requestTarget.baseUrl === target.value.baseUrl &&
+      requestTarget.apiKey === target.value.apiKey
+    )
+      loadMoreQueueError.value = describeTransportError(error, props.host.name);
   } finally {
-    loadingMoreQueue.value = false;
+    if (
+      generation === queueLoadMoreGeneration &&
+      epoch === loadEpoch &&
+      requestTarget.baseUrl === target.value.baseUrl &&
+      requestTarget.apiKey === target.value.apiKey
+    )
+      loadingMoreQueue.value = false;
   }
 }
 
@@ -384,8 +412,7 @@ function scheduleLivePoll(epoch: number): void {
     livePollTimer = null;
     // Queue authority has its own generation fence and must not hold device
     // freshness hostage if an older endpoint never settles.
-    void refreshQueue(epoch);
-    await refreshDevicesSafely(epoch);
+    await Promise.all([requestQueueRefresh(epoch), refreshDevicesSafely(epoch)]);
     scheduleLivePoll(epoch);
   }, 5_000);
 }
@@ -423,11 +450,11 @@ function startLiveServices(epoch: number): void {
 
   deviceEventsAbort = new AbortController();
   subscribeToDeviceSnapshots(target.value, deviceEventsAbort.signal, () => {
-    void refreshQueue(epoch);
+    void requestQueueRefresh(epoch);
     void refreshDevicesSafely(epoch);
   });
 
-  void refreshQueue(epoch);
+  void requestQueueRefresh(epoch);
   scheduleLivePoll(epoch);
 }
 
@@ -591,7 +618,7 @@ async function toggleDeviceById(deviceId: string, enabled: boolean): Promise<voi
 async function unpinWork(workId: string): Promise<void> {
   try {
     await setQueueDevicePin(target.value, workId, null);
-    await refreshQueue();
+    await requestQueueRefresh();
   } catch (caught) {
     error.value = describeTransportError(caught, props.host.name);
   }
@@ -620,7 +647,7 @@ async function cancelQueuedJob(entry: QueueEntry): Promise<void> {
       requestTarget.baseUrl === target.value.baseUrl &&
       requestTarget.apiKey === target.value.apiKey
     ) {
-      await refreshQueue(epoch);
+      await requestQueueRefresh(epoch);
     }
   } catch (caught) {
     if (

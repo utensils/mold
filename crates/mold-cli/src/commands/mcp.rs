@@ -518,10 +518,15 @@ impl McpServer {
             .await
             .map_err(|e| format!("failed to read server status: {e}"))?;
         let devices = self.client.devices().await.ok();
-        let queue = self.client.list_queue().await.ok().map(|mut queue| {
-            queue.normalize_planned_lanes_for_presentation();
-            queue
-        });
+        let queue = self
+            .client
+            .list_queue_for_capacity(status.queue_capacity)
+            .await
+            .ok()
+            .map(|mut queue| {
+                queue.normalize_planned_lanes_for_presentation();
+                queue
+            });
 
         let mut lines = vec![
             format!("mold server {}", status.version),
@@ -1922,6 +1927,7 @@ mod tests {
 
         let queue = mold_core::QueueListingWire {
             entries: vec![],
+            live_only_entries: vec![],
             plan: Some(mold_core::QueuePlan {
                 work_items: vec![
                     mold_core::QueueWorkItem {
@@ -1957,6 +1963,7 @@ mod tests {
                 ],
                 ..Default::default()
             }),
+            page: None,
         };
         let server = MockServer::start().await;
         Mock::given(method("GET"))

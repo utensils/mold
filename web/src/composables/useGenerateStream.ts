@@ -32,6 +32,7 @@ import { fetchGalleryBlob } from "../lib/galleryMedia";
 import { blobToBase64 } from "../lib/base64";
 import { inferFormatFromName, type OutputFormat } from "../types";
 import { ApiError, apiHeaders, type ApiTarget } from "@studio/api/client";
+import { mergeQueueEntries } from "@studio/api/queuePlan";
 import {
   admitGenerationBatch,
   lookupGenerationBatchByClientId,
@@ -298,13 +299,22 @@ async function hostJournalledJob(
   target: StreamTarget | undefined,
 ): Promise<boolean> {
   try {
-    const listing = await fetchQueue(
-      target,
-      AbortSignal.timeout(RETENTION_LOOKUP_TIMEOUT_MS),
-    );
-    return (
-      listing.entries.find((entry) => entry.id === serverId)?.durable === true
-    );
+    const signal = AbortSignal.timeout(RETENTION_LOOKUP_TIMEOUT_MS);
+    let listing = await fetchQueue(target, signal);
+    const seenCursors = new Set<string>();
+    for (;;) {
+      const entry = mergeQueueEntries(
+        listing.entries,
+        listing.live_only_entries ?? [],
+      ).find((candidate) => candidate.id === serverId);
+      if (entry) return entry.durable === true;
+      const cursor = listing.page?.next_cursor;
+      const limit = listing.page?.limit;
+      if (!cursor || !limit) return false;
+      if (seenCursors.has(cursor)) return false;
+      seenCursors.add(cursor);
+      listing = await fetchQueue(target, signal, { limit, cursor });
+    }
   } catch {
     return false;
   }

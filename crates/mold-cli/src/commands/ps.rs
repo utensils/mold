@@ -106,7 +106,11 @@ pub async fn run() -> Result<()> {
                 );
             }
 
-            if let Ok(queue) = ctx.client().list_queue().await {
+            if let Ok(queue) = ctx
+                .client()
+                .list_queue_for_capacity(status.queue_capacity)
+                .await
+            {
                 if let Some(plan) = queue.plan {
                     print_queue_plan(&plan);
                 }

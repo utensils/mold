@@ -2,7 +2,12 @@
 import { onBeforeUnmount, ref, watch } from "vue";
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import { listDevices, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
-import { listQueue, setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
+import {
+  listQueue,
+  queuePageRequestForCapacity,
+  setQueueDevicePin,
+  type QueuePlan,
+} from "@studio/api/queuePlan";
 import ConfigRowItem from "./ConfigRowItem.vue";
 import ConfigSettingRow from "./ConfigSettingRow.vue";
 import PlacementSection from "./PlacementSection.vue";
@@ -13,6 +18,8 @@ import { schemaFor } from "../../lib/settingsSchema";
 import type { ConfigRow } from "../../lib/api/types";
 import { subscribeToDeviceSnapshots } from "../../lib/api/deviceEvents";
 import { fetchServerCapabilities } from "../../lib/api/serverCapabilities";
+import { apiJsonTo } from "../../lib/api/client";
+import type { ServerStatus } from "../../lib/api/types";
 
 defineProps<{ filter?: ((row: ConfigRow) => boolean) | undefined }>();
 
@@ -49,9 +56,13 @@ async function loadDevices() {
       current.apiKey === apiTarget.apiKey
     );
   };
+  const statusRequest = apiJsonTo<ServerStatus>(apiTarget, "/api/status");
+  const queueRequest = statusRequest.then((status) =>
+    listQueue(apiTarget, queuePageRequestForCapacity(status.queue_capacity) ?? null),
+  );
   const [deviceResult, queueResult, capabilityResult] = await Promise.allSettled([
     listDevices(apiTarget),
-    listQueue(apiTarget),
+    queueRequest,
     fetchServerCapabilities(apiTarget),
   ]);
   if (!isCurrent()) return;

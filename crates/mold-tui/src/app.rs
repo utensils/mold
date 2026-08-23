@@ -170,6 +170,12 @@ pub enum BackgroundEvent {
         host_id: String,
         queue: Option<mold_core::QueueListingWire>,
     },
+    /// User-requested continuation page, fenced by the cursor it followed.
+    HostQueuePageLoaded {
+        host_id: String,
+        cursor: String,
+        queue: Option<mold_core::QueueListingWire>,
+    },
     /// Result of the connect-a-machine test fetch.
     MachineConnectTested {
         url: String,
@@ -4894,6 +4900,19 @@ impl App {
                     });
                 }
             }
+            Action::MachinesLoadMoreQueue
+                if self.active_view == View::Machines
+                    && self.machines.focus == crate::hosts::MachinesFocus::Detail =>
+            {
+                if let Some((entry, limit, cursor)) = self.machines.begin_queue_continuation() {
+                    self.tokio_handle.spawn(crate::hosts::fetch_host_queue_page(
+                        entry,
+                        limit,
+                        cursor,
+                        self.bg_tx.clone(),
+                    ));
+                }
+            }
             Action::MachinesNextDevice if self.active_view == View::Machines => {
                 self.machines.select_next_device();
             }
@@ -8697,6 +8716,14 @@ impl App {
                 }
                 BackgroundEvent::HostQueueUpdate { host_id, queue } => {
                     self.machines.apply_queue(host_id, queue);
+                }
+                BackgroundEvent::HostQueuePageLoaded {
+                    host_id,
+                    cursor,
+                    queue,
+                } => {
+                    self.machines
+                        .apply_queue_continuation(host_id, &cursor, queue);
                 }
                 BackgroundEvent::MachineConnectTested {
                     url,
@@ -17434,8 +17461,12 @@ mod tests {
                     target_gpu: None,
                     seed_pinned: None,
                     metadata: None,
+                    durable: None,
+                    held_reason: None,
                 }],
+                live_only_entries: vec![],
                 plan: None,
+                page: None,
             }),
         );
 
@@ -17725,6 +17756,8 @@ mod tests {
                         target_gpu: None,
                         seed_pinned: None,
                         metadata: None,
+                        durable: None,
+                        held_reason: None,
                     },
                     mold_core::QueueJobEntryWire {
                         id: "job-q".into(),
@@ -17736,9 +17769,13 @@ mod tests {
                         target_gpu: None,
                         seed_pinned: None,
                         metadata: None,
+                        durable: None,
+                        held_reason: None,
                     },
                 ],
+                live_only_entries: vec![],
                 plan: None,
+                page: None,
             }),
         );
 

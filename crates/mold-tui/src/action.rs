@@ -147,6 +147,8 @@ pub enum Action {
     MachinesRefresh,
     /// Machines: cancel the selected queued/running job when supported (confirmed).
     MachinesCancelJob,
+    /// Machines: explicitly load the next bounded durable queue page.
+    MachinesLoadMoreQueue,
     /// Machines: move the device-detail selection to the next visible GPU.
     MachinesNextDevice,
     /// Machines: move the device-detail selection backward/forward without

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { IncompatibleHostError } from "./client";
 import {
   cancelQueueJob,
+  findQueueEntryById,
   listQueue,
   mergeQueueEntries,
   parseQueueListing,
@@ -228,6 +229,44 @@ describe("queue plan contract", () => {
       ).rejects.toThrow("positive integer");
     }
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("finds an explicitly selected job through bounded continuation pages", async () => {
+    const row = (id: string) => ({
+      id,
+      model: "flux-dev:q8",
+      state: "queued",
+      started_at_unix_ms: 1,
+      position: 0,
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ queue_capacity: 1 }))
+      .mockResolvedValueOnce(
+        Response.json({
+          entries: [row("first")],
+          page: { limit: 1, offset: 0, returned: 1, next_cursor: "next" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          entries: [row("wanted")],
+          page: { limit: 1, offset: 1, returned: 1 },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      findQueueEntryById(
+        { baseUrl: "https://gpu.example", apiKey: "secret" },
+        "wanted",
+      ),
+    ).resolves.toMatchObject({ id: "wanted" });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "https://gpu.example/api/status",
+      "https://gpu.example/api/queue?limit=1",
+      "https://gpu.example/api/queue?limit=1&cursor=next",
+    ]);
   });
 
   it("preserves typed host lanes without treating them as device identities", () => {

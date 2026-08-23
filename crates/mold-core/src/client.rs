@@ -782,32 +782,18 @@ impl MoldClient {
     /// the job is queued and read only if the stream later dies, so a host
     /// that never answers, or one that predates the field, promises nothing.
     fn probe_retention(&self, job_id: String) -> RetainedJobProbe {
-        let client = self.client.clone();
-        let url = format!("{}/api/queue", self.base_url);
+        let client = self.clone();
         let host = self.base_url.clone();
         let wanted = job_id.clone();
         let durable = tokio::spawn(async move {
-            // Bound the request too, so the task itself cannot outlive the
-            // answer anyone is waiting for.
-            let Ok(response) = client
-                .get(url)
-                .timeout(RETENTION_PROBE_TIMEOUT)
-                .send()
+            // Bound the whole cursor chain so even an explicit lookup cannot
+            // outlive the answer anyone is waiting for.
+            tokio::time::timeout(RETENTION_PROBE_TIMEOUT, client.find_queue_job(&wanted))
                 .await
-            else {
-                return false;
-            };
-            let Ok(listing) = response.json::<serde_json::Value>().await else {
-                return false;
-            };
-            listing
-                .get("entries")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
+                .ok()
+                .and_then(Result::ok)
                 .flatten()
-                .find(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(&wanted))
-                .and_then(|entry| entry.get("durable"))
-                .and_then(serde_json::Value::as_bool)
+                .and_then(|entry| entry.durable)
                 .unwrap_or(false)
         });
         RetainedJobProbe {
@@ -1343,23 +1329,88 @@ impl MoldClient {
         Ok(response)
     }
 
-    /// Snapshot the server's generation queue (`GET /api/queue`).
+    /// Snapshot the server's live generation window (`GET /api/queue`).
     ///
-    /// The listing covers everything currently queued or running — completed
-    /// jobs live in the gallery, not here. Entries are wire-shaped twins of
+    /// Current hosts return the capacity-sized live window; older hosts that
+    /// omit `queue_capacity` retain the legacy full-list behavior. Entries are wire-shaped twins of
     /// the server's `job_registry::JobEntry`; see [`QueueListingWire`] for
     /// the forward-compat rules (plain-string `state`, defaulted additive
     /// fields), which let this client talk to both older and newer servers.
     pub async fn list_queue(&self) -> Result<QueueListingWire> {
-        let resp = self
-            .client
-            .get(format!("{}/api/queue", self.base_url))
+        let status = self.server_status().await?;
+        self.list_queue_for_capacity(status.queue_capacity).await
+    }
+
+    /// Read a queue page using capacity already observed from this exact host.
+    /// `None` is the explicit legacy-host fallback; current callers must pass
+    /// the positive `queue_capacity` advertised by `/api/status`.
+    pub async fn list_queue_for_capacity(
+        &self,
+        queue_capacity: Option<usize>,
+    ) -> Result<QueueListingWire> {
+        match queue_capacity {
+            Some(0) => anyhow::bail!("server reported an invalid zero queue capacity"),
+            Some(limit) => self.list_queue_page(limit, None).await,
+            None => self.fetch_queue_listing(None, None).await,
+        }
+    }
+
+    /// Continue an explicitly requested durable queue snapshot. This is for
+    /// user-driven pagination, never for health polling.
+    pub async fn list_queue_page(
+        &self,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> Result<QueueListingWire> {
+        if limit == 0 {
+            anyhow::bail!("queue page limit must be positive");
+        }
+        self.fetch_queue_listing(Some(limit), cursor).await
+    }
+
+    /// Resolve one exact job through bounded pages. This is reserved for an
+    /// explicit per-job action/probe; periodic consumers use only
+    /// [`Self::list_queue`] and never walk the durable journal.
+    pub async fn find_queue_job(&self, id: &str) -> Result<Option<crate::QueueJobEntryWire>> {
+        let mut listing = self.list_queue().await?;
+        let mut seen_cursors = std::collections::HashSet::new();
+        loop {
+            if let Some(entry) = listing.entries.into_iter().find(|entry| entry.id == id) {
+                return Ok(Some(entry));
+            }
+            let Some(page) = listing.page else {
+                return Ok(None);
+            };
+            let Some(cursor) = page.next_cursor else {
+                return Ok(None);
+            };
+            if !seen_cursors.insert(cursor.clone()) {
+                anyhow::bail!("host repeated a queue continuation cursor");
+            }
+            listing = self.list_queue_page(page.limit, Some(&cursor)).await?;
+        }
+    }
+
+    async fn fetch_queue_listing(
+        &self,
+        limit: Option<usize>,
+        cursor: Option<&str>,
+    ) -> Result<QueueListingWire> {
+        let mut request = self.client.get(format!("{}/api/queue", self.base_url));
+        if let Some(limit) = limit {
+            request = request.query(&[("limit", limit.to_string())]);
+        }
+        if let Some(cursor) = cursor {
+            request = request.query(&[("cursor", cursor)]);
+        }
+        let mut listing = request
             .send()
             .await?
             .error_for_status()?
             .json::<QueueListingWire>()
             .await?;
-        Ok(resp)
+        listing.merge_live_only_entries();
+        Ok(listing)
     }
 
     /// Cancel a still-queued job (`DELETE /api/queue/{id}`).
@@ -2746,12 +2797,24 @@ mod tests {
 
     #[tokio::test]
     async fn list_queue_parses_the_wrapped_entries_listing() {
-        use wiremock::matchers::{method, path};
+        use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
+            .and(path("/api/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "version": "0.20.0",
+                "models_loaded": [],
+                "gpu_info": null,
+                "uptime_secs": 1,
+                "queue_capacity": 2
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
             .and(path("/api/queue"))
+            .and(query_param("limit", "2"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "entries": [
                     {
@@ -2769,7 +2832,16 @@ mod tests {
                         "started_at_unix_ms": 1_711_305_601_000_u64,
                         "position": 1
                     }
-                ]
+                ],
+                "live_only_entries": [{
+                    "id": "job-live",
+                    "model": "minimax-h3:nvfp4",
+                    "state": "running",
+                    "started_at_unix_ms": 1_711_305_602_000_u64,
+                    "position": 0,
+                    "durable": false
+                }],
+                "page": { "limit": 2, "offset": 0, "returned": 2 }
             })))
             .mount(&server)
             .await;
@@ -2777,13 +2849,16 @@ mod tests {
         let client = MoldClient::new(&server.uri());
         let listing = client.list_queue().await.unwrap();
 
-        assert_eq!(listing.entries.len(), 2);
+        assert_eq!(listing.entries.len(), 3);
         assert_eq!(listing.entries[0].id, "job-1");
         assert_eq!(listing.entries[0].state, "running");
         assert_eq!(listing.entries[0].gpu, Some(0));
         assert_eq!(listing.entries[1].state, "queued");
         assert_eq!(listing.entries[1].gpu, None);
         assert_eq!(listing.entries[1].position, 1);
+        assert_eq!(listing.entries[2].id, "job-live");
+        assert_eq!(listing.entries[2].durable, Some(false));
+        assert_eq!(listing.page.as_ref().map(|page| page.limit), Some(2));
     }
 
     #[tokio::test]
@@ -2802,7 +2877,7 @@ mod tests {
             .await;
 
         let client = MoldClient::with_api_key(&server.uri(), "sekrit".to_string());
-        let listing = client.list_queue().await.unwrap();
+        let listing = client.list_queue_for_capacity(None).await.unwrap();
         assert!(listing.entries.is_empty());
     }
 
@@ -3032,6 +3107,27 @@ mod tests {
                         }
                     }
                     let head = String::from_utf8_lossy(&request).to_string();
+                    if head.starts_with("GET /api/status") {
+                        let body = serde_json::json!({
+                            "version": "0.20.0",
+                            "models_loaded": [],
+                            "gpu_info": null,
+                            "uptime_secs": 1,
+                            "queue_capacity": 1
+                        })
+                        .to_string();
+                        let _ = socket
+                            .write_all(
+                                format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                                    body.len()
+                                )
+                                .as_bytes(),
+                            )
+                            .await;
+                        let _ = socket.flush().await;
+                        return;
+                    }
                     if head.starts_with("GET /api/queue") {
                         let body = queue.to_string();
                         let _ = socket

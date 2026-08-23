@@ -649,6 +649,12 @@ describe("HostDetailPage — queue", () => {
     );
     expect(w.findAll('[data-test="queue-row"]')).toHaveLength(3);
     expect(w.find('[data-test="queue-load-more"]').exists()).toBe(false);
+
+    const refresh = subscribeToDeviceSnapshots.mock.calls[0]![2] as () => void;
+    refresh();
+    await flushPromises();
+    expect(w.findAll('[data-test="queue-row"]')).toHaveLength(2);
+    expect(w.find('[data-test="queue-load-more"]').exists()).toBe(true);
   });
 
   it("wires advertised pause and cancel-all controls to the viewed host", async () => {

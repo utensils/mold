@@ -1,5 +1,6 @@
 import type { Ref } from "vue";
 import { fetchQueue, listGalleryFrom } from "../api";
+import { mergeQueueEntries } from "@studio/api/queuePlan";
 import { getHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import type { StreamTarget } from "../api";
 import type { Job, UseGenerateStream } from "./useGenerateStream";
@@ -122,9 +123,18 @@ export function startQueueReconciler(
     const results = await Promise.allSettled(
       [...groups.values()].map(async (group) => {
         const listing = await fetchQueue(group.target ?? undefined);
-        const known = new Set(listing.entries.map((e) => e.id));
+        const known = new Set(
+          mergeQueueEntries(
+            listing.entries,
+            listing.live_only_entries ?? [],
+          ).map((entry) => entry.id),
+        );
         const missing = reconcileRound(group.jobs, known, Date.now());
         if (missing.length === 0) return;
+        // A bounded first page cannot prove that an absent durable row is
+        // gone. Wait until it advances into the live window; never turn a hot
+        // health loop into a scan of every durable row.
+        if (listing.page?.next_cursor) return;
         // A row leaves the queue for two reasons this loop cannot tell apart:
         // the job died, or it FINISHED. Absence decides neither — so ask the
         // host what it actually has. A print stamped with the job's own id is

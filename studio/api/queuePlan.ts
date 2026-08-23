@@ -21,6 +21,8 @@ export interface QueueEntry {
    * studio because desktop and web own structurally compatible metadata types. */
   metadata?: unknown;
   seed_pinned?: boolean | null;
+  durable?: boolean | null;
+  held_reason?: string | null;
 }
 
 export interface QueueWorkItem {
@@ -284,6 +286,34 @@ export async function listQueue(
       ? await apiJsonTo<unknown>(target, path)
       : await apiJsonTo<unknown>(target, path, { signal });
   return parseQueueListing(value);
+}
+
+/** Resolve one queue row for an explicit user action without ever asking the
+ * server for its legacy all-rows response. This may traverse every bounded
+ * page, but only on demand (for example, opening one activity row), never from
+ * a health or polling loop. */
+export async function findQueueEntryById(
+  target: ApiTarget,
+  id: string,
+  signal?: AbortSignal,
+): Promise<QueueEntry | null> {
+  let listing = await listQueue(target, undefined, signal);
+  const seenCursors = new Set<string>();
+  for (;;) {
+    const match = mergeQueueEntries(
+      listing.entries,
+      listing.live_only_entries ?? [],
+    ).find((entry) => entry.id === id);
+    if (match) return match;
+    const cursor = listing.page?.next_cursor;
+    const limit = listing.page?.limit;
+    if (!cursor || !limit) return null;
+    if (seenCursors.has(cursor)) {
+      throw new Error("host repeated a queue continuation cursor");
+    }
+    seenCursors.add(cursor);
+    listing = await listQueue(target, { limit, cursor }, signal);
+  }
 }
 
 /** Cancel work that is still waiting in the explicit host's generation queue. */

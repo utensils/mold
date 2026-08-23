@@ -251,24 +251,21 @@ export const useJobsStore = defineStore("jobs", {
           ),
         ]);
         if (!isCurrent()) return;
+        // Continuation rows are an explicit snapshot, not live authority. A
+        // bounded head refresh cannot prove that older rows still exist (an
+        // external client may have cancelled one), so discard that snapshot
+        // and re-arm its cursor rather than rendering ghost jobs forever.
         this.queues[host.id] = {
           hostId: host.id,
-          entries: distinctQueueEntries([
-            ...visibleQueueEntries(
-              mergeQueueEntries(listing.entries, listing.live_only_entries ?? []),
-            ),
-            ...(listing.page ? (previous?.tailEntries ?? []) : []),
-          ]),
+          entries: visibleQueueEntries(
+            mergeQueueEntries(listing.entries, listing.live_only_entries ?? []),
+          ),
           plan: listing.plan,
           pageLimit: listing.page?.limit ?? null,
-          nextCursor: listing.page
-            ? previous?.continued && previous.nextCursor
-              ? previous.nextCursor
-              : (listing.page.next_cursor ?? null)
-            : null,
-          tailEntries: listing.page ? (previous?.tailEntries ?? []) : [],
-          continued: listing.page ? (previous?.continued ?? false) : false,
-          loadingMore: previous?.loadingMore ?? false,
+          nextCursor: listing.page?.next_cursor ?? null,
+          tailEntries: [],
+          continued: false,
+          loadingMore: false,
           loadMoreError: null,
           paused: status.queue_paused ?? null,
           caps,
@@ -317,6 +314,7 @@ export const useJobsStore = defineStore("jobs", {
       const host = hosts.all.find((candidate) => candidate.id === hostId);
       const target = host ? this.targetFor(host) : null;
       if (!host || !target || host.status !== "ready") return;
+      const authority = snapshot;
       snapshot.loadingMore = true;
       snapshot.loadMoreError = null;
       try {
@@ -326,7 +324,7 @@ export const useJobsStore = defineStore("jobs", {
         const currentHost = hosts.all.find((candidate) => candidate.id === hostId);
         const current = this.queues[hostId];
         if (
-          !current ||
+          current !== authority ||
           current.nextCursor !== cursor ||
           currentHost?.baseUrl !== host.baseUrl ||
           currentHost.apiKey !== host.apiKey
@@ -355,10 +353,16 @@ export const useJobsStore = defineStore("jobs", {
         current.plan = listing.plan ?? current.plan ?? null;
       } catch (error) {
         const current = this.queues[hostId];
-        if (current?.nextCursor === cursor) current.loadMoreError = String(error);
+        if (
+          current === authority &&
+          current.nextCursor === cursor &&
+          hosts.all.find((candidate) => candidate.id === hostId)?.baseUrl === host.baseUrl &&
+          hosts.all.find((candidate) => candidate.id === hostId)?.apiKey === host.apiKey
+        )
+          current.loadMoreError = String(error);
       } finally {
         const current = this.queues[hostId];
-        if (current?.nextCursor === cursor || current?.loadingMore) current.loadingMore = false;
+        if (current === authority) current.loadingMore = false;
       }
     },
     async refresh() {

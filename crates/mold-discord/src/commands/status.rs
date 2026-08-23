@@ -8,13 +8,14 @@ use anyhow::Result;
 pub async fn status(ctx: Context<'_>) -> Result<()> {
     ctx.defer().await?;
 
-    let (status, devices, queue) = tokio::join!(
-        ctx.data().client.server_status(),
-        ctx.data().client.devices(),
-        ctx.data().client.list_queue()
-    );
-    match status {
+    match ctx.data().client.server_status().await {
         Ok(server_status) => {
+            let (devices, queue) = tokio::join!(
+                ctx.data().client.devices(),
+                ctx.data()
+                    .client
+                    .list_queue_for_capacity(server_status.queue_capacity)
+            );
             let pages = format::format_server_status_pages(
                 &server_status,
                 devices.as_ref().ok(),

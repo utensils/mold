@@ -3239,6 +3239,13 @@ pub struct QueueJobEntryWire {
     /// older servers; never carries image payloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Box<OutputMetadata>>,
+    /// Whether this exact request is journalled across restart. Additive and
+    /// per-job because some request shapes intentionally remain live-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable: Option<bool>,
+    /// Why a durable row is parked in the additive `held` state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_reason: Option<String>,
 }
 
 /// Confidence attached to a learned scheduler ETA.
@@ -3651,10 +3658,17 @@ pub struct QueuePage {
 pub struct QueueListingWire {
     #[serde(default)]
     pub entries: Vec<QueueJobEntryWire>,
+    /// Active rows without durable backing. Current servers repeat this
+    /// bounded set on every explicit durable page; absent on legacy hosts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub live_only_entries: Vec<QueueJobEntryWire>,
     /// Absent on legacy servers and before the V2 coordinator has produced
     /// its first plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<QueuePlan>,
+    /// Present only for an explicitly bounded durable request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<QueuePage>,
 }
 
 // ── GET /api/activity wire types ───────────────────────────────────────────
@@ -3709,6 +3723,22 @@ pub struct ActiveWorkSnapshot {
 }
 
 impl QueueListingWire {
+    /// Preserve the legacy `entries` view for Rust callers while accepting the
+    /// current split durable/live response. The first occurrence of an id is
+    /// authoritative, matching Studio consumers.
+    pub fn merge_live_only_entries(&mut self) {
+        let mut seen = self
+            .entries
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        self.entries.extend(
+            std::mem::take(&mut self.live_only_entries)
+                .into_iter()
+                .filter(|entry| seen.insert(entry.id.clone())),
+        );
+    }
+
     /// Normalize legacy internal lane identities before presenting this
     /// client-side projection to another consumer.
     pub fn normalize_planned_lanes_for_presentation(&mut self) {
@@ -4769,6 +4799,8 @@ mod tests {
             target_gpu: None,
             seed_pinned: None,
             metadata: None,
+            durable: None,
+            held_reason: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains(r#""state":"queued""#), "got: {json}");
@@ -10160,6 +10192,7 @@ mod queue_plan_wire_tests {
     fn presentation_normalization_only_rewrites_host_utility_identities() {
         let mut listing = QueueListingWire {
             entries: vec![],
+            live_only_entries: vec![],
             plan: Some(QueuePlan {
                 work_items: vec![
                     QueueWorkItem {
@@ -10191,6 +10224,7 @@ mod queue_plan_wire_tests {
                 ],
                 ..Default::default()
             }),
+            page: None,
         };
 
         listing.normalize_planned_lanes_for_presentation();

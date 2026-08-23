@@ -505,8 +505,22 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
                 }
             }
             lines.push(Line::default());
+            let more = if listing
+                .page
+                .as_ref()
+                .and_then(|page| page.next_cursor.as_ref())
+                .is_some()
+            {
+                if st.queue_loading_more {
+                    " · Loading more…"
+                } else {
+                    " · l Load more"
+                }
+            } else {
+                ""
+            };
             lines.push(Line::from(Span::styled(
-                "Tab Focus lanes · x Cancel queued",
+                format!("Tab Focus lanes · x Cancel queued{more}"),
                 theme.dim(),
             )));
         }

@@ -178,6 +178,7 @@ let queueRequestGeneration = 0;
 let capabilityRequestGeneration = 0;
 let modelRequestGeneration = 0;
 let downloadRequestGeneration = 0;
+let queueLoadMoreGeneration = 0;
 
 function isCurrentSession(
   entry: NonNullable<typeof host.value>,
@@ -213,21 +214,17 @@ async function reloadQueue(
         listing.entries,
         listing.live_only_entries ?? [],
       ) as QueueEntry[];
-      const seen = new Set<string>();
-      queue.value = [...head, ...(listing.page ? queueTail.value : [])].filter(
-        ({ id }) => !seen.has(id) && !!seen.add(id),
-      );
+      // Continuation rows are a user-requested snapshot. A bounded live poll
+      // cannot revalidate them, so reset to the authoritative head and let the
+      // user explicitly load the current continuation again.
+      queue.value = head;
       queuePlan.value = listing.plan ?? null;
       queuePageLimit.value = listing.page?.limit ?? null;
-      queueNextCursor.value = listing.page
-        ? queueContinued.value && queueNextCursor.value
-          ? queueNextCursor.value
-          : (listing.page.next_cursor ?? null)
-        : null;
-      if (!listing.page) {
-        queueTail.value = [];
-        queueContinued.value = false;
-      }
+      queueNextCursor.value = listing.page?.next_cursor ?? null;
+      queueTail.value = [];
+      queueContinued.value = false;
+      loadingMoreQueue.value = false;
+      queueLoadMoreGeneration += 1;
       loadMoreQueueError.value = "";
     }
   } catch {
@@ -243,9 +240,14 @@ async function loadMoreQueue() {
   loadingMoreQueue.value = true;
   loadMoreQueueError.value = "";
   const epoch = sessionEpoch;
+  const generation = ++queueLoadMoreGeneration;
   try {
     const listing = await hostQueue(entry, undefined, { limit, cursor });
-    if (!isCurrentSession(entry, epoch) || queueNextCursor.value !== cursor)
+    if (
+      generation !== queueLoadMoreGeneration ||
+      !isCurrentSession(entry, epoch) ||
+      queueNextCursor.value !== cursor
+    )
       return;
     if (!listing.page) {
       queue.value = listing.entries;
@@ -272,9 +274,17 @@ async function loadMoreQueue() {
     queueContinued.value = true;
     queuePlan.value = listing.plan ?? queuePlan.value;
   } catch (error) {
-    loadMoreQueueError.value = errMsg(error);
+    if (
+      generation === queueLoadMoreGeneration &&
+      isCurrentSession(entry, epoch)
+    )
+      loadMoreQueueError.value = errMsg(error);
   } finally {
-    loadingMoreQueue.value = false;
+    if (
+      generation === queueLoadMoreGeneration &&
+      isCurrentSession(entry, epoch)
+    )
+      loadingMoreQueue.value = false;
   }
 }
 
@@ -689,6 +699,7 @@ function scheduleReload(
 function stopHostSession() {
   sessionEpoch += 1;
   queueRequestGeneration += 1;
+  queueLoadMoreGeneration += 1;
   capabilityRequestGeneration += 1;
   modelRequestGeneration += 1;
   downloadRequestGeneration += 1;
@@ -729,6 +740,9 @@ function startHostSession() {
     deviceEventsAbort.signal,
     () => {
       void poll.refresh();
+      // The queued follow-up is single-flight, but the now-stale queue answer
+      // must not become visible while the current wave settles.
+      queueRequestGeneration += 1;
       void reloadAll(entry, epoch, signal);
     },
   );

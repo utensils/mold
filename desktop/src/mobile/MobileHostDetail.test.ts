@@ -1162,6 +1162,7 @@ describe("MobileHostDetail remote host data", () => {
   });
 
   it("pages by host capacity and loads the durable queue tail on demand", async () => {
+    vi.useFakeTimers();
     apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string): Promise<unknown> => {
       if (path === "/api/status") {
         return Promise.resolve(serverStatus({ queue_depth: 3, queue_capacity: 2 }));
@@ -1196,6 +1197,11 @@ describe("MobileHostDetail remote host data", () => {
 
     expect(view.get("[data-test='host-detail-queue']").findAll("li")).toHaveLength(3);
     expect(view.find("[data-test='host-detail-queue-load-more']").exists()).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(5_001);
+    expect(view.get("[data-test='host-detail-queue']").findAll("li")).toHaveLength(2);
+    expect(view.find("[data-test='host-detail-queue-load-more']").exists()).toBe(true);
+    vi.useRealTimers();
   });
 
   it("falls back to the status queue depth when the queue API is unavailable", async () => {

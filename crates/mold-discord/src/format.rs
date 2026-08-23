@@ -1524,6 +1524,7 @@ mod tests {
         };
         let queue = mold_core::QueueListingWire {
             entries: vec![],
+            live_only_entries: vec![],
             plan: Some(mold_core::QueuePlan {
                 work_items: vec![
                     mold_core::QueueWorkItem {
@@ -1546,6 +1547,7 @@ mod tests {
                 ],
                 ..Default::default()
             }),
+            page: None,
         };
 
         let fields = format_server_status_pages(&status, None, Some(&queue))
@@ -1584,6 +1586,7 @@ mod tests {
         };
         let queue = mold_core::QueueListingWire {
             entries: vec![],
+            live_only_entries: vec![],
             plan: Some(mold_core::QueuePlan {
                 work_items: vec![
                     mold_core::QueueWorkItem {
@@ -1613,6 +1616,7 @@ mod tests {
                 ],
                 ..Default::default()
             }),
+            page: None,
         };
 
         let fields = format_server_status_pages(&status, None, Some(&queue))

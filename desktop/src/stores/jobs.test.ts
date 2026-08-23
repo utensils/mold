@@ -210,6 +210,39 @@ describe("jobs store", () => {
     await jobs.loadMoreHost(host.id);
     expect(jobs.queues[host.id]?.entries.map(({ id }) => id)).toEqual(["one", "two", "three"]);
     expect(jobs.queues[host.id]?.nextCursor).toBeNull();
+
+    await jobs.refreshHost(host);
+    expect(jobs.queues[host.id]?.entries.map(({ id }) => id)).toEqual(["one", "two"]);
+    expect(jobs.queues[host.id]?.nextCursor).toBe("page-2");
+    expect(jobs.queues[host.id]?.continued).toBe(false);
+  });
+
+  it("cannot apply a load-more failure to a replacement queue authority", async () => {
+    const hosts = seedHosts();
+    const host = hosts.all.find((entry) => entry.id === "hal9000-7680")!;
+    const continuation = deferred<unknown>();
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve({ queue_capacity: 1 });
+      if (path === "/api/capabilities") return Promise.resolve({ queue: {} });
+      if (path === "/api/queue?limit=1")
+        return Promise.resolve({
+          entries: [
+            { id: "head", model: "m", state: "queued", started_at_unix_ms: 1, position: 0 },
+          ],
+          page: { limit: 1, offset: 0, returned: 1, next_cursor: "next" },
+        });
+      if (path === "/api/queue?limit=1&cursor=next") return continuation.promise;
+      return Promise.reject(new Error(`unexpected path ${path}`));
+    });
+    const jobs = useJobsStore();
+    await jobs.refreshHost(host);
+    const stale = jobs.loadMoreHost(host.id);
+    await jobs.refreshHost(host);
+    continuation.resolve({ error: "old host failed" });
+    await stale;
+
+    expect(jobs.queues[host.id]?.loadMoreError).toBeNull();
+    expect(jobs.queues[host.id]?.loadingMore).toBe(false);
   });
 
   it("self-schedules polling only after the previous refresh settles", async () => {

@@ -54,7 +54,9 @@ vi.mock("../../composables/useLiveActivity", () => ({
     stop: vi.fn(),
   }),
 }));
-vi.mock("@studio/api/queuePlan", () => ({ listQueue: listQueueMock }));
+vi.mock("@studio/api/queuePlan", () => ({
+  findQueueEntryById: listQueueMock,
+}));
 
 const notifState = vi.hoisted(() => ({ fresh: 0, offline: false }));
 const statusState = vi.hoisted(() => ({
@@ -187,14 +189,9 @@ describe("AppNav", () => {
       },
     ];
     listQueueMock.mockResolvedValue({
-      entries: [
-        {
-          id: "foreign",
-          seed_pinned: true,
-          metadata: { model: "flux-dev", prompt: "restore me", seed: 42 },
-        },
-      ],
-      plan: null,
+      id: "foreign",
+      seed_pinned: true,
+      metadata: { model: "flux-dev", prompt: "restore me", seed: 42 },
     });
     const wrapper = mountNav();
     await wrapper
@@ -204,10 +201,13 @@ describe("AppNav", () => {
       .findAll("[data-test^='live-activity-select-']")[0]!
       .trigger("click");
 
-    expect(listQueueMock).toHaveBeenCalledWith({
-      baseUrl: "http://render:7680",
-      apiKey: "secret",
-    });
+    expect(listQueueMock).toHaveBeenCalledWith(
+      {
+        baseUrl: "http://render:7680",
+        apiKey: "secret",
+      },
+      "foreign",
+    );
     expect(takeGenerationHandoff()).toMatchObject({
       metadata: { prompt: "restore me", seed: 42 },
       seedPinned: true,

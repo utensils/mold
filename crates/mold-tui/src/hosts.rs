@@ -368,6 +368,8 @@ pub(crate) struct MachinesState {
     pub device_selected: usize,
     /// Queue snapshot for the selected remote host.
     pub queue: Option<(String, mold_core::QueueListingWire)>,
+    /// Single-flight guard for explicit continuation reads.
+    pub queue_loading_more: bool,
     /// Job selection inside the detail pane's queue lanes.
     pub queue_selected: usize,
     /// Last host-poll instant (None = poll immediately).
@@ -439,6 +441,7 @@ impl MachinesState {
 
     fn on_selection_changed(&mut self) {
         self.queue = None;
+        self.queue_loading_more = false;
         self.queue_selected = 0;
         self.device_selected = 0;
     }
@@ -694,6 +697,64 @@ impl MachinesState {
                 self.queue = Some((host_id, listing));
             }
             None => self.queue = None,
+        }
+        self.queue_loading_more = false;
+    }
+
+    /// Capture the exact continuation authority and mark it in flight.
+    pub fn begin_queue_continuation(&mut self) -> Option<(HostEntry, usize, String)> {
+        if self.queue_loading_more {
+            return None;
+        }
+        let entry = self.selected_host()?.clone();
+        let (host_id, listing) = self.queue.as_ref()?;
+        if *host_id != entry.id {
+            return None;
+        }
+        let page = listing.page.as_ref()?;
+        let cursor = page.next_cursor.clone()?;
+        self.queue_loading_more = true;
+        Some((entry, page.limit, cursor))
+    }
+
+    /// Append a continuation only if the selected host still exposes the
+    /// cursor this request followed. A concurrent head poll invalidates it.
+    pub fn apply_queue_continuation(
+        &mut self,
+        host_id: String,
+        cursor: &str,
+        queue: Option<mold_core::QueueListingWire>,
+    ) {
+        self.queue_loading_more = false;
+        let Some((current_host, current)) = self.queue.as_mut() else {
+            return;
+        };
+        if *current_host != host_id
+            || current
+                .page
+                .as_ref()
+                .and_then(|page| page.next_cursor.as_deref())
+                != Some(cursor)
+        {
+            return;
+        }
+        let Some(mut continuation) = queue else {
+            return;
+        };
+        let mut seen = current
+            .entries
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        current.entries.extend(
+            continuation
+                .entries
+                .drain(..)
+                .filter(|entry| seen.insert(entry.id.clone())),
+        );
+        current.page = continuation.page;
+        if continuation.plan.is_some() {
+            current.plan = continuation.plan;
         }
     }
 
@@ -999,6 +1060,23 @@ pub(crate) async fn fetch_host_queue(entry: HostEntry, tx: mpsc::UnboundedSender
     let _ = tx.send(BackgroundEvent::HostCapabilitiesUpdate {
         host_id,
         capabilities: capabilities.ok().map(Box::new),
+    });
+}
+
+/// Fetch one user-requested durable continuation page. Periodic polling never
+/// calls this and therefore remains bounded to the host's live capacity.
+pub(crate) async fn fetch_host_queue_page(
+    entry: HostEntry,
+    limit: usize,
+    cursor: String,
+    tx: mpsc::UnboundedSender<BackgroundEvent>,
+) {
+    let client = client_for_host(&entry);
+    let queue = client.list_queue_page(limit, Some(&cursor)).await.ok();
+    let _ = tx.send(BackgroundEvent::HostQueuePageLoaded {
+        host_id: entry.id,
+        cursor,
+        queue,
     });
 }
 

@@ -1,6 +1,6 @@
 import { useRouter } from "vue-router";
 import type { FleetActiveWork } from "@studio/api/activity";
-import { listQueue } from "@studio/api/queuePlan";
+import { findQueueEntryById } from "@studio/api/queuePlan";
 import { selectedQueueGeneration } from "@studio/api/generationSelection";
 import type { OutputMetadata } from "../types";
 import type { HostRouting } from "./useHostRouting";
@@ -31,12 +31,12 @@ export function useOpenLiveWork(routing: HostRouting) {
         return;
       }
       try {
-        const queue = await listQueue({
-          baseUrl: host.url,
-          apiKey: host.apiKey ?? null,
-        });
+        const entry = await findQueueEntryById(
+          { baseUrl: host.url, apiKey: host.apiKey ?? null },
+          row.id,
+        );
         const selection = selectedQueueGeneration<OutputMetadata>(
-          queue.entries,
+          entry ? [entry] : [],
           row.id,
         );
         if (!selection) {
