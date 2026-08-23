@@ -14,7 +14,9 @@
 //!
 //! Rows never carry a secret. Reference-upload handles and resolved reference
 //! paths are excluded at admission rather than redacted here, which is why
-//! [`QueueJournal::record`] refuses any request carrying them.
+//! [`QueueJournal::record`] refuses any request carrying them. MiniMax H3
+//! requests are excluded too: replay cannot reconstruct their authenticated
+//! ingress grant, so claiming they are durable would be false.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,6 +49,9 @@ pub const DEFAULT_MAX_DISPATCH_ATTEMPTS: u32 = 2;
 /// Sized for a 5 s `RestartSec` crash loop, which is the only way a queued row
 /// loops without ever being claimed. Ordinary deploys never approach it.
 pub const DEFAULT_MAX_REPLAY_SEEN: u32 = 10;
+
+const PRIVATE_H3_BATCH_DURABILITY_ERROR: &str =
+    "heterogeneous batches cannot persist private MiniMax H3 requests";
 
 fn env_usize(name: &str, default: usize) -> usize {
     match std::env::var(name) {
@@ -128,6 +133,15 @@ fn carries_identity_photograph(request: &mold_core::GenerateRequest) -> bool {
     // multi-photograph request's faces into `mold.db`, which is the exact
     // outcome this predicate exists to prevent.
     mold_core::identity::request_carries_identity_photo(request)
+}
+
+/// Whether replay would require authenticated MiniMax H3 ingress authority.
+///
+/// The model capability contract is the existing authority for this
+/// partition. Do not infer it from family-shaped strings or reference
+/// presence: FL2VA has no references, and replay restores no private grant.
+fn requires_h3_replay_authority(request: &mold_core::GenerateRequest) -> bool {
+    mold_core::minimax_h3::capability_contract_for_model(&request.model).is_some()
 }
 
 /// Directory of per-identity claim records, one file per queue owner.
@@ -534,8 +548,9 @@ impl QueueJournal {
     ///
     /// `None` means the job is not durable. Every reason is deliberate:
     /// no gallery target, reference-upload authority (bearer secrets), a face
-    /// photograph (biometric data), a batch child (owned by the batch
-    /// transaction's own recovery), an oversized payload, or no journal at all.
+    /// photograph (biometric data), MiniMax H3 replay authority, a batch child
+    /// (owned by the batch transaction's own recovery), an oversized payload,
+    /// or no journal at all.
     pub fn record(self: &Arc<Self>, admission: JournalAdmission<'_>) -> Option<QueueTicket> {
         let owner_uuid = self.owner_uuid.as_deref()?;
         let db = self.db()?;
@@ -561,6 +576,15 @@ impl QueueJournal {
                 job = %admission.id,
                 "generation is not durable: it conditions on a reference photograph, \
                  which is never written to the database"
+            );
+            return None;
+        }
+        if requires_h3_replay_authority(admission.request) {
+            tracing::info!(
+                job = %admission.id,
+                model = %admission.request.model,
+                "generation is not durable: MiniMax H3 replay cannot reconstruct its \
+                 authenticated ingress authority"
             );
             return None;
         }
@@ -651,6 +675,9 @@ impl QueueJournal {
             }
             if carries_identity_photograph(child.request) {
                 return Err("heterogeneous batches cannot persist identity photographs".to_string());
+            }
+            if requires_h3_replay_authority(child.request) {
+                return Err(PRIVATE_H3_BATCH_DURABILITY_ERROR.to_string());
             }
             let request_json = serde_json::to_string(child.request)
                 .map_err(|error| format!("could not serialize batch child: {error}"))?;
@@ -1436,6 +1463,12 @@ mod tests {
         .expect("minimal generate request")
     }
 
+    fn request_for_model(model: &str) -> mold_core::GenerateRequest {
+        let mut request = request();
+        request.model = model.to_string();
+        request
+    }
+
     fn admission<'a>(
         id: &'a str,
         request: &'a mold_core::GenerateRequest,
@@ -1734,6 +1767,72 @@ mod tests {
 
         assert!(rows(&journal).is_empty());
         assert!(QueueJournal::disabled().is_enabled().eq(&false));
+    }
+
+    #[test]
+    fn private_h3_fl2va_without_references_is_non_durable() {
+        let journal = journal_with_db();
+        let request = request_for_model(mold_core::minimax_h3::FL2VA_COMFY);
+
+        assert!(journal
+            .record(admission("private-fl2va", &request, Path::new("/gallery")))
+            .is_none());
+        assert!(rows(&journal).is_empty());
+    }
+
+    #[test]
+    fn record_batch_rejects_every_h3_capability_contract_by_name() {
+        let journal = journal_with_db();
+        let models = [
+            mold_core::minimax_h3::FL2VA_OFFICIAL,
+            mold_core::minimax_h3::REF2VA_OFFICIAL,
+            mold_core::minimax_h3::FL2VA_COMFY,
+            mold_core::minimax_h3::REF2VA_COMFY,
+            mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
+            mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
+            mold_core::minimax_h3::FL2VA_COMFY_NVFP4,
+            mold_core::minimax_h3::REF2VA_COMFY_NVFP4,
+        ];
+
+        for (index, model) in models.into_iter().enumerate() {
+            assert!(
+                mold_core::minimax_h3::capability_contract_for_model(model).is_some(),
+                "test model must remain inside the authoritative H3 capability contract: {model}"
+            );
+            let request = request_for_model(model);
+            let child_id = format!("private-h3-{index}");
+            let child = admission(&child_id, &request, Path::new("/gallery"));
+            let error = journal
+                .record_batch(BatchJournalAdmission {
+                    id: "private-h3-batch",
+                    client_batch_id: "private-h3-client-batch",
+                    request_sha256: "private-h3-request",
+                    children: &[child],
+                })
+                .expect_err("private H3 must never enter the durable batch journal");
+
+            assert_eq!(
+                error,
+                "heterogeneous batches cannot persist private MiniMax H3 requests"
+            );
+            assert!(rows(&journal).is_empty());
+        }
+    }
+
+    #[test]
+    fn public_non_h3_generation_remains_durable() {
+        let journal = journal_with_db();
+        let request = request();
+        assert!(
+            mold_core::minimax_h3::capability_contract_for_model(&request.model).is_none(),
+            "the ordinary public control must remain outside H3 authority"
+        );
+
+        let ticket = journal
+            .record(admission("public-non-h3", &request, Path::new("/gallery")))
+            .expect("ordinary public generation remains durable");
+        assert_eq!(rows(&journal), vec!["public-non-h3"]);
+        ticket.discard();
     }
 
     #[test]
