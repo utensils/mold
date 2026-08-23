@@ -84,6 +84,111 @@ jobs:
           name: mold-aarch64-apple-darwin
           path: mold-aarch64-apple-darwin.tar.gz
 
+  # Self-signed Windows desktop + CPU CLI. The same pinned certificate signs
+  # every executable; its public half ships beside the artifacts so managed
+  # machines can opt into trust without making the private key public.
+  build-windows:
+    if: github.event_name != 'schedule'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            desktop/src-tauri -> desktop/src-tauri/target
+          key: windows-release
+          cache-on-failure: true
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install protoc and nasm
+        shell: pwsh
+        env:
+          PROTOC_VERSION: "29.3"
+        run: |
+          $zip = "$env:RUNNER_TEMP\protoc.zip"
+          $dest = "$env:RUNNER_TEMP\protoc"
+          $url = "https://github.com/protocolbuffers/protobuf/releases/download/v$env:PROTOC_VERSION/protoc-$env:PROTOC_VERSION-win64.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          "$dest\bin" >> $env:GITHUB_PATH
+          "PROTOC=$dest\bin\protoc.exe" >> $env:GITHUB_ENV
+          choco install --no-progress -y nasm
+          "$env:ProgramFiles\NASM" >> $env:GITHUB_PATH
+          & "$dest\bin\protoc.exe" --version
+          if (-not (Test-Path "$env:ProgramFiles\NASM\nasm.exe")) {
+            throw 'nasm was not installed'
+          }
+
+      - name: Build embedded web SPA
+        shell: bash
+        run: ./scripts/ensure-web-dist.sh
+
+      - name: Import the self-signed Windows certificate
+        id: windows-signing
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $certificate = Join-Path $env:RUNNER_TEMP 'mold-windows-self-signing.cert.cer'
+          $thumbprint = & ./scripts/import-windows-signing-certificate.ps1 `
+            -ConfigPath desktop/src-tauri/tauri.windows-self-signed.conf.json `
+            -PublicCertificatePath $certificate
+          "thumbprint=$thumbprint" >> $env:GITHUB_OUTPUT
+          "WINDOWS_PUBLIC_CERTIFICATE=$certificate" >> $env:GITHUB_ENV
+
+      - name: Build and sign the Windows CLI
+        shell: pwsh
+        run: |
+          cargo build --release -p mold-ai `
+            --features preview,discord,expand,tui,webp,metrics,mdns,pulid
+          ./scripts/sign-windows-binary.ps1 `
+            -ConfigPath desktop/src-tauri/tauri.windows-self-signed.conf.json `
+            -FilePath target/release/mold.exe
+
+      - name: Build the self-signed Windows desktop installer
+        working-directory: desktop
+        run: >-
+          bunx tauri build --features pulid --bundles nsis --ci -v
+          --config src-tauri/tauri.windows-self-signed.conf.json
+
+      - name: Verify and package Windows artifacts
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem `
+            desktop/src-tauri/target/release/bundle/nsis `
+            -Filter *.exe `
+            -ErrorAction Stop | Select-Object -First 1
+          if (-not $installer) { throw 'no NSIS installer was produced' }
+
+          ./scripts/verify-windows-signatures.ps1 `
+            -CertificatePath $env:WINDOWS_PUBLIC_CERTIFICATE `
+            -ExpectedThumbprint '${{ steps.windows-signing.outputs.thumbprint }}' `
+            -FilePath @(
+              'target/release/mold.exe',
+              'desktop/src-tauri/target/release/mold-desktop.exe',
+              $installer.FullName
+            )
+
+          Copy-Item $installer.FullName 'Mold-windows-x64-self-signed.exe'
+          Copy-Item $env:WINDOWS_PUBLIC_CERTIFICATE 'mold-windows-self-signing.cert.cer'
+          Compress-Archive `
+            -Path @('target/release/mold.exe', 'mold-windows-self-signing.cert.cer') `
+            -DestinationPath 'mold-x86_64-pc-windows-msvc-cpu.zip'
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mold-windows-x64
+          path: |
+            Mold-windows-x64-self-signed.exe
+            mold-windows-self-signing.cert.cer
+            mold-x86_64-pc-windows-msvc-cpu.zip
+
   # Ampere (RTX 3090/A40, sm_86)
   build-linux-sm86:
     if: github.event_name != 'schedule'
@@ -623,7 +728,15 @@ jobs:
     # Native rolling artifacts should not wait for best-effort Nix validation
     # or the lower-priority container matrix. Docker publishes its own rolling
     # aliases, and Nix builds live in nix-cache.yml.
-    needs: [build-macos, build-linux-sm86, build-linux-sm89, build-linux-sm100, build-linux-sm120]
+    needs:
+      [
+        build-macos,
+        build-windows,
+        build-linux-sm86,
+        build-linux-sm89,
+        build-linux-sm100,
+        build-linux-sm120,
+      ]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -636,7 +749,7 @@ jobs:
           merge-multiple: true
 
       - name: Generate checksums
-        run: cd artifacts && sha256sum -- *.tar.gz > SHA256SUMS
+        run: cd artifacts && sha256sum -- *.tar.gz *.zip *.exe *.cer > SHA256SUMS
 
       - name: Verify rolling release source is current main
         run: scripts/check-desktop-nightly-main-head.sh "$GITHUB_SHA"
@@ -654,6 +767,9 @@ jobs:
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz
+            artifacts/mold-x86_64-pc-windows-msvc-cpu.zip
+            artifacts/Mold-windows-x64-self-signed.exe
+            artifacts/mold-windows-self-signing.cert.cer
             artifacts/SHA256SUMS
           body: |
             Rolling pre-release — updated on every push to `main`.
@@ -665,6 +781,8 @@ jobs:
             | Platform | GPU | File |
             |----------|-----|------|
             | macOS Apple Silicon | Metal | `mold-aarch64-apple-darwin.tar.gz` |
+            | Windows x86_64 CLI | CPU / remote client | `mold-x86_64-pc-windows-msvc-cpu.zip` |
+            | Windows x86_64 Desktop | CPU / remote hosts | `Mold-windows-x64-self-signed.exe` |
             | Linux x86_64 | CUDA — RTX 3090 / A40 (Ampere) | `mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz` |
             | Linux x86_64 | CUDA — RTX 40-series (Ada Lovelace) | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz` |
             | Linux x86_64 | CUDA — B200 / B300 (datacenter Blackwell; simulated, not hardware-qualified) | `mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz` |
@@ -691,6 +809,10 @@ jobs:
             tar xzf mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz  # B200 / B300 (simulated)
             tar xzf mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz  # RTX 50-series
             ./mold version
+
+            # Windows PowerShell (CPU inference or remote client)
+            Expand-Archive .\mold-x86_64-pc-windows-msvc-cpu.zip -DestinationPath .\mold
+            .\mold\mold.exe version
             ```
 
       # action-gh-release updates an existing release's body and assets, but it
@@ -863,6 +985,8 @@ jobs:
             | Platform | GPU | File |
             |----------|-----|------|
             | macOS Apple Silicon | Metal | `mold-aarch64-apple-darwin.tar.gz` |
+            | Windows x86_64 CLI | CPU / remote client | `mold-x86_64-pc-windows-msvc-cpu.zip` |
+            | Windows x86_64 Desktop | CPU / remote hosts | `Mold-windows-x64-self-signed.exe` |
             | Linux x86_64 | CUDA — RTX 3090 / A40 (Ampere) | `mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz` |
             | Linux x86_64 | CUDA — RTX 40-series (Ada) | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz` |
             | Linux x86_64 | CUDA — B200 / B300 (datacenter Blackwell; simulated, not hardware-qualified) | `mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz` |
@@ -871,9 +995,11 @@ jobs:
             GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
             Current Linux release archives and container images are linux/amd64 only.
 
-            ## Desktop app (macOS)
+            ## Desktop apps
 
             `Mold-macos-arm64.dmg` (also attached with its versioned name) — signed, notarized, and stapled. Drag Mold to Applications; no quarantine dance needed. Stable link to the newest build: https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg
+
+            `Mold-windows-x64-self-signed.exe` — self-signed NSIS installer. Verify and explicitly trust the attached `mold-windows-self-signing.cert.cer` before installation. This certificate is not publicly trusted and does not suppress SmartScreen by itself.
 
       - name: Verify public stable updater manifest
         env:
@@ -938,11 +1064,19 @@ jobs:
           fi
           echo "Verified stable updater manifest: $manifest_url"
 
-  # Add native Linux archives once their independent CUDA builds pass. The
+  # Add native Linux and Windows archives once their independent builds pass. The
   # checksum manifest is atomically replaced with the complete native set.
   release-native:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [release-version, build-linux-sm86, build-linux-sm89, build-linux-sm100, build-linux-sm120]
+    needs:
+      [
+        release-version,
+        build-windows,
+        build-linux-sm86,
+        build-linux-sm89,
+        build-linux-sm100,
+        build-linux-sm120,
+      ]
     runs-on: ubuntu-latest
     concurrency:
       group: stable-release-publication
@@ -962,13 +1096,16 @@ jobs:
           set -euo pipefail
           (
             cd artifacts
-            sha256sum -- *.tar.gz *.dmg *.zip > SHA256SUMS
+            sha256sum -- *.tar.gz *.dmg *.zip *.exe *.cer > SHA256SUMS
           )
           gh release upload "$GITHUB_REF_NAME" \
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz \
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz \
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz \
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz \
+            artifacts/mold-x86_64-pc-windows-msvc-cpu.zip \
+            artifacts/Mold-windows-x64-self-signed.exe \
+            artifacts/mold-windows-self-signing.cert.cer \
             artifacts/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
@@ -999,7 +1136,7 @@ jobs:
           set -euo pipefail
           (
             cd artifacts
-            sha256sum -- *.tar.gz *.dmg *.zip > SHA256SUMS
+            sha256sum -- *.tar.gz *.dmg *.zip *.exe *.cer > SHA256SUMS
           )
           scripts/create-container-digest-manifest.sh \
             artifacts/mold-container-digests.json \

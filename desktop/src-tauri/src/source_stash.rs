@@ -61,6 +61,56 @@ fn source_paths_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// The remembered-source pointer file holds one native path in the platform's
+/// own lossless encoding. Unix keeps the raw `OsStr` bytes it always wrote, so
+/// an existing stash keeps resolving after an upgrade; Windows has no stable
+/// byte view of an `OsStr`, so it stores the UTF-16 code units little-endian.
+/// Both are lossless for paths the OS itself produced, which is the only kind
+/// that ever reaches here — the stash is machine-local and its contents are
+/// never transferred, so the two encodings never meet.
+#[cfg(unix)]
+fn encode_native_path(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(windows)]
+fn encode_native_path(path: &Path) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+
+    path.as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect()
+}
+
+#[cfg(unix)]
+fn decode_native_path(bytes: Vec<u8>) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+
+    Some(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+}
+
+#[cfg(windows)]
+fn decode_native_path(bytes: Vec<u8>) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+
+    // An odd length is a torn or foreign write, never something
+    // `encode_native_path` produced: miss rather than guess at a path.
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let wide: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .copied()
+        .map(u16::from_le_bytes)
+        .collect();
+    Some(PathBuf::from(std::ffi::OsString::from_wide(&wide)))
+}
+
 /// Remember where a native desktop picker/drop found these exact bytes. The
 /// path stays local to this app and is keyed by content hash; it is never sent
 /// to a server or embedded in gallery metadata.
@@ -69,30 +119,29 @@ pub(crate) fn remember_source_path(
     sha256: &str,
     path: &Path,
 ) -> Result<(), String> {
-    use std::os::unix::ffi::OsStrExt;
-
     if !is_valid_sha256_hex(sha256) {
         return Err("invalid sha256 key".to_string());
     }
     let dir = source_paths_dir(app)?;
     let destination = dir.join(sha256);
     let tmp = dir.join(format!("{sha256}.tmp"));
-    std::fs::write(&tmp, path.as_os_str().as_bytes()).map_err(|error| error.to_string())?;
+    std::fs::write(&tmp, encode_native_path(path)).map_err(|error| error.to_string())?;
     std::fs::rename(&tmp, destination).map_err(|error| error.to_string())?;
     prune_oldest(&dir, MAX_SOURCE_PATHS);
     Ok(())
 }
 
 fn remembered_source_read(dir: &Path, sha256: &str) -> Result<Option<Vec<u8>>, String> {
-    use std::os::unix::ffi::OsStringExt;
-
     let pointer = dir.join(sha256);
     let path_bytes = match std::fs::read(&pointer) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
-    let path = PathBuf::from(std::ffi::OsString::from_vec(path_bytes));
+    let Some(path) = decode_native_path(path_bytes) else {
+        let _ = std::fs::remove_file(pointer);
+        return Ok(None);
+    };
     let mut bytes = Vec::new();
     let read_result = std::fs::File::open(path).and_then(|file| {
         use std::io::Read;
@@ -300,9 +349,55 @@ mod tests {
     }
 
     #[test]
-    fn remembered_source_reloads_only_while_the_original_bytes_still_match() {
-        use std::os::unix::ffi::OsStrExt;
+    fn native_path_pointers_round_trip_on_this_platform() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("a b").join("caf\u{e9}.png");
+        assert_eq!(
+            decode_native_path(encode_native_path(&path)),
+            Some(path.clone())
+        );
+    }
 
+    /// The whole reason these encodings are not `to_str()` is that an OS path
+    /// need not be valid Unicode. A test using only well-formed text would
+    /// pass against a naive `to_string_lossy` implementation and prove
+    /// nothing, so each platform round-trips a path its own API can produce
+    /// and UTF-8 cannot represent.
+    #[cfg(windows)]
+    #[test]
+    fn a_lone_surrogate_survives_the_round_trip() {
+        use std::os::windows::ffi::OsStringExt;
+
+        // Unpaired high surrogate: legal in a Windows path, unrepresentable
+        // as UTF-8.
+        let name = std::ffi::OsString::from_wide(&[0x0061, 0xD800, 0x0062]);
+        assert!(name.to_str().is_none(), "fixture must not be valid UTF-8");
+        let path = PathBuf::from(name);
+        assert_eq!(decode_native_path(encode_native_path(&path)), Some(path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_byte_survives_the_round_trip() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let name = std::ffi::OsString::from_vec(vec![b'a', 0xFF, b'b']);
+        assert!(name.to_str().is_none(), "fixture must not be valid UTF-8");
+        let path = PathBuf::from(name);
+        assert_eq!(decode_native_path(encode_native_path(&path)), Some(path));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_torn_windows_pointer_misses_instead_of_naming_a_wrong_path() {
+        let dir = tempfile::tempdir().expect("dir");
+        let sha = format!("{:064}", 1);
+        std::fs::write(dir.path().join(&sha), [0x41u8, 0x00, 0x42]).unwrap();
+        assert_eq!(remembered_source_read(dir.path(), &sha).unwrap(), None);
+    }
+
+    #[test]
+    fn remembered_source_reloads_only_while_the_original_bytes_still_match() {
         let dir = tempfile::tempdir().expect("pointer dir");
         let source_dir = tempfile::tempdir().expect("source dir");
         let source = source_dir.path().join("target.png");
@@ -310,7 +405,7 @@ mod tests {
         std::fs::write(&source, bytes).unwrap();
         let sha = sha256_hex(bytes);
         let pointer = dir.path().join(&sha);
-        std::fs::write(&pointer, source.as_os_str().as_bytes()).unwrap();
+        std::fs::write(&pointer, encode_native_path(&source)).unwrap();
         filetime::set_file_mtime(&pointer, filetime::FileTime::from_unix_time(1, 0)).unwrap();
 
         assert_eq!(

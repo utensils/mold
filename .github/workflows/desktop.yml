@@ -31,6 +31,8 @@ on:
       - "package.json"
       - "bun.lock"
       - "bun.nix"
+      - ".cargo/config.toml"
+      - ".gitattributes"
       - "crates/mold-core/**"
       - "crates/mold-catalog/**"
       - "crates/mold-db/**"
@@ -51,6 +53,12 @@ on:
       - "scripts/notarize-desktop-dmg.sh"
       - "scripts/prepare-desktop-linuxdeploy.sh"
       - "scripts/verify-h3-release-exclusion.sh"
+      - "scripts/windows.ps1"
+      - "scripts/import-windows-signing-certificate.ps1"
+      - "scripts/sign-windows-binary.ps1"
+      - "scripts/verify-windows-signatures.ps1"
+      - "scripts/tests/windows-helper-shells.sh"
+      - "scripts/tests/windows-self-signing.sh"
       - "scripts/prune-desktop-nightly-assets.sh"
       - "scripts/select-desktop-stable-latest.sh"
       - "scripts/tests/check-desktop-nightly-main-head.sh"
@@ -139,8 +147,16 @@ jobs:
               - 'crates/mold-server/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.cargo/config.toml'
+              - '.gitattributes'
               - 'flake.nix'
               - 'scripts/verify-h3-release-exclusion.sh'
+              - 'scripts/windows.ps1'
+              - 'scripts/import-windows-signing-certificate.ps1'
+              - 'scripts/sign-windows-binary.ps1'
+              - 'scripts/verify-windows-signatures.ps1'
+              - 'scripts/tests/windows-helper-shells.sh'
+              - 'scripts/tests/windows-self-signing.sh'
               - '.github/workflows/desktop.yml'
               - '.github/workflows/desktop-distribution.yml'
             rust_format:
@@ -207,6 +223,128 @@ jobs:
       # `pulid` is in every shipped desktop recipe, so its lints must compile
       # here rather than first on a release runner.
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features pulid -- -D warnings
+
+  desktop-windows:
+    name: Windows (clippy, test; main NSIS installer)
+    needs: changes
+    if: >-
+      github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+          key: desktop-windows
+          cache-on-failure: true
+      - name: Install protoc and nasm
+        shell: pwsh
+        env:
+          PROTOC_VERSION: "29.3"
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # protoc: the `pulid` feature drives `candle-onnx` -> `prost-build`.
+          # Taken straight from the upstream release rather than a package
+          # feed: chocolatey's copy 504'd once and `choco install` STILL
+          # exited 0 ("installed 1/1 packages", counting only nasm), so the
+          # step went green and the missing binary surfaced ten minutes later
+          # as a candle-onnx build-script failure.
+          $zip = "$env:RUNNER_TEMP\protoc.zip"
+          $dest = "$env:RUNNER_TEMP\protoc"
+          $url = "https://github.com/protocolbuffers/protobuf/releases/download/v$env:PROTOC_VERSION/protoc-$env:PROTOC_VERSION-win64.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          "$dest\bin" >> $env:GITHUB_PATH
+          # prost-build reads PROTOC directly, so it does not depend on the
+          # PATH addition above taking effect in the next step.
+          "PROTOC=$dest\bin\protoc.exe" >> $env:GITHUB_ENV
+
+          # nasm: `openh264-sys2` compiles x86_64 assembly when it is present
+          # and silently drops to a slower C path when it is not, so pin the
+          # fast path rather than letting the runner decide.
+          choco install --no-progress -y nasm
+          "$env:ProgramFiles\NASM" >> $env:GITHUB_PATH
+
+          # Prove both landed. An installer that reports success without
+          # producing the binary is exactly what happened here, so the check
+          # is the point of the step, not decoration.
+          & "$dest\bin\protoc.exe" --version
+          if (-not (Test-Path "$env:ProgramFiles\NASM\nasm.exe")) { throw "nasm was not installed" }
+      - uses: oven-sh/setup-bun@v2
+      # The helper must answer identically under Windows PowerShell 5.1 and
+      # pwsh 7 — a bare `.\scripts\windows.ps1` runs under whichever the
+      # user's shell is, and the two disagree about machine architecture
+      # unless the script is careful.
+      - name: Helper script agrees across PowerShell editions
+        shell: bash
+        run: |
+          bash ../scripts/tests/windows-helper-shells.sh
+          bash ../scripts/tests/windows-self-signing.sh
+      - run: bun install --frozen-lockfile
+        working-directory: .
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      # CPU-only: `cuda` is deliberately off, and `mp4` is off on Windows
+      # because fdk-aac-sys cannot compile with MSVC (see the crate's own
+      # target-conditional entry in src-tauri/Cargo.toml).
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features pulid -- -D warnings
+      - name: Check the Windows CLI release recipe
+        working-directory: .
+        run: >-
+          cargo check --release -p mold-ai
+          --features preview,discord,expand,tui,webp,metrics,mdns,pulid
+      - name: Import the self-signed Windows certificate
+        if: github.event_name == 'push'
+        id: windows-signing
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $certificate = Join-Path $env:RUNNER_TEMP 'mold-windows-self-signing.cert.cer'
+          $thumbprint = & ../scripts/import-windows-signing-certificate.ps1 `
+            -ConfigPath src-tauri/tauri.windows-self-signed.conf.json `
+            -PublicCertificatePath $certificate
+          "thumbprint=$thumbprint" >> $env:GITHUB_OUTPUT
+
+      - name: Build the self-signed NSIS installer
+        if: github.event_name == 'push'
+        run: >-
+          bunx tauri build --features pulid --bundles nsis --ci -v
+          --config src-tauri/tauri.windows-self-signed.conf.json
+      - name: Verify Authenticode on the installer and standalone executable
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $exe = "src-tauri/target/release/mold-desktop.exe"
+          if (-not (Test-Path $exe)) { throw "missing $exe" }
+          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis -Filter *.exe -ErrorAction Stop |
+            Select-Object -First 1
+          if (-not $installer) { throw "no NSIS installer was produced" }
+          $certificate = Join-Path $env:RUNNER_TEMP 'mold-windows-self-signing.cert.cer'
+          & ../scripts/verify-windows-signatures.ps1 `
+            -CertificatePath $certificate `
+            -ExpectedThumbprint '${{ steps.windows-signing.outputs.thumbprint }}' `
+            -FilePath @($exe, $installer.FullName)
+
+          Copy-Item $certificate `
+            src-tauri/target/release/bundle/nsis/mold-windows-self-signing.cert.cer
+          "installer: $($installer.FullName) ($([math]::Round($installer.Length / 1MB, 1)) MB)"
+      - name: Upload the self-signed Windows installer
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mold-desktop-windows-x64-self-signed
+          path: desktop/src-tauri/target/release/bundle/nsis/*
+          retention-days: 14
 
   desktop-linux:
     name: Linux (clippy, test; main AppImage)

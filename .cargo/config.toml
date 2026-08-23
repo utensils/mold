@@ -13,3 +13,25 @@ run-dev = "run --profile dev-fast"
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+# `gemm-common`, reached through candle's CPU matmul, contains AArch64 inline
+# assembly using the half-precision `fmla v.8h` form. That instruction needs
+# the `fullfp16` target feature, which is baseline on `aarch64-apple-darwin`
+# and NOT baseline on `aarch64-pc-windows-msvc` — so an ARM64 Windows build
+# type-checks and then fails during codegen with
+# "error: instruction requires: fullfp16", which `cargo check` never sees.
+#
+# Every machine that can run Windows 11 on ARM is at least ARMv8.2 with FP16
+# (Snapdragon 8cx Gen 3 onward; Snapdragon X is ARMv8.7), so enabling it does
+# not narrow the supported hardware in practice. x86_64 Windows — the shipping
+# desktop target — is unaffected and deliberately gets no flag.
+#
+# This lives in the repository root rather than beside `desktop/src-tauri`
+# because cargo discovers config by walking up from the CURRENT DIRECTORY, not
+# from `--manifest-path`: a config next to that crate is invisible to both
+# `cargo --manifest-path desktop/src-tauri/Cargo.toml` from the root and to
+# `scripts/windows.ps1`, which runs cargo from `desktop/`.
+# `fp16` is rustc's stable name for what LLVM calls `fullfp16`; spelling the
+# LLVM name here builds but warns "unknown and unstable feature" on every crate.
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+fp16"]

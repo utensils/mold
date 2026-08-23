@@ -232,8 +232,11 @@ pub async fn reveal_output_file(
     from_trash: Option<bool>,
 ) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    // Gallery filenames are server-generated basenames; refuse traversal.
-    if filename.contains('/') || filename.contains("..") {
+    // Gallery filenames are server-generated basenames; refuse traversal
+    // through the ONE gallery rule rather than a second, weaker copy of it.
+    // The local spelling missed `\` and `:`, both of which reach a second
+    // location on Windows.
+    if !crate::gallery::valid_filename(&filename) {
         return Err("Invalid filename.".into());
     }
     let _ = state;
@@ -794,14 +797,13 @@ mod tests {
     #[tokio::test]
     async fn embedded_shutdown_timeout_retains_server_gallery_authority() {
         let dir = tempfile::tempdir().unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
         let state = test_state(
             &dir,
             Conn::Local {
                 base_url: "http://127.0.0.1:9".into(),
             },
-            LocalServer::Embedded(server::EngineHandle::sleeping_for_tests(
-                Duration::from_millis(150),
-            )),
+            LocalServer::Embedded(server::EngineHandle::parked_for_tests(release_rx)),
         );
 
         let error = stop_local_engine_inner(&state, Duration::from_millis(10))
@@ -813,7 +815,7 @@ mod tests {
             &*state.local_server.lock().await,
             LocalServer::Embedded(engine) if engine.is_alive()
         ));
-        tokio::time::sleep(Duration::from_millis(175)).await;
+        release_tx.send(()).unwrap();
         let mut local = state.local_server.lock().await;
         let LocalServer::Embedded(engine) = &mut *local else {
             panic!("timed-out engine authority was discarded");
@@ -859,9 +861,10 @@ mod tests {
     #[tokio::test]
     async fn start_health_timeout_retains_unstopped_embedded_authority() {
         let mut local = LocalServer::Off;
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
         let stopped = shutdown_embedded_or_retain(
             &mut local,
-            server::EngineHandle::sleeping_for_tests(Duration::from_millis(150)),
+            server::EngineHandle::parked_for_tests(release_rx),
             "desktop-test-key",
             Duration::from_millis(10),
         )
@@ -872,7 +875,7 @@ mod tests {
             &local,
             LocalServer::Embedded(engine) if engine.is_alive()
         ));
-        tokio::time::sleep(Duration::from_millis(175)).await;
+        release_tx.send(()).unwrap();
         let LocalServer::Embedded(engine) = &mut local else {
             panic!("failed-start engine authority was discarded");
         };

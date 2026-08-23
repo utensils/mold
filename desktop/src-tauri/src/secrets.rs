@@ -1,8 +1,18 @@
-//! Secrets: an owner-only (0600) `secrets.json` under the app data dir.
-//! Plain files instead of the macOS Keychain — Keychain access prompts on
-//! every ad-hoc rebuild in dev, and repeatedly interrupts users in release
-//! builds after updates. Names are constrained to a small allowlist so the
-//! IPC surface can't be used as an arbitrary secret browser.
+//! Secrets: an owner-only `secrets.json` under the app data dir. Plain files
+//! instead of the macOS Keychain — Keychain access prompts on every ad-hoc
+//! rebuild in dev, and repeatedly interrupts users in release builds after
+//! updates. Names are constrained to a small allowlist so the IPC surface
+//! can't be used as an arbitrary secret browser.
+//!
+//! "Owner-only" is spelled differently per platform and the difference is
+//! stated rather than glossed. Unix sets the mode to `0600` explicitly, below.
+//! Windows does not: the file lands in `%APPDATA%\<identifier>`, whose ACL is
+//! inherited from the user profile and already excludes other standard users,
+//! and mold does not additionally write a protected DACL — so on Windows a
+//! local administrator can read this file, in the same way root can on Unix,
+//! but an ordinary second account cannot. An explicit per-user DACL is a
+//! reasonable future hardening; what must not happen is a `#[cfg(unix)]`
+//! chmod whose absence elsewhere goes unmentioned.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

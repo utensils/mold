@@ -82,11 +82,66 @@ pub async fn send_native_notification(
         Ok(true)
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        let Some(action) = action else {
+            return Ok(false);
+        };
+        tauri::async_runtime::spawn_blocking(move || {
+            windows_toast(app, &title, body.as_deref(), action)
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        Ok(true)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = (app, title, body, action);
         Ok(false)
     }
+}
+
+/// Windows toasts are addressed by AppUserModelID, and only an *installed* app
+/// owns one: the NSIS installer's Start Menu shortcut registers the bundle
+/// identifier. A `tauri dev` run has no shortcut, so it falls back to
+/// PowerShell's well-known AUMID — the toast and its click routing are real
+/// either way, the alert is just attributed to PowerShell in dev.
+#[cfg(target_os = "windows")]
+fn windows_toast(
+    app: tauri::AppHandle,
+    title: &str,
+    body: Option<&str>,
+    action: NotificationAction,
+) -> Result<(), String> {
+    use tauri_winrt_notification::Toast;
+
+    // Routing is the whole reason this bypasses the plugin's own toast: a
+    // click has to reach the same `activate` the macOS delegate and the Linux
+    // XDG handle reach, or the alert names a print the app never opens.
+    let build = |app_id: &str| {
+        let mut toast = Toast::new(app_id).title(title);
+        if let Some(body) = body {
+            toast = toast.text1(body);
+        }
+        let routed = app.clone();
+        let action = action.clone();
+        toast.on_activated(move |_| {
+            activate(&routed, action.clone());
+            Ok(())
+        })
+    };
+
+    let identifier = tauri::Manager::config(&app).identifier.clone();
+    if build(&identifier).show().is_ok() {
+        return Ok(());
+    }
+    // An unregistered AUMID is the expected dev-mode failure, not a broken
+    // notification system — retry under PowerShell's before giving up, so the
+    // JS fallback is reserved for a genuinely unavailable toast surface.
+    build(Toast::POWERSHELL_APP_ID)
+        .show()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

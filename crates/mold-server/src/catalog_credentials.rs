@@ -3,6 +3,13 @@
 //! The web UI must not make a browser profile the authority for a remote
 //! server's downloads. Credentials are persisted beside the server config,
 //! returned only as masked status, and resolved ahead of environment defaults.
+//!
+//! On-disk protection is `0600` on unix, set below. Windows has no equivalent
+//! here and does not get one: the file lands under the per-user `$MOLD_HOME`,
+//! whose inherited ACL already excludes other standard users, but mold writes
+//! no explicit per-user DACL, so a local administrator can read it — as root
+//! can on unix. Stated rather than implied, because a `#[cfg(unix)]` chmod
+//! reads as a promise the other platform silently does not keep.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;

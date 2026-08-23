@@ -8,6 +8,7 @@ pub mod catalog_credentials;
 pub(crate) mod chain_execution;
 pub mod chain_job_runner;
 pub mod chain_limits;
+pub(crate) mod dir_sync;
 mod gallery_authority;
 #[allow(dead_code)]
 mod h3_admission;
@@ -1076,6 +1077,52 @@ pub async fn run_server(
                 if let Some(tx) = sigterm_state.shutdown_tx.lock().await.take() {
                     let _ = tx.send(());
                 }
+            }
+        });
+    }
+
+    // Windows has no SIGTERM, so without this arm the graceful path — and with
+    // it the queue journal's retention fence, which MUST go up before the
+    // scheduler is cancelled — was reachable on Windows only through
+    // `POST /api/shutdown`.
+    //
+    // `CTRL_CLOSE` and `CTRL_SHUTDOWN` are the SIGTERM analogues. `CTRL_C` is
+    // included even though the unix arm deliberately leaves SIGINT alone,
+    // because a console `mold serve` is the ordinary way to run one on Windows
+    // and Ctrl+C is how it is stopped; the cost is that Ctrl+C now drains
+    // rather than killing instantly. `serve` calls `allow_hard_shutdown_exit`,
+    // and a second Ctrl+C falls through to the OS default once this task has
+    // ended, so it cannot become a hang.
+    //
+    // Two limits, stated rather than implied. The OS grace period for
+    // CTRL_CLOSE is a few seconds, well under `DEFAULT_SHUTDOWN_ABORT_SECS`,
+    // so the tail of the drain WILL be cut off — what this buys is that
+    // `retain_all()` runs first, in the opening milliseconds. And these events
+    // reach console-attached processes only: the GUI desktop app embeds this
+    // server in a windowed process that receives none of them, so its quit and
+    // machine-shutdown paths still need Tauri's own exit hooks.
+    #[cfg(windows)]
+    {
+        let console_state = state.clone();
+        tokio::spawn(async move {
+            use tokio::signal::windows;
+
+            let (Ok(mut interrupt), Ok(mut close), Ok(mut shutdown)) = (
+                windows::ctrl_c(),
+                windows::ctrl_close(),
+                windows::ctrl_shutdown(),
+            ) else {
+                tracing::warn!("could not install Windows console control handlers");
+                return;
+            };
+            let event = tokio::select! {
+                _ = interrupt.recv() => "CTRL_C",
+                _ = close.recv() => "CTRL_CLOSE",
+                _ = shutdown.recv() => "CTRL_SHUTDOWN",
+            };
+            tracing::info!("received {event}, initiating graceful shutdown");
+            if let Some(tx) = console_state.shutdown_tx.lock().await.take() {
+                let _ = tx.send(());
             }
         });
     }

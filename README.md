@@ -114,10 +114,10 @@ adapter and render at their tier's fixed step count. Current capability limits
 
 ## Mold Studio
 
-One native desktop app for macOS and Linux with five workspaces — Create,
-Library, Models, Machines, and Settings — spanning local and remote generation,
-a merged multi-machine gallery, model discovery from Hugging Face and Civitai,
-GPU telemetry, and QR pairing for the iPhone companion.
+One native desktop app for macOS, Linux, and Windows with five workspaces —
+Create, Library, Models, Machines, and Settings — spanning local and remote
+generation, a merged multi-machine gallery, model discovery from Hugging Face
+and Civitai, GPU telemetry, and QR pairing for the iPhone companion.
 
 **[Download Mold for macOS (Apple Silicon)](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)**
 · [Explore the desktop app](https://utensils.io/mold/guide/desktop)

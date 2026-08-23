@@ -47,12 +47,22 @@ impl EngineHandle {
         true
     }
 
+    /// An engine thread that stays alive until the caller releases it.
+    ///
+    /// This replaced a `sleeping_for_tests(150ms)` whose liveness was a wall
+    /// clock: the caller under test first attempts an HTTP shutdown against a
+    /// closed port, and on Windows that attempt can outlast the sleep, so the
+    /// thread was already finished by the time the test asserted it was
+    /// retained. Releasing it explicitly removes the race on every platform
+    /// rather than widening the window.
     #[cfg(test)]
-    pub(crate) fn sleeping_for_tests(duration: Duration) -> Self {
+    pub(crate) fn parked_for_tests(release: std::sync::mpsc::Receiver<()>) -> Self {
         Self {
             port: 9,
             models_dir: PathBuf::new(),
-            thread: Some(std::thread::spawn(move || std::thread::sleep(duration))),
+            thread: Some(std::thread::spawn(move || {
+                let _ = release.recv();
+            })),
         }
     }
 

@@ -1711,10 +1711,29 @@ impl Config {
         // non-temp config path. This catches the race condition where parallel tests
         // set MOLD_HOME to /tmp/... and a config.save() writes the corrupted
         // models_dir to the user's real config file.
+        // `/tmp` is only the unix spelling of "a temporary directory", so on
+        // Windows both halves of this guard were dead and the race went
+        // unguarded. The Windows arm is added WITHOUT widening the unix one:
+        // the existing literals decide unix exactly as before, because
+        // loosening them would start silently refusing to save a real config
+        // whose `models_dir` merely happens to sit under a temp path (a
+        // scratch or RAM volume is a legitimate place to keep weights), and
+        // this refusal reports success.
+        const TEMP_MARKER: &str = "mold-config-test-";
         let path_str = path.to_string_lossy();
-        let is_temp_config = path_str.contains("/tmp/") || path_str.contains("/mold-config-test-");
-        let has_temp_models_dir = self.models_dir.contains("/tmp/mold-")
-            || self.models_dir.contains("/mold-config-test-");
+        // Separator-qualified so the marker cannot match mid-component. The
+        // Windows separator is the only addition — deliberately the harness
+        // marker alone and never `%TEMP%` at large, because that directory is
+        // a plausible home for a real `models_dir` and `std::env::temp_dir()`
+        // degrades to `%USERPROFILE%` when neither TMP nor TEMP is set, which
+        // would match nearly every user path.
+        let marked = |value: &str| {
+            value.contains(&format!("/{TEMP_MARKER}"))
+                || (cfg!(windows) && value.contains(&format!("\\{TEMP_MARKER}")))
+        };
+        let is_temp_config = path_str.contains("/tmp/") || marked(&path_str);
+        let has_temp_models_dir =
+            self.models_dir.contains("/tmp/mold-") || marked(&self.models_dir);
         if has_temp_models_dir && !is_temp_config {
             eprintln!(
                 "warning: refusing to save config with test models_dir ({}) to real config ({})",

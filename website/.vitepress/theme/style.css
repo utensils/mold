@@ -182,6 +182,62 @@
   }
 }
 
+.platform-downloads {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.9rem;
+  margin: 1.35rem 0;
+}
+
+.platform-download {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  min-height: 5rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid color-mix(in srgb, var(--vp-c-brand-1) 18%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--vp-c-bg-soft) 90%, transparent);
+  color: var(--vp-c-text-1) !important;
+  text-decoration: none !important;
+  transition:
+    transform 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.platform-download:hover {
+  transform: translateY(-2px);
+  border-color: var(--vp-c-brand-1);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.1);
+}
+
+.platform-download img {
+  width: 2rem;
+  height: 2rem;
+  flex: 0 0 auto;
+}
+
+.platform-download span,
+.platform-download small {
+  display: block;
+}
+
+.platform-download strong {
+  display: block;
+  line-height: 1.35;
+}
+
+.platform-download small {
+  margin-top: 0.2rem;
+  color: var(--vp-c-text-2);
+  line-height: 1.35;
+}
+
+.dark .platform-download:hover {
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.28);
+}
+
 /* Gallery grid */
 .gallery-grid {
   display: grid;

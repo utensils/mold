@@ -16,6 +16,8 @@ use mold_core::cuda_distribution::{
 const GITHUB_REPO: &str = "utensils/mold";
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const NIGHTLY_TAG: &str = "latest";
+const WINDOWS_MANUAL_UPDATE: &str =
+    "self-update is not supported on Windows; install the latest CLI zip from the releases page";
 
 // ── GitHub API types ────────────────────────────────────────────────────────
 
@@ -246,6 +248,13 @@ fn is_arch_linux(os_release: &str) -> bool {
     })
 }
 
+fn ensure_self_update_supported(os: &str) -> Result<()> {
+    if os == "windows" {
+        bail!(WINDOWS_MANUAL_UPDATE);
+    }
+    Ok(())
+}
+
 // ── SHA-256 checksum verification ───────────────────────────────────────────
 
 /// Parse a SHA256SUMS file and verify the checksum for `asset_name` against `data`.
@@ -313,6 +322,7 @@ fn extract_binary_from_tarball(data: &[u8]) -> Result<Vec<u8>> {
 // ── Binary self-replacement ─────────────────────────────────────────────────
 
 /// Replace the running binary with new contents. Returns the path that was replaced.
+#[cfg(unix)]
 fn replace_binary(new_binary: &[u8], exe_path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -352,6 +362,15 @@ fn replace_binary(new_binary: &[u8], exe_path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+// Windows locks a running executable, so the Unix rename-in-place updater is
+// not a valid installation strategy there. Windows release assets remain
+// manually installable until an external helper can replace mold.exe after the
+// current process exits.
+#[cfg(windows)]
+fn replace_binary(_new_binary: &[u8], _exe_path: &Path) -> Result<()> {
+    ensure_self_update_supported("windows")
 }
 
 // ── HTTP helpers ────────────────────────────────────────────────────────────
@@ -651,6 +670,11 @@ pub async fn run(check: bool, force: bool, nightly: bool, version: Option<String
         }
         return Ok(());
     }
+
+    // `--check` remains useful on Windows, but installing must stop before
+    // choosing or downloading an archive: the running .exe cannot be replaced
+    // with the Unix rename-in-place strategy.
+    ensure_self_update_supported(std::env::consts::OS)?;
 
     // From here on we will write to disk — validate install location
     let exe_path = std::env::current_exe()?.canonicalize()?;
@@ -1229,9 +1253,18 @@ GPU 0: NVIDIA B200 (UUID: GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa)
         assert!(!is_arch_linux(""));
     }
 
+    #[test]
+    fn windows_self_update_names_the_manual_zip_path() {
+        let error = ensure_self_update_supported("windows").unwrap_err();
+        assert_eq!(error.to_string(), WINDOWS_MANUAL_UPDATE);
+        ensure_self_update_supported("linux").unwrap();
+        ensure_self_update_supported("macos").unwrap();
+    }
+
     // ── Binary replacement ──────────────────────────────────────────────
 
     #[test]
+    #[cfg(unix)]
     fn test_replace_binary_roundtrip() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1259,6 +1292,7 @@ GPU 0: NVIDIA B200 (UUID: GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa)
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_replace_binary_no_leftover_tmp() {
         let dir = tempfile::tempdir().unwrap();
         let exe_path = dir.path().join("mold");

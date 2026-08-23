@@ -53,41 +53,37 @@ require_release_job_text() {
     || fail "$release job $job is missing: $text"
 }
 
+release_job_needs() {
+  local job="$1"
+  awk -v job="  ${job}:" '
+      $0 == job { in_job = 1 }
+      in_job && /^  [[:alnum:]_-]+:$/ && $0 != job { exit }
+      in_job && /^    needs:/ { in_needs = 1 }
+      in_needs && /^    [[:alnum:]_-]+:/ && $0 !~ /^    needs:/ { exit }
+      in_needs { print }
+    ' "$repo_root/$release"
+}
+
 require_release_job_need() {
   local job="$1"
   local dependency="$2"
   local needs
-  local declared
 
-  needs="$(
-    awk -v job="  ${job}:" '
-      $0 == job { in_job = 1 }
-      in_job && /^  [[:alnum:]_-]+:$/ && $0 != job { exit }
-      in_job && /^[[:space:]]+needs:/ { print; exit }
-    ' "$repo_root/$release"
-  )"
+  needs="$(release_job_needs "$job")"
   [[ -n "$needs" ]] || fail "$release job $job has no needs declaration"
-  declared="$(sed 's/^[^:]*:[[:space:]]*//; s/[][]//g; s/,/ /g' <<<"$needs")"
-  for declared_dependency in $declared; do
-    [[ "$declared_dependency" == "$dependency" ]] && return 0
-  done
+  grep -Eq "(^|[][,:[:space:]])${dependency}([],:[:space:]]|$)" <<<"$needs" \
+    && return 0
   fail "$release job $job does not depend on $dependency"
 }
 
 reject_release_job_need() {
   local job="$1"
   local dependency="$2"
-  local block
+  local needs
 
-  block="$(
-    awk -v job="  ${job}:" '
-      $0 == job { in_job = 1 }
-      in_job && /^  [[:alnum:]_-]+:$/ && $0 != job { exit }
-      in_job { print }
-    ' "$repo_root/$release"
-  )"
-  [[ -n "$block" ]] || fail "$release is missing job: $job"
-  if grep -Eq "^[[:space:]]+needs:.*(^|[,[[:space:]])${dependency}([],[[:space:]]|$)" <<<"$block"; then
+  needs="$(release_job_needs "$job")"
+  [[ -n "$needs" ]] || fail "$release job $job has no needs declaration"
+  if grep -Eq "(^|[][,:[:space:]])${dependency}([],:[:space:]]|$)" <<<"$needs"; then
     fail "$release job $job must not depend on lower-priority $dependency"
   fi
 }
@@ -186,10 +182,12 @@ for release_job in release-latest release-version release-native; do
 done
 require_release_job_need "release-version" "build-macos"
 require_release_job_need "release-version" "build-desktop-dmg"
+require_release_job_need "release-latest" "build-windows"
 for target in 86 89 100 120; do
   require_release_job_need "release-native" "build-linux-sm${target}"
 done
 require_release_job_need "release-native" "release-version"
+require_release_job_need "release-native" "build-windows"
 require_release_job_need "release-containers" "release-native"
 require_release_job_need "release-containers" "docker"
 require_release_job_text "release-latest" \
@@ -356,10 +354,12 @@ require_text "flake.nix" \
 require_release_job_need "publish" "release-version"
 require_release_job_need "publish-aur" "release-native"
 require_release_job_text "release-latest" \
-  'sha256sum -- *.tar.gz > SHA256SUMS'
-for checksum_job in release-version release-native release-containers; do
+  'sha256sum -- *.tar.gz *.zip *.exe *.cer > SHA256SUMS'
+require_release_job_text "release-version" \
+  'sha256sum -- *.tar.gz *.dmg *.zip > SHA256SUMS'
+for checksum_job in release-native release-containers; do
   require_release_job_text "$checksum_job" \
-    'sha256sum -- *.tar.gz *.dmg *.zip > SHA256SUMS'
+    'sha256sum -- *.tar.gz *.dmg *.zip *.exe *.cer > SHA256SUMS'
 done
 if grep -Fq 'sha256sum ./*' "$repo_root/$release"; then
   fail "$release must write asset names without a ./ prefix for legacy updater compatibility"

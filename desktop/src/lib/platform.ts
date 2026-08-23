@@ -40,8 +40,17 @@ export function platformUi(raw: string | DesktopPlatform | undefined = CURRENT_P
     isMacOS,
     modifier: isMacOS ? "Meta" : "Control",
     modifierLabel: isMacOS ? "⌘" : "Ctrl+",
+    // Shift is a glyph inside the macOS chord and a named word inside the
+    // Ctrl one, so it cannot be spelled by concatenating onto modifierLabel.
+    shiftLabel: isMacOS ? "⇧" : "Shift+",
     deviceLabel: isMacOS ? "This Mac" : "This device",
-    fileManagerLabel: isMacOS ? "Finder" : "file manager",
+    // Each platform's own name for the app that opens a folder. "file manager"
+    // is the honest generic on Linux, where there is no single one.
+    fileManagerLabel: isMacOS
+      ? "Finder"
+      : platform === "windows"
+        ? "File Explorer"
+        : "file manager",
   } as const;
 }
 
@@ -49,6 +58,11 @@ export const PLATFORM_UI = platformUi();
 
 export function shortcutLabel(key: string): string {
   return `${PLATFORM_UI.modifierLabel}${key}`;
+}
+
+/** The platform's spelling of a primary-modifier + Shift chord. */
+export function shiftShortcutLabel(key: string): string {
+  return `${PLATFORM_UI.modifierLabel}${PLATFORM_UI.shiftLabel}${key}`;
 }
 
 export function primaryModifierPressed(

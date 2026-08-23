@@ -488,12 +488,16 @@ describe("bulk bar", () => {
     wrapper.unmount();
   });
 
-  it("Command-A selects only the prints in the active filter", async () => {
+  it("the Select All chord selects only the prints in the active filter", async () => {
     const { wrapper } = await mountView();
     await wrapper.get("[data-test='tag-chip'][data-tag='smurf']").trigger("click");
     await flushPromises();
 
-    key("a", { metaKey: true });
+    // jsdom is not a Tauri window, so `CURRENT_PLATFORM` is "unknown" and the
+    // primary modifier is Control — the same answer `primaryModifierPressed`
+    // gives the ⌘⇧N tests below. Dispatching ⌘A here would test macOS from a
+    // non-macOS platform and simply not match.
+    key("a", { ctrlKey: true });
     await wrapper.vm.$nextTick();
 
     expect(wrapper.get("[data-test='bulk-action-bar']").text()).toContain("2 / 2 selected");

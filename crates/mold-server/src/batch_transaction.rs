@@ -3701,7 +3701,7 @@ fn reclaim_unlocked_authority_path(
             }
             let _ = fs2::FileExt::unlock(&lock);
         }
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+        Err(error) if is_lock_contention(&error) => {}
         Err(error) => {
             return Err(error).with_context(|| {
                 format!(
@@ -3926,7 +3926,7 @@ fn try_claim_authority_file(
                 path: lock_path.to_path_buf(),
             }))
         }
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) if is_lock_contention(&error) => Ok(None),
         Err(error) => Err(error).with_context(|| {
             format!(
                 "claiming batch attempt recovery authority {}",
@@ -3943,7 +3943,7 @@ fn probe_attempt_authority_lock_semantics(
     let probe = open_attempt_authority_probe_file(lock_path)?;
     verify_authority_file_at_path(lock_path, &probe, bookkeeping)?;
     match fs2::FileExt::try_lock_exclusive(&probe) {
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+        Err(error) if is_lock_contention(&error) => Ok(()),
         Ok(()) => {
             let _ = fs2::FileExt::unlock(&probe);
             bail!(
@@ -4863,10 +4863,28 @@ fn verify_gallery_bookkeeping_lock_target(output_dir: &Path, file: &File) -> any
     Ok(())
 }
 
+/// A `try_lock_*` refusal because someone else holds the lock, as opposed to a
+/// real I/O failure.
+///
+/// `ErrorKind::WouldBlock` is only the unix spelling of that answer: `fs2`
+/// reports `EWOULDBLOCK` there and `ERROR_LOCK_VIOLATION` (os error 33) on
+/// Windows, which Rust does not map to `WouldBlock`.
+/// `fs2::lock_contended_error()` is the portable sentinel for exactly this, and
+/// matching on the kind alone is what made every Windows lock probe read
+/// ordinary contention — the outcome each probe is asserting — as a hard error
+/// that refused to start the server at all.
+fn is_lock_contention(error: &std::io::Error) -> bool {
+    // `lock_contended_error()` always carries a raw OS error (EWOULDBLOCK on
+    // unix, ERROR_LOCK_VIOLATION on Windows), so comparing the options
+    // directly cannot match on a mutual `None`.
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
 fn probe_gallery_bookkeeping_lock_semantics(output_dir: &Path) -> anyhow::Result<()> {
     let probe = open_gallery_bookkeeping_lock_target(output_dir)?;
     match fs2::FileExt::try_lock_exclusive(&probe) {
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+        Err(error) if is_lock_contention(&error) => Ok(()),
         Ok(()) => {
             let _ = fs2::FileExt::unlock(&probe);
             bail!(
@@ -6447,15 +6465,9 @@ fn directory_sync_is_unsupported(error: &anyhow::Error) -> bool {
     }
 }
 
-#[cfg(unix)]
 fn sync_dir(path: &Path) -> anyhow::Result<()> {
-    File::open(path)?.sync_all()?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn sync_dir(_path: &Path) -> anyhow::Result<()> {
-    Ok(())
+    crate::dir_sync::sync_directory(path)
+        .with_context(|| format!("fsync directory '{}'", path.display()))
 }
 
 #[cfg(test)]
@@ -6850,7 +6862,7 @@ mod tests {
                     write_process_test_marker("PREDECESSOR_ACQUIRED");
                     fs2::FileExt::unlock(&lock).unwrap();
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(error) if is_lock_contention(&error) => {
                     write_process_test_marker("PREDECESSOR_CONTENDED");
                 }
                 Err(error) => panic!("predecessor authority probe failed: {error}"),
@@ -7293,7 +7305,7 @@ mod tests {
         assert!(
             matches!(
                 fs2::FileExt::try_lock_exclusive(&probe),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+                Err(error) if is_lock_contention(&error)
             ),
             "filesystem lock semantics admit two same-process bookkeeping owners"
         );
@@ -7390,7 +7402,7 @@ mod tests {
         assert_eq!(command.trim(), "CHECK");
         let lock = open_gallery_bookkeeping_lock_target(&output_dir).unwrap();
         match fs2::FileExt::try_lock_exclusive(&lock) {
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(error) if is_lock_contention(&error) => {
                 write_process_test_marker("CONTENDED");
             }
             Ok(()) => {

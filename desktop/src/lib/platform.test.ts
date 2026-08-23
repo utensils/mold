@@ -34,6 +34,7 @@ describe("platformUi", () => {
       isMacOS: true,
       modifier: "Meta",
       modifierLabel: "⌘",
+      shiftLabel: "⇧",
       deviceLabel: "This Mac",
       fileManagerLabel: "Finder",
     });
@@ -44,8 +45,21 @@ describe("platformUi", () => {
       isMacOS: false,
       modifier: "Control",
       modifierLabel: "Ctrl+",
+      shiftLabel: "Shift+",
       deviceLabel: "This device",
+      // Linux has no single file manager to name, so the generic stands.
       fileManagerLabel: "file manager",
+    });
+  });
+
+  it("names Windows conventions, including File Explorer", () => {
+    expect(platformUi("win32")).toEqual({
+      isMacOS: false,
+      modifier: "Control",
+      modifierLabel: "Ctrl+",
+      shiftLabel: "Shift+",
+      deviceLabel: "This device",
+      fileManagerLabel: "File Explorer",
     });
   });
 
