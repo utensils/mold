@@ -19,6 +19,9 @@ hero:
       text: Download for Mac (Apple Silicon)
       link: https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg
     - theme: alt
+      text: Download for Windows
+      link: https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe
+    - theme: alt
       text: View Models
       link: /models/
     - theme: alt
@@ -42,11 +45,19 @@ features:
       audio-video, and quantized variants that fit a wide range of GPUs.
   - icon:
       src: /icons/rust.svg
-    title: Linux NVIDIA + macOS Metal
-    details: Single binary built on candle. NVIDIA GPUs on Linux via CUDA, Apple
-      Silicon on macOS via Metal. No Python, no libtorch, no ONNX.
+    title: Native GPU engine
+    details: Single binary built on candle. NVIDIA GPUs on Linux and locally
+      built x64 Windows packages use CUDA; Apple Silicon uses Metal. No Python
+      or libtorch.
     link: https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg
     linkText: Download the macOS desktop app
+  - icon:
+      src: /icons/windows.svg
+    title: Windows Desktop + CLI
+    details: Self-signed x64 Desktop and CPU/remote-client CLI builds ship with
+      a pinned public certificate and explicit trust instructions.
+    link: https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe
+    linkText: Download the Windows installer
   - icon:
       src: /icons/server.svg
     title: Client-Server
@@ -112,8 +123,22 @@ and RunPod in one focused workspace.
 
 [![Mold Studio desktop app generating an owl](/screenshots/mold-studio-desktop.png)](/guide/desktop)
 
-**[Download for macOS (Apple Silicon)](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)**
-· **[Explore the desktop app](/guide/desktop)**
+<div class="platform-downloads">
+  <a class="platform-download" href="https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg">
+    <img src="/icons/apple.svg" alt="" />
+    <span><strong>macOS Desktop</strong><small>Signed and notarized · Apple Silicon</small></span>
+  </a>
+  <a class="platform-download" href="https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe">
+    <img src="/icons/windows.svg" alt="" />
+    <span><strong>Windows Desktop</strong><small>Self-signed NSIS installer · x64</small></span>
+  </a>
+  <a class="platform-download" href="https://github.com/utensils/mold/releases/latest/download/mold-x86_64-pc-windows-msvc-cpu.zip">
+    <img src="/icons/terminal.svg" alt="" />
+    <span><strong>Windows CLI</strong><small>Self-signed CPU / remote client · x64</small></span>
+  </a>
+</div>
+
+**[Explore the desktop app](/guide/desktop)** · **[Windows CLI instructions](/guide/installation#windows-cli)**
 
 ## Quick Example
 

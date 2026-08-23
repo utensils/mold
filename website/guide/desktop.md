@@ -28,14 +28,31 @@ machine status, and live generation progress in one native window._
 
 ## Download
 
-Every tagged release ships a signed, notarized, stapled DMG:
+<div class="platform-downloads">
+  <a class="platform-download" href="https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg">
+    <img src="/icons/apple.svg" alt="" />
+    <span><strong>macOS Desktop</strong><small>Signed and notarized · Apple Silicon</small></span>
+  </a>
+  <a class="platform-download" href="https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe">
+    <img src="/icons/windows.svg" alt="" />
+    <span><strong>Windows Desktop</strong><small>Self-signed NSIS installer · x64</small></span>
+  </a>
+  <a class="platform-download" href="https://github.com/utensils/mold/releases/latest/download/mold-x86_64-pc-windows-msvc-cpu.zip">
+    <img src="/icons/terminal.svg" alt="" />
+    <span><strong>Windows CLI</strong><small>Self-signed CPU / remote client · x64</small></span>
+  </a>
+</div>
 
-**[⬇ Download Mold for macOS (Apple Silicon)](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)**
+Every tagged release ships a signed, notarized, stapled macOS DMG. Open it and
+drag **Mold** to Applications — no quarantine dance needed. Version-pinned
+downloads and `SHA256SUMS` are on the
+[releases page](https://github.com/utensils/mold/releases).
 
-Open the DMG and drag **Mold** to Applications — no quarantine dance needed.
-Version-pinned DMGs and `SHA256SUMS` are on the
-[releases page](https://github.com/utensils/mold/releases). You can also build
-from source with the devshell commands below.
+The published Windows downloads are self-signed CPU/remote-client builds.
+Follow the [Windows trust instructions](#windows) before running them. The
+[Windows CLI installation steps](/guide/installation#windows-cli) cover PATH
+setup and connecting to a GPU host. You can also build from source with the
+platform commands below.
 
 Linux builds are currently source/CI distributions: `nix build
 .#mold-desktop` produces the native sm_89 package, with
@@ -44,11 +61,12 @@ Linux builds are currently source/CI distributions: `nix build
 `desktop-build` produces the native package on NixOS and a CUDA AppImage on
 conventional Linux. Tagged releases do not publish the AppImage yet.
 
-Windows is also a source/CI distribution today: `scripts\windows.ps1 build`
-produces an NSIS installer locally, and the `Desktop` workflow attaches an
-unsigned x64 installer to every `main` run. Tagged releases do not publish a
-signed Windows installer yet — see [Windows](#windows) below for the toolchain,
-the helper script, and the two capabilities that are still absent.
+Windows ships through tagged releases and CI: `scripts\windows.ps1 build`
+produces an NSIS installer locally, and the `Desktop` workflow also attaches a
+self-signed x64 installer and its public certificate to every `main` run.
+There is not yet a publicly trusted Windows installer — see [Windows](#windows)
+below for the toolchain, trust steps, and the capabilities that are still
+absent.
 
 ## What it is
 
@@ -557,6 +575,31 @@ scripts\windows.ps1 build    # NSIS installer plus the standalone Mold.exe
 scripts\windows.ps1 clean    # drop the desktop build outputs
 ```
 
+The `main` artifact is `mold-desktop-windows-x64-self-signed`. It contains the
+NSIS installer and `mold-windows-self-signing.cert.cer`. The signature proves
+that an installer came from Mold's CI only after the public certificate has
+been trusted on that Windows account; it does not establish a publicly trusted
+publisher and does not suppress SmartScreen on a fresh machine. Inspect the
+certificate thumbprint before trusting it:
+
+```powershell
+certutil -hashfile .\mold-windows-self-signing.cert.cer SHA1
+# Expected: E8 DA 29 90 15 5C CC 6E 92 78 A8 31 90 08 A7 63 AC 5D FC 79
+Import-Certificate -FilePath .\mold-windows-self-signing.cert.cer `
+  -CertStoreLocation Cert:\CurrentUser\Root
+Import-Certificate -FilePath .\mold-windows-self-signing.cert.cer `
+  -CertStoreLocation Cert:\CurrentUser\TrustedPublisher
+Get-AuthenticodeSignature .\Mold_*_x64-setup.exe | Format-List Status,SignerCertificate
+```
+
+Only install this certificate on machines where you explicitly trust Mold's
+GitHub release process. Remove it from both stores when that trust is no longer
+required. CI imports the password-protected PFX from the
+`WINDOWS_CERTIFICATE` and `WINDOWS_CERTIFICATE_PASSWORD` repository secrets,
+checks its pinned thumbprint, signs both `mold-desktop.exe` and the NSIS
+installer through Tauri, and fails closed if either secret or signature is
+missing. The retained private material must never enter the repository.
+
 The feature recipe is resolved per machine and printed by `doctor`: CPU-only by
 default, `cuda` added on an x64 host with a CUDA toolkit, and `pulid` added when
 protoc is on PATH. `MOLD_WINDOWS_FEATURES` replaces the whole recipe;
@@ -585,8 +628,8 @@ test` is. Besides the `h3` compile above, a handful of `mold-core` tests
   Windows on `main` today, independently of any Windows work. The desktop
   crate, which is what the Windows app actually builds, passes cleanly.
 
-Signed Windows installers are also still to come; the `main` CI artifact is
-unsigned, so SmartScreen will warn on first run.
+Publicly trusted Windows installers are still to come; current release and
+`main` artifacts use the pinned self-signed certificate described above.
 
 ### Notes for contributors
 

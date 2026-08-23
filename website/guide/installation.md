@@ -5,6 +5,10 @@
 - **macOS desktop:** download the signed and notarized
   [Mold DMG](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg),
   then follow the [Desktop App guide](/guide/desktop).
+- **Windows desktop:** download the self-signed
+  [NSIS installer](https://github.com/utensils/mold/releases/latest/download/Mold-windows-x64-self-signed.exe)
+  and its [public certificate](https://github.com/utensils/mold/releases/latest/download/mold-windows-self-signing.cert.cer),
+  then follow the [Windows desktop trust instructions](/guide/desktop#windows).
 - **iPhone:** the current remote-only app is distributed through the project's
   invited internal and external TestFlight groups; there is not yet a public
   App Store listing. See the [iPhone App guide](/guide/iphone) for supported
@@ -13,6 +17,31 @@
 Mold is CLI-native. The command-line installation below installs the primary
 Mold interface and the same engine/server used by both native apps, scripts,
 agents, and custom API clients.
+
+## Windows CLI
+
+The prebuilt x64 Windows CLI is a self-signed CPU inference and remote-client
+build. Download and unpack it with PowerShell:
+
+```powershell
+$release = 'https://github.com/utensils/mold/releases/latest/download'
+Invoke-WebRequest "$release/mold-x86_64-pc-windows-msvc-cpu.zip" `
+  -OutFile mold-windows.zip
+Expand-Archive .\mold-windows.zip `
+  -DestinationPath "$env:LOCALAPPDATA\Mold\bin" `
+  -Force
+& "$env:LOCALAPPDATA\Mold\bin\mold.exe" version
+```
+
+The zip includes `mold-windows-self-signing.cert.cer`. Verify its SHA-1
+thumbprint is `E8DA2990155CCC6E9278A8319008A763AC5DFC79` before trusting it;
+the [Desktop App guide](/guide/desktop#windows) has the exact PowerShell trust
+commands. Add `%LOCALAPPDATA%\Mold\bin` to your user `PATH` for a permanent
+`mold` command. This published CLI does not include CUDA; use it for CPU work
+or point it at a GPU host with `mold run --host http://gpu-host:7680 "prompt"`
+or `MOLD_HOST`. Build from source on an x64 machine with the CUDA toolkit to get a
+CUDA-enabled local binary; the [Windows contributor commands](/guide/desktop#commands)
+cover the supported helper.
 
 ## One-Line Install (recommended)
 

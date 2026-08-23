@@ -48,3 +48,9 @@
   quiet wrong answer was the worse half. Architecture now comes from WMI, the
   x64 question is answered by the Rust host triple that actually decides what
   cargo builds, and a new test refuses to let the two editions disagree.
+- **Windows downloads now ship from rolling and tagged releases.** The x64
+  NSIS desktop installer and the separate CPU/remote-client CLI zip share one
+  pinned self-signed Authenticode identity; releases include its public
+  certificate, SHA-256 coverage, explicit trust instructions, and Windows-logo
+  download cards alongside macOS. CI fails closed when the retained PFX or
+  either signature is missing. Public-trust signing remains future work.

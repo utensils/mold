@@ -23,6 +23,14 @@
         </svg>
         <span>macOS + Apple Silicon Metal</span>
       </div>
+      <div class="support-pill">
+        <svg aria-label="Windows" role="img" viewBox="0 0 24 24">
+          <path
+            d="M2 4.35 10.55 3.2v8.25H2V4.35Zm9.5-1.28L22 1.65v9.8H11.5V3.07ZM2 12.4h8.55v8.4L2 19.65V12.4Zm9.5 0H22v9.95l-10.5-1.42V12.4Z"
+          />
+        </svg>
+        <span>Windows x64 desktop + CLI</span>
+      </div>
     </div>
   </div>
 </template>

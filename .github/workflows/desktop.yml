@@ -54,7 +54,11 @@ on:
       - "scripts/prepare-desktop-linuxdeploy.sh"
       - "scripts/verify-h3-release-exclusion.sh"
       - "scripts/windows.ps1"
+      - "scripts/import-windows-signing-certificate.ps1"
+      - "scripts/sign-windows-binary.ps1"
+      - "scripts/verify-windows-signatures.ps1"
       - "scripts/tests/windows-helper-shells.sh"
+      - "scripts/tests/windows-self-signing.sh"
       - "scripts/prune-desktop-nightly-assets.sh"
       - "scripts/select-desktop-stable-latest.sh"
       - "scripts/tests/check-desktop-nightly-main-head.sh"
@@ -148,7 +152,11 @@ jobs:
               - 'flake.nix'
               - 'scripts/verify-h3-release-exclusion.sh'
               - 'scripts/windows.ps1'
+              - 'scripts/import-windows-signing-certificate.ps1'
+              - 'scripts/sign-windows-binary.ps1'
+              - 'scripts/verify-windows-signatures.ps1'
               - 'scripts/tests/windows-helper-shells.sh'
+              - 'scripts/tests/windows-self-signing.sh'
               - '.github/workflows/desktop.yml'
               - '.github/workflows/desktop-distribution.yml'
             rust_format:
@@ -276,7 +284,9 @@ jobs:
       # unless the script is careful.
       - name: Helper script agrees across PowerShell editions
         shell: bash
-        run: bash ../scripts/tests/windows-helper-shells.sh
+        run: |
+          bash ../scripts/tests/windows-helper-shells.sh
+          bash ../scripts/tests/windows-self-signing.sh
       - run: bun install --frozen-lockfile
         working-directory: .
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
@@ -286,10 +296,31 @@ jobs:
       # target-conditional entry in src-tauri/Cargo.toml).
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features pulid -- -D warnings
-      - name: Build the NSIS installer
+      - name: Check the Windows CLI release recipe
+        working-directory: .
+        run: >-
+          cargo check --release -p mold-ai
+          --features preview,discord,expand,tui,webp,metrics,mdns,pulid
+      - name: Import the self-signed Windows certificate
         if: github.event_name == 'push'
-        run: bunx tauri build --features pulid --bundles nsis --ci -v
-      - name: Verify the installer and the standalone executable exist
+        id: windows-signing
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $certificate = Join-Path $env:RUNNER_TEMP 'mold-windows-self-signing.cert.cer'
+          $thumbprint = & ../scripts/import-windows-signing-certificate.ps1 `
+            -ConfigPath src-tauri/tauri.windows-self-signed.conf.json `
+            -PublicCertificatePath $certificate
+          "thumbprint=$thumbprint" >> $env:GITHUB_OUTPUT
+
+      - name: Build the self-signed NSIS installer
+        if: github.event_name == 'push'
+        run: >-
+          bunx tauri build --features pulid --bundles nsis --ci -v
+          --config src-tauri/tauri.windows-self-signed.conf.json
+      - name: Verify Authenticode on the installer and standalone executable
         if: github.event_name == 'push'
         shell: pwsh
         run: |
@@ -298,13 +329,21 @@ jobs:
           $installer = Get-ChildItem src-tauri/target/release/bundle/nsis -Filter *.exe -ErrorAction Stop |
             Select-Object -First 1
           if (-not $installer) { throw "no NSIS installer was produced" }
+          $certificate = Join-Path $env:RUNNER_TEMP 'mold-windows-self-signing.cert.cer'
+          & ../scripts/verify-windows-signatures.ps1 `
+            -CertificatePath $certificate `
+            -ExpectedThumbprint '${{ steps.windows-signing.outputs.thumbprint }}' `
+            -FilePath @($exe, $installer.FullName)
+
+          Copy-Item $certificate `
+            src-tauri/target/release/bundle/nsis/mold-windows-self-signing.cert.cer
           "installer: $($installer.FullName) ($([math]::Round($installer.Length / 1MB, 1)) MB)"
-      - name: Upload the unsigned Windows installer
+      - name: Upload the self-signed Windows installer
         if: github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
-          name: mold-desktop-windows-x64-unsigned
-          path: desktop/src-tauri/target/release/bundle/nsis/*.exe
+          name: mold-desktop-windows-x64-self-signed
+          path: desktop/src-tauri/target/release/bundle/nsis/*
           retention-days: 14
 
   desktop-linux:
