@@ -104,8 +104,17 @@ function Get-VsInstallPath {
   # Finding any Visual Studio product is not enough: a web/.NET-only install
   # has an installation path but no MSVC compiler, linker, or Windows SDK, so
   # `doctor` would report success and the first cargo command would fail later.
-  # Require the workload that the install command below names.
-  $found = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Workload.VCTools -property installationPath 2>$null
+  # Require the compiler component for the Rust host target. Querying the
+  # workload bundle itself is not portable across VS installer layouts (the
+  # GitHub runner has the component but does not expose that workload package).
+  $triple = Get-RustHostTriple
+  $component = if ($triple -and $triple.StartsWith('aarch64')) {
+    'Microsoft.VisualStudio.Component.VC.Tools.ARM64'
+  }
+  else {
+    'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
+  }
+  $found = & $vswhere -latest -products * -requires $component -property installationPath 2>$null
   if ($found) { return ($found | Select-Object -First 1) }
   return $null
 }
