@@ -21,6 +21,7 @@ import type {
 import type { DeviceInfo, DeviceListResponse } from "@studio/api/devices";
 import type { GenerationPlacementPreview } from "@studio/api/generationPlacement";
 import { ApiError } from "@studio/api/client";
+import { ApiHttpError } from "../api";
 import { queueStatusFor } from "@studio/lib/queuePosition";
 import {
   AUTHENTICATED_MINIMAX_H3_PROFILE_SHA256,
@@ -1724,7 +1725,9 @@ describe("useHostRouting", () => {
 
     hostStatusCall.mockImplementation((host: HostEntry) =>
       host.id === studio.id
-        ? Promise.reject(new ApiError("API key was rejected", 401))
+        ? Promise.reject(
+            new ApiHttpError("GET /api/status", 401, "API key was rejected"),
+          )
         : Promise.resolve(status()),
     );
     await routing.refresh();

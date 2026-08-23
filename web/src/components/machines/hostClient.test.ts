@@ -16,6 +16,7 @@ import {
   useHostPoll,
 } from "./hostClient";
 import type { HostEntry } from "../../lib/hostRegistry";
+import { ApiHttpError } from "../../api";
 
 const originalFetch = globalThis.fetch;
 let fetchMock: ReturnType<typeof vi.fn>;
@@ -30,6 +31,14 @@ function ok(data: unknown, status = 200) {
     clone() {
       return this;
     },
+  };
+}
+
+function failed(status: number, body = "") {
+  return {
+    ok: false,
+    status,
+    text: async () => body,
   };
 }
 
@@ -80,6 +89,15 @@ describe("hostClient auth + requests", () => {
     expect(
       (init.headers as Record<string, string>)["x-api-key"],
     ).toBeUndefined();
+  });
+
+  it("preserves an HTTP credential rejection as typed authority evidence", async () => {
+    fetchMock.mockResolvedValueOnce(failed(401, "API key was rejected"));
+
+    const error = await hostStatus(remote).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(ApiHttpError);
+    expect(error).toMatchObject({ status: 401 });
   });
 
   it("requests an explicit bounded queue page and preserves the legacy path", async () => {

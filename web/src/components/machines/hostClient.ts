@@ -80,7 +80,10 @@ async function getJson<T>(
     headers: authHeaders(host.apiKey),
     signal,
   });
-  if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`);
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new ApiHttpError(`GET ${path}`, res.status, detail);
+  }
   return (await res.json()) as T;
 }
 

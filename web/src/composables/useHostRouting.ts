@@ -84,6 +84,7 @@ import type {
   ServerCapabilities,
   ServerStatus,
 } from "../types";
+import { ApiHttpError } from "../api";
 
 /** `gpu_info` plus the additive `backend` field newer servers report. */
 type GpuInfoWithBackend = GpuInfo & { backend?: string | null };
@@ -508,7 +509,8 @@ async function pollHost(entry: HostEntry): Promise<void> {
   let instanceChanged = false;
   const authorityRejected =
     status.status === "rejected" &&
-    status.reason instanceof ApiError &&
+    (status.reason instanceof ApiError ||
+      status.reason instanceof ApiHttpError) &&
     (status.reason.status === 401 || status.reason.status === 403);
   if (authorityRejected) {
     // Authentication is authoritative security evidence, unlike congestion.
