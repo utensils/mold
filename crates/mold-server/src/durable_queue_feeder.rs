@@ -11,6 +11,28 @@ use crate::state::{AppState, GenerationJob, SubmitError};
 pub(crate) struct FeederReport {
     pub submitted: usize,
     pub held: usize,
+    stop: FeederStop,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum FeederStop {
+    /// No durable row was claimable. Only a durable admission can make the
+    /// next scan useful; the speculative capacity release is not work.
+    #[default]
+    Drained,
+    /// Runtime hydration is bounded and every slot is currently occupied.
+    AtCapacity,
+    /// A persistence boundary could not be checked safely. Keep the sole
+    /// feeder alive and retry without treating an error as an empty result.
+    RecoverableFailure,
+    /// The runtime queue receiver is gone, so the server is shutting down.
+    TransportClosed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeederControl {
+    Continue,
+    Stop,
 }
 
 /// Clear ownership tokens left by the prior runtime before any new HTTP
@@ -44,11 +66,15 @@ pub(crate) fn spawn(
     shutdown: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        run(state, shutdown).await;
+        run_with_retry_delay(state, shutdown, mold_db::METADATA_DB_BUSY_TIMEOUT).await;
     })
 }
 
-async fn run(state: AppState, shutdown: tokio_util::sync::CancellationToken) {
+async fn run_with_retry_delay(
+    state: AppState,
+    shutdown: tokio_util::sync::CancellationToken,
+    retry_delay: std::time::Duration,
+) {
     tracing::info!(
         capacity = state.queue_capacity,
         "durable generation queue feeder started"
@@ -66,10 +92,7 @@ async fn run(state: AppState, shutdown: tokio_util::sync::CancellationToken) {
         tokio::pin!(durable_wake);
         tokio::pin!(capacity_wake);
 
-        let report = match feed_available(&state, current_output_dir.as_deref()).await {
-            Ok(report) => report,
-            Err(()) => break,
-        };
+        let report = feed_available(&state, current_output_dir.as_deref()).await;
         if report.submitted > 0 || report.held > 0 {
             tracing::debug!(
                 submitted = report.submitted,
@@ -80,46 +103,106 @@ async fn run(state: AppState, shutdown: tokio_util::sync::CancellationToken) {
         if shutdown.is_cancelled() {
             break;
         }
-        if state.queue.pending() < state.queue_capacity && report.submitted > 0 {
-            continue;
-        }
-
-        tokio::select! {
-            _ = shutdown.cancelled() => break,
-            _ = &mut durable_wake => {},
-            _ = &mut capacity_wake => {},
+        if wait_for_next_pass(
+            report.stop,
+            retry_delay,
+            &shutdown,
+            &mut durable_wake,
+            &mut capacity_wake,
+        )
+        .await
+            == FeederControl::Stop
+        {
+            break;
         }
     }
     tracing::info!("durable generation queue feeder stopped");
 }
 
+/// Wait only on events that can make the preceding stop reason actionable.
+///
+/// In particular, an empty scan has just dropped a speculative queue-slot
+/// reservation. That drop correctly wakes other producers, but must not wake
+/// this feeder into another empty SQLite scan. Recoverable failures similarly
+/// ignore notifications produced by retaining their own claim and retry on
+/// the database's existing contention window.
+async fn wait_for_next_pass<D, C>(
+    stop: FeederStop,
+    retry_delay: std::time::Duration,
+    shutdown: &tokio_util::sync::CancellationToken,
+    durable_wake: D,
+    capacity_wake: C,
+) -> FeederControl
+where
+    D: std::future::Future<Output = ()>,
+    C: std::future::Future<Output = ()>,
+{
+    tokio::pin!(durable_wake);
+    tokio::pin!(capacity_wake);
+    match stop {
+        FeederStop::TransportClosed => FeederControl::Stop,
+        FeederStop::RecoverableFailure => {
+            tokio::select! {
+                _ = shutdown.cancelled() => FeederControl::Stop,
+                _ = tokio::time::sleep(retry_delay) => FeederControl::Continue,
+            }
+        }
+        FeederStop::Drained => {
+            tokio::select! {
+                _ = shutdown.cancelled() => FeederControl::Stop,
+                _ = &mut durable_wake => FeederControl::Continue,
+            }
+        }
+        FeederStop::AtCapacity => {
+            tokio::select! {
+                _ = shutdown.cancelled() => FeederControl::Stop,
+                _ = &mut durable_wake => FeederControl::Continue,
+                _ = &mut capacity_wake => FeederControl::Continue,
+            }
+        }
+    }
+}
+
 async fn feed_available(
     state: &AppState,
     current_output_dir: Option<&std::path::Path>,
-) -> Result<FeederReport, ()> {
+) -> FeederReport {
     let mut report = FeederReport::default();
     loop {
         let reservation = match state.queue.try_reserve(state.queue_capacity) {
             Ok(reservation) => reservation,
-            Err(SubmitError::Full { .. }) => break,
-            Err(_) => break,
+            Err(SubmitError::Full { .. }) => {
+                report.stop = FeederStop::AtCapacity;
+                return report;
+            }
+            Err(SubmitError::Cancelled) => {
+                report.stop = FeederStop::RecoverableFailure;
+                return report;
+            }
+            Err(SubmitError::Shutdown) => {
+                report.stop = FeederStop::TransportClosed;
+                return report;
+            }
         };
         let journal = state.queue_journal.clone();
         let claim = match tokio::task::spawn_blocking(move || journal.claim_next_feeder()).await {
             Ok(Ok(Some(claim))) => claim,
             Ok(Ok(None)) => {
                 drop(reservation);
-                break;
+                report.stop = FeederStop::Drained;
+                return report;
             }
             Ok(Err(error)) => {
                 drop(reservation);
                 tracing::warn!(error = %format!("{error:#}"), "durable feeder could not claim the next row");
-                return Err(());
+                report.stop = FeederStop::RecoverableFailure;
+                return report;
             }
             Err(error) => {
                 drop(reservation);
                 tracing::warn!(%error, "durable feeder claim task failed");
-                return Err(());
+                report.stop = FeederStop::RecoverableFailure;
+                return report;
             }
         };
 
@@ -138,13 +221,15 @@ async fn feed_available(
                 let _ = tokio::task::spawn_blocking(move || ticket.retain()).await;
                 drop(reservation);
                 tracing::error!(job = %row.id, %error, "durable feeder idempotence infrastructure failed; retaining for retry");
-                return Err(());
+                report.stop = FeederStop::RecoverableFailure;
+                return report;
             }
             Err(error) => {
                 let _ = tokio::task::spawn_blocking(move || ticket.retain()).await;
                 drop(reservation);
                 tracing::error!(job = %row.id, %error, "durable feeder idempotence task failed; retaining for retry");
-                return Err(());
+                report.stop = FeederStop::RecoverableFailure;
+                return report;
             }
         };
         if completed_output.is_none() && row.output_dir.is_dir() {
@@ -177,13 +262,15 @@ async fn feed_available(
                     let _ = tokio::task::spawn_blocking(move || ticket.retain()).await;
                     drop(reservation);
                     tracing::error!(job = %row.id, %error, "durable archive lookup infrastructure failed; retaining for retry");
-                    return Err(());
+                    report.stop = FeederStop::RecoverableFailure;
+                    return report;
                 }
                 Err(error) => {
                     let _ = tokio::task::spawn_blocking(move || ticket.retain()).await;
                     drop(reservation);
                     tracing::error!(job = %row.id, %error, "durable archive lookup task failed; retaining for retry");
-                    return Err(());
+                    report.stop = FeederStop::RecoverableFailure;
+                    return report;
                 }
             }
         }
@@ -336,7 +423,8 @@ async fn feed_available(
                 drop(mutation);
                 drop(reservation);
                 tracing::error!(job = %row.id, %error, "durable feeder cancellation check failed");
-                return Err(());
+                report.stop = FeederStop::RecoverableFailure;
+                return report;
             }
             Err(error) => {
                 state.job_registry.remove(&row.id);
@@ -344,7 +432,8 @@ async fn feed_available(
                 drop(mutation);
                 drop(reservation);
                 tracing::error!(job = %row.id, %error, "durable feeder cancellation task failed");
-                return Err(());
+                report.stop = FeederStop::RecoverableFailure;
+                return report;
             }
         }
         drop(mutation);
@@ -377,11 +466,11 @@ async fn feed_available(
                 }
                 state.job_registry.remove(&id);
                 tracing::warn!(job = %id, ?error, "durable feeder transport stopped; row retained");
-                return Err(());
+                report.stop = FeederStop::TransportClosed;
+                return report;
             }
         }
     }
-    Ok(report)
 }
 
 #[cfg(test)]
@@ -1248,5 +1337,98 @@ mod tests {
             .map(|row| row.id)
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["job-0", "job-1", "job-2"]);
+    }
+
+    #[tokio::test]
+    async fn recoverable_persistence_failure_does_not_stop_the_only_feeder() {
+        let (state, mut rx) = state(1);
+        admit(&state, 1);
+        state.queue_journal.fail_completion_lookup_for_tests();
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = tokio::spawn(run_with_retry_delay(
+            state.clone(),
+            shutdown.clone(),
+            Duration::ZERO,
+        ));
+        let job = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the feeder must retry after a recoverable persistence failure")
+            .expect("the runtime queue remains open");
+        assert_eq!(job.id, "job-0");
+        assert!(
+            !handle.is_finished(),
+            "a recoverable row failure must not terminate the sole feeder task"
+        );
+
+        state.queue_journal.retain_all();
+        shutdown.cancel();
+        handle.await.unwrap();
+        drop(job);
+    }
+
+    #[tokio::test]
+    async fn drained_pass_ignores_capacity_wake_from_its_speculative_reservation() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let durable = Arc::new(tokio::sync::Notify::new());
+        let capacity = Arc::new(tokio::sync::Notify::new());
+        capacity.notify_one();
+
+        let waiting = tokio::spawn({
+            let shutdown = shutdown.clone();
+            let durable = durable.clone();
+            let capacity = capacity.clone();
+            async move {
+                wait_for_next_pass(
+                    FeederStop::Drained,
+                    Duration::ZERO,
+                    &shutdown,
+                    durable.notified(),
+                    capacity.notified(),
+                )
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "an idle feeder must not consume the slot release it produced itself"
+        );
+
+        durable.notify_one();
+        assert_eq!(waiting.await.unwrap(), FeederControl::Continue);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recoverable_pass_ignores_self_wakes_until_the_database_retry_window() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let durable = Arc::new(tokio::sync::Notify::new());
+        let capacity = Arc::new(tokio::sync::Notify::new());
+        durable.notify_one();
+        capacity.notify_one();
+
+        let waiting = tokio::spawn({
+            let shutdown = shutdown.clone();
+            let durable = durable.clone();
+            let capacity = capacity.clone();
+            async move {
+                wait_for_next_pass(
+                    FeederStop::RecoverableFailure,
+                    mold_db::METADATA_DB_BUSY_TIMEOUT,
+                    &shutdown,
+                    durable.notified(),
+                    capacity.notified(),
+                )
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "a retained claim's notifications must not create a retry spin"
+        );
+
+        tokio::time::advance(mold_db::METADATA_DB_BUSY_TIMEOUT).await;
+        assert_eq!(waiting.await.unwrap(), FeederControl::Continue);
     }
 }

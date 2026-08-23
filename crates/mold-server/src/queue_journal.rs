@@ -879,6 +879,15 @@ impl QueueJournal {
         Option<generation_queue::CompletedGenerationOutput>,
         generation_queue::CompletedOutputLookupError,
     > {
+        #[cfg(test)]
+        if self
+            .fail_completion_lookup
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(generation_queue::CompletedOutputLookupError::Infrastructure(
+                anyhow::anyhow!("injected completion-lookup failure"),
+            ));
+        }
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
             return Ok(None);
         };

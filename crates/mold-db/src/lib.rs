@@ -29,7 +29,7 @@ mod scheduler_estimates;
 pub mod settings;
 pub mod trash;
 
-pub use db::MetadataDb;
+pub use db::{MetadataDb, METADATA_DB_BUSY_TIMEOUT};
 pub use device_preferences::{DevicePreference, DevicePreferences};
 pub use gallery_mutations::GalleryMutationApply;
 pub use migrations::SCHEMA_VERSION;

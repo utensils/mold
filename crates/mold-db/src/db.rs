@@ -11,6 +11,13 @@ use crate::migrations;
 use crate::path::canonical_dir_string;
 use crate::record::{GenerationRecord, RecordSource};
 
+/// How long one metadata operation waits for SQLite lock contention.
+///
+/// Durable-queue retry scheduling reuses this exact window: retrying a failed
+/// persistence pass more frequently than the connection itself waits would
+/// amplify pressure on the same database without improving recovery latency.
+pub const METADATA_DB_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5000);
+
 /// Stat snapshot returned by [`MetadataDb::snapshot_paths`] — one entry per
 /// row, used by reconciliation to diff DB ↔ disk. Defined as a named struct
 /// to keep callsites readable (and to satisfy clippy::type_complexity).
@@ -69,7 +76,7 @@ fn configure_pragmas(conn: &Connection, path: &Path) {
     // most read paths treat an error as "no value" — without a timeout a
     // reader that lands on a checkpoint or schema lock silently loses
     // settings it would have found a few milliseconds later.
-    if let Err(e) = conn.busy_timeout(std::time::Duration::from_millis(5000)) {
+    if let Err(e) = conn.busy_timeout(METADATA_DB_BUSY_TIMEOUT) {
         tracing::warn!(error = %e, "metadata DB busy_timeout failed");
     }
     if let Err(e) = conn.pragma_update(None, "foreign_keys", "ON") {
