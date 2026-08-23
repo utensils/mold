@@ -844,6 +844,42 @@ fn completed_output_kind(filename: &str) -> Result<CompletedOutputKind> {
     }
 }
 
+/// Resolve the exact reconnect payload from filenames that share one durable
+/// queue job id. Callers may source those names from SQLite or another
+/// validated gallery authority; the ordinary/upscale shape is identical.
+pub fn resolve_completed_output_filenames(
+    job_id: &str,
+    filenames: impl IntoIterator<Item = String>,
+) -> Result<Option<CompletedGenerationOutput>> {
+    let mut primary = Vec::new();
+    let mut originals = Vec::new();
+    let mut upscaled = Vec::new();
+    for filename in filenames {
+        match completed_output_kind(&filename)? {
+            CompletedOutputKind::Primary => primary.push(filename),
+            CompletedOutputKind::Original => originals.push(filename),
+            CompletedOutputKind::Upscaled => upscaled.push(filename),
+        }
+    }
+
+    match (
+        primary.as_slice(),
+        originals.as_slice(),
+        upscaled.as_slice(),
+    ) {
+        ([], [], []) => Ok(None),
+        ([filename], [], []) => Ok(Some(CompletedGenerationOutput {
+            filename: filename.clone(),
+            original_filename: None,
+        })),
+        ([], [original], [filename]) => Ok(Some(CompletedGenerationOutput {
+            filename: filename.clone(),
+            original_filename: Some(original.clone()),
+        })),
+        _ => bail!("gallery outputs for queue job {job_id} are ambiguous"),
+    }
+}
+
 /// Recover one completed child's exact saved output from its owned gallery.
 ///
 /// The queue row supplies both the owner fence and output-directory scope.
@@ -882,9 +918,7 @@ pub fn find_completed_output(
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
 
-        let mut primary = Vec::new();
-        let mut originals = Vec::new();
-        let mut upscaled = Vec::new();
+        let mut filenames = Vec::new();
         for row in rows {
             let (filename, metadata_json) = row?;
             let metadata: serde_json::Value = serde_json::from_str(&metadata_json)
@@ -898,29 +932,9 @@ pub fn find_completed_output(
             if recorded_job_id != job_id {
                 continue;
             }
-            match completed_output_kind(&filename)? {
-                CompletedOutputKind::Primary => primary.push(filename),
-                CompletedOutputKind::Original => originals.push(filename),
-                CompletedOutputKind::Upscaled => upscaled.push(filename),
-            }
+            filenames.push(filename);
         }
-
-        match (
-            primary.as_slice(),
-            originals.as_slice(),
-            upscaled.as_slice(),
-        ) {
-            ([], [], []) => Ok(None),
-            ([filename], [], []) => Ok(Some(CompletedGenerationOutput {
-                filename: filename.clone(),
-                original_filename: None,
-            })),
-            ([], [original], [filename]) => Ok(Some(CompletedGenerationOutput {
-                filename: filename.clone(),
-                original_filename: Some(original.clone()),
-            })),
-            _ => bail!("gallery rows for queue job {job_id} are ambiguous"),
-        }
+        resolve_completed_output_filenames(job_id, filenames)
     })
 }
 

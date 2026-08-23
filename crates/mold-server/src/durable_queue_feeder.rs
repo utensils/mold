@@ -123,8 +123,24 @@ async fn feed_available(
             .attach_claimed(&row.id, claim.claim_token);
         let journal = state.queue_journal.clone();
         let completion_id = row.id.clone();
-        let completion =
+        let mut completion =
             tokio::task::spawn_blocking(move || journal.completed_output(&completion_id)).await;
+        if matches!(completion, Ok(Ok(None))) && row.output_dir.is_dir() {
+            // Resolve only the claimed row. Startup remains bounded by runtime
+            // queue capacity instead of reconciling the retained backlog or
+            // waiting for the independent whole-gallery DB projection pass.
+            let _gallery_reader = state.gallery_publication_gate.read().await;
+            let output_dir = row.output_dir.clone();
+            let completion_id = row.id.clone();
+            completion = tokio::task::spawn_blocking(move || {
+                crate::batch_transaction::find_completed_output_in_committed_archive(
+                    &output_dir,
+                    &completion_id,
+                )
+                .map_err(|error| format!("{error:#}"))
+            })
+            .await;
+        }
         match completion {
             Ok(Ok(Some(output))) => {
                 let result_json = serde_json::json!({
@@ -437,6 +453,61 @@ mod tests {
         ids
     }
 
+    fn archive_output_without_db(
+        state: &AppState,
+        output_dir: &std::path::Path,
+        filename: &str,
+        job_id: &str,
+    ) {
+        let path = output_dir.join(filename);
+        std::fs::write(&path, format!("published bytes for {filename}")).unwrap();
+        crate::batch_transaction::sync_ordinary_gallery_directory(output_dir).unwrap();
+        let mut metadata =
+            mold_core::OutputMetadata::from_generate_request(&request("published"), 7, None, "v");
+        metadata.job_id = Some(job_id.to_string());
+        let params = mold_db::persist::OutputRecordParams {
+            format: mold_core::OutputFormat::Png,
+            metadata: &metadata,
+            source: mold_db::RecordSource::Server,
+            generation_time_ms: Some(1),
+            backend: Some("test"),
+        };
+        let record =
+            mold_db::persist::build_saved_output_record(output_dir, filename, &path, &params);
+        let authority =
+            crate::batch_transaction::acquire_gallery_bookkeeping_lock(output_dir).unwrap();
+        crate::batch_transaction::archive_ordinary_gallery_record(
+            output_dir,
+            &path,
+            record,
+            &state.gallery_publication_gate,
+            &authority,
+        )
+        .unwrap();
+    }
+
+    async fn await_completed_batch(
+        state: &AppState,
+    ) -> mold_db::generation_batches::DurableGenerationBatchDetail {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let detail = mold_db::generation_batches::get_durable(
+                    state.metadata_db.as_ref().as_ref().unwrap(),
+                    state.queue_journal.owner_uuid().unwrap(),
+                    "batch",
+                )
+                .unwrap()
+                .unwrap();
+                if detail.children[0].state == "complete" {
+                    break detail;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("published output is reconciled without dispatch")
+    }
+
     #[tokio::test]
     async fn deep_backlog_hydrates_no_more_than_runtime_capacity() {
         let (state, mut rx) = state(3);
@@ -579,6 +650,167 @@ mod tests {
 
         shutdown.cancel();
         handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restart_after_ordinary_archive_before_db_upsert_does_not_rerender() {
+        let (mut state, mut rx) = state(1);
+        admit(&state, 1);
+        let dead_claim = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        archive_output_without_db(
+            &state,
+            &dead_claim.row.output_dir,
+            "mold-mock-model-1~portrait.png",
+            "job-0",
+        );
+        state.gallery_publication_gate = Default::default();
+        assert_eq!(
+            state
+                .metadata_db
+                .as_ref()
+                .as_ref()
+                .unwrap()
+                .count()
+                .unwrap(),
+            0,
+            "the test must stop in the archive-before-generations-upsert crash window"
+        );
+        state.queue_journal.recover_feeder_runtime().unwrap();
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+        let detail = await_completed_batch(&state).await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "the completed child must not rerender"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                detail.children[0].result_json.as_deref().unwrap()
+            )
+            .unwrap(),
+            serde_json::json!({
+                "filename": "mold-mock-model-1~portrait.png",
+                "original_filename": null,
+            })
+        );
+        shutdown.cancel();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restart_after_upscale_archives_before_db_upsert_recovers_exact_pair() {
+        let (mut state, mut rx) = state(1);
+        admit(&state, 1);
+        let dead_claim = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        for filename in [
+            "mold-mock-model-1-original~portrait.png",
+            "mold-mock-model-2-upscaled~portrait.png",
+        ] {
+            archive_output_without_db(&state, &dead_claim.row.output_dir, filename, "job-0");
+        }
+        state.gallery_publication_gate = Default::default();
+        assert_eq!(
+            state
+                .metadata_db
+                .as_ref()
+                .as_ref()
+                .unwrap()
+                .count()
+                .unwrap(),
+            0,
+            "the test must stop before either best-effort generations upsert"
+        );
+        state.queue_journal.recover_feeder_runtime().unwrap();
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+        let detail = await_completed_batch(&state).await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "the completed child must not rerender"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                detail.children[0].result_json.as_deref().unwrap()
+            )
+            .unwrap(),
+            serde_json::json!({
+                "filename": "mold-mock-model-2-upscaled~portrait.png",
+                "original_filename": "mold-mock-model-1-original~portrait.png",
+            })
+        );
+        shutdown.cancel();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn committed_archive_lookup_is_scoped_to_the_claimed_output_directory() {
+        let (mut state, mut rx) = state(1);
+        admit(&state, 1);
+        let owned_output = state.config.try_read().unwrap().effective_output_dir();
+        let foreign_output = owned_output.parent().unwrap().join("foreign-gallery");
+        std::fs::create_dir_all(&foreign_output).unwrap();
+        archive_output_without_db(&state, &foreign_output, "foreign.png", "job-0");
+        state.gallery_publication_gate = Default::default();
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+        let mut job = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.id, "job-0");
+        job.journal.take().unwrap().complete_before_dispatch();
+        state.job_registry.remove(&job.id);
+        state.queue.decrement();
+        shutdown.cancel();
+        handle.await.unwrap();
+    }
+
+    #[test]
+    fn committed_archive_lookup_fails_closed_on_ambiguous_job_outputs() {
+        let (mut state, _rx) = state(1);
+        let output_dir = state.config.try_read().unwrap().effective_output_dir();
+        for filename in ["first.png", "second.png"] {
+            archive_output_without_db(&state, &output_dir, filename, "job-0");
+        }
+        state.gallery_publication_gate = Default::default();
+
+        let _reader = state.gallery_publication_gate.blocking_read();
+        let error = crate::batch_transaction::find_completed_output_in_committed_archive(
+            &output_dir,
+            "job-0",
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("ambiguous"));
+    }
+
+    #[test]
+    fn committed_archive_lookup_fails_closed_on_malformed_authority() {
+        let (mut state, _rx) = state(1);
+        let output_dir = state.config.try_read().unwrap().effective_output_dir();
+        archive_output_without_db(&state, &output_dir, "print.png", "job-0");
+        state.gallery_publication_gate = Default::default();
+        std::fs::write(
+            output_dir
+                .join(crate::batch_transaction::TRANSACTION_DIR)
+                .join(crate::gallery_authority::authority_dir_name())
+                .join("generation.json"),
+            b"{",
+        )
+        .unwrap();
+
+        let _reader = state.gallery_publication_gate.blocking_read();
+        assert!(
+            crate::batch_transaction::find_completed_output_in_committed_archive(
+                &output_dir,
+                "job-0",
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]

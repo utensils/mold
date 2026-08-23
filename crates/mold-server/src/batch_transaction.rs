@@ -5565,6 +5565,36 @@ pub(crate) fn load_committed_archive_index(
     )
 }
 
+/// Recover one durable singleton's exact result from committed gallery
+/// authority when the process died after file/archive publication but before
+/// the best-effort `generations` upsert. The caller supplies the queue row's
+/// owner-scoped output directory and must hold the gallery reader gate.
+pub(crate) fn find_completed_output_in_committed_archive(
+    output_dir: &Path,
+    job_id: &str,
+) -> anyhow::Result<Option<mold_db::generation_queue::CompletedGenerationOutput>> {
+    // Do not use the gate's in-memory cache here: the feeder is deliberately
+    // allowed to inspect the exact output_dir retained by an older queue row,
+    // which need not be the server's currently configured gallery.
+    let index = load_committed_archive_index(output_dir)?;
+    let mut filenames = Vec::new();
+    for (filename, entry) in &index.entries {
+        if entry.record.metadata.job_id.as_deref() != Some(job_id) {
+            continue;
+        }
+        ensure!(
+            !index.quarantined_names.contains(filename),
+            "committed gallery output for queue job {job_id} is quarantined: {filename}"
+        );
+        ensure!(
+            entry.record.filename == *filename,
+            "committed gallery output filename disagrees with its archive key: {filename}"
+        );
+        filenames.push(filename.clone());
+    }
+    mold_db::generation_queue::resolve_completed_output_filenames(job_id, filenames)
+}
+
 /// Persist one ordinary server publication into the same committed authority
 /// domain used by atomic batches. The public file must already be fsynced and
 /// remain hidden behind the gallery writer until this function succeeds.
