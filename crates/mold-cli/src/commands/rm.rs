@@ -338,8 +338,9 @@ mod tests {
         // Run the orphan removal logic on the scoped cache dir
         let cfg = Config::default();
         let hf_index = HfCacheIndex::build(&cfg);
+        let mut removed = Vec::new();
         let (count, bytes) =
-            remove_orphaned_files_recursive(&t5_gguf_dir, &referenced_set, &hf_index);
+            remove_orphaned_files_recursive(&t5_gguf_dir, &referenced_set, &hf_index, &mut removed);
         assert_eq!(count, 1, "should delete exactly 1 orphaned file");
         assert_eq!(bytes, 21, "should report correct bytes freed"); // b"orphaned encoder data" = 21 bytes
 
@@ -361,7 +362,7 @@ mod tests {
         let referenced: HashSet<String> = HashSet::new();
         let cfg = Config::default();
         let hf_index = HfCacheIndex::build(&cfg);
-        remove_orphaned_files_recursive(&shared, &referenced, &hf_index);
+        remove_orphaned_files_recursive(&shared, &referenced, &hf_index, &mut Vec::new());
         remove_empty_dirs_recursive(&shared);
 
         assert!(
@@ -387,7 +388,7 @@ mod tests {
         let referenced: HashSet<String> = HashSet::new();
         let cfg = Config::default();
         let hf_index = HfCacheIndex::build(&cfg);
-        remove_orphaned_files_recursive(&shared, &referenced, &hf_index);
+        remove_orphaned_files_recursive(&shared, &referenced, &hf_index, &mut Vec::new());
         remove_empty_dirs_recursive(&shared);
         let _ = std::fs::remove_dir(&shared);
 
@@ -420,7 +421,9 @@ mod tests {
         let referenced: HashSet<String> = HashSet::new();
         let cfg = Config::default();
         let hf_index = HfCacheIndex::build(&cfg);
-        let (count, bytes) = remove_orphaned_files_recursive(&shared, &referenced, &hf_index);
+        let mut removed = Vec::new();
+        let (count, bytes) =
+            remove_orphaned_files_recursive(&shared, &referenced, &hf_index, &mut removed);
         assert_eq!(count, 2, "should delete both orphaned files");
         assert_eq!(bytes, 16, "should report correct total bytes"); // "t5 data"(7) + "qwen data"(9)
         remove_empty_dirs_recursive(&shared);
@@ -459,7 +462,9 @@ mod tests {
 
         let cfg = Config::default();
         let hf_index = HfCacheIndex::build(&cfg);
-        let (count, bytes) = remove_orphaned_files_recursive(&shared, &referenced, &hf_index);
+        let mut removed = Vec::new();
+        let (count, bytes) =
+            remove_orphaned_files_recursive(&shared, &referenced, &hf_index, &mut removed);
         assert_eq!(count, 0, "no files should be deleted");
         assert_eq!(bytes, 0, "no bytes should be freed");
         remove_empty_dirs_recursive(&shared);
@@ -642,7 +647,9 @@ mod tests {
 
         let referenced: HashSet<String> = HashSet::new();
         let hf_index = HfCacheIndex::build(&cfg);
-        let (count, _bytes) = remove_orphaned_files_recursive(&shared_flux, &referenced, &hf_index);
+        let mut removed = Vec::new();
+        let (count, _bytes) =
+            remove_orphaned_files_recursive(&shared_flux, &referenced, &hf_index, &mut removed);
 
         assert_eq!(count, 1, "should count the orphaned shared file once");
         assert!(!clean_path.exists(), "clean shared path should be removed");
@@ -650,6 +657,19 @@ mod tests {
         assert!(
             !snapshot_path.exists(),
             "snapshot symlink should be removed alongside the blob"
+        );
+
+        // The reported list is what the caller prints. It must name every
+        // path that actually disappeared, not just the shared one — an
+        // hf-cache-backed orphan unlinks its blob and snapshot links too.
+        let reported: HashSet<std::path::PathBuf> = removed.iter().cloned().collect();
+        let vanished: HashSet<std::path::PathBuf> =
+            [clean_path.clone(), blob.clone(), snapshot_path.clone()]
+                .into_iter()
+                .collect();
+        assert_eq!(
+            reported, vanished,
+            "the reported paths must equal the paths that were unlinked"
         );
 
         std::env::remove_var("MOLD_MODELS_DIR");
@@ -857,6 +877,200 @@ mod tests {
             plan.shared_files
         );
         assert!(!plan.unique_files.is_empty());
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Materialize every file of `model`'s manifest under `root` with its
+    /// `.sha256-verified` marker, so the model reads as a complete
+    /// manifest-only install with no `[models]` config entry — the shape the
+    /// H3 and LTX-2.3 checkpoints are installed in.
+    fn install_manifest_model(
+        root: &std::path::Path,
+        model: &str,
+    ) -> Vec<(std::path::PathBuf, mold_core::manifest::ModelComponent)> {
+        let manifest = mold_core::manifest::find_manifest(model)
+            .unwrap_or_else(|| panic!("no manifest for {model}"));
+        manifest
+            .files
+            .iter()
+            .map(|file| {
+                let path = root.join(mold_core::manifest::storage_path(manifest, file));
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, b"weights").unwrap();
+                mold_core::download::write_sha256_marker(&path, "deadbeef").unwrap();
+                (path, file.component)
+            })
+            .collect()
+    }
+
+    /// The post-removal sweep must never delete a file an installed sibling
+    /// still owns. `minimax-h3-fl2va:comfy-pruned-int8` and its Turbo tag
+    /// share the whole non-transformer graph, and several of those files —
+    /// the audio VAE and the task / processor / scheduler / architecture
+    /// configs — have no `ModelConfig` field at all, so the config projection
+    /// ownership used to be read from could not name them and the sweep read
+    /// them as orphans while the base install still needed them.
+    #[test]
+    fn sweep_keeps_every_shared_file_an_installed_h3_sibling_owns() {
+        use crate::test_support::ENV_LOCK;
+        use mold_core::manifest::ModelComponent;
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = make_tmp_dir("h3-sweep");
+
+        let base = mold_core::minimax_h3::FL2VA_COMFY;
+        let tier = &mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS[0];
+        let base_files = install_manifest_model(&tmp, base);
+        install_manifest_model(&tmp, tier.model);
+
+        // The roles a `ModelConfig` has no slot for must actually be
+        // exercised, or this test would pass for the wrong reason.
+        for component in [
+            ModelComponent::AudioVae,
+            ModelComponent::TaskConfig,
+            ModelComponent::Processor,
+            ModelComponent::VideoScheduler,
+            ModelComponent::AudioScheduler,
+            ModelComponent::ModelConfig,
+        ] {
+            assert!(
+                base_files.iter().any(|(_, role)| *role == component),
+                "the H3 manifest must carry a {component:?} file"
+            );
+        }
+
+        std::env::set_var("MOLD_MODELS_DIR", &tmp);
+        let mut config = Config::default();
+        config.models_dir = tmp.to_string_lossy().into_owned();
+        assert!(config.manifest_model_is_downloaded(base));
+        assert!(config.manifest_model_is_downloaded(tier.model));
+
+        let plan = mold_core::removal::plan_removal(&config, tier.model);
+        mold_core::removal::execute_removal(&config, &plan);
+        clean_orphaned_shared_files(&config);
+
+        for (path, role) in &base_files {
+            assert!(
+                path.exists(),
+                "the sweep deleted the base install's {role:?} at {}",
+                path.display()
+            );
+        }
+        assert!(
+            config.manifest_model_is_downloaded(base),
+            "the base must still read as installed after the sweep"
+        );
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// LTX-2.3 ships two `SpatialUpscaler` weights (x2 and x1.5) and
+    /// `ModelPaths` has one `spatial_upscaler` slot, so the config projection
+    /// named only the first of them. The 1.09 GB x1.5 upscaler was therefore
+    /// unowned by the very checkpoints that require it, and the sweep deleted
+    /// it out from under both installed LTX-2.3 models.
+    #[test]
+    fn sweep_keeps_every_shared_file_an_installed_ltx2_3_checkpoint_owns() {
+        use crate::test_support::ENV_LOCK;
+        use mold_core::manifest::ModelComponent;
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = make_tmp_dir("ltx23-sweep");
+
+        let kept = "ltx-2.3-22b-dev:fp8";
+        let removed = "ltx-2.3-22b-distilled:fp8";
+        let kept_files = install_manifest_model(&tmp, kept);
+        install_manifest_model(&tmp, removed);
+
+        let upscalers: Vec<&std::path::PathBuf> = kept_files
+            .iter()
+            .filter(|(_, role)| *role == ModelComponent::SpatialUpscaler)
+            .map(|(path, _)| path)
+            .collect();
+        assert_eq!(
+            upscalers.len(),
+            2,
+            "LTX-2.3 must exercise two spatial upscalers: {upscalers:?}"
+        );
+
+        std::env::set_var("MOLD_MODELS_DIR", &tmp);
+        let mut config = Config::default();
+        config.models_dir = tmp.to_string_lossy().into_owned();
+        assert!(config.manifest_model_is_downloaded(kept));
+        assert!(config.manifest_model_is_downloaded(removed));
+
+        let plan = mold_core::removal::plan_removal(&config, removed);
+        mold_core::removal::execute_removal(&config, &plan);
+        clean_orphaned_shared_files(&config);
+
+        for path in &upscalers {
+            assert!(
+                path.exists(),
+                "the sweep deleted a spatial upscaler the kept checkpoint owns: {}",
+                path.display()
+            );
+        }
+        for (path, role) in &kept_files {
+            assert!(
+                path.exists(),
+                "the sweep deleted the kept checkpoint's {role:?} at {}",
+                path.display()
+            );
+        }
+        assert!(
+            config.manifest_model_is_downloaded(kept),
+            "the kept checkpoint must still read as installed after the sweep"
+        );
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A half-installed model must not have its shared dependencies swept out
+    /// from under a repair. `mold pull` re-fetches only what is missing, and
+    /// deleting the companions it already has turns a resumable download into
+    /// a much larger one.
+    #[test]
+    fn sweep_keeps_the_shared_dependencies_of_a_partially_installed_model() {
+        use crate::test_support::ENV_LOCK;
+        use mold_core::manifest::ModelComponent;
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = make_tmp_dir("partial-install");
+
+        let model = mold_core::minimax_h3::FL2VA_COMFY;
+        let files = install_manifest_model(&tmp, model);
+
+        std::env::set_var("MOLD_MODELS_DIR", &tmp);
+        let mut config = Config::default();
+        config.models_dir = tmp.to_string_lossy().into_owned();
+        assert!(config.manifest_model_is_downloaded(model));
+
+        // Interrupt the install: drop the transformer, which lives in the
+        // model's own directory, so the model reads as not downloaded.
+        let transformer = files
+            .iter()
+            .find(|(_, role)| *role == ModelComponent::Transformer)
+            .map(|(path, _)| path.clone())
+            .expect("the compact H3 manifest pins a transformer");
+        std::fs::remove_file(&transformer).unwrap();
+        assert!(!config.manifest_model_is_downloaded(model));
+
+        clean_orphaned_shared_files(&config);
+
+        for (path, role) in &files {
+            if *path == transformer {
+                continue;
+            }
+            assert!(
+                path.exists(),
+                "the sweep deleted the {role:?} a repair would have reused: {}",
+                path.display()
+            );
+        }
 
         std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(&tmp);

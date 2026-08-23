@@ -17,22 +17,27 @@ use crate::ui::format_bytes;
 
 pub const STALE_PULL_MAX_AGE: Duration = Duration::from_secs(6 * 60 * 60);
 
-/// Collect all file paths still referenced by remaining models.
+/// Collect every file path still referenced by remaining models — the
+/// sweep's keep set.
 ///
-/// This includes:
-/// - explicit config entries
-/// - manifest-discovered local installs
-/// - manifest paths for models with an active `.pulling` marker
+/// Ownership itself comes from `mold_core::removal::model_owned_paths`, the
+/// single authority (see its doc comment for why a `[models]` config entry is
+/// not one). Three things are deliberately kept beyond that:
 ///
-/// The latter two matter because manifest-backed models can exist without a
-/// config entry, and incomplete pulls should prevent us from racing cleanup
-/// against files that are still being written.
+/// - models with an active `.pulling` marker, so cleanup never races files
+///   that are still being written;
+/// - models that are only PARTIALLY on disk
+///   (`removal::model_install_is_present`), so `mold pull` can repair one
+///   instead of finding its shared dependencies swept away;
+/// - the `.sha256-verified` sidecar of every kept file, which is part of that
+///   file's install — deleting it downgrades a positively attested file to
+///   the size heuristic.
 pub fn collect_referenced_paths(config: &Config) -> HashSet<String> {
-    let mut referenced: HashSet<String> = config
-        .models
-        .values()
-        .flat_map(|mc| mc.all_file_paths())
-        .collect();
+    let mut referenced: HashSet<String> = HashSet::new();
+
+    for name in config.models.keys() {
+        referenced.extend(mold_core::removal::model_owned_paths(config, name));
+    }
 
     let models_dir = config.resolved_models_dir();
 
@@ -49,17 +54,23 @@ pub fn collect_referenced_paths(config: &Config) -> HashSet<String> {
             continue;
         }
 
-        if config.manifest_model_is_downloaded(&manifest.name) {
-            // `model_owned_paths` (not the config entry) — a files-only bundle
-            // such as PuLID's identity assets has no `[models]` entry, so its
-            // files would look orphaned and `mold clean` would delete an
-            // installed bundle.
+        if mold_core::removal::model_install_is_present(config, &manifest.name) {
             referenced.extend(mold_core::removal::model_owned_paths(
                 config,
                 &manifest.name,
             ));
         }
     }
+
+    let markers: Vec<String> = referenced
+        .iter()
+        .map(|path| {
+            mold_core::download::sha256_marker_path(Path::new(path))
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
+    referenced.extend(markers);
 
     referenced
 }
@@ -320,10 +331,16 @@ pub fn reclaimed_disk_bytes(path: &Path, counted_inodes: &mut HashSet<(u64, u64)
 
 /// Recursively remove files under `dir` that are not in `referenced`.
 /// Returns `(files_deleted, bytes_freed)`.
+/// `removed` collects every path actually unlinked — the shared clean path
+/// AND, for an orphan backed by the managed hf-hub cache, its blob and each
+/// snapshot symlink — so the caller can name each one. A destructive
+/// operation must show what it deleted, not just how many files it counted,
+/// and one counted orphan can be several unlinks.
 pub fn remove_orphaned_files_recursive(
     dir: &Path,
     referenced: &HashSet<String>,
     hf_index: &HfCacheIndex,
+    removed: &mut Vec<PathBuf>,
 ) -> (u64, u64) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -334,7 +351,7 @@ pub fn remove_orphaned_files_recursive(
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_symlink() && path.is_dir() {
-            let (c, b) = remove_orphaned_files_recursive(&path, referenced, hf_index);
+            let (c, b) = remove_orphaned_files_recursive(&path, referenced, hf_index, removed);
             count += c;
             bytes += b;
         } else if path.is_file() {
@@ -346,12 +363,17 @@ pub fn remove_orphaned_files_recursive(
                 let mut counted_inodes = HashSet::new();
 
                 for target in &cache_targets {
-                    if target.exists() {
+                    // `symlink_metadata`, not `exists`: the blob is unlinked
+                    // before its snapshot links, and `exists` follows a
+                    // symlink — so the links read as absent and were left
+                    // dangling instead of removed (and so unreportable).
+                    if target.symlink_metadata().is_ok() {
                         let size = reclaimed_disk_bytes(target, &mut counted_inodes);
                         match std::fs::remove_file(target) {
                             Ok(()) => {
                                 removed_any = true;
                                 removed_bytes += size;
+                                removed.push(target.clone());
                             }
                             Err(e) => {
                                 eprintln!(
@@ -371,6 +393,7 @@ pub fn remove_orphaned_files_recursive(
                         Ok(()) => {
                             removed_any = true;
                             removed_bytes += clean_size;
+                            removed.push(path.clone());
                         }
                         Err(e) => {
                             eprintln!(
@@ -446,9 +469,18 @@ pub fn clean_orphaned_shared_files(config: &Config) -> (u64, u64) {
     let referenced = collect_referenced_paths(config);
     let hf_index = HfCacheIndex::build(config);
 
-    let (count, bytes) = remove_orphaned_files_recursive(&shared_dir, &referenced, &hf_index);
+    let mut removed = Vec::new();
+    let (count, bytes) =
+        remove_orphaned_files_recursive(&shared_dir, &referenced, &hf_index, &mut removed);
 
     if count > 0 {
+        // Name every path. "cleaned up 109 orphaned shared files" is not an
+        // account a user can check a destructive operation against. The list
+        // is longer than the count on purpose: one orphan backed by the
+        // managed hf-hub cache unlinks its blob and snapshot links too.
+        for path in &removed {
+            eprintln!("{} removed {}", theme::prefix_note(), path.display());
+        }
         eprintln!(
             "{} cleaned up {} orphaned shared file{} (freed {})",
             theme::prefix_note(),

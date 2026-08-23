@@ -30,22 +30,20 @@ pub fn file_size(path: &str) -> u64 {
 /// Build a map of file_path -> list of model names that reference it.
 pub fn build_ref_counts(config: &Config) -> HashMap<String, Vec<String>> {
     let mut refs: HashMap<String, Vec<String>> = HashMap::new();
+    let record = |name: &str, refs: &mut HashMap<String, Vec<String>>| {
+        // Always [`model_owned_paths`], never the config entry alone: the
+        // config entry is a `ModelPaths` projection and cannot name half of
+        // what a model owns. See that function's doc comment.
+        for path in model_owned_paths(config, name) {
+            refs.entry(path).or_default().push(name.to_string());
+        }
+    };
+
     for (model_name, model_config) in &config.models {
-        let paths = model_config.all_file_paths();
-        // An owner must be complete on disk. A configured model missing any
-        // of its own files — an H3 Turbo tag whose adapter was deleted, a
-        // half-repaired install — is not runnable and must not hold shared
-        // components hostage when a sibling is removed. The model BEING
-        // removed is unaffected: `plan_removal` iterates its paths directly.
-        if paths
-            .iter()
-            .any(|path| !std::path::Path::new(path).exists())
-        {
+        if !configured_owner_is_complete(config, model_name, model_config) {
             continue;
         }
-        for path in paths {
-            refs.entry(path).or_default().push(model_name.clone());
-        }
+        record(model_name, &mut refs);
     }
     // Include manifest-backed downloaded models that have no config entry.
     // Without this, shared components (VAE, encoders) referenced by another
@@ -55,23 +53,105 @@ pub fn build_ref_counts(config: &Config) -> HashMap<String, Vec<String>> {
             continue; // already counted above
         }
         if config.manifest_model_is_downloaded(&manifest.name) {
-            for path in model_owned_paths(config, &manifest.name) {
-                refs.entry(path).or_default().push(manifest.name.clone());
-            }
+            record(&manifest.name, &mut refs);
         }
     }
     refs
 }
 
-/// Every path a model owns on disk.
+/// Whether a model with a `[models]` config entry is a complete enough
+/// install to OWN shared components — i.e. to keep them alive when a sibling
+/// is removed.
 ///
-/// Normally that is its `[models]` config entry's file list. A files-only
-/// bundle (PuLID's identity assets, the hidden LTX-2 adapters) never gets a
-/// config entry and never resolves to a `ModelPaths`, so its config list is
-/// empty and removal would delete nothing — enumerate its manifest storage
-/// paths instead. The two are unioned rather than switched between: a utility
-/// model has both a resolved config list and manifest files, and each can name
-/// a path the other does not.
+/// An owner must be runnable. A configured model missing any of its own files
+/// — an H3 Turbo tag whose adapter was deleted, a half-repaired install — is
+/// not, and must not hold shared components hostage. The model BEING removed
+/// is unaffected: `plan_removal` iterates its paths directly.
+///
+/// The question is asked of the MANIFEST, not of the config entry's own list.
+/// That list is a `ModelPaths` projection with one field per component role,
+/// so an H3 install whose `AudioVae` was deleted, or an LTX-2.3 one missing
+/// its second `SpatialUpscaler`, still looks complete through it — and then
+/// goes on reporting the rest of the shared graph "in use" with nothing able
+/// to use it, stranding those bytes for good.
+///
+/// The manifest half is asked only of models with manifest files ON DISK. A
+/// config entry that pins every component somewhere else (a hand-written
+/// `[models]` table, a synthesized catalog entry) installed by some other
+/// route, and judging it against storage paths it was never going to have
+/// would disqualify a complete owner — the one mistake in this file that
+/// deletes data rather than merely leaking it.
+///
+/// Manifest-backed models with no config entry are not asked this: they go
+/// through `Config::manifest_model_is_downloaded`, which is strictly
+/// stronger (marker-or-size acceptance over every manifest file).
+fn configured_owner_is_complete(
+    config: &Config,
+    canonical: &str,
+    model_config: &crate::ModelConfig,
+) -> bool {
+    if model_config
+        .all_file_paths()
+        .iter()
+        .any(|path| !std::path::Path::new(path).exists())
+    {
+        return false;
+    }
+    let Some(manifest) = crate::manifest::find_manifest(canonical) else {
+        return true;
+    };
+    let models_dir = config.resolved_models_dir();
+    let storage: Vec<PathBuf> = manifest
+        .files
+        .iter()
+        .map(|file| models_dir.join(crate::manifest::storage_path(manifest, file)))
+        .collect();
+    if storage.iter().all(|path| !path.exists()) {
+        return true; // nothing of this manifest lives here; judge by config alone
+    }
+    storage.iter().all(|path| path.exists())
+}
+
+/// Every on-disk path a model owns — the single ownership authority for
+/// ref-counting, removal planning, and the orphaned-shared-file sweep.
+///
+/// **The manifest is the authority, not the `[models]` config entry.** A
+/// config entry is a [`crate::ModelPaths`] projection: it has one field per
+/// component role, so it can name neither a role `ModelPaths` has no field
+/// for — `AudioVae`, `Processor`, `VideoScheduler`, `AudioScheduler`,
+/// `ModelConfig`, `TaskConfig`, the identity assets — nor the second file of
+/// a role a manifest declares twice (LTX-2.3 ships an x2 and an x1.5
+/// `SpatialUpscaler`). Every path that projection dropped was invisible to
+/// ref-counting, so `mold rm`'s post-removal sweep read files that installed
+/// models still needed as orphans and deleted them: MiniMax H3's audio VAE
+/// and runtime support configs, and LTX-2.3's 1.09 GB x1.5 upscaler.
+///
+/// The union is taken over three sources and never switched between them,
+/// because each names paths the others do not:
+///
+/// 1. `storage_path` for every file of the model's manifest — the complete,
+///    role-agnostic set, and the reason this function is the authority.
+/// 2. The `[models]` config entry's file list — user-pinned component paths
+///    outside the models dir, and legacy storage locations a previous layout
+///    resolved to. A files-only bundle has no config entry at all, so this
+///    half is empty for one.
+/// 3. Artifacts a bundle derives rather than downloads. PuLID converts the
+///    EVA02-CLIP `.pt` and the BiSeNet parser into safetensors on first use,
+///    and nothing that walks the manifest can see the result — so a removal
+///    that enumerated manifest files alone would leave 660 MB behind. Both
+///    PuLID bundles name them: they are converted from the SHARED extraction
+///    inputs, so ref-counting keeps the surviving bundle's copy.
+///
+/// The rule when a path's ownership is uncertain is to NAME it: a file
+/// wrongly kept costs disk, a file wrongly deleted costs a re-download at
+/// best and breaks a running install at worst.
+///
+/// The config entry's paths are listed whether or not they exist — a declared
+/// component that has gone missing is worth reporting as `mold rm` already
+/// does. The manifest and derived additions are listed only when they are on
+/// disk: they are the model's *possible* storage locations, and a manifest
+/// file that was never downloaded is nothing to delete, nothing to keep, and
+/// only noise in a removal plan.
 pub fn model_owned_paths(config: &Config, canonical: &str) -> Vec<String> {
     let model_config = match config.models.get(canonical) {
         Some(cfg) => cfg.clone(),
@@ -80,35 +160,60 @@ pub fn model_owned_paths(config: &Config, canonical: &str) -> Vec<String> {
     let mut paths = model_config.all_file_paths();
 
     if let Some(manifest) = crate::manifest::find_manifest(canonical) {
-        if manifest.is_files_only_bundle() {
-            let models_dir = config.resolved_models_dir();
-            let manifest_files = manifest
-                .files
-                .iter()
-                .map(|file| models_dir.join(crate::manifest::storage_path(manifest, file)));
-            // A bundle can own artifacts it never downloaded. PuLID converts
-            // the EVA02-CLIP `.pt` into safetensors on first use, and nothing
-            // that walks the manifest can see the result — so a removal that
-            // enumerated manifest files alone would leave 609 MB of derived
-            // weights and their sidecar behind.
-            // Both PuLID bundles own the derived artifacts: they are converted
-            // from the SHARED extraction inputs, so each names them and the
-            // ref-counting above keeps the surviving bundle's copy.
-            let derived: Vec<std::path::PathBuf> =
-                if manifest.family == crate::manifest::PULID_FAMILY {
-                    crate::pulid_assets::derived_pulid_paths(config)
-                } else {
-                    Vec::new()
-                };
-            for owned in manifest_files.chain(derived) {
-                let path = owned.to_string_lossy().to_string();
-                if !paths.contains(&path) {
-                    paths.push(path);
-                }
+        let models_dir = config.resolved_models_dir();
+        let manifest_files = manifest
+            .files
+            .iter()
+            .map(|file| models_dir.join(crate::manifest::storage_path(manifest, file)));
+        let derived: Vec<PathBuf> = if manifest.family == crate::manifest::PULID_FAMILY {
+            crate::pulid_assets::derived_pulid_paths(config)
+        } else {
+            Vec::new()
+        };
+        for owned in manifest_files.chain(derived) {
+            if !owned.exists() {
+                continue;
+            }
+            let path = owned.to_string_lossy().to_string();
+            if !paths.contains(&path) {
+                paths.push(path);
             }
         }
     }
     paths
+}
+
+/// True when `canonical` has model-specific evidence on disk: any file that
+/// storage routes to the model's own directory rather than a shared family
+/// bucket, or that directory itself.
+///
+/// Deliberately laxer than [`is_model_installed`], and used only by the
+/// orphaned-file sweep's keep set. A half-installed model is repaired by
+/// `mold pull`, and sweeping its shared dependencies out from under that
+/// repair turns a resumable download into a much larger one. Ref-counting
+/// keeps the stricter completeness rule, because there a dropped owner only
+/// costs the shared bytes of a model that is already not runnable.
+pub fn model_install_is_present(config: &Config, canonical: &str) -> bool {
+    if is_model_installed(config, canonical) {
+        return true;
+    }
+    let Some(manifest) = crate::manifest::find_manifest(canonical) else {
+        return false;
+    };
+    let models_dir = config.resolved_models_dir();
+    manifest.files.iter().any(|file| {
+        let relative = crate::manifest::storage_path(manifest, file);
+        // A shared-bucket file proves nothing about THIS model: a sibling
+        // sharing the graph put it there.
+        if relative.starts_with("shared") {
+            return false;
+        }
+        let path = models_dir.join(&relative);
+        path.exists()
+            || path
+                .parent()
+                .is_some_and(|dir| dir != models_dir && dir.is_dir())
+    })
 }
 
 /// True when `canonical` is removable: it has an explicit config entry or
@@ -291,6 +396,9 @@ pub fn execute_removal(config: &Config, plan: &RemovalPlan) -> RemovalOutcome {
                     .push(format!("failed to delete {path}: {e}"));
             }
         }
+        // Unconditionally, including on the already-deleted arm: a marker
+        // stranded by an earlier removal is exactly the litter this clears.
+        remove_verification_marker(path, &mut outcome);
     }
 
     // Delete hf-cache blobs that were hardlinked to the clean paths.
@@ -317,14 +425,57 @@ pub fn execute_removal(config: &Config, plan: &RemovalPlan) -> RemovalOutcome {
         outcome.freed_bytes = plan.total_unique_bytes();
     }
 
-    // Clean up empty model-specific directories left behind.
+    // Clean up empty model-specific directories left behind. The transformer
+    // can be nested inside the model dir (H3's
+    // `<model>/diffusion_models/<file>`), so walk up rather than unlinking one
+    // parent — and stop at the models dir, which is never ours to remove.
     if let Some(ref t) = plan.transformer {
-        if let Some(parent) = std::path::Path::new(t).parent() {
-            let _ = std::fs::remove_dir(parent); // only succeeds if empty
-        }
+        remove_empty_dirs_upward(
+            std::path::Path::new(t).parent(),
+            &config.resolved_models_dir(),
+        );
     }
 
     outcome
+}
+
+/// Delete `<path>.sha256-verified`.
+///
+/// The marker attests that THIS file was written completely and, when the
+/// manifest declared a hash, matched it (`mold_core::download`). It is not an
+/// artifact a user installed, so it never appears in
+/// [`RemovalOutcome::removed`] — but it must never outlive its file either:
+/// `Config::manifest_files_exist` accepts marker presence as proof of a
+/// complete install, so a stranded marker would attest to whatever is next
+/// written under that exact name. An absent marker is not a problem: only a
+/// failed unlink is worth a warning.
+fn remove_verification_marker(path: &str, outcome: &mut RemovalOutcome) {
+    let marker = crate::download::sha256_marker_path(std::path::Path::new(path));
+    match std::fs::remove_file(&marker) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => outcome.warnings.push(format!(
+            "failed to delete verification marker {}: {e}",
+            marker.display()
+        )),
+    }
+}
+
+/// Remove `dir` and each of its parents while they are empty, stopping below
+/// `stop_at` (exclusive) — the models dir belongs to mold, not to the model
+/// being removed. `remove_dir` only succeeds on an empty directory, so this
+/// can never take a directory that still holds something.
+fn remove_empty_dirs_upward(dir: Option<&std::path::Path>, stop_at: &std::path::Path) {
+    let mut current = dir;
+    while let Some(path) = current {
+        if path == stop_at || !path.starts_with(stop_at) {
+            return;
+        }
+        if std::fs::remove_dir(path).is_err() {
+            return;
+        }
+        current = path.parent();
+    }
 }
 
 #[cfg(test)]
@@ -585,5 +736,188 @@ mod tests {
             "got: {:?}",
             outcome.warnings
         );
+    }
+
+    /// Materialize every file of `model`'s manifest under `root`, returning
+    /// the path of the one file carrying `probe`.
+    fn install_manifest(
+        root: &std::path::Path,
+        model: &str,
+        probe: crate::manifest::ModelComponent,
+    ) -> (Vec<PathBuf>, PathBuf) {
+        let manifest = crate::manifest::find_manifest(model).unwrap();
+        let mut probed = None;
+        let paths: Vec<PathBuf> = manifest
+            .files
+            .iter()
+            .map(|file| {
+                let path = root.join(crate::manifest::storage_path(manifest, file));
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, b"weights").unwrap();
+                if file.component == probe {
+                    probed = Some(path.clone());
+                }
+                path
+            })
+            .collect();
+        (
+            paths,
+            probed.expect("the manifest must carry the probed role"),
+        )
+    }
+
+    /// Completeness must be asked of the MANIFEST, not of the `ModelConfig`
+    /// projection. An H3 install whose audio VAE has been deleted is not
+    /// runnable, but every path its config entry can name is still present —
+    /// so the projection reports it complete and it goes on holding the rest
+    /// of the shared graph "in use" with nothing able to use it.
+    #[test]
+    fn a_configured_model_missing_an_unprojected_component_is_not_an_owner() {
+        use crate::manifest::ModelComponent;
+        use crate::ModelConfig;
+
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tmp_dir("unprojected");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("MOLD_MODELS_DIR", &tmp);
+
+        let base = crate::minimax_h3::FL2VA_COMFY;
+        let tier = &crate::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS[0];
+        let (_, audio_vae) = install_manifest(&tmp, base, ModelComponent::AudioVae);
+        let (_, adapter) = install_manifest(&tmp, tier.model, ModelComponent::DistilledLora);
+        let (_, video_vae) = install_manifest(&tmp, base, ModelComponent::Vae);
+        let (_, transformer) = install_manifest(&tmp, base, ModelComponent::Transformer);
+
+        let mut config = Config {
+            models_dir: tmp.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        config.models.insert(
+            base.to_string(),
+            ModelConfig {
+                transformer: Some(transformer.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        );
+        config.models.insert(
+            tier.model.to_string(),
+            ModelConfig {
+                transformer: Some(transformer.to_string_lossy().into_owned()),
+                distilled_lora: Some(adapter.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        );
+
+        // A complete base owns the shared graph and keeps it out of the
+        // Turbo tag's removal.
+        let video_vae_key = video_vae.to_string_lossy().into_owned();
+        let plan = plan_removal(&config, tier.model);
+        assert!(
+            plan.shared_files.iter().any(
+                |(path, used_by)| path == &video_vae_key && used_by.contains(&base.to_string())
+            ),
+            "a complete base must own the video VAE: {:?}",
+            plan.shared_files
+        );
+
+        // Delete a component no `ModelConfig` field can name. Every config
+        // path still exists, so only a manifest-derived question notices.
+        std::fs::remove_file(&audio_vae).unwrap();
+        assert!(
+            config.models[base]
+                .all_file_paths()
+                .iter()
+                .all(|path| std::path::Path::new(path).exists()),
+            "the projection must still look complete, or this proves nothing"
+        );
+
+        let refs = build_ref_counts(&config);
+        assert!(
+            !refs
+                .get(&video_vae_key)
+                .is_some_and(|owners| owners.contains(&base.to_string())),
+            "a base that cannot run must not own the video VAE: {:?}",
+            refs.get(&video_vae_key)
+        );
+        let plan = plan_removal(&config, tier.model);
+        assert!(
+            plan.shared_files.is_empty(),
+            "nothing runnable still uses the stack: {:?}",
+            plan.shared_files
+        );
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A file's `.sha256-verified` sidecar is an attestation ABOUT that file,
+    /// so it must not outlive it — and once both are gone the model's own
+    /// directory must go too, as the stale-pull-marker path already does.
+    ///
+    /// Observed live: after `mold rm minimax-h3-fl2va:comfy-pruned-nvfp4` the
+    /// model dir still held a bare
+    /// `MiniMax_H3_FL2VA_pruned_nvfp4.safetensors.sha256-verified`. Harmless
+    /// while completeness tests the weight's existence first, but a stranded
+    /// marker reports "verified" for whatever is next written under that
+    /// exact name.
+    #[test]
+    fn removal_takes_each_files_verification_marker_and_the_empty_model_dir() {
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tmp_dir("markers");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("MOLD_MODELS_DIR", &tmp);
+
+        // H3's transformer is nested (`<model>/diffusion_models/…`), so the
+        // directory cleanup has to walk up rather than unlink one parent.
+        let model = crate::minimax_h3::FL2VA_COMFY;
+        let manifest = crate::manifest::find_manifest(model).unwrap();
+        let installed: Vec<PathBuf> = manifest
+            .files
+            .iter()
+            .map(|file| {
+                let path = tmp.join(crate::manifest::storage_path(manifest, file));
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, b"weights").unwrap();
+                crate::download::write_sha256_marker(&path, "deadbeef").unwrap();
+                path
+            })
+            .collect();
+        let model_dir = tmp.join(model.replace(':', "-"));
+        assert!(model_dir.is_dir(), "{}", model_dir.display());
+
+        let config = Config {
+            models_dir: tmp.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let plan = plan_removal(&config, model);
+        assert!(
+            plan.shared_files.is_empty(),
+            "nothing else is installed: {:?}",
+            plan.shared_files
+        );
+        let outcome = execute_removal(&config, &plan);
+
+        for path in &installed {
+            assert!(!path.exists(), "{} survived removal", path.display());
+            let marker = crate::download::sha256_marker_path(path);
+            assert!(
+                !marker.exists(),
+                "{} outlived the file it attests",
+                marker.display()
+            );
+        }
+        assert!(
+            !model_dir.exists(),
+            "the emptied model directory must be removed: {}",
+            model_dir.display()
+        );
+        assert!(outcome.warnings.is_empty(), "got: {:?}", outcome.warnings);
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
