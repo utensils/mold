@@ -354,12 +354,12 @@ require_text "flake.nix" \
 require_release_job_need "publish" "release-version"
 require_release_job_need "publish-aur" "release-native"
 require_release_job_text "release-latest" \
-  'sha256sum -- *.tar.gz *.zip *.exe *.cer > SHA256SUMS'
+  'sha256sum -- *.tar.gz *.zip *.exe *.cer *.apk > SHA256SUMS'
 require_release_job_text "release-version" \
   'sha256sum -- *.tar.gz *.dmg *.zip > SHA256SUMS'
 for checksum_job in release-native release-containers; do
   require_release_job_text "$checksum_job" \
-    'sha256sum -- *.tar.gz *.dmg *.zip *.exe *.cer > SHA256SUMS'
+    'sha256sum -- *.tar.gz *.dmg *.zip *.exe *.cer *.apk > SHA256SUMS'
 done
 if grep -Fq 'sha256sum ./*' "$repo_root/$release"; then
   fail "$release must write asset names without a ./ prefix for legacy updater compatibility"
