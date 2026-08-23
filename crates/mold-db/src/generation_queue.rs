@@ -165,13 +165,34 @@ pub fn insert(db: &MetadataDb, row: &GenerationQueueRow) -> Result<()> {
 }
 
 pub(crate) fn insert_on_conn(conn: &rusqlite::Connection, row: &GenerationQueueRow) -> Result<()> {
+    insert_on_conn_with_claim(conn, row, None)
+}
+
+/// Insert a row already owned by the live runtime that admitted it.
+///
+/// Direct HTTP generation submits the job to the in-memory scheduler itself,
+/// so the durable feeder must not claim the same row concurrently. Startup
+/// recovery clears this runtime-only token after a process death, at which
+/// point the ordinary oldest-first feeder claim can safely adopt the row.
+pub fn insert_claimed(db: &MetadataDb, row: &GenerationQueueRow, claim_token: &str) -> Result<()> {
+    if claim_token.is_empty() {
+        bail!("queue claim token must not be empty");
+    }
+    db.with_conn(|conn| insert_on_conn_with_claim(conn, row, Some(claim_token)))
+}
+
+fn insert_on_conn_with_claim(
+    conn: &rusqlite::Connection,
+    row: &GenerationQueueRow,
+    claim_token: Option<&str>,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO generation_queue (
                 id, owner_uuid, state, model, request_json, output_dir,
                 target_gpu, target_device_id, completion_payload, seed_pinned,
                 dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
-                started_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                started_at, claim_token
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             &row.id,
             &row.owner_uuid,
@@ -189,6 +210,7 @@ pub(crate) fn insert_on_conn(conn: &rusqlite::Connection, row: &GenerationQueueR
             row.created_at_ms,
             row.updated_at_ms,
             row.started_at_ms,
+            claim_token,
         ],
     )?;
     Ok(())
@@ -443,57 +465,6 @@ pub fn claim_next(
                             SELECT 1 FROM generation_queue WHERE claim_token = ?2
                        )
                      ORDER BY created_at, rowid
-                     LIMIT 1
-              )
-                AND state = 'queued'
-                AND claim_token IS NULL
-          RETURNING id, owner_uuid, state, model, request_json, output_dir,
-                    target_gpu, target_device_id, completion_payload, seed_pinned,
-                    dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
-                    started_at",
-            params![owner_uuid, claim_token, now_ms],
-            |row| {
-                Ok(QueueClaim {
-                    row: row_to_queue_row(row)?,
-                    claim_token: claim_token.to_string(),
-                })
-            },
-        )
-        .optional()
-        .map_err(Into::into)
-    })
-}
-
-/// Reserve the oldest queued row explicitly admitted to the durable feeder.
-///
-/// The batch-child relation is the ownership marker: legacy singleton HTTP
-/// endpoints journal rows too, but submit those rows directly and must never
-/// race the feeder. Ordering is global across all eligible feeder rows and
-/// keeps SQLite's `rowid` tie-break for same-millisecond admissions.
-pub fn claim_next_feeder_owned(
-    db: &MetadataDb,
-    owner_uuid: &str,
-    claim_token: &str,
-    now_ms: i64,
-) -> Result<Option<QueueClaim>> {
-    if claim_token.is_empty() {
-        bail!("queue claim token must not be empty");
-    }
-    db.with_conn(|conn| {
-        conn.query_row(
-            "UPDATE generation_queue
-                SET claim_token = ?2, updated_at = ?3
-              WHERE id = (
-                    SELECT q.id
-                      FROM generation_queue AS q
-                      JOIN generation_batch_children AS child ON child.job_id = q.id
-                     WHERE q.owner_uuid = ?1
-                       AND q.state = 'queued'
-                       AND q.claim_token IS NULL
-                       AND NOT EXISTS (
-                            SELECT 1 FROM generation_queue WHERE claim_token = ?2
-                       )
-                     ORDER BY q.created_at, q.rowid
                      LIMIT 1
               )
                 AND state = 'queued'
@@ -1138,6 +1109,29 @@ mod tests {
     }
 
     #[test]
+    fn runtime_owned_insert_is_invisible_until_startup_recovery() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_claimed(&db, &row("live-direct", "owner-a", 1), "live-token").unwrap();
+
+        assert!(
+            claim_next(&db, "owner-a", "feeder-before-restart", 10)
+                .unwrap()
+                .is_none(),
+            "a live direct submitter owns the row and the feeder must not race it"
+        );
+
+        let recovered = recover_runtime_claims(&db, "owner-a", 20).unwrap();
+        assert_eq!(recovered.claims_cleared, 1);
+        assert_eq!(recovered.running_requeued, 0);
+
+        let replay = claim_next(&db, "owner-a", "feeder-after-restart", 21)
+            .unwrap()
+            .expect("the dead runtime's direct row becomes feeder-owned after recovery");
+        assert_eq!(replay.row.id, "live-direct");
+        assert_eq!(replay.claim_token, "feeder-after-restart");
+    }
+
+    #[test]
     fn state_and_claim_cas_fences_stale_tokens() {
         let db = MetadataDb::open_in_memory().unwrap();
         insert(&db, &row("job-1", "owner-a", 1)).unwrap();
@@ -1231,54 +1225,6 @@ mod tests {
             25,
             "claiming is a one-row SQL primitive; it does not materialize or remove the backlog"
         );
-    }
-
-    #[test]
-    fn feeder_claim_skips_legacy_rows_and_preserves_global_batch_fifo() {
-        let db = MetadataDb::open_in_memory().unwrap();
-        insert(&db, &row("legacy-oldest", "owner-a", 1)).unwrap();
-
-        insert(&db, &row("batch-first", "owner-a", 1)).unwrap();
-        insert(&db, &row("batch-second", "owner-a", 1)).unwrap();
-        db.with_conn(|conn| {
-            conn.execute(
-                "INSERT INTO generation_batches
-                    (id, client_batch_id, owner_uuid, request_sha256, created_at_ms)
-                 VALUES ('batch-a', 'client-a', 'owner-a', 'sha', 1)",
-                [],
-            )?;
-            for (index, id) in ["batch-first", "batch-second"].into_iter().enumerate() {
-                conn.execute(
-                    "INSERT INTO generation_batch_children
-                        (batch_id, job_id, batch_index, state, updated_at_ms)
-                     VALUES ('batch-a', ?1, ?2, 'accepted', 1)",
-                    rusqlite::params![id, index as i64 + 1],
-                )?;
-            }
-            Ok(())
-        })
-        .unwrap();
-
-        assert_eq!(
-            claim_next_feeder_owned(&db, "owner-a", "claim-1", 10)
-                .unwrap()
-                .unwrap()
-                .row
-                .id,
-            "batch-first"
-        );
-        assert_eq!(
-            claim_next_feeder_owned(&db, "owner-a", "claim-2", 11)
-                .unwrap()
-                .unwrap()
-                .row
-                .id,
-            "batch-second"
-        );
-        assert!(claim_next_feeder_owned(&db, "owner-a", "claim-3", 12)
-            .unwrap()
-            .is_none());
-        assert!(get(&db, "legacy-oldest").unwrap().is_some());
     }
 
     #[test]

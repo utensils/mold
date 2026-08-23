@@ -636,7 +636,8 @@ impl QueueJournal {
             updated_at_ms: now,
             started_at_ms: None,
         };
-        if let Err(error) = generation_queue::insert(db, &row) {
+        let claim_token = uuid::Uuid::new_v4().to_string();
+        if let Err(error) = generation_queue::insert_claimed(db, &row, &claim_token) {
             tracing::warn!(
                 job = %admission.id,
                 error = %format!("{error:#}"),
@@ -647,7 +648,7 @@ impl QueueJournal {
         Some(QueueTicket {
             journal: Arc::clone(self),
             id: admission.id.to_string(),
-            claim_token: None,
+            claim_token: Some(claim_token),
             settled: false,
         })
     }
@@ -774,8 +775,10 @@ impl QueueJournal {
         }
     }
 
-    /// Claim exactly one oldest feeder-owned row. Payload hydration starts
-    /// only after this returns, so the deep backlog never enters memory.
+    /// Claim exactly one oldest row not owned by a live direct submitter.
+    /// Payload hydration starts only after this returns, so the deep backlog
+    /// never enters memory. Startup recovery clears tokens from the prior
+    /// runtime, making interrupted legacy rows eligible here too.
     pub(crate) fn claim_next_feeder(
         self: &Arc<Self>,
     ) -> anyhow::Result<Option<mold_db::generation_queue::QueueClaim>> {
@@ -783,7 +786,7 @@ impl QueueJournal {
             return Ok(None);
         };
         let token = uuid::Uuid::new_v4().to_string();
-        generation_queue::claim_next_feeder_owned(db, owner, &token, now_ms())
+        generation_queue::claim_next(db, owner, &token, now_ms())
     }
 
     pub(crate) fn attach_claimed(self: &Arc<Self>, id: &str, claim_token: String) -> QueueTicket {
@@ -2038,6 +2041,33 @@ mod tests {
         assert!(rows(&journal).is_empty());
     }
 
+    #[test]
+    fn direct_record_is_feeder_invisible_until_runtime_recovery() {
+        let journal = journal_with_db();
+        let request = request();
+        let ticket = journal
+            .record(admission("live-direct", &request, Path::new("/gallery")))
+            .expect("an ordinary gallery-bound generation is durable");
+
+        assert!(
+            journal.claim_next_feeder().unwrap().is_none(),
+            "the direct submitter owns this row while its runtime is alive"
+        );
+
+        let recovered = journal.recover_feeder_runtime().unwrap();
+        assert_eq!(recovered.claims_cleared, 1);
+        let replay = journal
+            .claim_next_feeder()
+            .unwrap()
+            .expect("startup recovery makes the retained direct row replayable");
+        assert_eq!(replay.row.id, "live-direct");
+
+        drop(ticket);
+        journal
+            .attach_claimed(&replay.row.id, replay.claim_token)
+            .discard();
+    }
+
     /// The core invariant. Everything the scheduler discards on the way out is
     /// retained, without a single discard site knowing about durability.
     #[test]
@@ -2080,6 +2110,7 @@ mod tests {
             .unwrap();
 
         journal.retain_all();
+        assert_eq!(ticket.claim_dispatch(), DispatchClaim::Granted);
         ticket.complete();
 
         assert!(rows(&journal).is_empty());
@@ -2212,19 +2243,28 @@ mod tests {
             feeder_notify: tokio::sync::Notify::new(),
         });
         let request = request();
-        let ticket = journal
+        let first = journal
             .record(admission("job-1", &request, Path::new("/gallery")))
             .unwrap();
 
-        assert_eq!(ticket.claim_dispatch(), DispatchClaim::Granted);
-        assert_eq!(ticket.claim_dispatch(), DispatchClaim::Granted);
+        assert_eq!(first.claim_dispatch(), DispatchClaim::Granted);
+        journal.recover_feeder_runtime().unwrap();
+        let second_claim = journal.claim_next_feeder().unwrap().unwrap();
+        let second = journal.attach_claimed("job-1", second_claim.claim_token);
+        assert_eq!(second.claim_dispatch(), DispatchClaim::Granted);
+        journal.recover_feeder_runtime().unwrap();
+        let third_claim = journal.claim_next_feeder().unwrap().unwrap();
+        let third = journal.attach_claimed("job-1", third_claim.claim_token);
         assert_eq!(
-            ticket.claim_dispatch(),
+            third.claim_dispatch(),
             DispatchClaim::Exhausted {
                 attempts: 3,
                 cap: 2
             }
         );
+        drop(first);
+        drop(second);
+        drop(third);
 
         // Held rows stay listed and are no longer replayable.
         assert_eq!(rows(&journal), vec!["job-1"]);

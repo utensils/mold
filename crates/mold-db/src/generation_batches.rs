@@ -883,7 +883,7 @@ mod tests {
     fn bulk_cancel_settles_only_unclaimed_children_and_keeps_claimed_authority() {
         let db = MetadataDb::open_in_memory().unwrap();
         insert_or_get(&db, &batch("same"), &rows(3)).unwrap();
-        crate::generation_queue::claim_next_feeder_owned(&db, "owner-1", "claimed", 2)
+        crate::generation_queue::claim_next(&db, "owner-1", "claimed", 2)
             .unwrap()
             .unwrap();
         let count = finish_all_unclaimed_queued(

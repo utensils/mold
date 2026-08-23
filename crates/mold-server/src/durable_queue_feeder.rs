@@ -449,6 +449,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_recovery_feeds_an_interrupted_direct_generation() {
+        let (state, mut rx) = state(1);
+        let request = request("legacy stream interrupted");
+        let output = state.config.try_read().unwrap().effective_output_dir();
+        let direct_ticket = state
+            .queue_journal
+            .record(JournalAdmission {
+                id: "legacy-direct",
+                request: &request,
+                output_dir: Some(&output),
+                target_gpu: None,
+                completion_payload: SseCompletionPayload::MetadataOnly,
+                batch_child: false,
+                carries_reference_authority: false,
+            })
+            .unwrap();
+        assert!(state.queue_journal.claim_next_feeder().unwrap().is_none());
+
+        state.queue_journal.retain_all();
+        drop(direct_ticket);
+        assert_eq!(
+            state
+                .queue_journal
+                .recover_feeder_runtime()
+                .unwrap()
+                .claims_cleared,
+            1
+        );
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+        let mut replayed = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(replayed.id, "legacy-direct");
+        replayed.journal.take().unwrap().complete_before_dispatch();
+        assert!(state.queue_journal.list_all().is_empty());
+        state.job_registry.remove(&replayed.id);
+        state.queue.decrement();
+
+        shutdown.cancel();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn missing_stable_device_pin_resumes_on_auto_not_recorded_ordinal() {
         let (state, mut rx) = state(1);
         admit(&state, 1);
