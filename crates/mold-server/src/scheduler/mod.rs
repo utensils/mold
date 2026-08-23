@@ -2675,10 +2675,10 @@ impl Coordinator {
                             .active_vram_bytes()
                     })
                     .unwrap_or(0);
-                let reclaimable_cache_bytes = device
-                    .sampled_mold_vram_bytes
-                    .map(|used_by_mold| measured_cache_bytes.min(used_by_mold))
-                    .unwrap_or(0);
+                let reclaimable_cache_bytes = reclaimable_model_cache_bytes(
+                    measured_cache_bytes,
+                    device.sampled_mold_vram_bytes,
+                );
                 let mut warm = BTreeSet::new();
                 if let Some(fingerprint) = worker.and_then(|worker| {
                     worker
@@ -2966,22 +2966,8 @@ impl Coordinator {
                 })
                 .collect());
         }
-        let largest_total_vram_bytes = self.largest_total_vram_bytes();
-        resolved.map_err(|error| match error {
-            crate::execution_plan::ExecutionPlanError::InsufficientVram {
-                required_peak_bytes,
-                ..
-            } => {
-                if insufficient_vram_is_terminal(required_peak_bytes, largest_total_vram_bytes) {
-                    GenerationPlanFailure::Terminal(error)
-                } else {
-                    GenerationPlanFailure::Transient(error.to_string())
-                }
-            }
-            crate::execution_plan::ExecutionPlanError::PreparedInputsStale(_) => {
-                GenerationPlanFailure::StalePreparation(error.to_string())
-            }
-            _ => GenerationPlanFailure::Terminal(error),
+        resolved.map_err(|error| {
+            classify_generation_plan_failure(error, self.largest_total_vram_bytes())
         })
     }
 
@@ -4073,7 +4059,12 @@ impl Coordinator {
             Some(prepared_inputs),
         ) {
             Ok(plans) => plans,
-            Err(error) => return empty("infeasible", error.to_string()),
+            Err(error) => {
+                let failure =
+                    classify_generation_plan_failure(error, self.largest_total_vram_bytes());
+                let outcome = placement_preview_outcome_for_plan_failure(&failure);
+                return empty(outcome, failure.to_string());
+            }
         };
         if cancelled() {
             return self.cancelled_placement_preview();
@@ -6444,6 +6435,37 @@ fn insufficient_vram_is_terminal(required_peak_bytes: u64, largest_total_vram_by
     largest_total_vram_bytes > 0 && required_peak_bytes > largest_total_vram_bytes
 }
 
+fn classify_generation_plan_failure(
+    error: crate::execution_plan::ExecutionPlanError,
+    largest_total_vram_bytes: u64,
+) -> GenerationPlanFailure {
+    match error {
+        crate::execution_plan::ExecutionPlanError::InsufficientVram {
+            required_peak_bytes,
+            ..
+        } => {
+            if insufficient_vram_is_terminal(required_peak_bytes, largest_total_vram_bytes) {
+                GenerationPlanFailure::Terminal(error)
+            } else {
+                GenerationPlanFailure::Transient(error.to_string())
+            }
+        }
+        crate::execution_plan::ExecutionPlanError::PreparedInputsStale(_) => {
+            GenerationPlanFailure::StalePreparation(error.to_string())
+        }
+        _ => GenerationPlanFailure::Terminal(error),
+    }
+}
+
+fn placement_preview_outcome_for_plan_failure(failure: &GenerationPlanFailure) -> &'static str {
+    match failure {
+        GenerationPlanFailure::Terminal(_) => "infeasible",
+        GenerationPlanFailure::Transient(_) | GenerationPlanFailure::StalePreparation(_) => {
+            "temporarily_unavailable"
+        }
+    }
+}
+
 /// The forward passes one denoise step of this request performs, as a
 /// permille multiplier over the ordinary single-forward cost.
 ///
@@ -6705,6 +6727,22 @@ pub(crate) fn effective_available_vram_bytes(
     sampled_free_bytes
         .saturating_add(reclaimable_cache_bytes)
         .min(total_vram_bytes)
+}
+
+/// Cache bytes recorded by Mold's owner thread are first-party evidence even
+/// when the operating system cannot attribute aggregate process VRAM (Metal,
+/// and CUDA telemetry fallbacks). When attribution is available it remains an
+/// upper bound, preventing a stale cache counter from reclaiming bytes the
+/// process sample says Mold does not own. This is planning evidence only:
+/// dispatch still requires an idle owner lane, and the GPU worker retains its
+/// final allocation-time predicted-peak validation.
+pub(crate) fn reclaimable_model_cache_bytes(
+    measured_cache_bytes: u64,
+    sampled_mold_bytes: Option<u64>,
+) -> u64 {
+    sampled_mold_bytes.map_or(measured_cache_bytes, |mold_bytes| {
+        measured_cache_bytes.min(mold_bytes)
+    })
 }
 
 /// Effective capacity for serialized work on a device. While a lease is
@@ -9211,6 +9249,74 @@ mod tests {
     }
 
     #[test]
+    fn busy_unattributed_metal_pressure_is_transient_when_the_peak_fits_physically() {
+        const GIB: u64 = 1 << 30;
+        let available = schedulable_available_vram_bytes(4 * GIB, 0, None, true, 24 * GIB);
+        assert_eq!(
+            available,
+            4 * GIB,
+            "a busy unattributed lane must not invent reclaimable bytes"
+        );
+
+        let failure = classify_generation_plan_failure(
+            crate::execution_plan::ExecutionPlanError::InsufficientVram {
+                reason: "metal:0 is currently busy".to_string(),
+                required_peak_bytes: 20 * GIB,
+            },
+            24 * GIB,
+        );
+        assert!(
+            matches!(&failure, GenerationPlanFailure::Transient(_)),
+            "a physically fitting job waits for the active lane instead of being refused"
+        );
+        assert_eq!(
+            placement_preview_outcome_for_plan_failure(&failure),
+            "temporarily_unavailable",
+            "placement preview must not turn current lane pressure into infeasibility"
+        );
+    }
+
+    #[test]
+    fn busy_unattributed_cuda_lanes_keep_an_additional_fitting_job_waiting() {
+        const GIB: u64 = 1 << 30;
+        let available = (0..2)
+            .map(|_| schedulable_available_vram_bytes(3 * GIB, 0, None, true, 24 * GIB))
+            .collect::<Vec<_>>();
+        assert_eq!(available, vec![3 * GIB, 3 * GIB]);
+
+        let failure = classify_generation_plan_failure(
+            crate::execution_plan::ExecutionPlanError::InsufficientVram {
+                reason: "both CUDA lanes are currently busy".to_string(),
+                required_peak_bytes: 18 * GIB,
+            },
+            24 * GIB,
+        );
+        assert!(matches!(failure, GenerationPlanFailure::Transient(_)));
+    }
+
+    #[test]
+    fn unattributed_external_allocations_are_not_dispatch_capacity() {
+        const GIB: u64 = 1 << 30;
+        assert_eq!(
+            schedulable_available_vram_bytes(3 * GIB, 0, None, false, 24 * GIB),
+            3 * GIB,
+            "neither physical total nor unknown process memory is immediate capacity"
+        );
+    }
+
+    #[test]
+    fn first_party_cache_remains_reclaimable_without_process_attribution() {
+        const GIB: u64 = 1 << 30;
+        let reclaimable = reclaimable_model_cache_bytes(16 * GIB, None);
+        assert_eq!(reclaimable, 16 * GIB);
+        assert_eq!(
+            schedulable_available_vram_bytes(4 * GIB, reclaimable, None, false, 24 * GIB),
+            20 * GIB,
+            "the owner can evict its measured cache even when the OS cannot attribute the process"
+        );
+    }
+
+    #[test]
     fn warm_and_cold_resident_capacity_is_safe_while_idle_or_busy() {
         const GIB: u64 = 1 << 30;
         let (worker, _rx) = test_worker(0);
@@ -9239,8 +9345,8 @@ mod tests {
                 backend: mold_core::GpuBackend::Cuda,
                 vram_total: 24 * GIB,
                 vram_used: 20 * GIB,
-                vram_used_by_mold: Some(16 * GIB),
-                vram_used_by_other: Some(4 * GIB),
+                vram_used_by_mold: None,
+                vram_used_by_other: None,
                 gpu_utilization: Some(0),
             }],
             system_ram: mold_core::RamSnapshot {
@@ -9312,7 +9418,11 @@ mod tests {
         let busy = coordinator.device_snapshots().remove(0);
         assert_eq!(busy.available_vram_bytes, 20 * GIB);
         assert_eq!(busy.available_at_ms, Some(5_000));
-        assert_eq!(busy.activity, DeviceActivity::Busy);
+        assert_eq!(
+            busy.activity,
+            DeviceActivity::Busy,
+            "first-party cache credit cannot bypass the scheduler-owned lane gate"
+        );
         worker.model_cache.lock().unwrap().restore(checked_out);
     }
 
@@ -14644,6 +14754,17 @@ mod tests {
         assert!(
             insufficient_vram_is_terminal(33_474_340_818, RTX_4090_TOTAL),
             "a peak no device could ever hold must be terminal"
+        );
+        let impossible = classify_generation_plan_failure(
+            crate::execution_plan::ExecutionPlanError::InsufficientVram {
+                reason: "larger than every device".to_string(),
+                required_peak_bytes: 33_474_340_818,
+            },
+            RTX_4090_TOTAL,
+        );
+        assert_eq!(
+            placement_preview_outcome_for_plan_failure(&impossible),
+            "infeasible"
         );
         assert!(
             !insufficient_vram_is_terminal(20_000_000_000, RTX_4090_TOTAL),
