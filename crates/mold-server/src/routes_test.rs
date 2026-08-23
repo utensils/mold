@@ -6416,7 +6416,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_models_surfaces_only_the_pinned_compact_h3_downloads() {
+    async fn list_models_surfaces_every_pinned_h3_download_and_marks_runnability() {
+        // Every pinned H3 manifest is a download, so every one lists — the
+        // four reviewed compact identities that run, and the four that only
+        // download (the official BF16 references and the pruned NVFP4
+        // transformers). What tells them apart on the wire is the additive
+        // `runtime_available`, never their absence from the list.
         let app = app_with(MockEngine::ready());
         let resp = app
             .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
@@ -6436,32 +6441,26 @@ mod tests {
                     model["name"].as_str().unwrap(),
                     model["downloaded"].as_bool().unwrap(),
                     model["hf_repo"].as_str().unwrap(),
+                    model["runtime_available"].as_bool().unwrap(),
                 )
             })
             .collect::<std::collections::BTreeSet<_>>();
+        use mold_core::minimax_h3::{
+            COMFY_REPO, FL2VA_COMFY, FL2VA_COMFY_NVFP4, FL2VA_COMFY_TURBO_4STEP_768P,
+            FL2VA_COMFY_TURBO_8STEP, FL2VA_OFFICIAL, NVFP4_REPO, OFFICIAL_REPO, REF2VA_COMFY,
+            REF2VA_COMFY_NVFP4, REF2VA_OFFICIAL,
+        };
         assert_eq!(
             h3,
             std::collections::BTreeSet::from([
-                (
-                    mold_core::minimax_h3::FL2VA_COMFY,
-                    false,
-                    "Comfy-Org/MiniMax-H3",
-                ),
-                (
-                    mold_core::minimax_h3::REF2VA_COMFY,
-                    false,
-                    "Comfy-Org/MiniMax-H3",
-                ),
-                (
-                    mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
-                    false,
-                    "Comfy-Org/MiniMax-H3",
-                ),
-                (
-                    mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
-                    false,
-                    "Comfy-Org/MiniMax-H3",
-                ),
+                (FL2VA_COMFY, false, COMFY_REPO, true),
+                (REF2VA_COMFY, false, COMFY_REPO, true),
+                (FL2VA_COMFY_TURBO_8STEP, false, COMFY_REPO, true),
+                (FL2VA_COMFY_TURBO_4STEP_768P, false, COMFY_REPO, true),
+                (FL2VA_OFFICIAL, false, OFFICIAL_REPO, false),
+                (REF2VA_OFFICIAL, false, OFFICIAL_REPO, false),
+                (FL2VA_COMFY_NVFP4, false, NVFP4_REPO, false),
+                (REF2VA_COMFY_NVFP4, false, NVFP4_REPO, false),
             ])
         );
     }
