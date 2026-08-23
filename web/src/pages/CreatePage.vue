@@ -55,6 +55,7 @@ import { confirmCancellation } from "@studio/lib/cancellationRetry";
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
 import { requestNeedsReferenceUpload } from "@studio/api/referenceUploads";
+import { supportsDurableGenerationLifecycle } from "@studio/api/generationAdmission";
 import {
   expansionTaskForRequest,
   type ExpandTask,
@@ -596,7 +597,8 @@ function normalizeSubmitRoute(
   request?: GenerateRequestWire,
 ): HostRoute | null {
   return route?.hostId === "origin" &&
-    !(request && requestNeedsReferenceUpload(request))
+    !(request && requestNeedsReferenceUpload(request)) &&
+    !supportsDurableGenerationLifecycle(route.durableGeneration)
     ? null
     : route;
 }
@@ -886,6 +888,16 @@ function hostRouteFor(hostId: string): HostRoute | null {
       ...(host.apiKey ? { apiKey: host.apiKey } : {}),
     },
     instanceId: host.instanceId ?? null,
+    ...(routing.capabilitiesByHost.value[host.id]?.queue
+      ? { durableGeneration: routing.capabilitiesByHost.value[host.id]!.queue }
+      : {}),
+    ...(routing.capabilitiesByHost.value[host.id]?.events
+      ? {
+          eventsAvailable:
+            routing.capabilitiesByHost.value[host.id]!.events!.available ===
+            true,
+        }
+      : {}),
   };
 }
 
@@ -3366,6 +3378,16 @@ function routeForHostId(hostId: string): HostRoute | null {
     instanceId: host.instanceId ?? null,
     referenceUploads:
       routing.capabilitiesByHost.value[host.id]?.reference_uploads ?? null,
+    ...(routing.capabilitiesByHost.value[host.id]?.queue
+      ? { durableGeneration: routing.capabilitiesByHost.value[host.id]!.queue }
+      : {}),
+    ...(routing.capabilitiesByHost.value[host.id]?.events
+      ? {
+          eventsAvailable:
+            routing.capabilitiesByHost.value[host.id]!.events!.available ===
+            true,
+        }
+      : {}),
   };
 }
 
@@ -3602,20 +3624,15 @@ function submitRequestCopies(
     request.seed === null || request.seed === undefined
       ? crypto.getRandomValues(new Uint32Array(1))[0]!
       : request.seed;
-  for (let index = 0; index < copies; index += 1) {
-    stream.submit(
-      {
-        ...request,
-        batch_size: 1,
-        batch_id: batchId,
-        batch_index: index + 1,
-        batch_count: copies,
-        seed: baseSeed + index,
-      },
-      decision,
-      normalizeSubmitRoute(route, request),
-    );
-  }
+  const requests = Array.from({ length: copies }, (_, index) => ({
+    ...request,
+    batch_size: 1,
+    batch_id: batchId,
+    batch_index: index + 1,
+    batch_count: copies,
+    seed: baseSeed + index,
+  }));
+  stream.submitBatch(requests, decision, normalizeSubmitRoute(route, request));
 }
 
 /** True while a Generate click is being routed/admitted. The feasibility
@@ -4289,7 +4306,7 @@ async function queueVariations() {
           : `${feasibilityMessage(revalidated, "this complete batch")} Nothing was queued; your reviewed variations are preserved.`;
       return;
     }
-    for (const [index, prompt] of list.entries()) {
+    const requests = list.map((prompt, index) => {
       // Each variation already carries the style extras, so it is the final
       // prompt — override the base request's prompt rather than re-appending.
       // Each is one print; the batch size drove the variation count, not the
@@ -4320,12 +4337,13 @@ async function queueVariations() {
         batch_index: index + 1,
         batch_count: list.length,
       };
-      stream.submit(
-        request,
-        prepared.decision,
-        normalizeSubmitRoute(revalidated.route, request),
-      );
-    }
+      return request;
+    });
+    stream.submitBatch(
+      requests,
+      prepared.decision,
+      normalizeSubmitRoute(revalidated.route, requests[0]),
+    );
     variations.value = [];
     preparedBatch.value = null;
   } finally {

@@ -280,6 +280,8 @@ export interface ServerCapabilities {
     /** Enriched durable outcomes, by-client recovery and bulk reconciliation. */
     durable_batch_outcomes?: boolean;
   };
+  /** One server-wide, authenticated lifecycle stream. */
+  events?: { available?: boolean };
   /** Prompt expansion. `model_present` is the routing input: a host that is
    * known to lack the expander is the one case expansion leaves the
    * generation route. `model` names what to pull; absent on older servers. */

@@ -50,6 +50,9 @@ const props = withDefaults(
  * iPhone describe the same waiting row the same way; a server that lists
  * nothing degrades to the plain "Queued" pill. */
 function queueLabel(job: Job): string {
+  if (job.detached && job.durableBatch && !job.serverId) {
+    return "Confirming durable admission";
+  }
   return queueWaitLabel(
     resolveQueueWait(
       queueStatusFor(
@@ -180,6 +183,12 @@ function promptFor(job: Job): string {
       ? job.request.title.trim()
       : "";
   return title || job.request.prompt?.trim() || "Untitled print";
+}
+
+function terminalLabel(job: Job): string {
+  return job.detached
+    ? "Detached — the original machine still owns the outcome"
+    : "Failed — open Create for details";
 }
 
 const running = computed(() =>
@@ -387,7 +396,7 @@ const active = computed(
     >
       <span class="activity__error-body">
         <span class="activity__error-prompt">{{ promptFor(job) }}</span>
-        <span>Failed — open Create for details</span>
+        <span>{{ terminalLabel(job) }}</span>
       </span>
       <button
         type="button"

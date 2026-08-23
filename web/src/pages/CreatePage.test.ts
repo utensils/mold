@@ -38,6 +38,7 @@ import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import type {
   GalleryImage,
   GenerateFormState,
+  GenerateRequestWire,
   ModelInfoExtended,
   OutputMetadata,
 } from "../types";
@@ -250,6 +251,11 @@ vi.mock("../composables/useGenerateStream", async (importOriginal) => ({
     canvasErrorJobId: streamCanvasErrorJobIdRef,
     selectedJob: streamSelectedJobRef,
     submit: submitMock,
+    submitBatch: (
+      requests: GenerateRequestWire[],
+      decision: unknown,
+      route: unknown,
+    ) => requests.map((request) => submitMock(request, decision, route)),
     cancel: cancelPrintMock,
     failRunning: vi.fn(),
     remove: vi.fn(),

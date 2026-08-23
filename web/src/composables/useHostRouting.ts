@@ -625,6 +625,15 @@ function withReferenceUploads(route: HostRoute | null): HostRoute | null {
     target: { ...route.target },
     referenceUploads:
       capabilitiesByHost.value[route.hostId]?.reference_uploads ?? null,
+    ...(capabilitiesByHost.value[route.hostId]?.queue
+      ? { durableGeneration: capabilitiesByHost.value[route.hostId]!.queue }
+      : {}),
+    ...(capabilitiesByHost.value[route.hostId]?.events
+      ? {
+          eventsAvailable:
+            capabilitiesByHost.value[route.hostId]!.events!.available === true,
+        }
+      : {}),
   };
 }
 
@@ -829,6 +838,16 @@ async function resolveFeasibleWithPreview(
           instanceId: chosen.instanceId ?? null,
           referenceUploads:
             capabilitiesByHost.value[chosen.id]?.reference_uploads ?? null,
+          ...(capabilitiesByHost.value[chosen.id]?.queue
+            ? { durableGeneration: capabilitiesByHost.value[chosen.id]!.queue }
+            : {}),
+          ...(capabilitiesByHost.value[chosen.id]?.events
+            ? {
+                eventsAvailable:
+                  capabilitiesByHost.value[chosen.id]!.events!.available ===
+                  true,
+              }
+            : {}),
         },
       };
     }
@@ -1165,6 +1184,16 @@ async function revalidateFeasibleWithPreview(
       instanceId: capturedInstanceId,
       referenceUploads:
         capabilitiesByHost.value[route.hostId]?.reference_uploads ?? null,
+      ...(capabilitiesByHost.value[route.hostId]?.queue
+        ? { durableGeneration: capabilitiesByHost.value[route.hostId]!.queue }
+        : {}),
+      ...(capabilitiesByHost.value[route.hostId]?.events
+        ? {
+            eventsAvailable:
+              capabilitiesByHost.value[route.hostId]!.events!.available ===
+              true,
+          }
+        : {}),
     },
   };
 }

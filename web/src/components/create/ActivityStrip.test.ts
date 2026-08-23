@@ -102,6 +102,26 @@ describe("ActivityStrip", () => {
     expect(wrapper.emitted("shared-open")?.[0]).toEqual([shared]);
   });
 
+  it("does not label an authority-detached print as failed", () => {
+    const wrapper = mount(ActivityStrip, {
+      props: {
+        jobs: [
+          makeJob({
+            state: "error",
+            error: "machine replaced",
+            detached: true,
+            settledAt: Date.now(),
+          }),
+        ],
+      },
+    });
+
+    expect(wrapper.text()).toContain(
+      "Detached — the original machine still owns the outcome",
+    );
+    expect(wrapper.text()).not.toContain("Failed — open Create for details");
+  });
+
   it("is hidden when nothing is in flight", () => {
     const wrapper = mount(ActivityStrip, {
       props: { jobs: [makeJob({ state: "done" })] },

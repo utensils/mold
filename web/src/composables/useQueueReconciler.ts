@@ -44,6 +44,10 @@ export function reconcileRound(
   const missing: Job[] = [];
   for (const j of jobs) {
     if (j.state !== "running") continue;
+    // Batch outcome REST is the sole terminal authority for streamless jobs.
+    // Absence from the live queue is expected while durable work is waiting in
+    // SQLite and must never detach or fail it.
+    if (j.durableBatch) continue;
     if (!j.serverId) continue; // Request has not received its queued frame yet.
     if (serverIds.has(j.serverId)) continue; // server confirms it's alive
     if (now - j.lastProgressAt < RECONCILE_GRACE_MS) continue;
@@ -102,7 +106,7 @@ export function startQueueReconciler(
   async function tick() {
     if (stopped) return;
     const candidates = jobs.value.filter(
-      (j) => j.state === "running" && j.serverId,
+      (j) => j.state === "running" && j.serverId && !j.durableBatch,
     );
     if (candidates.length === 0) {
       schedule(intervalMs);
