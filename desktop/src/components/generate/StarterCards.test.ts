@@ -73,14 +73,20 @@ describe("StarterCards (cold start G10)", () => {
 
   it("shows inline progress on the pulling card instead of a Pull button", () => {
     const store = useDownloadsStore();
-    store.activeJobs = [job({ model: "flux2-klein:q4", bytes_done: 40, bytes_total: 100 })];
+    store.activeJobs = [
+      job({
+        model: "flux2-klein:q4",
+        bytes_done: 45_870_258_557,
+        bytes_total: 100_000_000_000,
+      }),
+    ];
     const wrapper = mount(StarterCards);
 
     const cards = wrapper.findAll("[data-test='starter-card']");
     // The first (matching) card is pulling; the others still offer Pull.
     expect(cards[0]!.find("[data-test='starter-pulling']").exists()).toBe(true);
     expect(cards[0]!.find("[data-test='starter-pull']").exists()).toBe(false);
-    expect(cards[0]!.text()).toContain("40%");
+    expect(cards[0]!.get("[data-test='starter-pulling']").text()).toBe("Pulling… 46%");
     expect(cards[1]!.find("[data-test='starter-pull']").exists()).toBe(true);
   });
 
