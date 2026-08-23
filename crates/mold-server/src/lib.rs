@@ -65,6 +65,7 @@ pub mod queue_media;
 // schema/store adapter activates it atomically with queue-media admission.
 #[allow(dead_code)]
 mod queue_media_startup;
+pub mod queue_media_store;
 pub mod rate_limit;
 pub mod reference_uploads;
 pub mod request_id;
