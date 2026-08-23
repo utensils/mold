@@ -10,7 +10,7 @@ use candle_core::Device;
 
 use crate::progress::InferenceCancellationToken;
 
-const MINIMUM_AVAILABLE_FLOOR_BYTES: u64 = 6 << 30;
+const MINIMUM_AVAILABLE_FLOOR_BYTES: u64 = 8 << 30;
 const MAXIMUM_ATTEMPT_SWAP_GROWTH_BYTES: u64 = 2 << 30;
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -31,11 +31,8 @@ struct H3MetalMemoryPolicy {
 
 impl H3MetalMemoryPolicy {
     fn for_sample(sample: H3MetalMemorySample) -> Self {
-        let minimum_available_bytes = minimum_available_floor_bytes(
-            crate::device::total_system_memory_bytes().unwrap_or_default(),
-        );
         Self {
-            minimum_available_bytes,
+            minimum_available_bytes: MINIMUM_AVAILABLE_FLOOR_BYTES,
             baseline_swap_bytes: sample.used_swap_bytes,
             maximum_swap_growth_bytes: MAXIMUM_ATTEMPT_SWAP_GROWTH_BYTES,
         }
@@ -61,13 +58,6 @@ impl H3MetalMemoryPolicy {
         }
         None
     }
-}
-
-fn minimum_available_floor_bytes(total_system_bytes: u64) -> u64 {
-    // Preserve at least 15% on larger unified-memory Macs while allowing the
-    // allocator's short transformer-load crest to pass on 48 GiB machines.
-    // The absolute 6 GiB floor still protects smaller supported systems.
-    (total_system_bytes.saturating_mul(15) / 100).max(MINIMUM_AVAILABLE_FLOOR_BYTES)
 }
 
 fn sample_metal_memory() -> Result<H3MetalMemorySample> {
@@ -213,15 +203,6 @@ mod tests {
             }),
             None
         );
-    }
-
-    #[test]
-    fn guard_floor_is_six_gib_or_fifteen_percent_whichever_is_larger() {
-        assert_eq!(minimum_available_floor_bytes(gib(32)), gib(6));
-        let forty_eight_gib_floor = minimum_available_floor_bytes(gib(48));
-        assert!(forty_eight_gib_floor > gib(7));
-        assert!(forty_eight_gib_floor < gib(8));
-        assert_eq!(minimum_available_floor_bytes(gib(64)), gib(64) * 15 / 100);
     }
 
     #[test]
