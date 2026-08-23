@@ -872,9 +872,10 @@ fn ensure_schedulable_device(state: &AppState) -> Result<(), ApiError> {
 
 /// Validate a generate request and resolve server-side defaults.
 ///
-/// Performs the identical pre-queue checks used by both `generate` and
-/// `generate_stream`: applies the default metadata setting, validates the
-/// request, checks model availability, and resolves the output directory.
+/// Performs the identical pre-queue checks used by `generate`,
+/// `generate_stream`, and durable batch admission: applies server defaults,
+/// validates policy and the resolved generation profile, checks model
+/// availability, freezes request transformations, and resolves publication.
 /// Pre-queue advisories about a request that was still accepted.
 ///
 /// Dimension adjustments keep their own long-standing header and documented
@@ -1083,11 +1084,79 @@ struct PreparedGenerationRoute {
     h3_private_ingress_grant: Option<crate::h3_private_bridge::H3PrivateIngressGrant>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GenerationPreparationDelivery {
+    AttachedResponse,
+    DurableBatch,
+}
+
+impl GenerationPreparationDelivery {
+    fn is_durable_batch(self) -> bool {
+        self == Self::DurableBatch
+    }
+}
+
+/// Name the first request-owned media authority that cannot be replayed from
+/// the durable queue. The first-party clients apply the same fence before
+/// selecting this endpoint, but the server must enforce its own persistence
+/// contract for direct and mixed-version callers too.
+fn durable_generation_media_field(request: &mold_core::GenerateRequest) -> Option<&'static str> {
+    [
+        (request.source_image.is_some(), "source_image"),
+        (request.id_image.is_some(), "id_image"),
+        (request.id_images.is_some(), "id_images"),
+        (request.edit_images.is_some(), "edit_images"),
+        (request.references.is_some(), "references"),
+        (request.mask_image.is_some(), "mask_image"),
+        (request.control_image.is_some(), "control_image"),
+        (request.audio_file.is_some(), "audio_file"),
+        (request.audio_file_path.is_some(), "audio_file_path"),
+        (request.source_video.is_some(), "source_video"),
+        (request.source_video_path.is_some(), "source_video_path"),
+        (request.extend_video.is_some(), "extend_video"),
+        (request.extend_video_path.is_some(), "extend_video_path"),
+        (request.keyframes.is_some(), "keyframes"),
+    ]
+    .into_iter()
+    .find_map(|(present, field)| present.then_some(field))
+}
+
+fn durable_generation_unsupported(message: impl Into<String>) -> ApiError {
+    ApiError::with_code(
+        message,
+        "GENERATION_BATCH_NOT_DURABLE",
+        StatusCode::UNPROCESSABLE_ENTITY,
+    )
+}
+
 async fn prepare_generation(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
     authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
 ) -> Result<PreparedGenerationRoute, ApiError> {
+    prepare_generation_for_delivery(
+        state,
+        request,
+        authenticated,
+        GenerationPreparationDelivery::AttachedResponse,
+    )
+    .await
+}
+
+async fn prepare_generation_for_delivery(
+    state: &AppState,
+    request: &mut mold_core::GenerateRequest,
+    authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
+    delivery: GenerationPreparationDelivery,
+) -> Result<PreparedGenerationRoute, ApiError> {
+    // This seam deliberately does not load an inference engine, prepare model
+    // weights, or reserve execution memory. Scheduler V2 owns those bounded
+    // operations after durable acknowledgement. Local prompt expansion and
+    // post-upscale downloads likewise remain scheduler dependencies. The
+    // request-boundary work retained here is what must be frozen in the
+    // journal for replay (including API-backed expansion); first-party adapter
+    // downloads with no resumable dependency record are handled explicitly at
+    // the materialization site below.
     // Stop admitting once the retention fence is up. Anything accepted after
     // that point is queued into a process that is already tearing down, so the
     // honest answer is "not now" rather than a job that immediately retains.
@@ -1101,6 +1170,19 @@ async fn prepare_generation(
     // and retry state can observe the request. This is deliberately a no-op
     // for every non-H3 configured alias and catalog ID.
     mold_core::minimax_h3::canonicalize_request_model(request);
+
+    if delivery.is_durable_batch() {
+        if let Some(field) = durable_generation_media_field(request) {
+            return Err(durable_generation_unsupported(format!(
+                "{field} carries temporary media authority and must use the attached generation lifecycle"
+            )));
+        }
+        if mold_core::minimax_h3::capability_contract_for_model(&request.model).is_some() {
+            return Err(durable_generation_unsupported(
+                "MiniMax H3 requests carry private replay authority and must use the attached generation lifecycle",
+            ));
+        }
+    }
 
     // `hdr_exr_dir` names an output directory on the machine doing inference.
     // An HTTP client must never choose that server-local path: unlike media
@@ -1342,7 +1424,30 @@ async fn prepare_generation(
 
     resolve_server_local_media_paths(state, request).await?;
     if let Some((adapter, path)) = planned_control {
+        // The ordinary attached route may wait for this first-party adapter
+        // download. A durable acknowledgement may not: there is no persisted
+        // dependency-download state for the feeder to resume after a crash.
+        // Installed adapters are materialized cheaply and identically; absent
+        // adapters are refused honestly instead of acknowledging a row whose
+        // request cannot reproduce the legacy execution payload.
+        if delivery.is_durable_batch() && !control_artifact_is_complete(adapter, &path) {
+            return Err(durable_generation_unsupported(format!(
+                "IC-LoRA control '{}' must be downloaded before durable batch admission",
+                adapter.id
+            )));
+        }
         materialize_builtin_ltx2_control(state, request, adapter, path).await?;
+    }
+    if delivery.is_durable_batch() {
+        if let Some((preset, _)) = planned_camera_controls
+            .iter()
+            .find(|(preset, path)| !camera_control_artifact_is_complete(preset, path))
+        {
+            return Err(durable_generation_unsupported(format!(
+                "camera control '{}' must be downloaded before durable batch admission",
+                preset.id
+            )));
+        }
     }
     materialize_builtin_ltx2_camera_controls(state, &planned_camera_controls).await?;
 
@@ -2289,7 +2394,7 @@ fn generation_batch_status(
 )]
 async fn admit_generation_batch(
     State(state): State<AppState>,
-    _authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
+    authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     Json(mut body): Json<mold_core::GenerationBatchAdmissionRequest>,
 ) -> Result<(StatusCode, Json<mold_core::GenerationBatchStatus>), ApiError> {
     if !state.scheduled_work.v2_authoritative() || !state.queue_journal.is_enabled() {
@@ -2337,78 +2442,61 @@ async fn admit_generation_batch(
     let fingerprint_bytes = serde_json::to_vec(&body.requests)
         .map_err(|error| ApiError::internal(format!("batch serialization failed: {error}")))?;
     let request_sha256 = format!("{:x}", Sha256::digest(&fingerprint_bytes));
-    // This endpoint acknowledges SQLite durability, not runtime preparation.
-    // Keep admission to pure request checks plus cheap host-local defaults;
-    // the scheduler's bounded preparation semaphore remains the sole model
-    // dependency authority after the feeder hydrates each child.
-    let (output_dir, family_by_model) = {
-        let config = state.config.read().await;
-        if state.is_output_disabled(&config) {
-            return Err(ApiError::validation(
-                "heterogeneous batches require server gallery output",
+
+    // A replay of the exact wire payload is already complete at the admission
+    // boundary. Return it before repeating prompt expansion, catalog lookup,
+    // media policy, or any other preparation whose surrounding host state may
+    // have changed since the first durable commit. The later insert remains
+    // the atomic authority for concurrent first admissions.
+    let existing = {
+        let journal = state.queue_journal.clone();
+        let client_batch_id = body.client_batch_id.clone();
+        tokio::task::spawn_blocking(move || {
+            journal.durable_generation_batch_by_client(&client_batch_id)
+        })
+        .await
+        .map_err(|error| ApiError::internal(format!("generation batch DB task failed: {error}")))?
+        .map_err(|error| {
+            ApiError::internal(format!("generation batch DB lookup failed: {error}"))
+        })?
+    };
+    if let Some(detail) = existing {
+        if detail.batch.request_sha256 != request_sha256 {
+            return Err(ApiError::with_code(
+                "client_batch_id was already used for a different request",
+                "GENERATION_BATCH_IDEMPOTENCY_CONFLICT",
+                StatusCode::CONFLICT,
             ));
         }
-        let families = body
-            .requests
-            .iter()
-            .map(|request| {
-                (
-                    request.model.clone(),
-                    config
-                        .resolved_model_config(&request.model)
-                        .family
-                        .or_else(|| {
-                            mold_core::manifest::find_manifest(&request.model)
-                                .map(|manifest| manifest.family.clone())
-                        }),
-                )
-            })
-            .collect::<std::collections::HashMap<_, _>>();
-        (config.effective_output_dir(), families)
-    };
-    ensure_schedulable_device(&state)?;
+        return Ok((
+            StatusCode::OK,
+            Json(generation_batch_status(&state.instance_id, detail)),
+        ));
+    }
+
     let mut admitted_children = Vec::with_capacity(body.requests.len());
     for (offset, mut request) in body.requests.into_iter().enumerate() {
-        if request.hdr_exr_dir.is_some() {
-            return Err(ApiError::validation(
-                "hdr_exr_dir is local-only and cannot be set through the server API",
-            ));
-        }
-        if request.references.is_some() {
-            return Err(ApiError::validation(
-                "heterogeneous batches cannot persist temporary reference uploads",
-            ));
-        }
-        if mold_core::identity::request_carries_identity_photo(&request) {
-            return Err(ApiError::validation(
-                "heterogeneous batches cannot persist identity photographs",
-            ));
-        }
-        if mold_core::minimax_h3::capability_contract_for_model(&request.model).is_some() {
-            return Err(ApiError::with_code(
-                "heterogeneous batches cannot persist private MiniMax H3 requests",
-                "GENERATION_BATCH_NOT_DURABLE",
-                StatusCode::UNPROCESSABLE_ENTITY,
-            ));
-        }
-        apply_default_metadata_setting(&state, &mut request).await;
-        normalize_generation_placement(&state, &mut request).await;
-        let preferred_gpu = validate_multi_gpu_placement(&state, request.placement.as_ref())?;
-        let family = family_by_model
-            .get(&request.model)
-            .and_then(|family| family.as_deref());
-        if request.output_format.is_none() {
-            request.normalise_output_format(family);
-        }
-        materialize_default_negative_prompt(&mut request, family);
-        mold_core::validation::materialize_extend_overlap_frames(&mut request, family);
-        let _ = mold_core::validation::materialize_request_organization(&mut request);
-        validate_generate_request(&request, family)
-            .map_err(|error| ApiError::validation(format!("requests[{}]: {error}", offset + 1)))?;
-        resolve_server_local_media_paths(&state, &mut request).await?;
+        let prepared = prepare_generation_for_delivery(
+            &state,
+            &mut request,
+            authenticated.as_ref().map(|Extension(auth)| auth),
+            GenerationPreparationDelivery::DurableBatch,
+        )
+        .await
+        .map_err(|mut error| {
+            error.error = format!("requests[{}]: {}", offset + 1, error.error);
+            error
+        })?;
+        let output_dir = prepared.output_dir.ok_or_else(|| {
+            ApiError::validation(format!(
+                "requests[{}]: heterogeneous batches require server gallery output",
+                offset + 1
+            ))
+        })?;
+        let preferred_gpu = prepared.preferred_gpu;
         let target_device_id =
             crate::queue_journal::stable_device_id_for_ordinal(&state, preferred_gpu);
-        admitted_children.push((request, preferred_gpu, target_device_id));
+        admitted_children.push((request, preferred_gpu, target_device_id, output_dir));
     }
 
     let batch_id = uuid::Uuid::new_v4().to_string();
@@ -2423,18 +2511,20 @@ async fn admit_generation_batch(
         let admissions = admitted_children
             .iter()
             .zip(&job_ids)
-            .map(|((request, preferred_gpu, target_device_id), job_id)| {
-                crate::queue_journal::JournalAdmission {
-                    id: job_id,
-                    request,
-                    output_dir: Some(output_dir.as_path()),
-                    target_gpu: *preferred_gpu,
-                    target_device_id: target_device_id.as_deref(),
-                    completion_payload: SseCompletionPayload::MetadataOnly,
-                    batch_child: false,
-                    carries_reference_authority: false,
-                }
-            })
+            .map(
+                |((request, preferred_gpu, target_device_id, output_dir), job_id)| {
+                    crate::queue_journal::JournalAdmission {
+                        id: job_id,
+                        request,
+                        output_dir: Some(output_dir.as_path()),
+                        target_gpu: *preferred_gpu,
+                        target_device_id: target_device_id.as_deref(),
+                        completion_payload: SseCompletionPayload::MetadataOnly,
+                        batch_child: false,
+                        carries_reference_authority: false,
+                    }
+                },
+            )
             .collect::<Vec<_>>();
         let (recorded, inserted) =
             journal.record_batch(crate::queue_journal::BatchJournalAdmission {

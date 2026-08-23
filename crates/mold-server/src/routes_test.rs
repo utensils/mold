@@ -4592,6 +4592,170 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn heterogeneous_batch_matches_attached_route_model_refusal_before_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+        let unavailable = generate_body_for_model(
+            "must not become a stranded durable row",
+            "not-installed-at-admission",
+            512,
+            512,
+        );
+        let attached = app
+            .clone()
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(unavailable.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let attached_status = attached.status();
+        let attached = json_body(attached).await;
+        assert!(attached_status.is_client_error());
+
+        let body = serde_json::json!({
+            "client_batch_id": uuid::Uuid::new_v4().to_string(),
+            "requests": [serde_json::from_str::<serde_json::Value>(
+                &unavailable
+            ).unwrap()],
+        });
+
+        let response = app
+            .oneshot(json_request("POST", "/api/generation-batches", body))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), attached_status);
+        let response = json_body(response).await;
+        assert_eq!(response["code"], attached["code"]);
+        assert!(journal.list_all().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn heterogeneous_batch_persists_the_attached_routes_prepared_filing() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let collection = db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .create_collection("Durable Shelf", None)
+            .unwrap();
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+        let mut request: serde_json::Value =
+            serde_json::from_str(&generate_body("file this once", 512, 512)).unwrap();
+        request["output_format"] = serde_json::Value::Null;
+        request["collection"] = serde_json::json!({ "id": collection.id });
+        request["tags"] = serde_json::json!(["  Night Sky  ", "night sky", "Blue"]);
+
+        let response = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [request],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 1);
+        let persisted: GenerateRequest = serde_json::from_str(&rows[0].request_json).unwrap();
+        assert_eq!(persisted.output_format, Some(OutputFormat::Png));
+        assert_eq!(persisted.embed_metadata, Some(true));
+        assert_eq!(
+            persisted.tags,
+            Some(vec!["Night Sky".into(), "Blue".into()])
+        );
+        assert_eq!(
+            persisted.collection,
+            Some(mold_core::CollectionRef {
+                id: Some(collection.id),
+                name: Some("Durable Shelf".into()),
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn heterogeneous_batch_replay_ignores_later_host_unavailability() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let app = app_with_state(state.clone());
+        let body = serde_json::json!({
+            "client_batch_id": uuid::Uuid::new_v4().to_string(),
+            "requests": [serde_json::from_str::<serde_json::Value>(
+                &generate_body("stable retry", 512, 512)
+            ).unwrap()],
+        });
+
+        let admitted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+        let admitted = json_body(admitted).await;
+
+        state.set_generation_unavailable("test host is draining");
+        let replay = app
+            .oneshot(json_request("POST", "/api/generation-batches", body))
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay = json_body(replay).await;
+        assert_eq!(replay["id"], admitted["id"]);
+        assert_eq!(replay["children"], admitted["children"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn heterogeneous_batch_refuses_media_authority_instead_of_journaling_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+        let mut request: serde_json::Value =
+            serde_json::from_str(&generate_body("volatile source", 512, 512)).unwrap();
+        request["source_image"] = serde_json::json!("aW1hZ2U=");
+
+        let response = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [request],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let response = json_body(response).await;
+        assert_eq!(response["code"], "GENERATION_BATCH_NOT_DURABLE");
+        assert!(response["error"].as_str().unwrap().contains("source_image"));
+        assert!(journal.list_all().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn heterogeneous_batch_admits_thirty_once_and_returns_same_ids_on_retry() {
         let root = tempfile::tempdir().unwrap();
         let db_path = root.path().join("mold.db");
@@ -4610,9 +4774,6 @@ mod tests {
                         serde_json::from_str(&generate_body(&format!("moon {index}"), 512, 512))
                             .unwrap();
                     request["batch_size"] = serde_json::json!(1);
-                    if index == 0 {
-                        request["model"] = serde_json::json!("not-installed-at-admission");
-                    }
                     request
                 })
                 .collect();
@@ -4710,6 +4871,9 @@ mod tests {
 
         let reopened = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
         let (state, mut rx) = durable_state(reopened, root.path());
+        crate::durable_queue_feeder::recover_runtime(&state)
+            .await
+            .unwrap();
         let feeder_shutdown = tokio_util::sync::CancellationToken::new();
         let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
         let mut replayed = Vec::new();
@@ -4738,7 +4902,7 @@ mod tests {
 
         let mut first: serde_json::Value = serde_json::from_str(&generate_body_for_model(
             "  first prompt exactly as typed  ",
-            "not-installed-at-admission",
+            "mock-model",
             512,
             512,
         ))
@@ -4771,7 +4935,7 @@ mod tests {
             entries[1].negative.as_deref(),
             Some("  literal negative prompt  ")
         );
-        assert_eq!(entries[1].model, "not-installed-at-admission");
+        assert_eq!(entries[1].model, "mock-model");
     }
 
     #[tokio::test(flavor = "current_thread")]
