@@ -2821,10 +2821,11 @@ async fn run_queue_dispatcher_with_tuning(
             continue;
         }
 
-        let placement_gpu = match state
-            .gpu_pool
-            .resolve_explicit_placement_gpu(job.request.placement.as_ref())
-        {
+        let preferred_gpu = match legacy_generation_preferred_gpu(
+            &state,
+            &job_id,
+            job.request.placement.as_ref(),
+        ) {
             Ok(ordinal) => ordinal,
             Err(err_msg) => {
                 tracing::warn!(model = %model_name, "{err_msg}");
@@ -2839,12 +2840,6 @@ async fn run_queue_dispatcher_with_tuning(
                 continue;
             }
         };
-        let preferred_gpu = state
-            .job_registry
-            .target_gpu(&job_id)
-            .flatten()
-            .or(placement_gpu);
-
         if job.result_tx.is_closed() {
             tracing::debug!(model = %model_name, "skipping queued multi-GPU job — client disconnected");
             state.queue.decrement();
@@ -3090,6 +3085,19 @@ async fn run_queue_dispatcher_with_tuning(
         reject_generation_job(&state, job, legacy_dispatch_stop_message(&state));
     }
     tracing::info!("multi-GPU queue dispatcher shutting down");
+}
+
+pub(crate) fn legacy_generation_preferred_gpu(
+    state: &AppState,
+    job_id: &str,
+    placement: Option<&mold_core::DevicePlacement>,
+) -> Result<Option<usize>, String> {
+    let placement_gpu = state.gpu_pool.resolve_explicit_placement_gpu(placement)?;
+    Ok(state
+        .job_registry
+        .target_gpu(job_id)
+        .flatten()
+        .or(placement_gpu))
 }
 
 fn reject_generation_job(state: &AppState, job: GenerationJob, message: String) {
@@ -3514,6 +3522,7 @@ mod tests {
                     request: &request,
                     output_dir: Some(root.as_path()),
                     target_gpu: None,
+                    target_device_id: None,
                     completion_payload: SseCompletionPayload::MetadataOnly,
                     batch_child: false,
                     carries_reference_authority: false,
@@ -3633,6 +3642,45 @@ mod tests {
         assert_eq!(backoff.take_wait(), std::time::Duration::from_secs(1));
         assert_eq!(backoff.take_wait(), std::time::Duration::from_secs(2));
         assert_eq!(backoff.take_wait(), std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn legacy_restart_without_stable_identity_never_dispatches_the_stale_ordinal() {
+        let (worker, _worker_rx) = test_worker(7, 1);
+        let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
+        let state = crate::state::AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(queue_tx),
+            Arc::new(GpuPool {
+                workers: vec![worker].into(),
+            }),
+            1,
+        );
+        let mut request = fake_request("mock-model");
+        request.placement = Some(mold_core::DevicePlacement {
+            text_encoders: mold_core::DeviceRef::Cpu,
+            advanced: Some(mold_core::AdvancedPlacement {
+                transformer: mold_core::DeviceRef::gpu(7),
+                vae: mold_core::DeviceRef::device("cuda:removed"),
+                ..mold_core::AdvancedPlacement::default()
+            }),
+        });
+
+        let replay_target =
+            crate::queue_journal::resolve_replay_affinity(&mut request, Some(7), None, |_| None);
+        state
+            .job_registry
+            .register_job("legacy-replay", "mock-model", replay_target, None, None);
+
+        assert_eq!(
+            legacy_generation_preferred_gpu(&state, "legacy-replay", request.placement.as_ref()),
+            Ok(None)
+        );
+        let placement = request.placement.unwrap();
+        assert_eq!(placement.text_encoders, mold_core::DeviceRef::Cpu);
+        let advanced = placement.advanced.unwrap();
+        assert_eq!(advanced.transformer, mold_core::DeviceRef::Auto);
+        assert_eq!(advanced.vae, mold_core::DeviceRef::Auto);
     }
 
     #[tokio::test]

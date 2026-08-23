@@ -65,7 +65,7 @@ const DISPATCH_RETRY_MAX_MS: u64 = 1_000;
 const UNSCHEDULABLE_IDLE_GRACE_MS: u64 = 60_000;
 pub(crate) const CPU_UTILITY_DEVICE_ID: &str = "cpu:utility:0";
 
-fn generation_hard_ordinal(
+pub(crate) fn generation_hard_ordinal(
     state: &AppState,
     id: &str,
     request: &mold_core::GenerateRequest,
@@ -7223,7 +7223,7 @@ mod tests {
             generation_hard_ordinal(&state, "replayed", &request),
             Some(7)
         );
-        crate::durable_queue_feeder::scrub_accelerator_pins(&mut request);
+        crate::queue_journal::resolve_replay_affinity(&mut request, Some(7), None, |_| None);
         assert_eq!(generation_hard_ordinal(&state, "replayed", &request), None);
         let placement = request.placement.unwrap();
         assert_eq!(placement.text_encoders, mold_core::DeviceRef::Cpu);

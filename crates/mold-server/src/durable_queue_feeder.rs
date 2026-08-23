@@ -239,27 +239,26 @@ async fn feed_available(
                 continue;
             }
         };
-        let target_gpu = match row.target_device_id.as_deref() {
-            Some(device_id) => match state
-                .gpu_pool
-                .workers
-                .iter()
-                .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
-                .map(|worker| worker.gpu.ordinal)
-            {
-                Some(ordinal) => Some(ordinal),
-                None => {
-                    scrub_accelerator_pins(&mut request);
-                    tracing::warn!(
-                        job = %row.id,
-                        device = %device_id,
-                        "the device this job was pinned to is not present; resuming on Auto"
-                    );
-                    None
-                }
+        let target_gpu = crate::queue_journal::resolve_replay_affinity(
+            &mut request,
+            row.target_gpu,
+            row.target_device_id.as_deref(),
+            |device_id| {
+                state
+                    .gpu_pool
+                    .workers
+                    .iter()
+                    .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
+                    .map(|worker| worker.gpu.ordinal)
             },
-            None => row.target_gpu,
-        };
+        );
+        if row.target_gpu.is_some() && target_gpu.is_none() {
+            tracing::warn!(
+                job = %row.id,
+                device = ?row.target_device_id,
+                "durable GPU identity is absent or unavailable; resuming on Auto"
+            );
+        }
         let metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
             &request,
             request.seed.unwrap_or(0),
@@ -345,41 +344,6 @@ async fn feed_available(
     Ok(report)
 }
 
-/// A missing stable lane invalidates every process-local accelerator reference
-/// captured with it. CPU is a durable semantic choice, so preserve it while
-/// turning only GPU ordinals and stable device IDs back into Auto.
-pub(crate) fn scrub_accelerator_pins(request: &mut mold_core::GenerateRequest) {
-    fn scrub(device: &mut mold_core::DeviceRef) {
-        if matches!(
-            device,
-            mold_core::DeviceRef::Gpu { .. } | mold_core::DeviceRef::Device { .. }
-        ) {
-            *device = mold_core::DeviceRef::Auto;
-        }
-    }
-
-    let Some(placement) = request.placement.as_mut() else {
-        return;
-    };
-    scrub(&mut placement.text_encoders);
-    let Some(advanced) = placement.advanced.as_mut() else {
-        return;
-    };
-    scrub(&mut advanced.transformer);
-    scrub(&mut advanced.vae);
-    for device in [
-        advanced.clip_l.as_mut(),
-        advanced.clip_g.as_mut(),
-        advanced.t5.as_mut(),
-        advanced.qwen.as_mut(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        scrub(device);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -436,6 +400,7 @@ mod tests {
                 request,
                 output_dir: Some(&output),
                 target_gpu: None,
+                target_device_id: None,
                 completion_payload: SseCompletionPayload::MetadataOnly,
                 batch_child: false,
                 carries_reference_authority: false,
@@ -825,6 +790,7 @@ mod tests {
                 request: &request,
                 output_dir: Some(&output),
                 target_gpu: None,
+                target_device_id: None,
                 completion_payload: SseCompletionPayload::MetadataOnly,
                 batch_child: false,
                 carries_reference_authority: false,
@@ -871,6 +837,7 @@ mod tests {
                 request: &request,
                 output_dir: Some(&output),
                 target_gpu: None,
+                target_device_id: None,
                 completion_payload: SseCompletionPayload::MetadataOnly,
                 batch_child: false,
                 carries_reference_authority: false,
@@ -892,6 +859,7 @@ mod tests {
                 request: &request,
                 output_dir: Some(&output),
                 target_gpu: None,
+                target_device_id: None,
                 completion_payload: SseCompletionPayload::MetadataOnly,
                 batch_child: false,
                 carries_reference_authority: false,
@@ -946,6 +914,7 @@ mod tests {
                     request: &pinned,
                     output_dir: Some(&output),
                     target_gpu: None,
+                    target_device_id: None,
                     completion_payload: SseCompletionPayload::MetadataOnly,
                     batch_child: false,
                     carries_reference_authority: false,

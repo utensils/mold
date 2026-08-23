@@ -109,6 +109,9 @@ pub struct JournalAdmission<'a> {
     /// survive the restart.
     pub output_dir: Option<&'a Path>,
     pub target_gpu: Option<usize>,
+    /// Stable identity corresponding to `target_gpu` in the admitting
+    /// worker inventory. `None` means the ordinal is not durable authority.
+    pub target_device_id: Option<&'a str>,
     pub completion_payload: SseCompletionPayload,
     /// True when the job is a server-owned adaptive-batch child; those are
     /// owned by the batch transaction's own durable recovery.
@@ -624,9 +627,7 @@ impl QueueJournal {
             request_json,
             output_dir: output_dir.to_path_buf(),
             target_gpu: admission.target_gpu,
-            // Admission records the ordinal a client asked for; a stable pin
-            // only ever arrives later, through PATCH /api/queue/:id.
-            target_device_id: None,
+            target_device_id: admission.target_device_id.map(ToOwned::to_owned),
             completion_payload: completion_payload_as_str(admission.completion_payload).to_string(),
             seed_pinned: admission.request.seed.is_some(),
             dispatch_attempts: 0,
@@ -703,7 +704,7 @@ impl QueueJournal {
                 request_json,
                 output_dir: output_dir.to_path_buf(),
                 target_gpu: child.target_gpu,
-                target_device_id: None,
+                target_device_id: child.target_device_id.map(ToOwned::to_owned),
                 completion_payload: completion_payload_as_str(child.completion_payload).to_string(),
                 seed_pinned: child.request.seed.is_some(),
                 dispatch_attempts: 0,
@@ -1334,7 +1335,8 @@ pub async fn replay(state: &crate::state::AppState, dispatch_available: bool) ->
             report.held += 1;
             continue;
         }
-        let request: mold_core::GenerateRequest = match serde_json::from_str(&row.request_json) {
+        let mut request: mold_core::GenerateRequest = match serde_json::from_str(&row.request_json)
+        {
             Ok(request) => request,
             Err(error) => {
                 // Fail closed: a request this build cannot read must not be
@@ -1350,30 +1352,25 @@ pub async fn replay(state: &crate::state::AppState, dispatch_available: bool) ->
             }
         };
 
+        let target_gpu = resolve_replay_affinity(
+            &mut request,
+            row.target_gpu,
+            row.target_device_id.as_deref(),
+            |device_id| resolve_pinned_ordinal(state, device_id),
+        );
+        if row.target_gpu.is_some() && target_gpu.is_none() {
+            tracing::warn!(
+                job = %row.id,
+                device = ?row.target_device_id,
+                "durable GPU identity is absent or unavailable; resuming on Auto"
+            );
+        }
         let metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
             &request,
             request.seed.unwrap_or(0),
             request.scheduler,
             mold_core::build_info::version_string(),
         ));
-        // Re-resolve a stable pin against THIS boot's device inventory. The
-        // recorded ordinal is only a fallback, and only when no stable pin was
-        // taken — replaying a renumbered ordinal runs the job on a device the
-        // user did not choose.
-        let target_gpu = match row.target_device_id.as_deref() {
-            Some(device_id) => match resolve_pinned_ordinal(state, device_id) {
-                Some(ordinal) => Some(ordinal),
-                None => {
-                    tracing::warn!(
-                        job = %row.id,
-                        device = %device_id,
-                        "the device this job was pinned to is not present; resuming on Auto"
-                    );
-                    None
-                }
-            },
-            None => row.target_gpu,
-        };
         let cancel = state.job_registry.register_job(
             &row.id,
             &row.model,
@@ -1455,6 +1452,87 @@ fn resolve_pinned_ordinal(state: &crate::state::AppState, device_id: &str) -> Op
         .iter()
         .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
         .map(|worker| worker.gpu.ordinal)
+}
+
+/// Capture durable affinity only when the active worker exposes a true stable
+/// identity. The scheduler's `runtime:gpu:N` fallback is deliberately not
+/// persisted: it is process-local and would merely disguise an ordinal as a
+/// durable pin.
+pub(crate) fn stable_device_id_for_ordinal(
+    state: &crate::state::AppState,
+    target_gpu: Option<usize>,
+) -> Option<String> {
+    target_gpu
+        .and_then(|ordinal| state.gpu_pool.worker_by_ordinal(ordinal))
+        .and_then(|worker| worker.gpu.stable_id.clone())
+}
+
+/// Rebuild one durable row's affinity against the current worker inventory.
+///
+/// A recorded ordinal is never restart authority by itself. With a stable
+/// identity, accelerator component pins are rebound to that identity so both
+/// the legacy dispatcher and scheduler V2 resolve the current ordinal. When
+/// the identity is absent or missing, accelerator pins become `Auto`; `Cpu`
+/// and already-`Auto` component choices remain unchanged.
+pub(crate) fn resolve_replay_affinity(
+    request: &mut mold_core::GenerateRequest,
+    _recorded_ordinal: Option<usize>,
+    target_device_id: Option<&str>,
+    resolve: impl FnOnce(&str) -> Option<usize>,
+) -> Option<usize> {
+    match target_device_id {
+        Some(device_id) => match resolve(device_id) {
+            Some(ordinal) => {
+                rewrite_accelerator_pins(request, Some(device_id));
+                Some(ordinal)
+            }
+            None => {
+                rewrite_accelerator_pins(request, None);
+                None
+            }
+        },
+        None => {
+            rewrite_accelerator_pins(request, None);
+            None
+        }
+    }
+}
+
+fn rewrite_accelerator_pins(
+    request: &mut mold_core::GenerateRequest,
+    stable_device_id: Option<&str>,
+) {
+    fn rewrite(device: &mut mold_core::DeviceRef, stable_device_id: Option<&str>) {
+        if matches!(
+            device,
+            mold_core::DeviceRef::Gpu { .. } | mold_core::DeviceRef::Device { .. }
+        ) {
+            *device = stable_device_id.map_or(mold_core::DeviceRef::Auto, |id| {
+                mold_core::DeviceRef::device(id.to_string())
+            });
+        }
+    }
+
+    let Some(placement) = request.placement.as_mut() else {
+        return;
+    };
+    rewrite(&mut placement.text_encoders, stable_device_id);
+    let Some(advanced) = placement.advanced.as_mut() else {
+        return;
+    };
+    rewrite(&mut advanced.transformer, stable_device_id);
+    rewrite(&mut advanced.vae, stable_device_id);
+    for device in [
+        advanced.clip_l.as_mut(),
+        advanced.clip_g.as_mut(),
+        advanced.t5.as_mut(),
+        advanced.qwen.as_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        rewrite(device, stable_device_id);
+    }
 }
 
 fn completion_payload_as_str(payload: SseCompletionPayload) -> &'static str {
@@ -1876,6 +1954,7 @@ mod tests {
             request,
             output_dir: Some(output_dir),
             target_gpu: None,
+            target_device_id: None,
             completion_payload: SseCompletionPayload::Full,
             batch_child: false,
             carries_reference_authority: false,
@@ -2378,6 +2457,119 @@ mod tests {
 
         for ticket in tickets {
             ticket.discard();
+        }
+    }
+
+    #[test]
+    fn direct_and_batch_admission_persist_the_authoritative_stable_device_id() {
+        let journal = journal_with_db();
+        let request = request();
+        let direct = JournalAdmission {
+            id: "direct-stable",
+            request: &request,
+            output_dir: Some(Path::new("/gallery")),
+            target_gpu: Some(2),
+            target_device_id: Some("cuda:stable-direct"),
+            completion_payload: SseCompletionPayload::Full,
+            batch_child: false,
+            carries_reference_authority: false,
+        };
+        let direct_ticket = journal.record(direct).expect("direct durable row");
+
+        let batch_child = JournalAdmission {
+            id: "batch-stable",
+            request: &request,
+            output_dir: Some(Path::new("/gallery")),
+            target_gpu: Some(5),
+            target_device_id: Some("cuda:stable-batch"),
+            completion_payload: SseCompletionPayload::MetadataOnly,
+            batch_child: false,
+            carries_reference_authority: false,
+        };
+        let (_, inserted) = journal
+            .record_batch(BatchJournalAdmission {
+                id: "stable-batch",
+                client_batch_id: "stable-client",
+                request_sha256: "stable-sha",
+                children: &[batch_child],
+            })
+            .expect("batch durable row");
+        assert!(inserted);
+
+        let rows = journal.list_all();
+        let direct = rows.iter().find(|row| row.id == "direct-stable").unwrap();
+        assert_eq!(direct.target_gpu, Some(2));
+        assert_eq!(
+            direct.target_device_id.as_deref(),
+            Some("cuda:stable-direct")
+        );
+        let batch = rows.iter().find(|row| row.id == "batch-stable").unwrap();
+        assert_eq!(batch.target_gpu, Some(5));
+        assert_eq!(batch.target_device_id.as_deref(), Some("cuda:stable-batch"));
+
+        direct_ticket.discard();
+    }
+
+    #[test]
+    fn replay_affinity_renumbers_by_stable_identity_and_preserves_cpu_and_auto() {
+        let mut request = request();
+        request.placement = Some(mold_core::DevicePlacement {
+            text_encoders: mold_core::DeviceRef::Cpu,
+            advanced: Some(mold_core::AdvancedPlacement {
+                transformer: mold_core::DeviceRef::gpu(2),
+                vae: mold_core::DeviceRef::Auto,
+                clip_l: Some(mold_core::DeviceRef::device("cuda:stable")),
+                clip_g: Some(mold_core::DeviceRef::Cpu),
+                ..mold_core::AdvancedPlacement::default()
+            }),
+        });
+
+        let target =
+            super::resolve_replay_affinity(&mut request, Some(2), Some("cuda:stable"), |id| {
+                (id == "cuda:stable").then_some(7)
+            });
+
+        assert_eq!(target, Some(7));
+        let placement = request.placement.unwrap();
+        assert_eq!(placement.text_encoders, mold_core::DeviceRef::Cpu);
+        let advanced = placement.advanced.unwrap();
+        assert_eq!(
+            advanced.transformer,
+            mold_core::DeviceRef::device("cuda:stable")
+        );
+        assert_eq!(advanced.vae, mold_core::DeviceRef::Auto);
+        assert_eq!(
+            advanced.clip_l,
+            Some(mold_core::DeviceRef::device("cuda:stable"))
+        );
+        assert_eq!(advanced.clip_g, Some(mold_core::DeviceRef::Cpu));
+    }
+
+    #[test]
+    fn replay_affinity_without_a_resolvable_stable_id_never_uses_the_stale_ordinal() {
+        for stable_id in [None, Some("cuda:removed")] {
+            let mut request = request();
+            request.placement = Some(mold_core::DevicePlacement {
+                text_encoders: mold_core::DeviceRef::Cpu,
+                advanced: Some(mold_core::AdvancedPlacement {
+                    transformer: mold_core::DeviceRef::gpu(2),
+                    vae: mold_core::DeviceRef::device("cuda:removed"),
+                    clip_l: Some(mold_core::DeviceRef::Cpu),
+                    clip_g: Some(mold_core::DeviceRef::Auto),
+                    ..mold_core::AdvancedPlacement::default()
+                }),
+            });
+
+            let target = super::resolve_replay_affinity(&mut request, Some(2), stable_id, |_| None);
+
+            assert_eq!(target, None);
+            let placement = request.placement.unwrap();
+            assert_eq!(placement.text_encoders, mold_core::DeviceRef::Cpu);
+            let advanced = placement.advanced.unwrap();
+            assert_eq!(advanced.transformer, mold_core::DeviceRef::Auto);
+            assert_eq!(advanced.vae, mold_core::DeviceRef::Auto);
+            assert_eq!(advanced.clip_l, Some(mold_core::DeviceRef::Cpu));
+            assert_eq!(advanced.clip_g, Some(mold_core::DeviceRef::Auto));
         }
     }
 

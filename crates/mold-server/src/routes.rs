@@ -2406,7 +2406,9 @@ async fn admit_generation_batch(
         validate_generate_request(&request, family)
             .map_err(|error| ApiError::validation(format!("requests[{}]: {error}", offset + 1)))?;
         resolve_server_local_media_paths(&state, &mut request).await?;
-        admitted_children.push((request, preferred_gpu));
+        let target_device_id =
+            crate::queue_journal::stable_device_id_for_ordinal(&state, preferred_gpu);
+        admitted_children.push((request, preferred_gpu, target_device_id));
     }
 
     let batch_id = uuid::Uuid::new_v4().to_string();
@@ -2421,17 +2423,18 @@ async fn admit_generation_batch(
         let admissions = admitted_children
             .iter()
             .zip(&job_ids)
-            .map(
-                |((request, preferred_gpu), job_id)| crate::queue_journal::JournalAdmission {
+            .map(|((request, preferred_gpu, target_device_id), job_id)| {
+                crate::queue_journal::JournalAdmission {
                     id: job_id,
                     request,
                     output_dir: Some(output_dir.as_path()),
                     target_gpu: *preferred_gpu,
+                    target_device_id: target_device_id.as_deref(),
                     completion_payload: SseCompletionPayload::MetadataOnly,
                     batch_child: false,
                     carries_reference_authority: false,
-                },
-            )
+                }
+            })
             .collect::<Vec<_>>();
         let (recorded, inserted) =
             journal.record_batch(crate::queue_journal::BatchJournalAdmission {
@@ -2702,6 +2705,8 @@ async fn generate(
     } = crate::job_supervisor::supervise_job(job_id.clone(), cancel);
     // Record the durable row BEFORE submit, so a crash between here and the
     // worker still leaves something to replay.
+    let target_device_id =
+        crate::queue_journal::stable_device_id_for_ordinal(&state, preferred_gpu);
     let journal = state
         .queue_journal
         .record(crate::queue_journal::JournalAdmission {
@@ -2709,6 +2714,7 @@ async fn generate(
             request: &req,
             output_dir: output_dir.as_deref(),
             target_gpu: preferred_gpu,
+            target_device_id: target_device_id.as_deref(),
             completion_payload: SseCompletionPayload::Full,
             batch_child: false,
             carries_reference_authority: resolved_references.is_some() || req.references.is_some(),
@@ -3853,6 +3859,8 @@ async fn generate_stream(
         result_tx,
         outcome_rx,
     } = crate::job_supervisor::supervise_job(job_id.clone(), cancel);
+    let target_device_id =
+        crate::queue_journal::stable_device_id_for_ordinal(&state, preferred_gpu);
     let journal = state
         .queue_journal
         .record(crate::queue_journal::JournalAdmission {
@@ -3860,6 +3868,7 @@ async fn generate_stream(
             request: &req,
             output_dir: output_dir.as_deref(),
             target_gpu: preferred_gpu,
+            target_device_id: target_device_id.as_deref(),
             completion_payload,
             batch_child: false,
             carries_reference_authority: resolved_references.is_some() || req.references.is_some(),

@@ -820,6 +820,18 @@ mod tests {
         gpu_worker_stub_with_receiver(ordinal).0
     }
 
+    fn gpu_worker_stub_with_stable_id(
+        ordinal: usize,
+        stable_id: &str,
+    ) -> Arc<crate::gpu_pool::GpuWorker> {
+        let (worker, _receiver) = gpu_worker_stub_with_receiver(ordinal);
+        let Ok(mut worker) = Arc::try_unwrap(worker) else {
+            unreachable!("fresh worker has one owner")
+        };
+        worker.gpu.stable_id = Some(stable_id.to_string());
+        Arc::new(worker)
+    }
+
     fn gpu_worker_stub_with_receiver(
         ordinal: usize,
     ) -> (
@@ -4316,6 +4328,7 @@ mod tests {
                     request: &request,
                     output_dir: Some(&output),
                     target_gpu: None,
+                    target_device_id: None,
                     completion_payload: crate::state::SseCompletionPayload::MetadataOnly,
                     batch_child: false,
                     carries_reference_authority: false,
@@ -5190,6 +5203,179 @@ mod tests {
             "replay re-registers under the original ids, so /api/queue and \
              /api/events see resumed jobs with no new event type"
         );
+    }
+
+    #[tokio::test]
+    async fn direct_admission_rebinds_a_stable_gpu_after_restart_and_renumbering() {
+        const STABLE_ID: &str = "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let output_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+
+        let submitted_id = {
+            let (mut state, mut rx) = durable_state(db.clone(), output_dir.path());
+            state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+                workers: vec![gpu_worker_stub_with_stable_id(2, STABLE_ID)].into(),
+            });
+            install_worker_registry(&mut state);
+            let journal = state.queue_journal.clone();
+            let app = app_with_state(state.clone());
+            let mut body: serde_json::Value =
+                serde_json::from_str(&generate_body("stable direct", 64, 64)).unwrap();
+            body["placement"] = serde_json::json!({
+                "text_encoders": { "kind": "cpu" },
+                "advanced": {
+                    "transformer": { "kind": "gpu", "ordinal": 2 },
+                    "vae": { "kind": "auto" },
+                    "clip_l": { "kind": "cpu" }
+                }
+            });
+            let task = tokio::spawn(async move {
+                app.oneshot(json_request("POST", "/api/generate", body))
+                    .await
+            });
+            let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("direct admission")
+                .expect("queue open");
+            task.abort();
+            let _ = task.await;
+            let row = journal
+                .list_all()
+                .into_iter()
+                .find(|row| row.id == job.id)
+                .expect("durable direct row");
+            assert_eq!(row.target_gpu, Some(2));
+            assert_eq!(row.target_device_id.as_deref(), Some(STABLE_ID));
+            let id = job.id.clone();
+            journal.retain_all();
+            drop(job);
+            id
+        };
+
+        let (mut state, mut rx) = durable_state(db, output_dir.path());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![gpu_worker_stub_with_stable_id(7, STABLE_ID)].into(),
+        });
+        install_worker_registry(&mut state);
+        let report = crate::queue_journal::replay(&state, true).await;
+        assert_eq!(report.resumed, 1);
+        let mut replayed = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("direct replay")
+            .expect("queue open");
+        assert_eq!(replayed.id, submitted_id);
+        assert_eq!(state.job_registry.target_gpu(&submitted_id), Some(Some(7)));
+        assert_eq!(
+            crate::scheduler::generation_hard_ordinal(&state, &submitted_id, &replayed.request),
+            Some(7),
+            "scheduler V2 resolves the current ordinal"
+        );
+        assert_eq!(
+            crate::queue::legacy_generation_preferred_gpu(
+                &state,
+                &submitted_id,
+                replayed.request.placement.as_ref(),
+            ),
+            Ok(Some(7)),
+            "legacy dispatch resolves the current ordinal"
+        );
+        let placement = replayed.request.placement.as_ref().unwrap();
+        assert_eq!(placement.text_encoders, mold_core::DeviceRef::Cpu);
+        let advanced = placement.advanced.as_ref().unwrap();
+        assert_eq!(
+            advanced.transformer,
+            mold_core::DeviceRef::device(STABLE_ID)
+        );
+        assert_eq!(advanced.vae, mold_core::DeviceRef::Auto);
+        assert_eq!(advanced.clip_l, Some(mold_core::DeviceRef::Cpu));
+        replayed.journal.take().unwrap().discard();
+        state.job_registry.remove(&submitted_id);
+        state.queue.decrement();
+    }
+
+    #[tokio::test]
+    async fn batch_admission_rebinds_a_stable_gpu_after_restart_and_renumbering() {
+        const STABLE_ID: &str = "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let output_dir = tempfile::tempdir().unwrap();
+        let db_path = output_dir.path().join("mold.db");
+        let submitted_id = {
+            let db = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
+            let (mut state, _rx) = durable_state(db, output_dir.path());
+            state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+                workers: vec![gpu_worker_stub_with_stable_id(2, STABLE_ID)].into(),
+            });
+            install_worker_registry(&mut state);
+            let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+            state.scheduled_work = crate::scheduler::ScheduledWorkHandle::new(scheduled_tx);
+            let journal = state.queue_journal.clone();
+            let app = app_with_state(state);
+            let mut request: serde_json::Value =
+                serde_json::from_str(&generate_body("stable batch", 64, 64)).unwrap();
+            request["placement"] = serde_json::json!({
+                "text_encoders": { "kind": "cpu" },
+                "advanced": {
+                    "transformer": { "kind": "gpu", "ordinal": 2 },
+                    "vae": { "kind": "auto" }
+                }
+            });
+            let response = app
+                .oneshot(json_request(
+                    "POST",
+                    "/api/generation-batches",
+                    serde_json::json!({
+                        "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                        "requests": [request],
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let body = json_body(response).await;
+            let id = body["children"][0]["job_id"].as_str().unwrap().to_string();
+            let row = journal
+                .list_all()
+                .into_iter()
+                .find(|row| row.id == id)
+                .expect("durable batch row");
+            assert_eq!(row.target_gpu, Some(2));
+            assert_eq!(row.target_device_id.as_deref(), Some(STABLE_ID));
+            id
+        };
+
+        let db = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
+        let (mut state, mut rx) = durable_state(db, output_dir.path());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![gpu_worker_stub_with_stable_id(7, STABLE_ID)].into(),
+        });
+        install_worker_registry(&mut state);
+        crate::durable_queue_feeder::recover_runtime(&state)
+            .await
+            .unwrap();
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), shutdown.clone());
+        let mut replayed = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("batch replay")
+            .expect("queue open");
+        assert_eq!(replayed.id, submitted_id);
+        assert_eq!(state.job_registry.target_gpu(&submitted_id), Some(Some(7)));
+        assert_eq!(
+            crate::scheduler::generation_hard_ordinal(&state, &submitted_id, &replayed.request),
+            Some(7)
+        );
+        assert_eq!(
+            crate::queue::legacy_generation_preferred_gpu(
+                &state,
+                &submitted_id,
+                replayed.request.placement.as_ref(),
+            ),
+            Ok(Some(7))
+        );
+        replayed.journal.take().unwrap().discard();
+        state.job_registry.remove(&submitted_id);
+        state.queue.decrement();
+        shutdown.cancel();
+        feeder.await.unwrap();
     }
 
     /// `PATCH /api/queue/:id` is authoritative over the lane and the order, so
