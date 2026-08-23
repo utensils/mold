@@ -7955,7 +7955,7 @@ mod tests {
 
     #[test]
     #[cfg(not(feature = "h3"))]
-    fn exact_authority_still_rejects_while_runtime_and_factory_registry_are_closed() {
+    fn exact_contract_only_authority_rejects_an_incomplete_runtime_registry() {
         let authority = authority();
         let error = authority
             .validate_for_dispatch(
@@ -7967,9 +7967,11 @@ mod tests {
                 AttentionChunkPolicy::Off,
             )
             .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("registry remains runtime unavailable"));
+        let error = error.to_string();
+        assert!(
+            error.contains("public runtime registry is incomplete"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -7991,12 +7993,10 @@ mod tests {
             )
             .unwrap_err();
         let error = error.to_string();
-        let expected = if cfg!(feature = "h3") {
-            "public runtime registry is incomplete"
-        } else {
-            "registry remains runtime unavailable"
-        };
-        assert!(error.contains(expected), "{error}");
+        assert!(
+            error.contains("public runtime registry is incomplete"),
+            "{error}"
+        );
 
         let mut exact_ref2va = exact_input();
         exact_ref2va.model = contract::REF2VA_COMFY.into();
