@@ -1595,6 +1595,368 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
   }
 
+  it("keeps accepting durable prints while earlier admissions are still awaiting responses", async () => {
+    const pendingAdmissions = new Map<
+      string,
+      (batch: {
+        id: string;
+        client_batch_id: string;
+        instance_id: string;
+        durable: true;
+        children: Array<{
+          index: number;
+          job_id: string;
+          state: "queued";
+          created_at_ms: number;
+          updated_at_ms: number;
+        }>;
+      }) => void
+    >();
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+        });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        const clientBatchId = JSON.parse(String(init.body)).client_batch_id as string;
+        return new Promise((resolve) => pendingAdmissions.set(clientBatchId, resolve));
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("first durable print");
+    await submitPrompt("second durable print");
+
+    expect(pendingAdmissions.size).toBe(2);
+    expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(2);
+    expect(openStreams.filter((stream) => stream.path === "/api/events")).toHaveLength(1);
+    expect(openStreams.filter((stream) => stream.path === "/api/generate/stream")).toHaveLength(0);
+
+    let index = 0;
+    for (const [clientBatchId, resolve] of pendingAdmissions) {
+      index += 1;
+      resolve({
+        id: `batch-${index}`,
+        client_batch_id: clientBatchId,
+        instance_id: "studio-id",
+        durable: true,
+        children: [
+          {
+            index: 1,
+            job_id: `job-${index}`,
+            state: "queued",
+            created_at_ms: 10,
+            updated_at_ms: 11,
+          },
+        ],
+      });
+    }
+    await flushPromises();
+  });
+
+  it("recovers an ambiguous durable POST by client UUID without retrying or streaming", async () => {
+    let clientBatchId = "";
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+        });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        clientBatchId = JSON.parse(String(init.body)).client_batch_id;
+        return Promise.reject(new Error("response lost after commit"));
+      }
+      if (path === "/api/generation-batches/status" && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual({ client_batch_ids: [clientBatchId] });
+        return Promise.resolve({
+          instance_id: "studio-id",
+          batches: [
+            {
+              id: "recovered-batch",
+              client_batch_id: clientBatchId,
+              instance_id: "studio-id",
+              durable: true,
+              children: [
+                {
+                  index: 1,
+                  job_id: "recovered-job",
+                  state: "queued",
+                  created_at_ms: 10,
+                  updated_at_ms: 11,
+                },
+              ],
+            },
+          ],
+          missing: { client_batch_ids: [], batch_ids: [] },
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("ambiguous durable print");
+    await vi.waitFor(() =>
+      expect(
+        apiJsonTo.mock.calls.filter(([, path]) => path === "/api/generation-batches/status"),
+      ).toHaveLength(1),
+    );
+
+    expect(
+      apiJsonTo.mock.calls.filter(([, path]) => path === "/api/generation-batches"),
+    ).toHaveLength(1);
+    expect(openStreams.filter((stream) => stream.path === "/api/generate/stream")).toHaveLength(0);
+    expect(wrapper.get("[data-test='mobile-generation-job']").text()).toContain(
+      "ambiguous durable print",
+    );
+  });
+
+  it("keeps a bulk-reconciled completion when the older admission response arrives later", async () => {
+    const admission = deferred<Record<string, unknown>>();
+    let clientBatchId = "";
+    const batch = (state: "queued" | "complete") => ({
+      id: "racing-batch",
+      client_batch_id: clientBatchId,
+      instance_id: "studio-id",
+      durable: true,
+      children: [
+        {
+          index: 1,
+          job_id: "racing-job",
+          state,
+          created_at_ms: 10,
+          updated_at_ms: state === "complete" ? 13 : 11,
+          ...(state === "complete"
+            ? { completed_at_ms: 13, result: { filename: "racing.png" } }
+            : {}),
+        },
+      ],
+    });
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+        });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        clientBatchId = JSON.parse(String(init.body)).client_batch_id;
+        return admission.promise;
+      }
+      if (path === "/api/generation-batches/status") {
+        return Promise.resolve({
+          instance_id: "studio-id",
+          batches: [batch("complete")],
+          missing: { client_batch_ids: [], batch_ids: [] },
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    streamableMediaUrl.mockResolvedValue("https://studio/exact-host/racing.png");
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("racing durable print");
+    openStreams.find((stream) => stream.path === "/api/events")!.options.onOpen?.();
+    await vi.waitFor(() =>
+      expect(wrapper!.find("[data-test='mobile-generation-queue']").exists()).toBe(false),
+    );
+    const photoCalls = invoke.mock.calls.filter(([command]) => command === "save_image_to_photos");
+
+    admission.resolve(batch("queued"));
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-generation-queue']").exists()).toBe(false);
+    expect(
+      invoke.mock.calls.filter(([command]) => command === "save_image_to_photos"),
+    ).toHaveLength(photoCalls.length);
+  });
+
+  it("admits a prepared Batch N as sibling children in one durable POST", async () => {
+    let admittedRequests: Array<Record<string, unknown>> = [];
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+        });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as {
+          client_batch_id: string;
+          requests: Array<Record<string, unknown>>;
+        };
+        admittedRequests = body.requests;
+        return Promise.resolve({
+          id: "batch-n",
+          client_batch_id: body.client_batch_id,
+          instance_id: "studio-id",
+          durable: true,
+          children: body.requests.map((_request, offset) => ({
+            index: offset + 1,
+            job_id: `batch-n-job-${offset + 1}`,
+            state: "queued",
+            created_at_ms: 10,
+            updated_at_ms: 11,
+          })),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("two durable variations");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
+    await flushPromises();
+
+    expect(admittedRequests).toHaveLength(2);
+    expect(admittedRequests.map((request) => request.batch_size)).toEqual([1, 1]);
+    expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(2);
+    expect(openStreams.filter((stream) => stream.path === "/api/events")).toHaveLength(1);
+    expect(openStreams.filter((stream) => stream.path === "/api/generate/stream")).toHaveLength(0);
+  });
+
+  it("admits a capable media-free print durably and settles it from one host event stream", async () => {
+    let phase: "queued" | "running" | "complete" = "queued";
+    let admittedClientBatchId = "";
+    const durableBatch = () => ({
+      id: "batch-1",
+      client_batch_id: "client-from-request",
+      instance_id: "studio-id",
+      durable: true as const,
+      children: [
+        {
+          index: 1,
+          job_id: "durable-job-1",
+          state: phase,
+          created_at_ms: 10,
+          updated_at_ms: phase === "queued" ? 11 : phase === "running" ? 12 : 13,
+          ...(phase === "complete"
+            ? {
+                completed_at_ms: 13,
+                result: { filename: "durable.png" },
+              }
+            : {}),
+        },
+      ],
+    });
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+        });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        const clientBatchId = JSON.parse(String(init.body)).client_batch_id;
+        admittedClientBatchId = clientBatchId;
+        return Promise.resolve({ ...durableBatch(), client_batch_id: clientBatchId });
+      }
+      if (path === "/api/generation-batches/status") {
+        return Promise.resolve({
+          instance_id: "studio-id",
+          batches: [{ ...durableBatch(), client_batch_id: admittedClientBatchId }],
+          missing: { client_batch_ids: [], batch_ids: [] },
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    apiFetchTo.mockResolvedValue({
+      blob: () => Promise.resolve(new Blob(["durable-image"], { type: "image/png" })),
+    } as Response);
+    streamableMediaUrl.mockResolvedValue("https://studio/exact-host/durable.png");
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("durable print");
+
+    expect(openStreams.filter((stream) => stream.path === "/api/generate/stream")).toHaveLength(0);
+    const hostEvents = openStreams.filter((stream) => stream.path === "/api/events");
+    expect(hostEvents).toHaveLength(1);
+    expect(wrapper.get("[data-test='mobile-generation-job']").text()).toContain("durable print");
+    const persisted = localStorage.getItem("mold.mobile.durable-generations.v1") ?? "";
+    expect(persisted).not.toContain("durable print");
+    expect(persisted).not.toContain(target.apiKey);
+    expect(persisted).not.toContain(target.baseUrl);
+
+    phase = "running";
+    hostEvents[0]!.options.onEvent(
+      "event",
+      JSON.stringify({ type: "job_started", id: "durable-job-1", model: model.name }),
+    );
+    await vi.waitFor(() =>
+      expect(wrapper!.get("[data-test='mobile-queue-count']").text()).toBe("1 active"),
+    );
+
+    phase = "complete";
+    hostEvents[0]!.options.onEvent(
+      "event",
+      JSON.stringify({ type: "job_ended", id: "durable-job-1" }),
+    );
+    await vi.waitFor(() =>
+      expect(wrapper!.find("[data-test='mobile-generation-queue']").exists()).toBe(false),
+    );
+    expect(streamableMediaUrl).toHaveBeenCalledWith(
+      "/api/gallery/image/durable.png",
+      expect.objectContaining({ target }),
+    );
+    expect(invoke).toHaveBeenCalledWith(
+      "save_image_to_photos",
+      expect.objectContaining({ dataB64: expect.any(String) }),
+    );
+    expect(JSON.parse(localStorage.getItem("mold.mobile.durable-generations.v1") ?? "[]")).toEqual(
+      [],
+    );
+
+    const photoCalls = invoke.mock.calls.filter(([command]) => command === "save_image_to_photos");
+    hostEvents[0]!.options.onEvent(
+      "event",
+      JSON.stringify({ type: "gallery_added", filename: "durable.png" }),
+    );
+    await flushPromises();
+    expect(
+      invoke.mock.calls.filter(([command]) => command === "save_image_to_photos"),
+    ).toHaveLength(photoCalls.length);
+  });
+
   it("composes the chosen style preset into the outgoing prompt without mutating the textarea", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
