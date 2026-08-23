@@ -84,8 +84,8 @@ describe("ColdStartGuide", () => {
         id: "d1",
         model: "flux2-klein:q4",
         status: "active",
-        bytes_done: 3_000,
-        bytes_total: 10_000,
+        bytes_done: 45_870_258_557,
+        bytes_total: 100_000_000_000,
       },
     ];
     dlState.queued = [];
@@ -96,7 +96,7 @@ describe("ColdStartGuide", () => {
     expect(
       wrapper.find('[data-test="starter-pull-flux2-klein:q4"]').exists(),
     ).toBe(false);
-    expect(wrapper.text()).toContain("pulling 30%");
+    expect(wrapper.text()).toContain("pulling 46%");
   });
 
   it("marks a queued starter as queued", () => {

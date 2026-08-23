@@ -81,7 +81,11 @@ async function pull(model: string) {
           </div>
           <span class="edge-code" data-test="starter-pulling">
             Pulling…
-            {{ percent(jobFor(starter.model)!.bytes_done, jobFor(starter.model)!.bytes_total) }}%
+            {{
+              Math.round(
+                percent(jobFor(starter.model)!.bytes_done, jobFor(starter.model)!.bytes_total),
+              )
+            }}%
           </span>
         </template>
         <button

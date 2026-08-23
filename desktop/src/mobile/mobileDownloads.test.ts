@@ -367,6 +367,29 @@ describe("mobile download authority", () => {
     expect(store.pullStatusForHost(entry, studio.id)?.phase).toBe("queued");
   });
 
+  it("rounds active pull progress to a whole-number percentage", () => {
+    const store = useMobileDownloadsStore();
+    store.registerConsumer("catalog", [studio]);
+    streams[0]!.onEvent(
+      "download",
+      JSON.stringify(
+        snapshot([
+          {
+            ...queuedJob("fractional-progress", entry.name),
+            status: "active",
+            bytes_done: 45_870_258_557,
+            bytes_total: 100_000_000_000,
+          },
+        ]),
+      ),
+    );
+
+    expect(store.pullStatusForHost(entry, studio.id)).toEqual({
+      label: "Pulling 46%",
+      phase: "active",
+    });
+  });
+
   it("replaces changed host targets, ignores stale frames, and isolates equal job ids", () => {
     const store = useMobileDownloadsStore();
     store.registerConsumer("catalog", [studio, render]);
