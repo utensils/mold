@@ -647,9 +647,12 @@ pub(crate) fn private_h3_admission_host_floor_bytes(
     let accelerated =
         released_h3_private_qwen_loader_memory_authority(H3PrivateQwenLoaderMemoryRoute::Cuda)?
             .host_resident_parameter_bytes;
+    let metal =
+        released_h3_private_qwen_loader_memory_authority(H3PrivateQwenLoaderMemoryRoute::Metal)?
+            .host_resident_parameter_bytes;
     bounds
         .fixed_runtime_host_bytes
-        .checked_add(cpu.min(accelerated))
+        .checked_add(cpu.min(accelerated).min(metal))
         .ok_or_else(|| anyhow!("private H3 admission host floor overflow"))
 }
 

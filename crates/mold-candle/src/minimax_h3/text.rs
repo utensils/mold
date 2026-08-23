@@ -130,6 +130,14 @@ pub(super) struct Qwen3VlNvfp4Weights {
     pub(super) layers: Vec<Qwen3VlNvfp4LayerWeights>,
 }
 
+pub(super) trait Qwen3VlNvfp4LayerLoader: Send + Sync {
+    fn load_layer(
+        &self,
+        index: usize,
+        checkpoint: &mut dyn FnMut(ConditionerCheckpoint) -> Result<()>,
+    ) -> Result<Qwen3VlNvfp4LayerWeights>;
+}
+
 struct Mlp {
     gate_proj: Qwen3VlLinear,
     up_proj: Qwen3VlLinear,
@@ -402,6 +410,40 @@ struct DecoderLayer {
     post_attention_layernorm: RmsNorm,
 }
 
+struct Qwen3VlDenseLayerWeights {
+    q_norm: RmsNorm,
+    k_norm: RmsNorm,
+    input_layernorm: RmsNorm,
+    post_attention_layernorm: RmsNorm,
+}
+
+impl Qwen3VlDenseLayerWeights {
+    fn new(config: &Qwen3VlTextDimensions, vb: VarBuilder) -> Result<Self> {
+        Ok(Self {
+            q_norm: rms_norm(
+                config.head_dim,
+                config.rms_norm_eps,
+                vb.pp("self_attn.q_norm"),
+            )?,
+            k_norm: rms_norm(
+                config.head_dim,
+                config.rms_norm_eps,
+                vb.pp("self_attn.k_norm"),
+            )?,
+            input_layernorm: rms_norm(
+                config.hidden_size,
+                config.rms_norm_eps,
+                vb.pp("input_layernorm"),
+            )?,
+            post_attention_layernorm: rms_norm(
+                config.hidden_size,
+                config.rms_norm_eps,
+                vb.pp("post_attention_layernorm"),
+            )?,
+        })
+    }
+}
+
 impl DecoderLayer {
     fn new(config: &Qwen3VlTextDimensions, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
@@ -454,6 +496,40 @@ impl DecoderLayer {
                 config.rms_norm_eps,
                 vb.pp("post_attention_layernorm"),
             )?,
+        })
+    }
+
+    fn new_nvfp4_with_dense(
+        config: &Qwen3VlTextDimensions,
+        dense: &Qwen3VlDenseLayerWeights,
+        weights: Qwen3VlNvfp4LayerWeights,
+    ) -> Result<Self> {
+        let Qwen3VlNvfp4LayerWeights {
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
+            gate_proj,
+            up_proj,
+            down_proj,
+        } = weights;
+        Ok(Self {
+            attention: Attention {
+                q_proj: Qwen3VlLinear::Nvfp4(q_proj),
+                k_proj: Qwen3VlLinear::Nvfp4(k_proj),
+                v_proj: Qwen3VlLinear::Nvfp4(v_proj),
+                o_proj: Qwen3VlLinear::Nvfp4(o_proj),
+                q_norm: dense.q_norm.clone(),
+                k_norm: dense.k_norm.clone(),
+                num_heads: config.num_attention_heads,
+                num_key_value_heads: config.num_key_value_heads,
+                head_dim: config.head_dim,
+                kv_groups: config.num_attention_heads / config.num_key_value_heads,
+                scale: 1.0 / (config.head_dim as f64).sqrt(),
+            },
+            mlp: Mlp::new_nvfp4(gate_proj, up_proj, down_proj),
+            input_layernorm: dense.input_layernorm.clone(),
+            post_attention_layernorm: dense.post_attention_layernorm.clone(),
         })
     }
 
@@ -601,6 +677,105 @@ impl Qwen3VlTextEncoder {
 
 fn qwen_requires_layer_synchronization(location: DeviceLocation) -> bool {
     matches!(location, DeviceLocation::Metal { .. })
+}
+
+pub(super) struct Qwen3VlNvfp4StreamingTextEncoder {
+    embed_tokens: Qwen3VlEmbedding,
+    rotary: MultimodalRotaryEmbedding,
+    dimensions: Qwen3VlTextDimensions,
+    dense_layers: Vec<Qwen3VlDenseLayerWeights>,
+    layer_loader: Box<dyn Qwen3VlNvfp4LayerLoader>,
+    device: Device,
+}
+
+impl Qwen3VlNvfp4StreamingTextEncoder {
+    pub(super) fn new(
+        config: &Qwen3VlTextDimensions,
+        dense_layers_vb: VarBuilder,
+        embed_tokens: H3ComfyInt8TensorwiseEmbedding,
+        layer_loader: Box<dyn Qwen3VlNvfp4LayerLoader>,
+    ) -> Result<Self> {
+        config.validate()?;
+        if !dense_layers_vb.device().is_metal() {
+            candle::bail!("H3 streamed NVFP4 Qwen language layers require Metal")
+        }
+        if embed_tokens.vocabulary() != config.vocab_size
+            || embed_tokens.hidden_size() != config.hidden_size
+        {
+            candle::bail!("H3 streamed NVFP4 Qwen embedding shape differs from the released config")
+        }
+        let device = dense_layers_vb.device().clone();
+        let mut dense_layers = Vec::with_capacity(config.num_layers);
+        for index in 0..config.num_layers {
+            dense_layers.push(Qwen3VlDenseLayerWeights::new(
+                config,
+                dense_layers_vb.pp("layers").pp(index),
+            )?);
+        }
+        Ok(Self {
+            embed_tokens: Qwen3VlEmbedding::Int8Tensorwise {
+                embedding: embed_tokens,
+                output_dtype: dense_layers_vb.dtype(),
+                device: device.clone(),
+            },
+            rotary: MultimodalRotaryEmbedding::new(config, &dense_layers_vb)?,
+            dimensions: config.clone(),
+            dense_layers,
+            layer_loader,
+            device,
+        })
+    }
+
+    pub(super) fn embed_tokens(&self, input_ids: &Tensor) -> Result<Tensor> {
+        self.embed_tokens.forward(input_ids)
+    }
+
+    pub(super) fn forward_embeds(
+        &self,
+        mut hidden: Tensor,
+        position_ids: &Tensor,
+        visual_indices: &[usize],
+        deepstack: Option<&[Tensor]>,
+        checkpoint: &mut dyn FnMut(ConditionerCheckpoint) -> Result<()>,
+    ) -> Result<Tensor> {
+        let (batch, sequence, width) = hidden.dims3()?;
+        if width != self.dimensions.hidden_size || batch != 1 {
+            candle::bail!(
+                "H3 streamed NVFP4 text embeddings have shape {:?}, expected (1, sequence, {})",
+                hidden.dims(),
+                self.dimensions.hidden_size
+            );
+        }
+        if deepstack.is_some_and(|features| features.len() > self.dimensions.num_layers) {
+            candle::bail!("H3 DeepStack has more feature layers than language layers");
+        }
+        let (cos, sin) = self.rotary.cos_sin(position_ids, hidden.dtype())?;
+        let causal = causal_mask(sequence, hidden.device())?;
+        for index in 0..self.dimensions.num_layers {
+            let weights = self.layer_loader.load_layer(index, checkpoint)?;
+            let layer = DecoderLayer::new_nvfp4_with_dense(
+                &self.dimensions,
+                &self.dense_layers[index],
+                weights,
+            )?;
+            hidden = layer.forward(&hidden, &cos, &sin, &causal)?;
+            if let Some(features) = deepstack.and_then(|features| features.get(index)) {
+                hidden = inject_deepstack(
+                    hidden,
+                    visual_indices,
+                    features,
+                    self.dimensions.hidden_size,
+                )?;
+            }
+            self.device.synchronize()?;
+            drop(layer);
+            checkpoint(ConditionerCheckpoint::LanguageLayer {
+                completed: index + 1,
+                total: self.dimensions.num_layers,
+            })?;
+        }
+        Ok(hidden)
+    }
 }
 
 #[cfg(feature = "h3-private-uat")]
@@ -818,22 +993,26 @@ mod tests {
             Tensor::ones((config.vocab_size, 1), DType::F32, &Device::Cpu).unwrap(),
         )
         .unwrap();
-        let q_width = config.num_attention_heads * config.head_dim;
-        let kv_width = config.num_key_value_heads * config.head_dim;
         let layers = (0..config.num_layers)
-            .map(|_| Qwen3VlNvfp4LayerWeights {
-                q_proj: synthetic_nvfp4(q_width, config.hidden_size, false),
-                k_proj: synthetic_nvfp4(kv_width, config.hidden_size, false),
-                v_proj: synthetic_nvfp4(kv_width, config.hidden_size, false),
-                o_proj: synthetic_nvfp4(config.hidden_size, q_width, true),
-                gate_proj: synthetic_nvfp4(config.intermediate_size, config.hidden_size, false),
-                up_proj: synthetic_nvfp4(config.intermediate_size, config.hidden_size, false),
-                down_proj: synthetic_nvfp4(config.hidden_size, config.intermediate_size, true),
-            })
+            .map(|_| synthetic_nvfp4_layer(config))
             .collect();
         Qwen3VlNvfp4Weights {
             embed_tokens,
             layers,
+        }
+    }
+
+    fn synthetic_nvfp4_layer(config: &Qwen3VlTextDimensions) -> Qwen3VlNvfp4LayerWeights {
+        let q_width = config.num_attention_heads * config.head_dim;
+        let kv_width = config.num_key_value_heads * config.head_dim;
+        Qwen3VlNvfp4LayerWeights {
+            q_proj: synthetic_nvfp4(q_width, config.hidden_size, false),
+            k_proj: synthetic_nvfp4(kv_width, config.hidden_size, false),
+            v_proj: synthetic_nvfp4(kv_width, config.hidden_size, false),
+            o_proj: synthetic_nvfp4(config.hidden_size, q_width, true),
+            gate_proj: synthetic_nvfp4(config.intermediate_size, config.hidden_size, false),
+            up_proj: synthetic_nvfp4(config.intermediate_size, config.hidden_size, false),
+            down_proj: synthetic_nvfp4(config.hidden_size, config.intermediate_size, true),
         }
     }
 
@@ -897,6 +1076,108 @@ mod tests {
             }
         }
         tensors
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    struct OrderedSyntheticLayerLoader {
+        config: Qwen3VlTextDimensions,
+        next: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    impl Qwen3VlNvfp4LayerLoader for OrderedSyntheticLayerLoader {
+        fn load_layer(
+            &self,
+            index: usize,
+            checkpoint: &mut dyn FnMut(ConditionerCheckpoint) -> Result<()>,
+        ) -> Result<Qwen3VlNvfp4LayerWeights> {
+            use std::sync::atomic::Ordering;
+            let expected = self.next.fetch_add(1, Ordering::SeqCst);
+            if index != expected {
+                candle::bail!("streamed test layer order changed")
+            }
+            checkpoint(ConditionerCheckpoint::LanguageLayerLoadHeartbeat)?;
+            Ok(synthetic_nvfp4_layer(&self.config))
+        }
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn streamed_nvfp4_metal_matches_resident_and_reads_each_layer_once() {
+        use std::sync::atomic::Ordering;
+
+        let metal = Device::new_metal(0).unwrap();
+        let config = Qwen3VlTextDimensions::tiny();
+        let dense = synthetic_dense_weights(&config)
+            .into_iter()
+            .map(|(name, tensor)| Ok((name, tensor.to_device(&metal)?)))
+            .collect::<Result<HashMap<_, _>>>()
+            .unwrap();
+        let resident_weights = synthetic_nvfp4_weights(&config);
+        let streamed_weights = synthetic_nvfp4_weights(&config);
+        let streamed_embedding = streamed_weights.embed_tokens;
+        let next = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let loader = OrderedSyntheticLayerLoader {
+            config: config.clone(),
+            next: std::sync::Arc::clone(&next),
+        };
+        let resident = Qwen3VlTextEncoder::new_nvfp4(
+            &config,
+            VarBuilder::from_tensors(dense.clone(), DType::F32, &metal),
+            resident_weights,
+        )
+        .unwrap();
+        let streamed = Qwen3VlNvfp4StreamingTextEncoder::new(
+            &config,
+            VarBuilder::from_tensors(dense, DType::F32, &metal),
+            streamed_embedding,
+            Box::new(loader),
+        )
+        .unwrap();
+        let ids = Tensor::new(&[[1_u32, 2, 3]], &metal).unwrap();
+        let positions =
+            Tensor::new(&[[[0_u32, 1, 2]], [[0_u32, 1, 2]], [[0_u32, 1, 2]]], &metal).unwrap();
+        let resident_out = resident
+            .forward_embeds(
+                resident.embed_tokens(&ids).unwrap(),
+                &positions,
+                &[],
+                None,
+                &mut |_| Ok(()),
+            )
+            .unwrap();
+        let mut heartbeats = 0;
+        let streamed_out = streamed
+            .forward_embeds(
+                streamed.embed_tokens(&ids).unwrap(),
+                &positions,
+                &[],
+                None,
+                &mut |checkpoint| {
+                    if checkpoint == ConditionerCheckpoint::LanguageLayerLoadHeartbeat {
+                        heartbeats += 1;
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+        metal.synchronize().unwrap();
+        let resident_values = resident_out.to_vec3::<f32>().unwrap();
+        let streamed_values = streamed_out.to_vec3::<f32>().unwrap();
+        assert_eq!(heartbeats, config.num_layers);
+        assert_eq!(next.load(Ordering::SeqCst), config.num_layers);
+        for (resident, streamed) in resident_values
+            .iter()
+            .flatten()
+            .zip(streamed_values.iter().flatten())
+        {
+            for (resident, streamed) in resident.iter().zip(streamed) {
+                assert!(
+                    (resident - streamed).abs() <= 1e-5,
+                    "{resident} != {streamed}"
+                );
+            }
+        }
     }
 
     #[test]

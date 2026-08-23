@@ -1709,7 +1709,7 @@ fn build_canonical_private_fl2va_target_budget(
         qwen_activation_device_bytes,
         qwen_output_transfer_device_bytes,
     ) = match qwen.placement() {
-        H3QwenNvfp4RuntimePlacement::Accelerated => (
+        H3QwenNvfp4RuntimePlacement::Accelerated | H3QwenNvfp4RuntimePlacement::MetalStreamed => (
             0,
             0,
             qwen_memory.device_resident_parameter_bytes,
@@ -1880,16 +1880,18 @@ fn build_canonical_private_fl2va_target_budget(
         qwen_output_state_device_bytes,
     ])?;
     let qwen_encode_phase_device_bytes = match qwen.placement() {
-        H3QwenNvfp4RuntimePlacement::Accelerated => checked_sum([
-            bounds.fixed_runtime_device_bytes,
-            qwen_device_parameter_bytes,
-            qwen_activation_device_bytes,
-            qwen_output_state_device_bytes,
-        ])?,
+        H3QwenNvfp4RuntimePlacement::Accelerated | H3QwenNvfp4RuntimePlacement::MetalStreamed => {
+            checked_sum([
+                bounds.fixed_runtime_device_bytes,
+                qwen_device_parameter_bytes,
+                qwen_activation_device_bytes,
+                qwen_output_state_device_bytes,
+            ])?
+        }
         H3QwenNvfp4RuntimePlacement::Cpu => bounds.fixed_runtime_device_bytes,
     };
     let qwen_transfer_phase_device_bytes = match qwen.placement() {
-        H3QwenNvfp4RuntimePlacement::Accelerated => 0,
+        H3QwenNvfp4RuntimePlacement::Accelerated | H3QwenNvfp4RuntimePlacement::MetalStreamed => 0,
         H3QwenNvfp4RuntimePlacement::Cpu => checked_sum([
             bounds.fixed_runtime_device_bytes,
             qwen_output_transfer_device_bytes,
