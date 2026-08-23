@@ -110,6 +110,13 @@ pub enum OwnedCancellation {
     Settled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnedHold {
+    Held,
+    Cancelled,
+    Fenced,
+}
+
 /// Insert the grouping rows and every ordinary durable queue row atomically.
 /// A retry with the same client id returns the existing detail; a different
 /// payload using that id is rejected.
@@ -380,6 +387,91 @@ pub fn cancel_owned(
             bail!("claimed batch child was already terminal during cancellation");
         }
         Ok(OwnedCancellation::Requested)
+    })
+}
+
+/// Atomically park one owner- and token-scoped row together with its child
+/// summary, unless cancellation already won.
+///
+/// `claim_token = None` is the legacy unclaimed attachment path and matches
+/// only an unclaimed row. A cancellation request is terminalized instead of
+/// being overwritten with `held`; the queue row is removed in that same
+/// transaction so a 204 cancellation cannot later become replayable work.
+pub fn hold_owned(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    job_id: &str,
+    claim_token: Option<&str>,
+    reason: &str,
+    now_ms: i64,
+) -> Result<OwnedHold> {
+    db.transact_immediate(|conn| {
+        let row = conn
+            .query_row(
+                "SELECT q.state,
+                        (SELECT child.state
+                           FROM generation_batch_children AS child
+                          WHERE child.job_id = q.id)
+                   FROM generation_queue AS q
+                  WHERE q.id = ?1 AND q.owner_uuid = ?2
+                    AND q.claim_token IS ?3",
+                params![job_id, owner_uuid, claim_token],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        let Some((queue_state, child_state)) = row else {
+            return Ok(OwnedHold::Fenced);
+        };
+
+        if child_state.as_deref() == Some("cancelling") {
+            update_terminal_child(
+                conn,
+                job_id,
+                GenerationBatchTerminal {
+                    state: GenerationBatchTerminalState::Cancelled,
+                    error: Some("Cancelled"),
+                    terminal_error_json: Some(r#"{"message":"Cancelled"}"#),
+                    result_json: None,
+                    completed_at_ms: now_ms,
+                },
+            )?;
+            let deleted = conn.execute(
+                "DELETE FROM generation_queue
+                  WHERE id = ?1 AND owner_uuid = ?2 AND claim_token IS ?3",
+                params![job_id, owner_uuid, claim_token],
+            )?;
+            if deleted != 1 {
+                bail!("owned queue row changed while terminalizing cancellation");
+            }
+            return Ok(OwnedHold::Cancelled);
+        }
+        if child_state
+            .as_deref()
+            .is_some_and(|state| matches!(state, "complete" | "failed" | "cancelled"))
+        {
+            bail!("terminal batch child retained active queue authority during hold");
+        }
+
+        let held = conn.execute(
+            "UPDATE generation_queue
+                SET state = 'held', held_reason = ?4, updated_at = ?5
+              WHERE id = ?1 AND owner_uuid = ?2 AND claim_token IS ?3 AND state = ?6",
+            params![job_id, owner_uuid, claim_token, reason, now_ms, queue_state],
+        )?;
+        if held != 1 {
+            bail!("owned queue row changed during hold");
+        }
+        let child_updated = conn.execute(
+            "UPDATE generation_batch_children
+                SET state = 'held', error = ?2, updated_at_ms = ?3
+              WHERE job_id = ?1
+                AND state NOT IN ('cancelling', 'complete', 'failed', 'cancelled')",
+            params![job_id, reason, now_ms],
+        )?;
+        if child_state.is_some() && child_updated != 1 {
+            bail!("batch child changed during hold");
+        }
+        Ok(OwnedHold::Held)
     })
 }
 
@@ -1377,6 +1469,53 @@ mod tests {
             get(&db, "owner-1", "batch-1").unwrap().unwrap().children[0].state,
             "cancelled"
         );
+    }
+
+    #[test]
+    fn cancellation_linearizes_before_a_claimed_hold() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
+        crate::generation_queue::claim_next(&db, "owner-1", "worker", 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cancel_owned(
+                &db,
+                "owner-1",
+                "job-0",
+                GenerationBatchTerminal {
+                    state: GenerationBatchTerminalState::Cancelled,
+                    error: Some("Cancelled"),
+                    terminal_error_json: Some(r#"{"message":"Cancelled"}"#),
+                    result_json: None,
+                    completed_at_ms: 3,
+                },
+            )
+            .unwrap(),
+            OwnedCancellation::Requested
+        );
+
+        assert_eq!(
+            hold_owned(
+                &db,
+                "owner-1",
+                "job-0",
+                Some("worker"),
+                "unusable output",
+                4,
+            )
+            .unwrap(),
+            OwnedHold::Cancelled
+        );
+        assert!(crate::generation_queue::get(&db, "job-0")
+            .unwrap()
+            .is_none());
+        let child = &get_durable(&db, "owner-1", "batch-1")
+            .unwrap()
+            .unwrap()
+            .children[0];
+        assert_eq!(child.state, "cancelled");
+        assert_eq!(child.completed_at_ms, Some(4));
     }
 
     #[test]

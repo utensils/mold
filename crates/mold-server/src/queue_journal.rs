@@ -1786,26 +1786,24 @@ impl QueueTicket {
                 let cap = self.journal.max_dispatch_attempts;
                 let reason =
                     format!("dispatch attempts exhausted ({attempts} > {cap}); held for review");
-                let held = match self.claim_token.as_deref() {
-                    Some(token) => generation_queue::hold_claimed(
-                        db,
-                        &self.id,
-                        token,
-                        QueueRowState::Running,
-                        &reason,
-                        now,
-                    ),
-                    None => generation_queue::hold(db, &self.id, &reason, now),
-                };
-                if let Err(error) = held {
-                    tracing::warn!(
+                match self.hold_owned(&reason, now) {
+                    Ok(generation_batches::OwnedHold::Held) => {}
+                    Ok(generation_batches::OwnedHold::Cancelled) => {
+                        return DispatchClaim::Fenced;
+                    }
+                    Ok(generation_batches::OwnedHold::Fenced) => {
+                        return if self.claim_token.is_some() {
+                            DispatchClaim::Fenced
+                        } else {
+                            DispatchClaim::Exhausted { attempts, cap }
+                        };
+                    }
+                    Err(error) => tracing::warn!(
                         job = %self.id,
                         error = %format!("{error:#}"),
                         "could not hold an exhausted durable queue row"
-                    );
+                    ),
                 }
-                self.journal
-                    .set_batch_child_state(&self.id, "held", Some(&reason));
                 DispatchClaim::Exhausted { attempts, cap }
             }
             Ok(Some(_)) => {
@@ -1833,67 +1831,28 @@ impl QueueTicket {
     /// Park the row: listed, never auto-run, and no longer owned by a ticket.
     pub fn hold(mut self, reason: &str) {
         self.settled = true;
-        if let Some(token) = self.claim_token.as_deref() {
-            let Some(db) = self.journal.db() else { return };
-            let held = generation_queue::hold_claimed(
-                db,
-                &self.id,
-                token,
-                QueueRowState::Running,
-                reason,
-                now_ms(),
-            )
-            .and_then(|held| {
-                if held {
-                    Ok(true)
-                } else {
-                    generation_queue::hold_claimed(
-                        db,
-                        &self.id,
-                        token,
-                        QueueRowState::Queued,
-                        reason,
-                        now_ms(),
-                    )
-                }
-            })
-            .and_then(|held| {
-                if held {
-                    Ok(true)
-                } else {
-                    generation_queue::hold_claimed(
-                        db,
-                        &self.id,
-                        token,
-                        QueueRowState::Held,
-                        reason,
-                        now_ms(),
-                    )
-                }
-            });
-            match held {
-                Ok(true) => self
-                    .journal
-                    .set_batch_child_state(&self.id, "held", Some(reason)),
-                Ok(false) => {}
-                Err(error) => {
-                    tracing::warn!(job = %self.id, %error, "could not hold a claimed durable queue row");
-                }
-            }
-            return;
-        }
-        self.journal
-            .set_batch_child_state(&self.id, "held", Some(reason));
-        let Some(db) = self.journal.db() else {
-            return;
-        };
-        if let Err(error) = generation_queue::hold(db, &self.id, reason, now_ms()) {
+        if let Err(error) = self.hold_owned(reason, now_ms()) {
             tracing::warn!(
                 job = %self.id,
                 error = %format!("{error:#}"),
                 "could not hold a durable queue row"
             );
         }
+    }
+
+    fn hold_owned(&self, reason: &str, now: i64) -> anyhow::Result<generation_batches::OwnedHold> {
+        let (Some(db), Some(owner)) = (self.journal.db(), self.journal.owner_uuid.as_deref())
+        else {
+            return Ok(generation_batches::OwnedHold::Fenced);
+        };
+        generation_batches::hold_owned(
+            db,
+            owner,
+            &self.id,
+            self.claim_token.as_deref(),
+            reason,
+            now,
+        )
     }
 
     fn finish_claimed(
@@ -2347,6 +2306,36 @@ mod tests {
         assert!(journal.cancel_id("held-child").unwrap());
         assert!(journal.list_all().is_empty());
         let child = &journal.generation_batch("held-batch").unwrap().children[0];
+        assert_eq!(child.state, "cancelled");
+    }
+
+    #[test]
+    fn cancellation_cannot_be_erased_by_a_late_feeder_hold() {
+        let journal = journal_with_db();
+        let request = request();
+        journal
+            .record_batch(BatchJournalAdmission {
+                id: "racing-hold-batch",
+                client_batch_id: "racing-hold-client",
+                request_sha256: "racing-hold-sha",
+                children: &[admission(
+                    "racing-hold-child",
+                    &request,
+                    Path::new("/gallery"),
+                )],
+            })
+            .unwrap();
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+
+        assert!(journal.cancel_id("racing-hold-child").unwrap());
+        ticket.hold("server gallery output is disabled");
+
+        assert!(journal.list_all().is_empty());
+        let child = &journal
+            .generation_batch("racing-hold-batch")
+            .unwrap()
+            .children[0];
         assert_eq!(child.state, "cancelled");
     }
 
