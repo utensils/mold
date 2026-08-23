@@ -1020,9 +1020,11 @@ mod tests {
             .err()
             .expect("contract-only H3 runtime must fail closed");
 
-            assert!(error.to_string().contains(
-                "public capability or production factory registry remains runtime unavailable"
-            ));
+            let error = error.to_string();
+            assert!(
+                error.contains("public runtime registry is incomplete"),
+                "{error}"
+            );
             assert!(!called.load(Ordering::SeqCst));
         }
     }

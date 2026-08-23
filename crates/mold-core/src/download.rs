@@ -1092,8 +1092,7 @@ fn require_manifest_acquisition(manifest: &ModelManifest) -> Result<(), Download
             });
     if contains_gated_identity {
         crate::require_model_acquisition(&manifest.name, Some(&manifest.family))?;
-        let reviewed = crate::manifest::find_manifest(&manifest.name);
-        if !reviewed.is_some_and(|reviewed| std::ptr::eq(reviewed, manifest)) {
+        if !crate::is_exact_registered_manifest(manifest) {
             crate::require_model_activation("minimax-h3", Some("minimax-h3"))?;
         }
     } else {

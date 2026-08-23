@@ -149,8 +149,18 @@ pub fn require_model_activation(
 ///
 /// A reviewed H3 manifest deliberately contains raw upstream repository and
 /// filename identities that remain forbidden as caller-selected models. Those
-/// locators are safe only when the manifest is the exact static registry
-/// object; a clone or caller-authored lookalike must not self-authorize.
+/// locators are safe only when the name, family, and complete pinned file set
+/// exactly match the static registry. Value identity is required because
+/// durable queue replay reconstructs the reviewed manifest across processes;
+/// pointer identity cannot survive a restart.
+pub fn is_exact_registered_manifest(manifest: &crate::manifest::ModelManifest) -> bool {
+    crate::manifest::find_manifest(&manifest.name).is_some_and(|registered| {
+        registered.name == manifest.name
+            && registered.family == manifest.family
+            && registered.files == manifest.files
+    })
+}
+
 pub fn require_registered_manifest_activation(
     manifest: &crate::manifest::ModelManifest,
 ) -> Result<(), ModelActivationError> {
@@ -162,10 +172,7 @@ pub fn require_registered_manifest_activation(
     if !contains_gated_source {
         return Ok(());
     }
-    let registered = crate::manifest::find_manifest(&manifest.name);
-    if is_reviewed_minimax_h3_model(&manifest.name)
-        && registered.is_some_and(|registered| std::ptr::eq(registered, manifest))
-    {
+    if is_reviewed_minimax_h3_model(&manifest.name) && is_exact_registered_manifest(manifest) {
         Ok(())
     } else {
         Err(ModelActivationError)
@@ -499,14 +506,18 @@ mod tests {
     }
 
     #[test]
-    fn only_the_registered_h3_manifest_may_bind_its_raw_sources() {
+    fn only_an_exact_registered_h3_manifest_may_bind_its_raw_sources() {
         let registered = crate::manifest::find_manifest(minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P)
             .expect("reviewed H3 Turbo manifest");
         require_registered_manifest_activation(registered)
             .expect("the exact source-controlled manifest must activate");
 
         let copied = registered.clone();
-        assert!(require_registered_manifest_activation(&copied).is_err());
+        require_registered_manifest_activation(&copied)
+            .expect("durable replay must preserve exact manifest authority by value");
+        let mut changed = copied;
+        changed.files[0].hf_filename.push_str(".changed");
+        assert!(require_registered_manifest_activation(&changed).is_err());
         assert!(
             require_model_activation("hf:Comfy-Org/MiniMax-H3", Some(minimax_h3::FAMILY),).is_err()
         );

@@ -11,18 +11,21 @@ use candle_nn::VarBuilder;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 use super::comfy_quant::{H3ComfyInt8TensorwiseEmbedding, H3ComfyNvfp4AwqLinear};
 use super::config::{H3ConditionerConfig, H3_SELECTED_LANGUAGE_LAYERS};
-use super::model::H3QwenNvfp4Layer50Conditioner;
+use super::model::{
+    ConditionerCheckpoint, H3QwenNvfp4Layer50Conditioner, H3QwenNvfp4StreamingLayer50Conditioner,
+};
 use super::qwen_nvfp4::{
     expected_h3_qwen_nvfp4_awq_schema, open_h3_qwen_nvfp4_awq_artifact, released_config,
     validate_h3_qwen_nvfp4_awq_schema, H3QwenNvfp4AwqError, H3QwenNvfp4AwqExecution,
     H3QwenNvfp4AwqMemoryAccounting, H3SafetensorsTensorHeader, OpenedH3QwenNvfp4AwqArtifact,
     H3_QWEN_NVFP4_AWQ_FILE_BYTES, H3_QWEN_NVFP4_AWQ_HEADER_BYTES, H3_QWEN_NVFP4_AWQ_PAYLOAD_BYTES,
 };
-use super::text::{Qwen3VlNvfp4LayerWeights, Qwen3VlNvfp4Weights};
+use super::text::{Qwen3VlNvfp4LayerLoader, Qwen3VlNvfp4LayerWeights, Qwen3VlNvfp4Weights};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum H3QwenNvfp4LoadEvent {
@@ -100,6 +103,9 @@ pub struct H3QwenNvfp4RuntimeMemoryFacts {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum H3QwenNvfp4RuntimePlacement {
     Accelerated,
+    /// Metal retains the embedding and dense vision/norm tensors, then reads
+    /// exactly one language layer's seven NVFP4 projections at a time.
+    MetalStreamed,
     Cpu,
 }
 
@@ -166,6 +172,7 @@ fn authenticated_qwen_authority_identity(authority: &H3AuthenticatedQwenNvfp4Aut
     digest.update(b"mold.minimax-h3.qwen-authenticated-open.v1\0");
     digest.update(match authority.placement {
         H3QwenNvfp4RuntimePlacement::Accelerated => b"accelerated".as_slice(),
+        H3QwenNvfp4RuntimePlacement::MetalStreamed => b"metal-streamed".as_slice(),
         H3QwenNvfp4RuntimePlacement::Cpu => b"cpu".as_slice(),
     });
     digest.update(authority.artifact_identity_sha256().as_bytes());
@@ -218,6 +225,8 @@ pub fn released_h3_qwen_nvfp4_runtime_memory_facts(
 ) -> Result<H3QwenNvfp4RuntimeMemoryFacts, H3QwenNvfp4RuntimeError> {
     released_h3_qwen_nvfp4_runtime_memory_facts_for_placement(if device.is_cpu() {
         H3QwenNvfp4RuntimePlacement::Cpu
+    } else if device.is_metal() {
+        H3QwenNvfp4RuntimePlacement::MetalStreamed
     } else {
         H3QwenNvfp4RuntimePlacement::Accelerated
     })
@@ -232,18 +241,15 @@ pub fn released_h3_qwen_nvfp4_runtime_memory_facts_for_placement(
     let config = released_config()?;
     let (tensors, markers) = expected_h3_qwen_nvfp4_awq_schema(&config)?;
     let policy = validate_h3_qwen_nvfp4_awq_schema(&config, &tensors, &markers)?;
-    runtime_memory_facts(
-        policy.memory(),
-        tensors.iter(),
-        placement == H3QwenNvfp4RuntimePlacement::Cpu,
-    )
+    runtime_memory_facts(policy.memory(), tensors.iter(), placement)
 }
 
 fn runtime_memory_facts<'a>(
     memory: &H3QwenNvfp4AwqMemoryAccounting,
     tensors: impl Iterator<Item = (&'a String, &'a super::qwen_quant::H3QwenTensorSpec)>,
-    cpu_resident: bool,
+    placement: H3QwenNvfp4RuntimePlacement,
 ) -> Result<H3QwenNvfp4RuntimeMemoryFacts, H3QwenNvfp4RuntimeError> {
+    let tensors = tensors.collect::<Vec<_>>();
     let effective_parameter_bytes = memory
         .tensor_payload_bytes
         .checked_sub(memory.quant_marker_bytes)
@@ -268,8 +274,8 @@ fn runtime_memory_facts<'a>(
     .ok_or_else(|| {
         H3QwenNvfp4RuntimeError::Contract("Qwen host parameter bytes overflow".into())
     })?;
-    let (host_resident_parameter_bytes, device_resident_parameter_bytes) = if cpu_resident {
-        (
+    let (host_resident_parameter_bytes, device_resident_parameter_bytes) = match placement {
+        H3QwenNvfp4RuntimePlacement::Cpu => (
             quantized_host_bytes
                 .checked_add(memory.dense_bf16_bytes)
                 .ok_or_else(|| {
@@ -278,9 +284,85 @@ fn runtime_memory_facts<'a>(
                     )
                 })?,
             0,
-        )
-    } else {
-        (quantized_host_bytes, memory.dense_bf16_bytes)
+        ),
+        H3QwenNvfp4RuntimePlacement::Accelerated => (quantized_host_bytes, memory.dense_bf16_bytes),
+        H3QwenNvfp4RuntimePlacement::MetalStreamed => {
+            // Exact peak: the INT8 embedding remains live while one layer's
+            // seven NVFP4 projections are loaded from the retained descriptor.
+            // Dense vision, rotary and all language RMS norms stay on Metal.
+            let encoded_bytes = |name: &str,
+                                 spec: &super::qwen_quant::H3QwenTensorSpec|
+             -> Result<u64, H3QwenNvfp4RuntimeError> {
+                spec.shape
+                    .iter()
+                    .try_fold(1_u64, |elements, dimension| {
+                        elements.checked_mul(*dimension as u64)
+                    })
+                    .and_then(|elements| elements.checked_mul(spec.dtype.byte_width()))
+                    .ok_or_else(|| {
+                        H3QwenNvfp4RuntimeError::Contract(format!(
+                            "Qwen streamed tensor {name:?} byte count overflows"
+                        ))
+                    })
+            };
+            let embedding_bytes = tensors
+                .iter()
+                .filter(|(name, _)| {
+                    name.starts_with("model.embed_tokens.") && !name.ends_with(".comfy_quant")
+                })
+                .try_fold(0_u64, |total, (name, spec)| {
+                    total
+                        .checked_add(encoded_bytes(name, spec)?)
+                        .ok_or_else(|| {
+                            H3QwenNvfp4RuntimeError::Contract(
+                                "Qwen streamed embedding bytes overflow".into(),
+                            )
+                        })
+                })?;
+            let layer_zero_bytes = tensors
+                .iter()
+                .filter(|(name, _)| {
+                    name.starts_with("model.layers.0.")
+                        && !name.ends_with(".comfy_quant")
+                        && [
+                            "self_attn.q_proj",
+                            "self_attn.k_proj",
+                            "self_attn.v_proj",
+                            "self_attn.o_proj",
+                            "mlp.gate_proj",
+                            "mlp.up_proj",
+                            "mlp.down_proj",
+                        ]
+                        .iter()
+                        .any(|projection| name.contains(projection))
+                })
+                .try_fold(0_u64, |total, (name, spec)| {
+                    total
+                        .checked_add(encoded_bytes(name, spec)?)
+                        .ok_or_else(|| {
+                            H3QwenNvfp4RuntimeError::Contract(
+                                "Qwen streamed layer bytes overflow".into(),
+                            )
+                        })
+                })?;
+            let streamed_host_peak =
+                embedding_bytes
+                    .checked_add(layer_zero_bytes)
+                    .ok_or_else(|| {
+                        H3QwenNvfp4RuntimeError::Contract(
+                            "Qwen streamed host peak overflows".into(),
+                        )
+                    })?;
+            if embedding_bytes != 778_520_064
+                || layer_zero_bytes != 274_335_772
+                || streamed_host_peak != 1_052_855_836
+            {
+                return Err(H3QwenNvfp4RuntimeError::Contract(format!(
+                    "released Metal streaming geometry changed: embedding/layer/peak {embedding_bytes}/{layer_zero_bytes}/{streamed_host_peak}"
+                )));
+            }
+            (streamed_host_peak, memory.dense_bf16_bytes)
+        }
     };
     let retained_parameter_bytes = host_resident_parameter_bytes
         .checked_add(device_resident_parameter_bytes)
@@ -288,6 +370,8 @@ fn runtime_memory_facts<'a>(
             H3QwenNvfp4RuntimeError::Contract("Qwen retained parameter bytes overflow".into())
         })?;
     let maximum_tensor_staging_bytes = tensors
+        .iter()
+        .copied()
         .filter(|(name, _)| !name.ends_with(".comfy_quant"))
         .map(|(_, spec)| {
             spec.shape
@@ -335,9 +419,156 @@ fn runtime_memory_facts<'a>(
     })
 }
 
-pub struct LoadedH3QwenNvfp4Conditioner {
-    model: H3QwenNvfp4Layer50Conditioner,
+enum LoadedQwenModel {
+    Resident(H3QwenNvfp4Layer50Conditioner),
+    MetalStreamed(H3QwenNvfp4StreamingLayer50Conditioner),
+}
+
+struct StreamingArtifactState {
     artifact: OpenedH3QwenNvfp4AwqArtifact,
+    tensor_index: usize,
+    tensor_count: usize,
+    completed_before: u64,
+    total_bytes: u64,
+    next_layer: usize,
+}
+
+struct ConditionerLoadHeartbeat<'a> {
+    checkpoint: &'a mut dyn FnMut(ConditionerCheckpoint) -> candle::Result<()>,
+}
+
+impl H3QwenNvfp4LoadObserver for ConditionerLoadHeartbeat<'_> {
+    fn should_cancel(&mut self, _event: &H3QwenNvfp4LoadEvent) -> bool {
+        (self.checkpoint)(ConditionerCheckpoint::LanguageLayerLoadHeartbeat).is_err()
+    }
+}
+
+impl Qwen3VlNvfp4LayerLoader for StreamingLayerLoader {
+    fn load_layer(
+        &self,
+        index: usize,
+        checkpoint: &mut dyn FnMut(ConditionerCheckpoint) -> candle::Result<()>,
+    ) -> candle::Result<Qwen3VlNvfp4LayerWeights> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| candle::Error::Msg("streamed Qwen artifact lock poisoned".into()))?;
+        if index != state.next_layer {
+            candle::bail!(
+                "H3 streamed Qwen requested language layer {index}, expected exactly {}",
+                state.next_layer
+            )
+        }
+        state
+            .artifact
+            .revalidate("before streaming H3 Qwen language layer")
+            .map_err(|error| candle::Error::Msg(error.to_string()))?;
+        let mut heartbeat = ConditionerLoadHeartbeat { checkpoint };
+        let mut progress = TensorLoadProgress {
+            observer: &mut heartbeat,
+            tensor_index: state.tensor_index,
+            tensor_count: state.tensor_count,
+            completed_before: state.completed_before,
+            total_bytes: state.total_bytes,
+        };
+        let weights = Qwen3VlNvfp4LayerWeights {
+            q_proj: load_linear(
+                &mut state.artifact,
+                &self.config,
+                index,
+                "self_attn.q_proj",
+                &mut progress,
+            )
+            .map_err(|error| candle::Error::Msg(error.to_string()))?,
+            k_proj: load_linear(
+                &mut state.artifact,
+                &self.config,
+                index,
+                "self_attn.k_proj",
+                &mut progress,
+            )
+            .map_err(|error| candle::Error::Msg(error.to_string()))?,
+            v_proj: load_linear(
+                &mut state.artifact,
+                &self.config,
+                index,
+                "self_attn.v_proj",
+                &mut progress,
+            )
+            .map_err(|error| candle::Error::Msg(error.to_string()))?,
+            o_proj: load_linear(
+                &mut state.artifact,
+                &self.config,
+                index,
+                "self_attn.o_proj",
+                &mut progress,
+            )
+            .map_err(|error| candle::Error::Msg(error.to_string()))?,
+            gate_proj: load_linear(
+                &mut state.artifact,
+                &self.config,
+                index,
+                "mlp.gate_proj",
+                &mut progress,
+            )
+            .map_err(|error| candle::Error::Msg(error.to_string()))?,
+            up_proj: load_linear(
+                &mut state.artifact,
+                &self.config,
+                index,
+                "mlp.up_proj",
+                &mut progress,
+            )
+            .map_err(|error| candle::Error::Msg(error.to_string()))?,
+            down_proj: load_linear(
+                &mut state.artifact,
+                &self.config,
+                index,
+                "mlp.down_proj",
+                &mut progress,
+            )
+            .map_err(|error| candle::Error::Msg(error.to_string()))?,
+        };
+        state.tensor_index = progress.tensor_index;
+        state.completed_before = progress.completed_before;
+        state.next_layer += 1;
+        state
+            .artifact
+            .revalidate("after streaming H3 Qwen language layer")
+            .map_err(|error| candle::Error::Msg(error.to_string()))?;
+        if state.next_layer == H3_SELECTED_LANGUAGE_LAYERS
+            && (state.tensor_index - 1 != state.tensor_count
+                || state.completed_before != state.total_bytes)
+        {
+            candle::bail!(
+                "streamed runtime read {} of {} tensors and {} of {} bytes",
+                state.tensor_index - 1,
+                state.tensor_count,
+                state.completed_before,
+                state.total_bytes
+            )
+        }
+        Ok(weights)
+    }
+}
+
+#[derive(Clone)]
+struct StreamingLayerLoader {
+    state: Arc<Mutex<StreamingArtifactState>>,
+    config: H3ConditionerConfig,
+}
+
+enum LoadedQwenArtifact {
+    Resident(Box<OpenedH3QwenNvfp4AwqArtifact>),
+    MetalStreamed(Arc<Mutex<StreamingArtifactState>>),
+}
+
+pub struct LoadedH3QwenNvfp4Conditioner {
+    model: LoadedQwenModel,
+    artifact: LoadedQwenArtifact,
+    artifact_identity: String,
+    header_identity: String,
+    policy_identity: String,
     device: Device,
     memory_facts: H3QwenNvfp4RuntimeMemoryFacts,
 }
@@ -348,15 +579,31 @@ impl LoadedH3QwenNvfp4Conditioner {
         input: &super::model::H3ConditionerInput,
         checkpoint: &mut dyn FnMut(super::model::ConditionerCheckpoint) -> candle::Result<()>,
     ) -> candle::Result<Tensor> {
-        self.model.encode(input, checkpoint)
+        match &self.model {
+            LoadedQwenModel::Resident(model) => model.encode(input, checkpoint),
+            LoadedQwenModel::MetalStreamed(model) => model.encode(input, checkpoint),
+        }
     }
 
     pub fn dtype_profile(&self) -> super::model::H3DTypeProfile {
-        self.model.dtype_profile()
+        match &self.model {
+            LoadedQwenModel::Resident(model) => model.dtype_profile(),
+            LoadedQwenModel::MetalStreamed(model) => model.dtype_profile(),
+        }
     }
 
     pub fn resident_language_layers(&self) -> usize {
-        self.model.resident_language_layers()
+        match &self.model {
+            LoadedQwenModel::Resident(model) => model.resident_language_layers(),
+            LoadedQwenModel::MetalStreamed(model) => model.language_layer_count(),
+        }
+    }
+
+    pub fn peak_resident_language_layers(&self) -> usize {
+        match &self.model {
+            LoadedQwenModel::Resident(model) => model.resident_language_layers(),
+            LoadedQwenModel::MetalStreamed(model) => model.peak_resident_language_layers(),
+        }
     }
 
     pub const fn memory_facts(&self) -> &H3QwenNvfp4RuntimeMemoryFacts {
@@ -373,26 +620,49 @@ impl LoadedH3QwenNvfp4Conditioner {
 
     /// Full authenticated checkpoint identity retained by this runtime.
     pub fn artifact_identity_sha256(&self) -> &str {
-        &self.artifact.inspection().expected_artifact_sha256
+        match &self.artifact {
+            LoadedQwenArtifact::Resident(_) | LoadedQwenArtifact::MetalStreamed(_) => {
+                self.artifact_identity.as_str()
+            }
+        }
     }
 
     /// Parsed safetensors-header identity used to reject cross-checkpoint
     /// pairing even when a caller supplies the same display name.
     pub fn header_identity_sha256(&self) -> &str {
-        &self.artifact.inspection().header_identity_sha256
+        self.header_identity.as_str()
     }
 
     /// Exact NVFP4-AWQ execution-policy identity selected from the opened
     /// checkpoint rather than from a filename or caller assertion.
     pub fn policy_identity_sha256(&self) -> &str {
-        &self.artifact.inspection().policy_sha256
+        self.policy_identity.as_str()
     }
 
     /// Revalidate the retained descriptor and its path identity before an
     /// inference callback reads the already-constructed tensor storage.
     pub fn revalidate_artifact(&self) -> Result<(), H3QwenNvfp4RuntimeError> {
-        self.artifact
-            .revalidate("while retaining loaded H3 Qwen runtime")?;
+        match &self.artifact {
+            LoadedQwenArtifact::Resident(artifact) => {
+                artifact.revalidate("while retaining loaded H3 Qwen runtime")?
+            }
+            LoadedQwenArtifact::MetalStreamed(state) => match state.try_lock() {
+                Ok(state) => state
+                    .artifact
+                    .revalidate("while retaining streamed H3 Qwen runtime")?,
+                // The layer reader owns this same singular state while its
+                // 1 MiB heartbeat validates the outer attempt authorities.
+                // It revalidates the descriptor immediately before and after
+                // the layer; recursively locking here would deadlock the
+                // heartbeat on the owner thread.
+                Err(std::sync::TryLockError::WouldBlock) => {}
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err(H3QwenNvfp4RuntimeError::Contract(
+                        "streamed Qwen artifact lock poisoned".into(),
+                    ));
+                }
+            },
+        }
         Ok(())
     }
 }
@@ -537,6 +807,8 @@ pub unsafe fn load_h3_qwen_nvfp4_conditioner_from_authority(
     authority.revalidate()?;
     let device_placement = if device.is_cpu() {
         H3QwenNvfp4RuntimePlacement::Cpu
+    } else if device.is_metal() {
+        H3QwenNvfp4RuntimePlacement::MetalStreamed
     } else {
         H3QwenNvfp4RuntimePlacement::Accelerated
     };
@@ -551,6 +823,9 @@ pub unsafe fn load_h3_qwen_nvfp4_conditioner_from_authority(
         return Err(H3QwenNvfp4RuntimeError::Contract(
             "authenticated Qwen memory facts differ from selected device facts".into(),
         ));
+    }
+    if device_placement == H3QwenNvfp4RuntimePlacement::MetalStreamed {
+        return load_metal_streamed_conditioner(authority, config, device, observer);
     }
     let loadable_names = authority
         .artifact
@@ -685,11 +960,124 @@ pub unsafe fn load_h3_qwen_nvfp4_conditioner_from_authority(
     authority
         .artifact
         .revalidate("after constructing H3 Qwen layer-50 model")?;
+    let artifact_identity = authority
+        .artifact
+        .inspection()
+        .expected_artifact_sha256
+        .clone();
+    let header_identity = authority
+        .artifact
+        .inspection()
+        .header_identity_sha256
+        .clone();
+    let policy_identity = authority.artifact.inspection().policy_sha256.clone();
     Ok(LoadedH3QwenNvfp4Conditioner {
-        model,
-        artifact: authority.artifact,
+        model: LoadedQwenModel::Resident(model),
+        artifact: LoadedQwenArtifact::Resident(Box::new(authority.artifact)),
+        artifact_identity,
+        header_identity,
+        policy_identity,
         device: device.clone(),
         memory_facts: expected_memory_facts,
+    })
+}
+
+fn load_metal_streamed_conditioner(
+    mut authority: H3AuthenticatedQwenNvfp4Authority,
+    config: &H3ConditionerConfig,
+    device: &Device,
+    observer: &mut dyn H3QwenNvfp4LoadObserver,
+) -> Result<LoadedH3QwenNvfp4Conditioner, H3QwenNvfp4RuntimeError> {
+    if !device.is_metal() || authority.placement != H3QwenNvfp4RuntimePlacement::MetalStreamed {
+        return Err(H3QwenNvfp4RuntimeError::Contract(
+            "streamed Qwen construction requires the frozen Metal placement".into(),
+        ));
+    }
+    let loadable_names = authority
+        .artifact
+        .tensors()
+        .iter()
+        .filter(|(name, _)| !name.ends_with(".comfy_quant"))
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let mut progress = TensorLoadProgress {
+        observer,
+        tensor_index: 1,
+        tensor_count: loadable_names.len(),
+        completed_before: 0,
+        total_bytes: authority.memory_facts.effective_parameter_bytes,
+    };
+    let embed_weight = load_tensor(
+        &mut authority.artifact,
+        "model.embed_tokens.weight",
+        &Device::Cpu,
+        &mut progress,
+    )?;
+    let embed_scale = load_tensor(
+        &mut authority.artifact,
+        "model.embed_tokens.weight_scale",
+        &Device::Cpu,
+        &mut progress,
+    )?;
+    let embed_tokens = H3ComfyInt8TensorwiseEmbedding::new(embed_weight, embed_scale)?;
+
+    let dense_names = authority
+        .artifact
+        .tensors()
+        .iter()
+        .filter(|(name, header)| header.dtype == "BF16" && !name.ends_with(".pre_quant_scale"))
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let mut dense = HashMap::with_capacity(dense_names.len());
+    for name in dense_names {
+        let tensor = load_tensor(&mut authority.artifact, &name, device, &mut progress)?;
+        if dense.insert(name.clone(), tensor).is_some() {
+            return Err(H3QwenNvfp4RuntimeError::Contract(format!(
+                "duplicate dense tensor {name:?}"
+            )));
+        }
+    }
+    authority
+        .artifact
+        .revalidate("after constructing streamed H3 Qwen fixed tensor storage")?;
+    let artifact_identity = authority
+        .artifact
+        .inspection()
+        .expected_artifact_sha256
+        .clone();
+    let header_identity = authority
+        .artifact
+        .inspection()
+        .header_identity_sha256
+        .clone();
+    let policy_identity = authority.artifact.inspection().policy_sha256.clone();
+    let memory_facts = authority.memory_facts.clone();
+    let state = Arc::new(Mutex::new(StreamingArtifactState {
+        artifact: authority.artifact,
+        tensor_index: progress.tensor_index,
+        tensor_count: progress.tensor_count,
+        completed_before: progress.completed_before,
+        total_bytes: progress.total_bytes,
+        next_layer: 0,
+    }));
+    let builder = VarBuilder::from_tensors(dense, DType::BF16, device);
+    let model = H3QwenNvfp4StreamingLayer50Conditioner::new(
+        config,
+        builder,
+        embed_tokens,
+        Box::new(StreamingLayerLoader {
+            state: Arc::clone(&state),
+            config: config.clone(),
+        }),
+    )?;
+    Ok(LoadedH3QwenNvfp4Conditioner {
+        model: LoadedQwenModel::MetalStreamed(model),
+        artifact: LoadedQwenArtifact::MetalStreamed(state),
+        artifact_identity,
+        header_identity,
+        policy_identity,
+        device: device.clone(),
+        memory_facts,
     })
 }
 
@@ -717,6 +1105,8 @@ pub unsafe fn load_h3_qwen_nvfp4_conditioner_after_authorization(
     }
     let placement = if device.is_cpu() {
         H3QwenNvfp4RuntimePlacement::Cpu
+    } else if device.is_metal() {
+        H3QwenNvfp4RuntimePlacement::MetalStreamed
     } else {
         H3QwenNvfp4RuntimePlacement::Accelerated
     };
@@ -868,6 +1258,30 @@ mod tests {
             facts.retained_parameter_bytes,
             facts.effective_parameter_bytes
         );
+    }
+
+    #[test]
+    fn released_metal_runtime_streams_one_language_layer_and_keeps_cuda_exact() {
+        let metal = released_h3_qwen_nvfp4_runtime_memory_facts_for_placement(
+            H3QwenNvfp4RuntimePlacement::MetalStreamed,
+        )
+        .unwrap();
+        let cuda = released_h3_qwen_nvfp4_runtime_memory_facts_for_placement(
+            H3QwenNvfp4RuntimePlacement::Accelerated,
+        )
+        .unwrap();
+        assert_eq!(metal.effective_parameter_bytes, 15_686_891_864);
+        assert_eq!(metal.host_resident_parameter_bytes, 1_052_855_836);
+        assert_eq!(metal.device_resident_parameter_bytes, 1_191_583_200);
+        assert_eq!(metal.retained_parameter_bytes, 2_244_439_036);
+        assert_eq!(
+            cuda.retained_parameter_bytes - metal.retained_parameter_bytes,
+            13_442_452_828
+        );
+        assert_eq!(metal.maximum_tensor_staging_bytes, 777_912_320);
+        assert_eq!(metal.tensor_io_bytes, cuda.tensor_io_bytes);
+        assert_eq!(cuda.host_resident_parameter_bytes, 14_495_308_664);
+        assert_eq!(cuda.device_resident_parameter_bytes, 1_191_583_200);
     }
 
     struct CancelAuthentication {

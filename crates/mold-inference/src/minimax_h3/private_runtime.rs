@@ -1,4 +1,4 @@
-//! Authorization-bound adapters for the private MiniMax H3 CUDA runtime.
+//! Authorization-bound adapters for the private MiniMax H3 accelerator runtime.
 //!
 //! This module is compiled only by the developer-only `h3-private-uat`
 //! feature. It has no registry, capability, catalog, download, server, or CLI
@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{bail, Result};
-use candle_core::Device;
+use candle_core::{Device, DeviceLocation};
 use mold_candle::minimax_h3::{
     H3AttentionActivation, H3AttentionBackend, H3AttentionDevice, H3AttentionKernel,
     H3AttentionModelContract, H3AttentionRuntimeAuthority, H3BlockProgress, H3BlockStack,
@@ -302,15 +302,21 @@ impl H3BlockLoader for H3PrivateComfyBlockLoader {
 pub(crate) struct H3PrivateComfyTransformerExecutor {
     transformer: H3StreamedTransformer,
     step: Option<H3TransformerStep>,
+    device: Device,
 }
 
 impl H3PrivateComfyTransformerExecutor {
-    fn new(transformer: H3StreamedTransformer) -> Self {
+    fn new(transformer: H3StreamedTransformer, device: Device) -> Self {
         Self {
             transformer,
             step: None,
+            device,
         }
     }
+}
+
+fn streamed_block_requires_synchronization(location: DeviceLocation) -> bool {
+    matches!(location, DeviceLocation::Metal { .. })
 }
 
 impl H3StreamedTransformerExecutor<H3LoadedTransformerBlock> for H3PrivateComfyTransformerExecutor {
@@ -345,7 +351,16 @@ impl H3StreamedTransformerExecutor<H3LoadedTransformerBlock> for H3PrivateComfyT
             .step
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("private H3 streamed step was not started"))?;
-        Ok(step.forward_block(index, block)?)
+        step.forward_block(index, block)?;
+        // The streamed INT8 block reconstructs bounded device weight chunks.
+        // Metal command buffers otherwise retain every completed block's
+        // temporary chunks until the whole 50-block step finishes, defeating
+        // the one-live-block memory contract. Fence each Metal block before
+        // its compact weights are released. CUDA and CPU remain asynchronous.
+        if streamed_block_requires_synchronization(self.device.location()) {
+            self.device.synchronize()?;
+        }
+        Ok(())
     }
 
     fn finish_step(
@@ -375,6 +390,7 @@ impl H3StreamedTransformerExecutor<H3LoadedTransformerBlock> for H3PrivateComfyT
 pub(crate) fn pair_private_comfy_stream(
     transformer: H3StreamedTransformer,
     loader: H3ComfyInt8BlockLoader,
+    device: Device,
     plan: &FrozenH3BlockStreamingPlan,
     expected_task: H3TransformerTask,
     cancellation: H3PrivateComfyCancellationSlot,
@@ -393,7 +409,7 @@ pub(crate) fn pair_private_comfy_stream(
     )?;
     Ok((
         H3PrivateComfyBlockLoader::new(loader, plan, cancellation)?,
-        H3PrivateComfyTransformerExecutor::new(transformer),
+        H3PrivateComfyTransformerExecutor::new(transformer, device),
     ))
 }
 
@@ -461,6 +477,26 @@ pub(crate) struct H3PrivateBoundComfyStream {
     models_root: std::path::PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum H3PrivateAttentionDispatch {
+    ReleaseCandidateFlash,
+    QualifiedMetalMath,
+}
+
+fn private_attention_dispatch(backend: H3AttentionBackend) -> Result<H3PrivateAttentionDispatch> {
+    match backend {
+        H3AttentionBackend::FlashAttentionV2 => {
+            Ok(H3PrivateAttentionDispatch::ReleaseCandidateFlash)
+        }
+        H3AttentionBackend::MetalChunkedDenseMath => {
+            Ok(H3PrivateAttentionDispatch::QualifiedMetalMath)
+        }
+        H3AttentionBackend::BoundedDenseMath => {
+            bail!("private MiniMax H3 production binding rejects synthetic dense attention")
+        }
+    }
+}
+
 impl H3PrivateBoundComfyStream {
     /// Read-only snapshot of the exact opened checkpoint and attention facts
     /// bound before any resident transformer allocation.
@@ -486,7 +522,7 @@ fn validate_private_attention_facts(
         actual.model_contract,
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    if expected.generic_backend != AttentionBackend::Flash
+    if expected.generic_backend != private_h3_generic_attention_backend(expected.device)
         || expected.generic_chunk != AttentionChunkPolicy::Off
         || expected.runtime_backend != actual.backend
         || expected.kernel != actual.kernel
@@ -505,6 +541,14 @@ fn validate_private_attention_facts(
         bail!("private MiniMax H3 concrete attention differs from frozen typed authority");
     }
     Ok(())
+}
+
+fn private_h3_generic_attention_backend(device: H3AttentionDevice) -> AttentionBackend {
+    match device {
+        H3AttentionDevice::Metal => AttentionBackend::Math,
+        H3AttentionDevice::Cuda { .. } => AttentionBackend::Flash,
+        H3AttentionDevice::Cpu => AttentionBackend::Math,
+    }
 }
 
 fn validate_private_checkpoint_facts(
@@ -547,9 +591,14 @@ pub(crate) fn bind_private_comfy_stream(
         &H3PrivateAttentionRuntimeFacts::from(&attention),
         actual_device,
     )?;
-    attention
-        .verify_current_release_candidate_dispatch(device)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    match private_attention_dispatch(attention.backend())? {
+        H3PrivateAttentionDispatch::ReleaseCandidateFlash => attention
+            .verify_current_release_candidate_dispatch(device)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+        H3PrivateAttentionDispatch::QualifiedMetalMath => attention
+            .verify_model(expected.attention.model_contract, device)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+    }
 
     let candidate = opened.candidate();
     let actual_checkpoint = H3PrivateComfyCheckpointFacts {
@@ -608,6 +657,7 @@ pub(crate) fn load_and_pair_private_comfy_stream(
     // The adapter's deltas become device-resident here, inside the phase whose
     // budget charges `turbo_adapter_device_bytes`. Loading it at admission
     // instead would hold ~1.82 GiB across every earlier phase for nothing.
+    let cancellation_for_candle: Arc<dyn H3ComfyInt8Cancellation> = Arc::new(cancellation.clone());
     let turbo_runtime = turbo
         .as_ref()
         .map(|authority| {
@@ -620,11 +670,11 @@ pub(crate) fn load_and_pair_private_comfy_stream(
                     .strategy
                     .dense_compute_precision
                     .compute_dtype(),
+                cancellation_for_candle.clone(),
             )
             .map(Arc::new)
         })
         .transpose()?;
-    let cancellation_for_candle: Arc<dyn H3ComfyInt8Cancellation> = Arc::new(cancellation.clone());
     let (transformer, loader) = cancellation.run_candle_operation(|| {
         opened.load_with_turbo_adapter(&device, attention, cancellation_for_candle, turbo_runtime)
     })?;
@@ -633,8 +683,14 @@ pub(crate) fn load_and_pair_private_comfy_stream(
     {
         bail!("private H3 Comfy streamed runtime differs from its opened artifact authority");
     }
-    let (loader, executor) =
-        pair_private_comfy_stream(transformer, loader, plan, authority.task, cancellation)?;
+    let (loader, executor) = pair_private_comfy_stream(
+        transformer,
+        loader,
+        device,
+        plan,
+        authority.task,
+        cancellation,
+    )?;
     Ok(H3PrivateComfyStream {
         loader,
         executor,
@@ -729,6 +785,19 @@ mod tests {
     const FINGERPRINT: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const CHECKPOINT: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 
+    #[test]
+    fn streamed_blocks_bound_queued_temporaries_only_on_metal() {
+        assert!(streamed_block_requires_synchronization(
+            DeviceLocation::Metal { gpu_id: 0 }
+        ));
+        assert!(!streamed_block_requires_synchronization(
+            DeviceLocation::Cuda { gpu_id: 0 }
+        ));
+        assert!(!streamed_block_requires_synchronization(
+            DeviceLocation::Cpu
+        ));
+    }
+
     fn plan() -> FrozenH3BlockStreamingPlan {
         FrozenH3BlockStreamingPlan::new("gpu-0", FINGERPRINT, 0, 0).unwrap()
     }
@@ -803,6 +872,33 @@ mod tests {
         .unwrap();
         let checkpoint = checkpoint_facts();
         validate_private_checkpoint_facts(&checkpoint, &checkpoint).unwrap();
+    }
+
+    #[test]
+    fn generic_attention_backend_follows_the_bound_device() {
+        assert_eq!(
+            private_h3_generic_attention_backend(H3AttentionDevice::Metal),
+            AttentionBackend::Math,
+        );
+        assert_eq!(
+            private_h3_generic_attention_backend(H3AttentionDevice::Cuda {
+                compute_capability: Some((8, 9)),
+            }),
+            AttentionBackend::Flash,
+        );
+    }
+
+    #[test]
+    fn production_attention_dispatch_separates_metal_from_flash_qualification() {
+        assert_eq!(
+            private_attention_dispatch(H3AttentionBackend::MetalChunkedDenseMath).unwrap(),
+            H3PrivateAttentionDispatch::QualifiedMetalMath,
+        );
+        assert_eq!(
+            private_attention_dispatch(H3AttentionBackend::FlashAttentionV2).unwrap(),
+            H3PrivateAttentionDispatch::ReleaseCandidateFlash,
+        );
+        assert!(private_attention_dispatch(H3AttentionBackend::BoundedDenseMath).is_err());
     }
 
     #[test]

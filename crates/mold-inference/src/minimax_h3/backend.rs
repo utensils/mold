@@ -200,6 +200,13 @@ pub(crate) enum H3CandleBackendDevice {
 }
 
 impl H3CandleBackendDevice {
+    const fn pipeline_kind(self) -> H3PipelineBackendKind {
+        match self {
+            Self::Cuda { .. } => H3PipelineBackendKind::Cuda,
+            Self::Metal => H3PipelineBackendKind::Metal,
+        }
+    }
+
     fn validate(self) -> Result<()> {
         match self {
             Self::Cuda {
@@ -687,7 +694,7 @@ where
 {
     fn identity(&self) -> H3PipelineBackendIdentity {
         H3PipelineBackendIdentity {
-            kind: H3PipelineBackendKind::Cuda,
+            kind: self.plan.backend.pipeline_kind(),
             device_id: self.plan.device_id.clone(),
             execution_fingerprint: self.plan.execution_fingerprint.clone(),
         }
@@ -1274,6 +1281,17 @@ mod tests {
                 compute_capability: (8, 9)
             }
             .stable_id()
+        );
+        assert_eq!(
+            H3CandleBackendDevice::Metal.pipeline_kind(),
+            H3PipelineBackendKind::Metal,
+        );
+        assert_eq!(
+            H3CandleBackendDevice::Cuda {
+                compute_capability: (8, 9),
+            }
+            .pipeline_kind(),
+            H3PipelineBackendKind::Cuda,
         );
     }
 

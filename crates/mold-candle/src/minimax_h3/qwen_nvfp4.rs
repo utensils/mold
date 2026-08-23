@@ -1059,6 +1059,7 @@ pub(crate) fn open_h3_qwen_nvfp4_awq_artifact(
         std::fs::canonicalize(path).map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
     checked_path_identity(&path, Some(&before), "after resolving artifact path")?;
     let mut file = File::open(&path).map_err(|error| H3QwenNvfp4AwqError::Io(error.to_string()))?;
+    disable_macos_file_cache(&file)?;
     checked_open_identity(&file, &before, "after opening artifact")?;
     checked_path_identity(&path, Some(&before), "after opening artifact")?;
     let header = read_h3_safetensors_header(&mut file, before.len)?;
@@ -1154,6 +1155,32 @@ pub(crate) fn open_h3_qwen_nvfp4_awq_artifact(
         policy,
         inspection,
     })
+}
+
+/// Keep the two sequential 15.7 GiB authentication/load passes from filling
+/// unified memory with disposable file-cache pages immediately before the
+/// anonymous Qwen tensors are allocated. `F_NOCACHE` changes caching policy
+/// only; the retained descriptor, identity fences, and exact reads are
+/// unchanged. Other platforms, including every CUDA target, are untouched.
+#[cfg(target_os = "macos")]
+fn disable_macos_file_cache(file: &File) -> Result<(), H3QwenNvfp4AwqError> {
+    use std::os::fd::AsRawFd;
+
+    // SAFETY: `file` owns a live descriptor for the duration of the call and
+    // F_NOCACHE accepts the integer enable flag as its third argument.
+    let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1) };
+    if result == -1 {
+        return Err(H3QwenNvfp4AwqError::Io(format!(
+            "failed to disable macOS caching for H3 Qwen artifact: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn disable_macos_file_cache(_file: &File) -> Result<(), H3QwenNvfp4AwqError> {
+    Ok(())
 }
 
 fn hex_digest(bytes: impl AsRef<[u8]>) -> String {

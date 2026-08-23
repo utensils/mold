@@ -8699,7 +8699,6 @@ mod tests {
         )
         .is_err());
     }
-
     /// #787: an absent negative on a wan request materializes the tuned
     /// default so queue/worker metadata record the real uncond; an explicit
     /// value — the empty-string opt-out above all — passes through untouched,

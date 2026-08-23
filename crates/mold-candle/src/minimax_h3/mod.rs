@@ -191,6 +191,7 @@ pub use visual_weights::{
     expected_comfy_weight_shapes, expected_diffusers_weight_shapes,
     expected_visual_vae_parameter_bytes, inspect_safetensors_header, inspect_visual_vae_config,
     inspect_visual_vae_config_bytes, validate_comfy_weight_file,
+    validate_comfy_weight_file_from_authenticated_staging_descriptor,
     validate_comfy_weight_file_from_opened_descriptor, validate_diffusers_weight_index,
     ComfyTensorTransform, DiffusersWeightIndex, NoopVisualWeightReadObserver, SafetensorsHeader,
     SafetensorsTensorHeader, ValidatedVisualVaeWeights, VisualVaeComponentRole,

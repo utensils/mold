@@ -5,15 +5,28 @@ use super::artifacts::ConditionerWeightLayout;
 use super::config::{H3ConditionerConfig, H3_SELECTED_LANGUAGE_LAYERS};
 #[cfg(feature = "h3-private-uat")]
 use super::text::Qwen3VlStreamingTextEncoder;
-use super::text::{Qwen3VlNvfp4Weights, Qwen3VlTextDimensions, Qwen3VlTextEncoder};
+use super::text::{
+    Qwen3VlNvfp4LayerLoader, Qwen3VlNvfp4StreamingTextEncoder, Qwen3VlNvfp4Weights,
+    Qwen3VlTextDimensions, Qwen3VlTextEncoder,
+};
 use super::vision::{Qwen3VlVisionDimensions, Qwen3VlVisionModel};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConditionerCheckpoint {
     TokenEmbedding,
     VisionPatchEmbedding,
-    VisionLayer { completed: usize, total: usize },
-    LanguageLayer { completed: usize, total: usize },
+    VisionLayer {
+        completed: usize,
+        total: usize,
+    },
+    LanguageLayer {
+        completed: usize,
+        total: usize,
+    },
+    /// A zero-progress poll while a streamed Metal language-layer tensor is
+    /// read from the retained authenticated descriptor. Callers must validate
+    /// authority and cancellation but must not advance user-visible progress.
+    LanguageLayerLoadHeartbeat,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -66,6 +79,23 @@ trait H3TextBackend {
 }
 
 impl H3TextBackend for Qwen3VlTextEncoder {
+    fn embed_tokens(&self, input_ids: &Tensor) -> Result<Tensor> {
+        self.embed_tokens(input_ids)
+    }
+
+    fn forward_embeds(
+        &self,
+        hidden: Tensor,
+        position_ids: &Tensor,
+        visual_indices: &[usize],
+        deepstack: Option<&[Tensor]>,
+        checkpoint: &mut dyn FnMut(ConditionerCheckpoint) -> Result<()>,
+    ) -> Result<Tensor> {
+        self.forward_embeds(hidden, position_ids, visual_indices, deepstack, checkpoint)
+    }
+}
+
+impl H3TextBackend for Qwen3VlNvfp4StreamingTextEncoder {
     fn embed_tokens(&self, input_ids: &Tensor) -> Result<Tensor> {
         self.embed_tokens(input_ids)
     }
@@ -277,6 +307,71 @@ impl H3QwenNvfp4Layer50Conditioner {
 
     pub(crate) fn embed_tokens(&self, input_ids: &Tensor) -> Result<Tensor> {
         self.text.embed_tokens(input_ids)
+    }
+}
+
+/// Metal-only conditioner which retains the embedding, vision stack, rotary
+/// state, and language norms, while loading exactly one layer's seven NVFP4
+/// projections from the already-authenticated descriptor at a time.
+pub(super) struct H3QwenNvfp4StreamingLayer50Conditioner {
+    text: Qwen3VlNvfp4StreamingTextEncoder,
+    vision: Qwen3VlVisionModel,
+    dtype_profile: H3DTypeProfile,
+}
+
+impl H3QwenNvfp4StreamingLayer50Conditioner {
+    pub(super) fn new(
+        config: &H3ConditionerConfig,
+        dense_vb: VarBuilder,
+        embed_tokens: super::comfy_quant::H3ComfyInt8TensorwiseEmbedding,
+        layer_loader: Box<dyn Qwen3VlNvfp4LayerLoader>,
+    ) -> Result<Self> {
+        config
+            .validate()
+            .map_err(|error| candle::Error::Msg(error.to_string()))?;
+        let vision_dimensions = Qwen3VlVisionDimensions::from_h3(config);
+        let text_dimensions = Qwen3VlTextDimensions::from_h3(config);
+        let parameter_dtype = dense_vb.dtype();
+        let vision = Qwen3VlVisionModel::new(&vision_dimensions, dense_vb.pp("visual"))?;
+        let text = Qwen3VlNvfp4StreamingTextEncoder::new(
+            &text_dimensions,
+            dense_vb.pp("model"),
+            embed_tokens,
+            layer_loader,
+        )?;
+        Ok(Self {
+            text,
+            vision,
+            dtype_profile: H3DTypeProfile {
+                parameter_dtype,
+                vision_input_dtype: DType::F32,
+                rotary_compute_dtype: DType::F32,
+                vision_attention_dtype: parameter_dtype,
+                language_attention_dtype: parameter_dtype,
+                attention_softmax_dtype: DType::F32,
+                output_dtype: parameter_dtype,
+            },
+        })
+    }
+
+    pub fn encode(
+        &self,
+        input: &H3ConditionerInput,
+        checkpoint: &mut dyn FnMut(ConditionerCheckpoint) -> Result<()>,
+    ) -> Result<Tensor> {
+        encode_conditioner(&self.text, &self.vision, input, checkpoint)
+    }
+
+    pub fn dtype_profile(&self) -> H3DTypeProfile {
+        self.dtype_profile
+    }
+
+    pub const fn language_layer_count(&self) -> usize {
+        H3_SELECTED_LANGUAGE_LAYERS
+    }
+
+    pub const fn peak_resident_language_layers(&self) -> usize {
+        1
     }
 }
 

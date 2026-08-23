@@ -1981,7 +1981,10 @@ async fn prepare_h3_private_inputs_for_devices(
                 engine_config: frozen,
                 pending_artifacts: BTreeMap::new(),
                 prepared_available_vram_bytes: device.available_vram_bytes,
-                capacity_sensitive: true,
+                // Metal's artifact/layout route is exact and does not select a
+                // dependency variant from capacity. CUDA retains its existing
+                // capacity-sensitive preparation contract.
+                capacity_sensitive: h3_preparation_capacity_sensitive(device.backend),
             },
         );
         admissions.insert(device_id, evidence);
@@ -2013,6 +2016,14 @@ async fn prepare_h3_private_inputs_for_devices(
         h3_private_ingress_grant: Some(rebound_grant),
         h3_private_admission_by_device: admissions,
     })
+}
+
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+const fn h3_preparation_capacity_sensitive(backend: mold_core::GpuBackend) -> bool {
+    match backend {
+        mold_core::GpuBackend::Cuda => true,
+        mold_core::GpuBackend::Metal => false,
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2144,6 +2155,17 @@ const H3_PUBLIC_LOCAL_INSTANCE_ID: &str = "mold-public-forced-local";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "h3")]
+    #[test]
+    fn h3_metal_preparation_is_capacity_insensitive_without_changing_cuda() {
+        assert!(h3_preparation_capacity_sensitive(
+            mold_core::GpuBackend::Cuda
+        ));
+        assert!(!h3_preparation_capacity_sensitive(
+            mold_core::GpuBackend::Metal
+        ));
+    }
     use mold_core::{DevicePlacement, DeviceRef, ModelConfig};
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use tempfile::TempDir;

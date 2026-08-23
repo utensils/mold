@@ -1042,27 +1042,87 @@ fn validate_private_execution_route_facts(
         },
         None => H3AttentionDevice::Metal,
     };
-    let expected_location = match admitted.compute_capability {
-        Some(_) => DeviceLocation::Cuda {
-            gpu_id: admitted.device_ordinal,
-        },
-        None => DeviceLocation::Metal {
-            gpu_id: admitted.device_ordinal,
-        },
+    let pooled_metal_location = if admitted.compute_capability.is_none() {
+        Some(
+            crate::device::metal_device(admitted.device_ordinal)
+                .map_err(|error| {
+                    anyhow::anyhow!("cannot resolve pooled Metal execution device: {error}")
+                })?
+                .location(),
+        )
+    } else {
+        None
     };
-    if !actual.active
-        || actual.lease_id.trim().is_empty()
-        || actual.device_id != admitted.device_id
-        || actual.execution_fingerprint != admitted.execution_fingerprint
-        || actual.backend
-            != H3CandleBackendDevice::from_compute_capability(admitted.compute_capability)
-        || actual.location != expected_location
-        || admitted.attention.device != expected_attention_device
-        || actual.attention_device != admitted.attention.device
-    {
-        bail!("private MiniMax H3 execution route differs before component binding");
+    let mut mismatches = Vec::new();
+    for (axis, mismatch) in [
+        ("active", !actual.active),
+        ("lease-id", actual.lease_id.trim().is_empty()),
+        ("device-id", actual.device_id != admitted.device_id),
+        (
+            "execution-fingerprint",
+            actual.execution_fingerprint != admitted.execution_fingerprint,
+        ),
+        (
+            "backend",
+            actual.backend
+                != H3CandleBackendDevice::from_compute_capability(admitted.compute_capability),
+        ),
+        (
+            "location",
+            !private_execution_location_matches(
+                actual.location,
+                admitted.compute_capability,
+                admitted.device_ordinal,
+                pooled_metal_location,
+            ),
+        ),
+        (
+            "admitted-attention",
+            admitted.attention.device != expected_attention_device,
+        ),
+        (
+            "execution-attention",
+            actual.attention_device != admitted.attention.device,
+        ),
+    ] {
+        if mismatch {
+            mismatches.push(axis);
+        }
+    }
+    if !mismatches.is_empty() {
+        bail!(
+            "private MiniMax H3 execution route differs before component binding: {}",
+            mismatches.join(", ")
+        );
     }
     Ok(())
+}
+
+fn private_execution_location_matches(
+    actual: DeviceLocation,
+    compute_capability: Option<(u16, u16)>,
+    device_ordinal: usize,
+    pooled_metal_location: Option<DeviceLocation>,
+) -> bool {
+    match (compute_capability, actual) {
+        (Some(_), DeviceLocation::Cuda { gpu_id }) => gpu_id == device_ordinal,
+        // Candle's Metal gpu_id is a process-global MetalDevice identity, not
+        // a physical GPU ordinal. Compare it to the location of Mold's pooled
+        // device for the admitted ordinal so a separately minted MetalDevice
+        // fails at binding instead of at the first cross-device kernel.
+        (None, DeviceLocation::Metal { .. }) => pooled_metal_location == Some(actual),
+        _ => false,
+    }
+}
+
+fn private_h3_pipeline_backend_kind(
+    compute_capability: Option<(u16, u16)>,
+) -> H3PipelineBackendKind {
+    if compute_capability.is_some() {
+        H3PipelineBackendKind::Cuda
+    } else {
+        H3PipelineBackendKind::Metal
+    }
 }
 
 /// Snapshot the safe execution-lease surface once. In particular, the Candle
@@ -1326,9 +1386,9 @@ fn validate_prepared_overlap_binding(
         || overlap.visual_decode_peak_device_bytes != budget.visual_decode_phase_device_bytes
         || overlap.normalized_endpoint_host_bytes != budget.normalized_endpoint_host_bytes
         || budget.load_drop_policy
-            != H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+            != H3FactoryTargetLoadDropPolicy::LoadQwenEncodeTransferDropQwenLoadVaesEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
     {
-        bail!("private H3 prepared attempt, target budget, and overlap authority differ before VAE allocation")
+        bail!("private H3 prepared attempt, target budget, and overlap authority differ before component allocation")
     }
     Ok(())
 }
@@ -1661,7 +1721,7 @@ impl H3PrivatePhaseLedger {
     fn references_encoded(&mut self) -> Result<()> {
         self.transition(
             &[
-                H3PrivatePhaseState::QwenDropped,
+                H3PrivatePhaseState::VaesLoaded,
                 H3PrivatePhaseState::ReferencesEncoded,
             ],
             H3PrivatePhaseState::ReferencesEncoded,
@@ -1671,12 +1731,7 @@ impl H3PrivatePhaseLedger {
 
     fn vaes_loaded(&mut self) -> Result<()> {
         self.transition(
-            // Ref2VA has already normalized its media by this point; FL2VA
-            // constructs the VAEs first.
-            &[
-                H3PrivatePhaseState::Bound,
-                H3PrivatePhaseState::ReferencesPreprocessed,
-            ],
+            &[H3PrivatePhaseState::QwenDropped],
             H3PrivatePhaseState::VaesLoaded,
             "VAE load",
         )
@@ -1684,7 +1739,10 @@ impl H3PrivatePhaseLedger {
 
     fn qwen_loaded(&mut self) -> Result<()> {
         self.transition(
-            &[H3PrivatePhaseState::VaesLoaded],
+            &[
+                H3PrivatePhaseState::Bound,
+                H3PrivatePhaseState::ReferencesPreprocessed,
+            ],
             H3PrivatePhaseState::QwenLoaded,
             "Qwen load",
         )
@@ -1701,7 +1759,7 @@ impl H3PrivatePhaseLedger {
     fn conditions_encoded(&mut self) -> Result<()> {
         self.transition(
             &[
-                H3PrivatePhaseState::QwenDropped,
+                H3PrivatePhaseState::VaesLoaded,
                 H3PrivatePhaseState::ConditionsEncoded,
             ],
             H3PrivatePhaseState::ConditionsEncoded,
@@ -1712,7 +1770,7 @@ impl H3PrivatePhaseLedger {
     fn vaes_parked(&mut self) -> Result<()> {
         self.transition(
             &[
-                H3PrivatePhaseState::QwenDropped,
+                H3PrivatePhaseState::VaesLoaded,
                 H3PrivatePhaseState::ConditionsEncoded,
                 H3PrivatePhaseState::ReferencesEncoded,
             ],
@@ -1871,7 +1929,7 @@ where
         let cancellation_slot = H3PrivateComfyCancellationSlot::default();
         let cancellation_guard = cancellation_slot.install(progress)?;
         let identity = H3PipelineBackendIdentity {
-            kind: H3PipelineBackendKind::Cuda,
+            kind: private_h3_pipeline_backend_kind(admitted.compute_capability),
             device_id: admitted.device_id.clone(),
             execution_fingerprint: admitted.execution_fingerprint.clone(),
         };
@@ -2167,13 +2225,6 @@ where
         checkpoint: &mut dyn H3PipelineCheckpoint,
     ) -> Result<H3TextConditioning> {
         self.validate_continuing_authority()?;
-        self.ledger.vaes_loaded()?;
-        let opened_vae = self
-            .opened_vae
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("private H3 VAE authority was already consumed"))?;
-        self.construct_vaes(opened_vae, checkpoint)?;
-
         self.ledger.qwen_loaded()?;
         checkpoint.checkpoint(H3PipelineEvent {
             phase: H3PipelinePhase::QwenLoad,
@@ -2232,6 +2283,12 @@ where
         self.ledger.qwen_dropped()?;
         let text = text?;
         self.validate_continuing_authority()?;
+        self.ledger.vaes_loaded()?;
+        let opened_vae = self
+            .opened_vae
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("private H3 VAE authority was already consumed"))?;
+        self.construct_vaes(opened_vae, checkpoint)?;
         Ok(text)
     }
 
@@ -2244,9 +2301,9 @@ where
         self.validate_continuing_authority()?;
         if !matches!(
             self.ledger.state,
-            H3PrivatePhaseState::QwenDropped | H3PrivatePhaseState::ConditionsEncoded
+            H3PrivatePhaseState::VaesLoaded | H3PrivatePhaseState::ConditionsEncoded
         ) {
-            bail!("private H3 condition encode occurred before Qwen drop")
+            bail!("private H3 condition encode occurred before VAE load")
         }
         let result = self
             .vae
@@ -2268,6 +2325,15 @@ where
         // removed from the transformer's own peak rather than added to it.
         self.validate_continuing_authority()?;
         drop(self.vae.take());
+        // Candle's memoized Metal device retains freed allocations in its
+        // buffer pool until a synchronized sweep. H3 reloads both VAEs for
+        // decode, so keeping their old buffers cached here defeats the phase
+        // boundary on unified memory and can overlap ~5.8 GiB with the
+        // transformer. CUDA owns a different allocator and keeps its existing
+        // lifecycle unchanged.
+        if self.continuing_execution.device().is_metal() {
+            crate::device::release_pooled_metal_memory(self.authority.device_ordinal());
+        }
         self.ledger.vaes_parked()?;
         self.validate_continuing_authority()
     }
@@ -2319,6 +2385,12 @@ where
             .denoise(input, layout, checkpoint)?;
         if self.ledger.denoise_completed()? {
             drop(self.denoiser.take());
+            // Mirror the VAE-to-transformer phase boundary above. Candle's
+            // Metal allocator otherwise retains the streamed transformer's
+            // freed buffers while both VAEs are reconstructed for decode.
+            if self.continuing_execution.device().is_metal() {
+                crate::device::release_pooled_metal_memory(self.authority.device_ordinal());
+            }
         }
         self.validate_continuing_authority()?;
         Ok(output)
@@ -2447,13 +2519,6 @@ where
     ) -> Result<H3TextConditioning> {
         self.require_ref2va()?;
         self.validate_continuing_authority()?;
-        self.ledger.vaes_loaded()?;
-        let opened_vae = self
-            .opened_vae
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("private H3 VAE authority was already consumed"))?;
-        self.construct_vaes(opened_vae, checkpoint)?;
-
         self.ledger.qwen_loaded()?;
         checkpoint.checkpoint(H3PipelineEvent {
             phase: H3PipelinePhase::QwenLoad,
@@ -2515,6 +2580,12 @@ where
         self.ledger.qwen_dropped()?;
         let text = text?;
         self.validate_continuing_authority()?;
+        self.ledger.vaes_loaded()?;
+        let opened_vae = self
+            .opened_vae
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("private H3 VAE authority was already consumed"))?;
+        self.construct_vaes(opened_vae, checkpoint)?;
         Ok(text)
     }
 
@@ -2528,9 +2599,9 @@ where
         self.validate_continuing_authority()?;
         if !matches!(
             self.ledger.state,
-            H3PrivatePhaseState::QwenDropped | H3PrivatePhaseState::ReferencesEncoded
+            H3PrivatePhaseState::VaesLoaded | H3PrivatePhaseState::ReferencesEncoded
         ) {
-            bail!("private H3 reference encode occurred before Qwen drop")
+            bail!("private H3 reference encode occurred before VAE load")
         }
         let frames = reference_visual_frames(&self.reference_media, reference)?;
         let condition = self
@@ -2553,9 +2624,9 @@ where
         self.validate_continuing_authority()?;
         if !matches!(
             self.ledger.state,
-            H3PrivatePhaseState::QwenDropped | H3PrivatePhaseState::ReferencesEncoded
+            H3PrivatePhaseState::VaesLoaded | H3PrivatePhaseState::ReferencesEncoded
         ) {
-            bail!("private H3 reference encode occurred before Qwen drop")
+            bail!("private H3 reference encode occurred before VAE load")
         }
         let H3AudioConditionEncodeMode::OfficialPosteriorModeF32 = mode;
         let waveform = reference_audio_waveform(
@@ -3292,6 +3363,52 @@ mod tests {
                 "continuing {axis}"
             );
         }
+    }
+
+    #[test]
+    fn metal_location_uses_candle_identity_while_cuda_keeps_the_ordinal_fence() {
+        assert!(private_execution_location_matches(
+            DeviceLocation::Metal { gpu_id: 41 },
+            None,
+            0,
+            Some(DeviceLocation::Metal { gpu_id: 41 }),
+        ));
+        assert!(!private_execution_location_matches(
+            DeviceLocation::Metal { gpu_id: 42 },
+            None,
+            0,
+            Some(DeviceLocation::Metal { gpu_id: 41 }),
+        ));
+        assert!(private_execution_location_matches(
+            DeviceLocation::Cuda { gpu_id: 2 },
+            Some((8, 9)),
+            2,
+            None,
+        ));
+        assert!(!private_execution_location_matches(
+            DeviceLocation::Cuda { gpu_id: 41 },
+            Some((8, 9)),
+            2,
+            None,
+        ));
+        assert!(!private_execution_location_matches(
+            DeviceLocation::Metal { gpu_id: 2 },
+            Some((8, 9)),
+            2,
+            None,
+        ));
+    }
+
+    #[test]
+    fn private_pipeline_identity_follows_the_admitted_device_kind() {
+        assert_eq!(
+            private_h3_pipeline_backend_kind(None),
+            H3PipelineBackendKind::Metal,
+        );
+        assert_eq!(
+            private_h3_pipeline_backend_kind(Some((8, 9))),
+            H3PipelineBackendKind::Cuda,
+        );
     }
 
     struct AlternatingDeviceLease {
@@ -4719,18 +4836,10 @@ mod tests {
         let mux_calls = AtomicUsize::new(0);
         let mut ledger = H3PrivatePhaseLedger::new(3).unwrap();
         assert!(H3PrivatePhaseLedger::new(0).is_err());
-        assert!(ledger.qwen_loaded().is_err());
+        assert!(ledger.vaes_loaded().is_err());
         assert!(ledger.denoise_completed().is_err());
         assert!(ledger.visual_decoded().is_err());
         assert!(ledger.vaes_dropped().is_err());
-        assert!(try_mux(&ledger, &mux_calls).is_err());
-
-        let vae = DropCount {
-            name: "vae",
-            events: Arc::clone(&events),
-        };
-        ledger.vaes_loaded().unwrap();
-        assert!(ledger.vaes_loaded().is_err());
         assert!(try_mux(&ledger, &mux_calls).is_err());
 
         let qwen = DropCount {
@@ -4742,6 +4851,17 @@ mod tests {
         drop(qwen);
         ledger.qwen_dropped().unwrap();
         assert_eq!(*events.lock().unwrap(), ["qwen"]);
+        assert!(ledger.conditions_encoded().is_err());
+
+        // Both VAEs are constructed only after Qwen has been released, so
+        // their multi-gigabyte residents never overlap its packed weights.
+        let vae = DropCount {
+            name: "vae",
+            events: Arc::clone(&events),
+        };
+        ledger.vaes_loaded().unwrap();
+        assert!(ledger.vaes_loaded().is_err());
+        assert!(try_mux(&ledger, &mux_calls).is_err());
         ledger.conditions_encoded().unwrap();
         ledger.conditions_encoded().unwrap();
 

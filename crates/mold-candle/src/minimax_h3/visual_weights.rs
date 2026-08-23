@@ -127,6 +127,7 @@ pub struct ValidatedVisualVaeWeights {
     layout: WeightLayout,
     inspection: VisualVaeWeightInspection,
     files: Vec<VisualWeightFileIdentity>,
+    authenticated_staging_descriptor: bool,
 }
 
 impl ValidatedVisualVaeWeights {
@@ -153,10 +154,19 @@ impl ValidatedVisualVaeWeights {
     pub(crate) fn revalidate_files(&self) -> Result<()> {
         for expected in &self.files {
             let current = current_visual_weight_file_identity(expected)?;
-            if !same_visual_weight_file_identity(&current, expected) {
+            let mut mismatches = visual_weight_file_identity_mismatches(&current, expected);
+            if self.authenticated_staging_descriptor && expected.descriptor_bound {
+                // The caller owns a retained, content-authenticated private
+                // file descriptor and revalidates its underlying file after
+                // construction. macOS `/dev/fd` may drift only this synthetic
+                // metadata axis while reopening the same descriptor.
+                mismatches.retain(|axis| *axis != "changed-time");
+            }
+            if !mismatches.is_empty() {
                 bail!(
-                    "validated H3 visual VAE artifact changed after inspection: {}",
-                    expected.canonical_path.display()
+                    "validated H3 visual VAE artifact changed after inspection: {} ({})",
+                    expected.canonical_path.display(),
+                    mismatches.join(", ")
                 )
             }
         }
@@ -807,6 +817,7 @@ pub fn validate_diffusers_weight_index(
             header_identity_sha256: hex_digest(identity.finalize()),
         },
         files,
+        authenticated_staging_descriptor: false,
     })
 }
 
@@ -819,7 +830,7 @@ pub fn validate_comfy_weight_file(
     config: &MiniMaxH3VisualVaeConfig,
     weight_path: &Path,
 ) -> Result<ValidatedVisualVaeWeights> {
-    validate_comfy_weight_file_inner(config, weight_path, true)
+    validate_comfy_weight_file_inner(config, weight_path, true, false)
 }
 
 /// Validate the Comfy visual VAE through a retained process descriptor.
@@ -839,13 +850,34 @@ pub fn validate_comfy_weight_file_from_opened_descriptor(
     if !is_descriptor || !has_numeric_descriptor {
         bail!("H3 Comfy visual VAE opened authority must use a process descriptor path")
     }
-    validate_comfy_weight_file_inner(config, weight_path, false)
+    validate_comfy_weight_file_inner(config, weight_path, false, false)
+}
+
+/// Validate a descriptor for Mold's private content-authenticated staging
+/// copy. The caller must retain the underlying file and re-authenticate it
+/// after construction; only this route tolerates macOS `/dev/fd` ctime drift.
+pub fn validate_comfy_weight_file_from_authenticated_staging_descriptor(
+    config: &MiniMaxH3VisualVaeConfig,
+    weight_path: &Path,
+) -> Result<ValidatedVisualVaeWeights> {
+    let parent = weight_path.parent();
+    let is_descriptor =
+        parent == Some(Path::new("/dev/fd")) || parent == Some(Path::new("/proc/self/fd"));
+    let has_numeric_descriptor = weight_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()));
+    if !is_descriptor || !has_numeric_descriptor {
+        bail!("H3 authenticated staging authority must use a process descriptor path")
+    }
+    validate_comfy_weight_file_inner(config, weight_path, false, true)
 }
 
 fn validate_comfy_weight_file_inner(
     config: &MiniMaxH3VisualVaeConfig,
     weight_path: &Path,
     require_canonical_filename: bool,
+    authenticated_staging_descriptor: bool,
 ) -> Result<ValidatedVisualVaeWeights> {
     config.validate_production_contract()?;
     if require_canonical_filename {
@@ -905,6 +937,7 @@ fn validate_comfy_weight_file_inner(
             header_identity_sha256: hex_digest(identity.finalize()),
         },
         files: vec![file_identity],
+        authenticated_staging_descriptor,
     })
 }
 
@@ -1147,20 +1180,57 @@ fn same_visual_weight_file_identity(
     opened: &VisualWeightFileIdentity,
     expected: &VisualWeightFileIdentity,
 ) -> bool {
+    visual_weight_file_identity_mismatches(opened, expected).is_empty()
+}
+
+fn visual_weight_file_identity_mismatches(
+    opened: &VisualWeightFileIdentity,
+    expected: &VisualWeightFileIdentity,
+) -> Vec<&'static str> {
+    let mut mismatches = Vec::new();
+    if opened.canonical_path != expected.canonical_path {
+        mismatches.push("path");
+    }
+    if opened.logical_name != expected.logical_name {
+        mismatches.push("logical-name");
+    }
+    if opened.descriptor_bound != expected.descriptor_bound {
+        mismatches.push("descriptor-binding");
+    }
+    if opened.len != expected.len {
+        mismatches.push("length");
+    }
+    #[cfg(unix)]
+    if opened.inode != expected.inode {
+        mismatches.push("inode");
+    }
+    #[cfg(unix)]
+    if opened.modified_seconds != expected.modified_seconds
+        || opened.modified_nanoseconds != expected.modified_nanoseconds
+    {
+        mismatches.push("modified-time");
+    }
+    #[cfg(unix)]
+    if opened.changed_seconds != expected.changed_seconds
+        || opened.changed_nanoseconds != expected.changed_nanoseconds
+    {
+        mismatches.push("changed-time");
+    }
+    #[cfg(unix)]
+    if opened.device != expected.device {
+        mismatches.push("device");
+    }
     #[cfg(all(unix, not(target_os = "linux")))]
     if expected.descriptor_bound {
         // macOS reports a synthetic device id when statting `/dev/fd/N`, but
         // the descriptor's own metadata retains the underlying filesystem id.
-        return opened.canonical_path == expected.canonical_path
-            && opened.descriptor_bound == expected.descriptor_bound
-            && opened.len == expected.len
-            && opened.inode == expected.inode
-            && opened.modified_seconds == expected.modified_seconds
-            && opened.modified_nanoseconds == expected.modified_nanoseconds
-            && opened.changed_seconds == expected.changed_seconds
-            && opened.changed_nanoseconds == expected.changed_nanoseconds;
+        mismatches.retain(|axis| *axis != "device");
     }
-    opened == expected
+    #[cfg(not(unix))]
+    if opened.modified != expected.modified {
+        mismatches.push("modified-time");
+    }
+    mismatches
 }
 
 fn visual_weight_file_identity_from_metadata(
@@ -1439,6 +1509,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let storage_path = directory.path().join(COMFY_VISUAL_VAE_FILENAME);
         let retained = write_sparse_production_comfy_weights(&storage_path);
+        let mut permissions = retained.metadata().unwrap().permissions();
+        permissions.set_readonly(true);
+        retained.set_permissions(permissions).unwrap();
         #[cfg(target_os = "linux")]
         let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", retained.as_raw_fd()));
         #[cfg(not(target_os = "linux"))]
@@ -1456,6 +1529,58 @@ mod tests {
         validated.revalidate_files().unwrap();
         validated.mmap_var_builder(&Device::Cpu).unwrap();
         assert_eq!(validated.files[0].canonical_path, descriptor_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_bound_validation_rejects_post_inspection_ctime_drift() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let storage_path = directory.path().join(COMFY_VISUAL_VAE_FILENAME);
+        let retained = write_sparse_production_comfy_weights(&storage_path);
+        #[cfg(target_os = "linux")]
+        let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", retained.as_raw_fd()));
+        #[cfg(not(target_os = "linux"))]
+        let descriptor_path = PathBuf::from(format!("/dev/fd/{}", retained.as_raw_fd()));
+        let validated = validate_comfy_weight_file_from_opened_descriptor(
+            &MiniMaxH3VisualVaeConfig::production(),
+            &descriptor_path,
+        )
+        .unwrap();
+
+        retained
+            .set_permissions(std::fs::Permissions::from_mode(0o440))
+            .unwrap();
+        let error = validated.revalidate_files().unwrap_err().to_string();
+        assert!(error.contains("changed-time"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authenticated_staging_descriptor_defers_ctime_to_outer_content_fence() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let storage_path = directory.path().join(COMFY_VISUAL_VAE_FILENAME);
+        let retained = write_sparse_production_comfy_weights(&storage_path);
+        #[cfg(target_os = "linux")]
+        let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", retained.as_raw_fd()));
+        #[cfg(not(target_os = "linux"))]
+        let descriptor_path = PathBuf::from(format!("/dev/fd/{}", retained.as_raw_fd()));
+        let validated = validate_comfy_weight_file_from_authenticated_staging_descriptor(
+            &MiniMaxH3VisualVaeConfig::production(),
+            &descriptor_path,
+        )
+        .unwrap();
+
+        retained
+            .set_permissions(std::fs::Permissions::from_mode(0o440))
+            .unwrap();
+        validated.revalidate_files().unwrap();
+        validated.mmap_var_builder(&Device::Cpu).unwrap();
     }
 
     #[cfg(unix)]
@@ -1486,6 +1611,7 @@ mod tests {
                 header_identity_sha256: "test".into(),
             },
             files: vec![identity],
+            authenticated_staging_descriptor: false,
         };
         let digest = token
             .component_fingerprint(&mut NoopVisualWeightReadObserver)
@@ -1730,6 +1856,7 @@ mod tests {
                 header_identity_sha256: "test".into(),
             },
             files: vec![visual_weight_file_identity(&path).unwrap()],
+            authenticated_staging_descriptor: false,
         };
         let mut bytes = std::fs::read(&path).unwrap();
         bytes.push(9);

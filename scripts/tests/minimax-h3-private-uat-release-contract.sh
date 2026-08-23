@@ -578,23 +578,23 @@ runtime_source=crates/mold-inference/src/minimax_h3/private_fl2va_runtime.rs
 # The Ref2VA backend and its attempt are verbatim twins of the FL2VA phase
 # markers, so each anchor is resolved inside the block that identifies the
 # FL2VA occurrence rather than by a whole-file grep. `H3PrivatePhaseBackend`'s
-# inherent impl owns VAE construction; the `H3Fl2VaBackend` impl owns the
-# encode/park/denoise/decode phases; `run_private_comfy_fl2va_attempt` owns the
-# terminal identity echo and the mux.
-phase_impl_line=$(sole_file_line 'phase backend impl' "$runtime_source" \
-  'impl<C, E, A> H3PrivatePhaseBackend<C, E, A>')
-phase_impl_end=$(block_end "$runtime_source" "$phase_impl_line")
+# `H3Fl2VaBackend` owns the encode/park/denoise/decode phases;
+# `run_private_comfy_fl2va_attempt` owns the terminal identity echo and mux.
 fl2va_impl_line=$(sole_file_line 'FL2VA backend impl' "$runtime_source" \
   'impl<C, E, A> H3Fl2VaBackend for H3PrivatePhaseBackend<C, E, A>')
 fl2va_impl_end=$(block_end "$runtime_source" "$fl2va_impl_line")
+fl2va_encode_text_line=$(sole_file_line 'FL2VA text encode' "$runtime_source" \
+  'fn encode_text(' "$fl2va_impl_line" "$fl2va_impl_end")
+fl2va_encode_visual_line=$(sole_file_line 'FL2VA visual condition encode' "$runtime_source" \
+  'fn encode_visual_condition(' "$fl2va_impl_line" "$fl2va_impl_end")
 fl2va_attempt_line=$(sole_file_line 'FL2VA attempt' "$runtime_source" \
   'pub(crate) fn run_private_comfy_fl2va_attempt<C, E, A>(')
 fl2va_attempt_end=$(block_end "$runtime_source" "$fl2va_attempt_line")
 fl2va_decode_audio_line=$(sole_file_line 'FL2VA audio decode' "$runtime_source" \
   'fn decode_audio(' "$fl2va_impl_line" "$fl2va_impl_end")
 vae_load_line=$(sole_file_line 'VAE construction' "$runtime_source" \
-  'let loaded = load_h3_comfy_vae_runtime_from_authority(' \
-  "$phase_impl_line" "$phase_impl_end")
+  'self.construct_vaes(opened_vae, checkpoint)?;' \
+  "$fl2va_encode_text_line" "$((fl2va_encode_visual_line - 1))")
 qwen_load_line=$(sole_file_line 'FL2VA Qwen load' "$runtime_source" \
   'let qwen = H3PrivateQwenAdapter::load_authorized_from_opened(' \
   "$fl2va_impl_line" "$fl2va_impl_end")
@@ -613,12 +613,12 @@ terminal_line=$(sole_file_line 'FL2VA terminal identity echo' "$runtime_source" 
   "$fl2va_attempt_line" "$fl2va_attempt_end")
 mux_line=$(sole_file_line 'FL2VA AV mux' "$runtime_source" \
   'let output = super::pipeline::finalize_av(' "$fl2va_attempt_line" "$fl2va_attempt_end")
-if ((vae_load_line >= qwen_load_line || qwen_load_line >= vae_park_line \
+if ((qwen_load_line >= vae_load_line || vae_load_line >= vae_park_line \
   || vae_park_line >= transformer_load_line \
   || transformer_load_line >= transformer_drop_line \
   || transformer_drop_line >= vae_reload_line || vae_reload_line >= vae_drop_line \
   || vae_drop_line >= terminal_line || terminal_line >= mux_line)); then
-  fail "private H3 phase runtime no longer parks, reloads, and drops components before terminal-only mux"
+  fail "private H3 phase runtime no longer drops Qwen before VAE construction or parks, reloads, and drops components before terminal-only mux"
 fi
 # The developer-only Ref2VA attempt owns the same terminal-before-mux rule.
 ref2va_attempt_line=$(sole_file_line 'Ref2VA attempt' "$runtime_source" \

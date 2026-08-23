@@ -191,7 +191,8 @@ impl H3PrivateQwenOpenRouteAuthority {
 impl H3PrivateQwenLoaderMemoryRoute {
     const fn placement(self) -> H3QwenNvfp4RuntimePlacement {
         match self {
-            Self::Cuda | Self::Metal => H3QwenNvfp4RuntimePlacement::Accelerated,
+            Self::Cuda => H3QwenNvfp4RuntimePlacement::Accelerated,
+            Self::Metal => H3QwenNvfp4RuntimePlacement::MetalStreamed,
             Self::Cpu => H3QwenNvfp4RuntimePlacement::Cpu,
         }
     }
@@ -203,9 +204,8 @@ pub fn released_h3_private_qwen_loader_memory_authority(
     route: H3PrivateQwenLoaderMemoryRoute,
 ) -> Result<H3PrivateQwenLoaderMemoryAuthority> {
     let placement = match route {
-        H3PrivateQwenLoaderMemoryRoute::Cuda | H3PrivateQwenLoaderMemoryRoute::Metal => {
-            H3QwenNvfp4RuntimePlacement::Accelerated
-        }
+        H3PrivateQwenLoaderMemoryRoute::Cuda => H3QwenNvfp4RuntimePlacement::Accelerated,
+        H3PrivateQwenLoaderMemoryRoute::Metal => H3QwenNvfp4RuntimePlacement::MetalStreamed,
         H3PrivateQwenLoaderMemoryRoute::Cpu => H3QwenNvfp4RuntimePlacement::Cpu,
     };
     let facts = released_h3_qwen_nvfp4_runtime_memory_facts_for_placement(placement)?;
@@ -233,9 +233,8 @@ pub fn validate_h3_private_qwen_loader_memory_authority(
     route: H3PrivateQwenLoaderMemoryRoute,
 ) -> Result<()> {
     let placement = match route {
-        H3PrivateQwenLoaderMemoryRoute::Cuda | H3PrivateQwenLoaderMemoryRoute::Metal => {
-            H3QwenNvfp4RuntimePlacement::Accelerated
-        }
+        H3PrivateQwenLoaderMemoryRoute::Cuda => H3QwenNvfp4RuntimePlacement::Accelerated,
+        H3PrivateQwenLoaderMemoryRoute::Metal => H3QwenNvfp4RuntimePlacement::MetalStreamed,
         H3PrivateQwenLoaderMemoryRoute::Cpu => H3QwenNvfp4RuntimePlacement::Cpu,
     };
     let facts = released_h3_qwen_nvfp4_runtime_memory_facts_for_placement(placement)?;
@@ -388,6 +387,8 @@ where
         let device = resources.conditioner_lease.device();
         let placement = if device.is_cpu() {
             H3QwenNvfp4RuntimePlacement::Cpu
+        } else if device.is_metal() {
+            H3QwenNvfp4RuntimePlacement::MetalStreamed
         } else {
             H3QwenNvfp4RuntimePlacement::Accelerated
         };
@@ -491,6 +492,8 @@ where
         let memory_facts = opened.memory_facts().clone();
         let expected_placement = if resources.conditioner_lease.device().is_cpu() {
             H3QwenNvfp4RuntimePlacement::Cpu
+        } else if resources.conditioner_lease.device().is_metal() {
+            H3QwenNvfp4RuntimePlacement::MetalStreamed
         } else {
             H3QwenNvfp4RuntimePlacement::Accelerated
         };
@@ -1413,7 +1416,10 @@ fn encode_with_typed_checkpoint(
         }
         let result = validate_authorities()
             .and_then(|()| mapper.map(conditioner_checkpoint))
-            .and_then(|event| checkpoint.checkpoint(event));
+            .and_then(|event| match event {
+                Some(event) => checkpoint.checkpoint(event),
+                None => Ok(()),
+            });
         if let Err(error) = result {
             first_error = Some(error);
             return Err(candle_core::Error::Msg(
@@ -1464,7 +1470,17 @@ impl ConditionerProgressMapper {
         })
     }
 
-    fn map(&mut self, checkpoint: ConditionerCheckpoint) -> Result<H3PipelineEvent> {
+    fn map(&mut self, checkpoint: ConditionerCheckpoint) -> Result<Option<H3PipelineEvent>> {
+        if checkpoint == ConditionerCheckpoint::LanguageLayerLoadHeartbeat {
+            if self.token_seen
+                && self.completed_vision_passes == self.vision_passes
+                && self.current_vision_layer.is_none()
+                && self.language_layer < H3_SELECTED_LANGUAGE_LAYERS
+            {
+                return Ok(None);
+            }
+            bail!("private H3 Qwen emitted a language-layer load heartbeat out of phase")
+        }
         let completed = match checkpoint {
             ConditionerCheckpoint::TokenEmbedding
                 if !self.token_seen
@@ -1521,11 +1537,11 @@ impl ConditionerProgressMapper {
             bail!("private H3 Qwen progress was non-monotonic or exceeded its exact total")
         }
         self.last_completed = completed;
-        Ok(H3PipelineEvent {
+        Ok(Some(H3PipelineEvent {
             phase: H3PipelinePhase::QwenEncodeChunk,
             completed,
             total: self.total,
-        })
+        }))
     }
 }
 
@@ -2041,6 +2057,33 @@ mod tests {
             let wrong = test_authority(under_or_over, 1, 1, 0);
             assert!(validate_parameter_memory(&wrong, &facts).is_err());
         }
+    }
+
+    #[test]
+    fn metal_streaming_memory_authority_is_distinct_and_cuda_stays_resident() {
+        let metal =
+            released_h3_private_qwen_loader_memory_authority(H3PrivateQwenLoaderMemoryRoute::Metal)
+                .unwrap();
+        let cuda =
+            released_h3_private_qwen_loader_memory_authority(H3PrivateQwenLoaderMemoryRoute::Cuda)
+                .unwrap();
+        assert_eq!(metal.source_parameter_bytes, cuda.source_parameter_bytes);
+        assert_eq!(metal.host_resident_parameter_bytes, 1_052_855_836);
+        assert_eq!(metal.device_resident_parameter_bytes, 1_191_583_200);
+        assert_eq!(cuda.host_resident_parameter_bytes, 14_495_308_664);
+        assert_eq!(cuda.device_resident_parameter_bytes, 1_191_583_200);
+        assert_eq!(
+            cuda.host_resident_parameter_bytes - metal.host_resident_parameter_bytes,
+            13_442_452_828
+        );
+        assert_eq!(
+            metal.maximum_tensor_staging_bytes,
+            cuda.maximum_tensor_staging_bytes
+        );
+        assert_eq!(
+            metal.retained_raw_header_bytes,
+            cuda.retained_raw_header_bytes
+        );
     }
 
     #[test]

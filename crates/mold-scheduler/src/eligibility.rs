@@ -108,12 +108,15 @@ fn compare_candidates(left: &CandidatePlacement, right: &CandidatePlacement) -> 
         .then_with(|| left.execution_fingerprint.cmp(&right.execution_fingerprint))
 }
 
-fn candidate_key(candidate: &CandidatePlacement) -> (&DeviceId, u64, u64, u64, u64, u64, u64) {
+fn candidate_key(
+    candidate: &CandidatePlacement,
+) -> (&DeviceId, u64, u64, u64, bool, u64, u64, u64) {
     (
         &candidate.device_id,
         candidate.incremental_host_ram_bytes,
         candidate.predicted_vram_bytes,
         candidate.device_available_vram_bytes,
+        candidate.frozen_device_capacity,
         candidate.cold_setup_ms,
         candidate.warm_setup_ms,
         candidate.predicted_run_ms,

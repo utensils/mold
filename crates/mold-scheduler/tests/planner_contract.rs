@@ -1948,6 +1948,40 @@ fn consuming_work_is_still_gated_by_host_headroom_and_vram() {
 }
 
 #[test]
+fn frozen_capacity_candidate_uses_reviewed_admission_until_owner_fence() {
+    let placement = CandidatePlacement::new("metal:default", "h3-reviewed", 0)
+        .with_vram(32 * GIB)
+        .with_device_available_vram(40 * GIB)
+        .with_frozen_device_capacity()
+        .with_timing(1_000, 50, 1_000);
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![DeviceSnapshot::idle("metal:default", 20 * GIB)],
+            vec![work("h3", 0, vec![placement])],
+            64,
+        ))
+        .expect("valid plan");
+    let lease = &plan.immediate_leases[0];
+    let current = GrantValidationSnapshot {
+        work_id: "h3".into(),
+        device_id: "metal:default".into(),
+        state_version: 7,
+        plan_version: 11,
+        sample_generation: 0,
+        ledger_sequence: 0,
+        work_ready: true,
+        work_cancelled: false,
+        worker_generation: lease.worker_generation,
+        worker_ready: true,
+        device_admin_state: DeviceAdminState::Enabled,
+        device_health: DeviceHealth::Healthy,
+        execution_fingerprint: lease.placement.execution_fingerprint.clone(),
+        available_vram_bytes: 20 * GIB,
+    };
+    assert_eq!(plan.validate_lease_for_grant(lease, &current), Ok(()));
+}
+
+#[test]
 fn only_model_unload_is_exempt_from_admission_pressure() {
     for kind in [
         WorkKind::Generation,

@@ -3172,6 +3172,7 @@ dependencies = [
  "cudaforge",
  "float8",
  "half",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

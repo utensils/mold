@@ -44,6 +44,8 @@ use super::backend::{H3BackendArtifactLease, H3BackendExecutionLease, H3CandleBa
 #[cfg(feature = "mp4")]
 use super::engine::H3EngineProgressObserver;
 #[cfg(feature = "mp4")]
+use super::metal_memory_guard::H3MetalMemoryGuard;
+#[cfg(feature = "mp4")]
 use super::pipeline::{H3PipelineCheckpoint, H3PipelineEvent};
 #[cfg(feature = "mp4")]
 use super::private_fl2va_runtime::{
@@ -645,9 +647,12 @@ pub(crate) fn private_h3_admission_host_floor_bytes(
     let accelerated =
         released_h3_private_qwen_loader_memory_authority(H3PrivateQwenLoaderMemoryRoute::Cuda)?
             .host_resident_parameter_bytes;
+    let metal =
+        released_h3_private_qwen_loader_memory_authority(H3PrivateQwenLoaderMemoryRoute::Metal)?
+            .host_resident_parameter_bytes;
     bounds
         .fixed_runtime_host_bytes
-        .checked_add(cpu.min(accelerated))
+        .checked_add(cpu.min(accelerated).min(metal))
         .ok_or_else(|| anyhow!("private H3 admission host floor overflow"))
 }
 
@@ -868,7 +873,6 @@ fn private_h3_qwen_route(
         )
     }
 }
-
 impl H3PrivateRuntimeBoundRecord {
     fn into_authority(self) -> H3PrivateQualifiedRuntimeBounds {
         H3PrivateQualifiedRuntimeBounds {
@@ -1572,8 +1576,11 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     } = input;
     if device_id.trim().is_empty()
         || compute_capability.is_some_and(|capability| capability.0 == 0)
-        || available_device_bytes == 0
-        || available_host_headroom_bytes == 0
+        || !private_h3_capacity_sample_is_concrete(
+            compute_capability,
+            available_device_bytes,
+            available_host_headroom_bytes,
+        )
     {
         bail!("private H3 admission requires one concrete nonempty GPU capacity sample")
     }
@@ -2014,6 +2021,16 @@ fn prepare_reviewed_h3_private_fl2va_admission(
 }
 
 #[cfg(feature = "mp4")]
+fn private_h3_capacity_sample_is_concrete(
+    compute_capability: Option<(u16, u16)>,
+    available_device_bytes: u64,
+    available_host_headroom_bytes: u64,
+) -> bool {
+    available_device_bytes > 0
+        && (compute_capability.is_none() || available_host_headroom_bytes > 0)
+}
+
+#[cfg(feature = "mp4")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct H3PrivateComponentDigest {
     role: H3FactoryComponentRole,
@@ -2432,7 +2449,11 @@ impl H3PrivateFl2VaOwnerFenceFacts {
                 .is_some_and(|capability| capability.0 == 0)
             || self.memory_ledger_sequence == 0
             || self.predicted_device_peak_bytes == 0
-            || self.predicted_host_increment_bytes == 0
+            // Metal folds simultaneously-live host and device bytes into the
+            // one reviewed unified-memory peak, so its independent host claim
+            // is deliberately zero. CUDA retains two physical pools and must
+            // carry a positive host increment.
+            || (self.compute_capability.is_some() && self.predicted_host_increment_bytes == 0)
             || !valid_sha256(&self.work_identity_sha256)
             || !valid_sha256(&self.cancellation_scope_identity_sha256)
             || !valid_sha256(&self.admission_evidence_identity_sha256)
@@ -2985,10 +3006,17 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         prepared.budget_echo_input().clone(),
         attention_input,
     )?;
+    let (prepared_fence_device_bytes, prepared_fence_host_bytes) =
+        private_h3_project_owner_fence_budget(
+            owner_fence.compute_capability,
+            prepared.predicted_device_peak_bytes(),
+            prepared.predicted_host_increment_bytes(),
+            private_h3_unified_target_peak_bytes(&prepared.factory_attempt_input().target_budget)?,
+        );
     if prepared.prepared_attempt_identity_sha256() != owner_fence.prepared_attempt_identity_sha256
         || prepared.target_budget_identity_sha256() != owner_fence.target_budget_identity_sha256
-        || prepared.predicted_device_peak_bytes() != owner_fence.predicted_device_peak_bytes
-        || prepared.predicted_host_increment_bytes() != owner_fence.predicted_host_increment_bytes
+        || prepared_fence_device_bytes != owner_fence.predicted_device_peak_bytes
+        || prepared_fence_host_bytes != owner_fence.predicted_host_increment_bytes
     {
         bail!("private H3 prepared budget differs from the scheduler owner fence")
     }
@@ -3077,7 +3105,11 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         &opened_vae,
         &memory_overlap,
     )?;
-    let facts = owner.attempt_facts(&consumption_binding);
+    let facts = owner.attempt_facts_with_scheduler_budget(
+        &consumption_binding,
+        prepared_fence_device_bytes,
+        prepared_fence_host_bytes,
+    );
     let runner = H3PrivateConcretePreparedRunner {
         authority: enriched_factory,
         activation,
@@ -3099,6 +3131,20 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
 }
 
 #[cfg(feature = "mp4")]
+const fn private_h3_project_owner_fence_budget(
+    compute_capability: Option<(u16, u16)>,
+    split_device_bytes: u64,
+    split_host_bytes: u64,
+    unified_device_bytes: u64,
+) -> (u64, u64) {
+    if compute_capability.is_some() {
+        (split_device_bytes, split_host_bytes)
+    } else {
+        (unified_device_bytes, 0)
+    }
+}
+
+#[cfg(feature = "mp4")]
 fn validate_base_factory(
     factory: &FrozenH3FactoryAuthority,
     owner: &H3PrivateFl2VaOwnerFenceFacts,
@@ -3115,12 +3161,24 @@ fn validate_base_factory(
         || factory.compute_capability() != owner.compute_capability
         || factory.prepared_target_attempt_identities().is_some()
         || !factory.attention_runtime_identity_sha256().is_empty()
-        || factory.attention_backend() != AttentionBackend::Flash
+        || factory.attention_backend()
+            != private_h3_factory_attention_backend(owner.compute_capability)
         || factory.attention_chunk() != AttentionChunkPolicy::Off
     {
         bail!("private H3 base factory differs from the exact frozen owner route")
     }
     Ok(())
+}
+
+#[cfg(feature = "mp4")]
+const fn private_h3_factory_attention_backend(
+    compute_capability: Option<(u16, u16)>,
+) -> AttentionBackend {
+    if compute_capability.is_some() {
+        AttentionBackend::Flash
+    } else {
+        AttentionBackend::Math
+    }
 }
 
 /// The route every reopen gate below the fence is keyed on, derived from the
@@ -3869,10 +3927,12 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
                     match authority.compute_capability() {
                         Some(_) => Device::new_cuda(owner.device_ordinal)
                             .context("failed to construct the reviewed H3 CUDA route"),
-                        None => Device::new_metal(owner.device_ordinal)
+                        None => crate::device::metal_device(owner.device_ordinal)
                             .context("failed to construct the H3 Metal route"),
                     }
                 })?;
+            let metal_memory_guard =
+                H3MetalMemoryGuard::start(&execution_device, cancellation.clone())?;
             let qwen_on_cpu = matches!(
                 authority.conditioner_placement(),
                 H3FactoryConditionerPlacement::HostCpuThenDrop
@@ -3934,7 +3994,11 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
                 allocation_commit,
             )?;
             let mut observer = H3EngineProgressObserver::new(progress);
-            let output = run_private_comfy_fl2va_attempt(phase_owner, progress, &mut observer)?;
+            let output = run_private_comfy_fl2va_attempt(phase_owner, progress, &mut observer);
+            if let Some(violation) = metal_memory_guard.finish()? {
+                bail!(violation);
+            }
+            let output = output?;
             completion_device
                 .synchronize()
                 .context("private H3 completion synchronization failed")?;
@@ -4150,6 +4214,19 @@ impl H3PrivateFl2VaOwnerFacts {
         &self,
         consumption: &H3PrivateAttemptConsumptionBinding,
     ) -> H3PrivateFl2VaAttemptFacts {
+        self.attempt_facts_with_scheduler_budget(
+            consumption,
+            self.predicted_device_peak_bytes,
+            self.predicted_host_increment_bytes,
+        )
+    }
+
+    fn attempt_facts_with_scheduler_budget(
+        &self,
+        consumption: &H3PrivateAttemptConsumptionBinding,
+        scheduler_device_peak_bytes: u64,
+        scheduler_host_increment_bytes: u64,
+    ) -> H3PrivateFl2VaAttemptFacts {
         H3PrivateFl2VaAttemptFacts {
             device_id: self.device_id.clone(),
             device_ordinal: self.device_ordinal,
@@ -4157,8 +4234,8 @@ impl H3PrivateFl2VaOwnerFacts {
             prepared_attempt_identity_sha256: self.prepared_attempt_identity_sha256.clone(),
             target_budget_identity_sha256: self.target_budget_identity_sha256.clone(),
             component_set_identity_sha256: self.component_set_identity_sha256.clone(),
-            predicted_device_peak_bytes: self.predicted_device_peak_bytes,
-            predicted_host_increment_bytes: self.predicted_host_increment_bytes,
+            predicted_device_peak_bytes: scheduler_device_peak_bytes,
+            predicted_host_increment_bytes: scheduler_host_increment_bytes,
             media: self.media.clone(),
             admission_evidence_identity_sha256: self.admission_evidence_identity_sha256.clone(),
             artifact_qualification_identity_sha256: self
@@ -7471,6 +7548,63 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn metal_owner_fence_accepts_the_unified_zero_host_claim() {
+        let mut fence = owner_fence_for(&base_factory());
+        fence.compute_capability = None;
+        fence.predicted_host_increment_bytes = 0;
+        fence.validate().unwrap();
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn cuda_owner_fence_requires_an_independent_host_claim() {
+        let mut fence = owner_fence_for(&base_factory());
+        fence.predicted_host_increment_bytes = 0;
+        assert!(fence.validate().is_err());
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn metal_capacity_sample_needs_only_the_unified_pool() {
+        assert!(private_h3_capacity_sample_is_concrete(None, 40, 0));
+        assert!(!private_h3_capacity_sample_is_concrete(None, 0, 40));
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn cuda_capacity_sample_still_needs_both_physical_pools() {
+        assert!(private_h3_capacity_sample_is_concrete(Some((8, 9)), 40, 40));
+        assert!(!private_h3_capacity_sample_is_concrete(Some((8, 9)), 40, 0,));
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn frozen_factory_attention_backend_follows_the_device_route() {
+        assert_eq!(
+            private_h3_factory_attention_backend(None),
+            AttentionBackend::Math,
+        );
+        assert_eq!(
+            private_h3_factory_attention_backend(Some((8, 9))),
+            AttentionBackend::Flash,
+        );
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn owner_fence_budget_preserves_cuda_and_projects_metal_unified_memory() {
+        assert_eq!(
+            private_h3_project_owner_fence_budget(Some((8, 9)), 30, 12, 38),
+            (30, 12),
+        );
+        assert_eq!(
+            private_h3_project_owner_fence_budget(None, 30, 12, 38),
+            (38, 0),
+        );
+    }
+
     /// The resolved queue/worker form of an FL2VA request, matching what the
     /// reopen receives from the durable queue.
     #[cfg(feature = "mp4")]
@@ -7812,7 +7946,7 @@ mod tests {
             // Pin the derived floors so any re-derivation of the ceilings is
             // a visible, reviewed decision rather than silent drift.
             assert_eq!(device_floor, 603_979_776 + 16_978_542_592);
-            assert_eq!(host_floor, 805_306_368 + 14_495_308_664);
+            assert_eq!(host_floor, 805_306_368 + 1_052_855_836);
         }
 
         // The two sequence-linear denoise transients are the FL2VA
@@ -8275,6 +8409,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn private_h3_metal_execution_reuses_the_process_device() {
+        let source = include_str!("private_server.rs");
+        let production = source
+            .split_once("#[cfg(test)]\nmod tests")
+            .expect("private server test module boundary")
+            .0;
+        assert!(production.contains("crate::device::metal_device(owner.device_ordinal)"));
+        assert!(
+            !production.contains("Device::new_metal"),
+            "private H3 must not mint a second Candle Metal identity"
+        );
+    }
+
     #[cfg(feature = "mp4")]
     #[test]
     fn preparation_vae_observer_uses_the_same_attempt_cancellation() {
@@ -8569,6 +8717,7 @@ mod tests {
                 for route in [
                     H3PrivateQwenLoaderMemoryRoute::Cpu,
                     H3PrivateQwenLoaderMemoryRoute::Cuda,
+                    H3PrivateQwenLoaderMemoryRoute::Metal,
                 ] {
                     let qwen = released_h3_private_qwen_loader_memory_authority(route).unwrap();
                     let qwen_phase = bounds.fixed_runtime_host_bytes

@@ -60,6 +60,7 @@ pub(crate) struct H3AttemptClaim {
     pub(crate) work_id: String,
     pub(crate) device_id: String,
     pub(crate) device_ordinal: usize,
+    pub(crate) backend: mold_core::GpuBackend,
     pub(crate) owner_epoch: u64,
     pub(crate) worker_generation: u64,
     pub(crate) state_version: u64,
@@ -79,6 +80,7 @@ pub(crate) struct H3AttemptCurrent {
     pub(crate) work_id: String,
     pub(crate) device_id: String,
     pub(crate) device_ordinal: usize,
+    pub(crate) backend: mold_core::GpuBackend,
     pub(crate) owner_epoch: u64,
     pub(crate) worker_generation: u64,
     pub(crate) state_version: u64,
@@ -405,6 +407,7 @@ impl<'a> H3AttemptScope<'a> {
             work_id: &self.claim.work_id,
             device_id: &self.claim.device_id,
             device_ordinal: self.claim.device_ordinal,
+            backend: self.claim.backend,
             owner_epoch: self.claim.owner_epoch,
             worker_generation: self.claim.worker_generation,
             state_version: self.claim.state_version,
@@ -427,6 +430,7 @@ pub(crate) struct H3AttemptScopeFacts<'a> {
     work_id: &'a str,
     device_id: &'a str,
     device_ordinal: usize,
+    backend: mold_core::GpuBackend,
     owner_epoch: u64,
     worker_generation: u64,
     state_version: u64,
@@ -449,6 +453,10 @@ impl<'a> H3AttemptScopeFacts<'a> {
 
     pub(crate) fn device_ordinal(self) -> usize {
         self.device_ordinal
+    }
+
+    pub(crate) fn backend(self) -> mold_core::GpuBackend {
+        self.backend
     }
 
     pub(crate) fn matches_lease(self, lease: &crate::scheduler::LeaseFence) -> bool {
@@ -534,6 +542,7 @@ fn generation_attempt_claim_for_test(work_id: &str) -> H3AttemptClaim {
         work_id: work_id.to_string(),
         device_id: "cuda:0".to_string(),
         device_ordinal: 0,
+        backend: mold_core::GpuBackend::Cuda,
         owner_epoch: 7,
         worker_generation: 11,
         state_version: 13,
@@ -593,6 +602,7 @@ pub(crate) fn generation_attempt_for_test(
         work_id: claim.work_id.clone(),
         device_id: claim.device_id.clone(),
         device_ordinal: claim.device_ordinal,
+        backend: claim.backend,
         owner_epoch: claim.owner_epoch,
         worker_generation: claim.worker_generation,
         state_version: claim.state_version,
@@ -673,6 +683,7 @@ pub(crate) fn claim_generation_attempt(
         work_id: fence.work_id.clone(),
         device_id: fence.device_id.clone(),
         device_ordinal: worker.gpu.ordinal,
+        backend: worker.gpu.backend,
         owner_epoch: fence.owner_epoch,
         worker_generation: fence.worker_generation,
         state_version: fence.state_version,
@@ -690,6 +701,7 @@ pub(crate) fn claim_generation_attempt(
         work_id: job.id.clone(),
         device_id: worker_device_id.clone(),
         device_ordinal: plan.device_ordinal,
+        backend: worker.gpu.backend,
         owner_epoch: worker.owner_epoch,
         worker_generation: current_worker_generation,
         state_version: fence.state_version,
@@ -775,6 +787,7 @@ pub(crate) fn rebuild_generation_current(
         work_id: lease.work_id.clone(),
         device_id: lease.device_id.clone(),
         device_ordinal: plan.device_ordinal,
+        backend: worker.gpu.backend,
         owner_epoch: lease.owner_epoch,
         worker_generation: lease.worker_generation,
         state_version: lease.state_version,
@@ -914,7 +927,8 @@ fn validate_claim(claim: &H3AttemptClaim) -> Result<(), H3AttemptError> {
         || !valid_sha256(&claim.target_budget_identity_sha256)
         || !valid_sha256(&claim.component_set_identity_sha256)
         || claim.predicted_device_peak_bytes == 0
-        || claim.predicted_host_increment_bytes == 0
+        || (claim.predicted_host_increment_bytes == 0
+            && claim.backend != mold_core::GpuBackend::Metal)
     {
         return Err(H3AttemptError::InvalidClaim);
     }
@@ -928,6 +942,7 @@ fn validate_current(
     if claim.work_id != current.work_id
         || claim.device_id != current.device_id
         || claim.device_ordinal != current.device_ordinal
+        || claim.backend != current.backend
         || claim.owner_epoch != current.owner_epoch
         || claim.worker_generation != current.worker_generation
         || claim.state_version != current.state_version
@@ -976,6 +991,7 @@ mod tests {
             work_id: work_id.into(),
             device_id: "cuda:0".into(),
             device_ordinal: 0,
+            backend: mold_core::GpuBackend::Cuda,
             owner_epoch: 7,
             worker_generation: 11,
             state_version: 13,
@@ -996,6 +1012,7 @@ mod tests {
             work_id: claim.work_id.clone(),
             device_id: claim.device_id.clone(),
             device_ordinal: claim.device_ordinal,
+            backend: claim.backend,
             owner_epoch: claim.owner_epoch,
             worker_generation: claim.worker_generation,
             state_version: claim.state_version,
@@ -1014,6 +1031,24 @@ mod tests {
     fn probe() -> (H3AttemptSettlementProbe, Arc<AtomicUsize>) {
         let count = Arc::new(AtomicUsize::new(0));
         (H3AttemptSettlementProbe::new(Arc::clone(&count)), count)
+    }
+
+    #[test]
+    fn metal_attempt_accepts_zero_separate_host_increment() {
+        let mut claim = fixture("h3-metal-unified-budget");
+        claim.device_id = "metal:default".into();
+        claim.backend = mold_core::GpuBackend::Metal;
+        claim.predicted_host_increment_bytes = 0;
+
+        assert_eq!(validate_claim(&claim), Ok(()));
+    }
+
+    #[test]
+    fn cuda_attempt_still_requires_separate_host_increment() {
+        let mut claim = fixture("h3-cuda-split-budget");
+        claim.predicted_host_increment_bytes = 0;
+
+        assert_eq!(validate_claim(&claim), Err(H3AttemptError::InvalidClaim));
     }
 
     fn item_body<'a>(source: &'a str, start: &str, next: &str) -> &'a str {
