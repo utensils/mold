@@ -243,12 +243,25 @@ enum EvictionError {
 
 /// Evict one target and wait for its teardown to finish.
 ///
-/// The shared cache holds parked engines with no device context, so it is
-/// released in place exactly as `DELETE /api/models/:model` does. A worker's
-/// engine can only be destroyed on the thread that owns its CUDA context, so it
-/// goes through the same `Admin` owner work the unload route uses.
+/// A worker's engine can only be destroyed on the thread that owns its CUDA
+/// context, so it goes through the same `Admin` owner work
+/// `DELETE /api/models/:model` uses.
+///
+/// The shared cache is the LEGACY (non-Scheduler-V2) path's cache and is
+/// released in place, exactly as that same route already releases it. Its
+/// engine may be GPU-resident rather than parked, and the legacy loader itself
+/// drops such engines from async context (`model_manager::ensure_model_ready`),
+/// so this is that path's own discipline rather than a new one — restricting
+/// this to parked entries would instead skip the very engine holding the memory
+/// on a legacy deployment. `model_load_lock` is what that path serializes on;
+/// it is taken without blocking, and a held lock means a load is in flight, so
+/// the entry is left alone rather than raced into the loader's `cache race`
+/// error.
 async fn evict_target(state: &AppState, target: &ReclaimTarget) -> Result<bool, EvictionError> {
     let Some(ordinal) = target.ordinal else {
+        let Ok(_load_guard) = state.model_load_lock.try_lock() else {
+            return Ok(false);
+        };
         let removed = state.model_cache.lock().await.remove(&target.model);
         return Ok(removed.is_some());
     };
