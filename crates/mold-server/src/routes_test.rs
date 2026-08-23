@@ -3636,6 +3636,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_queue_cannot_cross_a_live_owner_in_the_same_mold_home() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (first, _first_rx) = durable_state(db.clone(), root.path());
+        let (second, _second_rx) = durable_state(db.clone(), root.path());
+        let first_owner = first.queue_journal.owner_uuid().unwrap();
+        let second_owner = second.queue_journal.owner_uuid().unwrap();
+        assert_ne!(first_owner, second_owner);
+        seed_durable_projection_row(
+            &db,
+            second_owner,
+            "foreign-job",
+            mold_db::generation_queue::QueueRowState::Queued,
+            1,
+            0,
+        );
+
+        let response = app_with_state(first)
+            .oneshot(
+                Request::delete("/api/queue/foreign-job")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(second.queue_journal.list_all().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_queue_terminalizes_a_held_batch_child_before_acknowledging() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db, root.path());
+        admit_one_durable_batch(&state, "held-child", "held-batch");
+        let claim = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        state
+            .queue_journal
+            .attach_claimed(&claim.row.id, claim.claim_token)
+            .hold("operator review");
+
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::delete("/api/queue/held-child")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(state.queue_journal.list_all().is_empty());
+        let child = &state
+            .queue_journal
+            .generation_batch("held-batch")
+            .unwrap()
+            .children[0];
+        assert_eq!(child.state, "cancelled");
+    }
+
+    #[tokio::test]
     async fn delete_queue_running_job_revokes_inference_without_waiting_for_teardown() {
         let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
         state.job_registry.register("aaaa", "flux-dev:fp16");
@@ -4313,6 +4375,14 @@ mod tests {
         root.join("gallery")
     }
 
+    fn published_gallery_file_count(root: &std::path::Path) -> usize {
+        std::fs::read_dir(durable_gallery_dir(root))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            .count()
+    }
+
     fn admit_one_durable_batch(state: &AppState, id: &str, batch_id: &str) {
         let request: GenerateRequest =
             serde_json::from_str(&generate_body("publication fence", 64, 64)).unwrap();
@@ -4394,9 +4464,7 @@ mod tests {
         wait_for_attempt_cleanup(&state, "cancel-at-publication").await;
 
         assert_eq!(
-            std::fs::read_dir(durable_gallery_dir(root.path()))
-                .unwrap()
-                .count(),
+            published_gallery_file_count(root.path()),
             0,
             "a success returned after DELETE must not reach the gallery"
         );
@@ -4449,9 +4517,7 @@ mod tests {
             mold_db::generation_queue::QueueRowState::Queued
         );
         assert_eq!(
-            std::fs::read_dir(durable_gallery_dir(root.path()))
-                .unwrap()
-                .count(),
+            published_gallery_file_count(root.path()),
             0,
             "shutdown-cancelled inference must not publish"
         );
@@ -4997,6 +5063,7 @@ mod tests {
         let (mut state, _rx) = durable_state(db.clone(), root.path());
         install_authoritative_v2(&mut state);
         state.instance_id = Arc::new("serving-instance-not-journal-owner".into());
+        let queue_owner = state.queue_journal.owner_uuid().unwrap().to_string();
         let app = app_with_state(state);
 
         let capabilities = json_body(
@@ -5053,6 +5120,7 @@ mod tests {
         let db = db.as_ref().as_ref().unwrap();
         mold_db::generation_batches::finish_unclaimed_queued(
             db,
+            &queue_owner,
             &complete_job,
             mold_db::generation_batches::GenerationBatchTerminal {
                 state: mold_db::generation_batches::GenerationBatchTerminalState::Complete,
@@ -5067,6 +5135,7 @@ mod tests {
         .unwrap();
         mold_db::generation_batches::finish_unclaimed_queued(
             db,
+            &queue_owner,
             &failed_job,
             mold_db::generation_batches::GenerationBatchTerminal {
                 state: mold_db::generation_batches::GenerationBatchTerminalState::Failed,

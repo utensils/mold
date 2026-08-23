@@ -1162,7 +1162,7 @@ mod tests {
         admit(&state, 2);
         let claimed = state.queue_journal.claim_next_feeder().unwrap().unwrap();
         assert_eq!(claimed.row.id, "job-0");
-        state.queue_journal.cancel_id("job-0");
+        state.queue_journal.cancel_id("job-0").unwrap();
         recover_runtime(&state).await.unwrap();
 
         let shutdown = tokio_util::sync::CancellationToken::new();
@@ -1198,7 +1198,7 @@ mod tests {
             .unwrap()
             .unwrap();
         state.job_registry.cancel_queued(&first.id).unwrap();
-        state.queue_journal.cancel_id(&first.id);
+        state.queue_journal.cancel_id(&first.id).unwrap();
         let first_id = first.id.clone();
         drop(first);
         state.queue.decrement();

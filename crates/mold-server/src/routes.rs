@@ -6132,14 +6132,7 @@ async fn cancel_queue_job(
     // Unconditional, not fence-aware: a cancel that lands during the shutdown
     // drain must not come back after the restart.
     let journal = state.queue_journal.clone();
-    if let Err(error) = spawn_queue_mutation(move || {
-        journal.cancel_id(&id);
-        Ok(())
-    })
-    .await
-    {
-        tracing::warn!(?error, "queue cancellation persistence task failed");
-    }
+    spawn_queue_mutation(move || journal.cancel_id(&id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

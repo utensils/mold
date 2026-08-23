@@ -892,10 +892,10 @@ impl QueueJournal {
     }
 
     pub(crate) fn feeder_cancel_requested(&self, id: &str) -> anyhow::Result<bool> {
-        let Some(db) = self.db() else {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
             return Ok(false);
         };
-        generation_batches::child_cancel_requested(db, id)
+        generation_batches::child_cancel_requested(db, owner, id)
     }
 
     /// Drop one row regardless of the fence. The cancellation path: a job the
@@ -917,8 +917,10 @@ impl QueueJournal {
     /// Cancel an API-visible queue id without stealing a feeder claim.
     /// Unhydrated batch children settle atomically; claimed children are left
     /// for their token-bearing ticket, and legacy rows keep direct deletion.
-    pub fn cancel_id(&self, id: &str) {
-        let Some(db) = self.db() else { return };
+    pub fn cancel_id(&self, id: &str) -> anyhow::Result<bool> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(false);
+        };
         let terminal_error_json = serde_json::json!({ "message": "Cancelled" }).to_string();
         let terminal = generation_batches::GenerationBatchTerminal {
             state: generation_batches::GenerationBatchTerminalState::Cancelled,
@@ -927,18 +929,10 @@ impl QueueJournal {
             result_json: None,
             completed_at_ms: now_ms(),
         };
-        if let Err(error) = generation_batches::finish_unclaimed_queued(db, id, terminal) {
-            tracing::warn!(job = %id, %error, "could not atomically cancel an unclaimed batch child");
-            return;
-        }
-        if let Err(error) = generation_batches::request_cancel_claimed(db, id, now_ms()) {
-            tracing::warn!(job = %id, %error, "could not mark a claimed batch child cancelling");
-            return;
-        }
-        if let Err(error) = generation_queue::delete_legacy(db, id) {
-            tracing::warn!(job = %id, %error, "could not remove a cancelled legacy queue row");
-        }
+        let cancelled = generation_batches::cancel_owned(db, owner, id, terminal)?
+            != generation_batches::OwnedCancellation::NotOwned;
         self.wake_feeder();
+        Ok(cancelled)
     }
 
     /// Drop every still-queued row this server owns. Backs `DELETE /api/queue`.
@@ -1194,13 +1188,16 @@ impl QueueJournal {
     /// half an answer. A `running` row is excluded — the endpoint refuses
     /// running work, and the registry is the authority on that.
     pub fn owns_cancellable_row(&self, id: &str) -> bool {
-        let Some(db) = self.db() else {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
             return false;
         };
         generation_queue::get(db, id)
             .ok()
             .flatten()
-            .is_some_and(|row| matches!(row.state, QueueRowState::Held | QueueRowState::Queued))
+            .is_some_and(|row| {
+                row.owner_uuid == owner
+                    && matches!(row.state, QueueRowState::Held | QueueRowState::Queued)
+            })
     }
 
     /// Park a row by id, for a caller that has no ticket.
@@ -1913,7 +1910,10 @@ impl QueueTicket {
         let cancelled = self
             .journal
             .db()
-            .and_then(|db| generation_batches::child_cancel_requested(db, &self.id).ok())
+            .zip(self.journal.owner_uuid.as_deref())
+            .and_then(|(db, owner)| {
+                generation_batches::child_cancel_requested(db, owner, &self.id).ok()
+            })
             .unwrap_or(false);
         let terminal_message = if cancelled { "Cancelled" } else { message };
         let terminal_error_json = serde_json::json!({ "message": terminal_message }).to_string();
@@ -2295,6 +2295,48 @@ mod tests {
             rows(&journal).is_empty(),
             "a cancel during the drain must not resurrect the job after restart"
         );
+    }
+
+    #[test]
+    fn shared_mold_home_cannot_cancel_another_live_queue_owner() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let first = QueueJournal::new(db.clone(), Some(home.path()), "instance-a");
+        let second = QueueJournal::new(db.clone(), Some(home.path()), "instance-b");
+        assert_ne!(first.owner_uuid(), second.owner_uuid());
+
+        let second_owner = second.owner_uuid().unwrap();
+        seed_row(db.as_ref().as_ref().unwrap(), second_owner, "foreign-job");
+
+        assert!(!first.owns_cancellable_row("foreign-job"));
+        assert!(!first.cancel_id("foreign-job").unwrap());
+        assert_eq!(second.list_all().len(), 1);
+        assert!(second.cancel_id("foreign-job").unwrap());
+        assert!(second.list_all().is_empty());
+    }
+
+    #[test]
+    fn cancelling_a_held_batch_child_is_not_a_false_acknowledgement() {
+        let journal = journal_with_db();
+        let request = request();
+        journal
+            .record_batch(BatchJournalAdmission {
+                id: "held-batch",
+                client_batch_id: "held-client",
+                request_sha256: "held-sha",
+                children: &[admission("held-child", &request, Path::new("/gallery"))],
+            })
+            .unwrap();
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        journal
+            .attach_claimed(&claim.row.id, claim.claim_token)
+            .hold("operator review");
+
+        assert_eq!(journal.list_all()[0].state, QueueRowState::Held);
+        assert!(journal.cancel_id("held-child").unwrap());
+        assert!(journal.list_all().is_empty());
+        let child = &journal.generation_batch("held-batch").unwrap().children[0];
+        assert_eq!(child.state, "cancelled");
     }
 
     #[test]

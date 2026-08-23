@@ -98,6 +98,18 @@ pub struct ClaimedTerminalCommit {
     pub batch_child_updated: bool,
 }
 
+/// Durable result of cancelling one queue row through its owning server.
+///
+/// `Requested` retains the token-fenced queue row so the live worker can
+/// settle it. `Settled` removes execution authority in the same transaction
+/// that records any batch-child terminal outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnedCancellation {
+    NotOwned,
+    Requested,
+    Settled,
+}
+
 /// Insert the grouping rows and every ordinary durable queue row atomically.
 /// A retry with the same client id returns the existing detail; a different
 /// payload using that id is rejected.
@@ -284,24 +296,7 @@ pub fn finish_claimed(
             return Ok(ClaimedTerminalCommit::default());
         }
 
-        let child_updated = conn.execute(
-            "UPDATE generation_batch_children
-                SET state = ?2,
-                    error = ?3,
-                    terminal_error_json = ?4,
-                    result_json = ?5,
-                    completed_at_ms = ?6,
-                    updated_at_ms = ?6
-              WHERE job_id = ?1",
-            params![
-                job_id,
-                terminal.state.as_str(),
-                terminal.error,
-                terminal.terminal_error_json,
-                terminal.result_json,
-                terminal.completed_at_ms,
-            ],
-        )?;
+        let child_updated = update_terminal_child(conn, job_id, terminal)?;
         let queue_deleted = conn.execute(
             "DELETE FROM generation_queue
               WHERE id = ?1 AND state = ?2 AND claim_token = ?3",
@@ -312,8 +307,79 @@ pub fn finish_claimed(
         }
         Ok(ClaimedTerminalCommit {
             queue_deleted: true,
-            batch_child_updated: child_updated > 0,
+            batch_child_updated: child_updated,
         })
+    })
+}
+
+/// Cancel exactly one durable row owned by `owner_uuid`.
+///
+/// This is one immediate transaction because a feeder may claim or hold the
+/// row while the API request is in flight. Unclaimed queued and held work is
+/// terminalized immediately. A claimed batch child records cancellation
+/// intent while retaining its token-fenced execution authority; the worker's
+/// later settlement observes that intent and cannot overwrite it with success.
+/// Legacy/singleton rows have no reconnect summary, so removing their owned
+/// queue row is the terminal cancellation record.
+pub fn cancel_owned(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    job_id: &str,
+    terminal: GenerationBatchTerminal<'_>,
+) -> Result<OwnedCancellation> {
+    if terminal.state != GenerationBatchTerminalState::Cancelled {
+        bail!("owned cancellation requires a cancelled terminal outcome");
+    }
+    db.transact_immediate(|conn| {
+        let row = conn
+            .query_row(
+                "SELECT q.state, q.claim_token,
+                        EXISTS (
+                            SELECT 1 FROM generation_batch_children AS child
+                             WHERE child.job_id = q.id
+                        )
+                   FROM generation_queue AS q
+                  WHERE q.id = ?1 AND q.owner_uuid = ?2",
+                params![job_id, owner_uuid],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)? != 0,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((state, claim_token, has_child)) = row else {
+            return Ok(OwnedCancellation::NotOwned);
+        };
+
+        let can_settle_now = state == "held" || (state == "queued" && claim_token.is_none());
+        if can_settle_now || !has_child {
+            if has_child {
+                update_terminal_child(conn, job_id, terminal)?;
+            }
+            let deleted = conn.execute(
+                "DELETE FROM generation_queue WHERE id = ?1 AND owner_uuid = ?2",
+                params![job_id, owner_uuid],
+            )?;
+            if deleted != 1 {
+                bail!("owned queue row changed during cancellation");
+            }
+            return Ok(OwnedCancellation::Settled);
+        }
+
+        let requested = conn.execute(
+            "UPDATE generation_batch_children
+                SET state = 'cancelling', error = 'Cancelled', updated_at_ms = ?2
+              WHERE job_id = ?1
+                AND state NOT IN ('complete', 'failed', 'cancelled')",
+            params![job_id, terminal.completed_at_ms],
+        )?;
+        if requested != 1 {
+            bail!("claimed batch child was already terminal during cancellation");
+        }
+        Ok(OwnedCancellation::Requested)
     })
 }
 
@@ -322,6 +388,7 @@ pub fn finish_claimed(
 /// observes an accepted child whose execution authority was already removed.
 pub fn finish_unclaimed_queued(
     db: &MetadataDb,
+    owner_uuid: &str,
     job_id: &str,
     terminal: GenerationBatchTerminal<'_>,
 ) -> Result<ClaimedTerminalCommit> {
@@ -329,11 +396,12 @@ pub fn finish_unclaimed_queued(
         let owned: Option<i64> = conn
             .query_row(
                 "SELECT 1 FROM generation_queue
-                  WHERE id = ?1 AND state = 'queued' AND claim_token IS NULL
+                  WHERE id = ?1 AND owner_uuid = ?2
+                    AND state = 'queued' AND claim_token IS NULL
                     AND EXISTS (
                         SELECT 1 FROM generation_batch_children WHERE job_id = ?1
                     )",
-                params![job_id],
+                params![job_id, owner_uuid],
                 |row| row.get(0),
             )
             .optional()?;
@@ -343,8 +411,9 @@ pub fn finish_unclaimed_queued(
         let child_updated = update_terminal_child(conn, job_id, terminal)?;
         let queue_deleted = conn.execute(
             "DELETE FROM generation_queue
-              WHERE id = ?1 AND state = 'queued' AND claim_token IS NULL",
-            params![job_id],
+              WHERE id = ?1 AND owner_uuid = ?2
+                AND state = 'queued' AND claim_token IS NULL",
+            params![job_id, owner_uuid],
         )?;
         Ok(ClaimedTerminalCommit {
             queue_deleted: queue_deleted == 1,
@@ -388,25 +457,6 @@ pub fn finish_all_unclaimed_queued(
             params![owner_uuid],
         )?;
         Ok(updated)
-    })
-}
-
-/// Record cancellation intent for a hydrated/claimed child. This is not a
-/// terminal transition and does not remove queue authority; the exact
-/// token-bearing ticket performs the later atomic settlement.
-pub fn request_cancel_claimed(db: &MetadataDb, job_id: &str, now_ms: i64) -> Result<bool> {
-    db.with_conn(|conn| {
-        Ok(conn.execute(
-            "UPDATE generation_batch_children
-                SET state = 'cancelling', error = 'Cancelled', updated_at_ms = ?2
-              WHERE job_id = ?1
-                AND EXISTS (
-                    SELECT 1 FROM generation_queue
-                     WHERE id = ?1 AND claim_token IS NOT NULL
-                       AND state IN ('queued', 'running')
-                )",
-            params![job_id, now_ms],
-        )? > 0)
     })
 }
 
@@ -538,12 +588,15 @@ pub fn cancel_all_queued(
     })
 }
 
-pub fn child_cancel_requested(db: &MetadataDb, job_id: &str) -> Result<bool> {
+pub fn child_cancel_requested(db: &MetadataDb, owner_uuid: &str, job_id: &str) -> Result<bool> {
     db.with_conn(|conn| {
         Ok(conn
             .query_row(
-                "SELECT state = 'cancelling' FROM generation_batch_children WHERE job_id = ?1",
-                params![job_id],
+                "SELECT child.state = 'cancelling'
+                   FROM generation_batch_children AS child
+                   JOIN generation_queue AS q ON q.id = child.job_id
+                  WHERE child.job_id = ?1 AND q.owner_uuid = ?2",
+                params![job_id, owner_uuid],
                 |row| row.get(0),
             )
             .optional()?
@@ -558,8 +611,15 @@ fn update_terminal_child(
 ) -> Result<bool> {
     Ok(conn.execute(
         "UPDATE generation_batch_children
-            SET state = ?2, error = ?3, terminal_error_json = ?4,
-                result_json = ?5, completed_at_ms = ?6, updated_at_ms = ?6
+            SET state = CASE WHEN state = 'cancelling' THEN 'cancelled' ELSE ?2 END,
+                error = CASE WHEN state = 'cancelling' THEN 'Cancelled' ELSE ?3 END,
+                terminal_error_json = CASE
+                    WHEN state = 'cancelling' THEN '{\"message\":\"Cancelled\"}'
+                    ELSE ?4
+                END,
+                result_json = CASE WHEN state = 'cancelling' THEN NULL ELSE ?5 END,
+                completed_at_ms = ?6,
+                updated_at_ms = ?6
           WHERE job_id = ?1",
         params![
             job_id,
@@ -897,6 +957,7 @@ mod tests {
         insert_or_get(&db, &batch("first"), &rows(1)).unwrap();
         finish_unclaimed_queued(
             &db,
+            "owner-1",
             "job-0",
             GenerationBatchTerminal {
                 state: GenerationBatchTerminalState::Complete,
@@ -1110,6 +1171,7 @@ mod tests {
         insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
         let commit = finish_unclaimed_queued(
             &db,
+            "owner-1",
             "job-0",
             GenerationBatchTerminal {
                 state: GenerationBatchTerminalState::Cancelled,
@@ -1128,6 +1190,113 @@ mod tests {
         assert!(crate::generation_queue::get(&db, "job-0")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn held_child_cancellation_is_terminal_and_removes_execution_authority() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
+        crate::generation_queue::hold(&db, "job-0", "operator review", 5).unwrap();
+        set_child_state(&db, "job-0", "held", Some("operator review"), 5).unwrap();
+
+        let outcome = cancel_owned(
+            &db,
+            "owner-1",
+            "job-0",
+            GenerationBatchTerminal {
+                state: GenerationBatchTerminalState::Cancelled,
+                error: Some("Cancelled"),
+                terminal_error_json: Some(r#"{"message":"Cancelled"}"#),
+                result_json: None,
+                completed_at_ms: 9,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome, OwnedCancellation::Settled);
+        let detail = get_durable(&db, "owner-1", "batch-1").unwrap().unwrap();
+        assert_eq!(detail.children[0].state, "cancelled");
+        assert_eq!(detail.children[0].completed_at_ms, Some(9));
+        assert!(crate::generation_queue::get(&db, "job-0")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn cancellation_cannot_cross_queue_owner_authority() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
+
+        let outcome = cancel_owned(
+            &db,
+            "owner-2",
+            "job-0",
+            GenerationBatchTerminal {
+                state: GenerationBatchTerminalState::Cancelled,
+                error: Some("Cancelled"),
+                terminal_error_json: Some(r#"{"message":"Cancelled"}"#),
+                result_json: None,
+                completed_at_ms: 9,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome, OwnedCancellation::NotOwned);
+        assert_eq!(
+            get(&db, "owner-1", "batch-1").unwrap().unwrap().children[0].state,
+            "accepted"
+        );
+        assert!(crate::generation_queue::get(&db, "job-0")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn cancellation_linearizes_before_claimed_completion() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
+        crate::generation_queue::claim_next(&db, "owner-1", "worker", 2)
+            .unwrap()
+            .unwrap();
+
+        let cancelled = cancel_owned(
+            &db,
+            "owner-1",
+            "job-0",
+            GenerationBatchTerminal {
+                state: GenerationBatchTerminalState::Cancelled,
+                error: Some("Cancelled"),
+                terminal_error_json: Some(r#"{"message":"Cancelled"}"#),
+                result_json: None,
+                completed_at_ms: 3,
+            },
+        )
+        .unwrap();
+        assert_eq!(cancelled, OwnedCancellation::Requested);
+
+        let committed = finish_claimed(
+            &db,
+            "job-0",
+            "worker",
+            crate::generation_queue::QueueRowState::Queued,
+            GenerationBatchTerminal {
+                state: GenerationBatchTerminalState::Complete,
+                error: None,
+                terminal_error_json: None,
+                result_json: Some(r#"{"filename":"too-late.png"}"#),
+                completed_at_ms: 4,
+            },
+        )
+        .unwrap();
+
+        assert!(committed.queue_deleted);
+        let child = &get_durable(&db, "owner-1", "batch-1")
+            .unwrap()
+            .unwrap()
+            .children[0];
+        assert_eq!(child.state, "cancelled");
+        assert_eq!(child.error.as_deref(), Some("Cancelled"));
+        assert!(child.result_json.is_none());
     }
 
     #[test]
