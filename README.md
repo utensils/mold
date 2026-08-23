@@ -11,8 +11,8 @@
 
 Local AI image and video generation on your own GPU — NVIDIA CUDA and Apple
 Silicon Metal, no Python, no cloud account, no usage fees. CLI-native and
-pipe-friendly, with a native desktop app, web studio, TUI, iPhone companion,
-Discord bot, and REST/SSE API built on the same engine.
+pipe-friendly, with a native desktop app, web studio, TUI, iPhone and Android
+companions, Discord bot, and REST/SSE API built on the same engine.
 
 **[Documentation](https://utensils.io/mold/)** ·
 **[Models](https://utensils.io/mold/models/)** ·
@@ -121,6 +121,13 @@ and Civitai, GPU telemetry, and QR pairing for the iPhone companion.
 
 **[Download Mold for macOS (Apple Silicon)](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)**
 · [Explore the desktop app](https://utensils.io/mold/guide/desktop)
+
+Android uses the same remote-only Mold Studio mobile interface. Download the
+signed universal APK directly—there is no zip to unpack:
+
+**[Download stable Android APK](https://github.com/utensils/mold/releases/latest/download/Mold-android.apk)**
+· **[Download nightly Android APK](https://github.com/utensils/mold/releases/download/latest/Mold-android.apk)**
+· [Android installation guide](https://utensils.io/mold/guide/android)
 
 ## More ways to create
 

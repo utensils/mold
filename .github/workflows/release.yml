@@ -561,6 +561,98 @@ jobs:
       channel: stable
     secrets: inherit
 
+  # Signed universal APK for direct installation. The same long-lived signing
+  # key serves nightly and stable assets so Android can upgrade in place.
+  build-android-apk:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+      - name: Install Android toolchain
+        run: |
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;27.0.12077973"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+      - uses: gradle/actions/setup-gradle@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/mobile/src-tauri
+          key: mold-android-release
+      - name: Cache Tauri CLI
+        id: tauri-cli-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-${{ runner.os }}-${{ runner.arch }}-2.11.4
+      - name: Install Tauri CLI
+        if: steps.tauri-cli-cache.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      - name: Verify Tauri CLI
+        run: cargo tauri --version | grep -F '2.11.4'
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+      - name: Configure Android signing
+        env:
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in ANDROID_KEY_ALIAS ANDROID_KEY_BASE64 ANDROID_KEY_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::required Android signing secret is missing: $name"
+              exit 1
+            fi
+          done
+          keystore="$RUNNER_TEMP/mold-android-release.jks"
+          printf '%s' "$ANDROID_KEY_BASE64" | base64 --decode > "$keystore"
+          {
+            printf 'keyAlias=%s\n' "$ANDROID_KEY_ALIAS"
+            printf 'password=%s\n' "$ANDROID_KEY_PASSWORD"
+            printf 'storeFile=%s\n' "$keystore"
+          } > apps/mobile/src-tauri/gen/android/keystore.properties
+      - name: Build signed universal APK
+        working-directory: apps/mobile/src-tauri
+        run: |
+          set -euo pipefail
+          version_code=$((100000000 + GITHUB_RUN_NUMBER))
+          jq --argjson version_code "$version_code" \
+            '.bundle.android.versionCode = $version_code' \
+            tauri.conf.json > "$RUNNER_TEMP/tauri.android.release.conf.json"
+          cargo tauri android build \
+            --apk \
+            --target aarch64 \
+            --target armv7 \
+            --config "$RUNNER_TEMP/tauri.android.release.conf.json" \
+            --ci
+          apk=$(find gen/android/app/build/outputs/apk/universal/release \
+            -maxdepth 1 -name '*.apk' ! -name '*-unsigned.apk' -print -quit)
+          if [[ -z "$apk" ]]; then
+            echo "::error::signed universal Android APK was not produced"
+            exit 1
+          fi
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" \
+            verify --verbose --print-certs "$apk"
+          cp "$apk" "$GITHUB_WORKSPACE/Mold-android.apk"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mold-android-apk
+          path: Mold-android.apk
+          if-no-files-found: error
+
   # Docker images — the off-hours schedule publishes the mutable rolling
   # latest* map; v* jobs create-once/verify semver aliases and export exact
   # digest fragments. Main pushes never allocate this six-target matrix.
@@ -736,6 +828,7 @@ jobs:
         build-linux-sm89,
         build-linux-sm100,
         build-linux-sm120,
+        build-android-apk,
       ]
     runs-on: ubuntu-latest
     permissions:
@@ -749,7 +842,7 @@ jobs:
           merge-multiple: true
 
       - name: Generate checksums
-        run: cd artifacts && sha256sum -- *.tar.gz *.zip *.exe *.cer > SHA256SUMS
+        run: cd artifacts && sha256sum -- *.tar.gz *.zip *.exe *.cer *.apk > SHA256SUMS
 
       - name: Verify rolling release source is current main
         run: scripts/check-desktop-nightly-main-head.sh "$GITHUB_SHA"
@@ -770,6 +863,7 @@ jobs:
             artifacts/mold-x86_64-pc-windows-msvc-cpu.zip
             artifacts/Mold-windows-x64-self-signed.exe
             artifacts/mold-windows-self-signing.cert.cer
+            artifacts/Mold-android.apk
             artifacts/SHA256SUMS
           body: |
             Rolling pre-release — updated on every push to `main`.
@@ -783,6 +877,7 @@ jobs:
             | macOS Apple Silicon | Metal | `mold-aarch64-apple-darwin.tar.gz` |
             | Windows x86_64 CLI | CPU / remote client | `mold-x86_64-pc-windows-msvc-cpu.zip` |
             | Windows x86_64 Desktop | CPU / remote hosts | `Mold-windows-x64-self-signed.exe` |
+            | Android 7.0+ | Remote client | `Mold-android.apk` |
             | Linux x86_64 | CUDA — RTX 3090 / A40 (Ampere) | `mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz` |
             | Linux x86_64 | CUDA — RTX 40-series (Ada Lovelace) | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz` |
             | Linux x86_64 | CUDA — B200 / B300 (datacenter Blackwell; simulated, not hardware-qualified) | `mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz` |
@@ -1076,6 +1171,7 @@ jobs:
         build-linux-sm89,
         build-linux-sm100,
         build-linux-sm120,
+        build-android-apk,
       ]
     runs-on: ubuntu-latest
     concurrency:
@@ -1096,7 +1192,7 @@ jobs:
           set -euo pipefail
           (
             cd artifacts
-            sha256sum -- *.tar.gz *.dmg *.zip *.exe *.cer > SHA256SUMS
+            sha256sum -- *.tar.gz *.dmg *.zip *.exe *.cer *.apk > SHA256SUMS
           )
           gh release upload "$GITHUB_REF_NAME" \
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz \
@@ -1106,6 +1202,7 @@ jobs:
             artifacts/mold-x86_64-pc-windows-msvc-cpu.zip \
             artifacts/Mold-windows-x64-self-signed.exe \
             artifacts/mold-windows-self-signing.cert.cer \
+            artifacts/Mold-android.apk \
             artifacts/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
@@ -1136,7 +1233,7 @@ jobs:
           set -euo pipefail
           (
             cd artifacts
-            sha256sum -- *.tar.gz *.dmg *.zip *.exe *.cer > SHA256SUMS
+            sha256sum -- *.tar.gz *.dmg *.zip *.exe *.cer *.apk > SHA256SUMS
           )
           scripts/create-container-digest-manifest.sh \
             artifacts/mold-container-digests.json \
