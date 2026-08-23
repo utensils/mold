@@ -1,4 +1,4 @@
-use candle::{DType, Device, IndexOp, Result, Tensor, D};
+use candle::{DType, Device, DeviceLocation, IndexOp, Result, Tensor, D};
 use candle_nn::{
     embedding, linear_b, rms_norm, Activation, Embedding, Linear, Module, RmsNorm, VarBuilder,
 };
@@ -578,6 +578,16 @@ impl Qwen3VlTextEncoder {
             if let Some(features) = deepstack.and_then(|features| features.get(index)) {
                 hidden = inject_deepstack(hidden, visual_indices, features, self.hidden_size)?;
             }
+            // The portable NVFP4 projections reconstruct bounded F32 weight
+            // chunks for each matmul. Metal command buffers retain those
+            // temporary buffers until completion even after their Tensor
+            // handles are dropped, so allowing all 50 layers to queue at once
+            // turns a bounded workspace into a tens-of-gigabytes peak. Commit
+            // one completed layer at a time on Metal. CUDA and CPU keep their
+            // existing asynchronous execution path.
+            if qwen_requires_layer_synchronization(hidden.device().location()) {
+                hidden.device().synchronize()?;
+            }
             checkpoint(ConditionerCheckpoint::LanguageLayer {
                 completed: index + 1,
                 total: self.layers.len(),
@@ -587,6 +597,10 @@ impl Qwen3VlTextEncoder {
         // unnormalized state immediately after decoder layer 49.
         Ok(hidden)
     }
+}
+
+fn qwen_requires_layer_synchronization(location: DeviceLocation) -> bool {
+    matches!(location, DeviceLocation::Metal { .. })
 }
 
 #[cfg(feature = "h3-private-uat")]
@@ -736,6 +750,17 @@ mod tests {
     use candle::{DType, Device};
     use candle_nn::VarMap;
     use std::collections::HashMap;
+
+    #[test]
+    fn qwen_bounds_queued_layer_temporaries_only_on_metal() {
+        assert!(qwen_requires_layer_synchronization(DeviceLocation::Metal {
+            gpu_id: 0
+        }));
+        assert!(!qwen_requires_layer_synchronization(DeviceLocation::Cuda {
+            gpu_id: 0
+        }));
+        assert!(!qwen_requires_layer_synchronization(DeviceLocation::Cpu));
+    }
 
     fn round_up(value: usize, multiple: usize) -> usize {
         value.div_ceil(multiple) * multiple
