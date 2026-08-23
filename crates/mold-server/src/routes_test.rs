@@ -4616,6 +4616,175 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn durable_batch_outcomes_recover_by_client_and_bulk_with_instance_fencing() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
+        install_authoritative_v2(&mut state);
+        state.instance_id = Arc::new("serving-instance-not-journal-owner".into());
+        let app = app_with_state(state);
+
+        let capabilities = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get("/api/capabilities")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(capabilities["queue"]["heterogeneous_batch"], true);
+        assert_eq!(capabilities["queue"]["durable_batch_outcomes"], true);
+
+        let client_batch_id = uuid::Uuid::new_v4().to_string();
+        let requests = ["complete", "failed"]
+            .into_iter()
+            .map(|prompt| {
+                serde_json::from_str::<serde_json::Value>(&generate_body(prompt, 512, 512)).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let admitted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": client_batch_id,
+                    "requests": requests,
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+        let admitted = json_body(admitted).await;
+        assert_eq!(
+            admitted["instance_id"],
+            "serving-instance-not-journal-owner"
+        );
+        assert_eq!(admitted["durable"], true);
+        assert!(admitted["children"][0]["created_at_ms"].as_i64().unwrap() > 0);
+        let batch_id = admitted["id"].as_str().unwrap().to_string();
+        let complete_job = admitted["children"][0]["job_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let failed_job = admitted["children"][1]["job_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let db = db.as_ref().as_ref().unwrap();
+        mold_db::generation_batches::finish_unclaimed_queued(
+            db,
+            &complete_job,
+            mold_db::generation_batches::GenerationBatchTerminal {
+                state: mold_db::generation_batches::GenerationBatchTerminalState::Complete,
+                error: None,
+                terminal_error_json: None,
+                result_json: Some(
+                    r#"{"filename":"finished.png","original_filename":"original.png"}"#,
+                ),
+                completed_at_ms: 200,
+            },
+        )
+        .unwrap();
+        mold_db::generation_batches::finish_unclaimed_queued(
+            db,
+            &failed_job,
+            mold_db::generation_batches::GenerationBatchTerminal {
+                state: mold_db::generation_batches::GenerationBatchTerminalState::Failed,
+                error: Some("render failed"),
+                terminal_error_json: Some(r#"{"code":"RENDER_FAILED","message":"render failed"}"#),
+                result_json: None,
+                completed_at_ms: 201,
+            },
+        )
+        .unwrap();
+
+        let lookup_path = format!("/api/generation-batches/by-client/{client_batch_id}");
+        let first = app
+            .clone()
+            .oneshot(Request::get(&lookup_path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let first = json_body(first).await;
+        let retry = json_body(
+            app.clone()
+                .oneshot(Request::get(&lookup_path).body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(retry, first, "lookup is an idempotent authoritative read");
+        assert_eq!(first["id"], batch_id);
+        assert_eq!(first["instance_id"], "serving-instance-not-journal-owner");
+        assert_eq!(first["children"][0]["state"], "complete");
+        assert_eq!(first["children"][0]["completed_at_ms"], 200);
+        assert_eq!(first["children"][0]["result"]["filename"], "finished.png");
+        assert_eq!(
+            first["children"][0]["result"]["original_filename"],
+            "original.png"
+        );
+        assert_eq!(first["children"][1]["state"], "failed");
+        assert_eq!(first["children"][1]["error"], "render failed");
+        assert_eq!(
+            first["children"][1]["terminal_error"]["code"],
+            "RENDER_FAILED"
+        );
+        assert_eq!(first["children"][1]["updated_at_ms"], 201);
+        let by_server_id = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get(format!("/api/generation-batches/{batch_id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(by_server_id, first);
+
+        let unknown_client = uuid::Uuid::new_v4().to_string();
+        let unknown_batch = uuid::Uuid::new_v4().to_string();
+        let bulk = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches/status",
+                serde_json::json!({
+                    "client_batch_ids": [client_batch_id, unknown_client],
+                    "batch_ids": [batch_id, unknown_batch],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bulk.status(), StatusCode::OK);
+        let bulk = json_body(bulk).await;
+        assert_eq!(bulk["instance_id"], "serving-instance-not-journal-owner");
+        assert_eq!(bulk["batches"].as_array().unwrap().len(), 1);
+        assert_eq!(bulk["batches"][0], first);
+        assert_eq!(bulk["missing"]["client_batch_ids"][0], unknown_client);
+        assert_eq!(bulk["missing"]["batch_ids"][0], unknown_batch);
+
+        let missing = app
+            .oneshot(
+                Request::get(format!(
+                    "/api/generation-batches/by-client/{}",
+                    uuid::Uuid::new_v4()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn bulk_cancel_terminalizes_every_unhydrated_batch_child() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
@@ -9787,6 +9956,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn generation_batch_recovery_routes_require_the_configured_api_key() {
+        let keys = std::collections::HashSet::from(["test-key".to_string()]);
+        let auth = Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys)));
+        let app = app_with_auth(auth);
+
+        let lookup = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/generation-batches/by-client/{}",
+                    uuid::Uuid::new_v4()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(lookup.status(), StatusCode::UNAUTHORIZED);
+
+        let bulk = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches/status",
+                serde_json::json!({"client_batch_ids": [], "batch_ids": []}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bulk.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

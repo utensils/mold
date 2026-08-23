@@ -6,6 +6,7 @@
 
 use anyhow::{bail, Result};
 use rusqlite::{params, OptionalExtension};
+use std::collections::HashSet;
 
 use crate::generation_queue::{self, GenerationQueueRow};
 use crate::MetadataDb;
@@ -54,6 +55,13 @@ pub struct DurableGenerationBatchChildRow {
 pub struct DurableGenerationBatchDetail {
     pub batch: GenerationBatchRow,
     pub children: Vec<DurableGenerationBatchChildRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableGenerationBatchLookup {
+    pub batches: Vec<DurableGenerationBatchDetail>,
+    pub missing_client_batch_ids: Vec<String>,
+    pub missing_batch_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,19 +180,7 @@ pub fn get_durable(
     owner_uuid: &str,
     id: &str,
 ) -> Result<Option<DurableGenerationBatchDetail>> {
-    db.with_conn(|conn| {
-        let batch = conn
-            .query_row(
-                "SELECT id, client_batch_id, owner_uuid, request_sha256, created_at_ms
-                   FROM generation_batches WHERE id = ?1 AND owner_uuid = ?2",
-                params![id, owner_uuid],
-                batch_from_row,
-            )
-            .optional()?;
-        batch
-            .map(|batch| durable_detail_on_conn(conn, batch))
-            .transpose()
-    })
+    db.with_conn(|conn| get_durable_on_conn(conn, owner_uuid, id))
 }
 
 pub fn get_durable_by_client(
@@ -192,18 +188,57 @@ pub fn get_durable_by_client(
     owner_uuid: &str,
     client_batch_id: &str,
 ) -> Result<Option<DurableGenerationBatchDetail>> {
+    db.with_conn(|conn| get_durable_by_client_on_conn(conn, owner_uuid, client_batch_id))
+}
+
+/// Resolve reconnect state without materializing any unrelated batch rows.
+/// Inputs are de-duplicated in first-seen order; matches requested through
+/// both identities appear once while each unknown identity remains explicit.
+pub fn lookup_durable(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    client_batch_ids: &[String],
+    batch_ids: &[String],
+) -> Result<DurableGenerationBatchLookup> {
     db.with_conn(|conn| {
-        let batch = conn
-            .query_row(
-                "SELECT id, client_batch_id, owner_uuid, request_sha256, created_at_ms
-                   FROM generation_batches WHERE owner_uuid = ?1 AND client_batch_id = ?2",
-                params![owner_uuid, client_batch_id],
-                batch_from_row,
-            )
-            .optional()?;
-        batch
-            .map(|batch| durable_detail_on_conn(conn, batch))
-            .transpose()
+        let mut batches = Vec::new();
+        let mut missing_client_batch_ids = Vec::new();
+        let mut missing_batch_ids = Vec::new();
+        let mut seen_client_ids = HashSet::new();
+        let mut seen_batch_ids = HashSet::new();
+        let mut returned_batch_ids = HashSet::new();
+
+        for client_batch_id in client_batch_ids {
+            if !seen_client_ids.insert(client_batch_id.as_str()) {
+                continue;
+            }
+            match get_durable_by_client_on_conn(conn, owner_uuid, client_batch_id)? {
+                Some(detail) => {
+                    returned_batch_ids.insert(detail.batch.id.clone());
+                    batches.push(detail);
+                }
+                None => missing_client_batch_ids.push(client_batch_id.clone()),
+            }
+        }
+
+        for batch_id in batch_ids {
+            if !seen_batch_ids.insert(batch_id.as_str()) {
+                continue;
+            }
+            match get_durable_on_conn(conn, owner_uuid, batch_id)? {
+                Some(detail) if returned_batch_ids.insert(detail.batch.id.clone()) => {
+                    batches.push(detail);
+                }
+                Some(_) => {}
+                None => missing_batch_ids.push(batch_id.clone()),
+            }
+        }
+
+        Ok(DurableGenerationBatchLookup {
+            batches,
+            missing_client_batch_ids,
+            missing_batch_ids,
+        })
     })
 }
 
@@ -494,6 +529,42 @@ fn durable_detail_on_conn(
     Ok(DurableGenerationBatchDetail { batch, children })
 }
 
+fn get_durable_on_conn(
+    conn: &rusqlite::Connection,
+    owner_uuid: &str,
+    id: &str,
+) -> Result<Option<DurableGenerationBatchDetail>> {
+    let batch = conn
+        .query_row(
+            "SELECT id, client_batch_id, owner_uuid, request_sha256, created_at_ms
+               FROM generation_batches WHERE id = ?1 AND owner_uuid = ?2",
+            params![id, owner_uuid],
+            batch_from_row,
+        )
+        .optional()?;
+    batch
+        .map(|batch| durable_detail_on_conn(conn, batch))
+        .transpose()
+}
+
+fn get_durable_by_client_on_conn(
+    conn: &rusqlite::Connection,
+    owner_uuid: &str,
+    client_batch_id: &str,
+) -> Result<Option<DurableGenerationBatchDetail>> {
+    let batch = conn
+        .query_row(
+            "SELECT id, client_batch_id, owner_uuid, request_sha256, created_at_ms
+               FROM generation_batches WHERE owner_uuid = ?1 AND client_batch_id = ?2",
+            params![owner_uuid, client_batch_id],
+            batch_from_row,
+        )
+        .optional()?;
+    batch
+        .map(|batch| durable_detail_on_conn(conn, batch))
+        .transpose()
+}
+
 fn batch_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationBatchRow> {
     Ok(GenerationBatchRow {
         id: row.get(0)?,
@@ -709,6 +780,77 @@ mod tests {
             );
         }
         assert_eq!(claimed, vec!["job-0", "job-1", "later-0", "later-1"]);
+    }
+
+    #[test]
+    fn durable_bulk_lookup_is_owner_scoped_ordered_and_projects_terminal_data() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("first"), &rows(1)).unwrap();
+        finish_unclaimed_queued(
+            &db,
+            "job-0",
+            GenerationBatchTerminal {
+                state: GenerationBatchTerminalState::Complete,
+                error: None,
+                terminal_error_json: None,
+                result_json: Some(
+                    r#"{"filename":"finished.png","original_filename":"original.png"}"#,
+                ),
+                completed_at_ms: 9,
+            },
+        )
+        .unwrap();
+
+        let mut second_rows = rows(1);
+        second_rows[0].0.batch_id = "batch-2".into();
+        second_rows[0].0.job_id = "job-2".into();
+        second_rows[0].1.id = "job-2".into();
+        let second = GenerationBatchRow {
+            id: "batch-2".into(),
+            client_batch_id: "client-2".into(),
+            owner_uuid: "owner-1".into(),
+            request_sha256: "second".into(),
+            created_at_ms: 2,
+        };
+        insert_or_get(&db, &second, &second_rows).unwrap();
+
+        let lookup = lookup_durable(
+            &db,
+            "owner-1",
+            &[
+                "client-2".into(),
+                "missing-client".into(),
+                "client-2".into(),
+            ],
+            &["batch-1".into(), "missing-batch".into(), "batch-2".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            lookup
+                .batches
+                .iter()
+                .map(|detail| detail.batch.id.as_str())
+                .collect::<Vec<_>>(),
+            ["batch-2", "batch-1"]
+        );
+        assert_eq!(lookup.missing_client_batch_ids, ["missing-client"]);
+        assert_eq!(lookup.missing_batch_ids, ["missing-batch"]);
+        let completed = &lookup.batches[1].children[0];
+        assert_eq!(completed.completed_at_ms, Some(9));
+        assert_eq!(
+            completed.result_json.as_deref(),
+            Some(r#"{"filename":"finished.png","original_filename":"original.png"}"#)
+        );
+
+        assert!(lookup_durable(
+            &db,
+            "other-owner",
+            &["client-1".into()],
+            &["batch-1".into()]
+        )
+        .unwrap()
+        .batches
+        .is_empty());
     }
 
     #[test]

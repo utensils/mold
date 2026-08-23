@@ -274,6 +274,8 @@ use crate::queue::clean_error_message;
         generate_stream,
         admit_generation_batch,
         get_generation_batch,
+        get_generation_batch_by_client,
+        reconcile_generation_batches,
         generate_placement_preview,
         crate::reference_uploads::create_reference_upload_session,
         crate::reference_uploads::upload_reference,
@@ -364,6 +366,12 @@ use crate::queue::clean_error_message;
         mold_core::Ltx2CameraControlInfo,
         mold_core::Ltx2GuidanceOverrides,
         mold_core::GenerateResponse,
+        mold_core::GenerationBatchStatus,
+        mold_core::GenerationBatchChild,
+        mold_core::GenerationBatchResult,
+        mold_core::GenerationBatchStatusRequest,
+        mold_core::GenerationBatchStatusResponse,
+        mold_core::GenerationBatchMissing,
         mold_core::GenerationPlacementPreviewRequest,
         mold_core::GenerationPlacementPreview,
         mold_core::GenerationPlacementCandidate,
@@ -514,6 +522,14 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/generate/stream", post(generate_stream))
         .route("/api/generation-batches", post(admit_generation_batch))
+        .route(
+            "/api/generation-batches/by-client/:client_batch_id",
+            get(get_generation_batch_by_client),
+        )
+        .route(
+            "/api/generation-batches/status",
+            post(reconcile_generation_batches),
+        )
         .route("/api/generation-batches/:id", get(get_generation_batch))
         .route(
             "/api/generate/reference-upload-sessions",
@@ -2203,27 +2219,53 @@ fn validate_live_server_batch_admission(
 const MAX_HETEROGENEOUS_BATCH_OUTPUTS: usize = 64;
 
 fn generation_batch_status(
-    detail: mold_db::generation_batches::GenerationBatchDetail,
+    instance_id: &str,
+    detail: mold_db::generation_batches::DurableGenerationBatchDetail,
 ) -> mold_core::GenerationBatchStatus {
     use mold_core::GenerationBatchChildState as State;
+    let created_at_ms = detail.batch.created_at_ms;
     mold_core::GenerationBatchStatus {
         id: detail.batch.id,
         client_batch_id: detail.batch.client_batch_id,
+        instance_id: instance_id.to_string(),
+        durable: true,
         children: detail
             .children
             .into_iter()
-            .map(|child| mold_core::GenerationBatchChild {
-                index: child.batch_index,
-                job_id: child.job_id,
-                state: match child.state.as_str() {
-                    "running" => State::Running,
-                    "complete" => State::Complete,
-                    "failed" => State::Failed,
-                    "cancelled" => State::Cancelled,
-                    "held" => State::Held,
-                    _ => State::Accepted,
-                },
-                error: child.error,
+            .map(|child| {
+                let terminal_error = child
+                    .terminal_error_json
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str(value).ok())
+                    .filter(serde_json::Value::is_object)
+                    .or_else(|| {
+                        child
+                            .error
+                            .as_deref()
+                            .map(|message| serde_json::json!({ "message": message }))
+                    });
+                let result = child
+                    .result_json
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str(value).ok());
+                mold_core::GenerationBatchChild {
+                    index: child.batch_index,
+                    job_id: child.job_id,
+                    state: match child.state.as_str() {
+                        "running" => State::Running,
+                        "complete" => State::Complete,
+                        "failed" => State::Failed,
+                        "cancelled" => State::Cancelled,
+                        "held" => State::Held,
+                        _ => State::Accepted,
+                    },
+                    error: child.error,
+                    created_at_ms,
+                    updated_at_ms: child.updated_at_ms,
+                    completed_at_ms: child.completed_at_ms,
+                    terminal_error,
+                    result,
+                }
             })
             .collect(),
     }
@@ -2391,20 +2433,24 @@ async fn admit_generation_batch(
                 },
             )
             .collect::<Vec<_>>();
-        let outcome = journal.record_batch(crate::queue_journal::BatchJournalAdmission {
-            id: &batch_id_for_db,
-            client_batch_id: &client_batch_id,
-            request_sha256: &request_sha256,
-            children: &admissions,
-        })?;
-        if outcome.1 {
+        let (recorded, inserted) =
+            journal.record_batch(crate::queue_journal::BatchJournalAdmission {
+                id: &batch_id_for_db,
+                client_batch_id: &client_batch_id,
+                request_sha256: &request_sha256,
+                children: &admissions,
+            })?;
+        if inserted {
             if let Some(db) = metadata_db.as_ref().as_ref() {
                 for (prompt, negative, model) in &typed_history {
                     record_prompt_history_in_db(db, prompt, negative.as_deref(), model);
                 }
             }
         }
-        Ok::<_, String>(outcome)
+        let durable = journal
+            .durable_generation_batch(&recorded.batch.id)?
+            .ok_or_else(|| "generation batch disappeared after durable admission".to_string())?;
+        Ok::<_, String>((durable, inserted))
     })
     .await
     .map_err(|error| ApiError::internal(format!("generation batch DB task failed: {error}")))?
@@ -2424,9 +2470,15 @@ async fn admit_generation_batch(
         }
     })?;
     if !inserted {
-        return Ok((StatusCode::OK, Json(generation_batch_status(detail))));
+        return Ok((
+            StatusCode::OK,
+            Json(generation_batch_status(&state.instance_id, detail)),
+        ));
     }
-    Ok((StatusCode::ACCEPTED, Json(generation_batch_status(detail))))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(generation_batch_status(&state.instance_id, detail)),
+    ))
 }
 
 #[utoipa::path(
@@ -2444,16 +2496,89 @@ async fn get_generation_batch(
     Path(id): Path<String>,
 ) -> Result<Json<mold_core::GenerationBatchStatus>, ApiError> {
     let journal = state.queue_journal.clone();
-    let detail = spawn_queue_read(move || Ok(journal.generation_batch(&id)))
-        .await?
-        .ok_or_else(|| {
-            ApiError::with_code(
-                "generation batch not found",
-                "GENERATION_BATCH_NOT_FOUND",
-                StatusCode::NOT_FOUND,
-            )
-        })?;
-    Ok(Json(generation_batch_status(detail)))
+    let detail = spawn_queue_read(move || {
+        journal
+            .durable_generation_batch(&id)
+            .map_err(anyhow::Error::msg)
+    })
+    .await?
+    .ok_or_else(|| {
+        ApiError::with_code(
+            "generation batch not found",
+            "GENERATION_BATCH_NOT_FOUND",
+            StatusCode::NOT_FOUND,
+        )
+    })?;
+    Ok(Json(generation_batch_status(&state.instance_id, detail)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/generation-batches/by-client/{client_batch_id}",
+    tag = "generation",
+    params(("client_batch_id" = String, Path, description = "Client-generated idempotency UUID")),
+    responses(
+        (status = 200, description = "Authoritative batch recovered by client id", body = mold_core::GenerationBatchStatus),
+        (status = 404, description = "Batch not found"),
+    )
+)]
+async fn get_generation_batch_by_client(
+    State(state): State<AppState>,
+    Path(client_batch_id): Path<String>,
+) -> Result<Json<mold_core::GenerationBatchStatus>, ApiError> {
+    let journal = state.queue_journal.clone();
+    let detail = spawn_queue_read(move || {
+        journal
+            .durable_generation_batch_by_client(&client_batch_id)
+            .map_err(anyhow::Error::msg)
+    })
+    .await?
+    .ok_or_else(|| {
+        ApiError::with_code(
+            "generation batch not found",
+            "GENERATION_BATCH_NOT_FOUND",
+            StatusCode::NOT_FOUND,
+        )
+    })?;
+    Ok(Json(generation_batch_status(&state.instance_id, detail)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/generation-batches/status",
+    tag = "generation",
+    request_body = mold_core::GenerationBatchStatusRequest,
+    responses(
+        (status = 200, description = "Authoritative statuses and explicit missing identities", body = mold_core::GenerationBatchStatusResponse),
+    )
+)]
+async fn reconcile_generation_batches(
+    State(state): State<AppState>,
+    Json(body): Json<mold_core::GenerationBatchStatusRequest>,
+) -> Result<Json<mold_core::GenerationBatchStatusResponse>, ApiError> {
+    // The router's HTTP body limit is the authoritative request bound. Do not
+    // add a second guessed item quota: every requested identity is resolved
+    // without scanning unrelated rows, on the blocking pool.
+    let journal = state.queue_journal.clone();
+    let lookup = spawn_queue_read(move || {
+        journal
+            .durable_generation_batches(&body.client_batch_ids, &body.batch_ids)
+            .map_err(anyhow::Error::msg)
+    })
+    .await?;
+    let instance_id = state.instance_id.as_ref().clone();
+    Ok(Json(mold_core::GenerationBatchStatusResponse {
+        batches: lookup
+            .batches
+            .into_iter()
+            .map(|detail| generation_batch_status(&instance_id, detail))
+            .collect(),
+        instance_id,
+        missing: mold_core::GenerationBatchMissing {
+            client_batch_ids: lookup.missing_client_batch_ids,
+            batch_ids: lookup.missing_batch_ids,
+        },
+    }))
 }
 
 #[utoipa::path(
@@ -6239,6 +6364,7 @@ async fn server_capabilities(
             heterogeneous_batch,
             heterogeneous_batch_max_outputs: heterogeneous_batch
                 .then_some(MAX_HETEROGENEOUS_BATCH_OUTPUTS as u32),
+            durable_batch_outcomes: heterogeneous_batch,
         },
         reference_uploads: mold_core::ReferenceUploadCapabilities {
             available: true,

@@ -7220,6 +7220,50 @@ mod tests {
         assert_eq!(parsed.models_disk, status.models_disk);
     }
 
+    #[test]
+    fn generation_batch_status_preserves_legacy_wire_and_enriched_outcome() {
+        let legacy = r#"{
+            "id":"batch-1",
+            "client_batch_id":"client-1",
+            "children":[{"index":1,"job_id":"job-1","state":"accepted"}]
+        }"#;
+        let legacy: super::GenerationBatchStatus = serde_json::from_str(legacy).unwrap();
+        assert_eq!(legacy.instance_id, "");
+        assert!(!legacy.durable);
+        assert_eq!(legacy.children[0].created_at_ms, 0);
+        assert_eq!(legacy.children[0].updated_at_ms, 0);
+        assert!(legacy.children[0].result.is_none());
+
+        let enriched = super::GenerationBatchStatus {
+            id: "batch-1".into(),
+            client_batch_id: "client-1".into(),
+            instance_id: "instance-1".into(),
+            durable: true,
+            children: vec![super::GenerationBatchChild {
+                index: 1,
+                job_id: "job-1".into(),
+                state: super::GenerationBatchChildState::Complete,
+                error: None,
+                created_at_ms: 10,
+                updated_at_ms: 20,
+                completed_at_ms: Some(20),
+                terminal_error: None,
+                result: Some(super::GenerationBatchResult {
+                    filename: Some("finished.png".into()),
+                    original_filename: Some("original.png".into()),
+                }),
+            }],
+        };
+        let json = serde_json::to_value(&enriched).unwrap();
+        assert_eq!(json["instance_id"], "instance-1");
+        assert_eq!(json["durable"], true);
+        assert_eq!(json["children"][0]["result"]["filename"], "finished.png");
+        assert_eq!(
+            serde_json::from_value::<super::GenerationBatchStatus>(json).unwrap(),
+            enriched
+        );
+    }
+
     // ── UpscaleRequest / UpscaleResponse tests ────────────────────────────
 
     #[test]
@@ -7801,13 +7845,66 @@ pub struct GenerationBatchChild {
     pub state: GenerationBatchChildState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Unix-epoch milliseconds when the durable child was admitted.
+    #[serde(default)]
+    pub created_at_ms: i64,
+    /// Unix-epoch milliseconds of the latest authoritative state transition.
+    #[serde(default)]
+    pub updated_at_ms: i64,
+    /// Unix-epoch milliseconds when the child reached a terminal state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<i64>,
+    /// Structured terminal failure/cancellation details. `error` remains for
+    /// compatibility with clients that only understand the legacy string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub terminal_error: Option<serde_json::Value>,
+    /// Durable gallery identities produced by a completed child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<GenerationBatchResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationBatchResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_filename: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GenerationBatchStatus {
     pub id: String,
     pub client_batch_id: String,
+    /// Exact serving instance. Clients fence cached lifecycle state when this
+    /// differs from the instance that admitted the request.
+    #[serde(default)]
+    pub instance_id: String,
+    /// Always true on this authoritative reconnectable status surface.
+    #[serde(default)]
+    pub durable: bool,
     pub children: Vec<GenerationBatchChild>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationBatchStatusRequest {
+    #[serde(default)]
+    pub client_batch_ids: Vec<String>,
+    #[serde(default)]
+    pub batch_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationBatchMissing {
+    pub client_batch_ids: Vec<String>,
+    pub batch_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationBatchStatusResponse {
+    pub instance_id: String,
+    pub batches: Vec<GenerationBatchStatus>,
+    pub missing: GenerationBatchMissing,
 }
 
 /// Body of `POST /api/gallery/collections`.
@@ -7983,6 +8080,10 @@ pub struct QueueCapabilities {
     pub heterogeneous_batch: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heterogeneous_batch_max_outputs: Option<u32>,
+    /// Enriched durable child outcomes plus by-client and bulk
+    /// reconciliation routes are available.
+    #[serde(default)]
+    pub durable_batch_outcomes: bool,
 }
 
 /// Authenticated, stable-URL reference-media ingress advertised by current

@@ -757,6 +757,51 @@ impl QueueJournal {
             .flatten()
     }
 
+    pub fn durable_generation_batch(
+        &self,
+        id: &str,
+    ) -> Result<Option<mold_db::generation_batches::DurableGenerationBatchDetail>, String> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(None);
+        };
+        generation_batches::get_durable(db, owner, id).map_err(|error| format!("{error:#}"))
+    }
+
+    pub fn durable_generation_batch_by_client(
+        &self,
+        client_batch_id: &str,
+    ) -> Result<Option<mold_db::generation_batches::DurableGenerationBatchDetail>, String> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(None);
+        };
+        generation_batches::get_durable_by_client(db, owner, client_batch_id)
+            .map_err(|error| format!("{error:#}"))
+    }
+
+    pub fn durable_generation_batches(
+        &self,
+        client_batch_ids: &[String],
+        batch_ids: &[String],
+    ) -> Result<mold_db::generation_batches::DurableGenerationBatchLookup, String> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            let unique = |values: &[String]| {
+                let mut seen = HashSet::new();
+                values
+                    .iter()
+                    .filter(|value| seen.insert(value.as_str()))
+                    .cloned()
+                    .collect()
+            };
+            return Ok(mold_db::generation_batches::DurableGenerationBatchLookup {
+                batches: Vec::new(),
+                missing_client_batch_ids: unique(client_batch_ids),
+                missing_batch_ids: unique(batch_ids),
+            });
+        };
+        generation_batches::lookup_durable(db, owner, client_batch_ids, batch_ids)
+            .map_err(|error| format!("{error:#}"))
+    }
+
     fn set_batch_child_state(&self, id: &str, state: &str, error: Option<&str>) {
         let Some(db) = self.db() else { return };
         if let Err(error) = generation_batches::set_child_state(db, id, state, error, now_ms()) {
