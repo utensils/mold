@@ -617,6 +617,69 @@ pub(crate) async fn restore_gallery_files(
     }
 }
 
+// ── POST /api/gallery/trash/delete-forever ────────────────────────────────
+
+/// Permanently delete several live or trashed prints through one host call.
+/// Stops at the first failure and names it; earlier removals stay removed.
+#[utoipa::path(
+    post,
+    path = "/api/gallery/trash/delete-forever",
+    tag = "gallery",
+    request_body = TrashFilenamesRequest,
+    responses(
+        (status = 204, description = "Every listed print was permanently removed"),
+        (status = 404, description = "A print does not exist"),
+        (status = 409, description = "A live file changed since publication"),
+        (status = 422, description = "Empty list or invalid filename"),
+    )
+)]
+pub(crate) async fn delete_gallery_files_forever(
+    State(state): State<AppState>,
+    Json(request): Json<TrashFilenamesRequest>,
+) -> Result<StatusCode, ApiError> {
+    let _gallery_writer = state.gallery_publication_gate.write().await;
+    let dir = gallery_output_dir(&state).await?;
+    let names = clean_filenames(&request)?;
+    let db = state.metadata_db.clone();
+    let gate = state.gallery_publication_gate.clone();
+    let (removed, failure) = tokio::task::spawn_blocking(
+        move || -> Result<(Vec<String>, Option<ApiError>), ApiError> {
+            let mut removed = Vec::new();
+            for name in names {
+                let outcome = if let Some(db) = db.as_ref().as_ref() {
+                    let trashed = db
+                        .get(&dir, &name)
+                        .map_err(|error| internal("metadata DB read failed", format!("{error:#}")))?
+                        .is_some_and(|row| row.trashed_at_ms.is_some());
+                    if trashed {
+                        purge_trashed_print_blocking(&dir, &name, db, &gate)
+                    } else {
+                        hard_delete_live_print_blocking(&dir, &name, Some(db), &gate)
+                    }
+                } else {
+                    hard_delete_live_print_blocking(&dir, &name, None, &gate)
+                };
+                match outcome {
+                    Ok(()) => removed.push(name),
+                    Err(error) => return Ok((removed, Some(name_failure(&name, error)))),
+                }
+            }
+            Ok((removed, None))
+        },
+    )
+    .await
+    .map_err(|error| ApiError::internal(format!("gallery bulk delete task failed: {error}")))??;
+    for filename in removed {
+        state
+            .events
+            .publish(ServerEvent::GalleryRemoved { filename });
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(StatusCode::NO_CONTENT),
+    }
+}
+
 // ── DELETE /api/gallery/trash ───────────────────────────────────────────────
 
 /// Purge every trashed print now.

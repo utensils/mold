@@ -16,6 +16,7 @@ use mold_core::{
     ServerStatus, SseErrorEvent, SseProgressEvent,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::convert::Infallible;
 use tokio_stream::StreamExt as _;
 use utoipa::OpenApi;
@@ -261,6 +262,8 @@ use crate::queue::clean_error_message;
     paths(
         generate,
         generate_stream,
+        admit_generation_batch,
+        get_generation_batch,
         generate_placement_preview,
         crate::reference_uploads::create_reference_upload_session,
         crate::reference_uploads::upload_reference,
@@ -283,6 +286,7 @@ use crate::queue::clean_error_message;
         import_gallery_file,
         crate::gallery_organization::patch_gallery_image,
         crate::gallery_organization::organize_gallery,
+        crate::gallery_organization::mutate_gallery_bulk,
         crate::gallery_organization::list_collections,
         crate::gallery_organization::create_collection,
         crate::gallery_organization::get_collection,
@@ -295,6 +299,7 @@ use crate::queue::clean_error_message;
         crate::gallery_trash::delete_gallery_image,
         crate::gallery_trash::trash_gallery_files,
         crate::gallery_trash::restore_gallery_files,
+        crate::gallery_trash::delete_gallery_files_forever,
         crate::gallery_trash::empty_gallery_trash,
         crate::gallery_trash::sweep_gallery_trash,
         server_status,
@@ -460,6 +465,8 @@ use crate::queue::clean_error_message;
         GalleryGifRepeat,
         mold_core::GalleryPatchRequest,
         mold_core::GalleryOrganizeRequest,
+        mold_core::GalleryBulkMutationRequest,
+        mold_core::GalleryBulkMutationResult,
         mold_core::Collection,
         mold_core::CollectionDetail,
         mold_core::CollectionCreateRequest,
@@ -496,6 +503,8 @@ pub fn create_router(state: AppState) -> Router {
             post(generate_placement_preview),
         )
         .route("/api/generate/stream", post(generate_stream))
+        .route("/api/generation-batches", post(admit_generation_batch))
+        .route("/api/generation-batches/:id", get(get_generation_batch))
         .route(
             "/api/generate/reference-upload-sessions",
             post(crate::reference_uploads::create_reference_upload_session)
@@ -598,6 +607,10 @@ pub fn create_router(state: AppState) -> Router {
             post(crate::gallery_organization::organize_gallery),
         )
         .route(
+            "/api/gallery/mutations",
+            post(crate::gallery_organization::mutate_gallery_bulk),
+        )
+        .route(
             "/api/gallery/collections",
             get(crate::gallery_organization::list_collections)
                 .post(crate::gallery_organization::create_collection),
@@ -629,6 +642,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/gallery/trash/restore",
             post(crate::gallery_trash::restore_gallery_files),
+        )
+        .route(
+            "/api/gallery/trash/delete-forever",
+            post(crate::gallery_trash::delete_gallery_files_forever),
         )
         .route(
             "/api/gallery/trash/sweep",
@@ -2162,6 +2179,258 @@ fn validate_live_server_batch_admission(
             StatusCode::UNPROCESSABLE_ENTITY,
         )
     })
+}
+
+const MAX_HETEROGENEOUS_BATCH_OUTPUTS: usize = 64;
+
+fn generation_batch_status(
+    detail: mold_db::generation_batches::GenerationBatchDetail,
+) -> mold_core::GenerationBatchStatus {
+    use mold_core::GenerationBatchChildState as State;
+    mold_core::GenerationBatchStatus {
+        id: detail.batch.id,
+        client_batch_id: detail.batch.client_batch_id,
+        children: detail
+            .children
+            .into_iter()
+            .map(|child| mold_core::GenerationBatchChild {
+                index: child.batch_index,
+                job_id: child.job_id,
+                state: match child.state.as_str() {
+                    "running" => State::Running,
+                    "complete" => State::Complete,
+                    "failed" => State::Failed,
+                    "cancelled" => State::Cancelled,
+                    "held" => State::Held,
+                    _ => State::Accepted,
+                },
+                error: child.error,
+            })
+            .collect(),
+    }
+}
+
+/// Admit distinct prepared prompts as one durable, idempotent parent. Every
+/// child validates before the single DB commit; after admission children run
+/// independently through the ordinary generation queue.
+#[utoipa::path(
+    post,
+    path = "/api/generation-batches",
+    tag = "generation",
+    request_body = mold_core::GenerationBatchAdmissionRequest,
+    responses(
+        (status = 202, description = "Every child durably admitted", body = mold_core::GenerationBatchStatus),
+        (status = 200, description = "Idempotent replay of an admitted batch", body = mold_core::GenerationBatchStatus),
+        (status = 409, description = "Client batch id reused with changed requests"),
+        (status = 422, description = "A child is invalid; nothing admitted"),
+        (status = 503, description = "Durable heterogeneous admission unavailable"),
+    )
+)]
+async fn admit_generation_batch(
+    State(state): State<AppState>,
+    authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
+    Json(mut body): Json<mold_core::GenerationBatchAdmissionRequest>,
+) -> Result<(StatusCode, Json<mold_core::GenerationBatchStatus>), ApiError> {
+    if !state.scheduled_work.v2_authoritative() || !state.queue_journal.is_enabled() {
+        return Err(ApiError::with_code(
+            "heterogeneous batch admission requires Scheduler V2 and the durable queue",
+            "HETEROGENEOUS_BATCH_UNAVAILABLE",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
+    }
+    if uuid::Uuid::parse_str(body.client_batch_id.trim()).is_err() {
+        return Err(ApiError::validation("client_batch_id must be a UUID"));
+    }
+    if body.requests.is_empty() || body.requests.len() > MAX_HETEROGENEOUS_BATCH_OUTPUTS {
+        return Err(ApiError::validation(format!(
+            "requests must contain 1..={MAX_HETEROGENEOUS_BATCH_OUTPUTS} children"
+        )));
+    }
+    let count = body.requests.len() as u32;
+    for (offset, request) in body.requests.iter_mut().enumerate() {
+        mold_core::minimax_h3::canonicalize_request_model(request);
+        if request.batch_size != 1 {
+            return Err(ApiError::validation(format!(
+                "requests[{}].batch_size must be 1",
+                offset
+            )));
+        }
+        request.batch_id = Some(body.client_batch_id.clone());
+        request.batch_index = Some(offset as u32 + 1);
+        request.batch_count = Some(count);
+    }
+    let fingerprint_bytes = serde_json::to_vec(&body.requests)
+        .map_err(|error| ApiError::internal(format!("batch serialization failed: {error}")))?;
+    let request_sha256 = format!("{:x}", Sha256::digest(&fingerprint_bytes));
+    if let Some(existing) = state
+        .queue_journal
+        .generation_batch_by_client(&body.client_batch_id)
+    {
+        if existing.batch.request_sha256 != request_sha256 {
+            return Err(ApiError::with_code(
+                "client_batch_id was already used for a different request",
+                "GENERATION_BATCH_IDEMPOTENCY_CONFLICT",
+                StatusCode::CONFLICT,
+            ));
+        }
+        return Ok((StatusCode::OK, Json(generation_batch_status(existing))));
+    }
+
+    let mut prepared_children = Vec::with_capacity(body.requests.len());
+    for mut request in body.requests {
+        let typed = (
+            request.prompt.clone(),
+            request.negative_prompt.clone(),
+            request.model.clone(),
+        );
+        let prepared = prepare_generation(
+            &state,
+            &mut request,
+            authenticated.as_ref().map(|Extension(auth)| auth),
+        )
+        .await?;
+        if prepared.output_dir.is_none() {
+            return Err(ApiError::validation(
+                "heterogeneous batches require server gallery output",
+            ));
+        }
+        if prepared.resolved_references.is_some() || request.references.is_some() {
+            return Err(ApiError::validation(
+                "heterogeneous batches cannot persist temporary reference uploads",
+            ));
+        }
+        prepared_children.push((request, typed, prepared));
+    }
+
+    let batch_id = uuid::Uuid::new_v4().to_string();
+    let job_ids: Vec<String> = (0..prepared_children.len())
+        .map(|_| uuid::Uuid::new_v4().to_string())
+        .collect();
+    let admissions: Vec<crate::queue_journal::JournalAdmission<'_>> = prepared_children
+        .iter()
+        .zip(&job_ids)
+        .map(
+            |((request, _, prepared), job_id)| crate::queue_journal::JournalAdmission {
+                id: job_id,
+                request,
+                output_dir: prepared.output_dir.as_deref(),
+                target_gpu: prepared.preferred_gpu,
+                completion_payload: SseCompletionPayload::MetadataOnly,
+                batch_child: false,
+                carries_reference_authority: false,
+            },
+        )
+        .collect();
+    let (detail, tickets) = state
+        .queue_journal
+        .record_batch(crate::queue_journal::BatchJournalAdmission {
+            id: &batch_id,
+            client_batch_id: &body.client_batch_id,
+            request_sha256: &request_sha256,
+            children: &admissions,
+        })
+        .map_err(|message| {
+            ApiError::with_code(
+                message,
+                "GENERATION_BATCH_NOT_DURABLE",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            )
+        })?;
+    let Some(tickets) = tickets else {
+        return Ok((StatusCode::OK, Json(generation_batch_status(detail))));
+    };
+
+    let mut jobs = Vec::with_capacity(prepared_children.len());
+    for ((((request, typed, prepared), job_id), ticket), _) in prepared_children
+        .into_iter()
+        .zip(job_ids.iter())
+        .zip(tickets)
+        .zip(0..)
+    {
+        record_prompt_history(&state, &typed.0, typed.1.as_deref(), &typed.2);
+        let queue_metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
+            &request,
+            request.seed.unwrap_or(0),
+            request.scheduler,
+            mold_core::build_info::version_string(),
+        ));
+        let cancel = state.job_registry.register_job(
+            job_id,
+            &request.model,
+            prepared.preferred_gpu,
+            Some(request.seed.is_some()),
+            Some(queue_metadata),
+        );
+        let crate::job_supervisor::SupervisedJob {
+            result_tx,
+            outcome_rx,
+        } = crate::job_supervisor::supervise_job(job_id.clone(), cancel);
+        drop(outcome_rx);
+        jobs.push(GenerationJob {
+            id: job_id.clone(),
+            request,
+            resolved_references: prepared.resolved_references,
+            completion_payload: SseCompletionPayload::MetadataOnly,
+            progress_tx: None,
+            result_tx,
+            output_dir: prepared.output_dir,
+            batch_child: None,
+            journal: Some(ticket),
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+            h3_private_ingress_grant: prepared.h3_private_ingress_grant,
+        });
+    }
+    // Persistence is the admission acknowledgement. Feed every ordinary
+    // child into the bounded runtime queue independently in detached tasks,
+    // so an iPhone socket disappearing after the commit cannot cancel the
+    // remaining children and current queue occupancy cannot partially admit.
+    for job in jobs {
+        let queue = state.queue.clone();
+        let registry = state.job_registry.clone();
+        let capacity = state.queue_capacity;
+        let id = job.id.clone();
+        tokio::spawn(async move {
+            let mut pending = Some(job);
+            let keep_waiting = tokio_util::sync::CancellationToken::new();
+            if let Err(error) = queue
+                .submit_when_available(&mut pending, capacity, &keep_waiting)
+                .await
+            {
+                if let Some(mut retained) = pending {
+                    if let Some(ticket) = retained.journal.take() {
+                        ticket.retain();
+                    }
+                }
+                registry.remove(&id);
+                tracing::warn!(job = %id, ?error, "batch child retained for replay after queue transport stopped");
+            }
+        });
+    }
+    Ok((StatusCode::ACCEPTED, Json(generation_batch_status(detail))))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/generation-batches/{id}",
+    tag = "generation",
+    params(("id" = String, Path, description = "Generation batch id")),
+    responses(
+        (status = 200, description = "Authoritative child states", body = mold_core::GenerationBatchStatus),
+        (status = 404, description = "Batch not found"),
+    )
+)]
+async fn get_generation_batch(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<mold_core::GenerationBatchStatus>, ApiError> {
+    let detail = state.queue_journal.generation_batch(&id).ok_or_else(|| {
+        ApiError::with_code(
+            "generation batch not found",
+            "GENERATION_BATCH_NOT_FOUND",
+            StatusCode::NOT_FOUND,
+        )
+    })?;
+    Ok(Json(generation_batch_status(detail)))
 }
 
 #[utoipa::path(
@@ -5601,6 +5870,7 @@ async fn server_capabilities(
     // makes it a systematic over-promise rather than an edge case, and clients
     // read this to decide whether to keep polling a job whose stream died.
     let durable_queue = state.queue_journal.is_enabled() && !state.is_output_disabled(&config);
+    let heterogeneous_batch = durable_queue && state.scheduled_work.v2_authoritative();
     // Trash and organization both live in the metadata DB; trash additionally
     // needs somewhere to move bytes to. With the DB disabled, DELETE stays a
     // hard delete and the organization routes answer 501.
@@ -5612,6 +5882,7 @@ async fn server_capabilities(
             retention_days: config.gallery.effective_trash_retention_days(),
         }),
         organize: db_available,
+        bulk_mutations: db_available,
     };
     Json(mold_core::ServerCapabilities {
         generation_profile_v1: true,
@@ -5643,6 +5914,9 @@ async fn server_capabilities(
             server_batch,
             server_batch_max_outputs: server_batch
                 .then_some(crate::batch_runtime::MAX_LIVE_SERVER_BATCH_OUTPUTS),
+            heterogeneous_batch,
+            heterogeneous_batch_max_outputs: heterogeneous_batch
+                .then_some(MAX_HETEROGENEOUS_BATCH_OUTPUTS as u32),
         },
         reference_uploads: mold_core::ReferenceUploadCapabilities {
             available: true,

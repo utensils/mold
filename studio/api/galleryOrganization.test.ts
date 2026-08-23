@@ -5,6 +5,7 @@ import {
   createCollection,
   deleteCollection,
   deleteGalleryImageForever,
+  deleteManyForever,
   deleteTag,
   emptyTrash,
   listCollections,
@@ -262,6 +263,14 @@ describe("gallery organization API", () => {
       url: "http://plato:7680/api/gallery/trash/restore",
       method: "POST",
       body: { filenames: ["a.png"] },
+    });
+
+    captured = stub();
+    await deleteManyForever(target, ["a.png", "b.png"]);
+    expect(captured()).toMatchObject({
+      url: "http://plato:7680/api/gallery/trash/delete-forever",
+      method: "POST",
+      body: { filenames: ["a.png", "b.png"] },
     });
   });
 

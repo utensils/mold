@@ -65,6 +65,7 @@ import {
   tagKey,
   trashRetentionSummary,
   visibleTagCounts,
+  type OrganizationFanoutOp,
   type OrganizationMutation,
   type OrganizationUnion,
 } from "@studio/lib/libraryOrganization";
@@ -76,9 +77,17 @@ import {
   listCollections as listHostCollections,
   listTags as listHostTags,
   listTrash as listHostTrash,
+  mutateGalleryBulk,
   updateCollection as updateHostCollection,
   updateCollectionHidden as updateHostCollectionHidden,
 } from "@studio/api/galleryOrganization";
+import {
+  enqueueGalleryMutation,
+  galleryBulkRequest,
+  listGalleryMutations,
+  removeGalleryMutation,
+  updateGalleryMutationFailure,
+} from "@studio/lib/galleryMutationOutbox";
 import {
   defaultClipFrames,
   modelsForOutput,
@@ -322,6 +331,7 @@ import {
   fanoutFailureMessage,
   filterLibraryPrints,
   libraryOrganizationSupport,
+  logicalCopyIndex,
   logicalCopiesOf,
   mergeHostTags,
   mergeTrashSnapshot,
@@ -546,6 +556,7 @@ const LEGACY_LIBRARY_SEEN_KEY = "mold.mobile.library-seen.v1";
 const LIBRARY_VISITED_KEY = "mold.mobile.library-visited.v1";
 const SEQUENCE_RECOVERY_KEY = "mold.mobile.sequence-job.v1";
 const LIVE_ACTIVITY_KEY = "mold.mobile.live-activity.v1";
+const GALLERY_CAPABILITIES_KEY = "mold.mobile.gallery-capabilities.v1";
 const HOST_PROBE_TIMEOUT_MS = 9_000;
 /** How long automatic routing keeps waiting for slower machines once one has
  *  answered `planned`. Nothing is abandoned before that first plan exists —
@@ -645,6 +656,59 @@ const sequenceRoute = shallowRef<{ hostId: string; target: ApiTarget } | null>(n
 let sequenceWatch: SequenceWatchHandle | null = null;
 const expandCapabilities = reactive<Record<string, ExpandCapabilities | null | undefined>>({});
 const serverCapabilities = reactive<Record<string, ServerCapabilities | null | undefined>>({});
+interface SavedGalleryCapability {
+  instanceId: string | null;
+  gallery: ServerCapabilities["gallery"];
+}
+function loadSavedGalleryCapabilities(): Record<string, SavedGalleryCapability> {
+  try {
+    return JSON.parse(localStorage.getItem(GALLERY_CAPABILITIES_KEY) ?? "{}") as Record<
+      string,
+      SavedGalleryCapability
+    >;
+  } catch {
+    return {};
+  }
+}
+const savedGalleryCapabilities = reactive(loadSavedGalleryCapabilities());
+const effectiveGalleryCapabilities = computed<
+  Record<string, ServerCapabilities | null | undefined>
+>(() => {
+  const effective: Record<string, ServerCapabilities | null | undefined> = {
+    ...serverCapabilities,
+  };
+  for (const host of connectedHosts.value) {
+    if (effective[host.id]?.gallery) continue;
+    const saved = savedGalleryCapabilities[host.id];
+    if (!saved) continue;
+    if (saved.instanceId && saved.instanceId !== (host.instanceId?.trim() || null)) continue;
+    effective[host.id] = { gallery: saved.gallery } as ServerCapabilities;
+  }
+  return effective;
+});
+watch(
+  () =>
+    connectedHosts.value.map((host) => ({
+      id: host.id,
+      instanceId: host.instanceId?.trim() || null,
+      gallery: serverCapabilities[host.id]?.gallery ?? null,
+    })),
+  (snapshots) => {
+    let changed = false;
+    for (const snapshot of snapshots) {
+      if (!snapshot.gallery) continue;
+      savedGalleryCapabilities[snapshot.id] = {
+        instanceId: snapshot.instanceId,
+        gallery: snapshot.gallery,
+      };
+      changed = true;
+    }
+    if (changed) {
+      localStorage.setItem(GALLERY_CAPABILITIES_KEY, JSON.stringify(savedGalleryCapabilities));
+    }
+  },
+  { deep: true },
+);
 const form = reactive<GenerateForm>(newGenerateForm());
 // The shared builder defaults `fileUnderAutoTag` to FALSE so a surface with no
 // File under UI can never auto-tag invisibly. The phone HAS the removable
@@ -842,6 +906,8 @@ const organizationError = ref("");
 /** Accepted-request advisories stay visible until dismissed or superseded. */
 const requestAdvisories = ref<string[]>([]);
 const organizationBusy = ref(false);
+const pendingGalleryMutationCount = ref(0);
+let flushingGalleryOutbox = false;
 /** Trash listing, fetched lazily the first time the Trash scope opens. */
 let trashCopies: PendingGalleryPrint[] = [];
 const trashCount = ref(0);
@@ -2261,6 +2327,7 @@ async function saveCompletedStillToPhotos(result: CompleteEvent, target: ApiTarg
 }
 
 function routeForMobileHost(host: MobileHost): HostRoute {
+  const queue = serverCapabilities[host.id]?.queue;
   return {
     hostId: host.id,
     label: host.name,
@@ -2268,6 +2335,8 @@ function routeForMobileHost(host: MobileHost): HostRoute {
     target: { ...mobileHostTarget(host) },
     instanceId: host.instanceId ?? null,
     referenceUploads: serverCapabilities[host.id]?.reference_uploads ?? null,
+    heterogeneousBatch: queue?.heterogeneous_batch === true,
+    heterogeneousBatchMaxOutputs: queue?.heterogeneous_batch_max_outputs ?? null,
   };
 }
 
@@ -5270,6 +5339,8 @@ async function generate(): Promise<void> {
       target: { ...route.target },
       instanceId: route.instanceId ?? null,
       referenceUploads: route.referenceUploads ?? null,
+      heterogeneousBatch: route.heterogeneousBatch ?? false,
+      heterogeneousBatchMaxOutputs: route.heterogeneousBatchMaxOutputs ?? null,
       mirrorRemoteOutput: false,
       retainEncodedResult: false,
       metadataOnlyCompletion: true,
@@ -6408,7 +6479,7 @@ function allGalleryPrints(): Array<GalleryPrint | PendingGalleryPrint> {
 // ── Library organization: support, merges, filters ──────────────────────────
 
 const librarySupport = computed(() =>
-  libraryOrganizationSupport(connectedHosts.value, serverCapabilities),
+  libraryOrganizationSupport(connectedHosts.value, effectiveGalleryCapabilities.value),
 );
 const libraryOrganizeEnabled = computed(() => librarySupport.value.organize);
 const libraryTrashEnabled = computed(() => librarySupport.value.trash);
@@ -6820,9 +6891,12 @@ function selectedRepresentatives(): Array<GalleryPrint | PendingGalleryPrint> {
 /** Every physical copy behind the selected logical prints. */
 function selectedPhysicalCopies(): PendingGalleryPrint[] {
   const copies = scopeCopies();
+  const copyIndex = logicalCopyIndex(copies);
   const seen = new Map<string, PendingGalleryPrint>();
   for (const print of selectedRepresentatives()) {
-    for (const copy of logicalCopiesOf(copies, print)) seen.set(galleryPrintKey(copy), copy);
+    for (const copy of copyIndex.get(galleryPrintKey(print)) ?? []) {
+      seen.set(galleryPrintKey(copy), copy);
+    }
   }
   return [...seen.values()];
 }
@@ -6844,9 +6918,99 @@ function fanoutHosts(): Record<
   );
 }
 
+function bulkGalleryHostIds(): Set<string> {
+  return new Set(
+    connectedHosts.value
+      .filter(
+        (host) => effectiveGalleryCapabilities.value[host.id]?.gallery?.bulk_mutations === true,
+      )
+      .map((host) => host.id),
+  );
+}
+
 interface LibraryMutationOutcome {
   failedHostIds: Set<string>;
   ok: boolean;
+}
+
+async function executeGalleryOrganizationOp(
+  id: string,
+  op: OrganizationFanoutOp,
+  host: MobileHost,
+): Promise<void> {
+  const request = galleryBulkRequest(id, op);
+  if (request && effectiveGalleryCapabilities.value[host.id]?.gallery?.bulk_mutations === true) {
+    await mutateGalleryBulk(mobileHostTarget(host), request);
+    return;
+  }
+  const result = await runOrganizationFanout(
+    [op],
+    {
+      [host.id]: {
+        id: host.id,
+        name: host.name,
+        target: mobileHostTarget(host),
+        collections: hostCollections[host.id] ?? [],
+      },
+    },
+    undefined,
+    {
+      trashHostIds: librarySupport.value.trashHostIds,
+      bulkHostIds: bulkGalleryHostIds(),
+    },
+  );
+  if (result.failures[0]) throw result.failures[0].error;
+}
+
+async function retainGalleryOrganizationOp(
+  op: OrganizationFanoutOp,
+  host: MobileHost,
+  id = createUuid(),
+): Promise<void> {
+  await enqueueGalleryMutation({
+    id,
+    hostId: host.id,
+    hostInstanceId: host.instanceId?.trim() || null,
+    hostName: host.name,
+    op,
+  });
+  pendingGalleryMutationCount.value = (await listGalleryMutations()).length;
+}
+
+async function flushGalleryMutationOutbox(): Promise<void> {
+  if (flushingGalleryOutbox) return;
+  flushingGalleryOutbox = true;
+  try {
+    const queued = await listGalleryMutations();
+    for (const item of queued) {
+      const host = connectedHosts.value.find((candidate) => candidate.id === item.hostId);
+      if (!host?.online) continue;
+      if (item.hostInstanceId && item.hostInstanceId !== (host.instanceId?.trim() || null)) {
+        await updateGalleryMutationFailure(
+          item.id,
+          "Host identity changed; the retained edit was not sent.",
+        );
+        continue;
+      }
+      try {
+        await executeGalleryOrganizationOp(item.id, item.op, host);
+        await removeGalleryMutation(item.id);
+      } catch (error) {
+        await updateGalleryMutationFailure(
+          item.id,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
+    pendingGalleryMutationCount.value = (await listGalleryMutations()).length;
+    if (pendingGalleryMutationCount.value === 0 && organizationError.value.includes("retained")) {
+      organizationError.value = "";
+    }
+  } catch (error) {
+    organizationError.value = `Couldn’t read retained gallery edits. ${String(error)}`;
+  } finally {
+    flushingGalleryOutbox = false;
+  }
 }
 
 /**
@@ -6862,19 +7026,42 @@ async function runLibraryMutation(
   organizationBusy.value = true;
   try {
     const ops = planOrganizationFanout(copies, mutation);
-    const result = await runOrganizationFanout(ops, fanoutHosts(), undefined, {
-      trashHostIds: librarySupport.value.trashHostIds,
-    });
-    if (result.createdCollections.length > 0) {
-      await refreshHostOrganization(result.createdCollections.map((entry) => entry.hostId));
-    }
-    const failedHostIds = new Set(result.failures.map((failure) => failure.hostId));
-    if (result.failures.length > 0) {
-      organizationError.value = fanoutFailureMessage(action, result.failures, (error, name) =>
+    const failures: Array<{ hostId: string; hostName: string; error: unknown }> = [];
+    let retained = 0;
+    await Promise.all(
+      ops.map(async (op) => {
+        const host = connectedHosts.value.find((candidate) => candidate.id === op.hostId);
+        if (!host) {
+          failures.push({ hostId: op.hostId, hostName: op.hostId, error: "Host was removed." });
+          return;
+        }
+        const id = createUuid();
+        if (!host.online) {
+          await retainGalleryOrganizationOp(op, host, id);
+          retained += 1;
+          return;
+        }
+        try {
+          await executeGalleryOrganizationOp(id, op, host);
+        } catch (error) {
+          if (!(error instanceof ApiError)) {
+            await retainGalleryOrganizationOp(op, host, id);
+            retained += 1;
+            return;
+          }
+          failures.push({ hostId: host.id, hostName: host.name, error });
+        }
+      }),
+    );
+    const failedHostIds = new Set(failures.map((failure) => failure.hostId));
+    if (failures.length > 0) {
+      organizationError.value = fanoutFailureMessage(action, failures, (error, name) =>
         describeTransportError(error, name),
       );
+    } else if (retained > 0) {
+      organizationError.value = `${retained} gallery edit${retained === 1 ? " was" : "s were"} retained on this device and will sync when the host returns.`;
     }
-    return { failedHostIds, ok: result.failures.length === 0 };
+    return { failedHostIds, ok: failures.length === 0 };
   } finally {
     organizationBusy.value = false;
   }
@@ -7793,7 +7980,10 @@ async function deleteSelectedGalleryPrints(): Promise<void> {
     ),
     fanoutHosts(),
     undefined,
-    { trashHostIds: librarySupport.value.trashHostIds },
+    {
+      trashHostIds: librarySupport.value.trashHostIds,
+      bulkHostIds: bulkGalleryHostIds(),
+    },
   );
   const failedHostIds = new Set(result.failures.map((failure) => failure.hostId));
   const removedKeys = new Set(
@@ -7835,6 +8025,10 @@ async function deleteSelectedGalleryPrints(): Promise<void> {
           ? `Deleted ${donePrints} of ${selected.length} prints forever.`
           : `Deleted ${donePrints} of ${selected.length} prints everywhere.`;
     galleryError.value = `${verb} ${failedPrints} still have a copy on an unavailable device.`;
+    // A bulk permanent-delete request can lose its response after deleting a
+    // prefix. Re-read every host before preserving failed selections so the
+    // client converges to server truth instead of resurrecting removed tiles.
+    await refreshGallery();
   }
   gallerySelection.value = new Set(
     [...gallerySelection.value].filter((key) =>
@@ -8058,6 +8252,13 @@ watch(
   },
 );
 
+watch(
+  () => connectedHosts.value.map((host) => `${host.id}:${host.online}:${host.instanceId ?? ""}`),
+  (next, previous) => {
+    if (next.join("|") !== previous?.join("|")) void flushGalleryMutationOutbox();
+  },
+);
+
 /**
  * iOS froze this WebView and tore down every socket while the app was
  * backgrounded. On return: probe hosts immediately (instead of waiting out
@@ -8078,6 +8279,7 @@ function handleForegroundResume(): void {
     void invoke("restore_mobile_viewport").catch(() => undefined);
   }
   probeHosts();
+  void flushGalleryMutationOutbox();
   void refreshMobileActivity();
   if (modelLoadError.value && !loadingModels.value) void refreshModels();
   renewGeneratedResult(false);
@@ -8201,6 +8403,10 @@ onMounted(async () => {
   }
   await hydrateApiKeys();
   if (unmounted) return;
+  pendingGalleryMutationCount.value = (await listGalleryMutations()).length;
+  if (pendingGalleryMutationCount.value > 0) {
+    organizationError.value = `${pendingGalleryMutationCount.value} retained gallery edit${pendingGalleryMutationCount.value === 1 ? " is" : "s are"} waiting for its host.`;
+  }
   if ("__TAURI_INTERNALS__" in window) {
     try {
       await listenForPairingDeepLinks();

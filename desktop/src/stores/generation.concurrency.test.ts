@@ -3,12 +3,17 @@ import { flushPromises } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 
 vi.mock("../lib/api/sse", () => ({ sseStream: vi.fn() }));
+vi.mock("../lib/api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/api/client")>()),
+  apiJsonTo: vi.fn(),
+}));
 vi.mock("../lib/notify", () => ({
   notifyGenerated: vi.fn(),
   notifyGenerationFailed: vi.fn(),
 }));
 
 import { sseStream } from "../lib/api/sse";
+import { apiJsonTo } from "../lib/api/client";
 import { runWithConcurrency, useGenerationStore } from "./generation";
 import type { GenerateRequest } from "../lib/api/types";
 
@@ -90,6 +95,7 @@ describe("submitBatch connection cap", () => {
     setActivePinia(createPinia());
     streams.length = 0;
     mockSse.mockReset();
+    vi.mocked(apiJsonTo).mockReset();
     // Each POST parks open until the test resolves it, so we can observe how
     // many held streams the batch opens at once.
     mockSse.mockImplementation((_url, opts) => {
@@ -129,6 +135,58 @@ describe("submitBatch connection cap", () => {
     resolveStream(100);
     await flushPromises();
     expect(streams.map((s) => s.seed).sort()).toEqual([101, 102, 103, 104]);
+  });
+
+  it("retries one committed heterogeneous admission with the same UUID and maps all 30 ids", async () => {
+    const calls: Array<{ path: string; body: string | undefined }> = [];
+    let admissions = 0;
+    vi.mocked(apiJsonTo).mockImplementation(async (_target, path, init) => {
+      calls.push({ path, body: typeof init?.body === "string" ? init.body : undefined });
+      if (path === "/api/generation-batches") {
+        admissions += 1;
+        if (admissions === 1) throw new TypeError("Load failed");
+        return {
+          batch_id: "server-batch",
+          client_batch_id: "client-batch",
+          state: "queued",
+          created_at_ms: 1,
+          updated_at_ms: 1,
+          children: Array.from({ length: 30 }, (_, index) => ({
+            index: index + 1,
+            job_id: `job-${index + 1}`,
+            state: "queued",
+            error: null,
+          })),
+        } as never;
+      }
+      return new Promise<never>(() => {});
+    });
+    const store = useGenerationStore();
+    const { jobs } = store.submitBatch(
+      req,
+      30,
+      {
+        hostId: "hal9000",
+        label: "hal9000",
+        kind: "remote",
+        target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+        heterogeneousBatch: true,
+        heterogeneousBatchMaxOutputs: 64,
+      },
+      null,
+      { batchId: "client-batch" },
+    );
+    await flushPromises();
+    await flushPromises();
+
+    const admissionCalls = calls.filter((call) => call.path === "/api/generation-batches");
+    expect(admissionCalls).toHaveLength(2);
+    expect(admissionCalls[1]!.body).toBe(admissionCalls[0]!.body);
+    expect(JSON.parse(admissionCalls[0]!.body!).client_batch_id).toBe("client-batch");
+    expect(jobs.map((job) => job.id)).toEqual(
+      Array.from({ length: 30 }, (_, index) => `job-${index + 1}`),
+    );
+    expect(mockSse).not.toHaveBeenCalled();
   });
 
   it("holds at most four streams across separate Generate submissions", async () => {

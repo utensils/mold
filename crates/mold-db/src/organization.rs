@@ -123,7 +123,7 @@ pub fn normalize_tag_name(raw: &str) -> OrgResult<Option<String>> {
 
 /// Normalize a list of tag names, dropping empties and case-insensitive
 /// duplicates while preserving first-seen order.
-fn normalize_tag_list(raw: &[String]) -> OrgResult<Vec<String>> {
+pub(crate) fn normalize_tag_list(raw: &[String]) -> OrgResult<Vec<String>> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
     for name in raw {
@@ -139,7 +139,7 @@ fn normalize_tag_list(raw: &[String]) -> OrgResult<Vec<String>> {
 /// Validate a collection name, returning `(normalized name, slug)`.
 /// Delegates to [`mold_core::organization::validate_collection_name`] and
 /// only re-types the error.
-fn validate_collection_name(raw: &str) -> OrgResult<(String, String)> {
+pub(crate) fn validate_collection_name(raw: &str) -> OrgResult<(String, String)> {
     mold_core::organization::validate_collection_name(raw).map_err(OrganizationError::Invalid)
 }
 
@@ -180,14 +180,38 @@ pub(crate) fn generation_id(conn: &Connection, dir_key: &str, filename: &str) ->
 /// Resolve every filename to its row id, failing on the first unknown one.
 fn generation_ids(conn: &Connection, dir_key: &str, filenames: &[String]) -> OrgResult<Vec<i64>> {
     let mut seen = HashSet::new();
-    let mut ids = Vec::with_capacity(filenames.len());
-    for filename in filenames {
-        if !seen.insert(filename.as_str()) {
-            continue;
-        }
-        ids.push(generation_id(conn, dir_key, filename)?);
+    let unique: Vec<&str> = filenames
+        .iter()
+        .map(String::as_str)
+        .filter(|filename| seen.insert(*filename))
+        .collect();
+    if unique.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(ids)
+    // Leave room for output_dir below SQLite's historical 999-variable cap.
+    // Every chunk remains inside the caller's transaction.
+    const LOOKUP_CHUNK: usize = 900;
+    let mut by_name = HashMap::with_capacity(unique.len());
+    for chunk in unique.chunks(LOOKUP_CHUNK) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT filename, id FROM generations WHERE output_dir = ? AND filename IN ({placeholders})"
+        );
+        let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+        values.push(&dir_key);
+        values.extend(chunk.iter().map(|name| name as &dyn rusqlite::ToSql));
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(values.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        by_name.extend(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?);
+    }
+    if by_name.len() != unique.len() {
+        return Err(OrganizationError::NotFound);
+    }
+    Ok(unique.iter().map(|filename| by_name[*filename]).collect())
 }
 
 /// Find-or-create a tag by (already normalized) name; returns its id.
@@ -318,7 +342,7 @@ fn dedupe_case_insensitively(names: Vec<String>) -> Vec<String> {
 /// the caller's transaction, returning its new id. Loses a race to a
 /// concurrent creator gracefully by adopting the winner's row — the slug is
 /// the identity, so either row is the right answer.
-fn create_collection_with_conn(
+pub(crate) fn create_collection_with_conn(
     conn: &Connection,
     name: &str,
     slug: &str,
@@ -1027,6 +1051,35 @@ impl MetadataDb {
         })
     }
 
+    /// Apply distinct title edits and one common organization mutation in a
+    /// single transaction. Used by the idempotent bulk mutation endpoint.
+    pub fn mutate_bulk(
+        &self,
+        dir: &Path,
+        titles: &[(String, Option<String>)],
+        filenames: &[String],
+        op: BulkOrganize<'_>,
+    ) -> OrgResult<()> {
+        let dir_key = canonical_dir_string(dir);
+        let add_tags = op.add_tags.map(normalize_tag_list).transpose()?;
+        let remove_tags = op.remove_tags.map(normalize_tag_list).transpose()?;
+        let now = now_ms();
+        self.transact_typed(|conn| {
+            mutate_bulk_on_conn(
+                conn,
+                &dir_key,
+                titles,
+                filenames,
+                op.favorite,
+                add_tags.as_deref(),
+                remove_tags.as_deref(),
+                op.add_to_collections,
+                op.remove_from_collections,
+                now,
+            )
+        })
+    }
+
     /// Slugs of every collection a print belongs to, sorted. Used to build
     /// trash tombstones, which carry slugs rather than ids so a different
     /// host (or a rebuilt DB) can re-home the print by name.
@@ -1043,6 +1096,65 @@ impl MetadataDb {
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn mutate_bulk_on_conn(
+    conn: &Connection,
+    dir_key: &str,
+    titles: &[(String, Option<String>)],
+    filenames: &[String],
+    favorite: Option<bool>,
+    add_tags: Option<&[String]>,
+    remove_tags: Option<&[String]>,
+    add_to_collections: Option<&[String]>,
+    remove_from_collections: Option<&[String]>,
+    now: i64,
+) -> OrgResult<()> {
+    let ids = generation_ids(conn, dir_key, filenames)?;
+    let title_names = titles
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    generation_ids(conn, dir_key, &title_names)?;
+    for (filename, title) in titles {
+        conn.execute(
+            "UPDATE generations SET title = ?3 WHERE output_dir = ?1 AND filename = ?2",
+            params![dir_key, filename, normalize_title(title.as_deref())],
+        )?;
+    }
+    if let Some(favorite) = favorite {
+        for id in &ids {
+            conn.execute(
+                "UPDATE generations SET favorite = ?2 WHERE id = ?1",
+                params![id, favorite as i64],
+            )?;
+        }
+    }
+    if let Some(names) = add_tags {
+        for id in &ids {
+            attach_tags(conn, *id, names, now)?;
+        }
+    }
+    if let Some(names) = remove_tags {
+        for id in &ids {
+            detach_tags(conn, *id, names)?;
+        }
+    }
+    if let Some(collections) = add_to_collections {
+        for cid in collections {
+            collection_add_ids(conn, cid, &ids, now)?;
+        }
+    }
+    if let Some(collections) = remove_from_collections {
+        for cid in collections {
+            collection_remove_ids(conn, cid, &ids, now)?;
+        }
+    }
+    if remove_tags.is_some() {
+        gc_orphan_tags(conn)?;
+    }
+    Ok(())
 }
 
 fn tags_for_generation(conn: &Connection, generation_id: i64) -> OrgResult<Vec<String>> {
@@ -1531,6 +1643,37 @@ mod tests {
                 .unwrap()
                 .favorite
         );
+    }
+
+    #[test]
+    fn organize_bulk_chunks_more_than_sqlites_legacy_bind_limit() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let names = (0..1_200)
+            .map(|index| format!("large-{index}.png"))
+            .collect::<Vec<_>>();
+        for name in &names {
+            db.upsert(&GenerationRecord::from_save(
+                dir(),
+                name,
+                OutputFormat::Png,
+                meta(),
+                RecordSource::Server,
+                1,
+            ))
+            .unwrap();
+        }
+        db.organize_bulk(
+            dir(),
+            &names,
+            BulkOrganize {
+                favorite: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let organized = db.organization_for_dir(dir()).unwrap();
+        assert_eq!(organized.len(), names.len());
+        assert!(organized.values().all(|row| row.favorite));
     }
 
     #[test]

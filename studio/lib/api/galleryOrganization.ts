@@ -76,6 +76,8 @@ export interface GalleryCapabilitiesWire {
   trash?: GalleryTrashCapabilities | null;
   /** Titles / favorites / tags / collections are available. */
   organize?: boolean;
+  /** Replay-safe bulk organization endpoint. */
+  bulk_mutations?: boolean;
 }
 
 /** `PATCH /api/gallery/image/:filename` body. Every field is optional; an
@@ -100,6 +102,28 @@ export interface GalleryOrganizeRequest {
   add_to_collections?: string[] | null;
   /** Collection ids. */
   remove_from_collections?: string[] | null;
+}
+
+export interface GalleryTitleAssignment {
+  filename: string;
+  title: string;
+}
+
+export interface GalleryBulkMutationRequest {
+  operation_id: string;
+  filenames: string[];
+  titles?: GalleryTitleAssignment[];
+  favorite?: boolean;
+  add_tags?: string[];
+  remove_tags?: string[];
+  add_to_collection?: { id?: string; name?: string };
+  remove_from_collection_slug?: string;
+}
+
+export interface GalleryBulkMutationResult {
+  operation_id: string;
+  changed: number;
+  revision: number;
 }
 
 /** `POST /api/gallery/collections` body. */

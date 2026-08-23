@@ -12,6 +12,8 @@ import type {
   CollectionUpdateRequest,
   EmptyTrashResult,
   GalleryEntryWire,
+  GalleryBulkMutationRequest,
+  GalleryBulkMutationResult,
   GalleryOrganizeRequest,
   GalleryPatchRequest,
   GalleryView,
@@ -73,6 +75,22 @@ export async function organizeGallery(
     headers: JSON_HEADERS,
     body: JSON.stringify(body),
   });
+}
+
+/** Replay-safe bulk titles/tags/favorites/collection membership. */
+export function mutateGalleryBulk(
+  target: ApiTarget,
+  body: GalleryBulkMutationRequest,
+): Promise<GalleryBulkMutationResult> {
+  return apiJsonTo<GalleryBulkMutationResult>(
+    target,
+    "/api/gallery/mutations",
+    {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify(body),
+    },
+  );
 }
 
 // ── Collections ─────────────────────────────────────────────────────────────
@@ -211,6 +229,20 @@ export async function deleteGalleryImageForever(
     `/api/gallery/image/${encodePath(filename)}?permanent=true`,
     { method: "DELETE" },
   );
+}
+
+/** `POST /api/gallery/trash/delete-forever {filenames}` — one destructive
+ * request for a confirmed selection on a bulk-capable host. */
+export async function deleteManyForever(
+  target: ApiTarget,
+  filenames: string[],
+): Promise<void> {
+  const body: TrashFilenamesRequest = { filenames };
+  await apiFetchTo(target, "/api/gallery/trash/delete-forever", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(body),
+  });
 }
 
 /** `POST /api/gallery/trash {filenames}` — bulk move to trash. */

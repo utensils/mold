@@ -203,6 +203,8 @@ export interface GalleryCapabilities {
   can_delete?: boolean;
   trash?: GalleryTrashCapabilities | null;
   organize?: boolean;
+  /** Replay-safe titles/tags/favorites/collection and permanent-delete batches. */
+  bulk_mutations?: boolean;
 }
 
 // Mirror of `mold_core::ServerCapabilities`.

@@ -6,6 +6,11 @@ import type { Collection, GalleryImage } from "../types";
 const api = vi.hoisted(() => ({
   patchGalleryImage: vi.fn(async () => null),
   organizeGallery: vi.fn(async () => undefined),
+  mutateGalleryBulk: vi.fn(async () => ({
+    operation_id: "op",
+    changed: 1,
+    revision: 1,
+  })),
   createCollection: vi.fn(async (_t: unknown, body: { name: string }) => ({
     id: `new-${body.name}`,
     name: body.name,
@@ -22,6 +27,7 @@ const api = vi.hoisted(() => ({
   trashMany: vi.fn(async () => undefined),
   restoreTrashed: vi.fn(async () => undefined),
   deleteGalleryImageForever: vi.fn(async () => undefined),
+  deleteManyForever: vi.fn(async () => undefined),
   emptyTrash: vi.fn(async () => ({ purged: 2 })),
   listCollections: vi.fn(async () => []),
   listTags: vi.fn(async () => []),
@@ -103,6 +109,7 @@ function snapshot(
     hostId,
     hostLabel: hostId,
     organize: true,
+    bulkMutations: false,
     trash: { enabled: true, retentionDays: 30 },
     collections: [],
     tags: [],
@@ -418,6 +425,40 @@ describe("mutations fan out to every copy's host", () => {
       filenames: ["twin.png", "other.png"],
       favorite: true,
     });
+  });
+
+  it("uses one replay-safe request per modern host for title selections and permanent delete", async () => {
+    const context = {
+      hostById,
+      snapshots: [
+        snapshot("origin", { bulkMutations: true }),
+        snapshot("plato", { bulkMutations: true }),
+      ],
+    };
+    await applyOrganizationMutation(
+      copies,
+      { kind: "setTitle", title: "Twin" },
+      context,
+    );
+    expect(api.mutateGalleryBulk).toHaveBeenCalledTimes(2);
+    expect(api.mutateGalleryBulk).toHaveBeenCalledWith(
+      platoTarget,
+      expect.objectContaining({
+        filenames: [],
+        titles: [
+          { filename: "twin.png", title: "Twin" },
+          { filename: "other.png", title: "Twin" },
+        ],
+      }),
+    );
+
+    await applyOrganizationMutation(copies, { kind: "deleteForever" }, context);
+    expect(api.deleteManyForever).toHaveBeenCalledTimes(2);
+    expect(api.deleteManyForever).toHaveBeenCalledWith(platoTarget, [
+      "twin.png",
+      "other.png",
+    ]);
+    expect(api.deleteGalleryImageForever).not.toHaveBeenCalled();
   });
 
   it("creates a missing collection by name before adding, reusing an existing one by slug", async () => {
