@@ -6108,6 +6108,26 @@ describe("MobileApp create settings reset", () => {
     expect(wrapper.find("[data-test='mobile-advanced-trigger-count']").exists()).toBe(false);
   });
 
+  it("does not badge the general Batch setting as Advanced", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const batch = wrapper.get("[data-test='mobile-batch-value']");
+    await batch.setValue("30");
+    await batch.trigger("change");
+    await flushPromises();
+
+    expect(batch.attributes("value")).toBe("30");
+    expect(wrapper.find("[data-test='mobile-advanced-trigger-count']").exists()).toBe(false);
+
+    await fieldControl("Negative prompt").setValue("anime, cartoon, graphic, washed out");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-advanced-trigger-count']").text()).toBe("1");
+
+    await wrapper.get("[data-test='mobile-open-advanced']").trigger("click");
+    expect(wrapper.get("[data-test='mobile-advanced-count']").text()).toBe("1");
+  });
+
   it("keeps generated audio in the primary Create settings", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
