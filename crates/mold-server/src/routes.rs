@@ -1933,6 +1933,15 @@ fn record_prompt_history(state: &AppState, prompt: &str, negative: Option<&str>,
     let Some(db) = state.metadata_db.as_ref().as_ref() else {
         return;
     };
+    record_prompt_history_in_db(db, prompt, negative, model);
+}
+
+fn record_prompt_history_in_db(
+    db: &mold_db::MetadataDb,
+    prompt: &str,
+    negative: Option<&str>,
+    model: &str,
+) {
     // Video requests may legitimately carry no prompt at all; there is nothing
     // to recall later, so keep those rows out of history entirely (same rule as
     // the TUI's `History::push_entry`).
@@ -2256,6 +2265,20 @@ async fn admit_generation_batch(
             "requests must contain 1..={MAX_HETEROGENEOUS_BATCH_OUTPUTS} children"
         )));
     }
+    // Capture the request as received before canonicalization and default
+    // materialization mutate it. History is a user-input recall surface, not
+    // a record of the scheduler's durable execution payload.
+    let typed_history = body
+        .requests
+        .iter()
+        .map(|request| {
+            (
+                request.prompt.clone(),
+                request.negative_prompt.clone(),
+                request.model.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
     let count = body.requests.len() as u32;
     for (offset, request) in body.requests.iter_mut().enumerate() {
         mold_core::minimax_h3::canonicalize_request_model(request);
@@ -2351,6 +2374,7 @@ async fn admit_generation_batch(
     let journal = state.queue_journal.clone();
     let batch_id_for_db = batch_id.clone();
     let client_batch_id = body.client_batch_id.clone();
+    let metadata_db = state.metadata_db.clone();
     let (detail, inserted) = tokio::task::spawn_blocking(move || {
         let admissions = admitted_children
             .iter()
@@ -2367,12 +2391,20 @@ async fn admit_generation_batch(
                 },
             )
             .collect::<Vec<_>>();
-        journal.record_batch(crate::queue_journal::BatchJournalAdmission {
+        let outcome = journal.record_batch(crate::queue_journal::BatchJournalAdmission {
             id: &batch_id_for_db,
             client_batch_id: &client_batch_id,
             request_sha256: &request_sha256,
             children: &admissions,
-        })
+        })?;
+        if outcome.1 {
+            if let Some(db) = metadata_db.as_ref().as_ref() {
+                for (prompt, negative, model) in &typed_history {
+                    record_prompt_history_in_db(db, prompt, negative.as_deref(), model);
+                }
+            }
+        }
+        Ok::<_, String>(outcome)
     })
     .await
     .map_err(|error| ApiError::internal(format!("generation batch DB task failed: {error}")))?

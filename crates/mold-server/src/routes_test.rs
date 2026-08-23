@@ -4518,6 +4518,104 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn heterogeneous_batch_records_typed_prompt_history_after_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
+        install_authoritative_v2(&mut state);
+        let app = app_with_state(state);
+
+        let mut first: serde_json::Value = serde_json::from_str(&generate_body_for_model(
+            "  first prompt exactly as typed  ",
+            "not-installed-at-admission",
+            512,
+            512,
+        ))
+        .unwrap();
+        first["negative_prompt"] = serde_json::json!("  literal negative prompt  ");
+        let duplicate = first.clone();
+        let second: serde_json::Value =
+            serde_json::from_str(&generate_body("second prompt", 512, 512)).unwrap();
+        let response = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [first, duplicate, second],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let history = mold_db::PromptHistory::new(db.as_ref().as_ref().unwrap());
+        let entries = history.recent(10).unwrap();
+        assert_eq!(entries.len(), 2, "consecutive identical siblings dedupe");
+        assert_eq!(entries[0].prompt, "second prompt");
+        assert_eq!(entries[0].negative, None);
+        assert_eq!(entries[0].model, "mock-model");
+        assert_eq!(entries[1].prompt, "  first prompt exactly as typed  ");
+        assert_eq!(
+            entries[1].negative.as_deref(),
+            Some("  literal negative prompt  ")
+        );
+        assert_eq!(entries[1].model, "not-installed-at-admission");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn heterogeneous_batch_idempotent_retry_does_not_record_history_again() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
+        install_authoritative_v2(&mut state);
+        let app = app_with_state(state);
+        let body = serde_json::json!({
+            "client_batch_id": uuid::Uuid::new_v4().to_string(),
+            "requests": [serde_json::from_str::<serde_json::Value>(
+                &generate_body("durable batch prompt", 512, 512)
+            ).unwrap()],
+        });
+
+        let admitted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+
+        let history = mold_db::PromptHistory::new(db.as_ref().as_ref().unwrap());
+        history
+            .push(&mold_db::HistoryEntry::new(
+                "intervening prompt",
+                "mock-model",
+            ))
+            .unwrap();
+
+        let retry = app
+            .oneshot(json_request("POST", "/api/generation-batches", body))
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        assert_eq!(
+            history
+                .recent(10)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.prompt)
+                .collect::<Vec<_>>(),
+            vec![
+                "intervening prompt".to_string(),
+                "durable batch prompt".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn bulk_cancel_terminalizes_every_unhydrated_batch_child() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
