@@ -272,7 +272,8 @@ pub fn set_child_state(
         Ok(conn.execute(
             "UPDATE generation_batch_children
                 SET state = ?2, error = ?3, updated_at_ms = ?4
-              WHERE job_id = ?1",
+              WHERE job_id = ?1
+                AND state NOT IN ('cancelling', 'complete', 'failed', 'cancelled')",
             params![job_id, state, error, updated_at_ms],
         )? > 0)
     })
@@ -1391,6 +1392,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cancelled, OwnedCancellation::Requested);
+        assert!(
+            !set_child_state(&db, "job-0", "running", None, 3).unwrap(),
+            "a late nonterminal mirror must not erase cancellation intent"
+        );
 
         let committed = finish_claimed(
             &db,
