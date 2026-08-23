@@ -3,7 +3,9 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { parseDeviceListResponse, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
 import {
   cancelQueueJob,
-  parseQueueListing,
+  listQueue,
+  mergeQueueEntries,
+  queuePageRequestForCapacity,
   setQueueDevicePin,
   type QueuePlan,
 } from "@studio/api/queuePlan";
@@ -77,6 +79,12 @@ const installed = ref<ModelEntry[]>([]);
 const queue = ref<QueueEntry[]>([]);
 const queuePlan = ref<QueuePlan | null>(null);
 const queueApiAvailable = ref(false);
+const queueTail = ref<QueueEntry[]>([]);
+const queuePageLimit = ref<number | null>(null);
+const queueNextCursor = ref<string | null>(null);
+const queueContinued = ref(false);
+const loadingMoreQueue = ref(false);
+const loadMoreQueueError = ref("");
 const downloads = ref<DownloadsState>(emptyDownloadsState());
 const loading = ref(false);
 const error = ref("");
@@ -171,15 +179,37 @@ async function refreshQueue(epoch = loadEpoch): Promise<void> {
   const generation = ++queueRequestGeneration;
   const requestTarget = target.value;
   try {
-    const listing = parseQueueListing(await apiJsonTo<unknown>(requestTarget, "/api/queue"));
+    const listing = await listQueue(
+      requestTarget,
+      queuePageRequestForCapacity(status.value?.queue_capacity) ?? null,
+    );
     if (
       epoch === loadEpoch &&
       generation === queueRequestGeneration &&
       requestTarget.baseUrl === target.value.baseUrl &&
       requestTarget.apiKey === target.value.apiKey
     ) {
-      queue.value = listing.entries as QueueEntry[];
+      const head = mergeQueueEntries(
+        listing.entries,
+        listing.live_only_entries ?? [],
+      ) as QueueEntry[];
+      const seen = new Set<string>();
+      queue.value = [...head, ...(listing.page ? queueTail.value : [])].filter(({ id }) => {
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
       queuePlan.value = listing.plan;
+      queuePageLimit.value = listing.page?.limit ?? null;
+      queueNextCursor.value = listing.page
+        ? queueContinued.value && queueNextCursor.value
+          ? queueNextCursor.value
+          : (listing.page.next_cursor ?? null)
+        : null;
+      if (!listing.page) {
+        queueTail.value = [];
+        queueContinued.value = false;
+      }
       queueApiAvailable.value = true;
     }
   } catch {
@@ -195,6 +225,46 @@ async function refreshQueue(epoch = loadEpoch): Promise<void> {
       queuePlan.value = null;
       queueApiAvailable.value = false;
     }
+  }
+}
+
+async function loadMoreQueue(): Promise<void> {
+  const cursor = queueNextCursor.value;
+  const limit = queuePageLimit.value;
+  if (!cursor || !limit || loadingMoreQueue.value) return;
+  loadingMoreQueue.value = true;
+  loadMoreQueueError.value = "";
+  const epoch = loadEpoch;
+  const requestTarget = target.value;
+  try {
+    const listing = await listQueue(requestTarget, { limit, cursor });
+    if (
+      epoch !== loadEpoch ||
+      queueNextCursor.value !== cursor ||
+      requestTarget.baseUrl !== target.value.baseUrl ||
+      requestTarget.apiKey !== target.value.apiKey
+    )
+      return;
+    const seenTail = new Set(queueTail.value.map(({ id }) => id));
+    queueTail.value = [
+      ...queueTail.value,
+      ...(listing.entries as QueueEntry[]).filter(({ id }) => !seenTail.has(id)),
+    ];
+    const seen = new Set<string>();
+    queue.value = [...queue.value, ...queueTail.value, ...(listing.live_only_entries ?? [])].filter(
+      ({ id }) => {
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      },
+    ) as QueueEntry[];
+    queueNextCursor.value = listing.page?.next_cursor ?? null;
+    queueContinued.value = listing.page !== undefined;
+    queuePlan.value = listing.plan ?? queuePlan.value;
+  } catch (error) {
+    loadMoreQueueError.value = describeTransportError(error, props.host.name);
+  } finally {
+    loadingMoreQueue.value = false;
   }
 }
 
@@ -451,6 +521,12 @@ async function loadHost(): Promise<void> {
   queue.value = [];
   queuePlan.value = null;
   queueApiAvailable.value = false;
+  queueTail.value = [];
+  queuePageLimit.value = null;
+  queueNextCursor.value = null;
+  queueContinued.value = false;
+  loadingMoreQueue.value = false;
+  loadMoreQueueError.value = "";
   downloads.value = emptyDownloadsState();
   renameValue.value = props.host.name;
   renaming.value = false;
@@ -872,6 +948,19 @@ onBeforeUnmount(() => {
           </li>
         </ul>
         <p v-else class="mobile-empty-note">Queue is empty.</p>
+        <button
+          v-if="queueNextCursor"
+          type="button"
+          class="secondary-button mobile-host-queue-more"
+          data-test="host-detail-queue-load-more"
+          :disabled="loadingMoreQueue"
+          @click="loadMoreQueue"
+        >
+          {{ loadingMoreQueue ? "Loading…" : "Load more jobs" }}
+        </button>
+        <p v-if="loadMoreQueueError" class="status-line error-text" role="alert">
+          {{ loadMoreQueueError }}
+        </p>
 
         <div v-if="loadedModels.length" class="mobile-chip-list" aria-label="Loaded models">
           <span v-for="model in loadedModels" :key="model" class="mobile-model-chip">

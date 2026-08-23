@@ -109,6 +109,17 @@ describe("HostQueuePanel", () => {
     expect(wrapper.get("[data-test='queue-empty']").text()).toBe("Nothing queued");
   });
 
+  it("offers explicit continuation when the host has another durable page", async () => {
+    const { wrapper, jobs } = await mountPanel([], [queued("srv-0", 1, 0)]);
+    jobs.queues.local!.pageLimit = 1;
+    jobs.queues.local!.nextCursor = "next";
+    const loadMore = vi.spyOn(jobs, "loadMoreHost").mockResolvedValue(undefined);
+    await flushPromises();
+
+    await wrapper.get("[data-test='queue-load-more']").trigger("click");
+    expect(loadMore).toHaveBeenCalledWith("local");
+  });
+
   it("shows scheduler-only work instead of an empty queue", async () => {
     const { wrapper } = await mountPanel([], [], {
       plan_version: 1,

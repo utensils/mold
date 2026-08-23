@@ -155,6 +155,7 @@ describe("hostClient auth + requests", () => {
           page: { limit: 17, offset: 0, returned: 0 },
         }),
       )
+      .mockResolvedValueOnce(ok({ queue_depth: 0 }))
       .mockResolvedValueOnce(ok({ entries: [], plan: null }));
 
     await hostQueue(remote, undefined, { limit: 17 });
@@ -162,6 +163,7 @@ describe("hostClient auth + requests", () => {
 
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       "http://192.168.1.20:7680/api/queue?limit=17",
+      "http://192.168.1.20:7680/api/status",
       "http://192.168.1.20:7680/api/queue",
     ]);
   });

@@ -14,7 +14,12 @@ import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
-import { setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
+import {
+  mergeQueueEntries,
+  queuePageRequestForCapacity,
+  setQueueDevicePin,
+  type QueuePlan,
+} from "@studio/api/queuePlan";
 import { hostMemoryLevel } from "@studio/lib/hostMemory";
 import {
   modelDisplayName,
@@ -79,6 +84,12 @@ const hostName = ref(host.value?.name ?? "");
 const caps = ref<HostCapabilities | null>(null);
 const queue = ref<QueueEntry[]>([]);
 const queuePlan = ref<QueuePlan | null>(null);
+const queueTail = ref<QueueEntry[]>([]);
+const queuePageLimit = ref<number | null>(null);
+const queueNextCursor = ref<string | null>(null);
+const queueContinued = ref(false);
+const loadingMoreQueue = ref(false);
+const loadMoreQueueError = ref("");
 const cancellingIds = ref<string[]>([]);
 const mutatingDeviceIds = ref(new Set<string>());
 const models = ref<ModelInfoExtended[]>([]);
@@ -190,16 +201,80 @@ async function reloadQueue(
   if (!entry) return;
   const generation = ++queueRequestGeneration;
   try {
-    const listing = await hostQueue(entry, signal);
+    const page = queuePageRequestForCapacity(poll.status.value?.queue_capacity);
+    const listing = page
+      ? await hostQueue(entry, signal, page)
+      : await hostQueue(entry, signal);
     if (
       generation === queueRequestGeneration &&
       isCurrentSession(entry, epoch)
     ) {
-      queue.value = listing.entries;
+      const head = mergeQueueEntries(
+        listing.entries,
+        listing.live_only_entries ?? [],
+      ) as QueueEntry[];
+      const seen = new Set<string>();
+      queue.value = [...head, ...(listing.page ? queueTail.value : [])].filter(
+        ({ id }) => !seen.has(id) && !!seen.add(id),
+      );
       queuePlan.value = listing.plan ?? null;
+      queuePageLimit.value = listing.page?.limit ?? null;
+      queueNextCursor.value = listing.page
+        ? queueContinued.value && queueNextCursor.value
+          ? queueNextCursor.value
+          : (listing.page.next_cursor ?? null)
+        : null;
+      if (!listing.page) {
+        queueTail.value = [];
+        queueContinued.value = false;
+      }
+      loadMoreQueueError.value = "";
     }
   } catch {
     // Keep the last-good queue; the reconnecting banner covers the failure.
+  }
+}
+
+async function loadMoreQueue() {
+  const entry = host.value;
+  const cursor = queueNextCursor.value;
+  const limit = queuePageLimit.value;
+  if (!entry || !cursor || !limit || loadingMoreQueue.value) return;
+  loadingMoreQueue.value = true;
+  loadMoreQueueError.value = "";
+  const epoch = sessionEpoch;
+  try {
+    const listing = await hostQueue(entry, undefined, { limit, cursor });
+    if (!isCurrentSession(entry, epoch) || queueNextCursor.value !== cursor)
+      return;
+    if (!listing.page) {
+      queue.value = listing.entries;
+      queueTail.value = [];
+      queuePageLimit.value = null;
+      queueNextCursor.value = null;
+      queueContinued.value = false;
+      return;
+    }
+    const seenTail = new Set(queueTail.value.map(({ id }) => id));
+    queueTail.value = [
+      ...queueTail.value,
+      ...(listing.entries as QueueEntry[]).filter(
+        ({ id }) => !seenTail.has(id),
+      ),
+    ];
+    const seen = new Set<string>();
+    queue.value = [
+      ...queue.value,
+      ...queueTail.value,
+      ...(listing.live_only_entries ?? []),
+    ].filter(({ id }) => !seen.has(id) && !!seen.add(id)) as QueueEntry[];
+    queueNextCursor.value = listing.page.next_cursor ?? null;
+    queueContinued.value = true;
+    queuePlan.value = listing.plan ?? queuePlan.value;
+  } catch (error) {
+    loadMoreQueueError.value = errMsg(error);
+  } finally {
+    loadingMoreQueue.value = false;
   }
 }
 
@@ -634,6 +709,11 @@ function startHostSession() {
   caps.value = null;
   queue.value = [];
   queuePlan.value = null;
+  queueTail.value = [];
+  queuePageLimit.value = null;
+  queueNextCursor.value = null;
+  queueContinued.value = false;
+  loadMoreQueueError.value = "";
   models.value = [];
   downloads.value = [];
   hostName.value = host.value?.name ?? "";
@@ -968,6 +1048,19 @@ onBeforeUnmount(() => {
           @toggle-pause="onTogglePause"
           @cancel-all="onCancelAll"
         />
+        <button
+          v-if="queueNextCursor"
+          type="button"
+          class="md-library__empty mt-2"
+          data-test="queue-load-more"
+          :disabled="loadingMoreQueue || offline"
+          @click="loadMoreQueue"
+        >
+          {{ loadingMoreQueue ? "Loading…" : "Load more jobs" }}
+        </button>
+        <p v-if="loadMoreQueueError" class="error-text" role="alert">
+          {{ loadMoreQueueError }}
+        </p>
       </div>
 
       <CardSurface

@@ -1219,11 +1219,15 @@ export const useGenerationStore = defineStore("generation", {
         group.jobs.push(job);
         groups.set(key, group);
       }
+      const hostStore = useHostsStore();
       await Promise.all(
         [...groups.values()].map((group) =>
           reconcileInterruptedGenerationJobs(group.jobs, {
             target: { ...group.target },
             hostLabel: group.label,
+            queueCapacity:
+              hostStore.telemetry[group.jobs[0]?.hostId ?? hostStore.primaryHost?.id ?? ""]
+                ?.queueCapacity,
             chain: group.jobs.some((job) => chainRoutes.has(job.clientId)),
             refreshResultUrl: (clientId) =>
               void this.refreshRemoteResultUrl(clientId).catch(() => {

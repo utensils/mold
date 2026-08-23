@@ -104,6 +104,7 @@ function options(overrides: Record<string, unknown> = {}) {
   return {
     target,
     hostLabel: "Studio",
+    queueCapacity: null,
     refreshResultUrl: vi.fn(),
     pollIntervalMs: 0,
     sleep: () => Promise.resolve(),
@@ -928,6 +929,22 @@ describe("reconcileInterruptedGenerationJobs", () => {
     expect(job.error).toBe(
       "The connection to Studio was interrupted and this print didn’t finish.",
     );
+  });
+
+  it("reads status before recovery when capacity is not yet cached", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve({ queue_capacity: 3 });
+      if (path === "/api/queue?limit=3") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+
+    await reconcileInterruptedGenerationJobs([makeJob()], options({ queueCapacity: undefined }));
+
+    expect(apiJsonTo.mock.calls.slice(0, 2).map((call) => call[1])).toEqual([
+      "/api/status",
+      "/api/queue?limit=3",
+    ]);
   });
 
   it("releases the server id when it gives up, so the host's own row can surface", async () => {

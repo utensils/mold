@@ -162,7 +162,12 @@ import {
   type ActivityHostSnapshot,
   type FleetActiveWork,
 } from "@studio/api/activity";
-import { listQueue, type QueueListing } from "@studio/api/queuePlan";
+import {
+  listQueue,
+  mergeQueueEntries,
+  queuePageRequestForCapacity,
+  type QueueListing,
+} from "@studio/api/queuePlan";
 import { admitGenerationBatch, reconcileGenerationBatches } from "@studio/api/generationAdmission";
 import {
   selectedQueueGeneration,
@@ -1069,6 +1074,10 @@ interface HostTelemetry {
   vramUsedMb: number | null;
   vramTotalMb: number | null;
   queueDepth: number | null;
+  /** Runtime queue capacity is the server's authority for one hot queue page.
+   * `null` means a legacy status response; an absent telemetry row means the
+   * host has not answered status yet and queue polling must wait. */
+  queueCapacity: number | null;
   /** `gpu_info.backend` as this machine reported it; null on servers ≤ 0.16,
    *  where the routing ladder falls back to inferring it from the GPU name. */
   gpuBackend: string | null;
@@ -1098,8 +1107,22 @@ function captureHostTelemetry(hostId: string, status: ServerStatus): void {
     vramUsedMb: memory?.usedMb ?? null,
     vramTotalMb: memory?.totalMb ?? null,
     queueDepth: status.queue_depth ?? null,
+    queueCapacity: status.queue_capacity ?? null,
     gpuBackend: status.gpu_info?.backend ?? null,
     gpuName: status.gpu_info?.name ?? null,
+  };
+}
+
+async function listMobileQueue(host: MobileHost, target: ApiTarget): Promise<QueueListing | null> {
+  const telemetry = hostTelemetry[host.id];
+  if (!telemetry) return null;
+  const listing = await listQueue(
+    target,
+    queuePageRequestForCapacity(telemetry.queueCapacity) ?? null,
+  );
+  return {
+    ...listing,
+    entries: mergeQueueEntries(listing.entries, listing.live_only_entries ?? []),
   };
 }
 
@@ -2285,13 +2308,17 @@ async function openMobileLiveWork(row: FleetActiveWork): Promise<void> {
       if (current.instance_id !== snapshot.instanceId) {
         throw new Error("This queue item belongs to a different Mold server instance.");
       }
+      captureHostTelemetry(host.id, current);
     };
     await verifyAuthority();
     if (epoch !== mobileLiveWorkSelectionEpoch) return;
 
     if (row.kind === "generation") {
-      const queue = await listQueue(target);
+      const queue = await listMobileQueue(host, target);
       if (epoch !== mobileLiveWorkSelectionEpoch) return;
+      if (!queue) {
+        throw new Error("This host has not reported its queue capacity yet.");
+      }
       await verifyAuthority();
       if (epoch !== mobileLiveWorkSelectionEpoch) return;
       const selection = selectedQueueGeneration<OutputMetadata>(queue.entries, row.id);
@@ -3194,7 +3221,7 @@ async function refreshMobileActivity(): Promise<void> {
           (async (): Promise<QueueListing | null> => {
             try {
               if (!host.online) return null;
-              return await listQueue(route.target);
+              return await listMobileQueue(host, route.target);
             } catch {
               return previousQueue;
             }
@@ -5978,6 +6005,7 @@ async function generate(): Promise<void> {
     await reconcileInterruptedGenerationJobs(jobs, {
       target: { ...route.target },
       hostLabel: route.label,
+      queueCapacity: hostTelemetry[route.hostId]?.queueCapacity,
       chain: chainRouting.kind === "chain",
       refreshResultUrl: (clientId) =>
         void generation.refreshRemoteResultUrl(clientId).catch(() => {

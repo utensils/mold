@@ -178,7 +178,6 @@ import {
   loadLastSeed,
   storeLastSeed,
 } from "../lib/lastSeed";
-import { useQueue } from "../composables/useQueue";
 import { useLiveActivity } from "../composables/useLiveActivity";
 import { useOpenLiveWork } from "../composables/useOpenLiveWork";
 import { ORIGIN_HOST_ID, listHosts } from "../lib/hostRegistry";
@@ -297,7 +296,6 @@ const form = useGenerateForm();
 const pageRoute = useRoute();
 const router = useRouter();
 const { status } = useStatusPoll();
-const queue = useQueue();
 const routing = useHostRouting();
 const licenseAcceptance = useLicenseAcceptance();
 const installTargets = useModelInstallTargets();
@@ -4803,7 +4801,6 @@ onBeforeUnmount(() => {
   window.removeEventListener("mold:new-print", onNewPrint);
   document.removeEventListener("pointerdown", onTemplatesPointerDown);
   document.removeEventListener("keydown", onTemplatesKeydown);
-  queue.stop();
 });
 </script>
 

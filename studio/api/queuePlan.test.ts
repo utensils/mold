@@ -6,6 +6,7 @@ import {
   mergeQueueEntries,
   parseQueueListing,
   predictedCompletionUnixMs,
+  queuePageRequestForCapacity,
   reduceQueuePlanEvent,
   setQueueDevicePin,
   type QueuePlan,
@@ -15,6 +16,20 @@ import {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("queue plan contract", () => {
+  it("derives queue page size only from a positive host capacity", () => {
+    expect(queuePageRequestForCapacity(8)).toEqual({ limit: 8 });
+    for (const value of [
+      undefined,
+      null,
+      0,
+      -1,
+      1.5,
+      Number.POSITIVE_INFINITY,
+      "8",
+    ]) {
+      expect(queuePageRequestForCapacity(value)).toBeUndefined();
+    }
+  });
   const plan = (finish: number | null): QueuePlan => ({
     plan_version: 1,
     state_version: 1,
@@ -148,7 +163,10 @@ describe("queue plan contract", () => {
   });
 
   it("keeps the legacy listQueue URL and authenticated target unchanged", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(Response.json({ entries: [] }));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ queue_depth: 0 }))
+      .mockResolvedValueOnce(Response.json({ entries: [] }));
     vi.stubGlobal("fetch", fetchMock);
 
     await listQueue({ baseUrl: "https://gpu.example", apiKey: "secret" });
@@ -159,8 +177,29 @@ describe("queue plan contract", () => {
         headers: expect.any(Headers),
       }),
     );
-    const headers = fetchMock.mock.calls[0]?.[1]?.headers as Headers;
+    const headers = fetchMock.mock.calls[1]?.[1]?.headers as Headers;
     expect(headers.get("x-api-key")).toBe("secret");
+  });
+
+  it("defaults current hosts to a page derived from their reported queue capacity", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ queue_capacity: 4 }))
+      .mockResolvedValueOnce(
+        Response.json({
+          entries: [],
+          live_only_entries: [],
+          page: { limit: 4, offset: 0, returned: 0 },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await listQueue({ baseUrl: "https://gpu.example", apiKey: "secret" });
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "https://gpu.example/api/status",
+      "https://gpu.example/api/queue?limit=4",
+    ]);
   });
 
   it("encodes a caller-supplied cursor and rejects invalid limits before fetch", async () => {

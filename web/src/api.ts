@@ -35,6 +35,7 @@ import { conditionalApiJsonTo } from "@studio/api/client";
 import {
   parseQueueListing,
   queueListingPath,
+  queuePageRequestForCapacity,
   type QueuePageRequest,
 } from "@studio/api/queuePlan";
 export type {
@@ -132,7 +133,20 @@ export async function fetchQueue(
   page?: QueuePageRequest,
 ): Promise<QueueListing> {
   const headers = targetHeaders(target);
-  const res = await fetch(`${targetBase(target)}${queueListingPath(page)}`, {
+  let request = page;
+  if (request === undefined) {
+    const statusResponse = await fetch(`${targetBase(target)}/api/status`, {
+      ...(Object.keys(headers).length ? { headers } : {}),
+      signal,
+    });
+    if (!statusResponse.ok)
+      throw new Error(`GET /api/status failed: ${statusResponse.status}`);
+    const status = (await statusResponse.json()) as {
+      queue_capacity?: unknown;
+    };
+    request = queuePageRequestForCapacity(status.queue_capacity);
+  }
+  const res = await fetch(`${targetBase(target)}${queueListingPath(request)}`, {
     ...(Object.keys(headers).length ? { headers } : {}),
     signal,
   });

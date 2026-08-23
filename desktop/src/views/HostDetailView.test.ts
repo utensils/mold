@@ -148,7 +148,7 @@ function installApi(
       });
     }
     if (path === "/api/models") return Promise.resolve(models);
-    if (path === "/api/queue") return Promise.resolve({ entries: queueEntries });
+    if (path.startsWith("/api/queue")) return Promise.resolve({ entries: queueEntries });
     if (path === "/api/capabilities")
       return Promise.resolve({
         queue: { can_pause: true, can_cancel_all: true },
@@ -943,13 +943,15 @@ describe("HostDetailView models", () => {
       apiKey: "rotated-key",
     });
 
-    const queueReads = apiJsonTo.mock.calls.filter((call) => call[1] === "/api/queue").length;
+    const queueReads = apiJsonTo.mock.calls.filter((call) =>
+      call[1].startsWith("/api/queue"),
+    ).length;
     lastStream("/api/events").options.onEvent(
       "message",
       JSON.stringify({ type: "device_state_changed" }),
     );
     await flushPromises();
-    expect(apiJsonTo.mock.calls.filter((call) => call[1] === "/api/queue")).toHaveLength(
+    expect(apiJsonTo.mock.calls.filter((call) => call[1].startsWith("/api/queue"))).toHaveLength(
       queueReads + 1,
     );
   });

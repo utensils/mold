@@ -289,33 +289,41 @@ describe("NavRail developing jobs", () => {
     };
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            entries: [
-              {
-                id: "foreign",
-                model: "flux-dev",
-                state: "running",
-                started_at_unix_ms: 1,
-                position: 0,
-                seed_pinned: true,
-                metadata: {
-                  model: "flux-dev",
-                  prompt: "restore me",
-                  width: 1024,
-                  height: 1024,
-                  steps: 20,
-                  guidance: 3.5,
-                  seed: 42,
-                },
-              },
-            ],
-            plan: null,
+      vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ queue_capacity: 8 }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
           }),
-          { status: 200, headers: { "content-type": "application/json" } },
+        )
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              entries: [
+                {
+                  id: "foreign",
+                  model: "flux-dev",
+                  state: "running",
+                  started_at_unix_ms: 1,
+                  position: 0,
+                  seed_pinned: true,
+                  metadata: {
+                    model: "flux-dev",
+                    prompt: "restore me",
+                    width: 1024,
+                    height: 1024,
+                    steps: 20,
+                    guidance: 3.5,
+                    seed: 42,
+                  },
+                },
+              ],
+              plan: null,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
         ),
-      ),
     );
     await flushPromises();
 

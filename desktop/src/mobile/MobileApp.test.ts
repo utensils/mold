@@ -650,6 +650,7 @@ describe("MobileApp sequence generation", () => {
   });
 
   it("loads a tapped server-owned generation into Create like desktop", async () => {
+    const pagedStatus = { ...status, queue_capacity: 3 };
     const metadata = {
       prompt: "a lighthouse beyond the red dunes",
       title: "Queue lighthouse study",
@@ -662,7 +663,7 @@ describe("MobileApp sequence generation", () => {
       height: 576,
     };
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
-      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/status") return Promise.resolve(pagedStatus);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
       if (path === "/api/activity") {
@@ -682,7 +683,7 @@ describe("MobileApp sequence generation", () => {
           ],
         });
       }
-      if (path === "/api/queue") {
+      if (path === "/api/queue?limit=3") {
         return Promise.resolve({
           entries: [
             {
@@ -695,6 +696,8 @@ describe("MobileApp sequence generation", () => {
               seed_pinned: false,
             },
           ],
+          live_only_entries: [],
+          page: { limit: 3, offset: 0, returned: 1 },
           plan: null,
         });
       }
@@ -725,7 +728,8 @@ describe("MobileApp sequence generation", () => {
     expect(wrapper.get("[data-test='mobile-develop-preview']").attributes("src")).toBe(
       "data:image/png;base64,UFJFVklFVw==",
     );
-    expect(apiJsonTo).toHaveBeenCalledWith(target, "/api/queue");
+    expect(apiJsonTo).toHaveBeenCalledWith(target, "/api/queue?limit=3");
+    expect(apiJsonTo.mock.calls.some(([, path]) => path === "/api/queue")).toBe(false);
     expect(apiJsonTo).toHaveBeenCalledWith(
       target,
       "/api/queue/foreign-job/preview",

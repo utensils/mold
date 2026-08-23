@@ -15,6 +15,7 @@ import {
   minimaxH3TaskForModel,
   type MinimaxH3Task,
 } from "@studio/lib/minimaxH3Authoring";
+import { queueListingPath, queuePageRequestForCapacity } from "@studio/api/queuePlan";
 
 /**
  * Reconciliation for generations whose stream died while the host kept going.
@@ -102,6 +103,10 @@ export interface GenerationRecoveryOptions {
   /** The exact target the batch was submitted to — the frozen route. */
   target: ApiTarget;
   hostLabel: string;
+  /** Current host runtime capacity. Production callers source this from the
+   * status snapshot that established reachability; null is the explicit
+   * older-host fallback, while undefined makes recovery read status first. */
+  queueCapacity?: number | null | undefined;
   /** Whether this batch went through the durable long-video chain shim. */
   chain?: boolean;
   /** Reacquire a renderable URL for a job settled as complete. */
@@ -675,9 +680,15 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
         return;
       }
 
+      const queueCapacity =
+        opts.queueCapacity === undefined
+          ? await apiJsonTo<{ queue_capacity?: number | null }>(opts.target, "/api/status").then(
+              (status) => status.queue_capacity ?? null,
+            )
+          : opts.queueCapacity;
       const listing = await apiJsonTo<{ entries?: RecoveryQueueEntry[] }>(
         opts.target,
-        "/api/queue",
+        queueListingPath(queuePageRequestForCapacity(queueCapacity)),
       );
       transportRetries = 0;
       if (settledExternally(job) || !isActive()) return;

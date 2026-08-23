@@ -136,28 +136,33 @@ describe("queue api", () => {
   });
 
   it("fetchQueue preserves queued target_gpu metadata", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          entries: [
-            {
-              id: "srv-1",
-              model: "flux-dev:q4",
-              state: "queued",
-              started_at_unix_ms: 0,
-              position: 0,
-              target_gpu: 1,
-            },
-          ],
-        }),
-        { status: 200 },
-      ),
-    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ queue_capacity: 2 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            entries: [
+              {
+                id: "srv-1",
+                model: "flux-dev:q4",
+                state: "queued",
+                started_at_unix_ms: 0,
+                position: 0,
+                target_gpu: 1,
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
+      );
     vi.stubGlobal("fetch", fetchMock);
 
     const listing = await fetchQueue();
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/queue", { signal: undefined });
+    expect(fetchMock).toHaveBeenCalledWith("/api/queue?limit=2", {
+      signal: undefined,
+    });
     expect(listing.entries[0].target_gpu).toBe(1);
     expect(listing.page).toBeUndefined();
   });

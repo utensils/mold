@@ -605,6 +605,52 @@ describe("HostDetailPage — telemetry", () => {
 });
 
 describe("HostDetailPage — queue", () => {
+  it("pages by host capacity and exposes the durable tail on demand", async () => {
+    poll.status.value = makeStatus({ queue_capacity: 2 });
+    hostQueueCall.mockImplementation(
+      (
+        _host: unknown,
+        _signal: unknown,
+        page?: { limit: number; cursor?: string },
+      ) =>
+        Promise.resolve(
+          page?.cursor
+            ? {
+                entries: [queued("c", 2)],
+                page: { limit: 2, cursor: "tail", returned: 1 },
+              }
+            : {
+                entries: [queued("a", 0), queued("b", 1)],
+                page: {
+                  limit: 2,
+                  offset: 0,
+                  returned: 2,
+                  next_cursor: "tail",
+                },
+              },
+        ),
+    );
+
+    const w = await mountDetail();
+    expect(hostQueueCall).toHaveBeenCalledWith(
+      expect.objectContaining({ id: routeHolder.id }),
+      expect.any(AbortSignal),
+      { limit: 2 },
+    );
+    expect(w.findAll('[data-test="queue-row"]')).toHaveLength(2);
+
+    await w.get('[data-test="queue-load-more"]').trigger("click");
+    await flushPromises();
+
+    expect(hostQueueCall).toHaveBeenCalledWith(
+      expect.objectContaining({ id: routeHolder.id }),
+      undefined,
+      { limit: 2, cursor: "tail" },
+    );
+    expect(w.findAll('[data-test="queue-row"]')).toHaveLength(3);
+    expect(w.find('[data-test="queue-load-more"]').exists()).toBe(false);
+  });
+
   it("wires advertised pause and cancel-all controls to the viewed host", async () => {
     caps = {
       queue: { can_pause: true, can_cancel_all: true, can_reorder: false },

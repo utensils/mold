@@ -92,6 +92,22 @@ export interface QueuePage {
   next_cursor?: string;
 }
 
+/** Current servers expose the runtime queue capacity in `/api/status`. That
+ * is the authoritative amount of live work a hot client needs in one frame,
+ * and therefore the only honest default for a payload-free durable page.
+ * `undefined` keeps old hosts on their legacy endpoint; callers must never
+ * substitute a guessed cap. */
+export function queuePageRequestForCapacity(
+  capacity: unknown,
+): QueuePageRequest | undefined {
+  return typeof capacity === "number" &&
+    Number.isFinite(capacity) &&
+    Number.isInteger(capacity) &&
+    capacity > 0
+    ? { limit: capacity }
+    : undefined;
+}
+
 export type QueuePlanChangedEvent = {
   type: "queue_plan_changed";
   plan: QueuePlan;
@@ -249,10 +265,20 @@ export function parseQueuePlan(value: unknown): QueuePlan {
 
 export async function listQueue(
   target: ApiTarget,
-  page?: QueuePageRequest,
+  /** undefined discovers the host capacity first; null records that the
+   * caller already observed a legacy status response with no capacity. */
+  page?: QueuePageRequest | null,
   signal?: AbortSignal,
 ): Promise<QueueListing> {
-  const path = queueListingPath(page);
+  let request = page ?? undefined;
+  if (page === undefined) {
+    const status =
+      signal === undefined
+        ? await apiJsonTo<unknown>(target, "/api/status")
+        : await apiJsonTo<unknown>(target, "/api/status", { signal });
+    request = queuePageRequestForCapacity(record(status)?.queue_capacity);
+  }
+  const path = queueListingPath(request);
   const value =
     signal === undefined
       ? await apiJsonTo<unknown>(target, path)

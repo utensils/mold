@@ -49,6 +49,7 @@ import {
 import {
   parseQueueListing,
   queueListingPath,
+  queuePageRequestForCapacity,
   type QueuePageRequest,
 } from "@studio/api/queuePlan";
 
@@ -218,8 +219,20 @@ export function hostQueue(
   signal?: AbortSignal,
   page?: QueuePageRequest,
 ) {
-  return getJson<unknown>(host, queueListingPath(page), signal).then(
-    (value) => parseQueueListing(value) as QueueListing,
+  const request =
+    page === undefined
+      ? getJson<unknown>(host, "/api/status", signal).then((status) =>
+          queuePageRequestForCapacity(
+            typeof status === "object" && status !== null
+              ? (status as Record<string, unknown>).queue_capacity
+              : undefined,
+          ),
+        )
+      : Promise.resolve(page);
+  return request.then((resolved) =>
+    getJson<unknown>(host, queueListingPath(resolved), signal).then(
+      (value) => parseQueueListing(value) as QueueListing,
+    ),
   );
 }
 
