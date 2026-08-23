@@ -20,8 +20,10 @@ Mold's current releases do not bundle or mirror model payloads.
 
 Execution remains capability-gated for technical reasons. The first supported
 runtime is the compact FL2VA graph on CUDA and its documented request profile.
-Unsupported Metal/CPU routes, Ref2VA execution, altered weights, and broader
-request shapes remain fail-closed because they are not implemented or tested,
+The Apple Silicon Metal route is admitted and shipped but not yet
+hardware-qualified. The unsupported CPU route, Ref2VA execution, altered
+weights, and broader request shapes remain fail-closed because they are not
+implemented or tested,
 not because the user, location, deployment topology, or distribution path lacks
 authorization. Authorization does not claim that an unimplemented route works.
 
@@ -221,8 +223,9 @@ run, release, or hosted deployment.
       A personal-namespace re-upload can be deleted or relicensed without
       notice, and a reviewed source that has vanished blocks the release. This
       does not apply to `MiniMaxAI/MiniMax-H3` or `Comfy-Org/MiniMax-H3`.
-- [ ] Prove that public SM89 H3 binaries retain consistent H3-scoped attention
-      provenance while omitting global FlashAttention, qualification/capture
-      executables, private evidence producers, and every private marker.
+- [ ] Prove that public SM89 CUDA and Apple Silicon Metal H3 binaries retain
+      consistent H3-scoped attention provenance while omitting global
+      FlashAttention, qualification/capture executables, private evidence
+      producers, and every private marker.
 - [ ] Verify the README and H3 user guide still carry the pinned license link and
       clearly distinguish H3 assets from Mold's MIT-licensed code.

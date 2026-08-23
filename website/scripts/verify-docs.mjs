@@ -148,13 +148,14 @@ const requiredH3DownloadFacts = [
   '1344x768',
   'exactly 124 frames at 24 fps',
   '21 terminal-inclusive sampler grid points',
-  // Metal stopped being an unimplemented backend in #1164 and became a
-  // compiled correctness-only path that is still not a runnable route.
-  // All three strings are pinned because the interesting way this doc goes
-  // wrong is describing Metal as runnable, or quietly dropping the caveat.
+  // Metal stopped being an unimplemented backend in #1164 and, since #1323, is
+  // admitted by the frozen contract and shipped in the macOS artifacts -- but
+  // no H3 checkpoint has ever completed a render on it. All three strings are
+  // pinned because the interesting way this doc goes wrong is describing Metal
+  // as qualified, or quietly dropping the caveat.
   'Ref2VA execution and the CPU backend remain unavailable',
   'correctness-only',
-  'Metal is not yet a runnable H3 route',
+  'no H3 checkpoint has ever completed a render on Metal',
   'every territory',
   'shared-server, and hosted paths',
   'model distribution or redistribution',

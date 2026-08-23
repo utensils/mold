@@ -182,5 +182,7 @@ performance-qualified on CUDA; its CPU and Apple
 Metal paths are correctness-oriented (fp8-scaled Wan checkpoints stay
 CUDA-only — Metal has no fp8 widening kernel). MiniMax H3 compact checkpoints
 are downloadable, but only the reviewed FL2VA route can execute, on supported
-SM89 CUDA builds; Ref2VA execution, Metal, and CPU are unsupported.
+SM89 CUDA builds; Ref2VA execution and CPU are unsupported, and the Apple Metal
+route is admitted and shipped but correctness-only and not yet
+hardware-qualified.
 :::
