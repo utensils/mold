@@ -44,6 +44,8 @@ use super::backend::{H3BackendArtifactLease, H3BackendExecutionLease, H3CandleBa
 #[cfg(feature = "mp4")]
 use super::engine::H3EngineProgressObserver;
 #[cfg(feature = "mp4")]
+use super::metal_memory_guard::H3MetalMemoryGuard;
+#[cfg(feature = "mp4")]
 use super::pipeline::{H3PipelineCheckpoint, H3PipelineEvent};
 #[cfg(feature = "mp4")]
 use super::private_fl2va_runtime::{
@@ -3926,6 +3928,8 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
                             .context("failed to construct the H3 Metal route"),
                     }
                 })?;
+            let metal_memory_guard =
+                H3MetalMemoryGuard::start(&execution_device, cancellation.clone())?;
             let qwen_on_cpu = matches!(
                 authority.conditioner_placement(),
                 H3FactoryConditionerPlacement::HostCpuThenDrop
@@ -3987,7 +3991,11 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
                 allocation_commit,
             )?;
             let mut observer = H3EngineProgressObserver::new(progress);
-            let output = run_private_comfy_fl2va_attempt(phase_owner, progress, &mut observer)?;
+            let output = run_private_comfy_fl2va_attempt(phase_owner, progress, &mut observer);
+            if let Some(violation) = metal_memory_guard.finish()? {
+                bail!(violation);
+            }
+            let output = output?;
             completion_device
                 .synchronize()
                 .context("private H3 completion synchronization failed")?;

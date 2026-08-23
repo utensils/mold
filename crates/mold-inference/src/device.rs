@@ -1748,6 +1748,34 @@ pub fn available_system_memory_bytes() -> Option<u64> {
     macos_vm_stats().map(|s| s.free + s.inactive)
 }
 
+/// Currently used macOS swap bytes.
+///
+/// Large Metal jobs share physical memory with the host. A free-page sample
+/// alone can lag the onset of destructive paging, so H3's live guard also
+/// bounds swap growth relative to the start of one attempt.
+#[cfg(target_os = "macos")]
+pub fn used_system_swap_bytes() -> Option<u64> {
+    let mut usage = std::mem::MaybeUninit::<libc::xsw_usage>::zeroed();
+    let mut len = std::mem::size_of::<libc::xsw_usage>();
+    let name = c"vm.swapusage";
+    // SAFETY: `usage` has the exact kernel ABI type and `len` describes its
+    // writable storage for the duration of this sysctl call.
+    let ret = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            usage.as_mut_ptr().cast::<libc::c_void>(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ret != 0 || len != std::mem::size_of::<libc::xsw_usage>() {
+        return None;
+    }
+    // SAFETY: the successful sysctl initialized the complete `xsw_usage`.
+    Some(unsafe { usage.assume_init() }.xsu_used)
+}
+
 /// Installed physical RAM on macOS (`hw.memsize`).
 ///
 /// Unified memory has no separate VRAM total, so this is the ceiling the Metal
@@ -1803,6 +1831,11 @@ pub fn free_system_memory_bytes() -> Option<u64> {
 
 #[cfg(not(target_os = "macos"))]
 pub fn available_system_memory_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn used_system_swap_bytes() -> Option<u64> {
     None
 }
 
@@ -3314,6 +3347,12 @@ mod tests {
             installed >= available,
             "installed RAM ({installed}) must bound available ({available})"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn used_swap_is_reported_by_macos() {
+        used_system_swap_bytes().expect("macOS reports vm.swapusage");
     }
 
     #[cfg(target_os = "macos")]

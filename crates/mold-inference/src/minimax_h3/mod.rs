@@ -7,6 +7,8 @@
 pub(crate) mod backend;
 pub(crate) mod dtype;
 pub(crate) mod engine;
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+pub(crate) mod metal_memory_guard;
 pub(crate) mod offload;
 pub(crate) mod pipeline;
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]

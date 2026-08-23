@@ -1,4 +1,4 @@
-//! Authorization-bound adapters for the private MiniMax H3 CUDA runtime.
+//! Authorization-bound adapters for the private MiniMax H3 accelerator runtime.
 //!
 //! This module is compiled only by the developer-only `h3-private-uat`
 //! feature. It has no registry, capability, catalog, download, server, or CLI
@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{bail, Result};
-use candle_core::Device;
+use candle_core::{Device, DeviceLocation};
 use mold_candle::minimax_h3::{
     H3AttentionActivation, H3AttentionBackend, H3AttentionDevice, H3AttentionKernel,
     H3AttentionModelContract, H3AttentionRuntimeAuthority, H3BlockProgress, H3BlockStack,
@@ -302,15 +302,21 @@ impl H3BlockLoader for H3PrivateComfyBlockLoader {
 pub(crate) struct H3PrivateComfyTransformerExecutor {
     transformer: H3StreamedTransformer,
     step: Option<H3TransformerStep>,
+    device: Device,
 }
 
 impl H3PrivateComfyTransformerExecutor {
-    fn new(transformer: H3StreamedTransformer) -> Self {
+    fn new(transformer: H3StreamedTransformer, device: Device) -> Self {
         Self {
             transformer,
             step: None,
+            device,
         }
     }
+}
+
+fn streamed_block_requires_synchronization(location: DeviceLocation) -> bool {
+    matches!(location, DeviceLocation::Metal { .. })
 }
 
 impl H3StreamedTransformerExecutor<H3LoadedTransformerBlock> for H3PrivateComfyTransformerExecutor {
@@ -345,7 +351,16 @@ impl H3StreamedTransformerExecutor<H3LoadedTransformerBlock> for H3PrivateComfyT
             .step
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("private H3 streamed step was not started"))?;
-        Ok(step.forward_block(index, block)?)
+        step.forward_block(index, block)?;
+        // The streamed INT8 block reconstructs bounded device weight chunks.
+        // Metal command buffers otherwise retain every completed block's
+        // temporary chunks until the whole 50-block step finishes, defeating
+        // the one-live-block memory contract. Fence each Metal block before
+        // its compact weights are released. CUDA and CPU remain asynchronous.
+        if streamed_block_requires_synchronization(self.device.location()) {
+            self.device.synchronize()?;
+        }
+        Ok(())
     }
 
     fn finish_step(
@@ -375,6 +390,7 @@ impl H3StreamedTransformerExecutor<H3LoadedTransformerBlock> for H3PrivateComfyT
 pub(crate) fn pair_private_comfy_stream(
     transformer: H3StreamedTransformer,
     loader: H3ComfyInt8BlockLoader,
+    device: Device,
     plan: &FrozenH3BlockStreamingPlan,
     expected_task: H3TransformerTask,
     cancellation: H3PrivateComfyCancellationSlot,
@@ -393,7 +409,7 @@ pub(crate) fn pair_private_comfy_stream(
     )?;
     Ok((
         H3PrivateComfyBlockLoader::new(loader, plan, cancellation)?,
-        H3PrivateComfyTransformerExecutor::new(transformer),
+        H3PrivateComfyTransformerExecutor::new(transformer, device),
     ))
 }
 
@@ -666,8 +682,14 @@ pub(crate) fn load_and_pair_private_comfy_stream(
     {
         bail!("private H3 Comfy streamed runtime differs from its opened artifact authority");
     }
-    let (loader, executor) =
-        pair_private_comfy_stream(transformer, loader, plan, authority.task, cancellation)?;
+    let (loader, executor) = pair_private_comfy_stream(
+        transformer,
+        loader,
+        device,
+        plan,
+        authority.task,
+        cancellation,
+    )?;
     Ok(H3PrivateComfyStream {
         loader,
         executor,
@@ -761,6 +783,19 @@ mod tests {
 
     const FINGERPRINT: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const CHECKPOINT: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    #[test]
+    fn streamed_blocks_bound_queued_temporaries_only_on_metal() {
+        assert!(streamed_block_requires_synchronization(
+            DeviceLocation::Metal { gpu_id: 0 }
+        ));
+        assert!(!streamed_block_requires_synchronization(
+            DeviceLocation::Cuda { gpu_id: 0 }
+        ));
+        assert!(!streamed_block_requires_synchronization(
+            DeviceLocation::Cpu
+        ));
+    }
 
     fn plan() -> FrozenH3BlockStreamingPlan {
         FrozenH3BlockStreamingPlan::new("gpu-0", FINGERPRINT, 0, 0).unwrap()
