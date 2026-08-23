@@ -443,6 +443,8 @@ pub struct QueueJournal {
     owner_uuid: Option<String>,
     #[cfg(test)]
     fail_completion_lookup: AtomicBool,
+    #[cfg(test)]
+    fail_claim_release: AtomicBool,
     /// Held for the process's lifetime so a peer sharing this `MOLD_HOME`
     /// cannot adopt the same identity.
     _owner_claim: Option<QueueOwnerClaim>,
@@ -490,6 +492,8 @@ impl QueueJournal {
             _owner_claim: claim,
             #[cfg(test)]
             fail_completion_lookup: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_claim_release: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: env_usize(JOURNAL_MAX_BYTES_ENV, DEFAULT_JOURNAL_MAX_BYTES),
             max_dispatch_attempts: env_u32(
@@ -510,6 +514,8 @@ impl QueueJournal {
             _owner_claim: None,
             #[cfg(test)]
             fail_completion_lookup: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_claim_release: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
@@ -858,7 +864,12 @@ impl QueueJournal {
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
             return Ok(generation_queue::RuntimeClaimRecovery::default());
         };
-        generation_queue::recover_runtime_claims(db, owner, now_ms())
+        generation_queue::recover_runtime_claims_and_charge_replays(
+            db,
+            owner,
+            now_ms(),
+            self.max_replay_seen,
+        )
     }
 
     pub(crate) fn completed_output(
@@ -1566,6 +1577,21 @@ pub enum DispatchClaim {
     Fenced,
 }
 
+/// Result of returning one token-owned row to the feeder backlog.
+///
+/// `Retry` retains the exact token-bearing ticket. Its drop is inert, so a
+/// caller that cannot retry in this runtime leaves the row safely owned for
+/// startup recovery rather than terminalizing or deleting it.
+#[derive(Debug)]
+pub enum RetainOutcome {
+    Released,
+    Stale,
+    Retry {
+        ticket: QueueTicket,
+        error: anyhow::Error,
+    },
+}
+
 /// RAII owner of one journal row.
 ///
 /// Dropping the ticket deletes the row **unless** the retention fence is up.
@@ -1679,11 +1705,24 @@ impl QueueTicket {
     /// Distinct from `hold`: nothing is wrong with the job and the next boot
     /// should replay it normally. The `replay_seen` budget is what stops a row
     /// retrying forever if the condition persists.
-    pub fn retain(mut self) {
-        self.settled = true;
+    pub fn retain(mut self) -> RetainOutcome {
         if let Some(token) = self.claim_token.as_deref() {
-            let Some(db) = self.journal.db() else { return };
+            let Some(db) = self.journal.db() else {
+                self.settled = true;
+                return RetainOutcome::Released;
+            };
             let now = now_ms();
+            #[cfg(test)]
+            let released = if self
+                .journal
+                .fail_claim_release
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                Err(anyhow::anyhow!("injected claim-release failure"))
+            } else {
+                generation_queue::release_claim(db, &self.id, token, now)
+            };
+            #[cfg(not(test))]
             let released = generation_queue::release_claim(db, &self.id, token, now);
             let retained = match released {
                 Ok(true) => Ok(true),
@@ -1691,19 +1730,36 @@ impl QueueTicket {
                 Err(error) => Err(error),
             };
             match retained {
-                Ok(true) => self
-                    .journal
-                    .set_batch_child_state(&self.id, "accepted", None),
-                Ok(false) => tracing::warn!(
-                    job = %self.id,
-                    "could not retain a feeder claim because its token was stale"
-                ),
+                Ok(true) => {
+                    self.journal
+                        .set_batch_child_state(&self.id, "accepted", None);
+                    self.journal.wake_feeder();
+                    self.settled = true;
+                    return RetainOutcome::Released;
+                }
+                Ok(false) => {
+                    tracing::warn!(
+                        job = %self.id,
+                        "could not retain a feeder claim because its token was stale"
+                    );
+                    self.settled = true;
+                    return RetainOutcome::Stale;
+                }
                 Err(error) => {
-                    tracing::warn!(job = %self.id, %error, "could not release a retained feeder claim")
+                    tracing::warn!(job = %self.id, %error, "could not release a retained feeder claim");
+                    // The database still carries this exact claim. Make Drop
+                    // inert while returning the ticket so an in-process
+                    // retry can present the same token again.
+                    self.settled = true;
+                    return RetainOutcome::Retry {
+                        ticket: self,
+                        error,
+                    };
                 }
             }
-            self.journal.wake_feeder();
         }
+        self.settled = true;
+        RetainOutcome::Released
     }
 
     /// Charge a dispatch attempt on the GPU owner thread, immediately before
@@ -1921,6 +1977,7 @@ mod tests {
             owner_uuid: Some(owner),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
+            fail_claim_release: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
@@ -2351,6 +2408,7 @@ mod tests {
             owner_uuid: Some(owner),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
+            fail_claim_release: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: 64,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
@@ -2375,6 +2433,7 @@ mod tests {
             owner_uuid: Some(owner),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
+            fail_claim_release: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: 2,
@@ -2410,6 +2469,36 @@ mod tests {
         let held = journal.list_all().pop().unwrap();
         assert_eq!(held.state, QueueRowState::Held);
         assert!(held.held_reason.is_some());
+    }
+
+    #[test]
+    fn transient_retain_failure_returns_the_same_token_for_an_in_process_retry() {
+        let journal = journal_with_db();
+        let request = request();
+        let ticket = journal
+            .record(admission("retry-release", &request, Path::new("/gallery")))
+            .unwrap();
+        journal
+            .fail_claim_release
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let retry = match ticket.retain() {
+            RetainOutcome::Retry { ticket, error } => {
+                assert!(error.to_string().contains("injected claim-release failure"));
+                ticket
+            }
+            other => panic!("transient release must preserve its ticket, got {other:?}"),
+        };
+        assert!(
+            journal.claim_next_feeder().unwrap().is_none(),
+            "the failed release must leave the exact token as database authority"
+        );
+
+        assert!(matches!(retry.retain(), RetainOutcome::Released));
+        assert_eq!(
+            journal.claim_next_feeder().unwrap().unwrap().row.id,
+            "retry-release"
+        );
     }
 
     #[test]

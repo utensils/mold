@@ -23,10 +23,16 @@ pub(crate) async fn recover_runtime(
     let report = tokio::task::spawn_blocking(move || journal.recover_feeder_runtime())
         .await
         .map_err(|error| anyhow::anyhow!("durable feeder recovery task failed: {error}"))??;
-    if report.claims_cleared > 0 || report.running_requeued > 0 {
+    if report.claims_cleared > 0
+        || report.running_requeued > 0
+        || report.replays_charged > 0
+        || report.replays_held > 0
+    {
         tracing::info!(
             claims_cleared = report.claims_cleared,
             running_requeued = report.running_requeued,
+            replays_charged = report.replays_charged,
+            replays_held = report.replays_held,
             "durable feeder recovered prior runtime claims"
         );
     }
@@ -801,6 +807,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interrupted_upscale_archive_adopts_original_and_does_not_block_later_work() {
+        let (mut state, mut rx) = state(1);
+        admit(&state, 2);
+        let dead_claim = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        assert_eq!(dead_claim.row.id, "job-0");
+        archive_output_without_db(
+            &state,
+            &dead_claim.row.output_dir,
+            "mold-mock-model-1-original~portrait.png",
+            "job-0",
+        );
+        state.gallery_publication_gate = Default::default();
+        assert_eq!(
+            state
+                .metadata_db
+                .as_ref()
+                .as_ref()
+                .unwrap()
+                .count()
+                .unwrap(),
+            0,
+            "the crash window is after archive publication but before the DB upsert"
+        );
+        recover_runtime(&state).await.unwrap();
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+        let detail = await_completed_batch(&state).await;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                detail.children[0].result_json.as_deref().unwrap()
+            )
+            .unwrap(),
+            serde_json::json!({
+                "filename": "mold-mock-model-1-original~portrait.png",
+                "original_filename": null,
+            })
+        );
+
+        let later = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("later work must not be poisoned by the interrupted upscale")
+            .unwrap();
+        assert_eq!(later.id, "job-1");
+        assert!(state
+            .queue_journal
+            .list_all()
+            .iter()
+            .all(|row| row.id != "job-0"));
+
+        state.queue_journal.retain_all();
+        shutdown.cancel();
+        handle.await.unwrap();
+        drop(later);
+    }
+
+    #[tokio::test]
     async fn committed_archive_lookup_is_scoped_to_the_claimed_output_directory() {
         let (mut state, mut rx) = state(1);
         admit(&state, 1);
@@ -916,6 +979,45 @@ mod tests {
 
         shutdown.cancel();
         handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn production_recovery_charges_only_dead_runtime_claims_and_holds_exhausted_work() {
+        let (state, _rx) = state(1);
+        admit(&state, 2);
+        let cap = state.queue_journal.max_replay_seen();
+        let dead_claim = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        assert_eq!(dead_claim.row.id, "job-0");
+
+        for boot in 1..=cap + 1 {
+            recover_runtime(&state).await.unwrap();
+            let recovered = state
+                .queue_journal
+                .list_all()
+                .into_iter()
+                .find(|row| row.id == "job-0")
+                .unwrap();
+            assert_eq!(recovered.replay_seen, boot);
+        }
+
+        let rows = state.queue_journal.list_all();
+        let exhausted = rows.iter().find(|row| row.id == "job-0").unwrap();
+        assert_eq!(
+            exhausted.state,
+            mold_db::generation_queue::QueueRowState::Held
+        );
+        assert!(exhausted
+            .held_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("replayed by")));
+        let untouched = rows.iter().find(|row| row.id == "job-1").unwrap();
+        assert_eq!(untouched.replay_seen, 0);
+
+        let next = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        assert_eq!(next.row.id, "job-1");
+        let batch = state.queue_journal.generation_batch("batch").unwrap();
+        assert_eq!(batch.children[0].state, "held");
+        assert_eq!(batch.children[1].state, "accepted");
     }
 
     #[tokio::test]

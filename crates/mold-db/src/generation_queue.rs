@@ -211,6 +211,10 @@ pub struct QueueClaim {
 pub struct RuntimeClaimRecovery {
     pub claims_cleared: usize,
     pub running_requeued: usize,
+    /// Recovery-active rows that spent one boot of replay budget.
+    pub replays_charged: usize,
+    /// Charged claims parked after exceeding the configured replay budget.
+    pub replays_held: usize,
 }
 
 pub fn insert(db: &MetadataDb, row: &GenerationQueueRow) -> Result<()> {
@@ -696,6 +700,37 @@ pub fn recover_runtime_claims(
     owner_uuid: &str,
     now_ms: i64,
 ) -> Result<RuntimeClaimRecovery> {
+    recover_runtime_claims_inner(db, owner_uuid, now_ms, None)
+}
+
+/// Recover runtime ownership and atomically charge only recovery-active rows.
+///
+/// Untouched durable backlog rows have no claim token and spend no budget:
+/// otherwise a deep queue could be held merely because the server was
+/// deployed several times before those rows reached the bounded runtime
+/// window. A claimed row enters recovery on its first boot and remains active
+/// (`replay_seen > 0`) until it runs or is held, so a crash immediately after
+/// token recovery cannot reset the budget. It spends one unit per recovery
+/// boot. Exhaustion parks both queue authority and its batch-child summary in
+/// the same transaction.
+pub fn recover_runtime_claims_and_charge_replays(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    now_ms: i64,
+    max_replay_seen: u32,
+) -> Result<RuntimeClaimRecovery> {
+    if max_replay_seen == 0 {
+        bail!("replay budget must be at least one boot");
+    }
+    recover_runtime_claims_inner(db, owner_uuid, now_ms, Some(max_replay_seen))
+}
+
+fn recover_runtime_claims_inner(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    now_ms: i64,
+    max_replay_seen: Option<u32>,
+) -> Result<RuntimeClaimRecovery> {
     db.transact_immediate(|conn| {
         let claims_cleared: i64 = conn.query_row(
             "SELECT COUNT(*) FROM generation_queue
@@ -703,6 +738,67 @@ pub fn recover_runtime_claims(
             params![owner_uuid],
             |row| row.get(0),
         )?;
+        let mut replays_charged = 0usize;
+        let mut replays_held = 0usize;
+        if let Some(cap) = max_replay_seen {
+            let claimed = {
+                let mut stmt = conn.prepare(
+                    "SELECT id, replay_seen
+                      FROM generation_queue
+                      WHERE owner_uuid = ?1 AND state IN ('queued', 'running')
+                        AND (state = 'running' OR claim_token IS NOT NULL OR replay_seen > 0)
+                      ORDER BY created_at, rowid",
+                )?;
+                let rows = stmt
+                    .query_map(params![owner_uuid], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            for (id, previous_seen) in claimed {
+                let previous_seen = u32::try_from(previous_seen)
+                    .map_err(|_| anyhow::anyhow!("queue row {id} has invalid replay_seen"))?;
+                let seen = previous_seen
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("queue row {id} exhausted replay counter"))?;
+                replays_charged += 1;
+                if seen > cap {
+                    let reason =
+                        format!("replayed by {seen} boots without ever running (limit {cap})");
+                    conn.execute(
+                        "UPDATE generation_queue
+                            SET replay_seen = ?3, state = 'held', held_reason = ?4,
+                                started_at = NULL, updated_at = ?5
+                          WHERE id = ?1 AND owner_uuid = ?2
+                            AND state IN ('queued', 'running')
+                            AND (claim_token IS NOT NULL OR replay_seen > 0)",
+                        params![id, owner_uuid, seen as i64, reason, now_ms],
+                    )?;
+                    conn.execute(
+                        "UPDATE generation_batch_children
+                            SET state = 'held', error = ?3, updated_at_ms = ?4
+                          WHERE job_id = ?1
+                            AND EXISTS (
+                                SELECT 1 FROM generation_batches AS batch
+                                 WHERE batch.id = generation_batch_children.batch_id
+                                   AND batch.owner_uuid = ?2
+                            )",
+                        params![id, owner_uuid, reason, now_ms],
+                    )?;
+                    replays_held += 1;
+                } else {
+                    conn.execute(
+                        "UPDATE generation_queue
+                            SET replay_seen = ?3, updated_at = ?4
+                          WHERE id = ?1 AND owner_uuid = ?2
+                            AND state IN ('queued', 'running')
+                            AND (claim_token IS NOT NULL OR replay_seen > 0)",
+                        params![id, owner_uuid, seen as i64, now_ms],
+                    )?;
+                }
+            }
+        }
         let running_requeued: i64 = conn.query_row(
             "SELECT COUNT(*) FROM generation_queue
               WHERE owner_uuid = ?1 AND state = 'running'",
@@ -722,6 +818,8 @@ pub fn recover_runtime_claims(
         Ok(RuntimeClaimRecovery {
             claims_cleared: claims_cleared as usize,
             running_requeued: running_requeued as usize,
+            replays_charged,
+            replays_held,
         })
     })
 }
@@ -972,6 +1070,15 @@ pub fn resolve_completed_output_filenames(
     ) {
         ([], [], []) => Ok(None),
         ([filename], [], []) => Ok(Some(CompletedGenerationOutput {
+            filename: filename.clone(),
+            original_filename: None,
+        })),
+        // Publication intentionally saves the original first. If the process
+        // dies before the upscaled file is archived, that original is already
+        // a valid gallery print and is the same degraded result Mold returns
+        // when post-upscale fails. Adopt it as the terminal output instead of
+        // rerendering a second, potentially different print.
+        ([], [filename], []) => Ok(Some(CompletedGenerationOutput {
             filename: filename.clone(),
             original_filename: None,
         })),
@@ -1836,6 +1943,36 @@ mod tests {
             find_completed_output(&db, "owner-a", "done").unwrap(),
             Some(CompletedGenerationOutput {
                 filename: "print.mp4".to_string(),
+                original_filename: None,
+            })
+        );
+    }
+
+    #[test]
+    fn completed_output_adopts_one_interrupted_upscale_original_as_terminal_output() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let gallery = tempfile::tempdir().unwrap();
+        let mut queued = row("done", "owner-a", 1);
+        queued.output_dir = gallery.path().to_path_buf();
+        insert(&db, &queued).unwrap();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO generations
+                    (filename, output_dir, created_at_ms, format, model, metadata_json)
+                 VALUES ('mold-flux-1-original~portrait.png', ?1, 1, 'png', 'flux-dev:q4', ?2)",
+                params![
+                    crate::canonical_dir_string(gallery.path()),
+                    r#"{"job_id":"done","seed":7}"#
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            find_completed_output(&db, "owner-a", "done").unwrap(),
+            Some(CompletedGenerationOutput {
+                filename: "mold-flux-1-original~portrait.png".to_string(),
                 original_filename: None,
             })
         );
