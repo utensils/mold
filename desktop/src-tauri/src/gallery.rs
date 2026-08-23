@@ -2247,19 +2247,27 @@ mod tests {
         let victim = root.path().join("victim.png");
         std::fs::write(&victim, b"x").unwrap();
 
-        // Both separators, because `Path` accepts either one on Windows.
-        for escape in ["../victim.png", "..\\victim.png"] {
-            let refused = offline_trash(&dir, Some(&db), escape, 5).is_err();
-            #[cfg(windows)]
-            assert!(refused, "{escape} was not refused");
-            // A unix `Path` treats the backslash form as one ordinary filename,
-            // so it resolves to nothing and is a no-op rather than a refusal.
-            #[cfg(unix)]
-            assert!(
-                refused || !escape.contains('\\'),
-                "{escape} was not refused"
-            );
-        }
+        // `/` is a separator everywhere, so this escape really reaches the
+        // victim and must be refused on every platform.
+        assert!(
+            offline_trash(&dir, Some(&db), "../victim.png", 5).is_err(),
+            "../victim.png was not refused"
+        );
+
+        // `\` is a separator only on Windows. There the escape reaches the
+        // victim and is refused; on unix it is a single ordinary filename that
+        // resolves to nothing, so `contained_file` answers `None` and the call
+        // is a harmless no-op. Spelled as two explicit expectations rather than
+        // one boolean, because the boolean form read as if it covered both and
+        // in fact asserted nothing on unix.
+        let backslash = offline_trash(&dir, Some(&db), "..\\victim.png", 5);
+        #[cfg(windows)]
+        assert!(backslash.is_err(), "..\\victim.png was not refused");
+        #[cfg(unix)]
+        assert!(
+            backslash.is_ok(),
+            "a backslash name is one component on unix, so this should be a no-op"
+        );
 
         // The symlink arm needs a privilege Windows does not grant by default.
         #[cfg(unix)]

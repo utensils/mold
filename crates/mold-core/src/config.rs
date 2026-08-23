@@ -1719,22 +1719,21 @@ impl Config {
         // whose `models_dir` merely happens to sit under a temp path (a
         // scratch or RAM volume is a legitimate place to keep weights), and
         // this refusal reports success.
-        let temp_marker = "mold-config-test-";
+        const TEMP_MARKER: &str = "mold-config-test-";
         let path_str = path.to_string_lossy();
-        let mut is_temp_config =
-            path_str.contains("/tmp/") || path_str.contains(&format!("/{temp_marker}"));
-        let mut has_temp_models_dir = self.models_dir.contains("/tmp/mold-")
-            || self.models_dir.contains(&format!("/{temp_marker}"));
-        #[cfg(windows)]
-        {
-            // Only the test-harness marker, never `%TEMP%` at large: that
-            // directory is a plausible home for a real `models_dir`, and
-            // `std::env::temp_dir()` degrades to `%USERPROFILE%` when neither
-            // TMP nor TEMP is set, which would match nearly every user path.
-            let marker = format!("\\{temp_marker}");
-            is_temp_config = is_temp_config || path_str.contains(&marker);
-            has_temp_models_dir = has_temp_models_dir || self.models_dir.contains(&marker);
-        }
+        // Separator-qualified so the marker cannot match mid-component. The
+        // Windows separator is the only addition — deliberately the harness
+        // marker alone and never `%TEMP%` at large, because that directory is
+        // a plausible home for a real `models_dir` and `std::env::temp_dir()`
+        // degrades to `%USERPROFILE%` when neither TMP nor TEMP is set, which
+        // would match nearly every user path.
+        let marked = |value: &str| {
+            value.contains(&format!("/{TEMP_MARKER}"))
+                || (cfg!(windows) && value.contains(&format!("\\{TEMP_MARKER}")))
+        };
+        let is_temp_config = path_str.contains("/tmp/") || marked(&path_str);
+        let has_temp_models_dir =
+            self.models_dir.contains("/tmp/mold-") || marked(&self.models_dir);
         if has_temp_models_dir && !is_temp_config {
             eprintln!(
                 "warning: refusing to save config with test models_dir ({}) to real config ({})",
