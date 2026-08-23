@@ -1622,6 +1622,27 @@ pub struct ModelsState {
     pub filtering: bool,
 }
 
+/// Generation-model names the create-form model picker (`Popup::ModelSelector`)
+/// may offer: real generation models — never upscalers/utility rows — filtered
+/// by `query` (case-insensitive substring). `runtime_available: Some(false)`
+/// marks a download-only row (e.g. the pruned NVFP4 H3 partitions) whose build
+/// has no engine arm for it; picking one for generation would only earn a 501,
+/// so it is excluded here. `None` (older servers, every other family) keeps
+/// meaning runnable. The Models inventory view is unaffected — it lists
+/// `self.models.catalog` directly and keeps showing every downloaded row.
+fn generation_model_names(catalog: &[ModelInfoExtended], query: &str) -> Vec<String> {
+    let query = query.to_lowercase();
+    catalog
+        .iter()
+        .filter(|m| {
+            m.is_generation_model()
+                && m.runtime_available != Some(false)
+                && m.name.to_lowercase().contains(&query)
+        })
+        .map(|m| m.name.clone())
+        .collect()
+}
+
 // ── Settings view types ─────────────────────────────────────────────
 
 /// Identifies a single config field in the Settings view.
@@ -4256,14 +4277,7 @@ impl App {
             filtered,
         }) = &mut self.popup
         {
-            let query = filter.to_lowercase();
-            *filtered = self
-                .models
-                .catalog
-                .iter()
-                .filter(|m| m.is_generation_model() && m.name.to_lowercase().contains(&query))
-                .map(|m| m.name.clone())
-                .collect();
+            *filtered = generation_model_names(&self.models.catalog, filter);
             if *selected >= filtered.len() {
                 *selected = filtered.len().saturating_sub(1);
             }
@@ -5948,13 +5962,7 @@ impl App {
     }
 
     fn open_model_selector(&mut self) {
-        let mut models: Vec<String> = self
-            .models
-            .catalog
-            .iter()
-            .filter(|m| m.is_generation_model())
-            .map(|m| m.name.clone())
-            .collect();
+        let mut models: Vec<String> = generation_model_names(&self.models.catalog, "");
         // Sort: downloaded first, then undownloaded (preserving order within each group)
         let config = &self.config;
         models.sort_by_key(|name| {
@@ -14829,6 +14837,40 @@ mod tests {
             .filter(|name| name.to_lowercase().contains(&query))
             .collect();
         assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn generation_model_names_excludes_runtime_unavailable_rows() {
+        // A download-only row (the pruned NVFP4 H3 partition) is on disk but
+        // has no engine arm — offering it in the create-form picker would
+        // only earn a 501 at submit time.
+        let runnable = make_test_catalog_entry("flux-dev:q8", 20, 3.5, 1024, 1024, "");
+        let unrunnable = ModelInfoExtended {
+            runtime_available: Some(false),
+            ..make_test_catalog_entry(
+                "minimax-h3-fl2va:comfy-pruned-nvfp4",
+                8,
+                1.0,
+                1024,
+                1024,
+                "",
+            )
+        };
+        let catalog = vec![runnable, unrunnable];
+        assert_eq!(
+            generation_model_names(&catalog, ""),
+            vec!["flux-dev:q8".to_string()]
+        );
+    }
+
+    #[test]
+    fn generation_model_names_keeps_runtime_available_none_as_runnable() {
+        // Older servers omit the field; absence must keep meaning runnable.
+        let entry = make_test_catalog_entry("flux-dev:q8", 20, 3.5, 1024, 1024, "");
+        assert_eq!(
+            generation_model_names(std::slice::from_ref(&entry), ""),
+            vec!["flux-dev:q8".to_string()]
+        );
     }
 
     #[test]

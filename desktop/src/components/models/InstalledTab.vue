@@ -296,7 +296,7 @@ async function unload(m: LibraryModelEntry) {
                 <span
                   v-if="runtimeUnavailable(m)"
                   data-test="runtime-unavailable-note"
-                  class="text-caption text-ink-3"
+                  class="flex h-7 items-center text-caption text-ink-3"
                   title="This build has no runtime for this model's layout"
                 >
                   No runtime for this build

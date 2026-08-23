@@ -308,8 +308,6 @@ describe("InstalledTab model info drawer", () => {
 
     expect(wrapper.find("[data-test='load-btn']").exists()).toBe(false);
     expect(wrapper.find("[data-test='unload-btn']").exists()).toBe(false);
-    expect(wrapper.get("[data-test='runtime-unavailable-note']").text()).toContain(
-      "No runtime",
-    );
+    expect(wrapper.get("[data-test='runtime-unavailable-note']").text()).toContain("No runtime");
   });
 });
