@@ -65,7 +65,7 @@ fi
 
 # Assert the complete trusted-app predicates, then exercise the security truth
 # table. Fragment checks would pass if an operator were accidentally inverted.
-python3 - "$ci" "$desktop" "$ios" <<'PY' || exit 1
+python3 - "$ci" "$desktop" "$ios" "$android" <<'PY' || exit 1
 import re
 import sys
 from pathlib import Path
@@ -75,7 +75,7 @@ def normalize(value: str) -> str:
     return " ".join(value.split())
 
 
-ci_text, desktop_text, ios_text = (Path(path).read_text() for path in sys.argv[1:])
+ci_text, desktop_text, ios_text, android_text = (Path(path).read_text() for path in sys.argv[1:])
 trusted = (
     "github.event_name == 'pull_request' && "
     "github.actor == 'release-plz-mold[bot]' && "
@@ -92,7 +92,7 @@ untrusted = (
     "startsWith(github.head_ref, 'release-plz-') == false || "
     "github.event.pull_request.head.repo.full_name != github.repository"
 )
-for label, text in (("desktop", desktop_text), ("iOS", ios_text)):
+for label, text in (("desktop", desktop_text), ("iOS", ios_text), ("Android", android_text)):
     block = re.search(r"(?ms)^  changes:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n)", text)
     condition = re.search(r"(?ms)^    if: >-\n(.*?)(?=^    [A-Za-z0-9_-]+:)", block.group(1) if block else "")
     if condition is None or normalize(condition.group(1)) != untrusted:
