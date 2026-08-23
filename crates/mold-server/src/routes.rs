@@ -5956,22 +5956,29 @@ async fn patch_queue_job(
     // Mirror the mutation into the durable row while still holding the
     // scheduler fence, so a restart resumes the lane and order the user chose
     // rather than the ones the job was admitted with.
-    let reordered = req.position.is_some().then(|| {
-        state
-            .job_registry
-            .snapshot()
-            .entries
-            .into_iter()
-            .map(|entry| entry.id)
-            .collect::<Vec<_>>()
-    });
-    let pinned_device_id = req.hard_pinned_device_id.as_ref().map(|pin| pin.as_deref());
-    state.queue_journal.apply_queue_mutation(
-        &id,
-        resolved_target_gpu,
-        pinned_device_id,
-        reordered.as_deref(),
-    );
+    let reordered = req
+        .position
+        .is_some()
+        .then(|| state.job_registry.queued_ids_in_order());
+    let pinned_device_id = req.hard_pinned_device_id.clone();
+    let journal = state.queue_journal.clone();
+    let mutation_id = id.clone();
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        journal.apply_queue_mutation(
+            &mutation_id,
+            resolved_target_gpu,
+            pinned_device_id.as_ref().map(|pin| pin.as_deref()),
+            reordered.as_deref(),
+        );
+    })
+    .await
+    {
+        tracing::warn!(
+            job = %id,
+            %error,
+            "durable queue mutation worker stopped before acknowledgement"
+        );
+    }
 
     let entry = state
         .job_registry

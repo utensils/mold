@@ -143,6 +143,14 @@ const QUEUE_PROJECTION_PAGE_SQL: &str = "
      ORDER BY q.created_at, q.rowid
      LIMIT ?4";
 
+/// Payload-free stable scan used to complete a bounded hydrated reorder with
+/// every queued row that still lives only in SQLite.
+const QUEUE_REORDER_CANDIDATES_SQL: &str = "
+    SELECT id, created_at
+      FROM generation_queue
+     WHERE owner_uuid = ?1 AND state = 'queued'
+     ORDER BY created_at, rowid";
+
 /// One runtime reservation of an oldest queued row.
 ///
 /// The token is deliberately kept outside [`GenerationQueueRow`] so existing
@@ -697,35 +705,64 @@ pub fn set_target_gpu(
     })
 }
 
-/// Re-stamp `created_at` so replay follows `ids` in the order given.
+/// Re-stamp queued rows so replay follows the hydrated `ids` prefix, followed
+/// by every still-unhydrated queued row in its existing stable order.
 ///
-/// `created_at` is the replay sort key, so a queue reorder has to move it or
-/// the restart quietly restores the admission order. Values are rewritten as a
-/// dense sequence anchored at the oldest row's existing timestamp, which keeps
-/// them plausible wall-clock times and makes the pass self-healing: any prior
-/// drift is corrected. Ids absent from the table are ignored, and rows absent
-/// from `ids` (held work) keep their stamps.
+/// `created_at` is the replay sort key, so a queue reorder has to move the
+/// complete queued order or a same-millisecond tail can overtake the hydrated
+/// prefix after restart. The immediate transaction reads only ids and ordering
+/// keys, then rewrites a dense sequence anchored at the oldest queued row's
+/// existing timestamp. Payloads are never materialized, and held, running,
+/// foreign, missing, and duplicate prefix ids are ignored.
 pub fn apply_queue_order(db: &MetadataDb, owner_uuid: &str, ids: &[String]) -> Result<usize> {
     if ids.is_empty() {
         return Ok(0);
     }
-    db.with_conn(|conn| {
-        let anchor: Option<i64> = conn.query_row(
-            "SELECT MIN(created_at) FROM generation_queue WHERE owner_uuid = ?1",
-            params![owner_uuid],
-            |row| row.get(0),
-        )?;
-        let Some(anchor) = anchor else {
+    db.transact_immediate(|conn| {
+        let queued = {
+            let mut stmt = conn.prepare(QUEUE_REORDER_CANDIDATES_SQL)?;
+            let rows = stmt
+                .query_map(params![owner_uuid], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let Some(oldest_created_at) = queued.first().map(|(_, created_at)| *created_at) else {
             return Ok(0);
         };
+
+        let mut remaining = queued
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<HashSet<_>>();
+        let mut ordered = Vec::with_capacity(queued.len());
+        for id in ids {
+            if remaining.remove(id) {
+                ordered.push(id.clone());
+            }
+        }
+        let hydrated = ordered.len();
+        if hydrated == 0 {
+            return Ok(0);
+        }
+        for (id, _) in queued {
+            if remaining.remove(&id) {
+                ordered.push(id);
+            }
+        }
+
+        let span = i64::try_from(ordered.len().saturating_sub(1))
+            .map_err(|_| anyhow::anyhow!("queued generation count exceeds SQLite's range"))?;
+        let anchor = oldest_created_at.min(i64::MAX - span);
         let mut stmt = conn.prepare(
             "UPDATE generation_queue
                 SET created_at = ?2, updated_at = ?3
-              WHERE id = ?1 AND owner_uuid = ?4",
+              WHERE id = ?1 AND owner_uuid = ?4 AND state = 'queued'",
         )?;
         let mut moved = 0;
-        for (index, id) in ids.iter().enumerate() {
-            let stamp = anchor.saturating_add(index as i64);
+        for (index, id) in ordered.iter().enumerate() {
+            let stamp = anchor + index as i64;
             moved += stmt.execute(params![id, stamp, stamp, owner_uuid])?;
         }
         Ok(moved)
@@ -1071,6 +1108,17 @@ mod tests {
     }
 
     #[test]
+    fn queue_reorder_scan_never_selects_durable_payload_columns() {
+        let normalized = QUEUE_REORDER_CANDIDATES_SQL.to_ascii_lowercase();
+        for forbidden in ["request_json", "output_dir", "completion_payload"] {
+            assert!(
+                !normalized.contains(forbidden),
+                "queue reorder selected {forbidden}: {QUEUE_REORDER_CANDIDATES_SQL}"
+            );
+        }
+    }
+
+    #[test]
     fn projection_cursor_continues_after_its_row_is_deleted() {
         let db = MetadataDb::open_in_memory().unwrap();
         for id in ["first", "second", "third"] {
@@ -1206,6 +1254,106 @@ mod tests {
             400,
             "held rows are not part of the dispatch order"
         );
+    }
+
+    #[test]
+    fn apply_queue_order_appends_the_deep_same_millisecond_backlog_and_claims_it_fifo_after_reopen()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mold.db");
+        let db = MetadataDb::open(&path).unwrap();
+        let runtime_capacity = 3;
+        let admitted = (0..runtime_capacity * 3)
+            .map(|index| format!("job-{index}"))
+            .collect::<Vec<_>>();
+        for id in &admitted {
+            insert(&db, &row(id, "owner-a", 500)).unwrap();
+        }
+
+        // Only this prefix is hydrated into the bounded runtime registry. The
+        // remaining rows stay payload-bearing in SQLite and must still follow
+        // the reordered prefix after a restart.
+        let hydrated_order = vec![
+            admitted[2].clone(),
+            admitted[0].clone(),
+            admitted[1].clone(),
+        ];
+        assert_eq!(
+            apply_queue_order(&db, "owner-a", &hydrated_order).unwrap(),
+            admitted.len()
+        );
+        drop(db);
+
+        let db = MetadataDb::open(&path).unwrap();
+        let expected = hydrated_order
+            .iter()
+            .cloned()
+            .chain(admitted[runtime_capacity..].iter().cloned())
+            .collect::<Vec<_>>();
+        let mut claimed = Vec::new();
+        for index in 0..expected.len() {
+            claimed.push(
+                claim_next(
+                    &db,
+                    "owner-a",
+                    &format!("claim-{index}"),
+                    1_000 + index as i64,
+                )
+                .unwrap()
+                .expect("every queued row remains claimable")
+                .row
+                .id,
+            );
+        }
+        assert_eq!(claimed, expected);
+    }
+
+    #[test]
+    fn apply_queue_order_only_moves_queued_rows_owned_by_the_runtime() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        for (id, created) in [
+            ("running", 100),
+            ("first", 200),
+            ("second", 300),
+            ("tail", 400),
+            ("held", 500),
+        ] {
+            insert(&db, &row(id, "owner-a", created)).unwrap();
+        }
+        insert(&db, &row("foreign", "owner-b", 50)).unwrap();
+        mark_dispatched(&db, "running", 600).unwrap();
+        hold(&db, "held", "operator review", 601).unwrap();
+
+        let moved = apply_queue_order(
+            &db,
+            "owner-a",
+            &[
+                "held".to_string(),
+                "second".to_string(),
+                "running".to_string(),
+                "first".to_string(),
+                "foreign".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(moved, 3, "the prefix plus omitted queued tail were moved");
+
+        let replayable = list_replayable(&db, "owner-a").unwrap();
+        assert_eq!(
+            replayable
+                .iter()
+                .filter(|row| row.state == QueueRowState::Queued)
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second", "first", "tail"]
+        );
+        let running = get(&db, "running").unwrap().unwrap();
+        assert_eq!(running.state, QueueRowState::Running);
+        assert_eq!(running.created_at_ms, 100);
+        let held = get(&db, "held").unwrap().unwrap();
+        assert_eq!(held.state, QueueRowState::Held);
+        assert_eq!(held.created_at_ms, 500);
+        assert_eq!(get(&db, "foreign").unwrap().unwrap().created_at_ms, 50);
     }
 
     #[test]
