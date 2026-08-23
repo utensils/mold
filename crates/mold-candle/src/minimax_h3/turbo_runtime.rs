@@ -597,6 +597,13 @@ fn load_module_delta(
     // staging boundary so peak memory matches admission. CUDA and CPU retain
     // their existing asynchronous path.
     if turbo_load_requires_synchronization(device.location()) {
+        // The retained delta owns contiguous transposes; the source uploads
+        // are no longer part of the model. Release their last handles before
+        // the Metal fence so `drop_unused_buffers` can actually return those
+        // allocations instead of observing them as live and carrying them
+        // into the next module.
+        drop(down);
+        drop(up);
         device.synchronize().map_err(|error| {
             failure(
                 H3TurboLoraErrorCode::Io,
