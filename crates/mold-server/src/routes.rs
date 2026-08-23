@@ -9029,10 +9029,14 @@ fn snapshot_to_sse(snap: &ResourceSnapshot) -> SseEvent {
 /// `GET /api/events` — SSE stream of server-wide [`mold_core::ServerEvent`]s:
 /// job lifecycle, gallery mutations, queue replans, and semantic device
 /// lifecycle/health transitions. One connection observes the whole server.
-/// Deltas only — bootstrap or repair gaps from `GET /api/queue`,
-/// `GET /api/devices`, and `GET /api/gallery`. Raw utilization/memory
-/// telemetry remains on `/api/resources/stream`. Event name: `event`.
-/// Feature-detect via `capabilities.events.available`.
+/// The stream opens with an `authority` frame carrying this server's stable
+/// `instance_id`. Lifecycle deltas retain their existing `event` event name
+/// and exact [`mold_core::ServerEvent`] JSON shape. If the bounded broadcast
+/// buffer overruns a slow receiver, `resync_required` reports the gap instead
+/// of pretending the delta stream is complete; repair from `GET /api/queue`,
+/// `GET /api/devices`, and `GET /api/gallery`. Raw utilization/memory telemetry
+/// remains on `/api/resources/stream`. Feature-detect via
+/// `capabilities.events.available`.
 #[utoipa::path(
     get,
     path = "/api/events",
@@ -9047,14 +9051,21 @@ async fn stream_events(
     use tokio_stream::wrappers::BroadcastStream;
 
     let rx = state.events.subscribe();
+    let instance_id = state.instance_id.clone();
     let stream = async_stream::stream! {
+        yield Ok::<_, Infallible>(event_authority_to_sse(instance_id.as_str()));
         let mut bs = BroadcastStream::new(rx);
         while let Some(item) = bs.next().await {
-            match item {
-                Ok(ev) => yield Ok::<_, Infallible>(server_event_to_sse(&ev)),
-                // Lagged receivers skip the gap; REST endpoints are the
-                // recovery path for anything missed.
-                Err(_lagged) => continue,
+            match crate::events::classify_delivery(item) {
+                crate::events::BroadcastDelivery::Event(event) => {
+                    yield Ok::<_, Infallible>(server_event_to_sse(&event));
+                }
+                crate::events::BroadcastDelivery::ResyncRequired { missed_events } => {
+                    yield Ok::<_, Infallible>(event_resync_to_sse(
+                        instance_id.as_str(),
+                        missed_events,
+                    ));
+                }
             }
         }
     };
@@ -9064,6 +9075,40 @@ async fn stream_events(
             .interval(std::time::Duration::from_secs(15))
             .text("ping"),
     )
+}
+
+#[derive(Serialize)]
+struct EventStreamAuthority<'a> {
+    instance_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct EventStreamResync<'a> {
+    instance_id: &'a str,
+    missed_events: u64,
+}
+
+const EVENT_STREAM_RESYNC_NAME: &str = "resync_required";
+
+fn event_authority_to_sse(instance_id: &str) -> SseEvent {
+    SseEvent::default().event("authority").data(
+        serde_json::to_string(&EventStreamAuthority { instance_id })
+            .expect("authority frame serialization cannot fail"),
+    )
+}
+
+fn event_resync_to_sse(instance_id: &str, missed_events: u64) -> SseEvent {
+    SseEvent::default()
+        .event(EVENT_STREAM_RESYNC_NAME)
+        .data(event_resync_data(instance_id, missed_events))
+}
+
+fn event_resync_data(instance_id: &str, missed_events: u64) -> String {
+    serde_json::to_string(&EventStreamResync {
+        instance_id,
+        missed_events,
+    })
+    .expect("resync frame serialization cannot fail")
 }
 
 fn server_event_to_sse(ev: &mold_core::ServerEvent) -> SseEvent {
@@ -9082,6 +9127,15 @@ mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+
+    #[test]
+    fn event_stream_gap_has_explicit_resync_wire_contract() {
+        assert_eq!(EVENT_STREAM_RESYNC_NAME, "resync_required");
+        assert_eq!(
+            event_resync_data("host-123", 17),
+            r#"{"instance_id":"host-123","missed_events":17}"#
+        );
+    }
 
     async fn response_json(response: axum::response::Response) -> serde_json::Value {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)

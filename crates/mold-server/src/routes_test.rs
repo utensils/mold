@@ -11451,7 +11451,7 @@ mod tests {
     // ── GET /api/events ─────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn get_api_events_streams_published_server_events() {
+    async fn get_api_events_starts_with_instance_authority() {
         use futures::StreamExt as _;
         let state = AppState::empty(
             mold_core::Config::default(),
@@ -11481,30 +11481,66 @@ mod tests {
             "expected SSE content-type, got: {ct}"
         );
 
-        // Publish AFTER subscribing (SSE response already established) —
-        // registering on the job registry must surface as a job_queued frame.
-        let state_for_send = state.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            state_for_send.job_registry.register("j1", "flux-dev:q4");
-        });
+        let expected_instance_id = state.instance_id.as_str();
+        let mut body = res.into_body().into_data_stream();
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(1), body.next())
+            .await
+            .expect("authority frame must be immediately available")
+            .expect("authority frame stream must remain open")
+            .expect("authority frame body must be readable");
+        let frame = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(frame.starts_with("event: authority\n"), "frame: {frame:?}");
+        assert!(
+            frame.contains(&format!(r#""instance_id":"{expected_instance_id}""#)),
+            "frame: {frame:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_api_events_preserves_published_server_event_frames() {
+        use futures::StreamExt as _;
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let app = app_with_state(state.clone());
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
 
         let mut body = res.into_body().into_data_stream();
-        let mut saw_queued = false;
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        while tokio::time::Instant::now() < deadline {
-            match tokio::time::timeout(std::time::Duration::from_millis(300), body.next()).await {
-                Ok(Some(Ok(bytes))) => {
-                    let text = String::from_utf8_lossy(&bytes).to_string();
-                    if text.contains("\"type\":\"job_queued\"") && text.contains("\"id\":\"j1\"") {
-                        saw_queued = true;
-                        break;
-                    }
-                }
-                _ => continue,
-            }
-        }
-        assert!(saw_queued, "did not observe a job_queued SSE event");
+        let authority = tokio::time::timeout(std::time::Duration::from_secs(1), body.next())
+            .await
+            .expect("authority frame must be immediately available")
+            .expect("authority frame stream must remain open")
+            .expect("authority frame body must be readable");
+        assert!(String::from_utf8_lossy(&authority).starts_with("event: authority\n"));
+
+        // Publish only after consuming the opening authority frame. This
+        // deterministically proves the additive frame did not change the
+        // existing `event` name or ServerEvent JSON payload.
+        state.job_registry.register("j1", "flux-dev:q4");
+
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(1), body.next())
+            .await
+            .expect("published event must be immediately available")
+            .expect("event stream must remain open")
+            .expect("event frame body must be readable");
+        let frame = String::from_utf8(bytes.to_vec()).unwrap();
+        assert_eq!(
+            frame,
+            "event: event\ndata: {\"type\":\"job_queued\",\"id\":\"j1\",\"model\":\"flux-dev:q4\"}\n\n"
+        );
     }
 
     #[tokio::test]
