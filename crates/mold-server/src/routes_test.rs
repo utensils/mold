@@ -4873,7 +4873,7 @@ mod tests {
         let (state, mut rx) = durable_state(reopened, root.path());
         crate::durable_queue_feeder::recover_runtime(&state)
             .await
-            .unwrap();
+            .expect("restart clears the prior runtime's retained claim tokens");
         let feeder_shutdown = tokio_util::sync::CancellationToken::new();
         let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
         let mut replayed = Vec::new();

@@ -11226,6 +11226,10 @@ mod tests {
                 carries_reference_authority: false,
             })
             .expect("a gallery-bound generation is durable");
+        assert_eq!(
+            ticket.claim_dispatch(),
+            crate::queue_journal::DispatchClaim::Granted
+        );
 
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
@@ -11290,6 +11294,10 @@ mod tests {
                 carries_reference_authority: false,
             })
             .unwrap();
+        assert_eq!(
+            ticket.claim_dispatch(),
+            crate::queue_journal::DispatchClaim::Granted
+        );
 
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);

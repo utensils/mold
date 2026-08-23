@@ -399,6 +399,50 @@ pub(crate) fn read_generation(
     }))
 }
 
+/// Read an already-established authority snapshot without initializing,
+/// repairing, validating, or otherwise mutating the gallery.
+///
+/// Durable queue hydration is a read path. In particular, probing an ordinary
+/// empty gallery must not create `gallery-authority-v2`, and a crash-interrupted
+/// authority mutation must be left for the explicit startup recovery pass.
+pub(crate) fn load_existing_read_only(
+    root: &Path,
+    guard: &GalleryBookkeepingGuard,
+) -> anyhow::Result<Option<LoadedAuthority>> {
+    guard.ensure_root(root)?;
+    let root = guard.canonical_root();
+    let marker = read_marker(root)?;
+    let checkpoint = read_checkpoint(root)?;
+    match (marker, checkpoint) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => anyhow::bail!(
+            "gallery authority checkpoint has no stable generation marker; startup recovery is required"
+        ),
+        (Some(_), None) => anyhow::bail!(
+            "gallery authority generation marker has no checkpoint; startup recovery is required"
+        ),
+        (Some(marker), Some(snapshot)) => {
+            ensure!(
+                marker.pending.is_none(),
+                "gallery authority mutation is pending; startup recovery is required"
+            );
+            ensure!(
+                !wal_path(root).try_exists()?,
+                "gallery authority WAL is unresolved; startup recovery is required"
+            );
+            ensure!(
+                marker.committed_generation == snapshot.generation,
+                "gallery authority checkpoint generation does not match its stable marker"
+            );
+            Ok(Some(LoadedAuthority {
+                generation: snapshot.generation,
+                index: snapshot.index,
+                stats: ValidationStats::default(),
+            }))
+        }
+    }
+}
+
 pub(crate) fn load_or_initialize(
     root: &Path,
     guard: &GalleryBookkeepingGuard,

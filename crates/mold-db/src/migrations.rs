@@ -616,6 +616,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 24,
         kind: MigrationKind::Sql(V24_DURABLE_QUEUE_CLAIMS),
     },
+    Migration {
+        version: 25,
+        kind: MigrationKind::Rust(add_generation_job_lookup_indexes),
+    },
 ];
 
 /// #1227 phase 2 moved face-identity extraction from admission onto the
@@ -693,7 +697,89 @@ ALTER TABLE generation_batch_children ADD COLUMN completed_at_ms INTEGER;
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 24;
+pub const SCHEMA_VERSION: i64 = 25;
+
+/// Build a serde-compatible reverse lookup for durable publication recovery.
+///
+/// SQLite JSON projections are intentionally not the authority here: their
+/// duplicate-key and coercion behavior need not match the serde parse used by
+/// gallery metadata. The migration classifies every retained row with the
+/// exact Rust parser, and current writers maintain the same projection.
+fn add_generation_job_lookup_indexes(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        r#"
+        ALTER TABLE generations ADD COLUMN queue_job_id TEXT;
+        ALTER TABLE generations ADD COLUMN queue_job_metadata_state INTEGER;
+        "#,
+    )?;
+
+    let rows = {
+        let mut stmt = tx.prepare("SELECT id, metadata_json FROM generations ORDER BY id")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for (id, metadata_json) in rows {
+        let (job_id, state) = match metadata_json {
+            None => (None, 1_i64),
+            Some(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(value) => match value.get("job_id") {
+                    None => (None, 1),
+                    Some(serde_json::Value::String(job_id)) => (Some(job_id.clone()), 1),
+                    Some(_) => (None, 0),
+                },
+                Err(_) => (None, 0),
+            },
+        };
+        tx.execute(
+            "UPDATE generations
+                SET queue_job_id = ?1, queue_job_metadata_state = ?2
+              WHERE id = ?3",
+            rusqlite::params![job_id, state, id],
+        )?;
+    }
+
+    tx.execute_batch(
+        r#"
+        CREATE INDEX generations_queue_job_id
+        ON generations(queue_job_id, id)
+        WHERE queue_job_metadata_state = 1 AND queue_job_id IS NOT NULL;
+
+        CREATE INDEX generations_output_queue_job_id
+        ON generations(output_dir, queue_job_id, id)
+        WHERE queue_job_metadata_state = 1 AND queue_job_id IS NOT NULL;
+
+        CREATE INDEX generations_invalid_queue_metadata
+        ON generations(queue_job_metadata_state, id)
+        WHERE queue_job_metadata_state = 0;
+
+        CREATE INDEX generations_output_invalid_queue_metadata
+        ON generations(output_dir, queue_job_metadata_state, id)
+        WHERE queue_job_metadata_state = 0;
+
+        CREATE INDEX generations_unknown_queue_metadata
+        ON generations(queue_job_metadata_state, id)
+        WHERE queue_job_metadata_state IS NULL;
+
+        CREATE INDEX generations_output_unknown_queue_metadata
+        ON generations(output_dir, queue_job_metadata_state, id)
+        WHERE queue_job_metadata_state IS NULL;
+
+        CREATE TRIGGER generations_queue_job_projection_dirty
+        AFTER UPDATE OF metadata_json ON generations
+        WHEN NEW.metadata_json IS NOT OLD.metadata_json
+        BEGIN
+            UPDATE generations
+               SET queue_job_id = NULL, queue_job_metadata_state = NULL
+             WHERE id = NEW.id;
+        END;
+        "#,
+    )?;
+    Ok(())
+}
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep
@@ -1069,7 +1155,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 24);
+        assert_eq!(SCHEMA_VERSION, 25);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1222,8 +1308,8 @@ mod tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 24);
-        assert_eq!(SCHEMA_VERSION, 24);
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 25);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1300,7 +1386,7 @@ mod tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 24);
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
         let ids = conn
             .prepare(
                 "SELECT id FROM generation_queue
@@ -1357,8 +1443,8 @@ mod tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 24);
-        assert_eq!(SCHEMA_VERSION, 24);
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 25);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -1619,7 +1705,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 24);
+        assert_eq!(SCHEMA_VERSION, 25);
     }
 
     #[test]
@@ -1686,6 +1772,7 @@ mod v15_tests {
         let mut conn = Connection::open_in_memory().unwrap();
         // Every real v14 database carries the gallery table; v20 alters it.
         conn.execute_batch(V1_INITIAL_SCHEMA).unwrap();
+        conn.execute_batch(V10_GENERATION_METADATA_JSON).unwrap();
         conn.execute_batch(V13_SCHEDULER_ESTIMATES).unwrap();
         conn.execute_batch(V14_SCHEDULER_ESTIMATE_EVIDENCE).unwrap();
         conn.execute(
@@ -1724,6 +1811,7 @@ mod v17_tests {
         let mut conn = Connection::open_in_memory().unwrap();
         // Every real v16 database carries the gallery table; v20 alters it.
         conn.execute_batch(V1_INITIAL_SCHEMA).unwrap();
+        conn.execute_batch(V10_GENERATION_METADATA_JSON).unwrap();
         conn.execute_batch(V13_SCHEDULER_ESTIMATES).unwrap();
         conn.execute_batch(V14_SCHEDULER_ESTIMATE_EVIDENCE).unwrap();
         conn.execute_batch(V15_SCHEDULER_ESTIMATE_RUNTIME).unwrap();
@@ -1753,5 +1841,85 @@ mod v17_tests {
             )
             .unwrap();
         assert_eq!(phases, (Some(321.0), None, None, None));
+    }
+}
+
+#[cfg(test)]
+mod v25_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn migrate_through(conn: &mut Connection, version: i64) {
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= version)
+        {
+            let tx = conn.transaction().unwrap();
+            match migration.kind {
+                MigrationKind::Sql(sql) => tx.execute_batch(sql).unwrap(),
+                MigrationKind::Rust(function) => function(&tx).unwrap(),
+            }
+            tx.pragma_update(None, "user_version", migration.version)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+    }
+
+    #[test]
+    fn v25_backfills_exact_job_projection_and_dirties_old_writer_updates() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_through(&mut conn, 24);
+        for (filename, metadata) in [
+            ("valid.png", Some(r#"{"job_id":"job-a"}"#)),
+            ("absent.png", Some(r#"{"seed":7}"#)),
+            ("malformed.png", Some(r#"{"job_id":"broken""#)),
+            ("nonstring.png", Some(r#"{"job_id":7}"#)),
+            (
+                "duplicate.png",
+                Some(r#"{"job_id":"first","job_id":"last"}"#),
+            ),
+            ("none.png", None),
+        ] {
+            conn.execute(
+                "INSERT INTO generations
+                    (filename, output_dir, created_at_ms, format, model, metadata_json)
+                 VALUES (?1, '/gallery', 1, 'png', 'model', ?2)",
+                rusqlite::params![filename, metadata],
+            )
+            .unwrap();
+        }
+
+        apply_pending(&mut conn).unwrap();
+        let projected = |filename: &str| {
+            conn.query_row(
+                "SELECT queue_job_id, queue_job_metadata_state
+                   FROM generations WHERE filename = ?1",
+                [filename],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                    ))
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(projected("valid.png"), (Some("job-a".into()), Some(1)));
+        assert_eq!(projected("absent.png"), (None, Some(1)));
+        assert_eq!(projected("malformed.png"), (None, Some(0)));
+        assert_eq!(projected("nonstring.png"), (None, Some(0)));
+        assert_eq!(projected("duplicate.png"), (Some("last".into()), Some(1)));
+        assert_eq!(projected("none.png"), (None, Some(1)));
+
+        conn.execute(
+            "UPDATE generations SET metadata_json = ?1 WHERE filename = 'valid.png'",
+            [r#"{"job_id":"old-writer"}"#],
+        )
+        .unwrap();
+        assert_eq!(
+            projected("valid.png"),
+            (None, None),
+            "an older writer must make the projection explicitly reparsable, never stale"
+        );
     }
 }

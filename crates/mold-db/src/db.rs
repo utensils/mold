@@ -722,10 +722,11 @@ pub(crate) fn upsert_with_conn_reporting_organization(
             model, prompt, negative_prompt, original_prompt, seed, steps, guidance,
             width, height, strength, scheduler, lora, lora_scale, frames, fps,
             metadata_version, generation_time_ms, backend, hostname, source, metadata_synthetic,
-            metadata_json, title, favorite, trashed_at_ms
+            metadata_json, title, favorite, trashed_at_ms,
+            queue_job_id, queue_job_metadata_state
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-            ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31
+            ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33
          )
          ON CONFLICT(output_dir, filename) DO UPDATE SET
             title = COALESCE(generations.title, excluded.title),
@@ -754,7 +755,9 @@ pub(crate) fn upsert_with_conn_reporting_organization(
             hostname = excluded.hostname,
             source = excluded.source,
             metadata_synthetic = excluded.metadata_synthetic,
-            metadata_json = excluded.metadata_json",
+            metadata_json = excluded.metadata_json,
+            queue_job_id = excluded.queue_job_id,
+            queue_job_metadata_state = excluded.queue_job_metadata_state",
         params![
             rec.filename,
             dir_key,
@@ -787,7 +790,21 @@ pub(crate) fn upsert_with_conn_reporting_organization(
             rec.title,
             rec.favorite as i64,
             rec.trashed_at_ms,
+            rec.metadata.job_id,
+            1_i64,
         ],
+    )?;
+    // An older binary updating `metadata_json` cannot supply the v25
+    // projection, so the migration trigger marks it unknown. On the current
+    // writer's conflict-update path that same trigger runs after the UPSERT;
+    // repair the projection immediately while the DB mutex/transaction still
+    // fences readers. Inserts already carry these values, and this idempotent
+    // update keeps both paths identical.
+    conn.execute(
+        "UPDATE generations
+            SET queue_job_id = ?1, queue_job_metadata_state = 1
+          WHERE output_dir = ?2 AND filename = ?3",
+        params![rec.metadata.job_id, dir_key, rec.filename],
     )?;
     let id = conn.query_row(
         "SELECT id FROM generations WHERE output_dir = ?1 AND filename = ?2",
@@ -1163,6 +1180,39 @@ mod tests {
         assert_eq!(got.metadata.seed, 42);
         assert_eq!(got.format, OutputFormat::Png);
         assert_eq!(got.source, RecordSource::Server);
+    }
+
+    #[test]
+    fn current_upsert_keeps_the_queue_job_projection_exact() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut record = rec();
+        record.metadata.job_id = Some("first-job".into());
+        db.upsert(&record).unwrap();
+        let projection = |record: &GenerationRecord| {
+            db.with_conn(|conn| {
+                conn.query_row(
+                    "SELECT queue_job_id, queue_job_metadata_state
+                       FROM generations
+                      WHERE output_dir = ?1 AND filename = ?2",
+                    params![
+                        canonical_dir_string(Path::new(&record.output_dir)),
+                        record.filename
+                    ],
+                    |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap()
+        };
+        assert_eq!(projection(&record), (Some("first-job".into()), 1));
+
+        record.metadata.job_id = Some("replacement-job".into());
+        db.upsert(&record).unwrap();
+        assert_eq!(
+            projection(&record),
+            (Some("replacement-job".into()), 1),
+            "the old-writer dirty trigger must not leave a current UPSERT unknown"
+        );
     }
 
     #[test]

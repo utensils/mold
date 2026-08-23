@@ -123,51 +123,85 @@ async fn feed_available(
             .attach_claimed(&row.id, claim.claim_token);
         let journal = state.queue_journal.clone();
         let completion_id = row.id.clone();
-        let mut completion =
+        let db_completion =
             tokio::task::spawn_blocking(move || journal.completed_output(&completion_id)).await;
-        if matches!(completion, Ok(Ok(None))) && row.output_dir.is_dir() {
-            // Resolve only the claimed row. Startup remains bounded by runtime
-            // queue capacity instead of reconciling the retained backlog or
-            // waiting for the independent whole-gallery DB projection pass.
-            let _gallery_reader = state.gallery_publication_gate.read().await;
-            let output_dir = row.output_dir.clone();
-            let completion_id = row.id.clone();
-            completion = tokio::task::spawn_blocking(move || {
-                crate::batch_transaction::find_completed_output_in_committed_archive(
-                    &output_dir,
-                    &completion_id,
-                )
-                .map_err(|error| format!("{error:#}"))
-            })
-            .await;
-        }
-        match completion {
-            Ok(Ok(Some(output))) => {
-                let result_json = serde_json::json!({
-                    "filename": output.filename,
-                    "original_filename": output.original_filename,
-                })
-                .to_string();
-                let _ = tokio::task::spawn_blocking(move || {
-                    ticket.complete_before_dispatch_with_result(Some(&result_json));
-                })
-                .await;
-                drop(reservation);
-                continue;
-            }
-            Ok(Ok(None)) => {}
+        let (mut completed_output, db_invalid_authority) = match db_completion {
+            Ok(Ok(output)) => (output, None),
+            Ok(Err(error)) if error.is_invalid_authority() => (None, Some(error.to_string())),
             Ok(Err(error)) => {
                 let _ = tokio::task::spawn_blocking(move || ticket.retain()).await;
                 drop(reservation);
-                tracing::error!(job = %row.id, %error, "durable feeder idempotence check failed; stopping without rendering");
+                tracing::error!(job = %row.id, %error, "durable feeder idempotence infrastructure failed; retaining for retry");
                 return Err(());
             }
             Err(error) => {
                 let _ = tokio::task::spawn_blocking(move || ticket.retain()).await;
                 drop(reservation);
-                tracing::error!(job = %row.id, %error, "durable feeder idempotence task failed; stopping without rendering");
+                tracing::error!(job = %row.id, %error, "durable feeder idempotence task failed; retaining for retry");
                 return Err(());
             }
+        };
+        if completed_output.is_none() && row.output_dir.is_dir() {
+            // Resolve only the claimed row. Startup remains bounded by runtime
+            // queue capacity instead of reconciling the retained backlog or
+            // waiting for the independent whole-gallery DB projection pass.
+            let _gallery_reader = state.gallery_publication_gate.read().await;
+            let gallery_gate = state.gallery_publication_gate.clone();
+            let output_dir = row.output_dir.clone();
+            let completion_id = row.id.clone();
+            let archive_completion = tokio::task::spawn_blocking(move || {
+                crate::batch_transaction::find_completed_output_in_committed_archive(
+                    &gallery_gate,
+                    &output_dir,
+                    &completion_id,
+                )
+            })
+            .await;
+            match archive_completion {
+                Ok(Ok(output)) => completed_output = output,
+                Ok(Err(error)) if error.is_invalid_authority() => {
+                    let reason = format!("durable publication authority is invalid: {error}");
+                    let _ = tokio::task::spawn_blocking(move || ticket.hold(&reason)).await;
+                    drop(reservation);
+                    tracing::error!(job = %row.id, %error, "held durable generation with invalid publication authority");
+                    report.held += 1;
+                    continue;
+                }
+                Ok(Err(error)) => {
+                    let _ = tokio::task::spawn_blocking(move || ticket.retain()).await;
+                    drop(reservation);
+                    tracing::error!(job = %row.id, %error, "durable archive lookup infrastructure failed; retaining for retry");
+                    return Err(());
+                }
+                Err(error) => {
+                    let _ = tokio::task::spawn_blocking(move || ticket.retain()).await;
+                    drop(reservation);
+                    tracing::error!(job = %row.id, %error, "durable archive lookup task failed; retaining for retry");
+                    return Err(());
+                }
+            }
+        }
+        if completed_output.is_none() {
+            if let Some(error) = db_invalid_authority {
+                let reason = format!("durable publication metadata is invalid: {error}");
+                let _ = tokio::task::spawn_blocking(move || ticket.hold(&reason)).await;
+                drop(reservation);
+                tracing::error!(job = %row.id, %error, "held durable generation with invalid publication metadata");
+                report.held += 1;
+                continue;
+            }
+        } else if let Some(output) = completed_output {
+            let result_json = serde_json::json!({
+                "filename": output.filename,
+                "original_filename": output.original_filename,
+            })
+            .to_string();
+            let _ = tokio::task::spawn_blocking(move || {
+                ticket.complete_before_dispatch_with_result(Some(&result_json));
+            })
+            .await;
+            drop(reservation);
+            continue;
         }
         if !row.output_dir.is_dir() {
             match current_output_dir {
@@ -499,6 +533,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_oldest_publication_is_held_without_blocking_the_next_job() {
+        let (state, mut rx) = state(1);
+        admit(&state, 2);
+        let output_dir =
+            mold_db::canonical_dir_string(&state.config.try_read().unwrap().effective_output_dir());
+        state
+            .metadata_db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .with_conn(|conn| {
+                for filename in ["first.png", "second.png"] {
+                    conn.execute(
+                        "INSERT INTO generations
+                            (filename, output_dir, created_at_ms, format, model, metadata_json,
+                             queue_job_id, queue_job_metadata_state)
+                         VALUES (?1, ?2, 1, 'png', 'mock-model', ?3, 'job-0', 1)",
+                        (
+                            filename,
+                            output_dir.as_str(),
+                            r#"{"job_id":"job-0","seed":7}"#,
+                        ),
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+        let mut next = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the next valid job must not be head-of-line blocked")
+            .expect("the runtime queue remains open");
+        assert_eq!(next.id, "job-1");
+        let held = state
+            .queue_journal
+            .list_all()
+            .into_iter()
+            .find(|row| row.id == "job-0")
+            .unwrap();
+        assert_eq!(held.state, mold_db::generation_queue::QueueRowState::Held);
+        assert!(held
+            .held_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("publication metadata is invalid")));
+
+        next.journal.take().unwrap().complete_before_dispatch();
+        state.job_registry.remove(&next.id);
+        state.queue.decrement();
+        shutdown.cancel();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn fifo_continues_after_each_capacity_release() {
         let (state, mut rx) = state(1);
         let ids = admit(&state, 4);
@@ -746,10 +835,12 @@ mod tests {
 
         let _reader = state.gallery_publication_gate.blocking_read();
         let error = crate::batch_transaction::find_completed_output_in_committed_archive(
+            &state.gallery_publication_gate,
             &output_dir,
             "job-0",
         )
         .unwrap_err();
+        assert!(error.is_invalid_authority());
         assert!(format!("{error:#}").contains("ambiguous"));
     }
 
@@ -771,10 +862,12 @@ mod tests {
         let _reader = state.gallery_publication_gate.blocking_read();
         assert!(
             crate::batch_transaction::find_completed_output_in_committed_archive(
+                &state.gallery_publication_gate,
                 &output_dir,
                 "job-0",
             )
-            .is_err()
+            .unwrap_err()
+            .is_invalid_authority()
         );
     }
 

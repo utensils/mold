@@ -19,10 +19,55 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use rusqlite::{params, OptionalExtension, Row};
 
 use crate::db::MetadataDb;
+
+const COMPLETED_JOB_ID_LOOKUP_SQL: &str = "SELECT 1 FROM generations
+      WHERE queue_job_metadata_state = 1
+        AND queue_job_id = ?1
+      LIMIT 1";
+
+const INVALID_JOB_METADATA_LOOKUP_SQL: &str = "SELECT 1 FROM generations
+      WHERE queue_job_metadata_state = 0
+      LIMIT 1";
+
+const UNKNOWN_JOB_METADATA_LOOKUP_SQL: &str = "SELECT metadata_json FROM generations
+      WHERE queue_job_metadata_state IS NULL
+      ORDER BY id";
+
+const COMPLETED_OUTPUT_LOOKUP_SQL: &str = "SELECT filename FROM generations
+      WHERE output_dir = ?1
+        AND queue_job_metadata_state = 1
+        AND queue_job_id = ?2
+      ORDER BY id
+      LIMIT 3";
+
+const COMPLETED_OUTPUT_INVALID_METADATA_SQL: &str = "SELECT 1 FROM generations
+      WHERE output_dir = ?1
+        AND queue_job_metadata_state = 0
+      LIMIT 1";
+
+const COMPLETED_OUTPUT_UNKNOWN_METADATA_SQL: &str =
+    "SELECT filename, metadata_json FROM generations
+      WHERE output_dir = ?1
+        AND queue_job_metadata_state IS NULL
+      ORDER BY id";
+
+fn parse_queue_job_id(metadata_json: &str) -> Result<Option<String>> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|error| anyhow::anyhow!("malformed gallery metadata: {error}"))?;
+    let Some(recorded_job_id) = metadata.get("job_id") else {
+        return Ok(None);
+    };
+    Ok(Some(
+        recorded_job_id
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("gallery metadata job_id is not a string"))?
+            .to_string(),
+    ))
+}
 
 /// Lifecycle of a journal row. Deliberately narrow: the row records what to do
 /// next, not a full job history.
@@ -792,12 +837,29 @@ pub fn find_completed_job_ids(db: &MetadataDb, ids: &[String]) -> Result<HashSet
     }
     db.with_conn(|conn| {
         let mut found = HashSet::new();
-        let mut stmt = conn.prepare(
-            "SELECT 1 FROM generations
-              WHERE metadata_json IS NOT NULL
-                AND json_extract(metadata_json, '$.job_id') = ?1
-              LIMIT 1",
-        )?;
+        let invalid: Option<i64> = conn
+            .query_row(INVALID_JOB_METADATA_LOOKUP_SQL, [], |row| row.get(0))
+            .optional()?;
+        ensure!(
+            invalid.is_none(),
+            "gallery contains malformed queue publication metadata"
+        );
+
+        let requested = ids.iter().map(String::as_str).collect::<HashSet<_>>();
+        let mut unknown = conn.prepare(UNKNOWN_JOB_METADATA_LOOKUP_SQL)?;
+        let unknown_rows = unknown.query_map([], |row| row.get::<_, Option<String>>(0))?;
+        for metadata_json in unknown_rows {
+            let Some(metadata_json) = metadata_json? else {
+                continue;
+            };
+            if let Some(job_id) = parse_queue_job_id(&metadata_json)? {
+                if requested.contains(job_id.as_str()) {
+                    found.insert(job_id);
+                }
+            }
+        }
+
+        let mut stmt = conn.prepare(COMPLETED_JOB_ID_LOOKUP_SQL)?;
         for id in ids {
             let hit: Option<i64> = stmt.query_row(params![id], |row| row.get(0)).optional()?;
             if hit.is_some() {
@@ -816,6 +878,47 @@ pub struct CompletedGenerationOutput {
     pub filename: String,
     /// The separately saved pre-upscale image, when present.
     pub original_filename: Option<String>,
+}
+
+/// Failure class for one indexed publication lookup.
+///
+/// `InvalidAuthority` is deterministic for the retained row/gallery and may
+/// be held without blocking later queue work. `Infrastructure` means the
+/// lookup itself could not be completed and must remain retryable.
+#[derive(Debug)]
+pub enum CompletedOutputLookupError {
+    InvalidAuthority(String),
+    Infrastructure(anyhow::Error),
+}
+
+impl CompletedOutputLookupError {
+    pub fn is_invalid_authority(&self) -> bool {
+        matches!(self, Self::InvalidAuthority(_))
+    }
+}
+
+impl std::fmt::Display for CompletedOutputLookupError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidAuthority(message) => formatter.write_str(message),
+            Self::Infrastructure(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for CompletedOutputLookupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidAuthority(_) => None,
+            Self::Infrastructure(error) => error.source(),
+        }
+    }
+}
+
+impl From<rusqlite::Error> for CompletedOutputLookupError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Infrastructure(error.into())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -883,16 +986,17 @@ pub fn resolve_completed_output_filenames(
 /// Recover one completed child's exact saved output from its owned gallery.
 ///
 /// The queue row supplies both the owner fence and output-directory scope.
-/// Every metadata document in that gallery is parsed rather than asking
-/// SQLite's permissive JSON projection to guess: malformed metadata or an
-/// ambiguous set of matching rows is an error, because deleting queue
-/// authority in either case could make reconnect report the wrong output.
+/// Current rows are reached through the serde-populated
+/// `(output_dir, queue_job_id)` index. Only compatibility rows written by an
+/// older process after migration are parsed, through their own partial index.
+/// This keeps normal replay independent of total gallery size without giving
+/// SQLite's permissive JSON projection authority over malformed metadata.
 pub fn find_completed_output(
     db: &MetadataDb,
     owner_uuid: &str,
     job_id: &str,
-) -> Result<Option<CompletedGenerationOutput>> {
-    let output_dir: Option<String> = db.with_conn(|conn| {
+) -> std::result::Result<Option<CompletedGenerationOutput>, CompletedOutputLookupError> {
+    let output_dir: Option<String> = db.with_conn_typed(|conn| {
         conn.query_row(
             "SELECT output_dir FROM generation_queue
               WHERE id = ?1 AND owner_uuid = ?2",
@@ -900,7 +1004,7 @@ pub fn find_completed_output(
             |row| row.get(0),
         )
         .optional()
-        .map_err(Into::into)
+        .map_err(CompletedOutputLookupError::from)
     })?;
     let Some(output_dir) = output_dir else {
         return Ok(None);
@@ -908,34 +1012,46 @@ pub fn find_completed_output(
     // Canonicalization may touch the filesystem. Keep it outside the DB mutex
     // so a slow gallery mount cannot stall unrelated metadata readers.
     let output_dir = crate::canonical_dir_string(Path::new(&output_dir));
-    db.with_conn(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT filename, metadata_json FROM generations
-              WHERE output_dir = ?1 AND metadata_json IS NOT NULL
-              ORDER BY id",
-        )?;
-        let rows = stmt.query_map(params![output_dir], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-
+    let filenames = db.with_conn_typed(|conn| {
+        let invalid: Option<i64> = conn
+            .query_row(
+                COMPLETED_OUTPUT_INVALID_METADATA_SQL,
+                params![output_dir],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if invalid.is_some() {
+            return Err(CompletedOutputLookupError::InvalidAuthority(
+                "gallery contains malformed queue publication metadata".to_string(),
+            ));
+        }
         let mut filenames = Vec::new();
-        for row in rows {
+        let mut unknown = conn.prepare(COMPLETED_OUTPUT_UNKNOWN_METADATA_SQL)?;
+        let unknown_rows = unknown.query_map(params![output_dir], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        for row in unknown_rows {
             let (filename, metadata_json) = row?;
-            let metadata: serde_json::Value = serde_json::from_str(&metadata_json)
-                .map_err(|error| anyhow::anyhow!("malformed gallery metadata: {error}"))?;
-            let Some(recorded_job_id) = metadata.get("job_id") else {
+            let Some(metadata_json) = metadata_json else {
                 continue;
             };
-            let recorded_job_id = recorded_job_id
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("gallery metadata job_id is not a string"))?;
-            if recorded_job_id != job_id {
-                continue;
+            let parsed = parse_queue_job_id(&metadata_json).map_err(|error| {
+                CompletedOutputLookupError::InvalidAuthority(format!("{error:#}"))
+            })?;
+            if parsed.as_deref() == Some(job_id) {
+                filenames.push(filename);
             }
-            filenames.push(filename);
         }
-        resolve_completed_output_filenames(job_id, filenames)
-    })
+
+        let mut stmt = conn.prepare(COMPLETED_OUTPUT_LOOKUP_SQL)?;
+        let rows = stmt.query_map(params![output_dir, job_id], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            filenames.push(row?);
+        }
+        Ok(filenames)
+    })?;
+    resolve_completed_output_filenames(job_id, filenames)
+        .map_err(|error| CompletedOutputLookupError::InvalidAuthority(format!("{error:#}")))
 }
 
 fn row_to_queue_row(row: &Row<'_>) -> rusqlite::Result<GenerationQueueRow> {
@@ -1591,6 +1707,63 @@ mod tests {
     }
 
     #[test]
+    fn publication_lookup_query_plans_are_index_bounded() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        db.with_conn(|conn| {
+            let plans = [
+                (
+                    format!("EXPLAIN QUERY PLAN {COMPLETED_JOB_ID_LOOKUP_SQL}"),
+                    vec![rusqlite::types::Value::Text("job".to_string())],
+                    "generations_queue_job_id",
+                ),
+                (
+                    format!("EXPLAIN QUERY PLAN {COMPLETED_OUTPUT_LOOKUP_SQL}"),
+                    vec![
+                        rusqlite::types::Value::Text("/gallery".to_string()),
+                        rusqlite::types::Value::Text("job".to_string()),
+                    ],
+                    "generations_output_queue_job_id",
+                ),
+                (
+                    format!("EXPLAIN QUERY PLAN {COMPLETED_OUTPUT_INVALID_METADATA_SQL}"),
+                    vec![rusqlite::types::Value::Text("/gallery".to_string())],
+                    "generations_output_invalid_queue_metadata",
+                ),
+                (
+                    format!("EXPLAIN QUERY PLAN {INVALID_JOB_METADATA_LOOKUP_SQL}"),
+                    vec![],
+                    "generations_invalid_queue_metadata",
+                ),
+                (
+                    format!("EXPLAIN QUERY PLAN {COMPLETED_OUTPUT_UNKNOWN_METADATA_SQL}"),
+                    vec![rusqlite::types::Value::Text("/gallery".to_string())],
+                    "generations_output_unknown_queue_metadata",
+                ),
+            ];
+            for (sql, values, expected_index) in plans {
+                let mut stmt = conn.prepare(&sql)?;
+                let details = stmt
+                    .query_map(rusqlite::params_from_iter(values), |row| {
+                        row.get::<_, String>(3)
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                assert!(
+                    details.iter().any(|detail| detail.contains(expected_index)),
+                    "publication lookup must use {expected_index}, got {details:?}"
+                );
+                assert!(
+                    details.iter().all(|detail| {
+                        !detail.contains("SCAN generations") || detail.contains(expected_index)
+                    }),
+                    "publication lookup may scan only its bounded partial index: {details:?}"
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn completed_output_recovers_exact_primary_and_upscaled_names_in_its_owned_gallery() {
         let db = MetadataDb::open_in_memory().unwrap();
         let gallery = tempfile::tempdir().unwrap();
@@ -1699,7 +1872,9 @@ mod tests {
             })
             .unwrap();
 
-            assert!(find_completed_output(&db, "owner-a", "done").is_err());
+            assert!(find_completed_output(&db, "owner-a", "done")
+                .unwrap_err()
+                .is_invalid_authority());
             assert!(get(&db, "done").unwrap().is_some());
         }
     }

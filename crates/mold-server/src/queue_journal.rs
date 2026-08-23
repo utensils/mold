@@ -864,11 +864,14 @@ impl QueueJournal {
     pub(crate) fn completed_output(
         &self,
         id: &str,
-    ) -> Result<Option<generation_queue::CompletedGenerationOutput>, String> {
+    ) -> Result<
+        Option<generation_queue::CompletedGenerationOutput>,
+        generation_queue::CompletedOutputLookupError,
+    > {
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
             return Ok(None);
         };
-        generation_queue::find_completed_output(db, owner, id).map_err(|error| format!("{error:#}"))
+        generation_queue::find_completed_output(db, owner, id)
     }
 
     pub(crate) fn repoint_output(&self, id: &str, output_dir: &Path) -> anyhow::Result<()> {

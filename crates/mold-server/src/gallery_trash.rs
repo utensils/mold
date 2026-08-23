@@ -203,7 +203,7 @@ pub(crate) fn trash_print_blocking(
                 batch_transaction::move_gallery_file_to_trash(dir, &live_path, name)
                     .map_err(|e| internal("failed to move print to the trash", format!("{e:#}")))?;
             }
-            gate.retire_committed_filename(name);
+            gate.retire_committed_filename(dir, name);
         }
     }
 
@@ -277,7 +277,7 @@ pub(crate) fn restore_print_blocking(
         RestoreArchiveDisposition::NoArchive => {
             batch_transaction::move_gallery_file_from_trash(dir, &trash_path, name)
                 .map_err(|e| internal("failed to move print out of the trash", format!("{e:#}")))?;
-            gate.unretire_committed_filename(name);
+            gate.unretire_committed_filename(dir, name);
         }
     }
     if let Err(error) = mold_db::trash::remove_tombstone(&trash_dir, name) {
@@ -372,7 +372,7 @@ pub(crate) fn hard_delete_live_print_blocking(
         })?;
     }
     if archive_disposition == ArchiveDeleteDisposition::NoArchive {
-        gate.retire_committed_filename(name);
+        gate.retire_committed_filename(dir, name);
     }
     remove_cached_sidecars(name);
 
