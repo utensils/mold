@@ -8,7 +8,7 @@
  * returns to the normal empty state (the parent stops rendering this).
  */
 import { computed } from "vue";
-import { STARTER_MODELS } from "@studio/lib/starterModels";
+import { STARTER_MODELS } from "@mold/studio";
 import Icon from "@ui/components/Icon.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import { useDownloads } from "../../composables/useDownloads";

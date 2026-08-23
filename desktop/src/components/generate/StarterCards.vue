@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { STARTER_MODELS } from "@studio/lib/starterModels";
+import { STARTER_MODELS } from "@mold/studio";
 import { useDownloadsStore } from "../../stores/downloads";
 import { useToastStore } from "../../stores/toasts";
 import { percent } from "../../lib/format";

@@ -3,7 +3,7 @@
   "include": ["files", "dependencies", "exports"],
   "ignoreExportsUsedInFile": true,
   "ignoreBinaries": ["gh"],
-  "ignoreDependencies": ["@mold/studio", "@mold/ui", "tailwindcss"],
+  "ignoreDependencies": ["@mold/ui", "tailwindcss"],
   "ignoreFiles": ["docs/**", "website/**", "result*", "result*/**"],
   "workspaces": {
     "studio": {
