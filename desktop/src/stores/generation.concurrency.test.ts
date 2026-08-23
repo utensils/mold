@@ -115,6 +115,22 @@ describe("submitBatch connection cap", () => {
     streams[idx]!.resolve();
   }
 
+  function completeStream(seed: number) {
+    const stream = streams.find((candidate) => candidate.seed === seed);
+    stream!.onEvent(
+      "complete",
+      JSON.stringify({
+        image: btoa("generated"),
+        format: "png",
+        width: 1024,
+        height: 1024,
+        seed_used: seed,
+        generation_time_ms: 100,
+        model: req.model,
+      }),
+    );
+  }
+
   const req: GenerateRequest = {
     prompt: "a lighthouse",
     model: "flux-schnell:q8",
@@ -843,16 +859,16 @@ describe("submitBatch connection cap", () => {
     expect(streams.filter((stream) => stream.target === "http://phone-b:7680")).toHaveLength(4);
 
     expect(await store.cancel(first.jobs[4]!.clientId)).toBe(true);
-    resolveStream(600);
+    completeStream(600);
     await flushPromises();
     expect(streams.some((stream) => stream.seed === 604)).toBe(false);
 
-    resolveStream(700);
+    completeStream(700);
     await flushPromises();
     expect(streams.some((stream) => stream.seed === 704)).toBe(true);
 
     while (streams.length > 0) {
-      streams[0]!.resolve();
+      completeStream(streams[0]!.seed);
       await flushPromises();
     }
     await Promise.all([first.settled, second.settled]);
