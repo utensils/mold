@@ -1809,7 +1809,7 @@ dependencies = [
 
 [[package]]
 name = "mold-mobile"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "base64 0.22.1",
  "block2",
