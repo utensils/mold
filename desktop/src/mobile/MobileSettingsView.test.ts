@@ -497,15 +497,20 @@ describe("MobileSettingsView", () => {
     expect(alert.text()).toContain("device inventory crashed");
     expect(alert.text()).toContain("try again automatically");
 
-    await vi.advanceTimersByTimeAsync(5_000);
-    await flushPromises();
-
-    // The recovery poll settles through several microtask turns; a single
-    // flush races it under CI load (#1334), so wait for the DOM to settle.
-    await vi.waitFor(() => {
-      expect(wrapper.find("[role='alert']").exists()).toBe(false);
-      expect(wrapper.text()).toContain("RECOVERED GPU");
-    });
+    // The 5 s retry timer may not be registered yet when this advance runs —
+    // the failed fetch's promise chain schedules it — so advance one full
+    // poll period per waitFor attempt until the recovery poll has landed
+    // (#1334; a single advance + flush raced this under CI load).
+    await vi.waitFor(
+      async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushPromises();
+        expect(wrapper.find("[role='alert']").exists()).toBe(false);
+        expect(wrapper.text()).toContain("RECOVERED GPU");
+      },
+      { timeout: 10_000 },
+    );
+    expect(deviceCalls).toBeGreaterThanOrEqual(2);
     wrapper.unmount();
   });
 
