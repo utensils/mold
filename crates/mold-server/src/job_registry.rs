@@ -462,8 +462,14 @@ impl JobRegistry {
     /// and close every open server-batch parent authority. Ordinary running
     /// jobs remain untouched; running batch children drain without publication.
     /// After dropping the entry lock this emits one `JobEnded` per removed
-    /// queued row. The return value remains that queued-row count.
+    /// queued row. The public wrapper returns the established queued-row
+    /// count; the route uses the exact ids to avoid double-counting durable
+    /// rows in the same cancellation.
     pub fn cancel_all_queued(&self) -> usize {
+        self.cancel_all_queued_ids().len()
+    }
+
+    pub(crate) fn cancel_all_queued_ids(&self) -> Vec<String> {
         let batch_children = {
             // Hold the write side while closing every still-open parent
             // authority. This orders bulk cancellation against
@@ -508,7 +514,7 @@ impl JobRegistry {
         if !cancelled_ids.is_empty() {
             self.mark_mutated();
         }
-        cancelled_ids.len()
+        cancelled_ids
     }
 
     /// Promote a registry entry from `Queued` to `Running`. No-op if `id`

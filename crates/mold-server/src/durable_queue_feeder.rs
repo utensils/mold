@@ -124,16 +124,22 @@ async fn feed_available(
         let journal = state.queue_journal.clone();
         let completion_id = row.id.clone();
         let completion =
-            tokio::task::spawn_blocking(move || journal.completed_output_exists(&completion_id))
-                .await;
+            tokio::task::spawn_blocking(move || journal.completed_output(&completion_id)).await;
         match completion {
-            Ok(Ok(true)) => {
-                let _ =
-                    tokio::task::spawn_blocking(move || ticket.complete_before_dispatch()).await;
+            Ok(Ok(Some(output))) => {
+                let result_json = serde_json::json!({
+                    "filename": output.filename,
+                    "original_filename": output.original_filename,
+                })
+                .to_string();
+                let _ = tokio::task::spawn_blocking(move || {
+                    ticket.complete_before_dispatch_with_result(Some(&result_json));
+                })
+                .await;
                 drop(reservation);
                 continue;
             }
-            Ok(Ok(false)) => {}
+            Ok(Ok(None)) => {}
             Ok(Err(error)) => {
                 let _ = tokio::task::spawn_blocking(move || ticket.retain()).await;
                 drop(reservation);
@@ -493,6 +499,86 @@ mod tests {
         shutdown.cancel();
         handle.await.unwrap();
         drop(job);
+    }
+
+    #[tokio::test]
+    async fn restart_after_gallery_publication_recovers_exact_batch_result_without_rerender() {
+        let (state, mut rx) = state(1);
+        admit(&state, 1);
+        let dead_claim = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        assert_eq!(dead_claim.row.id, "job-0");
+        let output_dir = mold_db::canonical_dir_string(&dead_claim.row.output_dir);
+        state
+            .metadata_db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .with_conn(|conn| {
+                for filename in [
+                    "mold-mock-model-1-original~portrait.png",
+                    "mold-mock-model-2-upscaled~portrait.png",
+                ] {
+                    conn.execute(
+                        "INSERT INTO generations
+                            (filename, output_dir, created_at_ms, format, model, metadata_json)
+                         VALUES (?1, ?2, 1, 'png', 'mock-model', ?3)",
+                        (
+                            filename,
+                            output_dir.as_str(),
+                            r#"{"job_id":"job-0","seed":7}"#,
+                        ),
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            state
+                .queue_journal
+                .recover_feeder_runtime()
+                .unwrap()
+                .claims_cleared,
+            1
+        );
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+        let detail = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let detail = mold_db::generation_batches::get_durable(
+                    state.metadata_db.as_ref().as_ref().unwrap(),
+                    state.queue_journal.owner_uuid().unwrap(),
+                    "batch",
+                )
+                .unwrap()
+                .unwrap();
+                if detail.children[0].state == "complete" {
+                    break detail;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("published output is reconciled without dispatch");
+
+        assert!(
+            rx.try_recv().is_err(),
+            "the completed child must not rerender"
+        );
+        assert!(state.queue_journal.list_all().is_empty());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                detail.children[0].result_json.as_deref().unwrap()
+            )
+            .unwrap(),
+            serde_json::json!({
+                "filename": "mold-mock-model-2-upscaled~portrait.png",
+                "original_filename": "mold-mock-model-1-original~portrait.png",
+            })
+        );
+
+        shutdown.cancel();
+        handle.await.unwrap();
     }
 
     #[tokio::test]

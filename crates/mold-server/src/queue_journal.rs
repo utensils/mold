@@ -860,13 +860,14 @@ impl QueueJournal {
         generation_queue::recover_runtime_claims(db, owner, now_ms())
     }
 
-    pub(crate) fn completed_output_exists(&self, id: &str) -> Result<bool, String> {
-        let Some(db) = self.db() else {
-            return Ok(false);
+    pub(crate) fn completed_output(
+        &self,
+        id: &str,
+    ) -> Result<Option<generation_queue::CompletedGenerationOutput>, String> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(None);
         };
-        generation_queue::find_completed_job_ids(db, &[id.to_string()])
-            .map(|ids| ids.contains(id))
-            .map_err(|error| format!("{error:#}"))
+        generation_queue::find_completed_output(db, owner, id).map_err(|error| format!("{error:#}"))
     }
 
     pub(crate) fn repoint_output(&self, id: &str, output_dir: &Path) -> anyhow::Result<()> {
@@ -938,9 +939,9 @@ impl QueueJournal {
         }
     }
 
-    pub fn cancel_all_queued(&self) {
+    pub fn cancel_all_queued(&self, already_counted_live: &[String]) -> anyhow::Result<usize> {
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
-            return;
+            return Ok(0);
         };
         let terminal_error_json = serde_json::json!({ "message": "Cancelled" }).to_string();
         let terminal = generation_batches::GenerationBatchTerminal {
@@ -950,20 +951,10 @@ impl QueueJournal {
             result_json: None,
             completed_at_ms: now_ms(),
         };
-        if let Err(error) = generation_batches::finish_all_unclaimed_queued(db, owner, terminal) {
-            tracing::warn!(%error, "could not atomically cancel unclaimed batch children");
-            return;
-        }
-        if let Err(error) =
-            generation_batches::request_cancel_all_claimed_queued(db, owner, now_ms())
-        {
-            tracing::warn!(%error, "could not mark claimed batch children cancelling");
-            return;
-        }
-        if let Err(error) = generation_queue::delete_all_queued_legacy(db, owner) {
-            tracing::warn!(%error, "could not clear legacy queued rows");
-        }
+        let additional =
+            generation_batches::cancel_all_queued(db, owner, already_counted_live, terminal)?;
         self.wake_feeder();
+        Ok(additional)
     }
 
     /// Reconcile the journal against reality before anything is replayed.
@@ -1540,7 +1531,12 @@ impl QueueTicket {
         self.journal.discard_id(&self.id);
     }
 
-    pub(crate) fn complete_before_dispatch(mut self) {
+    #[cfg(test)]
+    pub(crate) fn complete_before_dispatch(self) {
+        self.complete_before_dispatch_with_result(None);
+    }
+
+    pub(crate) fn complete_before_dispatch_with_result(mut self, result_json: Option<&str>) {
         self.settled = true;
         let Some(token) = self.claim_token.as_deref() else {
             self.journal.discard_id(&self.id);
@@ -1553,7 +1549,7 @@ impl QueueTicket {
                 state: mold_db::generation_batches::GenerationBatchTerminalState::Complete,
                 error: None,
                 terminal_error_json: None,
-                result_json: None,
+                result_json,
                 completed_at_ms: now_ms(),
             },
         );

@@ -4785,7 +4785,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bulk_cancel_terminalizes_every_unhydrated_batch_child() {
+    async fn bulk_cancel_counts_deep_batch_legacy_and_claimed_rows_once() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let blocking_db = db.clone();
@@ -4793,7 +4793,7 @@ mod tests {
         let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
         state.scheduled_work = crate::scheduler::ScheduledWorkHandle::new(scheduled_tx);
         let journal = state.queue_journal.clone();
-        let app = app_with_state(state);
+        let app = app_with_state(state.clone());
         let client_batch_id = uuid::Uuid::new_v4().to_string();
         let requests = (0..12)
             .map(|index| {
@@ -4819,6 +4819,22 @@ mod tests {
         assert_eq!(admitted.status(), StatusCode::ACCEPTED);
         let admitted = json_body(admitted).await;
         let durable_id = admitted["id"].as_str().unwrap().to_string();
+        let claimed = journal.claim_next_feeder().unwrap().unwrap();
+        let claimed_ticket = journal.attach_claimed(&claimed.row.id, claimed.claim_token);
+        state
+            .job_registry
+            .register(&claimed.row.id, &claimed.row.model);
+        let owner = journal.owner_uuid().unwrap().to_string();
+        for index in 0..5 {
+            seed_durable_projection_row(
+                &blocking_db,
+                &owner,
+                &format!("legacy-deep-{index}"),
+                mold_db::generation_queue::QueueRowState::Queued,
+                100 + index,
+                0,
+            );
+        }
 
         let (locked_tx, locked_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -4863,6 +4879,12 @@ mod tests {
 
         let cancelled = cancel_task.await.unwrap();
         assert_eq!(cancelled.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(cancelled).await["cancelled"],
+            17,
+            "twelve durable batch children plus five legacy rows, with the claimed live child counted once"
+        );
+        claimed_ticket.discard();
         let status = app
             .oneshot(
                 Request::get(format!("/api/generation-batches/{durable_id}"))

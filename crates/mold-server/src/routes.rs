@@ -6120,19 +6120,19 @@ async fn resume_queue(State(state): State<AppState>) -> Result<Json<QueuePauseRe
         (status = 200, description = "Queued jobs cancelled", body = QueueCancelAllResponse),
     )
 )]
-async fn cancel_all_queue(State(state): State<AppState>) -> Json<QueueCancelAllResponse> {
+async fn cancel_all_queue(
+    State(state): State<AppState>,
+) -> Result<Json<QueueCancelAllResponse>, ApiError> {
     let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
-    let cancelled = state.job_registry.cancel_all_queued();
+    let live_cancelled = state.job_registry.cancel_all_queued_ids();
+    let live_count = live_cancelled.len();
     let journal = state.queue_journal.clone();
-    if let Err(error) = spawn_queue_mutation(move || {
-        journal.cancel_all_queued();
-        Ok(())
-    })
-    .await
-    {
-        tracing::warn!(?error, "queue cancellation persistence task failed");
-    }
-    Json(QueueCancelAllResponse { cancelled })
+    let durable_only =
+        spawn_queue_mutation(move || journal.cancel_all_queued(&live_cancelled)).await?;
+    let cancelled = live_count
+        .checked_add(durable_only)
+        .ok_or_else(|| ApiError::internal("queue cancellation count overflow"))?;
+    Ok(Json(QueueCancelAllResponse { cancelled }))
 }
 
 // ── /api/history ─────────────────────────────────────────────────────────────

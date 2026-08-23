@@ -17,7 +17,7 @@
 //! Free functions over [`MetadataDb`], matching `chain_jobs.rs`.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 use rusqlite::{params, OptionalExtension, Row};
@@ -747,6 +747,122 @@ pub fn find_completed_job_ids(db: &MetadataDb, ids: &[String]) -> Result<HashSet
     })
 }
 
+/// Exact gallery identity recovered for a durable child that published its
+/// output before its queue authority was deleted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedGenerationOutput {
+    /// The ordinary payload (or the post-generation upscaled payload).
+    pub filename: String,
+    /// The separately saved pre-upscale image, when present.
+    pub original_filename: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletedOutputKind {
+    Primary,
+    Original,
+    Upscaled,
+}
+
+fn completed_output_kind(filename: &str) -> Result<CompletedOutputKind> {
+    let path = Path::new(filename);
+    if path.file_name().and_then(|name| name.to_str()) != Some(filename) {
+        bail!("completed generation filename is not one gallery basename");
+    }
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| anyhow::anyhow!("completed generation filename has no UTF-8 stem"))?;
+    let stem = mold_core::strip_title_slug(stem);
+    if stem.ends_with("-original") {
+        Ok(CompletedOutputKind::Original)
+    } else if stem.ends_with("-upscaled") {
+        Ok(CompletedOutputKind::Upscaled)
+    } else {
+        Ok(CompletedOutputKind::Primary)
+    }
+}
+
+/// Recover one completed child's exact saved output from its owned gallery.
+///
+/// The queue row supplies both the owner fence and output-directory scope.
+/// Every metadata document in that gallery is parsed rather than asking
+/// SQLite's permissive JSON projection to guess: malformed metadata or an
+/// ambiguous set of matching rows is an error, because deleting queue
+/// authority in either case could make reconnect report the wrong output.
+pub fn find_completed_output(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    job_id: &str,
+) -> Result<Option<CompletedGenerationOutput>> {
+    let output_dir: Option<String> = db.with_conn(|conn| {
+        conn.query_row(
+            "SELECT output_dir FROM generation_queue
+              WHERE id = ?1 AND owner_uuid = ?2",
+            params![job_id, owner_uuid],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    })?;
+    let Some(output_dir) = output_dir else {
+        return Ok(None);
+    };
+    // Canonicalization may touch the filesystem. Keep it outside the DB mutex
+    // so a slow gallery mount cannot stall unrelated metadata readers.
+    let output_dir = crate::canonical_dir_string(Path::new(&output_dir));
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT filename, metadata_json FROM generations
+              WHERE output_dir = ?1 AND metadata_json IS NOT NULL
+              ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![output_dir], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        let mut primary = Vec::new();
+        let mut originals = Vec::new();
+        let mut upscaled = Vec::new();
+        for row in rows {
+            let (filename, metadata_json) = row?;
+            let metadata: serde_json::Value = serde_json::from_str(&metadata_json)
+                .map_err(|error| anyhow::anyhow!("malformed gallery metadata: {error}"))?;
+            let Some(recorded_job_id) = metadata.get("job_id") else {
+                continue;
+            };
+            let recorded_job_id = recorded_job_id
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("gallery metadata job_id is not a string"))?;
+            if recorded_job_id != job_id {
+                continue;
+            }
+            match completed_output_kind(&filename)? {
+                CompletedOutputKind::Primary => primary.push(filename),
+                CompletedOutputKind::Original => originals.push(filename),
+                CompletedOutputKind::Upscaled => upscaled.push(filename),
+            }
+        }
+
+        match (
+            primary.as_slice(),
+            originals.as_slice(),
+            upscaled.as_slice(),
+        ) {
+            ([], [], []) => Ok(None),
+            ([filename], [], []) => Ok(Some(CompletedGenerationOutput {
+                filename: filename.clone(),
+                original_filename: None,
+            })),
+            ([], [original], [filename]) => Ok(Some(CompletedGenerationOutput {
+                filename: filename.clone(),
+                original_filename: Some(original.clone()),
+            })),
+            _ => bail!("gallery rows for queue job {job_id} are ambiguous"),
+        }
+    })
+}
+
 fn row_to_queue_row(row: &Row<'_>) -> rusqlite::Result<GenerationQueueRow> {
     let state_raw: String = row.get(2)?;
     let state = QueueRowState::parse(&state_raw).ok_or_else(|| {
@@ -1272,6 +1388,120 @@ mod tests {
             find_completed_job_ids(&db, &["done".to_string(), "pending".to_string()]).unwrap();
         assert_eq!(found, HashSet::from(["done".to_string()]));
         assert!(find_completed_job_ids(&db, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn completed_output_recovers_exact_primary_and_upscaled_names_in_its_owned_gallery() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let gallery = tempfile::tempdir().unwrap();
+        let other_gallery = tempfile::tempdir().unwrap();
+        let mut queued = row("done", "owner-a", 1);
+        queued.output_dir = gallery.path().to_path_buf();
+        insert(&db, &queued).unwrap();
+
+        db.with_conn(|conn| {
+            for (filename, output_dir, metadata) in [
+                (
+                    "mold-flux-1-original~portrait.png",
+                    gallery.path(),
+                    r#"{"job_id":"done","seed":7}"#,
+                ),
+                (
+                    "mold-flux-2-upscaled~portrait.png",
+                    gallery.path(),
+                    r#"{"job_id":"done","seed":7}"#,
+                ),
+                (
+                    "wrong-gallery.png",
+                    other_gallery.path(),
+                    r#"{"job_id":"done","seed":7}"#,
+                ),
+            ] {
+                conn.execute(
+                    "INSERT INTO generations
+                        (filename, output_dir, created_at_ms, format, model, metadata_json)
+                     VALUES (?1, ?2, 1, 'png', 'flux-dev:q4', ?3)",
+                    params![filename, crate::canonical_dir_string(output_dir), metadata],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            find_completed_output(&db, "owner-a", "done").unwrap(),
+            Some(CompletedGenerationOutput {
+                filename: "mold-flux-2-upscaled~portrait.png".to_string(),
+                original_filename: Some("mold-flux-1-original~portrait.png".to_string()),
+            })
+        );
+        assert_eq!(find_completed_output(&db, "owner-b", "done").unwrap(), None);
+    }
+
+    #[test]
+    fn completed_output_recovers_one_ordinary_primary_name() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let gallery = tempfile::tempdir().unwrap();
+        let mut queued = row("done", "owner-a", 1);
+        queued.output_dir = gallery.path().to_path_buf();
+        insert(&db, &queued).unwrap();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO generations
+                    (filename, output_dir, created_at_ms, format, model, metadata_json)
+                 VALUES ('print.mp4', ?1, 1, 'mp4', 'wan', ?2)",
+                params![
+                    crate::canonical_dir_string(gallery.path()),
+                    r#"{"job_id":"done","seed":7}"#
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            find_completed_output(&db, "owner-a", "done").unwrap(),
+            Some(CompletedGenerationOutput {
+                filename: "print.mp4".to_string(),
+                original_filename: None,
+            })
+        );
+    }
+
+    #[test]
+    fn completed_output_fails_closed_on_ambiguous_or_malformed_gallery_rows() {
+        for rows in [
+            vec![
+                ("first.png", r#"{"job_id":"done"}"#),
+                ("second.png", r#"{"job_id":"done"}"#),
+            ],
+            vec![("broken.png", r#"{"job_id":"done""#)],
+        ] {
+            let db = MetadataDb::open_in_memory().unwrap();
+            let gallery = tempfile::tempdir().unwrap();
+            let mut queued = row("done", "owner-a", 1);
+            queued.output_dir = gallery.path().to_path_buf();
+            insert(&db, &queued).unwrap();
+            db.with_conn(|conn| {
+                for (filename, metadata) in &rows {
+                    conn.execute(
+                        "INSERT INTO generations
+                            (filename, output_dir, created_at_ms, format, model, metadata_json)
+                         VALUES (?1, ?2, 1, 'png', 'flux-dev:q4', ?3)",
+                        params![
+                            filename,
+                            crate::canonical_dir_string(gallery.path()),
+                            metadata
+                        ],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+            assert!(find_completed_output(&db, "owner-a", "done").is_err());
+            assert!(get(&db, "done").unwrap().is_some());
+        }
     }
 
     #[test]

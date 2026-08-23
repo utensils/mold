@@ -429,6 +429,115 @@ pub fn request_cancel_all_claimed_queued(
     })
 }
 
+/// Cancel every still-queued durable row owned by this server in one
+/// transaction and return the number not already counted by the live
+/// registry.
+///
+/// Unclaimed batch children become terminal with their queue rows removed.
+/// Claimed children retain their token-fenced authority in `cancelling` until
+/// the hydrated ticket settles. Legacy rows have no reconnect history and are
+/// deleted directly. `already_counted_live` is bounded by runtime queue
+/// capacity, so probing that intersection never materializes the deep durable
+/// backlog.
+pub fn cancel_all_queued(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    already_counted_live: &[String],
+    terminal: GenerationBatchTerminal<'_>,
+) -> Result<usize> {
+    db.transact_immediate(|conn| {
+        let eligible_sql = "SELECT COUNT(*) FROM generation_queue AS q
+             WHERE q.owner_uuid = ?1 AND q.state = 'queued'
+               AND NOT EXISTS (
+                   SELECT 1 FROM generation_batch_children AS child
+                    WHERE child.job_id = q.id AND child.state = 'cancelling'
+               )";
+        let total: i64 = conn.query_row(eligible_sql, params![owner_uuid], |row| row.get(0))?;
+
+        let mut live_overlap = 0usize;
+        let mut seen = HashSet::with_capacity(already_counted_live.len());
+        let mut overlap_stmt = conn.prepare(
+            "SELECT 1 FROM generation_queue AS q
+              WHERE q.owner_uuid = ?1 AND q.id = ?2 AND q.state = 'queued'
+                AND NOT EXISTS (
+                    SELECT 1 FROM generation_batch_children AS child
+                     WHERE child.job_id = q.id AND child.state = 'cancelling'
+                )
+              LIMIT 1",
+        )?;
+        for id in already_counted_live {
+            if seen.insert(id.as_str())
+                && overlap_stmt
+                    .query_row(params![owner_uuid, id], |_| Ok(()))
+                    .optional()?
+                    .is_some()
+            {
+                live_overlap += 1;
+            }
+        }
+        drop(overlap_stmt);
+
+        conn.execute(
+            "UPDATE generation_batch_children
+                SET state = ?2, error = ?3, terminal_error_json = ?4,
+                    result_json = ?5, completed_at_ms = ?6, updated_at_ms = ?6
+              WHERE state != 'cancelling'
+                AND job_id IN (
+                    SELECT q.id FROM generation_queue AS q
+                     WHERE q.owner_uuid = ?1 AND q.state = 'queued'
+                       AND q.claim_token IS NULL
+                )",
+            params![
+                owner_uuid,
+                terminal.state.as_str(),
+                terminal.error,
+                terminal.terminal_error_json,
+                terminal.result_json,
+                terminal.completed_at_ms,
+            ],
+        )?;
+        conn.execute(
+            "DELETE FROM generation_queue
+              WHERE owner_uuid = ?1 AND state = 'queued' AND claim_token IS NULL
+                AND EXISTS (
+                    SELECT 1 FROM generation_batch_children AS child
+                     WHERE child.job_id = generation_queue.id
+                )",
+            params![owner_uuid],
+        )?;
+        conn.execute(
+            "UPDATE generation_batch_children
+                SET state = 'cancelling', error = 'Cancelled', updated_at_ms = ?2
+              WHERE state != 'cancelling'
+                AND job_id IN (
+                    SELECT id FROM generation_queue
+                     WHERE owner_uuid = ?1 AND state = 'queued'
+                       AND claim_token IS NOT NULL
+                )",
+            params![owner_uuid, terminal.completed_at_ms],
+        )?;
+        conn.execute(
+            "DELETE FROM generation_queue
+              WHERE owner_uuid = ?1 AND state = 'queued'
+                AND NOT EXISTS (
+                    SELECT 1 FROM generation_batch_children AS child
+                     WHERE child.job_id = generation_queue.id
+                )",
+            params![owner_uuid],
+        )?;
+
+        let remaining: i64 = conn.query_row(eligible_sql, params![owner_uuid], |row| row.get(0))?;
+        if remaining != 0 {
+            bail!("bulk queue cancellation left {remaining} eligible durable rows");
+        }
+        let total = usize::try_from(total)
+            .map_err(|_| anyhow::anyhow!("durable cancellation count is outside usize"))?;
+        total
+            .checked_sub(live_overlap)
+            .ok_or_else(|| anyhow::anyhow!("live cancellation overlap exceeded durable rows"))
+    })
+}
+
 pub fn child_cancel_requested(db: &MetadataDb, job_id: &str) -> Result<bool> {
     db.with_conn(|conn| {
         Ok(conn
@@ -1054,5 +1163,77 @@ mod tests {
         assert!(crate::generation_queue::get(&db, "job-2")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn bulk_cancel_reports_only_durable_rows_not_already_counted_live() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(5)).unwrap();
+        crate::generation_queue::claim_next(&db, "owner-1", "claimed", 2)
+            .unwrap()
+            .unwrap();
+
+        for index in 0..3 {
+            let mut legacy = rows(1).pop().unwrap().1;
+            legacy.id = format!("legacy-{index}");
+            legacy.created_at_ms = 10 + index;
+            crate::generation_queue::insert(&db, &legacy).unwrap();
+        }
+        let mut running = rows(1).pop().unwrap().1;
+        running.id = "legacy-running".to_string();
+        running.created_at_ms = 20;
+        crate::generation_queue::insert(&db, &running).unwrap();
+        crate::generation_queue::mark_dispatched(&db, "legacy-running", 21).unwrap();
+
+        let additional = cancel_all_queued(
+            &db,
+            "owner-1",
+            &["job-0".to_string(), "legacy-0".to_string()],
+            GenerationBatchTerminal {
+                state: GenerationBatchTerminalState::Cancelled,
+                error: Some("Cancelled"),
+                terminal_error_json: Some(r#"{"message":"Cancelled"}"#),
+                result_json: None,
+                completed_at_ms: 30,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            additional, 6,
+            "eight durable queued rows minus two live rows"
+        );
+        let detail = get_durable(&db, "owner-1", "batch-1").unwrap().unwrap();
+        assert_eq!(detail.children[0].state, "cancelling");
+        assert!(detail.children[1..]
+            .iter()
+            .all(|child| child.state == "cancelled"));
+        assert!(crate::generation_queue::get(&db, "job-0")
+            .unwrap()
+            .is_some());
+        assert!(crate::generation_queue::get(&db, "legacy-running")
+            .unwrap()
+            .is_some());
+        assert!(crate::generation_queue::get(&db, "legacy-0")
+            .unwrap()
+            .is_none());
+
+        assert_eq!(
+            cancel_all_queued(
+                &db,
+                "owner-1",
+                &[],
+                GenerationBatchTerminal {
+                    state: GenerationBatchTerminalState::Cancelled,
+                    error: Some("Cancelled"),
+                    terminal_error_json: Some(r#"{"message":"Cancelled"}"#),
+                    result_json: None,
+                    completed_at_ms: 31,
+                },
+            )
+            .unwrap(),
+            0,
+            "an already-requested claimed cancellation is not counted twice"
+        );
     }
 }
