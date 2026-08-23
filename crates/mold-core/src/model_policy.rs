@@ -35,10 +35,13 @@ pub enum ModelActivation {
     ComplianceGated,
     /// Acquirable and storable, but this build has no runtime for it.
     ///
-    /// The pinned `official-bf16` references and the pruned NVFP4 compact
-    /// layout are both in this state: `mold pull`, inventory, repair, and
-    /// `mold rm` all work, and only execution is refused.
-    RuntimeUnavailable,
+    /// Three things land here, and the carried reason is what tells them
+    /// apart: the pinned `official-bf16` references and the pruned NVFP4
+    /// compact layout (no engine arm for the weight layout), every Ref2VA
+    /// identity (no qualified route on a released build), and *every* H3
+    /// identity on a binary compiled without the `h3` feature. `mold pull`,
+    /// inventory, repair, and `mold rm` all work; only execution is refused.
+    RuntimeUnavailable(minimax_h3::RuntimeUnavailableReason),
 }
 
 /// Why an activation was refused. Carried by [`ModelActivationError`] so the
@@ -47,7 +50,7 @@ pub enum ModelActivation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivationRefusal {
     ComplianceGated,
-    RuntimeUnavailable,
+    RuntimeUnavailable(minimax_h3::RuntimeUnavailableReason),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,12 +81,14 @@ impl fmt::Display for ModelActivationError {
                  ({MINIMAX_H3_AUTHORIZATION_REQUIRED}). See {MINIMAX_H3_AUTHORIZATION_ISSUE_URL}"
             ),
             // Deliberately carries no license or authorization URL: nothing
-            // about this refusal is the user's to resolve.
-            ActivationRefusal::RuntimeUnavailable => write!(
+            // about this refusal is the user's to resolve. The sentence comes
+            // from `minimax_h3::RuntimeUnavailableReason`, the single
+            // authority the `/api/models` row also publishes, so the refusal
+            // and the row can never name different obstacles.
+            ActivationRefusal::RuntimeUnavailable(reason) => write!(
                 formatter,
-                "MiniMax H3 has no runtime for this model's weight layout in this build \
-                 ({MINIMAX_H3_RUNTIME_UNAVAILABLE}). The checkpoint downloads and verifies \
-                 normally; only generation is unavailable"
+                "{} ({MINIMAX_H3_RUNTIME_UNAVAILABLE})",
+                reason.message()
             ),
         }
     }
@@ -105,7 +110,7 @@ impl ModelActivationError {
     pub fn restriction(self) -> Option<ModelAccessRestriction> {
         match self.0 {
             ActivationRefusal::ComplianceGated => Some(minimax_h3_restriction()),
-            ActivationRefusal::RuntimeUnavailable => None,
+            ActivationRefusal::RuntimeUnavailable(_) => None,
         }
     }
 }
@@ -132,17 +137,36 @@ fn minimax_h3_restriction() -> ModelAccessRestriction {
 /// `cv:` catalog ID). Callers that have resolved catalog metadata must pass it.
 pub fn model_activation(identifier: &str, family: Option<&str>) -> ModelActivation {
     if is_reviewed_minimax_h3_model(identifier) {
-        ModelActivation::Available
+        // Reviewed for acquisition, which is a separate authority from
+        // execution. Whether *this* build can run it is
+        // `minimax_h3::model_runtime_availability`'s answer and nothing
+        // else's: Ref2VA has no qualified route on any released binary, and
+        // only the sm89 recipe compiles the engine at all (#1276).
+        minimax_h3_runtime_activation(identifier)
     } else if is_pinned_unrunnable_minimax_h3_identity(identifier) {
         // A pinned H3 manifest identity mold may download but cannot execute:
         // the `official-bf16` qualification references and the pruned NVFP4
         // compact layout. Refusing these as compliance-gated would hand the
         // user a license URL for a missing engine arm.
-        ModelActivation::RuntimeUnavailable
+        minimax_h3_runtime_activation(identifier)
     } else if is_minimax_h3_identity(identifier) || family.is_some_and(is_minimax_h3_identity) {
         ModelActivation::ComplianceGated
     } else {
         ModelActivation::Available
+    }
+}
+
+/// Project the H3 runtime authority onto the activation vocabulary.
+///
+/// Fails closed on both halves: an identity the runtime authority cannot
+/// resolve reports [`minimax_h3::RuntimeUnavailableReason::UnsupportedLayout`]
+/// there, and this reads it verbatim rather than inventing a second answer.
+fn minimax_h3_runtime_activation(identifier: &str) -> ModelActivation {
+    match minimax_h3::model_runtime_availability(identifier) {
+        minimax_h3::RuntimeAvailability::Available => ModelActivation::Available,
+        minimax_h3::RuntimeAvailability::Unavailable(reason) => {
+            ModelActivation::RuntimeUnavailable(reason)
+        }
     }
 }
 
@@ -188,9 +212,9 @@ pub fn require_model_acquisition(
         ModelActivation::ComplianceGated => {
             Err(ModelActivationError(ActivationRefusal::ComplianceGated))
         }
-        ModelActivation::RuntimeUnavailable => {
-            Err(ModelActivationError(ActivationRefusal::RuntimeUnavailable))
-        }
+        ModelActivation::RuntimeUnavailable(reason) => Err(ModelActivationError(
+            ActivationRefusal::RuntimeUnavailable(reason),
+        )),
     }
 }
 
@@ -203,9 +227,9 @@ pub fn require_model_activation(
         ModelActivation::ComplianceGated => {
             Err(ModelActivationError(ActivationRefusal::ComplianceGated))
         }
-        ModelActivation::RuntimeUnavailable => {
-            Err(ModelActivationError(ActivationRefusal::RuntimeUnavailable))
-        }
+        ModelActivation::RuntimeUnavailable(reason) => Err(ModelActivationError(
+            ActivationRefusal::RuntimeUnavailable(reason),
+        )),
     }
 }
 
@@ -285,9 +309,9 @@ pub fn require_model_artifact_activation(
         }
         // `model_artifact_activation` classifies a path, never a model
         // identity, so it has no way to observe a missing engine arm.
-        ModelActivation::RuntimeUnavailable => {
-            Err(ModelActivationError(ActivationRefusal::RuntimeUnavailable))
-        }
+        ModelActivation::RuntimeUnavailable(reason) => Err(ModelActivationError(
+            ActivationRefusal::RuntimeUnavailable(reason),
+        )),
     }
 }
 
@@ -415,9 +439,14 @@ mod tests {
     #[test]
     #[cfg(not(feature = "h3"))]
     fn reviewed_h3_models_are_ordinary_activation_identities() {
+        use minimax_h3::RuntimeUnavailableReason;
+
+        // Acquisition and execution are separate authorities, and #1276 is
+        // the case where they disagree: every reviewed identity still
+        // downloads on this build, and none of them runs, because this build
+        // was compiled without the engine.
         for identifier in [
             "minimax-h3-fl2va:comfy-pruned-int8",
-            "minimax-h3-ref2va:comfy-pruned-int8",
             "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step",
             "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p",
         ] {
@@ -428,10 +457,22 @@ mod tests {
             );
             assert_eq!(
                 model_activation(identifier, Some("minimax-h3")),
-                ModelActivation::Available,
+                ModelActivation::RuntimeUnavailable(RuntimeUnavailableReason::EngineNotBuilt),
                 "{identifier}"
             );
         }
+
+        // Ref2VA downloads on every build and executes on none. The reason
+        // must name the task rather than the build recipe: an sm89 artifact
+        // refuses it too.
+        assert_eq!(
+            model_acquisition("minimax-h3-ref2va:comfy-pruned-int8", Some("minimax-h3")),
+            ModelActivation::Available
+        );
+        assert_eq!(
+            model_activation("minimax-h3-ref2va:comfy-pruned-int8", Some("minimax-h3")),
+            ModelActivation::RuntimeUnavailable(RuntimeUnavailableReason::UnsupportedTask)
+        );
 
         // An alias names the reviewed compact model, so it stays on the
         // compliance path rather than claiming mold has no runtime for it.
@@ -457,12 +498,15 @@ mod tests {
             );
             assert_eq!(
                 model_activation(unrunnable, Some("minimax-h3")),
-                ModelActivation::RuntimeUnavailable,
+                ModelActivation::RuntimeUnavailable(RuntimeUnavailableReason::UnsupportedLayout),
                 "{unrunnable}"
             );
             let error = require_model_activation(unrunnable, Some("minimax-h3"))
                 .expect_err("execution must be refused");
-            assert_eq!(error.refusal(), ActivationRefusal::RuntimeUnavailable);
+            assert_eq!(
+                error.refusal(),
+                ActivationRefusal::RuntimeUnavailable(RuntimeUnavailableReason::UnsupportedLayout)
+            );
             assert!(error.restriction().is_none(), "{unrunnable}");
             let message = error.to_string();
             assert!(
@@ -561,8 +605,18 @@ mod tests {
                 "{identifier}"
             );
         }
+        // Ref2VA is a reviewed acquisition identity with no qualified route
+        // on any released build, so even a build that carries the engine
+        // refuses it — and says so as a missing implementation, never as a
+        // licensing problem (#1276).
         assert_eq!(
             model_activation(minimax_h3::REF2VA_COMFY, Some("minimax-h3")),
+            ModelActivation::RuntimeUnavailable(
+                minimax_h3::RuntimeUnavailableReason::UnsupportedTask
+            )
+        );
+        assert_eq!(
+            model_acquisition(minimax_h3::REF2VA_COMFY, Some("minimax-h3")),
             ModelActivation::Available
         );
         assert!(model_access_capabilities().restrictions.is_empty());
@@ -620,15 +674,46 @@ mod tests {
     fn only_an_exact_registered_h3_manifest_may_bind_its_raw_sources() {
         let registered = crate::manifest::find_manifest(minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P)
             .expect("reviewed H3 Turbo manifest");
-        require_registered_manifest_activation(registered)
-            .expect("the exact source-controlled manifest must activate");
+        // The binding question this test owns is "may this manifest's raw
+        // upstream locators be used at all", which only an exact registered
+        // manifest may answer yes to. On a build with no engine the answer is
+        // separately no for a reason that has nothing to do with binding
+        // (#1276), so assert the *difference* between the exact manifest and
+        // a mutated one rather than an unconditional Ok.
+        let exact = require_registered_manifest_activation(registered);
+        if minimax_h3::engine_is_built() {
+            exact.expect("the exact source-controlled manifest must activate");
+        } else {
+            assert_eq!(
+                exact.unwrap_err().refusal(),
+                ActivationRefusal::RuntimeUnavailable(
+                    minimax_h3::RuntimeUnavailableReason::EngineNotBuilt
+                )
+            );
+        }
 
         let copied = registered.clone();
-        require_registered_manifest_activation(&copied)
-            .expect("durable replay must preserve exact manifest authority by value");
+        assert_eq!(
+            require_registered_manifest_activation(&copied).map_err(ModelActivationError::refusal),
+            exact.map_err(ModelActivationError::refusal),
+            "durable replay must preserve exact manifest authority by value"
+        );
         let mut changed = copied;
         changed.files[0].hf_filename.push_str(".changed");
-        assert!(require_registered_manifest_activation(&changed).is_err());
+        // The binding rule itself is value identity against the registry, and
+        // it holds on every build — a runtime answer never widens it.
+        assert!(is_exact_registered_manifest(registered));
+        assert!(!is_exact_registered_manifest(&changed));
+        require_registered_manifest_activation(&changed)
+            .expect_err("a mutated manifest may never bind raw upstream sources");
+        if minimax_h3::engine_is_built() {
+            assert_eq!(
+                require_registered_manifest_activation(&changed)
+                    .unwrap_err()
+                    .refusal(),
+                ActivationRefusal::ComplianceGated
+            );
+        }
         assert!(
             require_model_activation("hf:Comfy-Org/MiniMax-H3", Some(minimax_h3::FAMILY),).is_err()
         );

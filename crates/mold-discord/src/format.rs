@@ -1129,6 +1129,7 @@ mod tests {
     fn model_list_with_models() {
         let models = vec![ModelInfoExtended {
             runtime_available: None,
+            runtime_unavailable_reason: None,
             info: mold_core::ModelInfo {
                 name: "flux-schnell:q8".to_string(),
                 family: "flux".to_string(),
@@ -1173,6 +1174,7 @@ mod tests {
         let models = vec![
             ModelInfoExtended {
                 runtime_available: None,
+                runtime_unavailable_reason: None,
                 info: mold_core::ModelInfo {
                     name: "flux-schnell:q8".to_string(),
                     family: "flux".to_string(),
@@ -1207,6 +1209,7 @@ mod tests {
             },
             ModelInfoExtended {
                 runtime_available: None,
+                runtime_unavailable_reason: None,
                 info: mold_core::ModelInfo {
                     name: "flux-dev:q4".to_string(),
                     family: "flux".to_string(),
@@ -1241,6 +1244,7 @@ mod tests {
             },
             ModelInfoExtended {
                 runtime_available: None,
+                runtime_unavailable_reason: None,
                 info: mold_core::ModelInfo {
                     name: "wuerstchen-v2:fp16".to_string(),
                     family: "wuerstchen".to_string(),

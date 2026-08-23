@@ -54,6 +54,42 @@ while generation is refused up front — before any weights are loaded — and
 the whole rest of the compact stack with the INT8 variants, so if you already
 have one installed the pull is only the 12.529 GB transformer.
 
+## Which models this build can run
+
+The H3 catalog rows ship on every release target; the H3 _engine_ does not.
+The macOS and Linux sm89 artifacts are built with it; on an RTX 3090/A40
+(sm86), a B200/B300 (sm100), an RTX 50-series card (sm120), or Windows, the H3
+models download and verify normally and generate nothing. Ref2VA is the same
+shape for a different reason: it has no qualified runtime on **any** released
+binary.
+
+Rather than let you discover that after a 21–42 GB pull, every H3 row carries
+its answer. `GET /api/models` reports:
+
+- `runtime_available` — `false` when this server cannot execute the model,
+  whatever the cause. Absent on servers that predate the field, which clients
+  read as runnable.
+- `runtime_unavailable_reason` — one sentence naming the obstacle, present
+  exactly when `runtime_available` is `false`. There are three, and they have
+  three different remedies:
+  - **no engine arm for this weight layout** — the `official-bf16`
+    qualification references and the pruned NVFP4 tags. No build runs these.
+  - **Ref2VA execution is not available in any released build** — the task,
+    not the machine. A different artifact will not help.
+  - **this build was compiled without the H3 engine** — use the macOS or
+    Linux sm89 release, or build with the `h3` feature.
+
+Mold Studio renders that on the model card _before_ the pull: web, desktop,
+and the iPhone app show a **Download only** badge on the Discover row and the
+full sentence in the detail pane, with the Pull action still enabled — the
+model genuinely is downloadable. `mold pull` prints the same sentence in place
+of the `mold run` hint, and `mold run --local` refuses before opening a single
+checkpoint.
+
+Submitting one anyway returns HTTP `501` with code
+`MINIMAX_H3_RUNTIME_UNAVAILABLE` and that same sentence — deliberately not the
+`451` licensing refusal, because none of these is a licensing problem.
+
 Every H3 render carries synchronized generated audio, and no request can turn
 it off. `GET /api/models` says so directly: each H3 entry reports
 `"supports_audio": true` — including the Ref2VA row and variants that are not

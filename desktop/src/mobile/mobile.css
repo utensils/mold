@@ -3499,6 +3499,17 @@ button:disabled {
   gap: 6px;
 }
 
+/* "Download only": this machine cannot run the model behind the row. Shown
+   beside Pull rather than in place of it — the model is downloadable (#1276). */
+.mobile-catalog-runtime-badge {
+  border: 1px solid var(--edge);
+  border-radius: 4px;
+  padding: 2px 6px;
+  color: var(--ink-2);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .mobile-catalog-installed {
   color: var(--halide);
   font-family: var(--font-utility);

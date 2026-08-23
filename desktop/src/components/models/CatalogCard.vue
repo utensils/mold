@@ -15,6 +15,8 @@ import { resolveEntrySize } from "../../lib/catalogSizes";
 import { catalogThumbnailUrl } from "../../lib/catalogThumbnails";
 import { formatCount } from "../../lib/format";
 import { openExternal } from "../../lib/openExternal";
+import { RUNTIME_UNAVAILABLE_BADGE } from "@studio/lib/modelRuntimeAvailability";
+import type { ModelRuntimeNotice } from "@studio/lib/modelRuntimeAvailability";
 import type { ModelSource } from "../../lib/modelSource";
 import type { CatalogEntry } from "../../lib/api/types";
 
@@ -42,9 +44,20 @@ const props = withDefaults(
     /** Batch-download checkbox state. */
     selectable?: boolean;
     checked?: boolean;
+    /** This machine's own answer for the model behind the row, resolved by
+     *  the parent through `@studio/lib/modelRuntimeAvailability`. `null`
+     *  means runnable or unknown; nothing here derives it from the family,
+     *  and it never disables Pull — the model is downloadable (#1276). */
+    runtimeNotice?: ModelRuntimeNotice | null;
   }>(),
   // Explicit so Vue's boolean casting doesn't turn "not supplied" into false.
-  { installable: undefined, selected: false, selectable: true, checked: false },
+  {
+    installable: undefined,
+    selected: false,
+    selectable: true,
+    checked: false,
+    runtimeNotice: null,
+  },
 );
 const emit = defineEmits<{
   (e: "pull", entry: CatalogEntry): void;
@@ -251,6 +264,14 @@ function openPage(): void {
 
       <div class="mt-auto flex shrink-0 items-center justify-end gap-2 pt-1">
         <span v-if="entry.installed" class="data-mono text-caption text-halide">● installed</span>
+        <span
+          v-if="props.runtimeNotice"
+          data-test="runtime-unavailable-badge"
+          class="data-mono text-caption text-ink-3"
+          :title="props.runtimeNotice.message"
+        >
+          {{ RUNTIME_UNAVAILABLE_BADGE }}
+        </span>
         <button
           v-if="showAction"
           type="button"

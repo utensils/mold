@@ -73,7 +73,7 @@ impl ApiError {
                 mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED,
                 StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS,
             ),
-            mold_core::ActivationRefusal::RuntimeUnavailable => (
+            mold_core::ActivationRefusal::RuntimeUnavailable(_) => (
                 mold_core::MINIMAX_H3_RUNTIME_UNAVAILABLE,
                 StatusCode::NOT_IMPLEMENTED,
             ),
@@ -8701,8 +8701,13 @@ mod tests {
         let manifest =
             mold_core::manifest::find_manifest(mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P)
                 .expect("reviewed H3 Turbo manifest");
-        mold_core::require_registered_manifest_activation(manifest)
-            .expect("source-controlled reviewed manifest must activate");
+        // The raw repository identity is never authorized, whatever this
+        // build's runtime answer is; the reviewed manifest's own activation
+        // is the build's question and is asserted as such (#1276).
+        assert_eq!(
+            mold_core::require_registered_manifest_activation(manifest).is_ok(),
+            mold_core::minimax_h3::engine_is_built()
+        );
         assert!(mold_core::require_model_activation(
             "hf:Comfy-Org/MiniMax-H3",
             Some(mold_core::minimax_h3::FAMILY),

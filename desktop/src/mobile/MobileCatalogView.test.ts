@@ -372,6 +372,44 @@ describe("MobileCatalogView", () => {
     expect(ref2va.get(".mobile-catalog-pull").text()).toBe("Pulling 37%");
   });
 
+  it("warns before the pull that the host cannot run the model", async () => {
+    // #1276: 21-42 GB of weights, and the only honest refusal used to arrive
+    // at submit time. The badge and the inline note come from the server's
+    // own row, and neither disables Pull.
+    const reason =
+      "MiniMax H3 reference-to-audio-video (Ref2VA) execution is not available in any released build.";
+    const cold = h3Model("ref2va", false, {
+      runtime_unavailable_reason: reason,
+    });
+    apiFetchTo.mockImplementation((target: ApiTarget, path: string) => {
+      if (path === "/api/models") {
+        return Promise.resolve(jsonResponse(target.baseUrl === studio.baseUrl ? [cold] : []));
+      }
+      if (path === "/api/capabilities") return Promise.resolve(jsonResponse({}));
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    fetchCatalogDetail.mockRejectedValue(new Error("manifest detail unavailable"));
+
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    const card = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes(cold.name))!;
+    expect(card.get("[data-test='mobile-catalog-runtime-badge']").text()).toContain(
+      "Download only",
+    );
+    expect(card.get(".mobile-catalog-pull").attributes("disabled")).toBeUndefined();
+
+    await card.get(".mobile-catalog-card-open").trigger("click");
+    await flushPromises();
+    const detail = document.querySelector<HTMLElement>("[data-test='mobile-catalog-detail']")!;
+    expect(
+      detail.querySelector("[data-test='mobile-catalog-runtime-unavailable-predownload']")!
+        .textContent,
+    ).toContain("Ref2VA");
+  });
+
   it("keeps acquired H3 inventory repair and removal while hiding runtime load", async () => {
     const installed = h3Model("ref2va", true, {
       disk_usage_bytes: 42_482_090_318,
@@ -421,7 +459,9 @@ describe("MobileCatalogView", () => {
 
     const detail = document.querySelector<HTMLElement>("[data-test='mobile-catalog-detail']")!;
     expect(detail.textContent).toContain("1/2 present");
-    expect(detail.textContent).toContain("Stored on this host. Runtime unavailable.");
+    // The sentence is the server's when it names one, and a cause-free
+    // fallback otherwise; either way it is inline, never a toast (#1276).
+    expect(detail.textContent).toContain("cannot run this model");
     expect(detail.textContent).not.toContain("Load on GPU");
     expect(detail.querySelector("[data-test='mobile-catalog-runtime-unavailable']")).not.toBeNull();
 

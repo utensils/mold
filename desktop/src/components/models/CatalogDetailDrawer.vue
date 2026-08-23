@@ -21,6 +21,7 @@ import { openExternal } from "../../lib/openExternal";
 import { useToastStore } from "../../stores/toasts";
 import { ApiError, type ApiTarget } from "../../lib/api/client";
 import type { ModelSource } from "../../lib/modelSource";
+import type { ModelRuntimeNotice } from "@studio/lib/modelRuntimeAvailability";
 import type { CatalogEntry, ModelComponentStatus } from "../../lib/api/types";
 
 /** A selectable pull variant (e.g. quantization); selecting one sets the exact
@@ -55,6 +56,12 @@ const props = defineProps<{
    * (single-machine callers) falls back to this entry's own install flag.
    */
   action?: "Pull" | "Repair" | undefined;
+  /** This machine's own runtime answer for the model, resolved by the parent
+   *  through `@studio/lib/modelRuntimeAvailability`. Rendered as an inline
+   *  note above the action — before the pull, never as a toast after it —
+   *  and it never disables the action: the model is downloadable, it just
+   *  cannot generate here (#1276). */
+  runtimeNotice?: ModelRuntimeNotice | null | undefined;
 }>();
 const emit = defineEmits<{
   (e: "close"): void;
@@ -585,6 +592,13 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
 
     <!-- Action -->
     <div class="border-edge border-t p-4">
+      <p
+        v-if="props.runtimeNotice"
+        data-test="runtime-unavailable-note"
+        class="text-caption text-ink-2"
+      >
+        {{ props.runtimeNotice.message }}
+      </p>
       <button
         v-if="actionLabel === 'Repair'"
         type="button"

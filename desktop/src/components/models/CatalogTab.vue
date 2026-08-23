@@ -10,6 +10,7 @@ import { useDownloadsStore } from "../../stores/downloads";
 import { useHostsStore, type HostView } from "../../stores/hosts";
 import { useInventoryKnown } from "../../lib/modelInventory";
 import { isGenerationModel, useModelStore } from "../../stores/models";
+import { modelRuntimeNoticeForId } from "@studio/lib/modelRuntimeAvailability";
 import { useToastStore } from "../../stores/toasts";
 import { useUiStore } from "../../stores/ui";
 import { ApiError, type ApiTarget } from "../../lib/api/client";
@@ -208,6 +209,14 @@ function hostLabelsFor(entry: CatalogListEntry): string[] {
     (id) =>
       hosts.all.find((host) => host.id === id)?.label ?? (id === "local" ? "This device" : id),
   );
+}
+
+/** Whether this machine can run the model behind a Discover row, from its
+ *  own `/api/models` listing. Knowable before the pull — which for the
+ *  affected checkpoints is 21-42 GB (#1276). A live catalog id nobody lists
+ *  is unknown and gets no badge rather than a guess. */
+function runtimeNoticeFor(id: string) {
+  return modelRuntimeNoticeForId(id, models.all);
 }
 
 const manifestEntries = computed<CatalogEntry[]>(() => {
@@ -878,6 +887,7 @@ onUnmounted(() => {
           :selected="detailEntry?.id === entry.id"
           :selectable="!batchStarting && selectable(entry)"
           :checked="selected.has(entry.id)"
+          :runtime-notice="runtimeNoticeFor(entry.id)"
           @pull="pull"
           @open="detailEntry = $event"
           @toggle-select="toggleSelection"
@@ -891,6 +901,7 @@ onUnmounted(() => {
           :selected="detailEntry?.id === entry.id"
           :selectable="!batchStarting && selectable(entry)"
           :checked="selected.has(entry.id)"
+          :runtime-notice="runtimeNoticeFor(entry.id)"
           class="px-3 py-2"
           @pull="pull"
           @open="detailEntry = $event"
@@ -925,6 +936,7 @@ onUnmounted(() => {
       :forward-credentials="detailTarget.forward"
       :variants="detailVariants"
       :action="detailAction"
+      :runtime-notice="runtimeNoticeFor(detailEntry.id)"
       @close="detailEntry = null"
       @pull="pullFromDrawer"
       @select-variant="selectDrawerVariant"

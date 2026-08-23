@@ -411,13 +411,28 @@ pub async fn run(
         },
     }
 
-    // A download-only model (no engine arm in this build) must not be handed
-    // a `mold run` hint it will refuse; say what it is instead.
-    match mold_core::require_model_activation(&manifest.name, Some(&manifest.family)) {
-        Ok(()) => status!("  mold run \"your prompt\""),
-        Err(error) => status!("  Downloaded and verified. {error}"),
-    }
+    status!(
+        "{}",
+        post_pull_hint(mold_core::require_model_activation(
+            &manifest.name,
+            Some(&manifest.family)
+        ))
+    );
     Ok(())
+}
+
+/// The line printed after a successful manifest pull.
+///
+/// A model this build cannot execute must not be handed a `mold run` hint it
+/// would refuse. The activation authority answers for THIS build (#1276), so
+/// the note names the real obstacle — a missing engine arm for the weight
+/// layout, a task with no qualified route, or a binary compiled without the
+/// engine — rather than promising a command that returns 501.
+fn post_pull_hint(activation: Result<(), mold_core::ModelActivationError>) -> String {
+    match activation {
+        Ok(()) => "  mold run \"your prompt\"".to_string(),
+        Err(error) => format!("  Downloaded and verified. {error}"),
+    }
 }
 
 /// Run a recipe-driven pull for a Civitai catalog row. Pulls each missing
@@ -614,6 +629,57 @@ async fn pull_via_server(
 
 #[cfg(test)]
 mod tests {
+    /// #1276: the post-pull line is the last chance to be honest about a
+    /// 21-42 GB download. A runnable model gets the `mold run` hint; every
+    /// unrunnable one gets the server's own sentence for why, and never a
+    /// command that would 501.
+    #[test]
+    fn post_pull_hint_never_promises_a_run_this_build_would_refuse() {
+        assert_eq!(
+            super::post_pull_hint(Ok(())),
+            "  mold run \"your prompt\"".to_string()
+        );
+
+        for (model, reason) in [
+            (
+                mold_core::minimax_h3::REF2VA_COMFY,
+                mold_core::minimax_h3::RuntimeUnavailableReason::UnsupportedTask,
+            ),
+            (
+                mold_core::minimax_h3::FL2VA_COMFY_NVFP4,
+                mold_core::minimax_h3::RuntimeUnavailableReason::UnsupportedLayout,
+            ),
+        ] {
+            let hint = super::post_pull_hint(mold_core::require_model_activation(
+                model,
+                Some(mold_core::minimax_h3::FAMILY),
+            ));
+            assert!(!hint.contains("mold run"), "{model}: {hint}");
+            assert!(hint.contains(reason.message()), "{model}: {hint}");
+            assert!(
+                hint.contains(mold_core::MINIMAX_H3_RUNTIME_UNAVAILABLE),
+                "{model}: {hint}"
+            );
+        }
+
+        // The reviewed compact FL2VA tier is runnable only where the engine
+        // was compiled in, which is exactly the trap this issue closed.
+        let compact = super::post_pull_hint(mold_core::require_model_activation(
+            mold_core::minimax_h3::FL2VA_COMFY,
+            Some(mold_core::minimax_h3::FAMILY),
+        ));
+        if mold_core::minimax_h3::engine_is_built() {
+            assert!(compact.contains("mold run"), "{compact}");
+        } else {
+            assert!(
+                compact.contains(
+                    mold_core::minimax_h3::RuntimeUnavailableReason::EngineNotBuilt.message()
+                ),
+                "{compact}"
+            );
+        }
+    }
+
     #[test]
     fn a_server_that_answered_but_could_not_be_read_is_an_error_naming_the_host() {
         let error = anyhow::anyhow!("401 Unauthorized");

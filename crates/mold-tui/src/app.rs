@@ -1624,6 +1624,20 @@ pub struct ModelsState {
 
 /// Generation-model names the create-form model picker (`Popup::ModelSelector`)
 /// may offer: real generation models — never upscalers/utility rows — filtered
+/// The inline sentence for a row this build cannot generate with.
+///
+/// The server names the obstacle on the row (`runtime_unavailable_reason`) —
+/// a missing engine arm for the weight layout, a task with no qualified
+/// route, or a binary built without the engine are three different answers
+/// (#1276). An older server omits it, and the layout wording is the one that
+/// was true of every download-only row it could publish.
+fn runtime_unavailable_message(model: &ModelInfoExtended) -> String {
+    model
+        .runtime_unavailable_reason
+        .clone()
+        .unwrap_or_else(|| "No runtime for this layout in this build.".to_string())
+}
+
 /// by `query` (case-insensitive substring). `runtime_available: Some(false)`
 /// marks a download-only row (e.g. the pruned NVFP4 H3 partitions) whose build
 /// has no engine arm for it; picking one for generation would only earn a 501,
@@ -4176,9 +4190,8 @@ impl App {
                             if was_selected {
                                 let model = &self.models.catalog[relative_row];
                                 if model.runtime_available == Some(false) {
-                                    self.generate.error_message = Some(
-                                        "No runtime for this layout in this build.".to_string(),
-                                    );
+                                    self.generate.error_message =
+                                        Some(runtime_unavailable_message(model));
                                 } else {
                                     let name = model.name.clone();
                                     self.update_model(&name);
@@ -14898,6 +14911,13 @@ mod tests {
         app.layout.models_table = ratatui::layout::Rect::new(0, 0, 80, 20);
         let unrunnable = ModelInfoExtended {
             runtime_available: Some(false),
+            // The server names the obstacle; the TUI must repeat that
+            // sentence rather than its own layout-only guess (#1276).
+            runtime_unavailable_reason: Some(
+                mold_core::minimax_h3::RuntimeUnavailableReason::EngineNotBuilt
+                    .message()
+                    .to_string(),
+            ),
             ..make_test_catalog_entry(
                 "minimax-h3-fl2va:comfy-pruned-nvfp4",
                 8,
@@ -14931,13 +14951,24 @@ mod tests {
             app.generate.params.model, starting_model,
             "must not select the download-only model for generation either"
         );
+        assert_eq!(
+            app.generate.error_message.as_deref(),
+            Some(mold_core::minimax_h3::RuntimeUnavailableReason::EngineNotBuilt.message()),
+            "should surface the server's own reason instead of silently doing nothing"
+        );
+
+        // An older server omits the reason; the layout wording it could
+        // always publish stays the fallback.
+        app.generate.error_message = None;
+        app.models.catalog[0].runtime_unavailable_reason = None;
+        app.handle_mouse(click_row_zero);
         assert!(
             app.generate
                 .error_message
                 .as_deref()
                 .unwrap_or_default()
                 .contains("No runtime"),
-            "should surface an inline reason instead of silently doing nothing, got {:?}",
+            "got {:?}",
             app.generate.error_message
         );
     }
@@ -15239,6 +15270,7 @@ mod tests {
     ) -> ModelInfoExtended {
         ModelInfoExtended {
             runtime_available: None,
+            runtime_unavailable_reason: None,
             info: mold_core::ModelInfo {
                 name: name.to_string(),
                 family: "flux".to_string(),
@@ -17115,6 +17147,7 @@ mod tests {
         use mold_core::types::{ModelDefaults, ModelInfo, ModelInfoExtended};
         ModelInfoExtended {
             runtime_available: None,
+            runtime_unavailable_reason: None,
             info: ModelInfo {
                 name: name.to_string(),
                 family: family.to_string(),

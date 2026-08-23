@@ -35,6 +35,11 @@ import {
 } from "../lib/catalogFilters";
 import { catalogFamily, familyLabel, matchesCatalogFamily } from "@studio/lib/modelFamily";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
+import {
+  modelRuntimeNotice,
+  modelRuntimeNoticeForId,
+  RUNTIME_UNAVAILABLE_BADGE,
+} from "@studio/lib/modelRuntimeAvailability";
 import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Authoring";
 import { reviewedMiniMaxH3ModelAccess } from "@studio/lib/minimaxH3Inventory";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
@@ -485,6 +490,33 @@ const detailRuntimeAvailable = computed(() => {
   }
   return filterRestrictedModels([model], capabilitiesByHost.value[host.id]).length === 1;
 });
+
+/**
+ * The machine's own "can it run this" answer for the row, from its
+ * `/api/models` listing — including a row nothing has downloaded yet, which
+ * is the whole point of #1276: these checkpoints are 21-42 GB and the only
+ * honest refusal used to arrive at submit time. The owning host answers for
+ * an installed row; the browsed host answers for everything else. It never
+ * disables Pull.
+ */
+const detailRuntimeNotice = computed(() => {
+  const entry = detailEntry.value;
+  if (!entry) return null;
+  const host = owningHost(entry);
+  const rows = modelsByHost.value[host?.id ?? props.selectedHostId] ?? [];
+  return (
+    modelRuntimeNotice(detailModel.value) ??
+    modelRuntimeNoticeForId(entry.name, rows) ??
+    modelRuntimeNoticeForId(entry.id, rows)
+  );
+});
+
+/** The same answer for one grid row, rendered as a compact badge. */
+function runtimeNoticeFor(entry: MobileCatalogEntry) {
+  const host = owningHost(entry);
+  const rows = modelsByHost.value[host?.id ?? props.selectedHostId] ?? [];
+  return modelRuntimeNoticeForId(entry.name, rows) ?? modelRuntimeNoticeForId(entry.id, rows);
+}
 
 /** Runnable manifest siblings (`base:tag`) become exact pull targets. */
 const detailVariants = computed(() => {
@@ -1436,6 +1468,16 @@ onBeforeUnmount(() => {
           </button>
           <span class="mobile-catalog-card-actions">
             <span v-if="entry.installed" class="mobile-catalog-installed">Installed</span>
+            <!-- Downloadable, not runnable on the machine that would hold it.
+                 Said before the pull, never as a toast after it. -->
+            <span
+              v-if="runtimeNoticeFor(entry)"
+              class="mobile-catalog-runtime-badge"
+              data-test="mobile-catalog-runtime-badge"
+              :title="runtimeNoticeFor(entry)?.message"
+            >
+              {{ RUNTIME_UNAVAILABLE_BADGE }}
+            </span>
             <!-- Installed here is not installed everywhere: keep the action
                  whenever a reachable machine is still missing this model. -->
             <button
@@ -1658,7 +1700,7 @@ onBeforeUnmount(() => {
                 class="mobile-catalog-detail-muted"
                 data-test="mobile-catalog-runtime-unavailable"
               >
-                Stored on this host. Runtime unavailable.
+                {{ detailRuntimeNotice?.message ?? "Stored on this host. Runtime unavailable." }}
               </p>
               <button
                 v-if="detailModel.is_loaded"
@@ -1707,6 +1749,16 @@ onBeforeUnmount(() => {
             data-test="mobile-catalog-detail-action-status"
           >
             {{ announcement }}
+          </p>
+          <!-- The pre-download half of the answer. An installed model already
+               carries the same sentence in its actions block above, so this
+               one is scoped to rows nothing has pulled yet (#1276). -->
+          <p
+            v-if="detailRuntimeNotice && !mergedDetail.installed"
+            class="mobile-catalog-detail-muted"
+            data-test="mobile-catalog-runtime-unavailable-predownload"
+          >
+            {{ detailRuntimeNotice.message }}
           </p>
           <p v-if="mergedDetail.supported != null && !canDownloadEntry(mergedDetail)">
             This catalog package is not supported by a shipped Mold engine yet.

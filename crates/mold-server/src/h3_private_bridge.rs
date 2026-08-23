@@ -840,6 +840,7 @@ fn h3_model_row(
     Some(mold_core::ModelInfoExtended {
         // The bridge only ever re-publishes a reviewed, executable partition.
         runtime_available: Some(true),
+        runtime_unavailable_reason: None,
         info: mold_core::ModelInfo {
             name: model.to_string(),
             family: mold_core::minimax_h3::FAMILY.into(),

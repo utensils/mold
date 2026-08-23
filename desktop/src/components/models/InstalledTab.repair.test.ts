@@ -291,7 +291,34 @@ describe("InstalledTab model info drawer", () => {
     ).toBe(true);
   });
 
-  it("hides Load/Unload and shows an inline reason for a download-only (runtime_available: false) row", async () => {
+  it("hides Load/Unload and carries the server's own reason for a download-only row", async () => {
+    setActivePinia(createPinia());
+    const reason = "MiniMax H3 has no runtime for this model's weight layout in this build.";
+    const wrapper = mount(InstalledTab, {
+      props: {
+        entries: [
+          model({
+            name: "minimax-h3-fl2va:comfy-pruned-nvfp4",
+            family: "minimax-h3",
+            runtime_available: false,
+            runtime_unavailable_reason: reason,
+          }),
+        ],
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='load-btn']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='unload-btn']").exists()).toBe(false);
+    // The row is compact, so it wears the badge and the full sentence — the
+    // one #1276 added, never a family guess — rides its title (and the
+    // detail drawer renders it in full).
+    const note = wrapper.get("[data-test='runtime-unavailable-note']");
+    expect(note.text()).toContain("Download only");
+    expect(note.attributes("title")).toBe(reason);
+  });
+
+  it("falls back to a cause-free note when an older server sends no reason", async () => {
     setActivePinia(createPinia());
     const wrapper = mount(InstalledTab, {
       props: {
@@ -306,8 +333,8 @@ describe("InstalledTab model info drawer", () => {
     });
     await flushPromises();
 
-    expect(wrapper.find("[data-test='load-btn']").exists()).toBe(false);
-    expect(wrapper.find("[data-test='unload-btn']").exists()).toBe(false);
-    expect(wrapper.get("[data-test='runtime-unavailable-note']").text()).toContain("No runtime");
+    expect(wrapper.get("[data-test='runtime-unavailable-note']").attributes("title")).toContain(
+      "cannot run this model",
+    );
   });
 });

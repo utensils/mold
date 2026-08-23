@@ -11,6 +11,11 @@ import DownloadTargetDialog from "./DownloadTargetDialog.vue";
 import ModelTableRow from "./ModelTableRow.vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
+import {
+  isModelRuntimeUnavailable,
+  modelRuntimeNotice,
+  RUNTIME_UNAVAILABLE_BADGE,
+} from "@studio/lib/modelRuntimeAvailability";
 import { isVideoFamily } from "../../lib/capabilities";
 import { installedModelToEntry } from "../../lib/catalogDetail";
 import {
@@ -115,9 +120,14 @@ function hostLabels(m: LibraryModelEntry): string[] {
 /** `runtime_available: false` (download-only rows such as the NVFP4 H3
  * partitions) means the server rejects every load/generate attempt with a
  * 501 — hide Load/Unload for the row and say why instead of a toast. Pull,
- * Repair, and Remove stay reachable. */
+ * Repair, and Remove stay reachable. The obstacle itself is the server's to
+ * name (#1276); the row repeats its sentence rather than guessing. */
 function runtimeUnavailable(m: LibraryModelEntry): boolean {
-  return m.runtime_available === false;
+  return isModelRuntimeUnavailable(m);
+}
+
+function runtimeUnavailableTitle(m: LibraryModelEntry): string | undefined {
+  return modelRuntimeNotice(m)?.message;
 }
 
 function modelAccessibilityLabel(m: LibraryModelEntry): string {
@@ -297,9 +307,9 @@ async function unload(m: LibraryModelEntry) {
                   v-if="runtimeUnavailable(m)"
                   data-test="runtime-unavailable-note"
                   class="flex h-7 items-center text-caption text-ink-3"
-                  title="This build has no runtime for this model's layout"
+                  :title="runtimeUnavailableTitle(m)"
                 >
-                  No runtime for this build
+                  {{ RUNTIME_UNAVAILABLE_BADGE }}
                 </span>
                 <button
                   v-else-if="!m.is_loaded"
@@ -351,6 +361,7 @@ async function unload(m: LibraryModelEntry) {
     :target="targetFor(detailModel)"
     :forward-credentials="!!targetFor(detailModel)"
     :action="installPlan(detailModel).label"
+    :runtime-notice="modelRuntimeNotice(detailModel)"
     @close="detailModel = null"
     @pull="detailModel && requestDownload(detailModel)"
   />

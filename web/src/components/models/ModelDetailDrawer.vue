@@ -17,6 +17,10 @@ import { useCatalog } from "../../composables/useCatalog";
 import { useModelInstallTargets } from "../../composables/useModelInstallTargets";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import { modelDisplayName } from "@studio/lib/modelDisplay";
+import {
+  modelRuntimeNotice,
+  modelRuntimeNoticeForId,
+} from "@studio/lib/modelRuntimeAvailability";
 import { requestConfirm, toast } from "../../lib/toasts";
 import type {
   CatalogEntryWire,
@@ -128,10 +132,19 @@ const installedModel = computed<ModelInfoExtended | null>(() =>
 const isLoaded = computed(() => installedModel.value?.is_loaded ?? false);
 /** `runtime_available: false` (download-only rows such as the NVFP4 H3
  * partitions) means the server rejects every load/generate attempt with a
- * 501 — never offer the load action, and say why instead of a toast. */
-const runtimeUnavailable = computed(
-  () => installedModel.value?.runtime_available === false,
+ * 501 — never offer the load action, and say why instead of a toast.
+ *
+ * A Discover row is answered too, from the host's own `/api/models` listing
+ * (#1276): these checkpoints are 21-42 GB, so "this machine cannot run it"
+ * has to arrive before the Pull button, not after the download. The pull
+ * itself stays available — the whole point is that the model is downloadable
+ * and not runnable. */
+const runtimeNotice = computed(
+  () =>
+    modelRuntimeNotice(installedModel.value) ??
+    modelRuntimeNoticeForId(entry.value?.id, cat.availableManifests.value),
 );
+const runtimeUnavailable = computed(() => runtimeNotice.value !== null);
 
 const mediaLabel = computed(() => {
   if (metadataEntry.value) return metadataEntry.value.modality;
@@ -706,8 +719,12 @@ function onRetry() {
             <Icon name="download" :size="15" />
             {{ isLoaded ? "loaded into memory" : "Load into memory" }}
           </button>
-          <p v-else class="md__state-msg" data-test="runtime-unavailable-note">
-            No runtime for this layout in this build.
+          <p
+            v-else-if="runtimeNotice"
+            class="md__state-msg"
+            data-test="runtime-unavailable-note"
+          >
+            {{ runtimeNotice.message }}
           </p>
           <div class="md__secondary">
             <button
@@ -751,18 +768,28 @@ function onRetry() {
         </template>
 
         <!-- Discover (catalog) row: pull / repair -->
-        <button
-          v-else
-          type="button"
-          class="md__action"
-          :data-test="isRepair ? 'repair-btn' : 'pull-btn'"
-          :disabled="!canPull"
-          :title="canPull ? undefined : 'Unsupported catalog package'"
-          @click="handlePull"
-        >
-          <Icon v-if="!isRepair" name="download" :size="15" />
-          {{ isRepair ? "Repair" : "Pull" }}
-        </button>
+        <template v-else>
+          <!-- Downloadable, not runnable. Said before the Pull, never as a
+               toast after it, and it never disables the Pull. -->
+          <p
+            v-if="runtimeNotice"
+            class="md__state-msg"
+            data-test="runtime-unavailable-note"
+          >
+            {{ runtimeNotice.message }}
+          </p>
+          <button
+            type="button"
+            class="md__action"
+            :data-test="isRepair ? 'repair-btn' : 'pull-btn'"
+            :disabled="!canPull"
+            :title="canPull ? undefined : 'Unsupported catalog package'"
+            @click="handlePull"
+          >
+            <Icon v-if="!isRepair" name="download" :size="15" />
+            {{ isRepair ? "Repair" : "Pull" }}
+          </button>
+        </template>
       </div>
       <!-- Terminal branch. Reached only when the drawer is open with a detail we
          can't render — the panel says so and offers a way out instead of

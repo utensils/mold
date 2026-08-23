@@ -81,8 +81,10 @@ const mockDelete = vi
   .fn()
   .mockResolvedValue({ removed: [], kept: [], freed_bytes: 6_000_000_000 });
 
+const mockAvailableManifests = ref<ModelInfoExtended[]>([]);
 vi.mock("../../composables/useCatalog", () => ({
   useCatalog: () => ({
+    availableManifests: mockAvailableManifests,
     detail: mockDetail,
     detailLoadingId: mockDetailLoadingId,
     detailError: mockDetailError,
@@ -145,6 +147,7 @@ describe("ModelDetailDrawer", () => {
     localStorage.clear();
     mockHosts.value = [host("origin")];
     mockOwners.value = {};
+    mockAvailableManifests.value = [];
     useModelInstallTargets().cancel();
   });
 
@@ -209,6 +212,56 @@ describe("ModelDetailDrawer", () => {
   });
 
   describe("catalog (Discover)", () => {
+    /* #1276: these checkpoints are 21-42 GB, and the only honest refusal used
+       to arrive at submit time. The note has to be here, beside Pull, and it
+       must never disable Pull — the model IS downloadable. */
+    it("warns before the pull when the host cannot run the model", () => {
+      const entry = makeEntry({
+        id: "minimax-h3-ref2va:comfy-pruned-int8",
+        supported: true,
+      });
+      mockAvailableManifests.value = [
+        makeModel({
+          name: "minimax-h3-ref2va:comfy-pruned-int8",
+          downloaded: false,
+          runtime_available: false,
+          runtime_unavailable_reason:
+            "MiniMax H3 reference-to-audio-video (Ref2VA) execution is not available in any released build.",
+        }),
+      ];
+      mockDetail.value = catalogDetail(entry);
+      const w = mount(ModelDetailDrawer);
+      expect(w.get("[data-test=runtime-unavailable-note]").text()).toContain(
+        "Ref2VA",
+      );
+      const pull = w.get("[data-test=pull-btn]");
+      expect(pull.attributes("disabled")).toBeUndefined();
+    });
+
+    it("says nothing about runtime for a model the host can run", () => {
+      mockAvailableManifests.value = [
+        makeModel({
+          name: "cv:123",
+          downloaded: false,
+          runtime_available: true,
+        }),
+      ];
+      mockDetail.value = catalogDetail(makeEntry({ id: "cv:123" }));
+      const w = mount(ModelDetailDrawer);
+      expect(w.find("[data-test=runtime-unavailable-note]").exists()).toBe(
+        false,
+      );
+    });
+
+    it("says nothing for a catalog id the host listing does not mention", () => {
+      mockAvailableManifests.value = [];
+      mockDetail.value = catalogDetail();
+      const w = mount(ModelDetailDrawer);
+      expect(w.find("[data-test=runtime-unavailable-note]").exists()).toBe(
+        false,
+      );
+    });
+
     it("renders name, family, description, source and license", () => {
       mockDetail.value = catalogDetail();
       const w = mount(ModelDetailDrawer);
@@ -837,20 +890,36 @@ describe("ModelDetailDrawer", () => {
       expect(mockUnload).toHaveBeenCalledWith("flux-schnell:q8");
     });
 
-    it("hides Load/Unload and shows an inline reason for a download-only (runtime_available: false) row", () => {
+    it("hides Load/Unload and shows the server's reason for a download-only (runtime_available: false) row", () => {
       mockDetail.value = {
         kind: "installed",
-        model: makeModel({ runtime_available: false }),
+        model: makeModel({
+          runtime_available: false,
+          runtime_unavailable_reason:
+            "MiniMax H3 has no runtime for this model's weight layout in this build.",
+        }),
         components: [],
       };
       const w = mount(ModelDetailDrawer);
       expect(w.find("[data-test=load-btn]").exists()).toBe(false);
       expect(w.find("[data-test=unload-btn]").exists()).toBe(false);
       expect(w.get("[data-test=runtime-unavailable-note]").text()).toContain(
-        "No runtime",
+        "no runtime for this model's weight layout",
       );
       // Pull/Repair/Remove stay reachable — only the runtime actions hide.
       expect(w.find("[data-test=delete-btn]").exists()).toBe(true);
+    });
+
+    it("falls back to a cause-free note when an older server sends no reason", () => {
+      mockDetail.value = {
+        kind: "installed",
+        model: makeModel({ runtime_available: false }),
+        components: [],
+      };
+      const w = mount(ModelDetailDrawer);
+      expect(w.get("[data-test=runtime-unavailable-note]").text()).toContain(
+        "cannot run this model",
+      );
     });
 
     it("Delete confirms first, then calls deleteInstalled", async () => {

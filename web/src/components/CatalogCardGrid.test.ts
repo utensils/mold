@@ -73,6 +73,7 @@ const baseEntry = {
 let mockState: {
   entries: any;
   visibleEntries: any;
+  availableManifests: any;
   resultCount: any;
   layout: any;
   total: any;
@@ -97,6 +98,7 @@ beforeEach(() => {
   mockState = {
     entries: ref([baseEntry]),
     visibleEntries: ref([baseEntry]),
+    availableManifests: ref([]),
     resultCount: ref(1),
     layout: ref<"grid" | "list">("grid"),
     total: ref<number | null>(1),
@@ -271,6 +273,35 @@ describe("CatalogCardGrid layout", () => {
 describe("CatalogCardGrid client-side filtering", () => {
   // The grid renders the modality-filtered view, not the raw fetched page:
   // rendering `entries` would put image models under the Video chip.
+  it("badges a Discover row this host cannot run, without disabling its Pull", () => {
+    // #1276: the badge is the pre-download signal. Pull stays enabled — the
+    // model really is installable, it just cannot generate here.
+    mockState.availableManifests = ref([
+      {
+        name: baseEntry.id,
+        runtime_available: false,
+        runtime_unavailable_reason: "Ref2VA execution is not available.",
+      },
+    ]);
+    const w = mount(CatalogCardGrid);
+    expect(w.get("[data-test=runtime-unavailable-badge]").text()).toContain(
+      "Download only",
+    );
+    expect(
+      w.get("[data-test=pull-btn]").attributes("disabled"),
+    ).toBeUndefined();
+  });
+
+  it("badges nothing for a row the host lists as runnable", () => {
+    mockState.availableManifests = ref([
+      { name: baseEntry.id, runtime_available: true },
+    ]);
+    const w = mount(CatalogCardGrid);
+    expect(w.find("[data-test=runtime-unavailable-badge]").exists()).toBe(
+      false,
+    );
+  });
+
   it("renders visibleEntries rather than every fetched entry", () => {
     const video = { ...baseEntry, id: "hf:row-1", modality: "video" };
     mockState.entries = ref([baseEntry, video]);

@@ -9,6 +9,7 @@ import { useModelInstallTargets } from "../composables/useModelInstallTargets";
 import { toast } from "../lib/toasts";
 import type { CatalogEntryWire } from "../types";
 import CatalogCard from "./CatalogCard.vue";
+import { modelRuntimeNoticeForId } from "@studio/lib/modelRuntimeAvailability";
 
 const cat = useCatalog();
 const installTargets = useModelInstallTargets();
@@ -17,6 +18,14 @@ const selected = ref(new Map<string, CatalogEntryWire>());
 const selectedTargetId = ref("");
 const batchStarting = ref(false);
 let observer: IntersectionObserver | null = null;
+
+/** Whether this host can run the model behind a Discover row, from its own
+ *  `/api/models` listing — knowable before the pull, which for the affected
+ *  checkpoints is 21-42 GB (#1276). A live catalog id nobody lists is simply
+ *  unknown and gets no badge. */
+function runtimeNoticeFor(id: string) {
+  return modelRuntimeNoticeForId(id, cat.availableManifests.value);
+}
 
 function detach() {
   observer?.disconnect();
@@ -290,6 +299,7 @@ async function startBatch(): Promise<void> {
           :layout="cat.layout.value"
           :selectable="!batchStarting && selectable(entry)"
           :checked="selected.has(entry.id)"
+          :runtime-notice="runtimeNoticeFor(entry.id)"
           @open="openCard(entry.id)"
           @pull="pullCard(entry)"
           @toggle-select="toggleSelection(entry, $event)"

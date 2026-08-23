@@ -2818,6 +2818,19 @@ pub struct ModelInfoExtended {
     /// keeps behaving exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_available: Option<bool>,
+    /// One sentence naming *why* `runtime_available` is false.
+    ///
+    /// Present exactly when `runtime_available` is `Some(false)`, and always
+    /// the same sentence the generation refusal carries — both come from
+    /// `minimax_h3::RuntimeUnavailableReason`. It exists so a client can warn
+    /// before a 21-42 GB pull instead of after it (#1276): "no engine arm for
+    /// this weight layout", "Ref2VA execution is not available in any
+    /// released build", and "this build was compiled without the H3 engine"
+    /// are three different answers with three different remedies. `None` on
+    /// servers that predate the field, which clients render as a bare
+    /// download-only note exactly as they did before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_unavailable_reason: Option<String>,
     /// Whether this model can continue an existing video in one request
     /// (`GenerateRequest.extend_video`). `None` on servers that predate
     /// continuation support, which clients must read as "no" — offering the
@@ -3058,6 +3071,7 @@ mod model_display_name_tests {
     fn model(name: &str, display_name: Option<&str>, description: &str) -> ModelInfoExtended {
         ModelInfoExtended {
             runtime_available: None,
+            runtime_unavailable_reason: None,
             info: ModelInfo {
                 name: name.to_string(),
                 family: "sdxl".to_string(),
