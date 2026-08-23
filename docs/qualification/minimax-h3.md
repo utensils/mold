@@ -14,7 +14,8 @@ compact Comfy manifests and may download their pinned artifacts directly from
 the reviewed upstream repositories. Downloaded weights are not bundled in Mold
 releases. Execution remains fail-closed unless the live SM89 CUDA or Apple
 Silicon Metal route, exact artifact graph, task, fixed request envelope, and
-conservative memory admission profile all validate. Public activation does not require a private campaign record.
+conservative memory admission profile all validate. Public activation does not
+require a private campaign record.
 
 The research used public implementation source and small textual repository
 metadata only. The reviewed
@@ -565,9 +566,9 @@ The frozen admission contract in
 [`h3_admission.rs`](../../crates/mold-server/src/h3_admission.rs) requires
 exactly one Scheduler V2 CUDA or Metal GPU for one H3 generation
 (`crates/mold-server/src/h3_admission.rs:1291`, `:1736`). Passing zero or more
-than one device, or a device on any other backend, is a typed admission error. One backend owns Qwen, the visual
-and audio conditions, every DiT block, both decoders, and mux staging on that
-frozen route.
+than one device, or a device on any other backend, is a typed admission error.
+One backend owns Qwen, the visual and audio conditions, every DiT block, both
+decoders, and mux staging on that frozen route.
 
 Scheduler V2 may eventually distribute independent generation jobs across
 multiple GPUs. That is batch/job distribution, not tensor, sequence, or
