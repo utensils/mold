@@ -1020,10 +1020,19 @@ mod tests {
             .err()
             .expect("contract-only H3 runtime must fail closed");
 
+            // Whichever gate rejects first, the refusal must be the RUNTIME
+            // one and never a licensing one (#1276): on a build with no `h3`
+            // feature the activation authority now answers before the
+            // registry check, with a sentence naming the missing engine.
             let error = error.to_string();
             assert!(
-                error.contains("public runtime registry is incomplete"),
+                error.contains("public runtime registry is incomplete")
+                    || error.contains(mold_core::MINIMAX_H3_RUNTIME_UNAVAILABLE),
                 "{error}"
+            );
+            assert!(
+                !error.contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED),
+                "a missing engine is not a licensing refusal: {error}"
             );
             assert!(!called.load(Ordering::SeqCst));
         }
