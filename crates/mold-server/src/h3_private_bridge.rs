@@ -1700,9 +1700,32 @@ pub(crate) fn private_prepare_error_message(
         mold_inference::H3PrivateFl2VaPrepareError::MissingReviewedRuntimeQualification => {
             "MiniMax H3 runtime has no reviewed runtime qualification".to_string()
         }
+        mold_inference::H3PrivateFl2VaPrepareError::InsufficientHostHeadroom(shortfall) => {
+            shortfall.to_string()
+        }
         mold_inference::H3PrivateFl2VaPrepareError::InvalidEvidence(reason) => {
             format!("MiniMax H3 preparation evidence was rejected: {reason}")
         }
+    }
+}
+
+/// The host-memory shortfall a preparation refusal turns on, if that is what it
+/// turned on.
+///
+/// Read by the admission retry (#1289) so it can release mold's own model cache
+/// and ask again. Deliberately a match on the variant rather than a search of
+/// the rendered sentence: prose is not evidence, and only a host shortfall may
+/// be answered by eviction — a device shortfall would evict the cache for
+/// memory eviction cannot supply.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+pub(crate) fn private_prepare_host_shortfall(
+    error: &mold_inference::H3PrivateFl2VaPrepareError,
+) -> Option<mold_inference::H3PrivateHostHeadroomShortfall> {
+    match error {
+        mold_inference::H3PrivateFl2VaPrepareError::InsufficientHostHeadroom(shortfall) => {
+            Some(*shortfall)
+        }
+        _ => None,
     }
 }
 

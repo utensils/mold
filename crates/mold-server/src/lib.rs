@@ -32,6 +32,13 @@ mod gallery_trash;
 pub mod generation_cancel;
 pub mod gpu_pool;
 pub mod gpu_worker;
+// MiniMax H3 is the only family whose HOST admission refuses on headroom today:
+// every other family's host shortfall is a planner block that resolves when the
+// work holding the RAM gives it back. The module itself is family-blind, so a
+// build without H3 still compiles it and still runs its tests — it just has no
+// caller yet.
+#[cfg_attr(not(any(feature = "h3", feature = "h3-private-uat")), allow(dead_code))]
+mod host_reclaim;
 mod identity_dependencies;
 /// Public so the forced-local CLI path can run the same extraction the
 /// server's worker runs, at the same point in the lease. `mold-cli` builds its

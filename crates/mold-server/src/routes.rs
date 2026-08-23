@@ -2052,7 +2052,7 @@ async fn clear_global_upscaler_cache(state: &AppState) {
 ///
 /// Entries an engine still streams from (SD3's offloaded MMDiT) have a live
 /// strong count and are left alone.
-fn release_host_memory_after_unload(state: &AppState) {
+pub(crate) fn release_host_memory_after_unload(state: &AppState) {
     let released = state
         .shared_pool
         .lock()

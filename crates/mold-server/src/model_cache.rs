@@ -27,6 +27,19 @@ pub struct CachedEngine {
     pub vram_bytes: u64,
 }
 
+/// One cached engine a host-memory shortfall may reclaim.
+///
+/// Deliberately a value type rather than a borrow of [`CachedEngine`]: the
+/// reclaim planner sorts candidates from several caches together and must not
+/// hold any cache's lock while it decides.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReclaimableEntry {
+    pub model_name: String,
+    pub residency: ModelResidency,
+    pub last_used: Instant,
+    pub vram_bytes: u64,
+}
+
 /// Result of returning a checked-out cache entry.
 pub struct RestoreOutcome {
     /// The restored entry changed from GPU-resident to parked while checked out.
@@ -507,6 +520,28 @@ impl ModelCache {
         }
         self.debug_check_invariants();
         out
+    }
+
+    /// Every cached entry in LRU order, least-recently-used first.
+    ///
+    /// This is the reclaim inventory a host-memory shortfall reads before it
+    /// refuses a generation (#1289). Checked-out engines are absent by
+    /// construction — [`Self::take`] removes the entry from `entries` and
+    /// `lru_order` for the whole in-flight window — and `in_flight` is
+    /// consulted anyway, so an engine a running generation holds can never
+    /// become a reclaim candidate however that representation changes.
+    pub fn reclaimable(&self) -> Vec<ReclaimableEntry> {
+        self.lru_order
+            .iter()
+            .filter(|name| !self.in_flight.contains(name.as_str()))
+            .filter_map(|name| self.entries.get(name.as_str()))
+            .map(|entry| ReclaimableEntry {
+                model_name: entry.model_name.clone(),
+                residency: entry.residency,
+                last_used: entry.last_used,
+                vram_bytes: entry.vram_bytes,
+            })
+            .collect()
     }
 
     /// Evict the LRU entry that is *not* GPU-resident and (optionally) not the
@@ -1249,5 +1284,54 @@ mod tests {
         // clear drains everything
         let _all = cache.clear();
         assert!(cache.is_empty());
+    }
+
+    /// The reclaim inventory a host-memory shortfall reads (#1289) must be
+    /// ordered least-recently-used first, or eviction would start with the
+    /// model the next request is most likely to want back.
+    #[test]
+    fn reclaimable_lists_every_entry_least_recently_used_first() {
+        let mut cache = ModelCache::new(4);
+        cache.insert(Box::new(MockEngine::parked("model-a")), 1_000);
+        cache.insert(Box::new(MockEngine::parked("model-b")), 2_000);
+        cache.insert(Box::new(MockEngine::new("model-c")), 3_000);
+        // Touching the oldest entry must move it to the back of the order.
+        assert!(cache.touch("model-a"));
+
+        let names = cache
+            .reclaimable()
+            .into_iter()
+            .map(|entry| entry.model_name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["model-b", "model-c", "model-a"]);
+
+        let reclaimable = cache.reclaimable();
+        assert_eq!(reclaimable[0].vram_bytes, 2_000);
+        assert_eq!(reclaimable[1].residency, ModelResidency::Gpu);
+    }
+
+    /// An engine a running generation holds is never a reclaim candidate. The
+    /// take window removes the entry outright, and `in_flight` is consulted on
+    /// top of that so a future representation change cannot leak a leased
+    /// engine into the inventory.
+    #[test]
+    fn a_checked_out_engine_is_never_reclaimable() {
+        let mut cache = ModelCache::new(4);
+        cache.insert(Box::new(MockEngine::parked("idle")), 1_000);
+        cache.insert(Box::new(MockEngine::new("running")), 2_000);
+
+        let taken = cache.take("running").expect("the engine is checked out");
+        let names = cache
+            .reclaimable()
+            .into_iter()
+            .map(|entry| entry.model_name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["idle"]);
+        assert!(
+            cache.contains("running"),
+            "a checked-out engine is still logically cached"
+        );
+        cache.restore(taken);
+        assert_eq!(cache.reclaimable().len(), 2);
     }
 }
