@@ -24,10 +24,16 @@
 //!   construction, and the requested model is filtered here — evicting it would
 //!   turn a warm admission into a cold reload of the very weights being asked
 //!   for.
-//! - **Never a busy worker.** Eviction runs as `Admin` owner work on the thread
-//!   that owns the device context, which is exactly the thread a running render
-//!   occupies. Submitting to a busy worker would park this preparation behind a
-//!   whole generation for memory that render is about to give back anyway.
+//! - **Never a worker that cannot take the job.** Eviction runs as `Admin` owner
+//!   work on the thread that owns the device context, which is exactly the
+//!   thread a running render occupies. A busy worker would park this
+//!   preparation behind a whole generation for memory that render is about to
+//!   give back anyway, and a quarantined, shutting-down, or draining one would
+//!   never be leased the hard-pinned job at all — the scheduler refuses
+//!   releasing work on a poisoned device (its memory comes back with the
+//!   process) and a draining device never reports Idle. Both would leave a
+//!   request waiting on a oneshot nobody will send, so both are filtered out
+//!   and the await is bounded on top of that for the race between the two.
 //! - **Eviction completes before the re-sample.** The reservation discipline in
 //!   `AGENTS.md` says an OS sample can never prove a not-yet-settled allocation
 //!   is reflected; the mirror of that rule is that it cannot prove a
@@ -150,20 +156,67 @@ fn targets_from(entries: Vec<ReclaimableEntry>, ordinal: Option<usize>) -> Vec<R
         .collect()
 }
 
-/// Collect every engine this server could release right now.
+/// How long one eviction may be waited on before the reclaim gives up.
 ///
-/// A worker with work in flight contributes nothing: its owner thread is the
-/// only place its engines can be destroyed, and that thread is busy.
-async fn reclaim_candidates(state: &AppState, requested_model: &str) -> Vec<ReclaimTarget> {
-    let mut candidates = targets_from(state.model_cache.lock().await.reclaimable(), None);
-    for worker in state.gpu_pool.workers.snapshot() {
-        if worker.pending_or_executing() > 0
+/// The wait is bounded because a request is on the other end of it. A real
+/// teardown behind nothing is seconds — `cuMemFree` plus a safetensors unmap —
+/// so this is generous by a wide margin; what it actually guards is the race
+/// [`accepts_releasing_work`] cannot close, where a worker is healthy
+/// when it is snapshotted and quarantined or draining by the time the scheduler
+/// would lease its hard-pinned job. Expiry is not a failure to report: the
+/// caller falls back to exactly today's refusal.
+const EVICTION_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The worker facts a reclaim decision turns on, read once off the atomics.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct WorkerReleaseState {
+    pub quarantined: bool,
+    pub shutting_down: bool,
+    pub draining: bool,
+    pub busy: bool,
+}
+
+/// Whether the scheduler would actually lease this worker a hard-pinned
+/// releasing job, and whether its owner thread is free to run it.
+///
+/// Every arm is about a oneshot nobody would send. The scheduler refuses
+/// releasing work on a quarantined device — a poisoned or fatal-CUDA context's
+/// memory comes back with the process, never with an unload — and a draining or
+/// shutting-down device never reports Idle, so a hard-pinned job aimed at
+/// either is never dispatched and the caller waits forever. A busy worker would
+/// take the job eventually, but only behind a whole generation, for memory that
+/// render is about to give back anyway.
+///
+/// Degraded is deliberately NOT here: three consecutive failures degrade a
+/// worker, a wedged model is exactly what causes those failures while still
+/// holding the memory, and `DeviceSnapshot::accepts_releasing_work` admits it
+/// for precisely that reason.
+pub(crate) fn accepts_releasing_work(state: WorkerReleaseState) -> bool {
+    !state.quarantined && !state.shutting_down && !state.draining && !state.busy
+}
+
+fn worker_release_state(worker: &crate::gpu_pool::GpuWorker) -> WorkerReleaseState {
+    use std::sync::atomic::Ordering;
+
+    WorkerReleaseState {
+        quarantined: worker.poisoned.load(Ordering::SeqCst)
+            || worker.fatal_cuda_error.load(Ordering::SeqCst),
+        shutting_down: worker.shutdown_requested.load(Ordering::SeqCst),
+        draining: worker.drain_state.load(Ordering::SeqCst) != crate::gpu_pool::DRAIN_RUNNING,
+        busy: worker.pending_or_executing() > 0
             || worker
                 .active_generation
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_some()
-        {
+                .is_some(),
+    }
+}
+
+/// Collect every engine this server could release right now.
+async fn reclaim_candidates(state: &AppState, requested_model: &str) -> Vec<ReclaimTarget> {
+    let mut candidates = targets_from(state.model_cache.lock().await.reclaimable(), None);
+    for worker in state.gpu_pool.workers.snapshot() {
+        if !accepts_releasing_work(worker_release_state(&worker)) {
             continue;
         }
         let entries = worker
@@ -176,13 +229,25 @@ async fn reclaim_candidates(state: &AppState, requested_model: &str) -> Vec<Recl
     plan_reclaim(candidates, requested_model)
 }
 
+/// Why one eviction did not happen.
+///
+/// The two arms differ in what they say about the NEXT target: a failure is
+/// about this engine and the reclaim moves on, while an unanswered submission
+/// says the scheduler is not dispatching this reclaim's work at all, so trying
+/// another target would only wait again.
+#[derive(Debug)]
+enum EvictionError {
+    Failed(String),
+    Unanswered,
+}
+
 /// Evict one target and wait for its teardown to finish.
 ///
 /// The shared cache holds parked engines with no device context, so it is
 /// released in place exactly as `DELETE /api/models/:model` does. A worker's
 /// engine can only be destroyed on the thread that owns its CUDA context, so it
 /// goes through the same `Admin` owner work the unload route uses.
-async fn evict_target(state: &AppState, target: &ReclaimTarget) -> Result<bool, String> {
+async fn evict_target(state: &AppState, target: &ReclaimTarget) -> Result<bool, EvictionError> {
     let Some(ordinal) = target.ordinal else {
         let removed = state.model_cache.lock().await.remove(&target.model);
         return Ok(removed.is_some());
@@ -204,10 +269,15 @@ async fn evict_target(state: &AppState, target: &ReclaimTarget) -> Result<bool, 
                 .with_hard_ordinal(Some(ordinal))
                 .with_priority(mold_scheduler::PriorityClass::Admin),
         )
-        .await?;
-    let evicted = result_rx
         .await
-        .map_err(|_| "host-reclaim owner worker dropped its result".to_string())??;
+        .map_err(EvictionError::Failed)?;
+    let evicted = tokio::time::timeout(EVICTION_WAIT, result_rx)
+        .await
+        .map_err(|_| EvictionError::Unanswered)?
+        .map_err(|_| {
+            EvictionError::Failed("host-reclaim owner worker dropped its result".to_string())
+        })?
+        .map_err(EvictionError::Failed)?;
     Ok(evicted.is_some())
 }
 
@@ -250,7 +320,7 @@ pub(crate) async fn reclaim_host_headroom(
         match evict_target(state, &target).await {
             Ok(true) => {}
             Ok(false) => continue,
-            Err(error) => {
+            Err(EvictionError::Failed(error)) => {
                 tracing::warn!(
                     model = %target.model,
                     ordinal = ?target.ordinal,
@@ -258,6 +328,15 @@ pub(crate) async fn reclaim_host_headroom(
                     "host reclaim could not evict a cached model"
                 );
                 continue;
+            }
+            Err(EvictionError::Unanswered) => {
+                tracing::warn!(
+                    model = %target.model,
+                    ordinal = ?target.ordinal,
+                    wait_secs = EVICTION_WAIT.as_secs(),
+                    "host reclaim gave up waiting for an eviction; refusing with what it has"
+                );
+                break;
             }
         }
         // Parking an engine is not the same as handing its pages back: the
@@ -532,5 +611,38 @@ mod tests {
             host_shortfall_message(&outcome, 15_300_615_032, 12_659_979_674),
             "still 2.6 GB short (requires 15.30 GB, 12.66 GB available)"
         );
+    }
+
+    /// Every one of these is a oneshot nobody would send: the scheduler refuses
+    /// releasing work on a quarantined device, and a draining or shutting-down
+    /// one never reports Idle, so a hard-pinned admin unload aimed at either is
+    /// never dispatched. A reclaim that queued one would hang the request it is
+    /// trying to help.
+    #[test]
+    fn only_a_worker_that_can_be_leased_the_unload_is_a_reclaim_candidate() {
+        assert!(accepts_releasing_work(WorkerReleaseState::default()));
+        for state in [
+            WorkerReleaseState {
+                quarantined: true,
+                ..Default::default()
+            },
+            WorkerReleaseState {
+                shutting_down: true,
+                ..Default::default()
+            },
+            WorkerReleaseState {
+                draining: true,
+                ..Default::default()
+            },
+            WorkerReleaseState {
+                busy: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                !accepts_releasing_work(state),
+                "{state:?} cannot be leased a hard-pinned unload"
+            );
+        }
     }
 }

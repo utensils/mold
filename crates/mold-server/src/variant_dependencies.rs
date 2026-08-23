@@ -1788,14 +1788,27 @@ type HostShortfall = mold_inference::H3PrivateHostHeadroomShortfall;
 /// How much host headroom a reclaim has to reach for this attempt to be worth
 /// retrying, or `None` when it must not run at all.
 ///
-/// Two rules, and both are refusals rather than optimizations. Only a HOST
-/// shortfall qualifies — a device shortfall would evict the model cache for
-/// memory eviction cannot supply. And only the first attempt qualifies: the
-/// reclaim it ran already released everything it could, so a second one would
-/// re-ask a question whose answer cannot have changed.
+/// Three rules, and every one is a refusal rather than an optimization.
+///
+/// A placement PREVIEW never reclaims. `ExistingOnly` is the read-only probe
+/// (AGENTS.md, "Placement preview is an authority boundary"): it starts no
+/// downloads and must change no state, and automatic routing fans it across
+/// every candidate machine — so a preview that evicted would flush the warm
+/// cache of every host in the fleet to answer a question about one print.
+///
+/// Only a HOST shortfall qualifies: a device shortfall would evict the model
+/// cache for memory eviction cannot supply.
+///
+/// And only the first attempt qualifies: the reclaim it ran already released
+/// everything it could, so a second would re-ask a question whose answer cannot
+/// have changed.
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-fn h3_reclaim_requirement(attempt: usize, shortfall: Option<HostShortfall>) -> Option<u64> {
-    if attempt > 0 {
+fn h3_reclaim_requirement(
+    policy: DependencyMaterializationPolicy,
+    attempt: usize,
+    shortfall: Option<HostShortfall>,
+) -> Option<u64> {
+    if policy != DependencyMaterializationPolicy::Admission || attempt > 0 {
         return None;
     }
     Some(shortfall?.required_host_bytes)
@@ -1840,7 +1853,7 @@ async fn prepare_h3_private_inputs_for_devices(
     config: &Config,
     devices: Vec<DeviceFact>,
     progress: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
-    _policy: DependencyMaterializationPolicy,
+    policy: DependencyMaterializationPolicy,
     ingress_grant: crate::h3_private_bridge::H3PrivateIngressGrant,
     resolved_references: Option<crate::reference_uploads::ResolvedReferenceAdmissionView>,
 ) -> Result<PreparedExecutionInputs, String> {
@@ -2015,9 +2028,10 @@ async fn prepare_h3_private_inputs_for_devices(
         if !evidence_by_device.is_empty() {
             break;
         }
-        let (Some(required_host_bytes), Some(state)) =
-            (h3_reclaim_requirement(attempt, host_shortfall), state)
-        else {
+        let (Some(required_host_bytes), Some(state)) = (
+            h3_reclaim_requirement(policy, attempt, host_shortfall),
+            state,
+        ) else {
             break;
         };
         // The eviction is awaited and its host memory handed back before the
@@ -2274,24 +2288,50 @@ const H3_PUBLIC_LOCAL_INSTANCE_ID: &str = "mold-public-forced-local";
 mod tests {
     use super::*;
 
-    /// Only a HOST shortfall may be answered by releasing the model cache, and
-    /// only once (#1289). A device shortfall would evict engines for memory
-    /// eviction cannot supply, and a second reclaim would re-ask a question the
-    /// first already answered.
+    /// Only a HOST shortfall may be answered by releasing the model cache, only
+    /// once, and never from a placement preview (#1289). A device shortfall
+    /// would evict engines for memory eviction cannot supply; a second reclaim
+    /// would re-ask a question the first already answered; and a preview is the
+    /// read-only probe automatic routing fans across the whole fleet, so one
+    /// that evicted would flush every candidate machine's warm cache to answer
+    /// a question about one print.
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     #[test]
-    fn only_a_first_attempt_host_shortfall_asks_for_a_reclaim() {
+    fn only_a_first_attempt_host_shortfall_under_admission_asks_for_a_reclaim() {
         let shortfall = HostShortfall {
             context: "private H3 admission",
             required_host_bytes: 15_300_615_032,
             available_host_headroom_bytes: 12_659_979_674,
         };
         assert_eq!(
-            h3_reclaim_requirement(0, Some(shortfall)),
+            h3_reclaim_requirement(
+                DependencyMaterializationPolicy::Admission,
+                0,
+                Some(shortfall)
+            ),
             Some(15_300_615_032)
         );
-        assert_eq!(h3_reclaim_requirement(1, Some(shortfall)), None);
-        assert_eq!(h3_reclaim_requirement(0, None), None);
+        assert_eq!(
+            h3_reclaim_requirement(
+                DependencyMaterializationPolicy::Admission,
+                1,
+                Some(shortfall)
+            ),
+            None
+        );
+        assert_eq!(
+            h3_reclaim_requirement(DependencyMaterializationPolicy::Admission, 0, None),
+            None
+        );
+        assert_eq!(
+            h3_reclaim_requirement(
+                DependencyMaterializationPolicy::ExistingOnly,
+                0,
+                Some(shortfall)
+            ),
+            None,
+            "a read-only placement preview must never evict a model cache"
+        );
     }
 
     /// A staged-reference binding failure and an admission refusal fail for
