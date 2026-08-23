@@ -35,6 +35,61 @@ pub struct GenerationBatchDetail {
     pub children: Vec<GenerationBatchChildRow>,
 }
 
+/// Additive reconnect view. The legacy detail remains unchanged for callers
+/// that only understand `state` and `error`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableGenerationBatchChildRow {
+    pub batch_id: String,
+    pub job_id: String,
+    pub batch_index: u32,
+    pub state: String,
+    pub error: Option<String>,
+    pub updated_at_ms: i64,
+    pub terminal_error_json: Option<String>,
+    pub result_json: Option<String>,
+    pub completed_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableGenerationBatchDetail {
+    pub batch: GenerationBatchRow,
+    pub children: Vec<DurableGenerationBatchChildRow>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationBatchTerminalState {
+    Complete,
+    Failed,
+    Cancelled,
+}
+
+impl GenerationBatchTerminalState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// Opaque structured terminal values are validated by the server/core layer.
+/// The DB commits them atomically with the legacy terminal summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenerationBatchTerminal<'a> {
+    pub state: GenerationBatchTerminalState,
+    pub error: Option<&'a str>,
+    pub terminal_error_json: Option<&'a str>,
+    pub result_json: Option<&'a str>,
+    pub completed_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClaimedTerminalCommit {
+    pub queue_deleted: bool,
+    pub batch_child_updated: bool,
+}
+
 /// Insert the grouping rows and every ordinary durable queue row atomically.
 /// A retry with the same client id returns the existing detail; a different
 /// payload using that id is rejected.
@@ -112,6 +167,46 @@ pub fn get_by_client(
     db.with_conn(|conn| get_by_client_on_conn(conn, owner_uuid, client_batch_id))
 }
 
+pub fn get_durable(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    id: &str,
+) -> Result<Option<DurableGenerationBatchDetail>> {
+    db.with_conn(|conn| {
+        let batch = conn
+            .query_row(
+                "SELECT id, client_batch_id, owner_uuid, request_sha256, created_at_ms
+                   FROM generation_batches WHERE id = ?1 AND owner_uuid = ?2",
+                params![id, owner_uuid],
+                batch_from_row,
+            )
+            .optional()?;
+        batch
+            .map(|batch| durable_detail_on_conn(conn, batch))
+            .transpose()
+    })
+}
+
+pub fn get_durable_by_client(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    client_batch_id: &str,
+) -> Result<Option<DurableGenerationBatchDetail>> {
+    db.with_conn(|conn| {
+        let batch = conn
+            .query_row(
+                "SELECT id, client_batch_id, owner_uuid, request_sha256, created_at_ms
+                   FROM generation_batches WHERE owner_uuid = ?1 AND client_batch_id = ?2",
+                params![owner_uuid, client_batch_id],
+                batch_from_row,
+            )
+            .optional()?;
+        batch
+            .map(|batch| durable_detail_on_conn(conn, batch))
+            .transpose()
+    })
+}
+
 pub fn set_child_state(
     db: &MetadataDb,
     job_id: &str,
@@ -126,6 +221,64 @@ pub fn set_child_state(
               WHERE job_id = ?1",
             params![job_id, state, error, updated_at_ms],
         )? > 0)
+    })
+}
+
+/// Commit a terminal outcome and remove its active queue authority in one
+/// transaction. Both the expected durable state and runtime token must match;
+/// stale owners receive a clean no-op and cannot alter the child summary.
+/// Singleton rows are supported: `batch_child_updated` is false while the
+/// claimed queue row is still deleted atomically.
+pub fn finish_claimed(
+    db: &MetadataDb,
+    job_id: &str,
+    claim_token: &str,
+    expected_queue_state: crate::generation_queue::QueueRowState,
+    terminal: GenerationBatchTerminal<'_>,
+) -> Result<ClaimedTerminalCommit> {
+    db.transact_immediate(|conn| {
+        let owned: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM generation_queue
+                  WHERE id = ?1 AND state = ?2 AND claim_token = ?3",
+                params![job_id, expected_queue_state.as_str(), claim_token],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if owned.is_none() {
+            return Ok(ClaimedTerminalCommit::default());
+        }
+
+        let child_updated = conn.execute(
+            "UPDATE generation_batch_children
+                SET state = ?2,
+                    error = ?3,
+                    terminal_error_json = ?4,
+                    result_json = ?5,
+                    completed_at_ms = ?6,
+                    updated_at_ms = ?6
+              WHERE job_id = ?1",
+            params![
+                job_id,
+                terminal.state.as_str(),
+                terminal.error,
+                terminal.terminal_error_json,
+                terminal.result_json,
+                terminal.completed_at_ms,
+            ],
+        )?;
+        let queue_deleted = conn.execute(
+            "DELETE FROM generation_queue
+              WHERE id = ?1 AND state = ?2 AND claim_token = ?3",
+            params![job_id, expected_queue_state.as_str(), claim_token],
+        )?;
+        if queue_deleted != 1 {
+            bail!("claimed queue row changed during terminal commit");
+        }
+        Ok(ClaimedTerminalCommit {
+            queue_deleted: true,
+            batch_child_updated: child_updated > 0,
+        })
     })
 }
 
@@ -168,6 +321,33 @@ fn detail_on_conn(
     Ok(GenerationBatchDetail { batch, children })
 }
 
+fn durable_detail_on_conn(
+    conn: &rusqlite::Connection,
+    batch: GenerationBatchRow,
+) -> Result<DurableGenerationBatchDetail> {
+    let mut stmt = conn.prepare(
+        "SELECT batch_id, job_id, batch_index, state, error, updated_at_ms,
+                terminal_error_json, result_json, completed_at_ms
+           FROM generation_batch_children WHERE batch_id = ?1 ORDER BY batch_index",
+    )?;
+    let children = stmt
+        .query_map(params![batch.id], |row| {
+            Ok(DurableGenerationBatchChildRow {
+                batch_id: row.get(0)?,
+                job_id: row.get(1)?,
+                batch_index: row.get::<_, i64>(2)? as u32,
+                state: row.get(3)?,
+                error: row.get(4)?,
+                updated_at_ms: row.get(5)?,
+                terminal_error_json: row.get(6)?,
+                result_json: row.get(7)?,
+                completed_at_ms: row.get(8)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(DurableGenerationBatchDetail { batch, children })
+}
+
 fn batch_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationBatchRow> {
     Ok(GenerationBatchRow {
         id: row.get(0)?,
@@ -181,6 +361,7 @@ fn batch_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationBatchRo
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::{Arc, Barrier};
 
     use super::*;
     use crate::generation_queue::QueueRowState;
@@ -304,6 +485,41 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_duplicate_client_admission_returns_one_existing_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mold.db");
+        MetadataDb::open(&path).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let handles = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let db = MetadataDb::open(&path).unwrap();
+                    let children = rows(2);
+                    barrier.wait();
+                    insert_or_get(&db, &batch("same"), &children).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|(_, inserted)| *inserted).count(), 1);
+        assert_eq!(results[0].0, results[1].0);
+        let reopened = MetadataDb::open(&path).unwrap();
+        assert_eq!(
+            get_by_client(&reopened, "owner-1", "client-1")
+                .unwrap()
+                .unwrap()
+                .children
+                .len(),
+            2
+        );
+    }
+
+    #[test]
     fn child_insert_failure_rolls_back_parent_and_every_child() {
         let db = MetadataDb::open_in_memory().unwrap();
         let mut children = rows(2);
@@ -313,5 +529,181 @@ mod tests {
         assert!(crate::generation_queue::list_all(&db, "owner-1")
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn separate_batch_admissions_preserve_existing_created_at_rowid_order() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let first = rows(2);
+        insert_or_get(&db, &batch("first"), &first).unwrap();
+
+        let mut second = rows(2);
+        for (index, (child, queue)) in second.iter_mut().enumerate() {
+            child.batch_id = "batch-2".into();
+            child.job_id = format!("later-{index}");
+            queue.id = child.job_id.clone();
+        }
+        let second_batch = GenerationBatchRow {
+            id: "batch-2".into(),
+            client_batch_id: "client-2".into(),
+            owner_uuid: "owner-1".into(),
+            request_sha256: "second".into(),
+            created_at_ms: 1,
+        };
+        insert_or_get(&db, &second_batch, &second).unwrap();
+
+        let mut claimed = Vec::new();
+        for index in 0..4 {
+            claimed.push(
+                crate::generation_queue::claim_next(&db, "owner-1", &format!("claim-{index}"), 10)
+                    .unwrap()
+                    .unwrap()
+                    .row
+                    .id,
+            );
+        }
+        assert_eq!(claimed, vec!["job-0", "job-1", "later-0", "later-1"]);
+    }
+
+    #[test]
+    fn terminal_child_update_and_claimed_queue_delete_are_atomic() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let children = rows(1);
+        insert_or_get(&db, &batch("same"), &children).unwrap();
+        crate::generation_queue::claim_next(&db, "owner-1", "claim-1", 2)
+            .unwrap()
+            .unwrap();
+        crate::generation_queue::mark_dispatched_claimed(&db, "job-0", "claim-1", 3).unwrap();
+
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER reject_terminal_delete
+                 BEFORE DELETE ON generation_queue
+                 BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let terminal = GenerationBatchTerminal {
+            state: GenerationBatchTerminalState::Failed,
+            error: Some("render failed"),
+            terminal_error_json: Some(r#"{"code":"render_failed"}"#),
+            result_json: Some(r#"{"filename":"partial.png"}"#),
+            completed_at_ms: 4,
+        };
+        assert!(finish_claimed(
+            &db,
+            "job-0",
+            "claim-1",
+            crate::generation_queue::QueueRowState::Running,
+            terminal,
+        )
+        .is_err());
+        assert_eq!(
+            get(&db, "owner-1", "batch-1").unwrap().unwrap().children[0].state,
+            "accepted"
+        );
+        assert!(crate::generation_queue::get(&db, "job-0")
+            .unwrap()
+            .is_some());
+
+        db.with_conn(|conn| {
+            conn.execute_batch("DROP TRIGGER reject_terminal_delete")?;
+            Ok(())
+        })
+        .unwrap();
+        let committed = finish_claimed(
+            &db,
+            "job-0",
+            "claim-1",
+            crate::generation_queue::QueueRowState::Running,
+            terminal,
+        )
+        .unwrap();
+        assert!(committed.queue_deleted);
+        assert!(committed.batch_child_updated);
+        let child = &get(&db, "owner-1", "batch-1").unwrap().unwrap().children[0];
+        assert_eq!(child.state, "failed");
+        assert_eq!(child.error.as_deref(), Some("render failed"));
+        let durable = get_durable(&db, "owner-1", "batch-1").unwrap().unwrap();
+        assert_eq!(
+            durable.children[0].terminal_error_json.as_deref(),
+            Some(r#"{"code":"render_failed"}"#)
+        );
+        assert_eq!(durable.children[0].completed_at_ms, Some(4));
+        assert_eq!(
+            durable.children[0].result_json.as_deref(),
+            Some(r#"{"filename":"partial.png"}"#)
+        );
+        assert_eq!(
+            get_durable_by_client(&db, "owner-1", "client-1")
+                .unwrap()
+                .unwrap(),
+            durable
+        );
+        assert!(crate::generation_queue::get(&db, "job-0")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn claimed_singleton_can_use_the_same_fenced_terminal_primitive() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        crate::generation_queue::insert(&db, &rows(1).pop().unwrap().1).unwrap();
+        crate::generation_queue::claim_next(&db, "owner-1", "singleton", 2)
+            .unwrap()
+            .unwrap();
+
+        let committed = finish_claimed(
+            &db,
+            "job-0",
+            "singleton",
+            crate::generation_queue::QueueRowState::Queued,
+            GenerationBatchTerminal {
+                state: GenerationBatchTerminalState::Cancelled,
+                error: Some("cancelled before dispatch"),
+                terminal_error_json: None,
+                result_json: None,
+                completed_at_ms: 3,
+            },
+        )
+        .unwrap();
+        assert!(committed.queue_deleted);
+        assert!(!committed.batch_child_updated);
+        assert!(crate::generation_queue::get(&db, "job-0")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn stale_terminal_token_cannot_update_child_or_delete_queue_row() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
+        crate::generation_queue::claim_next(&db, "owner-1", "current", 2)
+            .unwrap()
+            .unwrap();
+        let committed = finish_claimed(
+            &db,
+            "job-0",
+            "stale",
+            crate::generation_queue::QueueRowState::Queued,
+            GenerationBatchTerminal {
+                state: GenerationBatchTerminalState::Cancelled,
+                error: Some("cancelled"),
+                terminal_error_json: None,
+                result_json: None,
+                completed_at_ms: 3,
+            },
+        )
+        .unwrap();
+        assert!(!committed.queue_deleted);
+        assert!(!committed.batch_child_updated);
+        assert_eq!(
+            get(&db, "owner-1", "batch-1").unwrap().unwrap().children[0].state,
+            "accepted"
+        );
+        assert!(crate::generation_queue::get(&db, "job-0")
+            .unwrap()
+            .is_some());
     }
 }

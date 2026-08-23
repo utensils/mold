@@ -612,6 +612,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 23,
         kind: MigrationKind::Sql(V23_HETEROGENEOUS_GENERATION_BATCHES),
     },
+    Migration {
+        version: 24,
+        kind: MigrationKind::Sql(V24_DURABLE_QUEUE_CLAIMS),
+    },
 ];
 
 /// #1227 phase 2 moved face-identity extraction from admission onto the
@@ -660,9 +664,36 @@ CREATE TABLE gallery_mutation_receipts (
 );
 "#;
 
+/// Token-fenced runtime claims and reconnectable batch-child outcomes.
+///
+/// Queue order remains `(created_at, rowid)`: v24 deliberately does not
+/// rewrite the existing admission rows or introduce a second ordering
+/// authority. A partial claimable index lets the feeder reserve one oldest
+/// row without reading the backlog into memory. The token is runtime-only and
+/// cleared during startup recovery.
+///
+/// Structured terminal payloads are opaque JSON at this layer. Their schemas
+/// belong to the server/core wire contract; SQLite only commits them beside
+/// the legacy `state`/`error` columns and queue-row deletion.
+const V24_DURABLE_QUEUE_CLAIMS: &str = r#"
+ALTER TABLE generation_queue ADD COLUMN claim_token TEXT;
+
+CREATE UNIQUE INDEX generation_queue_claim_token
+ON generation_queue(claim_token)
+WHERE claim_token IS NOT NULL;
+
+CREATE INDEX generation_queue_claimable
+ON generation_queue(owner_uuid, state, created_at)
+WHERE claim_token IS NULL;
+
+ALTER TABLE generation_batch_children ADD COLUMN terminal_error_json TEXT;
+ALTER TABLE generation_batch_children ADD COLUMN result_json TEXT;
+ALTER TABLE generation_batch_children ADD COLUMN completed_at_ms INTEGER;
+"#;
+
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 23;
+pub const SCHEMA_VERSION: i64 = 24;
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep
@@ -1038,7 +1069,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 23);
+        assert_eq!(SCHEMA_VERSION, 24);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1191,8 +1222,8 @@ mod tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 23);
-        assert_eq!(SCHEMA_VERSION, 23);
+        assert_eq!(current_version(&conn).unwrap(), 24);
+        assert_eq!(SCHEMA_VERSION, 24);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1227,6 +1258,77 @@ mod tests {
         assert_eq!(kept, 1, "the upgrade must not disturb existing rows");
     }
 
+    #[test]
+    fn v24_adds_claim_and_terminal_fields_without_changing_queue_order() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 23)
+        {
+            match &migration.kind {
+                MigrationKind::Sql(sql) => tx.execute_batch(sql).unwrap(),
+                MigrationKind::Rust(run) => run(&tx).unwrap(),
+            }
+        }
+        tx.execute_batch("PRAGMA user_version = 23;").unwrap();
+        tx.commit().unwrap();
+        for id in ["first", "second", "third"] {
+            conn.execute(
+                "INSERT INTO generation_queue (
+                    id, owner_uuid, state, model, request_json, output_dir,
+                    completion_payload, created_at, updated_at
+                 ) VALUES (?1, 'owner', 'queued', 'model', '{}', '/gallery', 'full', 7, 7)",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO generation_batches
+                (id, client_batch_id, owner_uuid, request_sha256, created_at_ms)
+             VALUES ('batch', 'client', 'owner', 'hash', 7)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO generation_batch_children
+                (batch_id, job_id, batch_index, state, updated_at_ms)
+             VALUES ('batch', 'first', 1, 'accepted', 7)",
+            [],
+        )
+        .unwrap();
+
+        apply_pending(&mut conn).unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), 24);
+        let ids = conn
+            .prepare(
+                "SELECT id FROM generation_queue
+                 WHERE owner_uuid = 'owner' ORDER BY created_at, rowid",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(ids, vec!["first", "second", "third"]);
+        let queue_columns = column_names(&conn, "generation_queue");
+        assert!(queue_columns.iter().any(|column| column == "claim_token"));
+        let child_columns = column_names(&conn, "generation_batch_children");
+        for expected in ["terminal_error_json", "result_json", "completed_at_ms"] {
+            assert!(child_columns.iter().any(|column| column == expected));
+        }
+        let fields: (Option<String>, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT terminal_error_json, result_json, completed_at_ms
+                   FROM generation_batch_children WHERE job_id = 'first'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(fields, (None, None, None));
+    }
+
     /// v20/v21: a v19 database gains organization plus hidden collections
     /// while every existing gallery row survives at neutral defaults.
     #[test]
@@ -1255,8 +1357,8 @@ mod tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 23);
-        assert_eq!(SCHEMA_VERSION, 23);
+        assert_eq!(current_version(&conn).unwrap(), 24);
+        assert_eq!(SCHEMA_VERSION, 24);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -1517,7 +1619,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 23);
+        assert_eq!(SCHEMA_VERSION, 24);
     }
 
     #[test]

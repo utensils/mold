@@ -19,7 +19,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use rusqlite::{params, OptionalExtension, Row};
 
 use crate::db::MetadataDb;
@@ -85,6 +85,23 @@ pub struct GenerationQueueRow {
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub started_at_ms: Option<i64>,
+}
+
+/// One runtime reservation of an oldest queued row.
+///
+/// The token is deliberately kept outside [`GenerationQueueRow`] so existing
+/// callers and struct literals remain source-compatible. Every mutation after
+/// hydration must present it together with the expected durable state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueueClaim {
+    pub row: GenerationQueueRow,
+    pub claim_token: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeClaimRecovery {
+    pub claims_cleared: usize,
+    pub running_requeued: usize,
 }
 
 pub fn insert(db: &MetadataDb, row: &GenerationQueueRow) -> Result<()> {
@@ -220,6 +237,118 @@ pub fn mark_dispatched(db: &MetadataDb, id: &str, now_ms: i64) -> Result<Option<
     })
 }
 
+/// Reserve the oldest unclaimed queued row without materializing the backlog.
+///
+/// The single UPDATE is the concurrency boundary across processes. A token
+/// may own at most one row; retrying an already-used token returns `None`
+/// rather than advancing to another job.
+pub fn claim_next(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    claim_token: &str,
+    now_ms: i64,
+) -> Result<Option<QueueClaim>> {
+    if claim_token.is_empty() {
+        bail!("queue claim token must not be empty");
+    }
+    db.with_conn(|conn| {
+        conn.query_row(
+            "UPDATE generation_queue
+                SET claim_token = ?2, updated_at = ?3
+              WHERE id = (
+                    SELECT id
+                      FROM generation_queue
+                     WHERE owner_uuid = ?1
+                       AND state = 'queued'
+                       AND claim_token IS NULL
+                       AND NOT EXISTS (
+                            SELECT 1 FROM generation_queue WHERE claim_token = ?2
+                       )
+                     ORDER BY created_at, rowid
+                     LIMIT 1
+              )
+                AND state = 'queued'
+                AND claim_token IS NULL
+          RETURNING id, owner_uuid, state, model, request_json, output_dir,
+                    target_gpu, target_device_id, completion_payload, seed_pinned,
+                    dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
+                    started_at",
+            params![owner_uuid, claim_token, now_ms],
+            |row| {
+                Ok(QueueClaim {
+                    row: row_to_queue_row(row)?,
+                    claim_token: claim_token.to_string(),
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    })
+}
+
+/// Clear a reservation that has not started execution.
+pub fn release_claim(db: &MetadataDb, id: &str, claim_token: &str, now_ms: i64) -> Result<bool> {
+    db.with_conn(|conn| {
+        Ok(conn.execute(
+            "UPDATE generation_queue
+                SET claim_token = NULL, updated_at = ?3
+              WHERE id = ?1 AND state = 'queued' AND claim_token = ?2",
+            params![id, claim_token, now_ms],
+        )? > 0)
+    })
+}
+
+/// Token-fenced dispatch transition. Unlike legacy [`mark_dispatched`], a
+/// stale runtime owner cannot charge or start the row.
+pub fn mark_dispatched_claimed(
+    db: &MetadataDb,
+    id: &str,
+    claim_token: &str,
+    now_ms: i64,
+) -> Result<Option<u32>> {
+    db.with_conn(|conn| {
+        conn.query_row(
+            "UPDATE generation_queue
+                SET state = 'running',
+                    dispatch_attempts = dispatch_attempts + 1,
+                    started_at = ?3,
+                    updated_at = ?3
+              WHERE id = ?1 AND state = 'queued' AND claim_token = ?2
+          RETURNING dispatch_attempts",
+            params![id, claim_token, now_ms],
+            |row| row.get::<_, i64>(0).map(|count| count as u32),
+        )
+        .optional()
+        .map_err(Into::into)
+    })
+}
+
+/// Refund a token-fenced dispatch that was never handed to the execution
+/// owner. This is the inverse of [`mark_dispatched_claimed`]: the attempt is
+/// decremented in the same CAS that returns the row to the queue.
+pub fn refund_dispatched_claim(
+    db: &MetadataDb,
+    id: &str,
+    claim_token: &str,
+    now_ms: i64,
+) -> Result<bool> {
+    db.with_conn(|conn| {
+        Ok(conn.execute(
+            "UPDATE generation_queue
+                SET state = 'queued',
+                    claim_token = NULL,
+                    dispatch_attempts = CASE
+                        WHEN dispatch_attempts > 0 THEN dispatch_attempts - 1
+                        ELSE 0
+                    END,
+                    started_at = NULL,
+                    updated_at = ?3
+              WHERE id = ?1 AND state = 'running' AND claim_token = ?2",
+            params![id, claim_token, now_ms],
+        )? > 0)
+    })
+}
+
 /// Charge one boot's replay against a row and return the new count.
 pub fn bump_replay_seen(db: &MetadataDb, id: &str, now_ms: i64) -> Result<Option<u32>> {
     db.with_conn(|conn| {
@@ -256,14 +385,46 @@ pub fn hold(db: &MetadataDb, id: &str, reason: &str, now_ms: i64) -> Result<bool
 /// column records what to do next, so it becomes `queued` again. Mirrors
 /// `chain_job_runner`'s startup flip.
 pub fn requeue_running(db: &MetadataDb, owner_uuid: &str, now_ms: i64) -> Result<usize> {
-    db.with_conn(|conn| {
-        let updated = conn.execute(
-            "UPDATE generation_queue
-                SET state = 'queued', started_at = NULL, updated_at = ?2
+    Ok(recover_runtime_claims(db, owner_uuid, now_ms)?.running_requeued)
+}
+
+/// Startup recovery for runtime-only ownership.
+///
+/// All running rows are replayable after a process death, including legacy
+/// untokened rows. Every token is cleared in the same statement, so a stale
+/// feeder or worker from the prior runtime is fenced from later CAS writes.
+pub fn recover_runtime_claims(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    now_ms: i64,
+) -> Result<RuntimeClaimRecovery> {
+    db.transact_immediate(|conn| {
+        let claims_cleared: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM generation_queue
+              WHERE owner_uuid = ?1 AND claim_token IS NOT NULL",
+            params![owner_uuid],
+            |row| row.get(0),
+        )?;
+        let running_requeued: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM generation_queue
               WHERE owner_uuid = ?1 AND state = 'running'",
+            params![owner_uuid],
+            |row| row.get(0),
+        )?;
+        conn.execute(
+            "UPDATE generation_queue
+                SET state = CASE WHEN state = 'running' THEN 'queued' ELSE state END,
+                    claim_token = NULL,
+                    started_at = CASE WHEN state = 'running' THEN NULL ELSE started_at END,
+                    updated_at = ?2
+              WHERE owner_uuid = ?1
+                AND (state = 'running' OR claim_token IS NOT NULL)",
             params![owner_uuid, now_ms],
         )?;
-        Ok(updated)
+        Ok(RuntimeClaimRecovery {
+            claims_cleared: claims_cleared as usize,
+            running_requeued: running_requeued as usize,
+        })
     })
 }
 
@@ -397,6 +558,8 @@ fn row_to_queue_row(row: &Row<'_>) -> rusqlite::Result<GenerationQueueRow> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+
     use super::*;
 
     fn row(id: &str, owner: &str, created_at_ms: i64) -> GenerationQueueRow {
@@ -561,6 +724,142 @@ mod tests {
             get(&db, "parked").unwrap().unwrap().created_at_ms,
             400,
             "held rows are not part of the dispatch order"
+        );
+    }
+
+    #[test]
+    fn concurrent_claims_are_exclusive_and_duplicate_tokens_claim_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mold.db");
+        let db = MetadataDb::open(&path).unwrap();
+        insert(&db, &row("only", "owner-a", 1)).unwrap();
+        drop(db);
+
+        let barrier = Arc::new(Barrier::new(2));
+        let handles = ["claim-a", "claim-b"].map(|token| {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let db = MetadataDb::open(&path).unwrap();
+                barrier.wait();
+                claim_next(&db, "owner-a", token, 10).unwrap()
+            })
+        });
+        let claimed = handles
+            .into_iter()
+            .filter_map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].row.id, "only");
+
+        let db = MetadataDb::open(&path).unwrap();
+        insert(&db, &row("next", "owner-a", 2)).unwrap();
+        assert!(claim_next(&db, "owner-a", &claimed[0].claim_token, 20)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            claim_next(&db, "owner-a", "fresh-token", 21)
+                .unwrap()
+                .unwrap()
+                .row
+                .id,
+            "next"
+        );
+    }
+
+    #[test]
+    fn state_and_claim_cas_fences_stale_tokens() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert(&db, &row("job-1", "owner-a", 1)).unwrap();
+        let claimed = claim_next(&db, "owner-a", "current", 10).unwrap().unwrap();
+        assert_eq!(claimed.row.state, QueueRowState::Queued);
+
+        assert_eq!(
+            mark_dispatched_claimed(&db, "job-1", "stale", 11).unwrap(),
+            None
+        );
+        assert_eq!(
+            mark_dispatched_claimed(&db, "job-1", "current", 12).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            get(&db, "job-1").unwrap().unwrap().state,
+            QueueRowState::Running
+        );
+        assert!(!release_claim(&db, "job-1", "current", 13).unwrap());
+    }
+
+    #[test]
+    fn release_and_dispatch_refund_are_token_fenced() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert(&db, &row("release", "owner-a", 1)).unwrap();
+        insert(&db, &row("refund", "owner-a", 2)).unwrap();
+
+        claim_next(&db, "owner-a", "release-token", 10).unwrap();
+        assert!(!release_claim(&db, "release", "stale", 11).unwrap());
+        assert!(release_claim(&db, "release", "release-token", 12).unwrap());
+        delete(&db, "release").unwrap();
+
+        claim_next(&db, "owner-a", "refund-token", 13).unwrap();
+        assert_eq!(
+            mark_dispatched_claimed(&db, "refund", "refund-token", 14).unwrap(),
+            Some(1)
+        );
+        assert!(!refund_dispatched_claim(&db, "refund", "stale", 15).unwrap());
+        assert!(refund_dispatched_claim(&db, "refund", "refund-token", 16).unwrap());
+        let refunded = get(&db, "refund").unwrap().unwrap();
+        assert_eq!(refunded.state, QueueRowState::Queued);
+        assert_eq!(refunded.dispatch_attempts, 0);
+        assert_eq!(refunded.started_at_ms, None);
+    }
+
+    #[test]
+    fn recovery_clears_queued_claims_requeues_running_and_fences_old_tokens() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert(&db, &row("queued", "owner-a", 1)).unwrap();
+        insert(&db, &row("running", "owner-a", 2)).unwrap();
+        claim_next(&db, "owner-a", "token-queued", 10).unwrap();
+        claim_next(&db, "owner-a", "token-running", 11).unwrap();
+        mark_dispatched_claimed(&db, "running", "token-running", 12).unwrap();
+
+        let recovered = recover_runtime_claims(&db, "owner-a", 20).unwrap();
+        assert_eq!(recovered.claims_cleared, 2);
+        assert_eq!(recovered.running_requeued, 1);
+        assert_eq!(
+            get(&db, "queued").unwrap().unwrap().state,
+            QueueRowState::Queued
+        );
+        assert_eq!(
+            get(&db, "running").unwrap().unwrap().state,
+            QueueRowState::Queued
+        );
+        assert_eq!(
+            mark_dispatched_claimed(&db, "running", "token-running", 21).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn repeated_claim_next_is_bounded_and_preserves_existing_queue_order() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        for index in 0..25 {
+            insert(&db, &row(&format!("job-{index}"), "owner-a", 1)).unwrap();
+        }
+
+        for index in 0..3 {
+            let claim = claim_next(&db, "owner-a", &format!("claim-{index}"), 10 + index)
+                .unwrap()
+                .unwrap();
+            assert_eq!(claim.row.id, format!("job-{index}"));
+        }
+        assert_eq!(
+            list_replayable(&db, "owner-a")
+                .unwrap()
+                .into_iter()
+                .filter(|row| row.state == QueueRowState::Queued)
+                .count(),
+            25,
+            "claiming is a one-row SQL primitive; it does not materialize or remove the backlog"
         );
     }
 
