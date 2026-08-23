@@ -35,14 +35,17 @@ const chipLabel = computed(() => {
 });
 const chipReady = computed(() =>
   target.value === "auto" || target.value === "capable"
-    ? hosts.all.some((h) => h.status === "ready")
-    : chipHost.value?.status === "ready",
+    ? hosts.all.some((h) => h.status === "ready" && !h.stale)
+    : chipHost.value?.status === "ready" && !chipHost.value.stale,
 );
 const chipStatus = computed(() => {
   if (target.value === "auto" || target.value === "capable") {
+    if (hosts.all.some((host) => host.status === "ready" && host.stale))
+      return chipReady.value ? "ready" : "reconnecting";
     return chipReady.value ? "ready" : "connecting";
   }
   const status = chipHost.value?.status;
+  if (chipHost.value?.stale) return "reconnecting";
   if (status === "ready") return "ready";
   if (status === "error") return "offline";
   return status ?? "connecting";
@@ -54,6 +57,8 @@ function pick(id: string) {
 }
 
 function hostLine(host: HostView): string {
+  if (host.stale) return "reconnecting";
+  if (host.status === "connecting") return "connecting";
   if (host.status !== "ready") return "offline";
   return host.queueDepth !== null ? `queue ${host.queueDepth}` : "ready";
 }
@@ -145,7 +150,9 @@ onBeforeUnmount(() => {
       >
         <span
           class="ms-hostchip__dot"
-          :class="h.status === 'ready' ? 'ms-hostchip__dot--ready' : 'ms-hostchip__dot--wait'"
+          :class="
+            h.status === 'ready' && !h.stale ? 'ms-hostchip__dot--ready' : 'ms-hostchip__dot--wait'
+          "
         />
         <span class="ms-hostchip__row-label">{{ h.label }}</span>
         <span class="ms-hostchip__row-sub data-mono">{{ hostLine(h) }}</span>

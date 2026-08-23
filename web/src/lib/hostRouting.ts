@@ -48,6 +48,9 @@ export interface RoutableHost {
   apiKey?: string;
   instanceId?: string;
   status: HostRoutingStatus;
+  /** Latest status transport failed after this host had supplied a verified
+   * snapshot. Routing continues from that snapshot while UI says stale. */
+  stale?: boolean;
   /** Live queue depth; null while unknown (counts as busiest). */
   queueDepth: number | null;
   /** Predicted end of this host's current plan. Null on legacy hosts. */

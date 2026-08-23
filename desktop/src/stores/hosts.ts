@@ -101,6 +101,9 @@ export interface HostView {
   baseUrl: string | null;
   apiKey: string | null;
   status: "connecting" | "ready" | "error";
+  /** The host answered successfully before, but its latest status poll did
+   * not. Last-good telemetry remains routable while the UI says reconnecting. */
+  stale?: boolean;
   primary: boolean;
   queueDepth: number | null;
   queueCapacity: number | null;
@@ -130,6 +133,9 @@ export interface HostTelemetry {
   instanceId?: string | null;
   /** Server-reported hostname from `/api/status`; drives the display label. */
   hostname?: string | null;
+  /** False after a successful status read; true while a later transient
+   * transport failure leaves this verified snapshot as the best authority. */
+  stale?: boolean;
 }
 
 /** Exported so a view can rank an arbitrary subset of hosts (expansion
@@ -317,6 +323,7 @@ export const useHostsStore = defineStore("hosts", {
         apiKey: conn.info.apiKey,
         status:
           conn.status === "ready" ? "ready" : conn.status === "starting" ? "connecting" : "error",
+        stale: t?.stale ?? false,
         primary: true,
         queueDepth: t?.queueDepth ?? null,
         queueCapacity: t?.queueCapacity ?? null,
@@ -361,6 +368,7 @@ export const useHostsStore = defineStore("hosts", {
           baseUrl: extra.url,
           apiKey: extra.apiKey,
           status: extra.status,
+          stale: t?.stale ?? false,
           primary: false,
           queueDepth: t?.queueDepth ?? null,
           queueCapacity: t?.queueCapacity ?? null,
@@ -419,7 +427,10 @@ export const useHostsStore = defineStore("hosts", {
             if (test.ok) {
               live.status = "ready";
             } else {
-              live.status = "error";
+              // A failed transport probe is not evidence that the remembered
+              // process died. Keep polling it as reconnecting until it either
+              // answers or the user explicitly disconnects it.
+              live.status = "connecting";
               live.error = test.error;
               // Boot probes are intentionally quiet. The Machines status row
               // is sufficient; an offline server must not create a startup
@@ -511,6 +522,7 @@ export const useHostsStore = defineStore("hosts", {
       this.extras = this.extras.filter((h) => h.id !== id);
       delete this.telemetry[id];
       delete this.capabilities[id];
+      delete useHostModelsStore().byHost[id];
       let clearedTarget = false;
       await withSettingsLock(async () => {
         const settings = await ipc.appSettingsGet();
@@ -565,10 +577,9 @@ export const useHostsStore = defineStore("hosts", {
       if (!extra) return;
       extra.status = "connecting";
       const test = await ipc.testRemoteHost(extra.url, extra.apiKey);
-      extra.status = test.ok ? "ready" : "error";
+      extra.status = test.ok ? "ready" : "connecting";
       extra.error = test.ok ? null : test.error;
       if (test.ok) void this.refreshAfterCurrent();
-      else delete this.capabilities[id];
     },
     /**
      * Resolve where a batch should run. `null` = Auto (least busy);
@@ -1123,7 +1134,7 @@ export const useHostsStore = defineStore("hosts", {
       const learned = new Map<string, string>();
       await Promise.all(
         this.all.map(async (host) => {
-          if (!host.baseUrl || host.status === "connecting") return;
+          if (!host.baseUrl) return;
           const generation = (this.refreshGenerations[host.id] ?? 0) + 1;
           this.refreshGenerations[host.id] = generation;
           const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
@@ -1136,6 +1147,8 @@ export const useHostsStore = defineStore("hosts", {
             );
           };
           try {
+            const previousTelemetry = this.telemetry[host.id];
+            const previousInstanceId = previousTelemetry?.instanceId ?? host.instanceId ?? null;
             const statusRequest = apiJsonTo<ServerStatus>(target, "/api/status");
             const queueRequest = statusRequest.then((status) => {
               const capacity = status.queue_capacity;
@@ -1161,14 +1174,18 @@ export const useHostsStore = defineStore("hosts", {
               ),
             ]);
             if (!isCurrent()) return;
-            const previousPredictedCompletion =
-              this.telemetry[host.id]?.predictedCompletionMs ?? null;
+            const nextInstanceId = status.instance_id ?? null;
+            const instanceChanged = previousInstanceId !== nextInstanceId;
+            if (instanceChanged) delete useHostModelsStore().byHost[host.id];
+            const previousPredictedCompletion = previousTelemetry?.predictedCompletionMs ?? null;
             this.telemetry[host.id] = {
               queueDepth: status.queue_depth ?? null,
               queueCapacity: status.queue_capacity ?? null,
               predictedCompletionMs:
                 queue === null
-                  ? previousPredictedCompletion
+                  ? instanceChanged
+                    ? null
+                    : previousPredictedCompletion
                   : queue.plan == null
                     ? null
                     : predictedCompletionUnixMs(queue.plan),
@@ -1177,8 +1194,9 @@ export const useHostsStore = defineStore("hosts", {
               gpuInfo: status.gpu_info ?? null,
               gpuWorkers: status.gpus ?? null,
               devices,
-              instanceId: status.instance_id ?? null,
+              instanceId: nextInstanceId,
               hostname: status.hostname ?? null,
+              stale: false,
             };
             if (status.instance_id) learned.set(host.id, status.instance_id);
             if (status.hostname) this.hostnames[host.id] = status.hostname;
@@ -1186,6 +1204,11 @@ export const useHostsStore = defineStore("hosts", {
             if (extra && extra.status !== "ready") {
               extra.status = "ready";
               extra.error = null;
+            }
+            if (host.id === "local") {
+              const conn = useConnectionStore();
+              conn.status = "ready";
+              conn.error = null;
             }
             try {
               const capabilities = await fetchServerCapabilities(target);
@@ -1200,26 +1223,38 @@ export const useHostsStore = defineStore("hosts", {
               }
             } catch {
               // Capability discovery is advisory. A failed/unsupported probe
-              // must not mark a healthy host unavailable or imply expand=false.
-              delete this.capabilities[host.id];
+              // must not mark a healthy host unavailable or erase last-good
+              // policy. A changed server identity is the exception: authority
+              // from the prior installation is security-sensitive and cannot
+              // cross that fence.
+              if (instanceChanged) delete this.capabilities[host.id];
             }
           } catch (err) {
             if (!isCurrent()) return;
+            const previous = this.telemetry[host.id];
+            if (previous) this.telemetry[host.id] = { ...previous, stale: true };
             const extra = this.extras.find((h) => h.id === host.id);
             if (extra) {
-              extra.status = "error";
+              // A verified last-good host stays routable; an unverified one
+              // stays in the non-authoritative connecting state. Neither a
+              // single failure nor an arbitrary count is proof of death.
+              extra.status = previous ? "ready" : "connecting";
               extra.error = String(err);
             }
             if (host.id === "local") {
               const conn = useConnectionStore();
-              conn.localStatus = "error";
-              conn.localError = String(err);
               // The native lifecycle distinguishes a dead embedded engine (or
-              // vanished external server) and brings this Mac back online.
-              void conn.ensureLocal(true);
+              // vanished external server) from a congested HTTP poll. It alone
+              // may transition lifecycle state to error and restart the engine.
+              void conn.ensureLocal(true).then(() => {
+                // A newer successful poll supersedes this failed generation.
+                if (!isCurrent() || conn.localStatus !== "error") return;
+                conn.status = "error";
+                conn.error = conn.localError ?? String(err);
+                delete this.telemetry[host.id];
+                delete this.capabilities[host.id];
+              });
             }
-            delete this.telemetry[host.id];
-            delete this.capabilities[host.id];
           }
         }),
       );

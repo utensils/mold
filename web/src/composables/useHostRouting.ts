@@ -90,6 +90,9 @@ type GpuInfoWithBackend = GpuInfo & { backend?: string | null };
 
 interface HostTelemetry {
   status: HostRoutingStatus;
+  /** The latest status transport failed; all other fields are the last
+   * verified snapshot and remain usable until success or registry removal. */
+  stale: boolean;
   version: string | null;
   instanceId: string | null;
   queueDepth: number | null;
@@ -241,6 +244,23 @@ let routingAuthorityGeneration = 0;
 let targetPolicyGeneration = 0;
 let registryAuthoritySignature = "";
 
+function retireHostAuthority(hostId: string): void {
+  const nextTelemetry = { ...telemetry.value };
+  delete nextTelemetry[hostId];
+  telemetry.value = nextTelemetry;
+  const nextModels = { ...modelsByHost.value };
+  delete nextModels[hostId];
+  modelsByHost.value = nextModels;
+  const nextCapabilities = { ...capabilitiesByHost.value };
+  delete nextCapabilities[hostId];
+  capabilitiesByHost.value = nextCapabilities;
+  settledHostIds.value = settledHostIds.value.filter((id) => id !== hostId);
+  inventoryHostIds.value = inventoryHostIds.value.filter((id) => id !== hostId);
+  // Do not reset to zero: incrementing invalidates any old in-flight request
+  // even if the same id/url/key is reconnected before that request settles.
+  pollGenerations.set(hostId, (pollGenerations.get(hostId) ?? 0) + 1);
+}
+
 function readRegistry(): void {
   const next = typeof localStorage === "undefined" ? [] : listHosts();
   const signature = JSON.stringify(
@@ -254,6 +274,28 @@ function readRegistry(): void {
   if (signature !== registryAuthoritySignature) {
     registryAuthoritySignature = signature;
     routingAuthorityGeneration += 1;
+  }
+  const nextIds = new Set(next.map((entry) => entry.id));
+  const previousById = new Map(entries.value.map((entry) => [entry.id, entry]));
+  for (const previous of entries.value) {
+    if (nextIds.has(previous.id)) continue;
+    // Explicit disconnect/forget is registry authority. Retire every cached
+    // value so reconnecting the same slug can never inherit queue, inventory,
+    // capability, or identity data from the former live membership.
+    retireHostAuthority(previous.id);
+  }
+  for (const current of next) {
+    const previous = previousById.get(current.id);
+    if (
+      previous &&
+      (previous.url !== current.url ||
+        previous.apiKey !== current.apiKey ||
+        previous.instanceId !== current.instanceId)
+    ) {
+      // A credential/address/identity edit is a new routing authority even
+      // when the stable registry slug is unchanged.
+      retireHostAuthority(current.id);
+    }
   }
   entries.value = next;
 }
@@ -278,6 +320,7 @@ const hosts = computed<RoutableHost[]>(() =>
       label: entry.name,
       url: entry.url,
       status: live?.status ?? "connecting",
+      stale: live?.stale ?? false,
       queueDepth: live?.queueDepth ?? null,
       gpu: live?.gpu ?? null,
       predictedCompletionMs: live?.predictedCompletionMs ?? null,
@@ -462,6 +505,7 @@ async function pollHost(entry: HostEntry): Promise<void> {
   ) {
     return;
   }
+  let instanceChanged = false;
   if (status.status === "fulfilled") {
     const previousTelemetry = telemetry.value[entry.id];
     const mergedQueue =
@@ -484,13 +528,15 @@ async function pollHost(entry: HostEntry): Promise<void> {
     const previousInstanceId =
       telemetry.value[entry.id]?.instanceId ?? entry.instanceId ?? null;
     const nextInstanceId = status.value.instance_id ?? null;
-    if (previousInstanceId !== nextInstanceId) {
+    instanceChanged = previousInstanceId !== nextInstanceId;
+    if (instanceChanged) {
       routingAuthorityGeneration += 1;
     }
     telemetry.value = {
       ...telemetry.value,
       [entry.id]: {
         status: generationReady ? "ready" : "error",
+        stale: false,
         version: status.value.version ?? null,
         instanceId: nextInstanceId,
         queueDepth: status.value.queue_depth ?? null,
@@ -499,37 +545,51 @@ async function pollHost(entry: HostEntry): Promise<void> {
           ? predictedCompletionUnixMs(mergedQueue.plan)
           : mergedQueue
             ? null
-            : (previousTelemetry?.predictedCompletionMs ?? null),
+            : instanceChanged
+              ? null
+              : (previousTelemetry?.predictedCompletionMs ?? null),
         queue: mergedQueue
           ? { entries: mergedQueue.entries, plan: mergedQueue.plan ?? null }
-          : (previousTelemetry?.queue ?? null),
+          : instanceChanged
+            ? null
+            : (previousTelemetry?.queue ?? null),
       },
     };
   } else {
+    const previous = telemetry.value[entry.id];
     telemetry.value = {
       ...telemetry.value,
-      [entry.id]: {
-        status: "error",
-        version: telemetry.value[entry.id]?.version ?? null,
-        instanceId:
-          telemetry.value[entry.id]?.instanceId ?? entry.instanceId ?? null,
-        queueDepth: null,
-        gpu: null,
-        predictedCompletionMs: null,
-        queue: null,
-      },
+      [entry.id]: previous
+        ? { ...previous, stale: true }
+        : {
+            status: "connecting",
+            stale: false,
+            version: null,
+            instanceId: entry.instanceId ?? null,
+            queueDepth: null,
+            gpu: null,
+            predictedCompletionMs: null,
+            queue: null,
+          },
     };
   }
-  if (models.status === "fulfilled") {
+  if (status.status === "fulfilled" && models.status === "fulfilled") {
     modelsByHost.value = { ...modelsByHost.value, [entry.id]: models.value };
     if (!inventoryHostIds.value.includes(entry.id)) {
       inventoryHostIds.value = [...inventoryHostIds.value, entry.id];
     }
+  } else if (status.status === "fulfilled" && instanceChanged) {
+    // A replacement server cannot inherit inventory authority from the old
+    // installation at the same URL. Unknown is safer than a plausible lie.
+    modelsByHost.value = { ...modelsByHost.value, [entry.id]: [] };
+    inventoryHostIds.value = inventoryHostIds.value.filter(
+      (id) => id !== entry.id,
+    );
   } else if (!modelsByHost.value[entry.id]) {
     // Keep the last good list for a host that blipped; only seed an empty one.
     modelsByHost.value = { ...modelsByHost.value, [entry.id]: [] };
   }
-  if (capabilities.status === "fulfilled") {
+  if (status.status === "fulfilled" && capabilities.status === "fulfilled") {
     const previous = capabilitiesByHost.value[entry.id];
     if (
       JSON.stringify(previous?.model_access ?? null) !==
@@ -541,6 +601,12 @@ async function pollHost(entry: HostEntry): Promise<void> {
       ...capabilitiesByHost.value,
       [entry.id]: capabilities.value,
     };
+  } else if (status.status === "fulfilled" && instanceChanged) {
+    // Capability and model-access policy is instance authority; never retain
+    // it across an observed replacement when the new probe did not answer.
+    const next = { ...capabilitiesByHost.value };
+    delete next[entry.id];
+    capabilitiesByHost.value = next;
   }
   if (!settledHostIds.value.includes(entry.id)) {
     settledHostIds.value = [...settledHostIds.value, entry.id];
@@ -686,9 +752,15 @@ async function resolveFeasibleWithPreview(
   readTarget();
   const authorityGeneration = routingAuthorityGeneration;
   const selection = targetId.value;
+  const explicitAuthorityRetry =
+    authorityRetry > 0 &&
+    selection !== AUTO_TARGET_ID &&
+    selection !== CAPABLE_TARGET_ID;
   let candidates = hosts.value.filter(
     (candidate) =>
-      candidate.id === ORIGIN_HOST_ID || candidate.status === "ready",
+      candidate.id === ORIGIN_HOST_ID ||
+      candidate.status === "ready" ||
+      (explicitAuthorityRetry && candidate.id === selection),
   );
   if (selection !== AUTO_TARGET_ID && selection !== CAPABLE_TARGET_ID) {
     candidates = candidates.filter((candidate) => candidate.id === selection);

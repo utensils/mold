@@ -6,6 +6,7 @@ import {
 } from "./useHostRouting";
 import {
   addHost,
+  HOSTS_STORAGE_KEY,
   ORIGIN_HOST_ID,
   setGenerateTargetId,
   updateHost,
@@ -30,7 +31,7 @@ import {
 const statuses = new Map<string, unknown>();
 const models = new Map<string, ModelInfoExtended[]>();
 const devices = new Map<string, DeviceListResponse>();
-const capabilities = new Map<string, ServerCapabilities>();
+const capabilities = new Map<string, ServerCapabilities | Error>();
 const hostStatusCall = vi.hoisted(() => vi.fn());
 const hostQueueCall = vi.hoisted(() => vi.fn());
 const placementCall = vi.hoisted(() => vi.fn());
@@ -60,12 +61,12 @@ vi.mock("../components/machines/hostClient", () => ({
       : Promise.reject(new Error("legacy server"));
   },
   hostQueue: (...args: unknown[]) => hostQueueCall(...args),
-  hostCapabilities: (host: HostEntry) =>
-    Promise.resolve(
-      capabilities.get(host.id) ?? {
-        gallery: { can_delete: true },
-      },
-    ),
+  hostCapabilities: (host: HostEntry) => {
+    const canned = capabilities.get(host.id);
+    return canned instanceof Error
+      ? Promise.reject(canned)
+      : Promise.resolve(canned ?? { gallery: { can_delete: true } });
+  },
 }));
 
 function placement(
@@ -1570,7 +1571,7 @@ describe("useHostRouting", () => {
     });
   });
 
-  it("marks an unreachable host errored without dropping it from the list", async () => {
+  it("keeps a never-reached host connecting without dropping it from the list", async () => {
     const studio = addHost({ url: "http://studio:7680", name: "Studio" });
     statuses.set(ORIGIN_HOST_ID, status());
     models.set(ORIGIN_HOST_ID, [model("flux2-klein:q4")]);
@@ -1579,9 +1580,205 @@ describe("useHostRouting", () => {
     await routing.refresh();
 
     const remote = routing.hosts.value.find((h) => h.id === studio.id);
-    expect(remote?.status).toBe("error");
+    expect(remote).toMatchObject({ status: "connecting", stale: false });
     // Auto never routes to it.
     expect(routing.resolve("flux2-klein:q4")?.hostId).toBe(ORIGIN_HOST_ID);
+  });
+
+  it("keeps a verified host routable with last-good state through repeated status failures", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      instanceId: "instance-a",
+    });
+    statuses.set(ORIGIN_HOST_ID, status());
+    models.set(ORIGIN_HOST_ID, []);
+    statuses.set(
+      studio.id,
+      status({
+        queue_depth: 5,
+        queue_capacity: 8,
+        instance_id: "instance-a",
+        gpu_info: {
+          backend: "cuda",
+          name: "RTX 4090",
+          vram_total_mb: 24_564,
+          vram_used_mb: 1_024,
+        },
+      }),
+    );
+    models.set(studio.id, [model("flux-dev:q4")]);
+    capabilities.set(studio.id, {
+      gallery: { can_delete: true },
+      queue: { heterogeneous_batch: true },
+    });
+    hostQueueCall.mockImplementation((host: HostEntry) =>
+      Promise.resolve({
+        entries:
+          host.id === studio.id
+            ? [
+                {
+                  id: "still-queued",
+                  model: "flux-dev:q4",
+                  state: "queued",
+                  started_at_unix_ms: 1,
+                  position: 3,
+                },
+              ]
+            : [],
+        plan: null,
+      }),
+    );
+    setGenerateTargetId(studio.id);
+    const routing = useHostRouting();
+    await routing.refresh();
+    const capabilitySnapshot = routing.capabilitiesByHost.value[studio.id];
+
+    hostStatusCall.mockImplementation((host: HostEntry) =>
+      host.id === studio.id
+        ? Promise.reject(new Error("status timeout"))
+        : Promise.resolve(status()),
+    );
+    hostQueueCall.mockRejectedValue(new Error("status unavailable"));
+    await routing.refresh();
+    await routing.refresh();
+
+    expect(
+      routing.hosts.value.find((host) => host.id === studio.id),
+    ).toMatchObject({
+      status: "ready",
+      stale: true,
+      queueDepth: 5,
+      gpu: { name: "RTX 4090", vramTotalMb: 24_564 },
+    });
+    expect(
+      queueStatusFor(routing.queueStatus.value, studio.id, "still-queued"),
+    ).toMatchObject({ position: 3 });
+    expect(routing.capabilitiesByHost.value[studio.id]).toBe(
+      capabilitySnapshot,
+    );
+    expect(routing.resolve("flux-dev:q4")?.hostId).toBe(studio.id);
+
+    hostStatusCall.mockImplementation((host: HostEntry) =>
+      Promise.resolve(
+        host.id === studio.id
+          ? status({
+              queue_depth: 7,
+              queue_capacity: 8,
+              instance_id: "instance-a",
+            })
+          : status(),
+      ),
+    );
+    hostQueueCall.mockResolvedValue({ entries: [], plan: null });
+    await routing.refresh();
+    expect(
+      routing.hosts.value.find((host) => host.id === studio.id),
+    ).toMatchObject({
+      status: "ready",
+      stale: false,
+      queueDepth: 7,
+    });
+  });
+
+  it("fences last-good authority when a successful poll reports a replacement instance", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      instanceId: "instance-a",
+    });
+    statuses.set(ORIGIN_HOST_ID, status());
+    models.set(ORIGIN_HOST_ID, []);
+    statuses.set(
+      studio.id,
+      status({ instance_id: "instance-a", queue_depth: 2 }),
+    );
+    models.set(studio.id, [model("old-model")]);
+    capabilities.set(studio.id, {
+      gallery: { can_delete: true },
+      model_access: { restrictions: [] },
+    });
+    hostQueueCall.mockResolvedValue({
+      entries: [
+        {
+          id: "old-job",
+          model: "old-model",
+          state: "queued",
+          started_at_unix_ms: 1,
+          position: 1,
+        },
+      ],
+      plan: null,
+    });
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    statuses.set(
+      studio.id,
+      status({ instance_id: "instance-b", queue_depth: 0 }),
+    );
+    models.delete(studio.id);
+    capabilities.set(studio.id, new Error("capabilities unavailable"));
+    hostQueueCall.mockRejectedValue(new Error("queue unavailable"));
+    await routing.refresh();
+
+    expect(
+      routing.hosts.value.find((host) => host.id === studio.id),
+    ).toMatchObject({
+      instanceId: "instance-b",
+      stale: false,
+      queueDepth: 0,
+    });
+    expect(
+      queueStatusFor(routing.queueStatus.value, studio.id, "old-job"),
+    ).toBeNull();
+    expect(routing.capabilitiesByHost.value[studio.id]).toBeUndefined();
+    expect(routing.inventoryKnown(studio.id)).toBe(false);
+  });
+
+  it("retires last-good authority across an explicit disconnect", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      instanceId: "instance-a",
+    });
+    statuses.set(ORIGIN_HOST_ID, status());
+    models.set(ORIGIN_HOST_ID, []);
+    statuses.set(
+      studio.id,
+      status({ instance_id: "instance-a", queue_depth: 4 }),
+    );
+    models.set(studio.id, [model("old-model")]);
+    capabilities.set(studio.id, { gallery: { can_delete: true } });
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    const stored = JSON.parse(
+      localStorage.getItem(HOSTS_STORAGE_KEY) ?? "[]",
+    ) as HostEntry[];
+    localStorage.setItem(
+      HOSTS_STORAGE_KEY,
+      JSON.stringify(stored.map((host) => ({ ...host, connected: false }))),
+    );
+    await routing.refresh();
+    localStorage.setItem(
+      HOSTS_STORAGE_KEY,
+      JSON.stringify(stored.map((host) => ({ ...host, connected: true }))),
+    );
+    statuses.delete(studio.id);
+    models.delete(studio.id);
+    capabilities.set(studio.id, new Error("unreachable"));
+    await routing.refresh();
+
+    expect(
+      routing.hosts.value.find((host) => host.id === studio.id),
+    ).toMatchObject({
+      status: "connecting",
+      stale: false,
+      queueDepth: null,
+    });
+    expect(routing.capabilitiesByHost.value[studio.id]).toBeUndefined();
+    expect(routing.inventoryKnown(studio.id)).toBe(false);
   });
 
   it("carries the remote's api key into the resolved route, never a URL", async () => {

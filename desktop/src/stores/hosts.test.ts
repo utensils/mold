@@ -287,7 +287,7 @@ describe("hosts store", () => {
     expect(testRemoteHost).toHaveBeenCalledWith(studio.url, "studio-key");
   });
 
-  it("marks an unreachable remembered host instead of blocking boot", async () => {
+  it("keeps an unreachable remembered host reconnecting instead of falsely offline", async () => {
     installSettings(settings({ savedHosts: [hal], connectedHostIds: [hal.id] }));
     testRemoteHost.mockResolvedValue({ ok: false, version: null, error: "down" });
     // A host the probe rejected fails telemetry too — only telemetry for the
@@ -299,7 +299,7 @@ describe("hosts store", () => {
     );
     const hosts = useHostsStore();
     await hosts.init();
-    expect(hosts.all.find((h) => h.id === hal.id)?.status).toBe("error");
+    expect(hosts.all.find((h) => h.id === hal.id)?.status).toBe("connecting");
     expect(useToastStore().items.some((t) => t.message.includes("hal9000"))).toBe(false);
   });
 
@@ -412,10 +412,16 @@ describe("hosts store", () => {
       gallery: { can_delete: true },
       expand: { configured: true, model_present: null, backend: "api" },
     };
+    useHostModelsStore().byHost[hal.id] = {
+      entries: [installedModel("old-model")],
+      fetchedAt: Date.now(),
+      error: null,
+    };
 
     await hosts.disconnect(hal.id);
 
     expect(hosts.capabilities[hal.id]).toBeUndefined();
+    expect(useHostModelsStore().byHost[hal.id]).toBeUndefined();
   });
 
   it("resolveRoute(null) auto-routes to the least busy ready host", async () => {
@@ -1599,8 +1605,8 @@ describe("hosts store", () => {
     });
     await hosts.refresh();
     expect(hosts.all.find((h) => h.id === hal.id)?.label).toBe("hal9000");
-    // A wifi blip fails one poll: telemetry is dropped, but the label must
-    // not flip back to the raw URL until the next successful poll.
+    // A wifi blip fails one poll: the verified snapshot remains available and
+    // is marked stale, rather than becoming a false offline state.
     apiJsonTo.mockImplementation((target: { baseUrl: string }) =>
       target.baseUrl.includes("hal9000")
         ? Promise.reject(new Error("timeout"))
@@ -1608,8 +1614,150 @@ describe("hosts store", () => {
     );
     await hosts.refresh();
     const row = hosts.all.find((h) => h.id === hal.id);
-    expect(row?.status).toBe("error");
+    expect(row).toMatchObject({ status: "ready", stale: true });
     expect(row?.label).toBe("hal9000");
+    expect(hosts.telemetry[hal.id]).toMatchObject({
+      queueDepth: 0,
+      queueCapacity: 8,
+      stale: true,
+    });
+  });
+
+  it("retains verified telemetry and capabilities through repeated status failures, then recovers", async () => {
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: "host-key",
+      status: "ready",
+      error: null,
+      instanceId: "instance-a",
+    });
+    let remoteStatus: "fresh" | "failed" | "recovered" = "fresh";
+    apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string) => {
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          gallery: { can_delete: true },
+          queue: { heterogeneous_batch: true },
+        });
+      }
+      if (!target.baseUrl.includes("hal9000")) {
+        return Promise.resolve({ queue_depth: 0, queue_capacity: 8, version: "local" });
+      }
+      if (remoteStatus === "failed") return Promise.reject(new Error("status timeout"));
+      return Promise.resolve({
+        queue_depth: remoteStatus === "recovered" ? 7 : 5,
+        queue_capacity: 32,
+        version: remoteStatus === "recovered" ? "recovered" : "fresh",
+        instance_id: "instance-a",
+        gpu_info: {
+          name: "RTX 4090",
+          vram_total_mb: 24_564,
+          vram_used_mb: 1_024,
+        },
+      });
+    });
+    listQueue.mockResolvedValue({ entries: [], plan: null });
+
+    await hosts.refresh();
+    const capabilitySnapshot = hosts.capabilities[hal.id];
+    expect(hosts.all.find((host) => host.id === hal.id)).toMatchObject({
+      status: "ready",
+      stale: false,
+      queueDepth: 5,
+    });
+
+    remoteStatus = "failed";
+    await hosts.refresh();
+    await hosts.refresh();
+
+    expect(hosts.all.find((host) => host.id === hal.id)).toMatchObject({
+      status: "ready",
+      stale: true,
+      queueDepth: 5,
+    });
+    expect(hosts.telemetry[hal.id]?.gpuInfo?.name).toBe("RTX 4090");
+    expect(hosts.capabilities[hal.id]).toBe(capabilitySnapshot);
+
+    remoteStatus = "recovered";
+    await hosts.refresh();
+    expect(hosts.all.find((host) => host.id === hal.id)).toMatchObject({
+      status: "ready",
+      stale: false,
+      queueDepth: 7,
+      version: "recovered",
+    });
+  });
+
+  it("fences capabilities from a replaced server identity", async () => {
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: "host-key",
+      status: "ready",
+      error: null,
+      instanceId: "instance-a",
+    });
+    hosts.telemetry[hal.id] = {
+      queueDepth: 2,
+      queueCapacity: 8,
+      version: "old",
+      instanceId: "instance-a",
+    };
+    hosts.capabilities[hal.id] = {
+      gallery: { can_delete: true },
+      model_access: { restrictions: [] },
+    };
+    useHostModelsStore().byHost[hal.id] = {
+      entries: [installedModel("old-model")],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string) => {
+      if (path === "/api/capabilities" && target.baseUrl.includes("hal9000")) {
+        return Promise.reject(new Error("capabilities unavailable"));
+      }
+      return Promise.resolve({
+        queue_depth: 1,
+        queue_capacity: 8,
+        version: "new",
+        instance_id: target.baseUrl.includes("hal9000") ? "instance-b" : "local",
+      });
+    });
+    listQueue.mockRejectedValue(new Error("queue unavailable"));
+
+    await hosts.refresh();
+
+    expect(hosts.telemetry[hal.id]).toMatchObject({
+      instanceId: "instance-b",
+      predictedCompletionMs: null,
+      stale: false,
+    });
+    expect(hosts.capabilities[hal.id]).toBeUndefined();
+    expect(useHostModelsStore().byHost[hal.id]).toBeUndefined();
+  });
+
+  it("marks the local host offline only after native lifecycle authority confirms death", async () => {
+    const hosts = useHostsStore();
+    hosts.telemetry.local = {
+      queueDepth: 4,
+      queueCapacity: 8,
+      version: "last-good",
+      stale: false,
+    };
+    hosts.capabilities.local = { gallery: { can_delete: true } };
+    ensureLocalServer.mockRejectedValueOnce(new Error("embedded process exited"));
+    apiJsonTo.mockRejectedValueOnce(new Error("status timeout"));
+
+    await hosts.refresh();
+    await vi.waitFor(() => expect(useConnectionStore().localStatus).toBe("error"));
+
+    expect(hosts.primaryHost?.status).toBe("error");
+    expect(hosts.telemetry.local).toBeUndefined();
+    expect(hosts.capabilities.local).toBeUndefined();
   });
 
   it("disconnect() clears a sticky generation target pointing at the removed host", async () => {
@@ -2003,7 +2151,7 @@ describe("hosts store", () => {
     );
     const hosts = useHostsStore();
     await hosts.init();
-    expect(hosts.all.find((h) => h.id === hal.id)?.status).toBe("error");
+    expect(hosts.all.find((h) => h.id === hal.id)?.status).toBe("connecting");
 
     // The user adds the box's NEW address; the probe proves it's the same box.
     testRemoteHost.mockResolvedValue({
@@ -2041,7 +2189,7 @@ describe("hosts store", () => {
     );
     const hosts = useHostsStore();
     await hosts.init();
-    expect(hosts.all.find((h) => h.id === hal.id)?.status).toBe("error");
+    expect(hosts.all.find((h) => h.id === hal.id)?.status).toBe("connecting");
 
     // Re-adding the host with the NEW key must persist it (a stale stored key
     // must not block adoption) and revive the live row in place.

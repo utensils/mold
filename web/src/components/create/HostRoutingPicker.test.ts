@@ -45,6 +45,13 @@ describe("HostRoutingPicker", () => {
     expect(wrapper.emitted("open-machines")).toHaveLength(1);
   });
 
+  it("labels a stale single origin as reconnecting", () => {
+    const wrapper = factory([{ ...origin, stale: true }]);
+    expect(wrapper.get("[data-test='controls-host']").text()).toContain(
+      "reconnecting",
+    );
+  });
+
   it("offers Auto, Most capable and every host once a remote is registered", async () => {
     const wrapper = factory([origin, studio]);
     expect(wrapper.find("[data-test='host-menu']").exists()).toBe(false);
@@ -135,5 +142,18 @@ describe("HostRoutingPicker", () => {
     const offline = { ...studio, status: "error" as const };
     const wrapper = factory([origin, offline], "studio");
     expect(wrapper.get("[data-test='host-chip']").text()).toContain("offline");
+  });
+
+  it("keeps a stale verified host selectable and labels it reconnecting", async () => {
+    const stale = { ...studio, stale: true };
+    const wrapper = factory([origin, stale], "studio");
+
+    expect(wrapper.get("[data-test='host-chip']").text()).toContain(
+      "reconnecting",
+    );
+    await wrapper.get("[data-test='host-chip']").trigger("click");
+    const row = wrapper.get("[data-test='host-option-studio']");
+    expect(row.attributes("disabled")).toBeUndefined();
+    expect(row.text()).toContain("reconnecting");
   });
 });

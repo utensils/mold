@@ -204,8 +204,9 @@ function memoryPct(host: HostView): number {
   return total > 0 ? Math.round((used / total) * 100) : 0;
 }
 
-function statusDot(status: HostView["status"]): string {
-  switch (status) {
+function statusDot(host: HostView): string {
+  if (host.stale) return "bg-halide animate-pulse";
+  switch (host.status) {
     case "ready":
       return "bg-safelight";
     case "connecting":
@@ -358,7 +359,7 @@ async function onConnected() {
             @contextmenu="contextMenu.open($event, connectedHostMenu(host))"
           >
             <div class="flex items-center gap-2.5">
-              <span class="h-2 w-2 shrink-0 rounded-full" :class="statusDot(host.status)" />
+              <span class="h-2 w-2 shrink-0 rounded-full" :class="statusDot(host)" />
               <span class="text-body-lg font-semibold text-ink">{{ host.label }}</span>
               <span class="data-mono ml-auto truncate text-caption text-ink-3">
                 {{ hardwareLine(host) }}
@@ -369,7 +370,7 @@ async function onConnected() {
                  it comes back on its own; say so rather than leaving a bare
                  red dot that reads as "gone". -->
             <div
-              v-if="host.status === 'error'"
+              v-if="host.status === 'error' || host.status === 'connecting' || host.stale"
               class="mt-2 text-caption text-warning"
               data-test="host-reconnecting"
             >
