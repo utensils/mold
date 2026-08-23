@@ -20,6 +20,7 @@ import type {
 import type { DeviceInfo, DeviceListResponse } from "@studio/api/devices";
 import type { GenerationPlacementPreview } from "@studio/api/generationPlacement";
 import { ApiError } from "@studio/api/client";
+import { queueStatusFor } from "@studio/lib/queuePosition";
 import {
   AUTHENTICATED_MINIMAX_H3_PROFILE_SHA256,
   authenticatedMiniMaxH3Capabilities,
@@ -31,6 +32,7 @@ const models = new Map<string, ModelInfoExtended[]>();
 const devices = new Map<string, DeviceListResponse>();
 const capabilities = new Map<string, ServerCapabilities>();
 const hostStatusCall = vi.hoisted(() => vi.fn());
+const hostQueueCall = vi.hoisted(() => vi.fn());
 const placementCall = vi.hoisted(() => vi.fn());
 
 vi.mock("@studio/api/generationPlacement", async (importOriginal) => {
@@ -57,7 +59,7 @@ vi.mock("../components/machines/hostClient", () => ({
       ? Promise.resolve(canned)
       : Promise.reject(new Error("legacy server"));
   },
-  hostQueue: () => Promise.resolve({ entries: [], plan: null }),
+  hostQueue: (...args: unknown[]) => hostQueueCall(...args),
   hostCapabilities: (host: HostEntry) =>
     Promise.resolve(
       capabilities.get(host.id) ?? {
@@ -181,6 +183,7 @@ describe("useHostRouting", () => {
         ? Promise.resolve(canned)
         : Promise.reject(new Error("unreachable"));
     });
+    hostQueueCall.mockReset().mockResolvedValue({ entries: [], plan: null });
     placementCall
       .mockReset()
       .mockImplementation((target: { baseUrl: string }) =>
@@ -203,6 +206,116 @@ describe("useHostRouting", () => {
 
     expect(routing.hosts.value.map((h) => h.id)).toEqual([ORIGIN_HOST_ID]);
     expect(routing.multiHost.value).toBe(false);
+  });
+
+  it("bounds the first queue read by current status capacity and merges live-only rows once", async () => {
+    statuses.set(ORIGIN_HOST_ID, status({ queue_capacity: 17 }));
+    models.set(ORIGIN_HOST_ID, []);
+    hostQueueCall.mockResolvedValue({
+      entries: [
+        {
+          id: "durable",
+          model: "flux-dev:q4",
+          state: "queued",
+          started_at_unix_ms: 1,
+          position: 4,
+        },
+      ],
+      live_only_entries: [
+        {
+          id: "durable",
+          model: "flux-dev:q4",
+          state: "running",
+          started_at_unix_ms: 1,
+          position: 9,
+        },
+        {
+          id: "live",
+          model: "flux-dev:q4",
+          state: "running",
+          started_at_unix_ms: 2,
+          position: 1,
+        },
+        {
+          id: "live",
+          model: "flux-dev:q4",
+          state: "running",
+          started_at_unix_ms: 2,
+          position: 8,
+        },
+      ],
+      plan: null,
+    });
+
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    expect(hostQueueCall).toHaveBeenCalledWith(
+      expect.objectContaining({ id: ORIGIN_HOST_ID }),
+      undefined,
+      { limit: 17 },
+    );
+    expect(
+      hostQueueCall.mock.calls.every(
+        ([, signal, page]) =>
+          signal === undefined &&
+          (page as { limit?: number } | undefined)?.limit === 17,
+      ),
+    ).toBe(true);
+    expect(
+      queueStatusFor(routing.queueStatus.value, ORIGIN_HOST_ID, "durable"),
+    ).toMatchObject({ position: 4 });
+    expect(
+      queueStatusFor(routing.queueStatus.value, ORIGIN_HOST_ID, "live"),
+    ).toMatchObject({ position: 1 });
+  });
+
+  it.each([undefined, null, 0, -1, 1.5, Number.NaN])(
+    "keeps the legacy queue read when status capacity is %s",
+    async (queueCapacity) => {
+      statuses.set(ORIGIN_HOST_ID, status({ queue_capacity: queueCapacity }));
+      models.set(ORIGIN_HOST_ID, []);
+
+      await useHostRouting().refresh();
+
+      expect(hostQueueCall).toHaveBeenCalledWith(
+        expect.objectContaining({ id: ORIGIN_HOST_ID }),
+      );
+      expect(hostQueueCall.mock.calls.every((call) => call.length === 1)).toBe(
+        true,
+      );
+    },
+  );
+
+  it("keeps a healthy status and the last good queue when its bounded queue page fails", async () => {
+    statuses.set(ORIGIN_HOST_ID, status({ queue_depth: 1, queue_capacity: 8 }));
+    models.set(ORIGIN_HOST_ID, []);
+    hostQueueCall.mockResolvedValue({
+      entries: [
+        {
+          id: "still-live",
+          model: "flux-dev:q4",
+          state: "queued",
+          started_at_unix_ms: 1,
+          position: 2,
+        },
+      ],
+      plan: null,
+    });
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    statuses.set(ORIGIN_HOST_ID, status({ queue_depth: 2, queue_capacity: 8 }));
+    hostQueueCall.mockRejectedValue(new Error("queue unavailable"));
+    await routing.refresh();
+
+    expect(routing.hosts.value[0]).toMatchObject({
+      status: "ready",
+      queueDepth: 2,
+    });
+    expect(
+      queueStatusFor(routing.queueStatus.value, ORIGIN_HOST_ID, "still-live"),
+    ).toMatchObject({ position: 2 });
   });
 
   it("reacts to same-tab host and generation-target changes", async () => {
@@ -377,6 +490,7 @@ describe("useHostRouting", () => {
     });
     const routing = useHostRouting();
     await routing.refresh();
+    hostQueueCall.mockClear();
 
     let resolveOlder!: (value: unknown) => void;
     let resolveNewer!: (value: unknown) => void;
@@ -389,6 +503,31 @@ describe("useHostRouting", () => {
     hostStatusCall
       .mockImplementationOnce(() => older)
       .mockImplementationOnce(() => newer);
+    hostQueueCall
+      .mockResolvedValueOnce({
+        entries: [
+          {
+            id: "newer-queue",
+            model: "flux-dev:q4",
+            state: "queued",
+            started_at_unix_ms: 2,
+            position: 9,
+          },
+        ],
+        plan: null,
+      })
+      .mockResolvedValueOnce({
+        entries: [
+          {
+            id: "older-queue",
+            model: "flux-dev:q4",
+            state: "queued",
+            started_at_unix_ms: 1,
+            position: 1,
+          },
+        ],
+        plan: null,
+      });
 
     const first = routing.refresh();
     const second = routing.refresh();
@@ -398,6 +537,12 @@ describe("useHostRouting", () => {
     await first;
 
     expect(routing.hosts.value[0]?.queueDepth).toBe(9);
+    expect(
+      queueStatusFor(routing.queueStatus.value, ORIGIN_HOST_ID, "newer-queue"),
+    ).toMatchObject({ position: 9 });
+    expect(
+      queueStatusFor(routing.queueStatus.value, ORIGIN_HOST_ID, "older-queue"),
+    ).toBeNull();
   });
 
   it("reports a remote host as ready with its live queue depth and GPU", async () => {
@@ -1135,6 +1280,7 @@ describe("useHostRouting", () => {
       batch_size: 1,
     });
     await vi.waitFor(() => expect(placementCall).toHaveBeenCalledOnce());
+    statuses.set(studio.id, status({ instance_id: "instance-b" }));
     updateHost(studio.id, { instanceId: "instance-b" });
     release(placement(100));
 

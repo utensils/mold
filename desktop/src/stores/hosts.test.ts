@@ -1672,6 +1672,89 @@ describe("hosts store", () => {
     expect(hosts.telemetry["hal9000-7680"]?.gpuInfo?.vram_total_mb).toBe(24564);
     expect(hosts.telemetry["hal9000-7680"]?.gpuWorkers).toHaveLength(1);
     expect(hosts.telemetry["hal9000-7680"]?.devices).toHaveLength(1);
+    expect(listQueue).toHaveBeenCalledWith(
+      expect.objectContaining({ baseUrl: "http://127.0.0.1:49152" }),
+      { limit: 8 },
+    );
+    expect(listQueue).toHaveBeenCalledWith(
+      expect.objectContaining({ baseUrl: "http://hal9000:7680" }),
+      { limit: 8 },
+    );
+    expect(
+      listQueue.mock.calls.every(
+        ([, page]) => (page as { limit?: number } | undefined)?.limit === 8,
+      ),
+    ).toBe(true);
+  });
+
+  it.each([undefined, null, 0, -1, 1.5, Number.NaN])(
+    "keeps the legacy queue read when status capacity is %s",
+    async (queueCapacity) => {
+      apiJsonTo.mockResolvedValue({
+        queue_depth: 0,
+        queue_capacity: queueCapacity,
+        version: "legacy",
+      });
+      listQueue.mockResolvedValue({ entries: [], plan: null });
+      const hosts = useHostsStore();
+
+      await hosts.refresh();
+
+      expect(listQueue).toHaveBeenCalledWith({
+        baseUrl: "http://127.0.0.1:49152",
+        apiKey: "k",
+      });
+      expect(listQueue.mock.calls[0]).toHaveLength(1);
+    },
+  );
+
+  it("keeps healthy status and last-good plan timing when the bounded queue page fails", async () => {
+    const now = Date.now();
+    apiJsonTo.mockResolvedValue({
+      queue_depth: 1,
+      queue_capacity: 8,
+      version: "current",
+    });
+    listQueue.mockResolvedValueOnce({
+      entries: [],
+      plan: {
+        plan_version: 1,
+        state_version: 1,
+        optimizer_state: "optimized",
+        dirty_since_unix_ms: null,
+        next_replan_at_unix_ms: null,
+        work_items: [
+          {
+            work_id: "queued",
+            parent_id: "queued",
+            work_kind: "generation",
+            priority_class: "user",
+            queue_rank: 0,
+            bypass_count: 0,
+            estimate_confidence: "high",
+            estimated_finish_unix_ms: now + 10_000,
+          },
+        ],
+      },
+    });
+    const hosts = useHostsStore();
+    await hosts.refresh();
+    const lastGood = hosts.telemetry.local?.predictedCompletionMs;
+
+    apiJsonTo.mockResolvedValue({
+      queue_depth: 2,
+      queue_capacity: 8,
+      version: "still-current",
+    });
+    listQueue.mockRejectedValueOnce(new Error("queue unavailable"));
+    await hosts.refresh();
+
+    expect(hosts.primaryHost).toMatchObject({
+      status: "ready",
+      queueDepth: 2,
+      version: "still-current",
+      predictedCompletionMs: lastGood,
+    });
   });
 
   it("coalesces overlapping refreshes into one request wave", async () => {
@@ -1833,10 +1916,13 @@ describe("hosts store", () => {
 
     await hosts.refresh();
 
-    expect(listQueue).toHaveBeenCalledWith({
-      baseUrl: "http://hal9000:7680",
-      apiKey: null,
-    });
+    expect(listQueue).toHaveBeenCalledWith(
+      {
+        baseUrl: "http://hal9000:7680",
+        apiKey: null,
+      },
+      { limit: 8 },
+    );
     expect(hosts.resolveRoute(null)?.hostId).toBe("hal9000-7680");
   });
 

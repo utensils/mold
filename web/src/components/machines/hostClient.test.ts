@@ -6,6 +6,7 @@ import {
   hostModelDownload,
   hostDiscoveryPeers,
   hostDownloads,
+  hostQueue,
   hostStatus,
   moveQueueJob,
   pauseHostQueue,
@@ -79,6 +80,27 @@ describe("hostClient auth + requests", () => {
     expect(
       (init.headers as Record<string, string>)["x-api-key"],
     ).toBeUndefined();
+  });
+
+  it("requests an explicit bounded queue page and preserves the legacy path", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        ok({
+          entries: [],
+          plan: null,
+          live_only_entries: [],
+          page: { limit: 17, offset: 0, returned: 0 },
+        }),
+      )
+      .mockResolvedValueOnce(ok({ entries: [], plan: null }));
+
+    await hostQueue(remote, undefined, { limit: 17 });
+    await hostQueue(remote);
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "http://192.168.1.20:7680/api/queue?limit=17",
+      "http://192.168.1.20:7680/api/queue",
+    ]);
   });
 
   it("fetches discovery peers from the primary with its API-key header", async () => {

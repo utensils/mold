@@ -40,6 +40,7 @@ import type { DeviceInfo } from "@studio/api/devices";
 import { ApiError, type ApiTarget } from "@studio/api/client";
 import { profileHashConflict } from "@studio/lib/profileFleet";
 import {
+  mergeQueueEntries,
   predictedCompletionUnixMs,
   type QueueListing,
 } from "@studio/api/queuePlan";
@@ -435,12 +436,21 @@ function gpuFromStatus(
 async function pollHost(entry: HostEntry): Promise<void> {
   const generation = (pollGenerations.get(entry.id) ?? 0) + 1;
   pollGenerations.set(entry.id, generation);
+  const statusRequest = hostStatus(entry);
+  const queueRequest = statusRequest.then((currentStatus) => {
+    const capacity = currentStatus.queue_capacity;
+    return typeof capacity === "number" &&
+      Number.isInteger(capacity) &&
+      capacity > 0
+      ? hostQueue(entry, undefined, { limit: capacity })
+      : hostQueue(entry);
+  });
   const [status, models, devices, queue, capabilities] =
     await Promise.allSettled([
-      hostStatus(entry),
+      statusRequest,
       hostModels(entry),
       hostDevices(entry),
-      hostQueue(entry),
+      queueRequest,
       hostCapabilities(entry),
     ]);
   const current = entries.value.find((candidate) => candidate.id === entry.id);
@@ -453,6 +463,17 @@ async function pollHost(entry: HostEntry): Promise<void> {
     return;
   }
   if (status.status === "fulfilled") {
+    const previousTelemetry = telemetry.value[entry.id];
+    const mergedQueue =
+      queue.status === "fulfilled"
+        ? {
+            ...queue.value,
+            entries: mergeQueueEntries(
+              queue.value.entries,
+              queue.value.live_only_entries ?? [],
+            ),
+          }
+        : null;
     const inventory =
       devices.status === "fulfilled" ? devices.value.devices : null;
     const generationReady =
@@ -474,14 +495,14 @@ async function pollHost(entry: HostEntry): Promise<void> {
         instanceId: nextInstanceId,
         queueDepth: status.value.queue_depth ?? null,
         gpu: gpuFromStatus(status.value, inventory),
-        predictedCompletionMs:
-          queue.status === "fulfilled" && queue.value.plan
-            ? predictedCompletionUnixMs(queue.value.plan)
-            : null,
-        queue:
-          queue.status === "fulfilled"
-            ? { entries: queue.value.entries, plan: queue.value.plan ?? null }
-            : (telemetry.value[entry.id]?.queue ?? null),
+        predictedCompletionMs: mergedQueue?.plan
+          ? predictedCompletionUnixMs(mergedQueue.plan)
+          : mergedQueue
+            ? null
+            : (previousTelemetry?.predictedCompletionMs ?? null),
+        queue: mergedQueue
+          ? { entries: mergedQueue.entries, plan: mergedQueue.plan ?? null }
+          : (previousTelemetry?.queue ?? null),
       },
     };
   } else {

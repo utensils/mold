@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import { modelAccessRestrictionFor } from "@studio/lib/modelAccess";
 import { profileHashConflict } from "@studio/lib/profileFleet";
 import { listDevices, type DeviceInfo } from "@studio/api/devices";
-import { listQueue, predictedCompletionUnixMs } from "@studio/api/queuePlan";
+import { listQueue, mergeQueueEntries, predictedCompletionUnixMs } from "@studio/api/queuePlan";
 import {
   classifyMissingModel,
   comparePlacementPreviews,
@@ -1130,23 +1130,42 @@ export const useHostsStore = defineStore("hosts", {
             );
           };
           try {
+            const statusRequest = apiJsonTo<ServerStatus>(target, "/api/status");
+            const queueRequest = statusRequest.then((status) => {
+              const capacity = status.queue_capacity;
+              const request =
+                typeof capacity === "number" && Number.isInteger(capacity) && capacity > 0
+                  ? { limit: capacity }
+                  : undefined;
+              const listingRequest = request ? listQueue(target, request) : listQueue(target);
+              return listingRequest.then((listing) => ({
+                ...listing,
+                entries: mergeQueueEntries(listing.entries, listing.live_only_entries ?? []),
+              }));
+            });
             const [status, devices, queue] = await Promise.all([
-              apiJsonTo<ServerStatus>(target, "/api/status"),
+              statusRequest,
               listDevices(target).then(
                 (snapshot) => snapshot.devices,
                 () => null,
               ),
-              listQueue(target).then(
+              queueRequest.then(
                 (listing) => listing,
                 () => null,
               ),
             ]);
             if (!isCurrent()) return;
+            const previousPredictedCompletion =
+              this.telemetry[host.id]?.predictedCompletionMs ?? null;
             this.telemetry[host.id] = {
               queueDepth: status.queue_depth ?? null,
               queueCapacity: status.queue_capacity ?? null,
               predictedCompletionMs:
-                queue?.plan == null ? null : predictedCompletionUnixMs(queue.plan),
+                queue === null
+                  ? previousPredictedCompletion
+                  : queue.plan == null
+                    ? null
+                    : predictedCompletionUnixMs(queue.plan),
               version: status.version ?? null,
               modelsLoaded: status.models_loaded ?? [],
               gpuInfo: status.gpu_info ?? null,

@@ -45,7 +45,11 @@ import {
   type DeviceInfo,
   type DeviceListResponse,
 } from "@studio/api/devices";
-import { parseQueueListing } from "@studio/api/queuePlan";
+import {
+  parseQueueListing,
+  queueListingPath,
+  type QueuePageRequest,
+} from "@studio/api/queuePlan";
 
 export type HostStatus = ServerStatus;
 export type HostCapabilities = ServerCapabilities;
@@ -205,8 +209,12 @@ export function hostResources(host: HostEntry, signal?: AbortSignal) {
   return getJson<ResourceSnapshot>(host, "/api/resources", signal);
 }
 
-export function hostQueue(host: HostEntry, signal?: AbortSignal) {
-  return getJson<unknown>(host, "/api/queue", signal).then(
+export function hostQueue(
+  host: HostEntry,
+  signal?: AbortSignal,
+  page?: QueuePageRequest,
+) {
+  return getJson<unknown>(host, queueListingPath(page), signal).then(
     (value) => parseQueueListing(value) as QueueListing,
   );
 }
