@@ -48,6 +48,7 @@ import {
   type GenerationLifecycleJob,
 } from "@studio/lib/generationLifecycle";
 import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Identity";
+import { requestCarriesGenerationMedia } from "../lib/generationRequestMedia";
 
 function surfaceRequestWarnings(warnings: string[]): void {
   for (const warning of warnings) toast("warning", warning);
@@ -1019,6 +1020,7 @@ export const __testing__ = {
   persistJobs,
   STORAGE_KEY,
   durableRequestIneligibility,
+  durablePersistenceSafeRequest,
   reconcileDurableHost,
   handleDurableEvent,
   resetDurableLifecycleForTests,
@@ -1097,9 +1099,8 @@ function durableRequestIneligibility(
   }
   if (!route.instanceId) return "the host instance is unknown";
   const generation = request as GenerateRequestWire;
-  if (generation.id_image) return "identity photographs are session-only";
-  if (generation.references != null) {
-    return "temporary reference authority is session-only";
+  if (requestCarriesGenerationMedia(generation)) {
+    return "media inputs require the session-only legacy lifecycle";
   }
   if (isMinimaxH3Identity(null, generation.model)) {
     return "MiniMax H3 replay authority is intentionally private";

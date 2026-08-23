@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GenerateRequestWire, GalleryImage } from "../types";
 import type { HostRoute } from "../lib/hostRouting";
+import { GENERATION_REQUEST_MEDIA_FIELDS } from "../lib/generationRequestMedia";
 import type {
   GenerationBatchStatus,
   GenerationBatchStatusResponse,
@@ -204,11 +205,7 @@ describe("web durable generation lifecycle", () => {
         Promise.resolve({ kind: "found", batch: batch(clientBatchId) }),
     );
     const stream = useGenerateStream();
-    const id = stream.submit(
-      { ...request(), source_image: "PRIVATE_SOURCE_BYTES" },
-      { kind: "single" },
-      route,
-    );
+    const id = stream.submit(request(), { kind: "single" }, route);
 
     await vi.waitFor(() =>
       expect(stream.jobs.value.find((job) => job.id === id)?.serverId).toMatch(
@@ -220,12 +217,34 @@ describe("web durable generation lifecycle", () => {
       .durableBatch!.clientBatchId;
     expect(persisted).toContain(clientBatchId);
     expect(persisted).not.toContain("secret");
-    expect(persisted).not.toContain("PRIVATE_SOURCE_BYTES");
     expect(lookupGenerationBatchByClientId).toHaveBeenCalledWith(
       expect.anything(),
       clientBatchId,
     );
     expect(generateStream).not.toHaveBeenCalled();
+  });
+
+  it("keeps recovery-record media redaction as defense in depth", () => {
+    const redacted = __testing__.durablePersistenceSafeRequest({
+      ...request(),
+      source_image: "source",
+      edit_images: ["edit"],
+      references: [],
+      id_image: "identity",
+      mask_image: "mask",
+      control_image: "control",
+      audio_file: "audio",
+      audio_file_path: "/audio",
+      source_video: "source-video",
+      source_video_path: "/source-video",
+      extend_video: "extend-video",
+      extend_video_path: "/extend-video",
+      keyframes: [{ frame: 0, image: "keyframe" }],
+    }) as unknown as Record<string, unknown>;
+
+    for (const field of GENERATION_REQUEST_MEDIA_FIELDS) {
+      expect(redacted).not.toHaveProperty(field);
+    }
   });
 
   it("bulk-reconciles on event gaps and reconnect opens", async () => {
@@ -476,6 +495,38 @@ describe("web durable generation lifecycle", () => {
       if (_name === "references") candidate.references = [];
       const stream = useGenerateStream();
       stream.submit(candidate, { kind: "single" }, candidateRoute);
+      await Promise.resolve();
+
+      expect(generateStream).toHaveBeenCalledTimes(1);
+      expect(admitGenerationBatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(GENERATION_REQUEST_MEDIA_FIELDS)(
+    "keeps media-bearing %s requests on the legacy stream",
+    async (field) => {
+      const valueByField: Record<string, unknown> = {
+        source_image: "source",
+        edit_images: ["edit"],
+        references: [],
+        id_image: "identity",
+        mask_image: "mask",
+        control_image: "control",
+        audio_file: "audio",
+        audio_file_path: "/audio",
+        source_video: "source-video",
+        source_video_path: "/source-video",
+        extend_video: "extend-video",
+        extend_video_path: "/extend-video",
+        keyframes: [{ frame: 0, image: "keyframe" }],
+      };
+      const stream = useGenerateStream();
+
+      stream.submit(
+        { ...request(), [field]: valueByField[field] },
+        { kind: "single" },
+        route,
+      );
       await Promise.resolve();
 
       expect(generateStream).toHaveBeenCalledTimes(1);
