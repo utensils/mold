@@ -68,7 +68,7 @@ the `sh` side of the install pipe.
 - **Broad model support** — FLUX.1, SDXL, SD 1.5, SD 3.5, Z-Image, Flux.2 Klein
   and Dev, Qwen-Image, Qwen-Image-Edit, Wuerstchen v2, LTX Video,
   LTX-2 / LTX-2.3, Wan 2.1/2.2, and MiniMax H3 (compact FL2VA; generation on
-  supported SM89 CUDA builds)
+  supported SM89 CUDA builds, with Apple Metal correctness-only)
 - **txt2img, img2img, multimodal edit, inpainting, ControlNet** — all in one binary
 - **Image upscaling** — Real-ESRGAN super-resolution (2x/4x) via CLI, server API, or TUI
 - **Pipe-friendly** — `mold run "a cat" | viu -` just works

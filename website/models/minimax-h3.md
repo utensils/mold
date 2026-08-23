@@ -8,7 +8,9 @@ Mold does not bundle or mirror the weights.
 
 ::: warning CUDA FL2VA is the first supported runtime
 Both compact variants can be downloaded on any Mold host. Mold's SM89 CUDA
-release can run the compact FL2VA model for the supported request profile below.
+release can run the compact FL2VA model for the supported request profile below;
+the Apple Silicon Metal route below is admitted and shipped but not yet
+hardware-qualified.
 Ref2VA execution and the CPU backend remain unavailable. Broader request
 shapes also remain unavailable until those paths are implemented and
 tested; Mold reports that limitation normally rather than treating it as a
@@ -21,11 +23,16 @@ folded audio-VAE reduction, chunked dense attention sized so the score matrix
 fits a Metal buffer, the portable INT8 ConvRot arm, and fp8-scaled weights
 refused by name because candle has no Metal fp8 widening kernel. It is
 advertised as **correctness-only**, the same tier Wan and LTX-2 landed on
-before their performance qualification. Metal is not yet a runnable H3 route:
-the public runtime profile is still SM89 CUDA, and Metal execution waits on
-qualification against real Apple Silicon hardware. Expect Metal to be slow when
-it lands — the reference MLX port measures minutes per step at 5 s — so this is
-a portability path, not a speed one.
+before their performance qualification. Admission now accepts a Metal device,
+the public runtime profile is `supported-compact-fl2va-cuda-sm89-or-metal`, and
+the released macOS builds carry the `h3` feature — so the route exists in a
+shipped binary. What is still missing is hardware qualification:
+no H3 checkpoint has ever completed a render on Metal. A Metal attempt is
+refused below a unified-memory floor that the compact stack's ~42.5 GB working
+set puts out of reach of a 48 GB machine, so lifting this tier needs a
+64 GB-class Apple Silicon host. Expect Metal to be slow when it is qualified — the reference MLX
+port measures minutes per step at 5 s — so this is a portability path, not a
+speed one.
 :::
 
 ## Compact variants
@@ -140,7 +147,8 @@ full-file manifest identities rather than estimates from repository listings.
 
 The initial compact CUDA implementation supports this request profile:
 
-- an SM89 CUDA GPU with sufficient VRAM and the H3 attention/runtime operators enabled
+- an SM89 CUDA GPU with sufficient VRAM and the H3 attention/runtime operators
+  enabled (an Apple Silicon Metal GPU is admitted but unqualified — see above)
 - `1344x768`, batch size 1
 - exactly 124 frames at 24 fps
 - exactly 21 terminal-inclusive sampler grid points (20 model evaluations) for
@@ -167,8 +175,8 @@ refused at submission instead of after the model loads.
 Mold rejects rather than silently resizing, rerouting, changing steps, dropping
 the source image, or falling back to another backend. A downloaded checkpoint
 can remain stored on an unsupported host; Create and request routing become
-available only when that host advertises the matching CUDA runtime capability.
-The public SM89 runtime uses a source-controlled conservative memory profile;
+available only when that host advertises the matching runtime capability.
+The public runtime uses a source-controlled conservative memory profile;
 it does not require private authorization or qualification-record files.
 
 ## License and support boundary
