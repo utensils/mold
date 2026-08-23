@@ -2024,7 +2024,13 @@ mod tests {
         let facts = released_h3_qwen_nvfp4_runtime_memory_facts(&Device::Cpu).unwrap();
         let exact = test_authority(facts.effective_parameter_bytes, 1, 1, 0);
         validate_parameter_memory(&exact, &facts).unwrap();
-        assert_ne!(
+        // Since #1316 every quantized component is retained at its source
+        // width, so the retained representation is identically the
+        // authenticated source total. The authority is still the source figure
+        // — the +/-1 rejections below are what prove the binding — but the two
+        // no longer differ, and asserting the equality is what catches a
+        // re-widened host cache creeping back in.
+        assert_eq!(
             facts.effective_parameter_bytes,
             facts.retained_parameter_bytes
         );
@@ -2959,9 +2965,9 @@ mod tests {
             prepared_qwen_activation_floor(&prepared).unwrap();
         drop(prepared);
         let memory_facts = released_h3_qwen_nvfp4_runtime_memory_facts(&device).unwrap();
-        assert_eq!(memory_facts.host_resident_parameter_bytes, 19_066_444_664);
+        assert_eq!(memory_facts.host_resident_parameter_bytes, 14_495_308_664);
         assert_eq!(memory_facts.device_resident_parameter_bytes, 1_191_583_200);
-        assert_eq!(memory_facts.retained_parameter_bytes, 20_258_027_864);
+        assert_eq!(memory_facts.retained_parameter_bytes, 15_686_891_864);
         let execution = sha('a');
         let conditioner_content = sha('1');
         let conditioner_validation = sha('5');

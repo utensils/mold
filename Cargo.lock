@@ -3170,6 +3170,7 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "cudaforge",
+ "float8",
  "half",
  "serde",
  "serde_json",

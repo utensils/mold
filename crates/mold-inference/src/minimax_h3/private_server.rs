@@ -588,6 +588,10 @@ impl H3PrivateRuntimeEnvelopeRecord {
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct H3PrivateRuntimeBoundRecord {
+    /// Captured process RSS at runtime entry, before any conditioner parameter
+    /// is retained. It is independent of how those parameters are represented,
+    /// so #1316's narrowing of the NVFP4 block-scale cache does not invalidate
+    /// this observation and required no re-capture campaign.
     pub(crate) fixed_runtime_host_bytes: u64,
     pub(crate) fixed_runtime_device_bytes: u64,
     pub(crate) qwen_activation_workspace_bytes: u64,
@@ -7808,7 +7812,7 @@ mod tests {
             // Pin the derived floors so any re-derivation of the ceilings is
             // a visible, reviewed decision rather than silent drift.
             assert_eq!(device_floor, 603_979_776 + 16_978_542_592);
-            assert_eq!(host_floor, 805_306_368 + 19_066_444_664);
+            assert_eq!(host_floor, 805_306_368 + 14_495_308_664);
         }
 
         // The two sequence-linear denoise transients are the FL2VA

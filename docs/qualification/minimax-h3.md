@@ -555,9 +555,14 @@ pipeline parallelism. The milestone contains no cross-GPU model partitioning
 claim, and combining VRAM across devices must never make one request appear
 feasible.
 
-The curated admission policy currently records a 128 GiB host-RAM
+The curated admission policy currently records a 64 GiB host-RAM
 recommendation and enforces a safety floor of `max(8 GiB, 15% of physical
-RAM)`. These are admission-policy constants, not measured H3 production peaks.
+RAM)`. The per-phase host ledger behind that tier peaks at about 22.75 GB in
+the Qwen phases (see `H3_CURATED_HOST_RAM_RECOMMENDATION_BYTES`), which fits a
+32 GiB host on paper with under 9% of the tier to spare; the recommendation
+deliberately stays at 64 GiB because the ledger does not measure allocator
+bookkeeping, transient conversion vectors, or backend workspaces. These are
+admission-policy constants, not measured H3 production peaks.
 Exact artifact sizes, header facts, attention workspace, resident block count,
 prefetch, dequantization workspace, and every phase allocation must be frozen
 before a real run can be admitted.

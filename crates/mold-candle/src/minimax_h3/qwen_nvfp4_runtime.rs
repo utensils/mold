@@ -68,14 +68,16 @@ pub enum H3QwenNvfp4RuntimeError {
 /// `effective_parameter_bytes` is the source-encoded sum of every tensor the
 /// runtime loads; marker payloads are authenticated policy metadata and are
 /// not parameters. Host/device residency describes the actual retained
-/// representation after the per-tensor read buffer has been dropped. In
-/// particular, portable NVFP4 block scales expand from authenticated FP8 to
-/// an unswizzled FP32 host cache, so retained bytes intentionally exceed the
-/// source-encoded parameter total. Inspection, authentication, tensor, and
-/// aggregate I/O are exact byte counts; authentication scratch and the maximum
-/// one-at-a-time source tensor buffer are exact loader bounds. Allocator
-/// bookkeeping, transient quantization conversion vectors, and backend
-/// workspaces are not measured by this structure.
+/// representation after the per-tensor read buffer has been dropped. Since
+/// #1316 the portable NVFP4 block scales are unswizzled at their authenticated
+/// FP8 byte width and widened through a 256-entry table per lookup, so every
+/// quantized component is retained at exactly its source width and the total
+/// retained bytes equal `effective_parameter_bytes`. Inspection,
+/// authentication, tensor, and aggregate I/O are exact byte counts;
+/// authentication scratch and the maximum one-at-a-time source tensor buffer
+/// are exact loader bounds. Allocator bookkeeping, transient quantization
+/// conversion vectors, and backend workspaces are not measured by this
+/// structure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct H3QwenNvfp4RuntimeMemoryFacts {
     pub effective_parameter_bytes: u64,
@@ -250,15 +252,12 @@ fn runtime_memory_facts<'a>(
                 "Qwen quantization marker bytes exceed the authenticated payload".into(),
             )
         })?;
-    let expanded_block_scale_bytes = memory
-        .nvfp4_block_scale_bytes
-        .checked_mul(std::mem::size_of::<f32>() as u64)
-        .ok_or_else(|| {
-            H3QwenNvfp4RuntimeError::Contract("Qwen expanded block-scale bytes overflow".into())
-        })?;
+    // The block scales are retained as the checkpoint's own FP8 bytes, not a
+    // widened `f32` cache (#1316), so they are charged at source width like
+    // every other quantized component.
     let quantized_host_bytes = [
         memory.nvfp4_packed_weight_bytes,
-        expanded_block_scale_bytes,
+        memory.nvfp4_block_scale_bytes,
         memory.nvfp4_tensor_scale_bytes,
         memory.awq_pre_quant_scale_bytes,
         memory.int8_embedding_weight_bytes,
@@ -831,9 +830,9 @@ mod tests {
     fn released_cpu_runtime_facts_separate_source_residency_and_bounded_io() {
         let facts = released_h3_qwen_nvfp4_runtime_memory_facts(&Device::Cpu).unwrap();
         assert_eq!(facts.effective_parameter_bytes, 15_686_891_864);
-        assert_eq!(facts.host_resident_parameter_bytes, 20_258_027_864);
+        assert_eq!(facts.host_resident_parameter_bytes, 15_686_891_864);
         assert_eq!(facts.device_resident_parameter_bytes, 0);
-        assert_eq!(facts.retained_parameter_bytes, 20_258_027_864);
+        assert_eq!(facts.retained_parameter_bytes, 15_686_891_864);
         assert_eq!(facts.retained_raw_header_bytes, 231_408);
         assert_eq!(facts.maximum_tensor_staging_bytes, 777_912_320);
         assert_eq!(facts.authentication_scratch_bytes, 1_048_576);
@@ -841,7 +840,11 @@ mod tests {
         assert_eq!(facts.authentication_io_bytes, 15_687_142_551);
         assert_eq!(facts.tensor_io_bytes, 15_686_891_864);
         assert_eq!(facts.aggregate_io_bytes, 31_374_285_102);
-        assert_ne!(
+        // Every quantized component is now retained at its source width, so the
+        // artifact is no longer inflated in RAM at all: retained bytes are
+        // identically the source-encoded parameter total. Asserting the
+        // equality is what catches a re-widened cache creeping back in.
+        assert_eq!(
             facts.retained_parameter_bytes,
             facts.effective_parameter_bytes
         );
@@ -854,13 +857,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(facts.effective_parameter_bytes, 15_686_891_864);
-        assert_eq!(facts.host_resident_parameter_bytes, 19_066_444_664);
+        assert_eq!(facts.host_resident_parameter_bytes, 14_495_308_664);
         assert_eq!(facts.device_resident_parameter_bytes, 1_191_583_200);
         assert_eq!(
             released_h3_qwen_nvfp4_output_tensor_bytes(7).unwrap(),
             7 * 5_120 * 2
         );
-        assert_eq!(facts.retained_parameter_bytes, 20_258_027_864);
+        assert_eq!(facts.retained_parameter_bytes, 15_686_891_864);
+        assert_eq!(
+            facts.retained_parameter_bytes,
+            facts.effective_parameter_bytes
+        );
     }
 
     struct CancelAuthentication {
