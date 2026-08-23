@@ -838,6 +838,8 @@ fn h3_model_row(
     (generation_profile, alignment, pixels): (mold_core::GenerationProfileSet, u32, u64),
 ) -> Option<mold_core::ModelInfoExtended> {
     Some(mold_core::ModelInfoExtended {
+        // The bridge only ever re-publishes a reviewed, executable partition.
+        runtime_available: Some(true),
         info: mold_core::ModelInfo {
             name: model.to_string(),
             family: mold_core::minimax_h3::FAMILY.into(),

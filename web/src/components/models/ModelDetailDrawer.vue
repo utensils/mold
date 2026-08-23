@@ -126,6 +126,12 @@ const installedModel = computed<ModelInfoExtended | null>(() =>
     : null,
 );
 const isLoaded = computed(() => installedModel.value?.is_loaded ?? false);
+/** `runtime_available: false` (download-only rows such as the NVFP4 H3
+ * partitions) means the server rejects every load/generate attempt with a
+ * 501 — never offer the load action, and say why instead of a toast. */
+const runtimeUnavailable = computed(
+  () => installedModel.value?.runtime_available === false,
+);
 
 const mediaLabel = computed(() => {
   if (metadataEntry.value) return metadataEntry.value.modality;
@@ -690,6 +696,7 @@ function onRetry() {
         <!-- Installed model: load / unload / delete -->
         <template v-if="isInstalled">
           <button
+            v-if="!runtimeUnavailable"
             type="button"
             class="md__action"
             data-test="load-btn"
@@ -699,8 +706,12 @@ function onRetry() {
             <Icon name="download" :size="15" />
             {{ isLoaded ? "loaded into memory" : "Load into memory" }}
           </button>
+          <p v-else class="md__state-msg" data-test="runtime-unavailable-note">
+            No runtime for this layout in this build.
+          </p>
           <div class="md__secondary">
             <button
+              v-if="!runtimeUnavailable"
               type="button"
               class="md__ghost"
               data-test="unload-btn"
