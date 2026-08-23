@@ -150,10 +150,14 @@ than silently feeding the transformer the wrong precision.
 ## The embedding seam
 
 `IdentityEmbedding` is a `[1, 32, 2048]` newtype, validated once at the
-boundary instead of at each of the twenty injection sites. It is the seam the
-face extractor plugs into: the detector → ArcFace → EVA-CLIP → IDFormer stack
-produces one of these and installs it with
-`InferenceEngine::install_identity_embedding`, and nothing downstream changes.
+boundary instead of at each of the twenty injection sites. The seam it sits
+behind is `InferenceEngine::install_identity_embedding`, which takes
+`Option<&mold_core::identity::FrozenIdentityEmbedding>` — the plain
+little-endian `f32` tokens plus source digests and fingerprint that the
+detector → ArcFace → EVA-CLIP → IDFormer stack freezes inside the leased job.
+Each engine override converts that frozen value into its own family-local
+`IdentityEmbedding` on install, so the extractor never names the adapter type
+and nothing downstream changes.
 
 A face-conditioned request that reaches the engine with no embedding installed
 is an **explicit error** rather than a silently unconditioned render.

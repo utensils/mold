@@ -412,13 +412,13 @@ pub const ID_IMAGE_LIMITS: IdImageLimits = IdImageLimits {
 /// Four, and the number is an extraction-latency budget rather than a taste.
 /// Every photo pays a whole extraction — SCRFD, ArcFace, the BiSeNet parse,
 /// a 336px EVA02-CLIP forward, and an IDFormer pass — and `docs/architecture/
-/// pulid-face-extraction.md` measured that at p95 415.7 ms on halcyon and
-/// 1574.5 ms on plato against a 2.0 s budget. Extractions run inside the
-/// leased job, serialized by the lease itself (exclusive on its device), so
-/// the whole-request cost is N times the slowest measurement: four photos is
-/// ~6.3 s of extraction latency on the slowest qualified box, which is the
-/// most that can sit in front of a render without the client believing the
-/// request was lost.
+/// pulid-perf.md` measured the whole stack at 395 ms on Metal (M4 Max),
+/// 573-795 ms on CUDA (L40S), and 1,907 ms on the host-only path. Extractions
+/// run inside the leased job, serialized by the lease itself (exclusive on
+/// its device), so the whole-request cost is N times the slowest
+/// measurement: four photos is ~3.2 s on the L40S and ~7.6 s on a host-only
+/// extraction, which is the most that can sit in front of a render without
+/// the client believing the request was lost.
 ///
 /// The averaging itself has no natural ceiling — `cubiq/PuLID_ComfyUI`
 /// (`pulid.py:415-419`) means over however many frames the batch carried — so
