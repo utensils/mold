@@ -511,8 +511,33 @@ fn central_committed_children(
             "committed batch child changed after publication: {}",
             output_dir.join(&entry.identity.final_name).display()
         );
+        anyhow::ensure!(
+            exact_committed_child_matches(output_dir, entry)?,
+            "committed batch child changed after publication: {}",
+            output_dir.join(&entry.identity.final_name).display()
+        );
     }
     Ok(Some(children))
+}
+
+fn exact_committed_child_matches(
+    output_dir: &Path,
+    entry: &CommittedArchiveEntry,
+) -> anyhow::Result<bool> {
+    let final_path = output_dir.join(&entry.identity.final_name);
+    let metadata = match std::fs::symlink_metadata(&final_path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Ok(_) => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.len() != entry.identity.size_bytes {
+        return Ok(false);
+    }
+    Ok(
+        crate::batch_transaction::checksum_file_for_authority(&final_path)?
+            == entry.identity.checksum_sha256,
+    )
 }
 
 fn reconcile_archived_commit_claimed(
@@ -898,6 +923,7 @@ fn parent_authority_dir(output_dir: &Path, parent_id: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::batch_transaction::{acquire_gallery_bookkeeping_lock, ArchiveFileFacts};
     use mold_core::{GenerateRequest, OutputFormat, OutputMetadata};
     use mold_db::RecordSource;
     use std::io::{BufRead as _, Write as _};
@@ -1802,6 +1828,7 @@ mod tests {
     #[tokio::test]
     async fn archived_commit_with_changed_final_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
+        let gate = GalleryPublicationGate::default();
         let mut bridge = DurableBatchAttempt::begin(
             dir.path(),
             "parent",
@@ -1815,19 +1842,28 @@ mod tests {
         bridge.parent.begin_commit().unwrap();
         bridge
             .transaction
-            .commit(&GalleryPublicationGate::default(), Arc::new(None))
+            .commit(&gate, Arc::new(None))
             .await
             .unwrap();
-        std::fs::write(dir.path().join("one.png"), b"tampered").unwrap();
+        // Keep the byte length unchanged so recovery must validate the exact
+        // committed content rather than rejecting on size alone. Replace the
+        // cached facts with the changed file's own facts to prove recovery
+        // cannot trust metadata equality instead of hashing the final bytes.
+        std::fs::write(dir.path().join("one.png"), b"two").unwrap();
+        let mut index = gate.committed_archive_index(dir.path()).unwrap();
+        index.entries.get_mut("one.png").unwrap().facts =
+            Some(ArchiveFileFacts::from_path(&dir.path().join("one.png")).unwrap());
+        let bookkeeping = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let generation = crate::gallery_authority::read_generation(dir.path(), &bookkeeping)
+            .unwrap()
+            .unwrap();
+        drop(bookkeeping);
+        gate.install_committed_archive_index(dir.path(), generation, index);
         drop(bridge);
 
-        let error = recover_batches(
-            dir.path(),
-            &GalleryPublicationGate::default(),
-            Arc::new(None),
-        )
-        .await
-        .unwrap_err();
+        let error = recover_batches(dir.path(), &gate, Arc::new(None))
+            .await
+            .unwrap_err();
 
         assert!(format!("{error:#}").contains("changed"));
     }
