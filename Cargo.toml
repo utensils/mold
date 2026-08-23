@@ -18,7 +18,7 @@ exclude = ["desktop/src-tauri", "apps/mobile/src-tauri"]
 resolver = "2"
 
 [workspace.package]
-version = "0.23.3"
+version = "0.24.0"
 edition = "2021"
 license = "MIT"
 authors = [
