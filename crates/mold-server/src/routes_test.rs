@@ -136,6 +136,8 @@ mod tests {
         progress_set_count: Arc<AtomicUsize>,
         progress_clear_count: Arc<AtomicUsize>,
         generate_blocker: Option<Arc<GenerateBlocker>>,
+        cancellation: Option<mold_inference::InferenceCancellationToken>,
+        ignore_cancellation: bool,
         /// When set, load() emits progress events through the stored callback.
         emit_load_progress: bool,
         progress_callback: Option<ProgressCallback>,
@@ -157,6 +159,8 @@ mod tests {
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
                 generate_blocker: None,
+                cancellation: None,
+                ignore_cancellation: false,
                 emit_load_progress: false,
                 progress_callback: None,
             }
@@ -172,6 +176,8 @@ mod tests {
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
                 generate_blocker: None,
+                cancellation: None,
+                ignore_cancellation: false,
                 emit_load_progress: false,
                 progress_callback: None,
             }
@@ -187,6 +193,8 @@ mod tests {
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
                 generate_blocker: None,
+                cancellation: None,
+                ignore_cancellation: false,
                 emit_load_progress: false,
                 progress_callback: None,
             }
@@ -202,6 +210,8 @@ mod tests {
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
                 generate_blocker: None,
+                cancellation: None,
+                ignore_cancellation: false,
                 emit_load_progress: false,
                 progress_callback: None,
             }
@@ -221,6 +231,8 @@ mod tests {
                 progress_set_count,
                 progress_clear_count,
                 generate_blocker: None,
+                cancellation: None,
+                ignore_cancellation: false,
                 emit_load_progress: false,
                 progress_callback: None,
             }
@@ -237,9 +249,19 @@ mod tests {
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
                 generate_blocker: Some(blocker),
+                cancellation: None,
+                ignore_cancellation: false,
                 emit_load_progress: false,
                 progress_callback: None,
             }
+        }
+
+        /// Simulates an engine family that finishes a result after its token
+        /// was revoked. Publication fencing must still discard those bytes.
+        fn blocking_generate_ignoring_cancellation(blocker: Arc<GenerateBlocker>) -> Self {
+            let mut engine = Self::blocking_generate(blocker);
+            engine.ignore_cancellation = true;
+            engine
         }
 
         /// Create an unloaded engine that emits progress events during load(),
@@ -255,6 +277,8 @@ mod tests {
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
                 generate_blocker: None,
+                cancellation: None,
+                ignore_cancellation: false,
                 emit_load_progress: true,
                 progress_callback: None,
             }
@@ -270,6 +294,11 @@ mod tests {
                     .released_cv
                     .wait_while(released, |released| !*released)
                     .unwrap();
+            }
+            if !self.ignore_cancellation {
+                if let Some(cancellation) = &self.cancellation {
+                    cancellation.checkpoint()?;
+                }
             }
             if self.fail {
                 anyhow::bail!("mock engine error");
@@ -332,6 +361,14 @@ mod tests {
         fn clear_on_progress(&mut self) {
             self.progress_clear_count.fetch_add(1, Ordering::SeqCst);
             self.progress_callback = None;
+        }
+
+        fn set_cancellation_token(&mut self, token: mold_inference::InferenceCancellationToken) {
+            self.cancellation = Some(token);
+        }
+
+        fn clear_cancellation_token(&mut self) {
+            self.cancellation = None;
         }
     }
 
@@ -4231,9 +4268,20 @@ mod tests {
         AppState,
         tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
     ) {
+        durable_state_with_engine(db, root, MockEngine::ready())
+    }
+
+    fn durable_state_with_engine(
+        db: Arc<Option<mold_db::MetadataDb>>,
+        root: &std::path::Path,
+        engine: MockEngine,
+    ) -> (
+        AppState,
+        tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
+    ) {
         let gallery = durable_gallery_dir(root);
         std::fs::create_dir_all(&gallery).unwrap();
-        let (mut state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let (mut state, rx) = AppState::with_engine_and_queue(engine);
         state.output_disabled_override = false;
         state.metadata_db = db.clone();
         state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
@@ -4251,6 +4299,156 @@ mod tests {
 
     fn durable_gallery_dir(root: &std::path::Path) -> PathBuf {
         root.join("gallery")
+    }
+
+    fn admit_one_durable_batch(state: &AppState, id: &str, batch_id: &str) {
+        let request: GenerateRequest =
+            serde_json::from_str(&generate_body("publication fence", 64, 64)).unwrap();
+        let output = state.config.try_read().unwrap().effective_output_dir();
+        state
+            .queue_journal
+            .record_batch(crate::queue_journal::BatchJournalAdmission {
+                id: batch_id,
+                client_batch_id: &format!("client-{batch_id}"),
+                request_sha256: "publication-fence-sha",
+                children: &[crate::queue_journal::JournalAdmission {
+                    id,
+                    request: &request,
+                    output_dir: Some(&output),
+                    target_gpu: None,
+                    completion_payload: crate::state::SseCompletionPayload::MetadataOnly,
+                    batch_child: false,
+                    carries_reference_authority: false,
+                }],
+            })
+            .unwrap();
+    }
+
+    async fn wait_for_attempt_cleanup(state: &AppState, id: &str) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if state.queue.pending() == 0 && !state.generation_cancel.is_registered(id) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("single-worker attempt must settle and unregister its token");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_racing_single_worker_completion_cannot_publish_or_overwrite_cancel() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let blocker = Arc::new(GenerateBlocker::default());
+        let (mut state, rx) = durable_state_with_engine(
+            db,
+            root.path(),
+            MockEngine::blocking_generate_ignoring_cancellation(blocker.clone()),
+        );
+        state.queue_capacity = 1;
+        admit_one_durable_batch(&state, "cancel-at-publication", "cancel-batch");
+
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
+        let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
+        let app = app_with_state(state.clone());
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !blocker.entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("single-worker fallback must enter inference");
+        assert!(state
+            .generation_cancel
+            .is_registered("cancel-at-publication"));
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
+
+        let cancelled = app
+            .oneshot(
+                Request::delete("/api/queue/cancel-at-publication")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::NO_CONTENT);
+        blocker.release();
+        wait_for_attempt_cleanup(&state, "cancel-at-publication").await;
+
+        assert_eq!(
+            std::fs::read_dir(durable_gallery_dir(root.path()))
+                .unwrap()
+                .count(),
+            0,
+            "a success returned after DELETE must not reach the gallery"
+        );
+        assert!(state.queue_journal.list_all().is_empty());
+        let detail = state
+            .queue_journal
+            .generation_batch("cancel-batch")
+            .unwrap();
+        assert_eq!(detail.children[0].state, "cancelled");
+
+        worker.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_cancellation_retains_single_worker_attempt_without_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let blocker = Arc::new(GenerateBlocker::default());
+        let (mut state, rx) = durable_state_with_engine(
+            db,
+            root.path(),
+            MockEngine::blocking_generate(blocker.clone()),
+        );
+        state.queue_capacity = 1;
+        admit_one_durable_batch(&state, "retain-on-shutdown", "retain-batch");
+
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
+        let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !blocker.entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("single-worker fallback must enter inference");
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
+
+        assert_eq!(state.generation_cancel.request_all(), 1);
+        blocker.release();
+        wait_for_attempt_cleanup(&state, "retain-on-shutdown").await;
+
+        let rows = state.queue_journal.list_all();
+        assert_eq!(rows.len(), 1, "shutdown must retain the durable attempt");
+        assert_eq!(rows[0].id, "retain-on-shutdown");
+        assert_eq!(
+            rows[0].state,
+            mold_db::generation_queue::QueueRowState::Queued
+        );
+        assert_eq!(
+            std::fs::read_dir(durable_gallery_dir(root.path()))
+                .unwrap()
+                .count(),
+            0,
+            "shutdown-cancelled inference must not publish"
+        );
+        let detail = state
+            .queue_journal
+            .generation_batch("retain-batch")
+            .unwrap();
+        assert_ne!(detail.children[0].state, "complete");
+
+        worker.abort();
     }
 
     fn seed_durable_projection_row(

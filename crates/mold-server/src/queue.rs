@@ -1778,6 +1778,12 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         return;
     }
 
+    // DELETE takes this same fence. Keep the durable running transition and
+    // the attempt-token handoff in one critical section so cancellation can
+    // only win on one side of the boundary: either it removes/fences the
+    // queued row first, or it observes and signals this exact attempt.
+    let scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+
     // The single-worker path owns the same durable dispatch transition as a
     // GPU owner thread. In particular, feeder tickets start queued with an
     // exact runtime token and must become running before terminal settlement
@@ -1813,9 +1819,37 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         }
     }
 
+    // Register every ordinary singleton with the shutdown registry and expose
+    // that exact token through the public job registry. The guard is created
+    // before publication and lives across every await/return below, so a
+    // finished attempt can never leave a token behind for a later job id.
+    let attempt_cancellation = state.generation_cancel.token(&job.id);
+    let _attempt_cancellation_guard = SingleWorkerCancelGuard {
+        registry: state.generation_cancel.as_ref(),
+        job_id: job.id.clone(),
+    };
+    let cancellation_installed = state
+        .job_registry
+        .install_running_cancellation(&job.id, attempt_cancellation.clone());
+    if !job.id.is_empty() && !cancellation_installed {
+        // A queued DELETE won before this critical section. It already made
+        // the durable row terminal; refuse to run or publish the stale payload.
+        attempt_cancellation.cancel();
+        drop(scheduler_mutation);
+        finish_single_worker_cancelled(job, true);
+        return;
+    }
+
     // Single-GPU path: there's only one slot. `gpu=None` keeps the wire
     // shape consistent with multi-GPU even when we don't know the ordinal.
     state.job_registry.mark_running(&job.id, None);
+    drop(scheduler_mutation);
+
+    if attempt_cancellation.is_cancelled() {
+        let user_requested = state.job_registry.cancel_requested(&job.id);
+        finish_single_worker_cancelled(job, user_requested);
+        return;
+    }
 
     // Send "now processing" event (position 0). `id` echoes the
     // server-assigned UUID so reconnecting clients can match progress
@@ -1836,11 +1870,12 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         } else {
             let request = job.request.clone();
             let resolved = job.resolved_references.take();
+            let cancellation = attempt_cancellation.clone();
             match tokio::task::spawn_blocking(move || {
                 let result = crate::reference_uploads::inference_bindings_for_request(
                     &request,
                     resolved.as_ref(),
-                    None,
+                    Some(&cancellation),
                 );
                 (resolved, result)
             })
@@ -1858,6 +1893,11 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     let reference_bindings = match reference_binding_result {
         Ok(bindings) => bindings,
         Err(error) => {
+            if mold_inference::is_inference_cancelled(&error) {
+                let user_requested = state.job_registry.cancel_requested(&job.id);
+                finish_single_worker_cancelled(job, user_requested);
+                return;
+            }
             let err_msg = format!("generation reference binding error: {error:#}");
             if let Some(ref tx) = job.progress_tx {
                 let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
@@ -1894,6 +1934,12 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         return;
     }
 
+    if attempt_cancellation.is_cancelled() {
+        let user_requested = state.job_registry.cancel_requested(&job.id);
+        finish_single_worker_cancelled(job, user_requested);
+        return;
+    }
+
     // 2. Low-memory warning (MPS/unified memory only — observability aid)
     #[cfg(target_os = "macos")]
     if let Some(available) = mold_inference::device::available_system_memory_bytes() {
@@ -1925,6 +1971,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     let active_gen = state.active_generation.clone();
     let gen_req = job.request.clone();
     let progress_tx = job.progress_tx.clone();
+    let inference_cancellation = attempt_cancellation.clone();
 
     set_active_generation(state, &job.request.model, &job.request.prompt);
 
@@ -1948,9 +1995,11 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     // the cache in async context regardless of outcome.
     let join_result = tokio::task::spawn_blocking(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            cached_engine
-                .engine
-                .generate_with_reference_bindings(&gen_req, &reference_bindings)
+            mold_inference::with_inference_cancellation(
+                &mut *cached_engine.engine,
+                inference_cancellation,
+                |engine| engine.generate_with_reference_bindings(&gen_req, &reference_bindings),
+            )
         }));
         cached_engine.engine.clear_on_progress();
         (cached_engine, result)
@@ -2062,6 +2111,23 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 original_img = preserved_original;
                 if let Some(error) = upscale_error {
                     tracing::warn!(%error, "post-generation upscale failed; keeping original image");
+                }
+            }
+
+            // Publication is a lifecycle claim, not merely the next line of
+            // the happy path. DELETE and shutdown cancellation use the same
+            // registry lock/token, so whichever won before this point decides
+            // whether the bytes may become visible or the durable row may be
+            // marked complete.
+            match state.job_registry.claim_completion(&job.id) {
+                crate::job_registry::CompletionClaim::Claimed => {}
+                crate::job_registry::CompletionClaim::UserCancelled => {
+                    finish_single_worker_cancelled(job, true);
+                    return;
+                }
+                crate::job_registry::CompletionClaim::AttemptCancelled => {
+                    finish_single_worker_cancelled(job, false);
+                    return;
                 }
             }
 
@@ -2206,6 +2272,11 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             crate::metrics::record_generation_error(&job.request.model);
 
             *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
+            if mold_inference::is_inference_cancelled(&e) {
+                let user_requested = state.job_registry.cancel_requested(&job.id);
+                finish_single_worker_cancelled(job, user_requested);
+                return;
+            }
             tracing::error!("generation error: {e:#}");
             let err_msg = format!("generation error: {}", clean_error_message(&e));
             if let Some(ref tx) = job.progress_tx {
@@ -2249,6 +2320,48 @@ fn claim_single_worker_dispatch(
     ticket: Option<&crate::queue_journal::QueueTicket>,
 ) -> Option<crate::queue_journal::DispatchClaim> {
     ticket.map(crate::queue_journal::QueueTicket::claim_dispatch)
+}
+
+/// Unregister an ordinary single-worker attempt from the shutdown registry on
+/// every exit path, including model-load errors and panics restored through
+/// the blocking-task boundary.
+struct SingleWorkerCancelGuard<'a> {
+    registry: &'a crate::generation_cancel::CancelRegistry,
+    job_id: String,
+}
+
+impl Drop for SingleWorkerCancelGuard<'_> {
+    fn drop(&mut self) {
+        self.registry.unregister(&self.job_id);
+    }
+}
+
+/// Settle an attempt whose cancellation authority won before publication.
+/// Explicit user cancellation is terminal; shutdown/attempt cancellation is
+/// retained for feeder replay. Neither path can publish gallery bytes or mark
+/// a durable batch child complete.
+fn finish_single_worker_cancelled(mut job: GenerationJob, user_requested: bool) {
+    if let Some(ticket) = job.journal.take() {
+        if user_requested {
+            ticket.discard();
+        } else {
+            ticket.retain();
+        }
+    }
+    let message = if user_requested {
+        "Cancelled".to_string()
+    } else {
+        crate::gpu_worker::shutdown_retention_user_message(&job.request.model)
+    };
+    if let Some(ref tx) = job.progress_tx {
+        let event = if user_requested {
+            SseErrorEvent::failed(message.clone())
+        } else {
+            SseErrorEvent::retained(message.clone())
+        };
+        let _ = tx.send(SseMessage::Error(event));
+    }
+    let _ = job.result_tx.send(Err(message));
 }
 
 // ── Multi-GPU queue dispatcher ──────────────────────────────────────────────

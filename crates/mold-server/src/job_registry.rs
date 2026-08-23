@@ -541,17 +541,21 @@ impl JobRegistry {
 
     /// Attach the exact attempt token to a running row. If DELETE won the
     /// dispatch hand-off race, installation immediately observes that fact.
+    /// Returns `false` when the row was already removed before hand-off.
     pub(crate) fn install_running_cancellation(
         &self,
         id: &str,
         token: mold_inference::InferenceCancellationToken,
-    ) {
+    ) -> bool {
         let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) {
             if entry.cancel_requested {
                 token.cancel();
             }
             entry.running_cancel = Some(token);
+            true
+        } else {
+            false
         }
     }
 

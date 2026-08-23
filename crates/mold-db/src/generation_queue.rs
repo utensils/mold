@@ -498,6 +498,30 @@ pub fn release_claim(db: &MetadataDb, id: &str, claim_token: &str, now_ms: i64) 
     })
 }
 
+/// Return an interrupted, token-owned execution attempt to the durable queue.
+///
+/// Unlike [`refund_dispatched_claim`], this preserves `dispatch_attempts`: the
+/// owner did begin executing and shutdown/cancellation interrupted it, so the
+/// crash-loop budget must still account for that attempt.
+pub fn requeue_running_claimed(
+    db: &MetadataDb,
+    id: &str,
+    claim_token: &str,
+    now_ms: i64,
+) -> Result<bool> {
+    db.with_conn(|conn| {
+        Ok(conn.execute(
+            "UPDATE generation_queue
+                SET state = 'queued',
+                    claim_token = NULL,
+                    started_at = NULL,
+                    updated_at = ?3
+              WHERE id = ?1 AND state = 'running' AND claim_token = ?2",
+            params![id, claim_token, now_ms],
+        )? > 0)
+    })
+}
+
 /// Token-fenced dispatch transition. Unlike legacy [`mark_dispatched`], a
 /// stale runtime owner cannot charge or start the row.
 pub fn mark_dispatched_claimed(
@@ -1274,6 +1298,7 @@ mod tests {
         let db = MetadataDb::open_in_memory().unwrap();
         insert(&db, &row("release", "owner-a", 1)).unwrap();
         insert(&db, &row("refund", "owner-a", 2)).unwrap();
+        insert(&db, &row("retain-running", "owner-a", 3)).unwrap();
 
         claim_next(&db, "owner-a", "release-token", 10).unwrap();
         assert!(!release_claim(&db, "release", "stale", 11).unwrap());
@@ -1291,6 +1316,19 @@ mod tests {
         assert_eq!(refunded.state, QueueRowState::Queued);
         assert_eq!(refunded.dispatch_attempts, 0);
         assert_eq!(refunded.started_at_ms, None);
+        delete(&db, "refund").unwrap();
+
+        claim_next(&db, "owner-a", "retain-token", 17).unwrap();
+        assert_eq!(
+            mark_dispatched_claimed(&db, "retain-running", "retain-token", 18).unwrap(),
+            Some(1)
+        );
+        assert!(!requeue_running_claimed(&db, "retain-running", "stale", 19).unwrap());
+        assert!(requeue_running_claimed(&db, "retain-running", "retain-token", 20).unwrap());
+        let retained = get(&db, "retain-running").unwrap().unwrap();
+        assert_eq!(retained.state, QueueRowState::Queued);
+        assert_eq!(retained.dispatch_attempts, 1);
+        assert_eq!(retained.started_at_ms, None);
     }
 
     #[test]

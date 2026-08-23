@@ -1602,8 +1602,24 @@ impl QueueTicket {
         self.settled = true;
         if let Some(token) = self.claim_token.as_deref() {
             let Some(db) = self.journal.db() else { return };
-            if let Err(error) = generation_queue::release_claim(db, &self.id, token, now_ms()) {
-                tracing::warn!(job = %self.id, %error, "could not release a retained feeder claim");
+            let now = now_ms();
+            let released = generation_queue::release_claim(db, &self.id, token, now);
+            let retained = match released {
+                Ok(true) => Ok(true),
+                Ok(false) => generation_queue::requeue_running_claimed(db, &self.id, token, now),
+                Err(error) => Err(error),
+            };
+            match retained {
+                Ok(true) => self
+                    .journal
+                    .set_batch_child_state(&self.id, "accepted", None),
+                Ok(false) => tracing::warn!(
+                    job = %self.id,
+                    "could not retain a feeder claim because its token was stale"
+                ),
+                Err(error) => {
+                    tracing::warn!(job = %self.id, %error, "could not release a retained feeder claim")
+                }
             }
             self.journal.wake_feeder();
         }
