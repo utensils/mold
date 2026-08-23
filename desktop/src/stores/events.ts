@@ -24,6 +24,7 @@ export const useEventsStore = defineStore("events", {
     /** True when the connected server streams `/api/events`. */
     live: false,
     abort: null as AbortController | null,
+    sharedHostId: null as string | null,
     pollTimer: null as ReturnType<typeof setInterval> | null,
   }),
   actions: {
@@ -47,6 +48,8 @@ export const useEventsStore = defineStore("events", {
     unsubscribe() {
       this.abort?.abort();
       this.abort = null;
+      if (this.sharedHostId) useGenerationStore().detachSharedDurableEventHost(this.sharedHostId);
+      this.sharedHostId = null;
       if (this.pollTimer) clearInterval(this.pollTimer);
       this.pollTimer = null;
       this.subscribed = false;
@@ -66,18 +69,27 @@ export const useEventsStore = defineStore("events", {
       }
       const abort = new AbortController();
       this.abort = abort;
+      this.sharedHostId = primary.id;
+      useGenerationStore().attachSharedDurableEventHost(primary.id);
       void sseStream("/api/events", {
         target: { baseUrl: primary.baseUrl, apiKey: primary.apiKey },
         signal: abort.signal,
         retry: true,
         terminalHttpStatuses: [401, 403, 404],
-        onOpen: () => this.refreshAuthoritativePrimary(),
-        onEvent: (_event, data) => {
+        onOpen: () => {
+          this.refreshAuthoritativePrimary();
+        },
+        onEvent: (event, data) => {
+          useGenerationStore().onDurableEvent(primary.id, event, data);
+          if (event !== "event" && event !== "message") return;
           try {
             this.apply(JSON.parse(data) as ServerEvent);
           } catch {
             /* skip malformed frame */
           }
+        },
+        onClose: () => {
+          if (!abort.signal.aborted) useGenerationStore().onDurableEventClose(primary.id);
         },
       });
     },

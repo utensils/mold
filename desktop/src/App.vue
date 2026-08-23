@@ -125,6 +125,10 @@ watch(
   () => hostsStore.all.map((h) => `${h.id}:${h.status}`).join("|"),
   () => {
     const current = hostsStore.all.map((h) => ({ id: h.id, label: h.label, status: h.status }));
+    for (const host of hostsStore.all) {
+      if (host.status === "ready") generation.ensureDurableHostStream(host.id);
+    }
+    void generation.reconcileDurableAll();
     hostStatusSnapshot = applyHostConnectivity(hostStatusSnapshot, current, offlineToastIds, {
       warn: (host) =>
         toasts.push(hostOfflineTitle(host.label), "warning", {
@@ -278,6 +282,10 @@ function suppressChromeSelection(e: Event) {
   if (!allowsNativeSelectAll(e.target as Element | null)) e.preventDefault();
 }
 
+function reconcileDurableOnWake() {
+  if (document.visibilityState === "visible") void generation.reconcileDurableAll();
+}
+
 onMounted(async () => {
   // Synchronous and first: the Create form's auto-tag mirror has to be right
   // before any request can be built from it, whichever workspace opens.
@@ -285,6 +293,8 @@ onMounted(async () => {
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("contextmenu", suppressNativeContextMenu);
   window.addEventListener("selectstart", suppressChromeSelection);
+  window.addEventListener("focus", reconcileDurableOnWake);
+  document.addEventListener("visibilitychange", reconcileDurableOnWake);
   // Prefs first: theme lands before the window is shown, and restore-last-view
   // navigates before the default route paints.
   const prefs = await appPrefs.init().catch(() => null);
@@ -311,11 +321,14 @@ onMounted(async () => {
   // Neither failure blocks launch: host errors remain visible in Machines,
   // while the local connection store owns its own error presentation.
   await Promise.allSettled([connectionStartup, hostStartup]);
+  generation.resumeDurableGenerations();
 });
 onUnmounted(() => {
   window.removeEventListener("keydown", onKeydown);
   window.removeEventListener("contextmenu", suppressNativeContextMenu);
   window.removeEventListener("selectstart", suppressChromeSelection);
+  window.removeEventListener("focus", reconcileDurableOnWake);
+  document.removeEventListener("visibilitychange", reconcileDurableOnWake);
   unlistenNotificationAction?.();
 });
 </script>

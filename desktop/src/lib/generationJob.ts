@@ -70,6 +70,9 @@ export interface Job {
   /** Wall clock at the first terminal status; null while the job is in flight.
    *  The Create strip's attention rows expire against this. */
   settledAtMs: number | null;
+  /** A terminal recovered from disk is historical, not a fresh foreground
+   * completion that should raise the App-shell toast again. */
+  suppressFreshCompletion?: boolean;
   /** Object URL of the decoded result. */
   resultUrl: string | null;
   /** Object URL of the latest live latent preview (small PNG, upscaled by CSS). */

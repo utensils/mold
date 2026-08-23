@@ -186,6 +186,8 @@ export interface HostRoute {
   /** Exact host supports one durable heterogeneous prepared-batch admission. */
   heterogeneousBatch?: boolean;
   heterogeneousBatchMaxOutputs?: number | null;
+  /** Exact host exposes idempotent admission plus durable terminal outcomes. */
+  durableBatchOutcomes?: boolean;
 }
 
 export interface HostPlacementFailure {
@@ -240,6 +242,7 @@ function hostRoute(host: HostView, capabilities?: ServerCapabilities): HostRoute
     referenceUploads: capabilities?.reference_uploads ?? null,
     heterogeneousBatch: capabilities?.queue?.heterogeneous_batch === true,
     heterogeneousBatchMaxOutputs: capabilities?.queue?.heterogeneous_batch_max_outputs ?? null,
+    ...(capabilities?.queue?.durable_batch_outcomes === true ? { durableBatchOutcomes: true } : {}),
   };
 }
 
@@ -642,6 +645,9 @@ export const useHostsStore = defineStore("hosts", {
         heterogeneousBatch: this.capabilities[chosen.id]?.queue?.heterogeneous_batch === true,
         heterogeneousBatchMaxOutputs:
           this.capabilities[chosen.id]?.queue?.heterogeneous_batch_max_outputs ?? null,
+        ...(this.capabilities[chosen.id]?.queue?.durable_batch_outcomes === true
+          ? { durableBatchOutcomes: true }
+          : {}),
       };
     },
     async resolveFeasible(
