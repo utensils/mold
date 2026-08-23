@@ -7587,8 +7587,8 @@ describe("MobileApp gallery", () => {
       ),
     );
 
-    await wrapper.get("[data-test='mobile-open-advanced']").trigger("click");
-    await flushPromises();
+    // Ref2VA references live in the primary Create stack, not behind Advanced.
+    expect(wrapper.find("[data-test='mobile-h3-authoring']").exists()).toBe(true);
     expect(wrapper.get("[data-test='h3-reference-0']").text()).toContain("ordered subject.png");
   });
 

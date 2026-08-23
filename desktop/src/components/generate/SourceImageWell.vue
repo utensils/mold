@@ -22,6 +22,7 @@ import { useToastStore } from "../../stores/toasts";
 import { attachPickedImage } from "../../lib/sourceAttachment";
 import ImageDropWell from "@studio/components/ImageDropWell.vue";
 import SourceMediaWells, { type SourceMediaSlot } from "@studio/components/SourceMediaWells.vue";
+import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import { sourceConditioningLimitLabel } from "@studio/lib/sourceResolution";
@@ -72,8 +73,7 @@ const caps = computed(() =>
 // Family-scoped label for the shared `strength` wire field (#1055).
 const strength = computed(() => strengthSemantics(props.form.family));
 /** The model's own image-attachment shape — the single policy every surface
- * renders (`@studio/lib/sourceMediaPlan`). `none` and `h3-references` render
- * nothing here. */
+ * renders (`@studio/lib/sourceMediaPlan`). */
 const plan = computed(() => sourceMediaPlan(caps.value));
 const flux2Dev = computed(() => isFlux2DevModel(props.form.model));
 /** Why the attached conditioning would be refused, in the server's own order. */
@@ -286,6 +286,9 @@ function onWellClear(slot: SourceMediaSlot) {
 // shared studio setters so a file and a gallery pick produce identical facts.
 
 const h3Authoring = computed(() => props.form.h3Authoring ?? emptyMinimaxH3AuthoringState());
+function setH3Authoring(value: typeof h3Authoring.value): void {
+  props.form.h3Authoring = value;
+}
 const h3PickerTarget = ref<MinimaxH3BoundaryEndpoint | null>(null);
 const h3Error = ref<string | null>(null);
 
@@ -345,8 +348,16 @@ function setSourceFitMode(e: Event) {
 </script>
 
 <template>
+  <div v-if="plan.kind === 'h3-references'" data-test="h3-reference-controls">
+    <div class="mb-2 flex items-center gap-2">
+      <span class="edge-code">Ordered references</span>
+      <div class="border-edge h-px flex-1 border-t" />
+    </div>
+    <MinimaxH3AuthoringPanel :model-value="h3Authoring" @update:model-value="setH3Authoring" />
+  </div>
+
   <!-- Ordered Qwen edit pictures or FLUX.2 reference images. -->
-  <div v-if="plan.kind === 'attachments'">
+  <div v-else-if="plan.kind === 'attachments'">
     <SourceMediaWells
       v-if="plan.primary === 'target'"
       :plan="plan"

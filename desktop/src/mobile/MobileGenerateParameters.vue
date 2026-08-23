@@ -92,12 +92,6 @@ import {
   isControlAdapterPipeline,
   pipelineForControlId,
 } from "@studio/lib/ltx2Control";
-import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
-import {
-  emptyMinimaxH3AuthoringState,
-  minimaxH3TaskForModel,
-  type MinimaxH3AuthoringState,
-} from "@studio/lib/minimaxH3Authoring";
 
 const props = withDefaults(
   defineProps<{
@@ -135,13 +129,6 @@ const caps = computed(() =>
     effectiveGenerationRecipe(props.selectedModel, props.form.pipeline),
   ),
 );
-const h3Task = computed(() =>
-  props.selectedModel ? minimaxH3TaskForModel(props.form.model) : null,
-);
-const h3Authoring = computed(() => props.form.h3Authoring ?? emptyMinimaxH3AuthoringState());
-function setH3Authoring(value: MinimaxH3AuthoringState): void {
-  props.form.h3Authoring = value;
-}
 const videoContract = computed(() => props.selectedModel ?? { family: props.form.family });
 const frameGridLabel = computed(() => videoFrameGridLabel(videoContract.value));
 const frameStep = computed(() => videoFrameStep(videoContract.value));
@@ -747,21 +734,6 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
       >
         {{ identityError }}
       </p>
-    </fieldset>
-
-    <!-- H3 Ref2VA ordered references. FL2VA boundaries render as the shared
-         source wells in the primary Create stack, not in this sheet. -->
-    <fieldset
-      v-if="h3Task === 'ref2va'"
-      class="mobile-generate-section"
-      data-test="mobile-h3-authoring"
-    >
-      <legend class="mobile-generate-legend">Ordered references</legend>
-      <MinimaxH3AuthoringPanel
-        :model-value="h3Authoring"
-        touch-friendly
-        @update:model-value="setH3Authoring"
-      />
     </fieldset>
 
     <fieldset

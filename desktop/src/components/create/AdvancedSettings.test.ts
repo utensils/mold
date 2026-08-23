@@ -475,7 +475,7 @@ describe("AdvancedSettings — video (LTX-2)", () => {
     expect(form.keyframes[0]!.frame).toBe(0);
   });
 
-  it("keeps only the Ref2VA ordered-reference panel in Advanced for H3", () => {
+  it("keeps all H3 media controls out of Advanced", () => {
     const fl2va = formFor("minimax-h3");
     fl2va.model = "minimax-h3-fl2va:comfy-pruned-int8";
     const fl2vaWrapper = mountSettings(fl2va, {
@@ -493,8 +493,8 @@ describe("AdvancedSettings — video (LTX-2)", () => {
     const ref2vaWrapper = mountSettings(ref2va, {
       selectedModel: { name: ref2va.model, family: ref2va.family } as ModelEntry,
     });
-    expect(ref2vaWrapper.find("[data-test='section-h3-authoring']").exists()).toBe(true);
-    expect(accordionTitles(ref2vaWrapper)).toContain("Ordered references");
+    expect(ref2vaWrapper.find("[data-test='section-h3-authoring']").exists()).toBe(false);
+    expect(accordionTitles(ref2vaWrapper)).not.toContain("Ordered references");
   });
 
   it("shows the chained-clips cue when frames exceed one clip for a chainable model", async () => {

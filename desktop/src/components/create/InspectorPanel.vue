@@ -219,18 +219,12 @@ const caps = computed(() =>
   ),
 );
 /** The model's image-attachment shape — one shared policy, never a local
- * heuristic. `none` hides the well outright; `h3-references` keeps the H3
- * ordered-reference editor in Advanced. */
+ * heuristic. Only `none` hides the primary conditioning editor. */
 const sourcePlan = computed(() => sourceMediaPlan(caps.value));
 const sequenceSourceImagesSupported = computed(
   () => (selectedModel.value?.source_image ?? props.form.sourceImageCapability) !== "unsupported",
 );
-const showSourceMedia = computed(
-  () =>
-    !isSequence.value &&
-    sourcePlan.value.kind !== "none" &&
-    sourcePlan.value.kind !== "h3-references",
-);
+const showSourceMedia = computed(() => !isSequence.value && sourcePlan.value.kind !== "none");
 /** Identity is capability-gated on positive knowledge only: an unread or
  * absent `supports_identity` renders nothing at all rather than a control for
  * a feature this host does not have. Sequence clips carry no identity slot.

@@ -5,6 +5,7 @@ import SliderRow from "@ui/components/SliderRow.vue";
 import SourceMediaWells, {
   type SourceMediaSlot,
 } from "@studio/components/SourceMediaWells.vue";
+import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import {
   generationCapabilitiesForFamily,
@@ -99,11 +100,13 @@ const sourceLimitLabel = computed(() =>
 const kicker = computed(() =>
   plan.value.kind === "h3-boundaries"
     ? "Frame endpoints"
-    : plan.value.kind === "attachments"
-      ? flux2Dev.value
-        ? "Reference images"
-        : "Edit images"
-      : "Source image",
+    : plan.value.kind === "h3-references"
+      ? "Ordered references"
+      : plan.value.kind === "attachments"
+        ? flux2Dev.value
+          ? "Reference images"
+          : "Edit images"
+        : "Source image",
 );
 
 const hasSource = computed(() => props.modelValue.imageAttachments.length > 0);
@@ -224,6 +227,9 @@ function onH3Clear(slot: SourceMediaSlot) {
     h3Authoring: { ...h3Authoring.value, [h3Endpoint(slot)]: null },
   });
 }
+function setH3Authoring(value: typeof h3Authoring.value) {
+  patch({ h3Authoring: value });
+}
 
 // ── Fit / strength / mask (single-source refinement) ──────────────────
 const fitOptions = SOURCE_FIT_OPTIONS;
@@ -276,7 +282,7 @@ function clearControl() {
 
 <template>
   <section
-    v-if="plan.kind !== 'none' && plan.kind !== 'h3-references'"
+    v-if="plan.kind !== 'none'"
     class="smp"
     data-test="source-media-panel"
   >
@@ -284,8 +290,14 @@ function clearControl() {
       <span class="smp__kicker">{{ kicker }}</span>
     </div>
 
+    <MinimaxH3AuthoringPanel
+      v-if="plan.kind === 'h3-references'"
+      :model-value="h3Authoring"
+      @update:model-value="setH3Authoring"
+    />
+
     <!-- Ordered picture strip (Qwen edit / FLUX.2 references). -->
-    <template v-if="plan.kind === 'attachments'">
+    <template v-else-if="plan.kind === 'attachments'">
       <SourceMediaWells
         v-if="plan.primary === 'target'"
         :plan="plan"

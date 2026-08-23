@@ -3,7 +3,9 @@ import type { GenerationReference } from "./generationReferences";
 import {
   MINIMAX_H3_FIXED_FPS,
   MINIMAX_H3_FL2VA_COMFY,
+  MINIMAX_H3_FL2VA_COMFY_NVFP4,
   MINIMAX_H3_REF2VA_COMFY,
+  MINIMAX_H3_REF2VA_COMFY_NVFP4,
   MINIMAX_H3_RESYNTHESIS_GUIDANCE,
   appendMinimaxH3GalleryImageReference,
   canonicalMinimaxH3ModelName,
@@ -75,6 +77,8 @@ describe("MiniMax H3 Studio authority", () => {
     expect(minimaxH3TaskForModel("minimax_h3_ref2va:comfy-pruned-int8")).toBe(
       "ref2va",
     );
+    expect(minimaxH3TaskForModel(MINIMAX_H3_FL2VA_COMFY_NVFP4)).toBe("fl2va");
+    expect(minimaxH3TaskForModel(MINIMAX_H3_REF2VA_COMFY_NVFP4)).toBe("ref2va");
     expect(minimaxH3TaskForModel("hf:opaque")).toBeNull();
     expect(isMinimaxH3Identity(null, "minimax_h3_ref2va")).toBe(true);
     expect(isMinimaxH3Identity(null, "hf:opaque")).toBe(false);

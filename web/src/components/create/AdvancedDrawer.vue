@@ -24,7 +24,6 @@ import LoraPicker from "../LoraPicker.vue";
 import PlacementPanel from "../PlacementPanel.vue";
 import ExtendVideoControls from "./advanced/ExtendVideoControls.vue";
 import Ltx2VideoControls from "./advanced/Ltx2VideoControls.vue";
-import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
 import { DEFAULT_EXTEND_OVERLAP_FRAMES } from "@studio/lib/extend";
 import type { CanvasIntent } from "@studio/lib/outputShape";
 import UpscaleSection from "./advanced/UpscaleSection.vue";
@@ -81,12 +80,9 @@ import {
   isCameraMotionPreset,
 } from "@studio/lib/cameraMotion";
 import {
-  emptyMinimaxH3AuthoringState,
   isMinimaxH3Identity,
-  minimaxH3TaskForModel,
   MINIMAX_H3_MAX_FRAMES,
   MINIMAX_H3_REVIEWED_COMPACT_FRAMES,
-  type MinimaxH3AuthoringState,
 } from "@studio/lib/minimaxH3Authoring";
 import {
   effectiveGenerationRecipe,
@@ -239,18 +235,9 @@ const caps = computed(() =>
     effectiveGenerationRecipe(selectedModel.value, props.modelValue.pipeline),
   ),
 );
-const h3Task = computed(() =>
-  selectedModel.value ? minimaxH3TaskForModel(props.modelValue.model) : null,
-);
 const h3Family = computed(() =>
   isMinimaxH3Identity(props.family, props.modelValue.model),
 );
-const h3Authoring = computed(
-  () => props.modelValue.h3Authoring ?? emptyMinimaxH3AuthoringState(),
-);
-function setH3Authoring(value: MinimaxH3AuthoringState) {
-  patch({ h3Authoring: value });
-}
 const formats = computed(() => caps.value.outputFormats as OutputFormat[]);
 
 // Wan puts its solver in the recipe section below, next to the flow shift it
@@ -654,23 +641,6 @@ function setSequenceCameraMode(mode: string) {
         </AccordionSection>
       </template>
       <template v-else>
-        <!-- H3 Ref2VA ordered references. FL2VA boundaries and every other
-             image well live in the primary form (SourceMediaPanel). -->
-        <AccordionSection
-          v-if="h3Task === 'ref2va'"
-          icon="video"
-          title="Ordered references"
-          :summary="`${h3Authoring.references.length} in semantic order`"
-          :open="true"
-          :header-interactive="false"
-          data-test="section-h3-authoring"
-        >
-          <MinimaxH3AuthoringPanel
-            :model-value="h3Authoring"
-            @update:model-value="setH3Authoring"
-          />
-        </AccordionSection>
-
         <AccordionSection
           v-if="showScheduler"
           icon="scheduler"

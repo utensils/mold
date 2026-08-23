@@ -380,6 +380,18 @@ describe("SourceImageWell — per-model source conditioning (#772, #779)", () =>
     });
   }
 
+  it("exposes Ref2VA ordered references in the primary source control", () => {
+    const form = reactive({
+      ...newGenerateForm(),
+      family: "minimax-h3",
+      model: "minimax-h3-ref2va:comfy-pruned-int8",
+    });
+    const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+
+    expect(wrapper.find("[data-test='h3-reference-controls']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='h3-reference-files']").exists()).toBe(true);
+  });
+
   it("keeps today's well and offers no end frame when the server advertises nothing", () => {
     const form = wanForm(undefined);
     const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });

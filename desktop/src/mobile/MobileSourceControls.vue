@@ -27,6 +27,7 @@ import { sourceConditioningLimitLabel } from "@studio/lib/sourceResolution";
 import MobileImagePickerSheet, { type MobilePickedImage } from "./MobileImagePickerSheet.vue";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import SourceMediaWells, { type SourceMediaSlot } from "@studio/components/SourceMediaWells.vue";
+import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import {
   emptyMinimaxH3AuthoringState,
@@ -86,6 +87,9 @@ const sourceLimitLabel = computed(() =>
 // The same standard wells, backed by the dedicated H3 authoring state and the
 // shared studio setters so a file and a gallery pick produce identical facts.
 const h3Authoring = computed(() => props.form.h3Authoring ?? emptyMinimaxH3AuthoringState());
+function setH3Authoring(value: typeof h3Authoring.value): void {
+  props.form.h3Authoring = value;
+}
 const h3PickerTarget = ref<MinimaxH3BoundaryEndpoint | null>(null);
 const h3Error = ref<string | null>(null);
 const h3PickerMaxBytes = computed(() =>
@@ -455,8 +459,21 @@ function applyMask(mask: string): void {
 </script>
 
 <template>
+  <fieldset
+    v-if="plan.kind === 'h3-references'"
+    class="mobile-source-controls"
+    data-test="mobile-h3-authoring"
+  >
+    <legend class="mobile-source-legend">Ordered references · Required</legend>
+    <MinimaxH3AuthoringPanel
+      :model-value="h3Authoring"
+      touch-friendly
+      @update:model-value="setH3Authoring"
+    />
+  </fieldset>
+
   <!-- MiniMax H3 FL2VA boundaries: the exact same wells, H3-owned state. -->
-  <template v-if="plan.kind === 'h3-boundaries'">
+  <template v-else-if="plan.kind === 'h3-boundaries'">
     <fieldset class="mobile-source-controls" data-test="mobile-h3-boundaries">
       <SourceMediaWells
         :plan="plan"

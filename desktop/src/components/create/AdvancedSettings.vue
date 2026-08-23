@@ -107,12 +107,6 @@ import { AUDIO_ONLY_PIPELINE, isAudioOnlyPipeline } from "@studio/lib/ltx2Pipeli
 import LoraStack from "../generate/LoraStack.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
 import { attachPickedVideo } from "../../lib/sourceAttachment";
-import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
-import {
-  emptyMinimaxH3AuthoringState,
-  minimaxH3TaskForModel,
-  type MinimaxH3AuthoringState,
-} from "@studio/lib/minimaxH3Authoring";
 
 const props = withDefaults(
   defineProps<{
@@ -156,13 +150,6 @@ const caps = computed(() =>
 );
 const formats = computed(() => caps.value.outputFormats as OutputFormat[]);
 const advancedCount = computed(() => advancedActiveCount(props.form));
-const h3Task = computed(() =>
-  props.selectedModel ? minimaxH3TaskForModel(props.form.model) : null,
-);
-const h3Authoring = computed(() => props.form.h3Authoring ?? emptyMinimaxH3AuthoringState());
-function setH3Authoring(value: MinimaxH3AuthoringState): void {
-  props.form.h3Authoring = value;
-}
 
 // ── Scheduler & sampling ─────────────────────────────────────────────────────
 const schedulerSummary = computed(() => schedulerLabel(props.form.scheduler));
@@ -740,20 +727,6 @@ function reset() {
         >
           {{ identityMessage }}
         </p>
-      </AccordionSection>
-
-      <!-- H3 Ref2VA ordered references. FL2VA boundaries and every other
-           image well live in the primary form (InspectorPanel), not here. -->
-      <AccordionSection
-        v-if="h3Task === 'ref2va'"
-        icon="video"
-        title="Ordered references"
-        :summary="`${h3Authoring.references.length} in semantic order`"
-        :open="true"
-        :header-interactive="false"
-        data-test="section-h3-authoring"
-      >
-        <MinimaxH3AuthoringPanel :model-value="h3Authoring" @update:model-value="setH3Authoring" />
       </AccordionSection>
 
       <!-- 4 · LoRA stack -->

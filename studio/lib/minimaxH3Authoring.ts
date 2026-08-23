@@ -21,10 +21,12 @@ export {
   isMinimaxH3Identity,
   minimaxH3TaskForModel,
   MINIMAX_H3_FL2VA_COMFY,
+  MINIMAX_H3_FL2VA_COMFY_NVFP4,
   MINIMAX_H3_FL2VA_COMFY_TURBO_4STEP_768P,
   MINIMAX_H3_FL2VA_COMFY_TURBO_8STEP,
   MINIMAX_H3_FL2VA_OFFICIAL,
   MINIMAX_H3_REF2VA_COMFY,
+  MINIMAX_H3_REF2VA_COMFY_NVFP4,
   MINIMAX_H3_REF2VA_OFFICIAL,
   type MinimaxH3Task,
 } from "./minimaxH3Identity";
@@ -32,8 +34,8 @@ export {
 export const MINIMAX_H3_FIXED_FPS = 24;
 // Mirrors `mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES` — the exact clip
 // length the reviewed compact runtime renders, which every Studio surface
-// authors because the official BF16 tags are policy-hidden and never reach a
-// picker. Deliberately NOT `MIN_FRAMES`, whose 107 is the family floor derived
+// authors because runtime-unavailable official/NVFP4 tags are filtered from
+// Create. Deliberately NOT `MIN_FRAMES`, whose 107 is the family floor derived
 // from the model card's 4-second minimum: the two were one constant until they
 // were separated, and a compact request clamped to 107 is one the runtime
 // refuses.

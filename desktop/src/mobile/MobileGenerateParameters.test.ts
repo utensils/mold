@@ -70,7 +70,7 @@ async function attachFile(wrapper: VueWrapper, selector: string, file: File): Pr
 }
 
 describe("MobileGenerateParameters", () => {
-  it("keeps only the Ref2VA ordered-reference panel in the Advanced sheet for H3", () => {
+  it("keeps all H3 media controls out of the Advanced sheet", () => {
     const fl2va = {
       name: "minimax-h3-fl2va:comfy-pruned-int8",
       family: "minimax-h3",
@@ -85,8 +85,8 @@ describe("MobileGenerateParameters", () => {
       family: "minimax-h3",
     } as ModelEntry;
     const references = mountParameters(formFor(ref2va.family, ref2va.name), [], [], [], ref2va);
-    expect(references.wrapper.find("[data-test='mobile-h3-authoring']").exists()).toBe(true);
-    expect(references.wrapper.text()).toContain("Ordered references");
+    expect(references.wrapper.find("[data-test='mobile-h3-authoring']").exists()).toBe(false);
+    expect(references.wrapper.text()).not.toContain("Ordered references");
   });
 
   it("resets model-owned controls when the recipe changes", async () => {

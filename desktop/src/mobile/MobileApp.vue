@@ -1239,12 +1239,9 @@ const caps = computed(() =>
   ),
 );
 /** The model's image-attachment shape — one shared policy (`sourceMediaPlan`).
- * `none` hides the source section outright; `h3-references` keeps the H3
- * ordered-reference editor in the Advanced sheet. */
+ * Only `none` hides the primary conditioning editor. */
 const sourcePlan = computed(() => sourceMediaPlan(caps.value));
-const showSourceMedia = computed(
-  () => sourcePlan.value.kind !== "none" && sourcePlan.value.kind !== "h3-references",
-);
+const showSourceMedia = computed(() => sourcePlan.value.kind !== "none");
 const h3AuthoringError = computed(() =>
   minimaxH3AuthoringError(
     form.family,
