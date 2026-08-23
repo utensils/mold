@@ -11,3 +11,5 @@ export * from "./lib/sequence";
 export * from "./lib/base64";
 export * from "./lib/starterModels";
 export * from "./lib/generationLifecycle";
+export * from "./lib/generationMedia";
+export * from "./lib/targetStreamSlots";

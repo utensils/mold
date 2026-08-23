@@ -1,5 +1,6 @@
 import type { GenerateRequest, OutputFormat } from "./api/types";
 import type { GenerationBatchTracker } from "@studio/lib/generationLifecycle";
+import { requestCarriesGenerationMedia } from "@studio/lib/generationMedia";
 
 export const DURABLE_GENERATION_STORAGE_KEY = "mold.desktop.durable-generations.v1";
 
@@ -30,24 +31,6 @@ export interface DurableGenerationRecoveryEnvelope {
   records: DurableGenerationRecoveryRecord[];
 }
 
-const MEDIA_AUTHORITY_FIELDS = [
-  "source_image",
-  "id_image",
-  "id_images",
-  "edit_images",
-  "references",
-  "mask_image",
-  "control_image",
-  "audio_file",
-  "audio_file_path",
-  "source_video",
-  "source_video_path",
-  "extend_video",
-  "extend_video_path",
-  "keyframes",
-  "hdr_exr_dir",
-] as const;
-
 /**
  * The current durable journal deliberately excludes temporary/private media
  * authority. Keep those shapes on the legacy attached stream until a server
@@ -55,11 +38,7 @@ const MEDIA_AUTHORITY_FIELDS = [
  */
 export function requestIsEligibleForDurableGeneration(request: GenerateRequest): boolean {
   if (request.model.toLowerCase().includes("minimax-h3")) return false;
-  const record = request as unknown as Record<string, unknown>;
-  return !MEDIA_AUTHORITY_FIELDS.some((field) => {
-    const value = record[field];
-    return value !== undefined && value !== null && value !== "";
-  });
+  return !requestCarriesGenerationMedia(request);
 }
 
 export function durableChildSummary(

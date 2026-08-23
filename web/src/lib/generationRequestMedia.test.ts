@@ -24,6 +24,7 @@ const PRESENT_MEDIA_VALUE: Record<
   edit_images: ["edit-bytes"],
   references: [{ type: "image", media: { authority: "inline", data: "ref" } }],
   id_image: "identity-bytes",
+  id_images: ["identity-bytes"],
   mask_image: "mask-bytes",
   control_image: "control-bytes",
   audio_file: "audio-bytes",
@@ -33,6 +34,7 @@ const PRESENT_MEDIA_VALUE: Record<
   extend_video: "extend-video-bytes",
   extend_video_path: "/private/extend.mp4",
   keyframes: [{ frame: 0, image: "keyframe-bytes" }],
+  hdr_exr_dir: "/private/hdr",
 };
 
 describe("requestCarriesGenerationMedia", () => {
@@ -55,6 +57,7 @@ describe("requestCarriesGenerationMedia", () => {
       edit_images: null,
       references: null,
       id_image: null,
+      id_images: null,
       mask_image: null,
       control_image: null,
       audio_file: null,
@@ -64,11 +67,12 @@ describe("requestCarriesGenerationMedia", () => {
       extend_video: null,
       extend_video_path: null,
       keyframes: null,
+      hdr_exr_dir: null,
       source_image_name: "descriptor-only.png",
       id_image_name: "descriptor-only-face.png",
       source_fit: { mode: "pad-fit" },
       loras: [{ path: "model/lora.safetensors", scale: 0.8 }],
-    };
+    } as GenerateRequestWire;
 
     expect(requestCarriesGenerationMedia(ordinary)).toBe(false);
   });

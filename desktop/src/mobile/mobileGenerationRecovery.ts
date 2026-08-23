@@ -15,6 +15,7 @@ import {
   type GenerationLifecycleJob,
 } from "@studio/lib/generationLifecycle";
 import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Authoring";
+import { requestCarriesGenerationMedia } from "@studio/lib/generationMedia";
 
 export const MOBILE_DURABLE_GENERATIONS_KEY = "mold.mobile.durable-generations.v1";
 
@@ -60,14 +61,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function finiteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
-
-type ExtendedMediaGenerateRequest = GenerateRequest & {
-  /** Additive server wire fields not yet authored by the shared mobile form. */
-  id_images?: readonly string[] | null;
-  audio_file_path?: string | null;
-  source_video_path?: string | null;
-  hdr_exr_dir?: string | null;
-};
 
 function parsePresentation(value: unknown): MobileDurableGenerationPresentation | null {
   if (
@@ -203,24 +196,7 @@ export function saveMobileDurableGenerationRecoveries(
 }
 
 export function generationRequestCarriesMedia(request: GenerateRequest): boolean {
-  const extended = request as ExtendedMediaGenerateRequest;
-  return (
-    request.source_image != null ||
-    request.id_image != null ||
-    request.mask_image != null ||
-    request.control_image != null ||
-    request.audio_file != null ||
-    request.source_video != null ||
-    request.extend_video != null ||
-    request.extend_video_path != null ||
-    request.edit_images !== undefined ||
-    request.keyframes !== undefined ||
-    request.references !== undefined ||
-    extended.id_images != null ||
-    extended.audio_file_path != null ||
-    extended.source_video_path != null ||
-    extended.hdr_exr_dir != null
-  );
+  return requestCarriesGenerationMedia(request);
 }
 
 /** Durable admission is intentionally narrower than server capability: media

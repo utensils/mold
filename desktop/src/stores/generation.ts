@@ -74,6 +74,7 @@ import {
   saveDurableGenerationRecovery,
   type DurableGenerationRecoveryRecord,
 } from "../lib/durableGeneration";
+import { TargetStreamSlots } from "@studio/lib/targetStreamSlots";
 
 export {
   applyChainProgress,
@@ -300,18 +301,7 @@ const MIME: Record<string, string> = {
  */
 const MAX_STREAMS_PER_TARGET = 4;
 
-interface StreamSlotWaiter {
-  signal: AbortSignal;
-  resolve: (release: (() => void) | null) => void;
-  onAbort?: () => void;
-}
-
-interface StreamSlotPool {
-  active: number;
-  waiters: StreamSlotWaiter[];
-}
-
-const streamSlotPools = new Map<string, StreamSlotPool>();
+const streamSlots = new TargetStreamSlots(MAX_STREAMS_PER_TARGET);
 
 interface DurableSettlement {
   promise: Promise<Job[]>;
@@ -373,58 +363,6 @@ function requestFormat(
         extension === "wav"
       ? extension
       : fallback;
-}
-
-function cleanStreamSlotPool(key: string, pool: StreamSlotPool): void {
-  if (pool.active === 0 && pool.waiters.length === 0) streamSlotPools.delete(key);
-}
-
-function drainStreamSlotPool(key: string, pool: StreamSlotPool): void {
-  while (pool.active < MAX_STREAMS_PER_TARGET && pool.waiters.length > 0) {
-    const waiter = pool.waiters.shift()!;
-    if (waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
-    if (waiter.signal.aborted) {
-      waiter.resolve(null);
-      continue;
-    }
-
-    pool.active += 1;
-    let released = false;
-    const release = () => {
-      if (released) return;
-      released = true;
-      waiter.signal.removeEventListener("abort", release);
-      pool.active -= 1;
-      drainStreamSlotPool(key, pool);
-      cleanStreamSlotPool(key, pool);
-    };
-    waiter.signal.addEventListener("abort", release, { once: true });
-    waiter.resolve(release);
-    if (waiter.signal.aborted) release();
-  }
-  cleanStreamSlotPool(key, pool);
-}
-
-function acquireStreamSlot(key: string, signal: AbortSignal): Promise<(() => void) | null> {
-  if (signal.aborted) return Promise.resolve(null);
-  let pool = streamSlotPools.get(key);
-  if (!pool) {
-    pool = { active: 0, waiters: [] };
-    streamSlotPools.set(key, pool);
-  }
-  return new Promise((resolve) => {
-    const waiter: StreamSlotWaiter = { signal, resolve };
-    waiter.onAbort = () => {
-      const index = pool.waiters.indexOf(waiter);
-      if (index >= 0) pool.waiters.splice(index, 1);
-      signal.removeEventListener("abort", waiter.onAbort!);
-      resolve(null);
-      cleanStreamSlotPool(key, pool);
-    };
-    signal.addEventListener("abort", waiter.onAbort, { once: true });
-    pool.waiters.push(waiter);
-    drainStreamSlotPool(key, pool);
-  });
 }
 
 function jobHasSettled(job: Job): boolean {
@@ -1535,7 +1473,7 @@ export const useGenerationStore = defineStore("generation", {
       const abort = new AbortController();
       aborts.set(job.clientId, abort);
       const target = targets.get(job.clientId);
-      const releaseStreamSlot = await acquireStreamSlot(
+      const releaseStreamSlot = await streamSlots.acquire(
         target?.baseUrl ?? "__primary__",
         abort.signal,
       );

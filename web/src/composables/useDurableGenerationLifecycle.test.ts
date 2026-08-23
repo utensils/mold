@@ -555,6 +555,7 @@ describe("web durable generation lifecycle", () => {
         edit_images: ["edit"],
         references: [],
         id_image: "identity",
+        id_images: ["identity"],
         mask_image: "mask",
         control_image: "control",
         audio_file: "audio",
@@ -564,6 +565,7 @@ describe("web durable generation lifecycle", () => {
         extend_video: "extend-video",
         extend_video_path: "/extend-video",
         keyframes: [{ frame: 0, image: "keyframe" }],
+        hdr_exr_dir: "/hdr",
       };
       const stream = useGenerateStream();
 
@@ -578,4 +580,95 @@ describe("web durable generation lifecycle", () => {
       expect(admitGenerationBatch).not.toHaveBeenCalled();
     },
   );
+
+  it("keeps every waiting media job visible while draining four streams per target", async () => {
+    const opened: Array<{
+      prompt: string;
+      target: string;
+    }> = [];
+    generateStream.mockImplementation(
+      (
+        candidate: GenerateRequestWire,
+        _handlers: unknown,
+        signal: AbortSignal,
+        target: { baseUrl?: string } | undefined,
+      ) =>
+        new Promise<void>((resolve) => {
+          opened.push({
+            prompt: candidate.prompt,
+            target: target?.baseUrl ?? "origin",
+          });
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        }),
+    );
+    const otherRoute: HostRoute = {
+      ...route,
+      hostId: "render-box-b",
+      label: "Render box B",
+      target: { baseUrl: "http://render-box-b:7680", apiKey: "secret-b" },
+      instanceId: "instance-2",
+    };
+    const stream = useGenerateStream();
+    const ids = [route, otherRoute].flatMap((candidateRoute) =>
+      Array.from({ length: 5 }, (_, index) =>
+        stream.submit(
+          {
+            ...request(`${candidateRoute.hostId}-${index}`),
+            source_image: `session-media-${candidateRoute.hostId}-${index}`,
+          },
+          { kind: "single" },
+          candidateRoute,
+        ),
+      ),
+    );
+
+    try {
+      expect(
+        stream.jobs.value.filter((job) => ids.includes(job.id)),
+      ).toHaveLength(10);
+      expect(
+        opened.filter((entry) => entry.target === route.target.baseUrl),
+      ).toHaveLength(4);
+      expect(
+        opened.filter((entry) => entry.target === otherRoute.target.baseUrl),
+      ).toHaveLength(4);
+
+      const waitingA = stream.jobs.value.find(
+        (job) => job.request.prompt === "render-box-4",
+      )!;
+      const waitingB = stream.jobs.value.find(
+        (job) => job.request.prompt === "render-box-b-4",
+      )!;
+      expect(waitingA.streamStarted).toBe(false);
+      expect(waitingB.streamStarted).toBe(false);
+
+      await stream.cancel(waitingA.id);
+      expect(waitingA.state).toBe("canceled");
+      stream.jobs.value
+        .find((job) => job.request.prompt === "render-box-0")!
+        .controller.abort();
+      await Promise.resolve();
+      expect(
+        opened.filter((entry) => entry.target === route.target.baseUrl),
+      ).toHaveLength(4);
+
+      const activeB = stream.jobs.value.find(
+        (job) => job.request.prompt === "render-box-b-0",
+      )!;
+      activeB.controller.abort();
+      await vi.waitFor(() =>
+        expect(
+          opened.filter((entry) => entry.target === otherRoute.target.baseUrl),
+        ).toHaveLength(5),
+      );
+      expect(waitingB.streamStarted).toBe(true);
+    } finally {
+      for (const job of stream.jobs.value.filter((candidate) =>
+        ids.includes(candidate.id),
+      )) {
+        job.controller.abort();
+        stream.remove(job.id);
+      }
+    }
+  });
 });

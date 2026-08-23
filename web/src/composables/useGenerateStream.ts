@@ -18,14 +18,14 @@ import type {
 } from "../types";
 import type { ChainRoutingDecision } from "../lib/chainRouting";
 import type { HostRoute } from "../lib/hostRouting";
-import { StreamSlotPool } from "../lib/streamSlots";
+import { TargetStreamSlots } from "@studio/lib/targetStreamSlots";
 import { createUuid } from "@studio/lib/id";
 import {
   prepareReferenceUploads,
   requestNeedsReferenceUpload,
   type ReferenceUploadLease,
 } from "@studio/api/referenceUploads";
-import { redactGenerationReference } from "@studio/lib/generationReferences";
+import { redactGenerationMediaForPersistence } from "@studio/lib/generationMedia";
 import { getHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { toast } from "../lib/toasts";
 import { fetchGalleryBlob } from "../lib/galleryMedia";
@@ -661,57 +661,21 @@ function stripHeavyResult(r: SseCompleteEvent | null): PersistedResult | null {
   return rest;
 }
 
-/** Job recovery keeps only redacted reference descriptors. Inline bytes and
- * one-use upload handles are session memory, never localStorage state. */
+/** Job recovery keeps ordinary presentation settings only. Media bytes,
+ * authorities, paths, reference provenance, and identity metadata remain
+ * session memory and never enter localStorage. */
 function persistenceSafeRequest(
   request: GenerateRequestWire | ChainRequestWire,
 ): GenerateRequestWire | ChainRequestWire {
-  if (isPrebuiltChainRequest(request) || !request.references?.length) {
-    return request;
-  }
-  return {
-    ...request,
-    references: request.references.map(redactGenerationReference),
-  };
+  return redactGenerationMediaForPersistence(request);
 }
 
-/** Durable recovery retains settings needed to label/retry a row, but never
- * browser-held media bytes, server-local paths, or one-use authorities. */
+/** Durable recovery uses the same privacy projection. Durable-eligible work
+ * is media-free already; applying the fence again keeps recovery fail-closed. */
 function durablePersistenceSafeRequest(
   request: GenerateRequestWire | ChainRequestWire,
 ): GenerateRequestWire | ChainRequestWire {
-  const safe = persistenceSafeRequest(request);
-  if (isPrebuiltChainRequest(safe)) return safe;
-  const {
-    source_image: _sourceImage,
-    mask_image: _maskImage,
-    control_image: _controlImage,
-    edit_images: _editImages,
-    id_image: _identityImage,
-    audio_file: _audioFile,
-    audio_file_path: _audioPath,
-    source_video: _sourceVideo,
-    source_video_path: _sourceVideoPath,
-    extend_video: _extendVideo,
-    extend_video_path: _extendVideoPath,
-    keyframes: _keyframes,
-    references: _references,
-    ...redacted
-  } = safe;
-  void _sourceImage;
-  void _maskImage;
-  void _controlImage;
-  void _editImages;
-  void _identityImage;
-  void _audioFile;
-  void _audioPath;
-  void _sourceVideo;
-  void _sourceVideoPath;
-  void _extendVideo;
-  void _extendVideoPath;
-  void _keyframes;
-  void _references;
-  return redacted;
+  return persistenceSafeRequest(request);
 }
 
 /** Reconstitute the persisted job rail. `raw` is the localStorage payload
@@ -1018,7 +982,12 @@ function scheduleAutoRemoveOnDone(id: string) {
 /// stream surfaces within a minute instead of leaving the user staring
 /// at a frozen card indefinitely.
 export const STALE_THRESHOLD_MS = 60_000;
-const streamSlots = new StreamSlotPool(4);
+const streamSlots = new TargetStreamSlots(4);
+
+function streamTargetKey(route: HostRoute | null): string {
+  if (route?.target.baseUrl) return route.target.baseUrl;
+  return typeof window === "undefined" ? "__origin__" : window.location.origin;
+}
 
 export const __testing__ = {
   AUTO_REMOVE_DONE_MS,
@@ -1893,7 +1862,7 @@ function submitJob(
   // Four held-open render streams leave browser connection headroom for queue
   // reconciliation, gallery refreshes, and model downloads. Waiting jobs keep
   // their visible Starting state and can be canceled before they acquire a slot.
-  streamSlots.schedule(controller.signal, (release) => {
+  streamSlots.schedule(streamTargetKey(route), controller.signal, (release) => {
     void startStream().finally(release);
   });
 

@@ -105,6 +105,7 @@ describe("submitBatch connection cap", () => {
   const mockSse = vi.mocked(sseStream);
   const streams: Array<{
     seed: number;
+    target: string;
     onEvent: (event: string, data: string) => void;
     resolve: () => void;
   }> = [];
@@ -144,6 +145,7 @@ describe("submitBatch connection cap", () => {
         let settled = false;
         const stream = {
           seed: (opts.body as { seed: number }).seed,
+          target: opts.target?.baseUrl ?? "__primary__",
           onEvent: opts.onEvent,
           resolve: () => {},
         };
@@ -801,6 +803,53 @@ describe("submitBatch connection cap", () => {
     resolveStream(401);
     await flushPromises();
     expect(streams).toHaveLength(4);
+
+    while (streams.length > 0) {
+      streams[0]!.resolve();
+      await flushPromises();
+    }
+    await Promise.all([first.settled, second.settled]);
+  });
+
+  it("drains the mobile media backlog per target and keeps waiting jobs visible and cancellable", async () => {
+    const store = useGenerationStore();
+    const mobileRoute = (hostId: string, baseUrl: string) => ({
+      hostId,
+      label: hostId,
+      kind: "remote" as const,
+      target: { baseUrl, apiKey: `${hostId}-secret` },
+      instanceId: `${hostId}-instance`,
+      heterogeneousBatch: true,
+      durableBatchOutcomes: true,
+      mirrorRemoteOutput: false,
+      retainEncodedResult: false,
+      metadataOnlyCompletion: true,
+    });
+    const first = store.submitBatch(
+      { ...req, seed: 600, source_image: "session-only-a" },
+      5,
+      mobileRoute("phone-a", "http://phone-a:7680"),
+    );
+    const second = store.submitBatch(
+      { ...req, seed: 700, source_image: "session-only-b" },
+      5,
+      mobileRoute("phone-b", "http://phone-b:7680"),
+    );
+
+    await flushPromises();
+    expect(store.jobs.map((job) => job.error)).toEqual(Array(10).fill(null));
+    expect(store.pending).toHaveLength(10);
+    expect(streams.filter((stream) => stream.target === "http://phone-a:7680")).toHaveLength(4);
+    expect(streams.filter((stream) => stream.target === "http://phone-b:7680")).toHaveLength(4);
+
+    expect(await store.cancel(first.jobs[4]!.clientId)).toBe(true);
+    resolveStream(600);
+    await flushPromises();
+    expect(streams.some((stream) => stream.seed === 604)).toBe(false);
+
+    resolveStream(700);
+    await flushPromises();
+    expect(streams.some((stream) => stream.seed === 704)).toBe(true);
 
     while (streams.length > 0) {
       streams[0]!.resolve();
