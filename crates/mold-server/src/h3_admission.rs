@@ -28,16 +28,30 @@ pub(crate) const H3_TINY_MATH_MAX_PACKED_ROWS: u64 = 4_096;
 /// budget, never on this figure.
 ///
 /// The corrected per-phase host ledger puts the peak in the Qwen phases at the
-/// qualified envelope: ~20.26 GB of packed CPU parameters + 4.83 GB activation
+/// qualified envelope: ~15.69 GB of packed CPU parameters + 4.83 GB activation
 /// workspace + ~1.56 GB load staging + the ~0.67 GB fixed runtime baseline,
-/// about 27.3 GB. (The activation term was 3.96 GB before #1245 raised the
+/// about 22.75 GB. (The activation term was 3.96 GB before #1245 raised the
 /// reviewed prompt budget and re-measured the workspace at the longer Qwen
 /// sequence; the CPU-placed conditioner is what puts that grant on the host
-/// side.) The old flat sum reached ~74 GB only by charging 42.5 GB of artifact
-/// FILE bytes and a 5.2 GB file-backed VAE mapping as anonymous demand. A
-/// 32 GiB host still fails — 27.3 GB plus the 8 GiB minimum floor exceeds it —
-/// so 64 GiB is the smallest honest recommendation. The old 128 GiB figure was
-/// L40S-era and derived from that same flat sum.
+/// side. The parameter term was ~20.26 GB before #1316 stopped widening the
+/// NVFP4 block scales into an `f32` host cache — 4.57 GB of pure
+/// representation waste — so it is now identically the source-encoded
+/// parameter total.) The old flat sum reached ~74 GB only by charging 42.5 GB
+/// of artifact FILE bytes and a 5.2 GB file-backed VAE mapping as anonymous
+/// demand.
+///
+/// That arithmetic no longer refuses a 32 GiB host outright: 22.75 GB plus the
+/// 8 GiB minimum floor is ~31.3 GB against 34.36 GB, so a 32 GiB box is now
+/// marginal rather than impossible. It is not enough to lower this tier on.
+/// The ledger deliberately measures neither allocator bookkeeping, transient
+/// quantization conversion vectors, nor backend workspaces
+/// (`H3QwenNvfp4RuntimeMemoryFacts`), and the ~3 GB left over is under 9% of
+/// that 32 GiB host — less slack than the unmeasured terms plus the operating
+/// system and page-cache pressure on a machine also holding a 42.5 GB artifact
+/// set. 64 GiB stays the
+/// recommendation; a 48 GiB or 32 GiB tier is a measurement campaign, not an
+/// arithmetic edit. The old 128 GiB figure was L40S-era and derived from that
+/// same flat sum.
 pub(crate) const H3_CURATED_HOST_RAM_RECOMMENDATION_BYTES: u64 = 64 * GIB;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -2074,9 +2088,9 @@ mod tests {
     const COMFY_QWEN_SOURCE_PARAMETER_BYTES: u64 = 15_686_891_864;
     const COMFY_QWEN_MAX_TENSOR_STAGING_BYTES: u64 = 777_912_320;
     const COMFY_QWEN_RETAINED_HEADER_BYTES: u64 = 231_408;
-    const COMFY_QWEN_CUDA_HOST_PARAMETER_BYTES: u64 = 19_066_444_664;
+    const COMFY_QWEN_CUDA_HOST_PARAMETER_BYTES: u64 = 14_495_308_664;
     const COMFY_QWEN_CUDA_DEVICE_PARAMETER_BYTES: u64 = 1_191_583_200;
-    const COMFY_QWEN_CPU_HOST_PARAMETER_BYTES: u64 = 20_258_027_864;
+    const COMFY_QWEN_CPU_HOST_PARAMETER_BYTES: u64 = 15_686_891_864;
 
     fn sha(byte: u8) -> String {
         format!("{byte:02x}").repeat(32)
@@ -2777,8 +2791,12 @@ mod tests {
             enormous.safety_floor_bytes(),
             (u64::MAX / 100) * 15 + ((u64::MAX % 100) * 15 / 100)
         );
-        // The corrected per-phase host ledger peaks at ~27.3 GB in the Qwen
-        // phases; 32 GiB cannot hold that plus the 8 GiB minimum floor.
+        // The corrected per-phase host ledger peaks at ~22.75 GB in the Qwen
+        // phases since #1316. That plus the 8 GiB minimum floor now fits a
+        // 32 GiB host on paper, with under 9% of that host to spare for the
+        // terms the ledger deliberately does not measure, so the advisory tier
+        // deliberately stays where it is. Lowering it is a measurement
+        // campaign; this assertion is the gate that makes it a reviewed one.
         assert_eq!(H3_CURATED_HOST_RAM_RECOMMENDATION_BYTES, 64 * GIB);
 
         let inventory = landed_inventory(minimax_h3::FL2VA_OFFICIAL);
@@ -3511,8 +3529,31 @@ mod tests {
             H3AdmissionPolicy::default(),
         )
         .unwrap();
+        // Since #1316 the retained representation is identically the
+        // source-encoded parameter total, so a *downward* perturbation is no
+        // longer merely a disagreement with the frozen plan — it is an
+        // undercharge of the authenticated source, and
+        // `H3QwenCheckpointMemoryFacts::validate` refuses it first. Both
+        // directions are asserted: the coarse checkpoint invariant below, and
+        // the post-plan mismatch through an *overcharge*, which that invariant
+        // deliberately permits so only the exact-plan comparison can catch it.
+        let mut undercharged_after_plan = exact.clone();
+        undercharged_after_plan
+            .qwen
+            .cuda
+            .host_resident_parameter_bytes -= 1;
+        let error = bind_h3_factory_authority(
+            &plan,
+            &inventory,
+            &undercharged_after_plan,
+            &device,
+            &mut private_engine_config(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, H3AdmissionError::InvalidCheckpointFacts(_)));
+
         let mut changed_after_plan = exact.clone();
-        changed_after_plan.qwen.cuda.host_resident_parameter_bytes -= 1;
+        changed_after_plan.qwen.cuda.host_resident_parameter_bytes += 1;
         let error = bind_h3_factory_authority(
             &plan,
             &inventory,
@@ -3523,8 +3564,12 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, H3AdmissionError::InvalidRuntimeFacts(_)));
 
-        let mut cpu_undercharge = compact_cpu_route_checkpoint(&inventory);
-        cpu_undercharge.qwen.cpu.host_resident_parameter_bytes -= 1;
+        // Same reason as above: the CPU route retains exactly the source total
+        // since #1316, so the route-exactness of the private loader authority
+        // is probed with an overcharge, which admission's own `>= source`
+        // invariant admits and only the loader's exact comparison rejects.
+        let mut cpu_overcharge = compact_cpu_route_checkpoint(&inventory);
+        cpu_overcharge.qwen.cpu.host_resident_parameter_bytes += 1;
         let cpu_runtime = compact_cpu_route_runtime();
         let cpu_device = cuda(512 * MIB);
         let (task, shape) = prepared(minimax_h3::FL2VA_COMFY, 124);
@@ -3532,7 +3577,7 @@ mod tests {
             task,
             shape,
             &inventory,
-            &cpu_undercharge,
+            &cpu_overcharge,
             Some(&cpu_runtime),
             std::slice::from_ref(&cpu_device),
             H3HostMemory {
@@ -3542,20 +3587,17 @@ mod tests {
             H3AdmissionPolicy::default(),
         )
         .unwrap();
-        let mut cpu_undercharge_config = private_engine_config();
+        let mut cpu_overcharge_config = private_engine_config();
         bind_h3_factory_authority(
             &cpu_plan,
             &inventory,
-            &cpu_undercharge,
+            &cpu_overcharge,
             &cpu_device,
-            &mut cpu_undercharge_config,
+            &mut cpu_overcharge_config,
         )
         .unwrap();
         validate_h3_private_qwen_loader_memory_authority(
-            cpu_undercharge_config
-                .h3_factory_authority
-                .as_ref()
-                .unwrap(),
+            cpu_overcharge_config.h3_factory_authority.as_ref().unwrap(),
             H3PrivateQwenLoaderMemoryRoute::Cpu,
         )
         .unwrap_err();

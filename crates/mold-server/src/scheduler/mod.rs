@@ -8275,11 +8275,11 @@ mod tests {
     fn an_h3_host_shortfall_names_host_bytes_instead_of_being_sniffed_for_a_substring() {
         let reason = crate::execution_plan::h3_host_headroom_shortfall_reason(
             "cuda:0",
-            19_871_751_032,
+            15_300_615_032,
             8_869_770_650,
         );
         assert!(reason.contains("host"), "{reason}");
-        assert!(reason.contains("19871751032"), "{reason}");
+        assert!(reason.contains("15300615032"), "{reason}");
         assert!(reason.contains("8869770650"), "{reason}");
         // The opaque revalidation sentence this used to be recovered from
         // never contained "host" at all, which is what filed a host-memory

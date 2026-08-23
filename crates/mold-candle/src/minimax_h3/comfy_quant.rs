@@ -31,6 +31,8 @@
 //! limited to Mold's separately qualified runtime route.
 
 use candle::{DType, Device, Result, Tensor};
+use float8::F8E4M3 as f8e4m3;
+use std::sync::OnceLock;
 
 /// Comfy's released H3 INT8 checkpoints require this exact ConvRot group.
 pub const H3_COMFY_CONVROT_GROUP_SIZE: usize = 256;
@@ -100,6 +102,34 @@ pub fn select_h3_int8_linear_kind(
 const E2M1_LUT: [f32; 16] = [
     0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
 ];
+
+/// Widened image of all 256 F8E4M3 bit patterns.
+///
+/// F8E4M3 has exactly 256 encodings and every one has an exact `f32` image, so
+/// this table is a lossless replacement for widening the checkpoint's scales
+/// into a host-resident `f32` cache. It is built through Candle's own
+/// `to_dtype` conversion — never a hand-rolled FP8 decode — so the table can
+/// never drift from the conversion it replaces.
+fn f8e4m3_widening_table() -> Result<&'static [f32; 256]> {
+    static TABLE: OnceLock<std::result::Result<[f32; 256], String>> = OnceLock::new();
+    TABLE
+        .get_or_init(|| build_f8e4m3_widening_table().map_err(|error| error.to_string()))
+        .as_ref()
+        .map_err(|message| candle::Error::Msg(message.clone()))
+}
+
+fn build_f8e4m3_widening_table() -> Result<[f32; 256]> {
+    let widened = Tensor::from_vec(
+        (0..=u8::MAX).map(f8e4m3::from_bits).collect::<Vec<_>>(),
+        256,
+        &Device::Cpu,
+    )?
+    .to_dtype(DType::F32)?
+    .to_vec1::<f32>()?;
+    let mut table = [0.0f32; 256];
+    table.copy_from_slice(&widened);
+    Ok(table)
+}
 
 fn ensure_floating(dtype: DType, role: &str) -> Result<()> {
     match dtype {
@@ -946,11 +976,16 @@ impl H3ComfyInt8ConvRotLinear {
     }
 }
 
-fn unswizzle_nvfp4_scales(
-    swizzled: &[f32],
+/// Gather the logical scale grid out of the swizzled tile layout.
+///
+/// This is index arithmetic only, so it is generic over the stored element:
+/// production reads the checkpoint's raw F8E4M3 bytes, while the pinned
+/// comfy-kitchen oracle tests exercise the same gather over `f32`.
+fn unswizzle_nvfp4_scales<T: Copy + Default>(
+    swizzled: &[T],
     logical_rows: usize,
     logical_columns: usize,
-) -> Result<Vec<f32>> {
+) -> Result<Vec<T>> {
     let row_blocks = logical_rows.div_ceil(128);
     let column_blocks = logical_columns.div_ceil(4);
     let padded_rows = row_blocks
@@ -971,7 +1006,7 @@ fn unswizzle_nvfp4_scales(
     let logical_elements = logical_rows.checked_mul(logical_columns).ok_or_else(|| {
         candle::Error::Msg("MiniMax H3 NVFP4 logical scale size overflows".into())
     })?;
-    let mut natural = vec![0.0; logical_elements];
+    let mut natural = vec![T::default(); logical_elements];
     for row in 0..logical_rows {
         let row_block = row / 128;
         let row_in_block = row % 128;
@@ -1120,7 +1155,11 @@ impl H3ComfyInt8TensorwiseEmbedding {
 #[derive(Clone, Debug)]
 pub struct H3ComfyNvfp4AwqLinear {
     packed_weight: Tensor,
-    natural_block_scales: Vec<f32>,
+    /// The checkpoint's own one-byte F8E4M3 scales, unswizzled into the logical
+    /// grid. Widening happens per lookup through [`f8e4m3_widening_table`];
+    /// retaining an `f32` copy here quadrupled the host footprint of the
+    /// shipped Qwen3-VL conditioner by 4.57 GB for no arithmetic difference.
+    natural_block_scales: Vec<u8>,
     tensor_scale: f32,
     pre_quant_scale: Option<Tensor>,
     out_features: usize,
@@ -1231,14 +1270,27 @@ impl H3ComfyNvfp4AwqLinear {
             }
         }
         let swizzled = block_scales
-            .to_dtype(DType::F32)?
             .flatten_all()?
-            .to_vec1::<f32>()?;
+            .to_vec1::<f8e4m3>()?
+            .into_iter()
+            .map(|scale| scale.to_bits())
+            .collect::<Vec<u8>>();
         let natural_block_scales =
             unswizzle_nvfp4_scales(&swizzled, padded_out_features, blocks_per_row)?;
-        if natural_block_scales
+        // The old check widened every scale and tested it individually. The
+        // byte cache reaches the identical verdict from one pass that records
+        // which encodings occur followed by a scan of just those table entries,
+        // so `-0.0` (0x80) is still accepted and the two NaN encodings
+        // (0x7f / 0xff) are still refused.
+        let table = f8e4m3_widening_table()?;
+        let mut present = [false; 256];
+        for bits in &natural_block_scales {
+            present[*bits as usize] = true;
+        }
+        if present
             .iter()
-            .any(|scale| !scale.is_finite() || *scale < 0.0)
+            .zip(table.iter())
+            .any(|(present, scale)| *present && (!scale.is_finite() || *scale < 0.0))
         {
             candle::bail!("MiniMax H3 NVFP4 block scales must be finite and nonnegative")
         }
@@ -1267,8 +1319,8 @@ impl H3ComfyNvfp4AwqLinear {
     ///
     /// The AWQ vector is charged at its incoming F16, BF16, or F32 dtype; it is
     /// converted to F32 only while validating or executing a forward pass. The
-    /// FP8 block scales are charged at their source byte width even though this
-    /// portable implementation retains an unswizzled F32 cache for execution.
+    /// FP8 block scales are charged at their source byte width, which is also
+    /// exactly what the unswizzled host cache retains.
     pub fn encoded_weight_bytes(&self) -> Result<usize> {
         let packed = self
             .padded_out_features
@@ -1301,7 +1353,7 @@ impl H3ComfyNvfp4AwqLinear {
     /// Dense F32 device-weight bytes staged for one output-row chunk.
     ///
     /// This deliberately excludes the already-resident packed host tensor,
-    /// its unswizzled scale cache, and the final output tensor.
+    /// its unswizzled byte scale cache, and the final output tensor.
     pub fn portable_weight_staging_bytes(&self, rows_per_chunk: usize) -> Result<usize> {
         if rows_per_chunk == 0 {
             candle::bail!("MiniMax H3 NVFP4 row chunk must be positive")
@@ -1314,6 +1366,7 @@ impl H3ComfyNvfp4AwqLinear {
     }
 
     fn dequantize_rows(&self, start: usize, rows: usize, device: &Device) -> Result<Tensor> {
+        let table = f8e4m3_widening_table()?;
         let packed_columns = self.padded_in_features / 2;
         let blocks_per_row = self.padded_in_features / H3_COMFY_NVFP4_BLOCK_SIZE;
         let packed = self
@@ -1337,7 +1390,7 @@ impl H3ComfyNvfp4AwqLinear {
                     byte & 0x0f
                 };
                 output[row * self.in_features + column] = E2M1_LUT[nibble as usize]
-                    * scales[column / H3_COMFY_NVFP4_BLOCK_SIZE]
+                    * table[scales[column / H3_COMFY_NVFP4_BLOCK_SIZE] as usize]
                     * self.tensor_scale;
             }
         }
@@ -1369,9 +1422,9 @@ impl H3ComfyNvfp4AwqLinear {
     /// There is deliberately no device dispatch here, on any backend: NVFP4
     /// has no native kernel in mold at all, so CUDA, Metal, and CPU share this
     /// one arm. The FP8-E4M3 block scales never reach a device — they are
-    /// unswizzled to `f32` on the host at construction — so this path needs no
-    /// Metal fp8 cast and is exempt from the fp8 refusal that
-    /// `H3ComfyFp8ScaledLinear` carries.
+    /// unswizzled on the host at construction and widened through a 256-entry
+    /// table at lookup — so this path needs no Metal fp8 cast and is exempt
+    /// from the fp8 refusal that `H3ComfyFp8ScaledLinear` carries.
     pub fn forward_dequantized(
         &self,
         input: &Tensor,
@@ -1417,6 +1470,7 @@ impl H3ComfyNvfp4AwqLinear {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use float8::F8E4M3 as f8e4m3;
 
     fn max_error(left: &Tensor, right: &Tensor) -> Result<f32> {
         let left = left.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
@@ -2193,6 +2247,230 @@ mod tests {
             .collect::<Vec<_>>();
         let swizzled = swizzle_scales(&natural, rows, columns);
         assert_eq!(unswizzle_nvfp4_scales(&swizzled, rows, columns)?, natural);
+        Ok(())
+    }
+
+    /// Every F8E4M3 bit pattern this loader accepts: the 127 finite
+    /// non-negative patterns plus `0x80`, which is `-0.0` and therefore passes
+    /// the `< 0.0` check. The negative finite patterns and the two NaN
+    /// encodings (`0x7f` / `0xff`) are refused at construction, so no accepted
+    /// scale cache can contain them.
+    fn accepted_f8e4m3_bit_patterns() -> Vec<u8> {
+        (0x00u8..=0x7e).chain(std::iter::once(0x80u8)).collect()
+    }
+
+    fn swizzle_scale_bits(natural: &[u8], rows: usize, columns: usize) -> Vec<u8> {
+        let row_blocks = rows.div_ceil(128);
+        let column_blocks = columns.div_ceil(4);
+        let mut swizzled = vec![0u8; row_blocks * 128 * column_blocks * 4];
+        for row in 0..rows {
+            let row_block = row / 128;
+            let row_in_block = row % 128;
+            let quarter = row_in_block / 32;
+            let lane = row_in_block % 32;
+            for column in 0..columns {
+                let column_block = column / 4;
+                let column_in_block = column % 4;
+                let swizzled_column = quarter * 4 + column_in_block;
+                let tile = row_block * column_blocks + column_block;
+                swizzled[tile * 512 + lane * 16 + swizzled_column] =
+                    natural[row * columns + column];
+            }
+        }
+        swizzled
+    }
+
+    /// The gate for #1316: the host scale cache narrowed from `f32` to the
+    /// checkpoint's own byte plus a widening table, so every dequantized
+    /// element must stay **bit**-identical, never merely close.
+    ///
+    /// The expectation is derived independently of the cache: the same
+    /// `Tensor::to_dtype(F32)` widening the loader used to perform is applied
+    /// here to the natural (already unswizzled) scale grid, and the dense
+    /// weight is composed by hand as `E2M1_LUT * widened_scale * tensor_scale`.
+    /// A `-0.0` scale meeting a `-0.0` E2M1 code is exactly why this compares
+    /// `f32::to_bits` rather than values.
+    #[test]
+    fn nvfp4_dequantization_is_bit_identical_across_every_accepted_scale_pattern() -> Result<()> {
+        let device = Device::Cpu;
+        let out_features = 8;
+        let in_features = 256;
+        let padded_rows = 16;
+        let packed_columns = in_features / 2;
+        let blocks_per_row = in_features / H3_COMFY_NVFP4_BLOCK_SIZE;
+        let tensor_scale = 0.375f32;
+
+        // 16 padded rows x 16 blocks = 256 scales, so each of the 128 accepted
+        // bit patterns appears twice: 0x00, 0x80 (-0.0), the subnormals
+        // 0x01..=0x07, and 0x7e (448.0, the largest finite E4M3 value).
+        let patterns = accepted_f8e4m3_bit_patterns();
+        assert_eq!(patterns.len(), 128);
+        let natural_bits = (0..padded_rows * blocks_per_row)
+            .map(|index| patterns[index % patterns.len()])
+            .collect::<Vec<_>>();
+        let block_scales = Tensor::from_vec(
+            swizzle_scale_bits(&natural_bits, padded_rows, blocks_per_row)
+                .into_iter()
+                .map(f8e4m3::from_bits)
+                .collect::<Vec<_>>(),
+            (128, 16),
+            &device,
+        )?;
+        assert_eq!(block_scales.dtype(), DType::F8E4M3);
+
+        let packed = (0..padded_rows * packed_columns)
+            .map(|index| ((index * 37 + 11) % 256) as u8)
+            .collect::<Vec<_>>();
+        let awq = (0..in_features)
+            .map(|column| 1.0 + (column % 5) as f32 / 4.0)
+            .collect::<Vec<_>>();
+        let linear = H3ComfyNvfp4AwqLinear::new(
+            Tensor::from_vec(packed.clone(), (padded_rows, packed_columns), &device)?,
+            block_scales,
+            Tensor::new(tensor_scale, &device)?,
+            Tensor::from_vec(awq.clone(), in_features, &device)?,
+            out_features,
+            in_features,
+        )?;
+
+        // Independent expectation: candle's own F8E4M3 -> F32 widening applied
+        // to the natural grid, then the published dequantization arithmetic in
+        // the published order.
+        let widened = Tensor::from_vec(
+            natural_bits
+                .iter()
+                .map(|bits| f8e4m3::from_bits(*bits))
+                .collect::<Vec<_>>(),
+            natural_bits.len(),
+            &device,
+        )?
+        .to_dtype(DType::F32)?
+        .to_vec1::<f32>()?;
+        let mut expected = vec![0.0f32; out_features * in_features];
+        for row in 0..out_features {
+            for column in 0..in_features {
+                let byte = packed[row * packed_columns + column / 2];
+                let nibble = if column.is_multiple_of(2) {
+                    byte >> 4
+                } else {
+                    byte & 0x0f
+                };
+                expected[row * in_features + column] = E2M1_LUT[nibble as usize]
+                    * widened[row * blocks_per_row + column / H3_COMFY_NVFP4_BLOCK_SIZE]
+                    * tensor_scale;
+            }
+        }
+
+        // A chunk width that does not divide the row count exercises the
+        // partial trailing chunk as well.
+        let actual = linear
+            .dequantize_weight(DType::F32, &device, 3)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert_eq!(actual.len(), expected.len());
+        for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "dequantized element {index} differs bitwise: {actual} vs {expected}"
+            );
+        }
+
+        // The forward pass consumes the same weights, so its output is bitwise
+        // reproducible from the independently composed dense weight.
+        let input = Tensor::from_vec(
+            (0..in_features)
+                .map(|column| (column as f32 % 7.0 - 3.0) / 8.0)
+                .collect::<Vec<_>>(),
+            (1, in_features),
+            &device,
+        )?;
+        let reference = input
+            .broadcast_mul(&Tensor::from_vec(awq, (1, in_features), &device)?)?
+            .matmul(
+                &Tensor::from_vec(expected, (out_features, in_features), &device)?
+                    .t()?
+                    .contiguous()?,
+            )?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let forward = linear
+            .forward_dequantized(&input, None, DType::F32, out_features)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        for (index, (actual, expected)) in forward.iter().zip(&reference).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "forward element {index} differs bitwise: {actual} vs {expected}"
+            );
+        }
+
+        // Source-encoded accounting prices the scales at their checkpoint byte
+        // width and must not move with the host representation.
+        assert_eq!(
+            linear.encoded_weight_bytes()?,
+            padded_rows * in_features / 2 + 128 * 16 + 4 + in_features * 4
+        );
+        Ok(())
+    }
+
+    /// The point of #1316: the host cache is one byte per checkpoint scale, so
+    /// the retained representation costs exactly what the source encodes. The
+    /// memory authority charges `nvfp4_block_scale_bytes` unexpanded on the
+    /// strength of this.
+    #[test]
+    fn nvfp4_host_scale_cache_is_one_byte_per_logical_source_scale() -> Result<()> {
+        let device = Device::Cpu;
+        let out_features = 8;
+        let in_features = 256;
+        let padded_rows = 16;
+        let blocks_per_row = in_features / H3_COMFY_NVFP4_BLOCK_SIZE;
+        let linear = H3ComfyNvfp4AwqLinear::new_with_optional_awq(
+            Tensor::zeros((padded_rows, in_features / 2), DType::U8, &device)?,
+            Tensor::ones((128, 16), DType::F32, &device)?.to_dtype(DType::F8E4M3)?,
+            Tensor::new(1.0f32, &device)?,
+            None,
+            out_features,
+            in_features,
+        )?;
+        assert_eq!(
+            std::mem::size_of_val(&linear.natural_block_scales[..]),
+            padded_rows * blocks_per_row
+        );
+        Ok(())
+    }
+
+    /// The 256-entry table is Candle's own widening, so a hand-rolled decode
+    /// can never drift from it. Zero, negative zero, the subnormals, and the
+    /// largest finite encoding are named because they are the values the
+    /// construction-time validation branches on.
+    #[test]
+    fn f8e4m3_widening_table_is_candles_own_conversion() -> Result<()> {
+        let table = f8e4m3_widening_table()?;
+        let widened = Tensor::from_vec(
+            (0..=u8::MAX).map(f8e4m3::from_bits).collect::<Vec<_>>(),
+            256,
+            &Device::Cpu,
+        )?
+        .to_dtype(DType::F32)?
+        .to_vec1::<f32>()?;
+        for (bits, expected) in widened.iter().enumerate() {
+            assert_eq!(
+                table[bits].to_bits(),
+                expected.to_bits(),
+                "bits {bits:#04x}"
+            );
+        }
+        assert_eq!(table[0x00].to_bits(), 0.0f32.to_bits());
+        assert_eq!(table[0x80].to_bits(), (-0.0f32).to_bits());
+        // -0.0 survives the construction-time "finite and nonnegative" check
+        // exactly as it did when the cache widened every scale eagerly.
+        assert!(table[0x80].is_finite() && table[0x80] >= 0.0);
+        assert_eq!(table[0x01], 2.0f32.powi(-9));
+        assert_eq!(table[0x7e], 448.0);
+        assert!(table[0x7f].is_nan());
+        assert!(table[0xff].is_nan());
         Ok(())
     }
 
