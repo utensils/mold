@@ -2172,23 +2172,24 @@ impl StagedWeight {
             .len
             .checked_add(1)
             .ok_or_else(|| artifact_error(self.role, "staging read bound overflows"))?;
-        let mut bounded = (&mut file).take(read_limit);
-        loop {
-            let read = bounded.read(&mut buffer).map_err(|error| {
-                artifact_error(
-                    self.role,
-                    format!("cannot re-authenticate private staging file {operation}: {error}"),
-                )
-            })?;
-            if read == 0 {
-                break;
+        {
+            let mut bounded = (&mut file).take(read_limit);
+            loop {
+                let read = bounded.read(&mut buffer).map_err(|error| {
+                    artifact_error(
+                        self.role,
+                        format!("cannot re-authenticate private staging file {operation}: {error}"),
+                    )
+                })?;
+                if read == 0 {
+                    break;
+                }
+                total = total
+                    .checked_add(read as u64)
+                    .ok_or_else(|| artifact_error(self.role, "staging byte count overflow"))?;
+                digest.update(&buffer[..read]);
             }
-            total = total
-                .checked_add(read as u64)
-                .ok_or_else(|| artifact_error(self.role, "staging byte count overflow"))?;
-            digest.update(&buffer[..read]);
         }
-        drop(bounded);
         let closed = file_identity(&file.metadata().map_err(|error| {
             artifact_error(
                 self.role,
