@@ -8,30 +8,16 @@
  * returns to the normal empty state (the parent stops rendering this).
  */
 import { computed } from "vue";
+import { STARTER_MODELS } from "@mold/studio";
 import Icon from "@ui/components/Icon.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import { useDownloads } from "../../composables/useDownloads";
+import { toast } from "../../lib/toasts";
 import type { DownloadJobWire } from "../../types";
-
-interface Starter {
-  name: string;
-  label: string;
-  note: string;
-  recommended?: boolean;
-}
 
 // Recommended-first: a fast, capable default, then the smallest/fastest, then a
 // familiar classic. Names are canonical manifest ids the downloads API accepts.
-const starters: Starter[] = [
-  {
-    name: "flux2-klein:q4",
-    label: "FLUX.2 Klein",
-    note: "fast · 6.9 GB",
-    recommended: true,
-  },
-  { name: "z-image:turbo", label: "Z-Image Turbo", note: "fastest · 3.4 GB" },
-  { name: "sdxl:base", label: "SDXL", note: "classic · 6.6 GB" },
-];
+const starters = STARTER_MODELS;
 
 const downloads = useDownloads();
 
@@ -55,11 +41,16 @@ function statusLabel(job: DownloadJobWire): string {
 }
 
 const anyPulling = computed(() =>
-  starters.some((s) => jobFor(s.name) !== null),
+  starters.some((s) => jobFor(s.model) !== null),
 );
 
-function pull(name: string) {
-  void downloads.enqueue(name);
+async function pull(model: string) {
+  try {
+    await downloads.enqueue(model);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    toast("error", `couldn't pull ${model} — ${detail}`);
+  }
 }
 </script>
 
@@ -76,36 +67,36 @@ function pull(name: string) {
     <div class="cold__starters">
       <div
         v-for="s in starters"
-        :key="s.name"
+        :key="s.model"
         class="cold__card"
-        :data-test="`starter-${s.name}`"
+        :data-test="`starter-${s.model}`"
       >
         <div class="cold__meta">
           <div class="cold__name-row">
-            <span class="cold__name">{{ s.label }}</span>
+            <span class="cold__name">{{ s.displayName }}</span>
             <span v-if="s.recommended" class="cold__rec">recommended</span>
           </div>
-          <span class="cold__note">{{ s.note }}</span>
+          <span class="cold__note">{{ s.speed }} · {{ s.size }}</span>
         </div>
 
         <div
-          v-if="jobFor(s.name)"
+          v-if="jobFor(s.model)"
           class="cold__progress"
-          :data-test="`starter-progress-${s.name}`"
+          :data-test="`starter-progress-${s.model}`"
         >
           <ProgressBar
-            :value="pct(jobFor(s.name)!)"
+            :value="pct(jobFor(s.model)!)"
             tone="accent"
             :height="6"
           />
-          <span class="cold__status">{{ statusLabel(jobFor(s.name)!) }}</span>
+          <span class="cold__status">{{ statusLabel(jobFor(s.model)!) }}</span>
         </div>
         <button
           v-else
           type="button"
           class="cold__pull"
-          :data-test="`starter-pull-${s.name}`"
-          @click="pull(s.name)"
+          :data-test="`starter-pull-${s.model}`"
+          @click="pull(s.model)"
         >
           Pull
         </button>
