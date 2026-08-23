@@ -331,9 +331,11 @@ pub fn reclaimed_disk_bytes(path: &Path, counted_inodes: &mut HashSet<(u64, u64)
 
 /// Recursively remove files under `dir` that are not in `referenced`.
 /// Returns `(files_deleted, bytes_freed)`.
-/// `removed` collects every clean path actually unlinked, so the caller can
-/// name each one: a destructive operation must show what it deleted, not just
-/// how many files it counted.
+/// `removed` collects every path actually unlinked — the shared clean path
+/// AND, for an orphan backed by the managed hf-hub cache, its blob and each
+/// snapshot symlink — so the caller can name each one. A destructive
+/// operation must show what it deleted, not just how many files it counted,
+/// and one counted orphan can be several unlinks.
 pub fn remove_orphaned_files_recursive(
     dir: &Path,
     referenced: &HashSet<String>,
@@ -361,12 +363,17 @@ pub fn remove_orphaned_files_recursive(
                 let mut counted_inodes = HashSet::new();
 
                 for target in &cache_targets {
-                    if target.exists() {
+                    // `symlink_metadata`, not `exists`: the blob is unlinked
+                    // before its snapshot links, and `exists` follows a
+                    // symlink — so the links read as absent and were left
+                    // dangling instead of removed (and so unreportable).
+                    if target.symlink_metadata().is_ok() {
                         let size = reclaimed_disk_bytes(target, &mut counted_inodes);
                         match std::fs::remove_file(target) {
                             Ok(()) => {
                                 removed_any = true;
                                 removed_bytes += size;
+                                removed.push(target.clone());
                             }
                             Err(e) => {
                                 eprintln!(
@@ -468,13 +475,11 @@ pub fn clean_orphaned_shared_files(config: &Config) -> (u64, u64) {
 
     if count > 0 {
         // Name every path. "cleaned up 109 orphaned shared files" is not an
-        // account a user can check a destructive operation against.
+        // account a user can check a destructive operation against. The list
+        // is longer than the count on purpose: one orphan backed by the
+        // managed hf-hub cache unlinks its blob and snapshot links too.
         for path in &removed {
-            eprintln!(
-                "{} removed orphaned shared file {}",
-                theme::prefix_note(),
-                path.display()
-            );
+            eprintln!("{} removed {}", theme::prefix_note(), path.display());
         }
         eprintln!(
             "{} cleaned up {} orphaned shared file{} (freed {})",

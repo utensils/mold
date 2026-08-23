@@ -4068,10 +4068,16 @@ mod tests {
 
         let adapter_path = path_of(turbo_manifest, ModelComponent::DistilledLora);
         let transformer_path = path_of(base_manifest, ModelComponent::Transformer);
-        for path in [&adapter_path, &transformer_path] {
-            let path = std::path::Path::new(path);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, b"weights").unwrap();
+        // Both stacks are materialized WHOLE. Ownership requires a complete
+        // install, and completeness is a manifest question — the audio VAE
+        // and the runtime support configs count even though no `ModelConfig`
+        // field can name them.
+        for manifest in [base_manifest, turbo_manifest] {
+            for file in &manifest.files {
+                let path = root.join(storage_path(manifest, file));
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, b"weights").unwrap();
+            }
         }
 
         let mut config = Config::default();

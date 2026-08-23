@@ -6,5 +6,8 @@
   files as orphans and deleted them out from under installed MiniMax H3 and
   LTX-2.3 checkpoints. A partially installed model now also keeps its shared
   dependencies so `mold pull` can repair it, `.sha256-verified` markers are
-  kept with the files they attest, and every path the sweep deletes is printed
-  instead of only being counted.
+  kept with the files they attest. Whether a model is complete enough to own
+  shared components is asked of its manifest for the same reason. The sweep now
+  prints every path it unlinks — the shared file plus an hf-cache-backed
+  orphan's blob and snapshot links, which it also stopped leaving dangling —
+  instead of only counting them.

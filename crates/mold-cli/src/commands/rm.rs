@@ -659,6 +659,19 @@ mod tests {
             "snapshot symlink should be removed alongside the blob"
         );
 
+        // The reported list is what the caller prints. It must name every
+        // path that actually disappeared, not just the shared one — an
+        // hf-cache-backed orphan unlinks its blob and snapshot links too.
+        let reported: HashSet<std::path::PathBuf> = removed.iter().cloned().collect();
+        let vanished: HashSet<std::path::PathBuf> =
+            [clean_path.clone(), blob.clone(), snapshot_path.clone()]
+                .into_iter()
+                .collect();
+        assert_eq!(
+            reported, vanished,
+            "the reported paths must equal the paths that were unlinked"
+        );
+
         std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
