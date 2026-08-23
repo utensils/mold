@@ -60,6 +60,7 @@ pub mod model_cache;
 pub mod model_manager;
 pub mod queue;
 pub mod queue_journal;
+pub mod queue_media;
 pub mod rate_limit;
 pub mod reference_uploads;
 pub mod request_id;
