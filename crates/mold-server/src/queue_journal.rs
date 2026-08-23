@@ -884,9 +884,11 @@ impl QueueJournal {
             .fail_completion_lookup
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
-            return Err(generation_queue::CompletedOutputLookupError::Infrastructure(
-                anyhow::anyhow!("injected completion-lookup failure"),
-            ));
+            return Err(
+                generation_queue::CompletedOutputLookupError::Infrastructure(anyhow::anyhow!(
+                    "injected completion-lookup failure"
+                )),
+            );
         }
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
             return Ok(None);
@@ -1069,6 +1071,21 @@ impl QueueJournal {
     pub(crate) fn fail_completion_lookup_for_tests(&self) {
         self.fail_completion_lookup
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam: make the next feeder claim release fail after the database
+    /// has accepted the claim, preserving the exact token for an in-process
+    /// retry.
+    #[cfg(test)]
+    pub(crate) fn fail_claim_release_for_tests(&self) {
+        self.fail_claim_release
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn claim_release_failure_pending_for_tests(&self) -> bool {
+        self.fail_claim_release
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Drop every row whose output already exists.

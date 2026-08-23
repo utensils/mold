@@ -92,7 +92,7 @@ async fn run_with_retry_delay(
         tokio::pin!(durable_wake);
         tokio::pin!(capacity_wake);
 
-        let report = feed_available(&state, current_output_dir.as_deref()).await;
+        let report = feed_available(&state, current_output_dir.as_deref(), &shutdown).await;
         if report.submitted > 0 || report.held > 0 {
             tracing::debug!(
                 submitted = report.submitted,
@@ -163,9 +163,81 @@ where
     }
 }
 
+/// Return a token-owned row to the durable backlog before the feeder resumes.
+///
+/// A failed release leaves the exact claim token on both the SQLite row and
+/// the returned ticket. Retry that ticket in process after the metadata DB's
+/// authoritative contention window. If shutdown wins the wait, dropping the
+/// returned ticket is inert and startup recovery clears the preserved token.
+async fn retain_for_retry(
+    mut ticket: crate::queue_journal::QueueTicket,
+    shutdown: &tokio_util::sync::CancellationToken,
+) {
+    loop {
+        let job = ticket.id().to_owned();
+        let retain_task = tokio::task::spawn_blocking(move || ticket.retain());
+        let retained = tokio::select! {
+            retained = retain_task => retained,
+            _ = shutdown.cancelled() => {
+                // The blocking attempt owns the ticket until it finishes. If
+                // release fails, its returned Retry ticket is inert when the
+                // detached task result is dropped; if it succeeds, the row is
+                // already back in the durable backlog.
+                tracing::info!(%job, "shutdown left a durable claim release to finish safely");
+                return;
+            }
+        };
+        match retained {
+            Ok(crate::queue_journal::RetainOutcome::Released) => return,
+            Ok(crate::queue_journal::RetainOutcome::Stale) => {
+                tracing::warn!(%job, "durable feeder claim became stale while retaining");
+                return;
+            }
+            Ok(crate::queue_journal::RetainOutcome::Retry {
+                ticket: retry_ticket,
+                error,
+            }) => {
+                tracing::warn!(%job, %error, "durable feeder claim release will retry");
+                ticket = retry_ticket;
+                tokio::select! {
+                    _ = shutdown.cancelled() => {
+                        tracing::info!(%job, "shutdown preserved a token-owned durable row for startup recovery");
+                        return;
+                    }
+                    _ = tokio::time::sleep(mold_db::METADATA_DB_BUSY_TIMEOUT) => {}
+                }
+            }
+            Err(error) => {
+                tracing::error!(%job, %error, "durable feeder claim-release task failed");
+                return;
+            }
+        }
+    }
+}
+
+/// Make one best-effort release after the runtime queue transport has closed.
+/// There is no live feeder to resume, so a failed release deliberately drops
+/// the inert retry ticket and leaves the exact token for startup recovery.
+async fn retain_for_shutdown(ticket: crate::queue_journal::QueueTicket) {
+    let job = ticket.id().to_owned();
+    match tokio::task::spawn_blocking(move || ticket.retain()).await {
+        Ok(crate::queue_journal::RetainOutcome::Released) => {}
+        Ok(crate::queue_journal::RetainOutcome::Stale) => {
+            tracing::warn!(%job, "shutdown found a stale durable feeder claim");
+        }
+        Ok(crate::queue_journal::RetainOutcome::Retry { error, .. }) => {
+            tracing::warn!(%job, %error, "shutdown preserved a token-owned durable row for startup recovery");
+        }
+        Err(error) => {
+            tracing::error!(%job, %error, "shutdown claim-release task failed");
+        }
+    }
+}
+
 async fn feed_available(
     state: &AppState,
     current_output_dir: Option<&std::path::Path>,
+    shutdown: &tokio_util::sync::CancellationToken,
 ) -> FeederReport {
     let mut report = FeederReport::default();
     loop {
@@ -218,15 +290,15 @@ async fn feed_available(
             Ok(Ok(output)) => (output, None),
             Ok(Err(error)) if error.is_invalid_authority() => (None, Some(error.to_string())),
             Ok(Err(error)) => {
-                let _ = tokio::task::spawn_blocking(move || ticket.retain()).await;
                 drop(reservation);
+                retain_for_retry(ticket, shutdown).await;
                 tracing::error!(job = %row.id, %error, "durable feeder idempotence infrastructure failed; retaining for retry");
                 report.stop = FeederStop::RecoverableFailure;
                 return report;
             }
             Err(error) => {
-                let _ = tokio::task::spawn_blocking(move || ticket.retain()).await;
                 drop(reservation);
+                retain_for_retry(ticket, shutdown).await;
                 tracing::error!(job = %row.id, %error, "durable feeder idempotence task failed; retaining for retry");
                 report.stop = FeederStop::RecoverableFailure;
                 return report;
@@ -236,18 +308,20 @@ async fn feed_available(
             // Resolve only the claimed row. Startup remains bounded by runtime
             // queue capacity instead of reconciling the retained backlog or
             // waiting for the independent whole-gallery DB projection pass.
-            let _gallery_reader = state.gallery_publication_gate.read().await;
             let gallery_gate = state.gallery_publication_gate.clone();
             let output_dir = row.output_dir.clone();
             let completion_id = row.id.clone();
-            let archive_completion = tokio::task::spawn_blocking(move || {
-                crate::batch_transaction::find_completed_output_in_committed_archive(
-                    &gallery_gate,
-                    &output_dir,
-                    &completion_id,
-                )
-            })
-            .await;
+            let archive_completion = {
+                let _gallery_reader = state.gallery_publication_gate.read().await;
+                tokio::task::spawn_blocking(move || {
+                    crate::batch_transaction::find_completed_output_in_committed_archive(
+                        &gallery_gate,
+                        &output_dir,
+                        &completion_id,
+                    )
+                })
+                .await
+            };
             match archive_completion {
                 Ok(Ok(output)) => completed_output = output,
                 Ok(Err(error)) if error.is_invalid_authority() => {
@@ -259,15 +333,15 @@ async fn feed_available(
                     continue;
                 }
                 Ok(Err(error)) => {
-                    let _ = tokio::task::spawn_blocking(move || ticket.retain()).await;
                     drop(reservation);
+                    retain_for_retry(ticket, shutdown).await;
                     tracing::error!(job = %row.id, %error, "durable archive lookup infrastructure failed; retaining for retry");
                     report.stop = FeederStop::RecoverableFailure;
                     return report;
                 }
                 Err(error) => {
-                    let _ = tokio::task::spawn_blocking(move || ticket.retain()).await;
                     drop(reservation);
+                    retain_for_retry(ticket, shutdown).await;
                     tracing::error!(job = %row.id, %error, "durable archive lookup task failed; retaining for retry");
                     report.stop = FeederStop::RecoverableFailure;
                     return report;
@@ -419,18 +493,18 @@ async fn feed_available(
             Ok(Ok(false)) => {}
             Ok(Err(error)) => {
                 state.job_registry.remove(&row.id);
-                let _ = tokio::task::spawn_blocking(move || ticket.retain()).await;
                 drop(mutation);
                 drop(reservation);
+                retain_for_retry(ticket, shutdown).await;
                 tracing::error!(job = %row.id, %error, "durable feeder cancellation check failed");
                 report.stop = FeederStop::RecoverableFailure;
                 return report;
             }
             Err(error) => {
                 state.job_registry.remove(&row.id);
-                let _ = tokio::task::spawn_blocking(move || ticket.retain()).await;
                 drop(mutation);
                 drop(reservation);
+                retain_for_retry(ticket, shutdown).await;
                 tracing::error!(job = %row.id, %error, "durable feeder cancellation task failed");
                 report.stop = FeederStop::RecoverableFailure;
                 return report;
@@ -462,7 +536,7 @@ async fn feed_available(
             Ok(_) => report.submitted += 1,
             Err((error, mut job)) => {
                 if let Some(ticket) = job.journal.take() {
-                    let _ = tokio::task::spawn_blocking(move || ticket.retain()).await;
+                    retain_for_shutdown(ticket).await;
                 }
                 state.job_registry.remove(&id);
                 tracing::warn!(job = %id, ?error, "durable feeder transport stopped; row retained");
@@ -1367,6 +1441,115 @@ mod tests {
         shutdown.cancel();
         handle.await.unwrap();
         drop(job);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_claim_release_retries_in_process_and_hydrates_without_restart() {
+        let (state, mut rx) = state(1);
+        admit(&state, 1);
+        state.queue_journal.fail_completion_lookup_for_tests();
+        state.queue_journal.fail_claim_release_for_tests();
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = tokio::spawn(run_with_retry_delay(
+            state.clone(),
+            shutdown.clone(),
+            Duration::ZERO,
+        ));
+        while state
+            .queue_journal
+            .claim_release_failure_pending_for_tests()
+        {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(
+            state.queue.pending(),
+            0,
+            "claim-release backoff must not retain a runtime queue reservation"
+        );
+        assert!(rx.try_recv().is_err());
+
+        let job = tokio::time::timeout(
+            mold_db::METADATA_DB_BUSY_TIMEOUT + Duration::from_secs(1),
+            rx.recv(),
+        )
+        .await
+        .expect("the same feeder runtime must retry the claim release")
+        .expect("the same feeder runtime must hydrate after claim release recovers");
+        assert_eq!(job.id, "job-0");
+        assert!(
+            !handle.is_finished(),
+            "a failed claim release must not terminate the sole feeder"
+        );
+
+        state.queue_journal.retain_all();
+        shutdown.cancel();
+        handle.await.unwrap();
+        drop(job);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_during_claim_release_retry_leaves_startup_recoverable_authority() {
+        let (state, _rx) = state(1);
+        admit(&state, 1);
+        state.queue_journal.fail_completion_lookup_for_tests();
+        state.queue_journal.fail_claim_release_for_tests();
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = tokio::spawn(run_with_retry_delay(
+            state.clone(),
+            shutdown.clone(),
+            Duration::ZERO,
+        ));
+        let claimed_token = loop {
+            let token = state
+                .metadata_db
+                .as_ref()
+                .as_ref()
+                .unwrap()
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT claim_token FROM generation_queue WHERE id = 'job-0'",
+                        [],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .map_err(anyhow::Error::from)
+                })
+                .unwrap();
+            if let Some(token) = token {
+                break token;
+            }
+            tokio::task::yield_now().await;
+        };
+        while state
+            .queue_journal
+            .claim_release_failure_pending_for_tests()
+        {
+            tokio::task::yield_now().await;
+        }
+
+        shutdown.cancel();
+        handle.await.unwrap();
+        let retained_token = state
+            .metadata_db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT claim_token FROM generation_queue WHERE id = 'job-0'",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .unwrap();
+        assert_eq!(retained_token.as_deref(), Some(claimed_token.as_str()));
+
+        let recovery = state.queue_journal.recover_feeder_runtime().unwrap();
+        assert_eq!(recovery.claims_cleared, 1);
+        assert_eq!(state.queue_journal.list_all()[0].id, "job-0");
     }
 
     #[tokio::test]
