@@ -30,22 +30,33 @@ pub fn file_size(path: &str) -> u64 {
 /// Build a map of file_path -> list of model names that reference it.
 pub fn build_ref_counts(config: &Config) -> HashMap<String, Vec<String>> {
     let mut refs: HashMap<String, Vec<String>> = HashMap::new();
+    let record = |name: &str, refs: &mut HashMap<String, Vec<String>>| {
+        // Always [`model_owned_paths`], never the config entry alone: the
+        // config entry is a `ModelPaths` projection and cannot name half of
+        // what a model owns. See that function's doc comment.
+        for path in model_owned_paths(config, name) {
+            refs.entry(path).or_default().push(name.to_string());
+        }
+    };
+
     for (model_name, model_config) in &config.models {
-        let paths = model_config.all_file_paths();
         // An owner must be complete on disk. A configured model missing any
         // of its own files — an H3 Turbo tag whose adapter was deleted, a
         // half-repaired install — is not runnable and must not hold shared
         // components hostage when a sibling is removed. The model BEING
         // removed is unaffected: `plan_removal` iterates its paths directly.
-        if paths
+        //
+        // Completeness is deliberately still asked of the CONFIG entry's own
+        // paths rather than the wider owned set: widening it here would
+        // disqualify more owners, and a dropped owner is what deletes data.
+        if model_config
+            .all_file_paths()
             .iter()
             .any(|path| !std::path::Path::new(path).exists())
         {
             continue;
         }
-        for path in paths {
-            refs.entry(path).or_default().push(model_name.clone());
-        }
+        record(model_name, &mut refs);
     }
     // Include manifest-backed downloaded models that have no config entry.
     // Without this, shared components (VAE, encoders) referenced by another
@@ -55,23 +66,52 @@ pub fn build_ref_counts(config: &Config) -> HashMap<String, Vec<String>> {
             continue; // already counted above
         }
         if config.manifest_model_is_downloaded(&manifest.name) {
-            for path in model_owned_paths(config, &manifest.name) {
-                refs.entry(path).or_default().push(manifest.name.clone());
-            }
+            record(&manifest.name, &mut refs);
         }
     }
     refs
 }
 
-/// Every path a model owns on disk.
+/// Every on-disk path a model owns — the single ownership authority for
+/// ref-counting, removal planning, and the orphaned-shared-file sweep.
 ///
-/// Normally that is its `[models]` config entry's file list. A files-only
-/// bundle (PuLID's identity assets, the hidden LTX-2 adapters) never gets a
-/// config entry and never resolves to a `ModelPaths`, so its config list is
-/// empty and removal would delete nothing — enumerate its manifest storage
-/// paths instead. The two are unioned rather than switched between: a utility
-/// model has both a resolved config list and manifest files, and each can name
-/// a path the other does not.
+/// **The manifest is the authority, not the `[models]` config entry.** A
+/// config entry is a [`crate::ModelPaths`] projection: it has one field per
+/// component role, so it can name neither a role `ModelPaths` has no field
+/// for — `AudioVae`, `Processor`, `VideoScheduler`, `AudioScheduler`,
+/// `ModelConfig`, `TaskConfig`, the identity assets — nor the second file of
+/// a role a manifest declares twice (LTX-2.3 ships an x2 and an x1.5
+/// `SpatialUpscaler`). Every path that projection dropped was invisible to
+/// ref-counting, so `mold rm`'s post-removal sweep read files that installed
+/// models still needed as orphans and deleted them: MiniMax H3's audio VAE
+/// and runtime support configs, and LTX-2.3's 1.09 GB x1.5 upscaler.
+///
+/// The union is taken over three sources and never switched between them,
+/// because each names paths the others do not:
+///
+/// 1. `storage_path` for every file of the model's manifest — the complete,
+///    role-agnostic set, and the reason this function is the authority.
+/// 2. The `[models]` config entry's file list — user-pinned component paths
+///    outside the models dir, and legacy storage locations a previous layout
+///    resolved to. A files-only bundle has no config entry at all, so this
+///    half is empty for one.
+/// 3. Artifacts a bundle derives rather than downloads. PuLID converts the
+///    EVA02-CLIP `.pt` and the BiSeNet parser into safetensors on first use,
+///    and nothing that walks the manifest can see the result — so a removal
+///    that enumerated manifest files alone would leave 660 MB behind. Both
+///    PuLID bundles name them: they are converted from the SHARED extraction
+///    inputs, so ref-counting keeps the surviving bundle's copy.
+///
+/// The rule when a path's ownership is uncertain is to NAME it: a file
+/// wrongly kept costs disk, a file wrongly deleted costs a re-download at
+/// best and breaks a running install at worst.
+///
+/// The config entry's paths are listed whether or not they exist — a declared
+/// component that has gone missing is worth reporting as `mold rm` already
+/// does. The manifest and derived additions are listed only when they are on
+/// disk: they are the model's *possible* storage locations, and a manifest
+/// file that was never downloaded is nothing to delete, nothing to keep, and
+/// only noise in a removal plan.
 pub fn model_owned_paths(config: &Config, canonical: &str) -> Vec<String> {
     let model_config = match config.models.get(canonical) {
         Some(cfg) => cfg.clone(),
@@ -80,35 +120,60 @@ pub fn model_owned_paths(config: &Config, canonical: &str) -> Vec<String> {
     let mut paths = model_config.all_file_paths();
 
     if let Some(manifest) = crate::manifest::find_manifest(canonical) {
-        if manifest.is_files_only_bundle() {
-            let models_dir = config.resolved_models_dir();
-            let manifest_files = manifest
-                .files
-                .iter()
-                .map(|file| models_dir.join(crate::manifest::storage_path(manifest, file)));
-            // A bundle can own artifacts it never downloaded. PuLID converts
-            // the EVA02-CLIP `.pt` into safetensors on first use, and nothing
-            // that walks the manifest can see the result — so a removal that
-            // enumerated manifest files alone would leave 609 MB of derived
-            // weights and their sidecar behind.
-            // Both PuLID bundles own the derived artifacts: they are converted
-            // from the SHARED extraction inputs, so each names them and the
-            // ref-counting above keeps the surviving bundle's copy.
-            let derived: Vec<std::path::PathBuf> =
-                if manifest.family == crate::manifest::PULID_FAMILY {
-                    crate::pulid_assets::derived_pulid_paths(config)
-                } else {
-                    Vec::new()
-                };
-            for owned in manifest_files.chain(derived) {
-                let path = owned.to_string_lossy().to_string();
-                if !paths.contains(&path) {
-                    paths.push(path);
-                }
+        let models_dir = config.resolved_models_dir();
+        let manifest_files = manifest
+            .files
+            .iter()
+            .map(|file| models_dir.join(crate::manifest::storage_path(manifest, file)));
+        let derived: Vec<PathBuf> = if manifest.family == crate::manifest::PULID_FAMILY {
+            crate::pulid_assets::derived_pulid_paths(config)
+        } else {
+            Vec::new()
+        };
+        for owned in manifest_files.chain(derived) {
+            if !owned.exists() {
+                continue;
+            }
+            let path = owned.to_string_lossy().to_string();
+            if !paths.contains(&path) {
+                paths.push(path);
             }
         }
     }
     paths
+}
+
+/// True when `canonical` has model-specific evidence on disk: any file that
+/// storage routes to the model's own directory rather than a shared family
+/// bucket, or that directory itself.
+///
+/// Deliberately laxer than [`is_model_installed`], and used only by the
+/// orphaned-file sweep's keep set. A half-installed model is repaired by
+/// `mold pull`, and sweeping its shared dependencies out from under that
+/// repair turns a resumable download into a much larger one. Ref-counting
+/// keeps the stricter completeness rule, because there a dropped owner only
+/// costs the shared bytes of a model that is already not runnable.
+pub fn model_install_is_present(config: &Config, canonical: &str) -> bool {
+    if is_model_installed(config, canonical) {
+        return true;
+    }
+    let Some(manifest) = crate::manifest::find_manifest(canonical) else {
+        return false;
+    };
+    let models_dir = config.resolved_models_dir();
+    manifest.files.iter().any(|file| {
+        let relative = crate::manifest::storage_path(manifest, file);
+        // A shared-bucket file proves nothing about THIS model: a sibling
+        // sharing the graph put it there.
+        if relative.starts_with("shared") {
+            return false;
+        }
+        let path = models_dir.join(&relative);
+        path.exists()
+            || path
+                .parent()
+                .is_some_and(|dir| dir != models_dir && dir.is_dir())
+    })
 }
 
 /// True when `canonical` is removable: it has an explicit config entry or

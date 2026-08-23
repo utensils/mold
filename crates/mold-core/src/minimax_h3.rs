@@ -4042,8 +4042,16 @@ mod tests {
         use crate::removal::plan_removal;
         use crate::{Config, ModelConfig};
 
+        // Ownership is read from the manifest, so this must be pinned to the
+        // temp root: without it the test consults — and can be satisfied by —
+        // whatever the host's real models dir happens to hold.
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let root =
             std::env::temp_dir().join(format!("mold-h3-turbo-removal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("MOLD_MODELS_DIR", &root);
         let base_manifest = find_manifest(FL2VA_COMFY).unwrap();
         let tier = &REVIEWED_TURBO_MANIFEST_TIERS[0];
         let turbo_manifest = find_manifest(tier.model).unwrap();
@@ -4121,6 +4129,7 @@ mod tests {
             .iter()
             .any(|(path, _)| path == &transformer_path));
 
+        std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(&root);
     }
 
