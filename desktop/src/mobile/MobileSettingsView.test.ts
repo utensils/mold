@@ -3,19 +3,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../lib/api/client";
 import MobileSettingsView from "./MobileSettingsView.vue";
 
-const { apiJsonTo, listQueueMock, openExternalMock, setDeviceEnabled, subscribeMock } = vi.hoisted(
-  () => ({
-    apiJsonTo: vi.fn(),
-    listQueueMock: vi.fn(),
-    openExternalMock: vi.fn(),
-    setDeviceEnabled: vi.fn(),
-    subscribeMock: vi.fn(),
-  }),
-);
+const {
+  apiJsonTo,
+  fetchLicenseListingMock,
+  listQueueMock,
+  openExternalMock,
+  setDeviceEnabled,
+  subscribeMock,
+} = vi.hoisted(() => ({
+  apiJsonTo: vi.fn(),
+  fetchLicenseListingMock: vi.fn(),
+  listQueueMock: vi.fn(),
+  openExternalMock: vi.fn(),
+  setDeviceEnabled: vi.fn(),
+  subscribeMock: vi.fn(),
+}));
 vi.mock("../lib/openExternal", () => ({ openExternal: openExternalMock }));
 vi.mock("../lib/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api/client")>()),
   apiJsonTo,
+}));
+vi.mock("@studio/api/licenseAcceptance", () => ({
+  fetchLicenseListing: fetchLicenseListingMock,
 }));
 vi.mock("@studio/api/devices", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@studio/api/devices")>()),
@@ -32,6 +41,7 @@ vi.mock("../lib/api/deviceEvents", () => ({
 beforeEach(() => {
   openExternalMock.mockClear();
   apiJsonTo.mockReset();
+  fetchLicenseListingMock.mockReset().mockResolvedValue({ licenses: [] });
   listQueueMock.mockReset().mockResolvedValue({ entries: [], plan: null });
   setDeviceEnabled.mockReset().mockResolvedValue(undefined);
   subscribeMock.mockReset();
