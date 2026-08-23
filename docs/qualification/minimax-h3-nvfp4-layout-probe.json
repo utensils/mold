@@ -1,0 +1,456 @@
+{
+  "cost": {
+    "extrapolated_denoise_seconds": {
+      "basis": "per_linear_ms x 4 linears x 50 blocks x 9 terminal-inclusive steps",
+      "int8_native": 289.4795604,
+      "nvfp4_host_dequantize": 535.6054944,
+      "prototype_device_dequantize": 462.54605040000007,
+      "prototype_device_dequantize_bf16_matmul": 182.17513440000002,
+      "turbo_8_step_baseline_seconds": 730.0
+    },
+    "in_features": 5376,
+    "int8_forward_reference_mean_ms": 161.3321666,
+    "int8_forward_reference_ms": 160.821978,
+    "int8_linear_kind": "NativeCudaInt8",
+    "int8_native_cublaslt": true,
+    "linear": "blocks.0.attn.qkv_proj",
+    "loadavg_1m_at_report": 4.24,
+    "nvfp4_attribution_ms": {
+      "host_dequantize": 101.70083399999997,
+      "host_to_device": 134.82522399999993,
+      "matmul": 159.744353,
+      "note": "fastest run; a device synchronize separates each stage, so these three serialize work the shipped forward overlaps: their sum therefore exceeds nvfp4_forward_dequantized_ms and each figure is an upper bound on that stage alone"
+    },
+    "nvfp4_forward_dequantized_mean_ms": 300.14348800000005,
+    "nvfp4_forward_dequantized_ms": 297.558608,
+    "out_features": 21504,
+    "prototype_device_dequantize_bf16_matmul_mean_ms": 102.3396626,
+    "prototype_device_dequantize_bf16_matmul_ms": 101.208408,
+    "prototype_device_dequantize_mean_ms": 261.8024976,
+    "prototype_device_dequantize_ms": 256.970028,
+    "prototype_device_dequantize_without_matmul_mean_ms": 41.327338,
+    "prototype_device_dequantize_without_matmul_ms": 41.30371,
+    "reviewed_max_target_video_rows": 37296,
+    "rows": 37296,
+    "statistic": "fastest of the timed runs; this is a shared development machine, so the mean is reported alongside each figure to expose contention",
+    "timed_runs": 5,
+    "warmup_runs": 2
+  },
+  "divergence": {
+    "activation_space": {
+      "distribution": "fixed-seed N(0,1)",
+      "extrapolation_basis_rows": 37296,
+      "per_linear": [
+        {
+          "block": 0,
+          "int8_vs_bf16_rel_l2": 0.012491868264718129,
+          "linear": "attn.qkv_proj",
+          "nvfp4_over_int8": 7.584559571585365,
+          "nvfp4_vs_bf16_rel_l2": 0.09474531901415136,
+          "rows": 4096
+        },
+        {
+          "block": 0,
+          "int8_vs_bf16_rel_l2": 0.014998003271961371,
+          "linear": "attn.out_proj",
+          "nvfp4_over_int8": 6.385984577498356,
+          "nvfp4_vs_bf16_rel_l2": 0.0957770175880152,
+          "rows": 4096
+        },
+        {
+          "block": 0,
+          "int8_vs_bf16_rel_l2": 0.01247825124392483,
+          "linear": "mlp.fc1",
+          "nvfp4_over_int8": 7.6288487340817195,
+          "nvfp4_vs_bf16_rel_l2": 0.09519469120576958,
+          "rows": 4096
+        },
+        {
+          "block": 0,
+          "int8_vs_bf16_rel_l2": 0.013243350649610217,
+          "linear": "mlp.fc2",
+          "nvfp4_over_int8": 7.151196544092068,
+          "nvfp4_vs_bf16_rel_l2": 0.09470580339769202,
+          "rows": 4096
+        },
+        {
+          "block": 25,
+          "int8_vs_bf16_rel_l2": 0.012488714331120108,
+          "linear": "attn.qkv_proj",
+          "nvfp4_over_int8": 7.593703722797579,
+          "nvfp4_vs_bf16_rel_l2": 0.09483559650918225,
+          "rows": 4096
+        },
+        {
+          "block": 25,
+          "int8_vs_bf16_rel_l2": 0.013293727372746896,
+          "linear": "attn.out_proj",
+          "nvfp4_over_int8": 7.188475880563465,
+          "nvfp4_vs_bf16_rel_l2": 0.09556163858177738,
+          "rows": 4096
+        },
+        {
+          "block": 25,
+          "int8_vs_bf16_rel_l2": 0.012480451688082796,
+          "linear": "mlp.fc1",
+          "nvfp4_over_int8": 7.62003365592124,
+          "nvfp4_vs_bf16_rel_l2": 0.09510146190428996,
+          "rows": 4096
+        },
+        {
+          "block": 25,
+          "int8_vs_bf16_rel_l2": 0.013224278965816806,
+          "linear": "mlp.fc2",
+          "nvfp4_over_int8": 7.159876479897851,
+          "nvfp4_vs_bf16_rel_l2": 0.09468420393095962,
+          "rows": 4096
+        },
+        {
+          "block": 49,
+          "int8_vs_bf16_rel_l2": 0.012509664753292184,
+          "linear": "attn.qkv_proj",
+          "nvfp4_over_int8": 7.523189669251269,
+          "nvfp4_vs_bf16_rel_l2": 0.09411258063776448,
+          "rows": 4096
+        },
+        {
+          "block": 49,
+          "int8_vs_bf16_rel_l2": 0.014370387171094675,
+          "linear": "attn.out_proj",
+          "nvfp4_over_int8": 6.663576512672779,
+          "nvfp4_vs_bf16_rel_l2": 0.09575817443132069,
+          "rows": 4096
+        },
+        {
+          "block": 49,
+          "int8_vs_bf16_rel_l2": 0.01250677065074974,
+          "linear": "mlp.fc1",
+          "nvfp4_over_int8": 7.564089305171626,
+          "nvfp4_vs_bf16_rel_l2": 0.09460233012157047,
+          "rows": 4096
+        },
+        {
+          "block": 49,
+          "int8_vs_bf16_rel_l2": 0.01333964509683367,
+          "linear": "mlp.fc2",
+          "nvfp4_over_int8": 6.980126653181991,
+          "nvfp4_vs_bf16_rel_l2": 0.09311241228439716,
+          "rows": 4096
+        }
+      ],
+      "rows": 4096
+    },
+    "go_no_go": "no-go",
+    "go_no_go_rule": "if nvfp4_vs_bf16 > 2 x int8_vs_bf16 in activation space, the layout is not worth shipping as-is",
+    "reference": "pruned BF16 FL2VA, the common base both quantizations were derived from",
+    "weight_space": [
+      {
+        "block": 0,
+        "int8_row_cosine_min": 0.9999106526374817,
+        "int8_row_cosine_p50": 0.9999620914459229,
+        "int8_vs_bf16_rel_fro": 0.00883695003340336,
+        "linear": "attn.qkv_proj",
+        "nvfp4_row_cosine_min": 0.9951145648956299,
+        "nvfp4_row_cosine_p50": 0.9955254197120667,
+        "nvfp4_vs_bf16_rel_fro": 0.09472627016912338,
+        "nvfp4_vs_int8_rel_fro": 0.09431284278400683
+      },
+      {
+        "block": 0,
+        "int8_row_cosine_min": 0.9995662569999695,
+        "int8_row_cosine_p50": 0.9999341368675232,
+        "int8_vs_bf16_rel_fro": 0.012003500284230858,
+        "linear": "attn.out_proj",
+        "nvfp4_row_cosine_min": 0.9946410655975342,
+        "nvfp4_row_cosine_p50": 0.9954144358634949,
+        "nvfp4_vs_bf16_rel_fro": 0.09580718125213422,
+        "nvfp4_vs_int8_rel_fro": 0.09505420144547855
+      },
+      {
+        "block": 0,
+        "int8_row_cosine_min": 0.9998899698257446,
+        "int8_row_cosine_p50": 0.9999619722366333,
+        "int8_vs_bf16_rel_fro": 0.0088235782891407,
+        "linear": "mlp.fc1",
+        "nvfp4_row_cosine_min": 0.9950592517852783,
+        "nvfp4_row_cosine_p50": 0.9954816102981567,
+        "nvfp4_vs_bf16_rel_fro": 0.09518402654445028,
+        "nvfp4_vs_int8_rel_fro": 0.09477518618453896
+      },
+      {
+        "block": 0,
+        "int8_row_cosine_min": 0.9999154210090637,
+        "int8_row_cosine_p50": 0.999957263469696,
+        "int8_vs_bf16_rel_fro": 0.009369978770834354,
+        "linear": "mlp.fc2",
+        "nvfp4_row_cosine_min": 0.9952460527420044,
+        "nvfp4_row_cosine_p50": 0.995517909526825,
+        "nvfp4_vs_bf16_rel_fro": 0.0946986763940344,
+        "nvfp4_vs_int8_rel_fro": 0.09423363869700331
+      },
+      {
+        "block": 25,
+        "int8_row_cosine_min": 0.9999164342880249,
+        "int8_row_cosine_p50": 0.9999620318412781,
+        "int8_vs_bf16_rel_fro": 0.008831561337281505,
+        "linear": "attn.qkv_proj",
+        "nvfp4_row_cosine_min": 0.9951035976409912,
+        "nvfp4_row_cosine_p50": 0.9955013990402222,
+        "nvfp4_vs_bf16_rel_fro": 0.09482171490931432,
+        "nvfp4_vs_int8_rel_fro": 0.0944150379040105
+      },
+      {
+        "block": 25,
+        "int8_row_cosine_min": 0.999699056148529,
+        "int8_row_cosine_p50": 0.9999537467956543,
+        "int8_vs_bf16_rel_fro": 0.009812000775111096,
+        "linear": "attn.out_proj",
+        "nvfp4_row_cosine_min": 0.9949214458465576,
+        "nvfp4_row_cosine_p50": 0.9954332709312439,
+        "nvfp4_vs_bf16_rel_fro": 0.09556229612458716,
+        "nvfp4_vs_int8_rel_fro": 0.09505866709048647
+      },
+      {
+        "block": 25,
+        "int8_row_cosine_min": 0.9999111890792847,
+        "int8_row_cosine_p50": 0.9999621510505676,
+        "int8_vs_bf16_rel_fro": 0.008825695983823758,
+        "linear": "mlp.fc1",
+        "nvfp4_row_cosine_min": 0.9950703978538513,
+        "nvfp4_row_cosine_p50": 0.995474100112915,
+        "nvfp4_vs_bf16_rel_fro": 0.09509671305325545,
+        "nvfp4_vs_int8_rel_fro": 0.09468972980031166
+      },
+      {
+        "block": 25,
+        "int8_row_cosine_min": 0.9999151825904846,
+        "int8_row_cosine_p50": 0.9999573826789856,
+        "int8_vs_bf16_rel_fro": 0.009343209102770901,
+        "linear": "mlp.fc2",
+        "nvfp4_row_cosine_min": 0.9952092170715332,
+        "nvfp4_row_cosine_p50": 0.9955196976661682,
+        "nvfp4_vs_bf16_rel_fro": 0.09468135041617112,
+        "nvfp4_vs_int8_rel_fro": 0.09422116888616328
+      },
+      {
+        "block": 49,
+        "int8_row_cosine_min": 0.9998904466629028,
+        "int8_row_cosine_p50": 0.9999617338180542,
+        "int8_vs_bf16_rel_fro": 0.00886707045891547,
+        "linear": "attn.qkv_proj",
+        "nvfp4_row_cosine_min": 0.995141327381134,
+        "nvfp4_row_cosine_p50": 0.9955782294273376,
+        "nvfp4_vs_bf16_rel_fro": 0.09410359340210903,
+        "nvfp4_vs_int8_rel_fro": 0.09369275940896833
+      },
+      {
+        "block": 49,
+        "int8_row_cosine_min": 0.9995739459991455,
+        "int8_row_cosine_p50": 0.9999416470527649,
+        "int8_vs_bf16_rel_fro": 0.011205859527516121,
+        "linear": "attn.out_proj",
+        "nvfp4_row_cosine_min": 0.9949342012405396,
+        "nvfp4_row_cosine_p50": 0.9954168796539307,
+        "nvfp4_vs_bf16_rel_fro": 0.09577869361171484,
+        "nvfp4_vs_int8_rel_fro": 0.09512605231877523
+      },
+      {
+        "block": 49,
+        "int8_row_cosine_min": 0.9999074935913086,
+        "int8_row_cosine_p50": 0.9999619722366333,
+        "int8_vs_bf16_rel_fro": 0.008853563669243655,
+        "linear": "mlp.fc1",
+        "nvfp4_row_cosine_min": 0.9950259923934937,
+        "nvfp4_row_cosine_p50": 0.9955032467842102,
+        "nvfp4_vs_bf16_rel_fro": 0.09459219512571825,
+        "nvfp4_vs_int8_rel_fro": 0.09417775191001096
+      },
+      {
+        "block": 49,
+        "int8_row_cosine_min": 0.9998981952667236,
+        "int8_row_cosine_p50": 0.9999567866325378,
+        "int8_vs_bf16_rel_fro": 0.009517150526094796,
+        "linear": "mlp.fc2",
+        "nvfp4_row_cosine_min": 0.9953356981277466,
+        "nvfp4_row_cosine_p50": 0.9955906271934509,
+        "nvfp4_vs_bf16_rel_fro": 0.09310675755667748,
+        "nvfp4_vs_int8_rel_fro": 0.09262292045773286
+      }
+    ],
+    "worst_nvfp4_over_int8": 7.6288487340817195
+  },
+  "inputs": {
+    "int8_convrot": {
+      "file_len": 20970379616,
+      "header_len": 95416,
+      "path": "/storage-fast/mold/models/minimax-h3-fl2va-comfy-pruned-int8/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "payload_end": 20970284192,
+      "tensor_count": 932,
+      "trailing_bytes": 0
+    },
+    "nvfp4": {
+      "file_len": 12528636865,
+      "header_len": 116000,
+      "path": "/storage-fast/mold/probe-1317/MiniMax_H3_FL2VA_pruned_nvfp4.safetensors",
+      "payload_end": 12528520792,
+      "tensor_count": 1132,
+      "trailing_bytes": 65
+    },
+    "pruned_bf16": {
+      "file_len": 40225724176,
+      "header_len": 55976,
+      "path": "/storage-fast/mold/probe-1317/minimax_h3_fl2va_pruned_bf16.safetensors",
+      "payload_end": 40225668192,
+      "tensor_count": 532,
+      "trailing_bytes": 0
+    }
+  },
+  "scale_layout": {
+    "natural_hypothesis_mean_rel_fro": 0.569313389221364,
+    "note": "every probed linear has out % 128 == 0 and in/16 % 4 == 0, so the swizzled and natural scale shapes coincide and the header cannot answer",
+    "per_linear": [
+      {
+        "block": 0,
+        "in_features": 5376,
+        "library_unswizzle_max_abs_delta": 0.0,
+        "linear": "attn.qkv_proj",
+        "natural_hypothesis_vs_bf16_rel_fro": 0.5336356269457374,
+        "out_features": 21504,
+        "swizzled_hypothesis_vs_bf16_rel_fro": 0.09472627016912338,
+        "swizzled_hypothesis_vs_int8_rel_fro": 0.09431284278400683
+      },
+      {
+        "block": 0,
+        "in_features": 7168,
+        "library_unswizzle_max_abs_delta": 0.0,
+        "linear": "attn.out_proj",
+        "natural_hypothesis_vs_bf16_rel_fro": 0.7185125047268321,
+        "out_features": 5376,
+        "swizzled_hypothesis_vs_bf16_rel_fro": 0.09580718125213422,
+        "swizzled_hypothesis_vs_int8_rel_fro": 0.09505420144547855
+      },
+      {
+        "block": 0,
+        "in_features": 5376,
+        "library_unswizzle_max_abs_delta": 0.0,
+        "linear": "mlp.fc1",
+        "natural_hypothesis_vs_bf16_rel_fro": 0.5514711132791588,
+        "out_features": 28672,
+        "swizzled_hypothesis_vs_bf16_rel_fro": 0.09518402654445028,
+        "swizzled_hypothesis_vs_int8_rel_fro": 0.09477518618453896
+      },
+      {
+        "block": 0,
+        "in_features": 14336,
+        "library_unswizzle_max_abs_delta": 0.0,
+        "linear": "mlp.fc2",
+        "natural_hypothesis_vs_bf16_rel_fro": 0.42953382617521746,
+        "out_features": 5376,
+        "swizzled_hypothesis_vs_bf16_rel_fro": 0.0946986763940344,
+        "swizzled_hypothesis_vs_int8_rel_fro": 0.09423363869700331
+      },
+      {
+        "block": 25,
+        "in_features": 5376,
+        "library_unswizzle_max_abs_delta": 0.0,
+        "linear": "attn.qkv_proj",
+        "natural_hypothesis_vs_bf16_rel_fro": 0.40065347507590415,
+        "out_features": 21504,
+        "swizzled_hypothesis_vs_bf16_rel_fro": 0.09482171490931432,
+        "swizzled_hypothesis_vs_int8_rel_fro": 0.0944150379040105
+      },
+      {
+        "block": 25,
+        "in_features": 7168,
+        "library_unswizzle_max_abs_delta": 0.0,
+        "linear": "attn.out_proj",
+        "natural_hypothesis_vs_bf16_rel_fro": 0.5254780416403996,
+        "out_features": 5376,
+        "swizzled_hypothesis_vs_bf16_rel_fro": 0.09556229612458716,
+        "swizzled_hypothesis_vs_int8_rel_fro": 0.09505866709048647
+      },
+      {
+        "block": 25,
+        "in_features": 5376,
+        "library_unswizzle_max_abs_delta": 0.0,
+        "linear": "mlp.fc1",
+        "natural_hypothesis_vs_bf16_rel_fro": 0.44019713626355517,
+        "out_features": 28672,
+        "swizzled_hypothesis_vs_bf16_rel_fro": 0.09509671305325545,
+        "swizzled_hypothesis_vs_int8_rel_fro": 0.09468972980031166
+      },
+      {
+        "block": 25,
+        "in_features": 14336,
+        "library_unswizzle_max_abs_delta": 0.0,
+        "linear": "mlp.fc2",
+        "natural_hypothesis_vs_bf16_rel_fro": 0.4435942478777986,
+        "out_features": 5376,
+        "swizzled_hypothesis_vs_bf16_rel_fro": 0.09468135041617112,
+        "swizzled_hypothesis_vs_int8_rel_fro": 0.09422116888616328
+      },
+      {
+        "block": 49,
+        "in_features": 5376,
+        "library_unswizzle_max_abs_delta": 0.0,
+        "linear": "attn.qkv_proj",
+        "natural_hypothesis_vs_bf16_rel_fro": 0.5574560152697807,
+        "out_features": 21504,
+        "swizzled_hypothesis_vs_bf16_rel_fro": 0.09410359340210903,
+        "swizzled_hypothesis_vs_int8_rel_fro": 0.09369275940896833
+      },
+      {
+        "block": 49,
+        "in_features": 7168,
+        "library_unswizzle_max_abs_delta": 0.0,
+        "linear": "attn.out_proj",
+        "natural_hypothesis_vs_bf16_rel_fro": 0.6660867196658947,
+        "out_features": 5376,
+        "swizzled_hypothesis_vs_bf16_rel_fro": 0.09577869361171484,
+        "swizzled_hypothesis_vs_int8_rel_fro": 0.09512605231877523
+      },
+      {
+        "block": 49,
+        "in_features": 5376,
+        "library_unswizzle_max_abs_delta": 0.0,
+        "linear": "mlp.fc1",
+        "natural_hypothesis_vs_bf16_rel_fro": 0.5624547167472715,
+        "out_features": 28672,
+        "swizzled_hypothesis_vs_bf16_rel_fro": 0.09459219512571825,
+        "swizzled_hypothesis_vs_int8_rel_fro": 0.09417775191001096
+      },
+      {
+        "block": 49,
+        "in_features": 14336,
+        "library_unswizzle_max_abs_delta": 0.0,
+        "linear": "mlp.fc2",
+        "natural_hypothesis_vs_bf16_rel_fro": 1.0026872469888177,
+        "out_features": 5376,
+        "swizzled_hypothesis_vs_bf16_rel_fro": 0.09310675755667748,
+        "swizzled_hypothesis_vs_int8_rel_fro": 0.09262292045773286
+      }
+    ],
+    "question": "are comfy-kitchen NVFP4 block scales stored swizzled on H3-shaped tensors?",
+    "swizzled_hypothesis_mean_rel_fro": 0.09484662237994083,
+    "verdict": "swizzled"
+  },
+  "schema": "mold.minimax-h3.nvfp4-layout-probe.v1",
+  "self_checks": {
+    "candle_u8_index_select_sentinel": {
+      "affects": "0xff is an ordinary NVFP4 payload byte: two -6.0 E2M1 nibbles",
+      "finding": "candle-kernels/src/indexing.cu:60 zeroes any index_select id equal to max_value<I>(), so a 256-entry F32 lookup table driven by U8 ids can never return its 256th entry",
+      "resolution": "the prototype casts the packed bytes to U32 ids on the device; the packed weight itself stays U8 at rest",
+      "sentinel_bytes_in_probed_weight": 122820,
+      "u8_id_arm_mismatched_elements": 245640,
+      "u8_id_arm_total_elements": 115605504
+    },
+    "e4m3_table_bytes_agreeing_with_candle": 256,
+    "local_unswizzle_vs_library_max_abs_delta": 0.0,
+    "prototype_device_dequantize_bit_equal_to_host_loop": true,
+    "shared_base": {
+      "claim": "the NVFP4 and INT8 ConvRot artifacts are requantizations of this exact pruned BF16 base",
+      "of_those_byte_identical_in_all_three": 332,
+      "tensors_carried_by_all_three_at_one_dtype_and_shape": 332
+    }
+  }
+}
