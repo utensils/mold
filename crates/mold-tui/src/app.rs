@@ -4167,12 +4167,24 @@ impl App {
                         if relative_row < self.models.catalog.len() {
                             let was_selected = self.models.selected == relative_row;
                             self.models.selected = relative_row;
-                            // Double-click: select model and switch to Generate
+                            // Double-click: select model and switch to Generate —
+                            // unless the build has no engine arm for it, in which
+                            // case double-clicking would only queue a request the
+                            // server refuses with a 501. Keep the row selected
+                            // (this inventory view still lists it) and say why
+                            // inline instead of silently jumping to Create.
                             if was_selected {
-                                let name = self.models.catalog[relative_row].name.clone();
-                                self.update_model(&name);
-                                self.active_view = View::Create;
-                                self.generate.focus = GenerateFocus::Prompt;
+                                let model = &self.models.catalog[relative_row];
+                                if model.runtime_available == Some(false) {
+                                    self.generate.error_message = Some(
+                                        "No runtime for this layout in this build.".to_string(),
+                                    );
+                                } else {
+                                    let name = model.name.clone();
+                                    self.update_model(&name);
+                                    self.active_view = View::Create;
+                                    self.generate.focus = GenerateFocus::Prompt;
+                                }
                             }
                         }
                     }
@@ -14871,6 +14883,94 @@ mod tests {
             generation_model_names(std::slice::from_ref(&entry), ""),
             vec!["flux-dev:q8".to_string()]
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn double_click_on_runtime_unavailable_model_row_does_not_open_generate() {
+        // The Models-tab double-click shortcut bypasses the create-form
+        // picker's `generation_model_names` filter entirely, so it needs its
+        // own guard: a download-only row (no engine arm in this build) must
+        // never be double-clicked into a request the server will 501.
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = make_settings_test_app();
+        app.active_view = View::Models;
+        app.layout.models_table = ratatui::layout::Rect::new(0, 0, 80, 20);
+        let unrunnable = ModelInfoExtended {
+            runtime_available: Some(false),
+            ..make_test_catalog_entry(
+                "minimax-h3-fl2va:comfy-pruned-nvfp4",
+                8,
+                1.0,
+                1024,
+                1024,
+                "",
+            )
+        };
+        app.models.catalog = vec![unrunnable];
+        let starting_model = app.generate.params.model.clone();
+
+        let click_row_zero = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 2, // relative_row = (2 - models_table.y=0).saturating_sub(2) = 0
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        app.handle_mouse(click_row_zero); // first click: select
+        assert_eq!(app.models.selected, 0);
+        assert_eq!(app.active_view, View::Models);
+
+        app.handle_mouse(click_row_zero); // second click on the same row: "double-click"
+
+        assert_eq!(
+            app.active_view,
+            View::Models,
+            "double-clicking a runtime_available:false row must not jump to Create"
+        );
+        assert_eq!(
+            app.generate.params.model, starting_model,
+            "must not select the download-only model for generation either"
+        );
+        assert!(
+            app.generate
+                .error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("No runtime"),
+            "should surface an inline reason instead of silently doing nothing, got {:?}",
+            app.generate.error_message
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn double_click_on_runnable_model_row_still_opens_generate() {
+        // Regression guard for the fix above: an ordinary runnable row must
+        // keep working exactly as before.
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = make_settings_test_app();
+        app.active_view = View::Models;
+        app.layout.models_table = ratatui::layout::Rect::new(0, 0, 80, 20);
+        app.models.catalog = vec![make_test_catalog_entry(
+            "flux-dev:q8",
+            20,
+            3.5,
+            1024,
+            1024,
+            "",
+        )];
+
+        let click_row_zero = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 2,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        app.handle_mouse(click_row_zero);
+        app.handle_mouse(click_row_zero);
+
+        assert_eq!(app.active_view, View::Create);
+        assert_eq!(app.generate.params.model, "flux-dev:q8");
     }
 
     #[test]
