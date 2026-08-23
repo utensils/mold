@@ -2385,6 +2385,12 @@ where
             .denoise(input, layout, checkpoint)?;
         if self.ledger.denoise_completed()? {
             drop(self.denoiser.take());
+            // Mirror the VAE-to-transformer phase boundary above. Candle's
+            // Metal allocator otherwise retains the streamed transformer's
+            // freed buffers while both VAEs are reconstructed for decode.
+            if self.continuing_execution.device().is_metal() {
+                crate::device::release_pooled_metal_memory(self.authority.device_ordinal());
+            }
         }
         self.validate_continuing_authority()?;
         Ok(output)

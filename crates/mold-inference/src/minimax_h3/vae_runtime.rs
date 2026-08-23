@@ -2167,8 +2167,14 @@ impl StagedWeight {
         let mut digest = Sha256::new();
         let mut buffer = vec![0_u8; AUTHENTICATION_CHUNK_BYTES];
         let mut total = 0_u64;
+        let read_limit = self
+            .identity
+            .len
+            .checked_add(1)
+            .ok_or_else(|| artifact_error(self.role, "staging read bound overflows"))?;
+        let mut bounded = (&mut file).take(read_limit);
         loop {
-            let read = file.read(&mut buffer).map_err(|error| {
+            let read = bounded.read(&mut buffer).map_err(|error| {
                 artifact_error(
                     self.role,
                     format!("cannot re-authenticate private staging file {operation}: {error}"),
@@ -2182,6 +2188,7 @@ impl StagedWeight {
                 .ok_or_else(|| artifact_error(self.role, "staging byte count overflow"))?;
             digest.update(&buffer[..read]);
         }
+        drop(bounded);
         let closed = file_identity(&file.metadata().map_err(|error| {
             artifact_error(
                 self.role,
