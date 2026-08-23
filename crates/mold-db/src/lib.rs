@@ -11,6 +11,8 @@ pub mod chain_jobs;
 pub mod config_sync;
 mod db;
 mod device_preferences;
+pub mod gallery_mutations;
+pub mod generation_batches;
 pub mod generation_queue;
 pub mod metadata_io;
 pub mod migrations;
@@ -29,6 +31,7 @@ pub mod trash;
 
 pub use db::MetadataDb;
 pub use device_preferences::{DevicePreference, DevicePreferences};
+pub use gallery_mutations::GalleryMutationApply;
 pub use migrations::SCHEMA_VERSION;
 pub use model_prefs::ModelPrefs;
 pub use organization::{

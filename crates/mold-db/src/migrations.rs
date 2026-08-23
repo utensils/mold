@@ -608,6 +608,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 22,
         kind: MigrationKind::Sql(V22_IDENTITY_EXTRACT_ESTIMATE),
     },
+    Migration {
+        version: 23,
+        kind: MigrationKind::Sql(V23_HETEROGENEOUS_GENERATION_BATCHES),
+    },
 ];
 
 /// #1227 phase 2 moved face-identity extraction from admission onto the
@@ -622,9 +626,43 @@ const V22_IDENTITY_EXTRACT_ESTIMATE: &str = r#"
 ALTER TABLE scheduler_estimates ADD COLUMN ewma_identity_extract_ms REAL;
 "#;
 
+/// Durable grouping and idempotency for one heterogeneous client admission.
+/// Child requests continue to live in `generation_queue` as the sole replay
+/// authority; terminal summaries survive after those queue rows are removed.
+const V23_HETEROGENEOUS_GENERATION_BATCHES: &str = r#"
+CREATE TABLE generation_batches (
+    id             TEXT PRIMARY KEY,
+    client_batch_id TEXT NOT NULL,
+    owner_uuid     TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,
+    created_at_ms  INTEGER NOT NULL,
+    UNIQUE(owner_uuid, client_batch_id)
+);
+
+CREATE TABLE generation_batch_children (
+    batch_id      TEXT NOT NULL REFERENCES generation_batches(id) ON DELETE CASCADE,
+    job_id        TEXT PRIMARY KEY,
+    batch_index   INTEGER NOT NULL,
+    state         TEXT NOT NULL,
+    error         TEXT,
+    updated_at_ms INTEGER NOT NULL,
+    UNIQUE(batch_id, batch_index)
+);
+
+CREATE INDEX generation_batch_children_parent
+ON generation_batch_children(batch_id, batch_index);
+
+CREATE TABLE gallery_mutation_receipts (
+    operation_id   TEXT PRIMARY KEY,
+    request_sha256 TEXT NOT NULL,
+    response_json  TEXT NOT NULL,
+    created_at_ms  INTEGER NOT NULL
+);
+"#;
+
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 22;
+pub const SCHEMA_VERSION: i64 = 23;
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep
@@ -1000,7 +1038,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 22);
+        assert_eq!(SCHEMA_VERSION, 23);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1153,8 +1191,8 @@ mod tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 22);
-        assert_eq!(SCHEMA_VERSION, 22);
+        assert_eq!(current_version(&conn).unwrap(), 23);
+        assert_eq!(SCHEMA_VERSION, 23);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1217,8 +1255,8 @@ mod tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 22);
-        assert_eq!(SCHEMA_VERSION, 22);
+        assert_eq!(current_version(&conn).unwrap(), 23);
+        assert_eq!(SCHEMA_VERSION, 23);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -1479,7 +1517,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 22);
+        assert_eq!(SCHEMA_VERSION, 23);
     }
 
     #[test]

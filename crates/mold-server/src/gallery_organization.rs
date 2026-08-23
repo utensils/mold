@@ -13,7 +13,7 @@
 //! disabled every route answers 501 and `GET /api/capabilities` advertises
 //! `gallery.organize = false`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -24,10 +24,11 @@ use axum::{
 };
 use mold_core::{
     Collection, CollectionCreateRequest, CollectionDetail, CollectionItemsRequest,
-    CollectionUpdateRequest, GalleryImage, GalleryOrganizeRequest, GalleryPatchRequest,
-    ServerEvent, TagCount, TagRenameRequest,
+    CollectionUpdateRequest, GalleryBulkMutationRequest, GalleryBulkMutationResult, GalleryImage,
+    GalleryOrganizeRequest, GalleryPatchRequest, ServerEvent, TagCount, TagRenameRequest,
 };
 use mold_db::{CollectionRow, MetadataDb, OrganizationError, PrintOrganization};
+use sha2::Digest;
 
 use crate::batch_transaction::CommittedArchiveIndex;
 use crate::routes::ApiError;
@@ -370,6 +371,142 @@ pub(crate) async fn organize_gallery(
             .publish(ServerEvent::GalleryCollectionsChanged {});
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── POST /api/gallery/mutations ────────────────────────────────────────────
+
+/// Apply a replay-safe bulk organization mutation. This folds bulk title
+/// edits and portable collection slugs into one request; retries with the
+/// same operation id return the retained result without duplicating work.
+#[utoipa::path(
+    post,
+    path = "/api/gallery/mutations",
+    tag = "gallery",
+    request_body = GalleryBulkMutationRequest,
+    responses(
+        (status = 200, description = "Applied or replayed", body = GalleryBulkMutationResult),
+        (status = 409, description = "Operation id was reused with a different payload"),
+        (status = 422, description = "Invalid operation, filename, title, tag, or collection"),
+        (status = 501, description = "Metadata DB disabled — organization unavailable"),
+    )
+)]
+pub(crate) async fn mutate_gallery_bulk(
+    State(state): State<AppState>,
+    Json(request): Json<GalleryBulkMutationRequest>,
+) -> Result<Json<GalleryBulkMutationResult>, ApiError> {
+    let _gallery_reader = state.gallery_publication_gate.read().await;
+    let dir = gallery_output_dir(&state).await?;
+    uuid::Uuid::parse_str(&request.operation_id)
+        .map_err(|_| ApiError::validation("operation_id must be a UUID"))?;
+    if request.filenames.is_empty() && request.titles.is_empty() {
+        return Err(ApiError::validation(
+            "filenames or title assignments must not be empty",
+        ));
+    }
+    let filenames = request
+        .filenames
+        .iter()
+        .map(|name| clean_gallery_filename(name))
+        .collect::<Result<Vec<_>, _>>()?;
+    let titles = request
+        .titles
+        .iter()
+        .map(|assignment| {
+            let filename = clean_gallery_filename(&assignment.filename)?;
+            let title =
+                mold_core::validate_print_title(&assignment.title).map_err(ApiError::validation)?;
+            Ok((filename, title))
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    let collection_ref_fields = request.add_to_collection.as_ref().map(|reference| {
+        usize::from(reference.id.is_some()) + usize::from(reference.name.is_some())
+    });
+    if collection_ref_fields.is_some_and(|count| count != 1) {
+        return Err(ApiError::validation(
+            "add_to_collection must contain exactly one of id or name",
+        ));
+    }
+    let request_json = serde_json::to_vec(&request).map_err(|error| {
+        ApiError::internal(format!("gallery mutation encoding failed: {error}"))
+    })?;
+    let request_sha256 = format!("{:x}", sha2::Sha256::digest(request_json));
+    let operation_id = request.operation_id.clone();
+    let event_filenames = filenames
+        .iter()
+        .chain(titles.iter().map(|(filename, _)| filename))
+        .cloned()
+        .collect::<HashSet<_>>();
+    let db = state.metadata_db.clone();
+    require_metadata_db(&db)?;
+    let collection_may_change =
+        request.add_to_collection.is_some() || request.remove_from_collection_slug.is_some();
+    let changed = filenames
+        .iter()
+        .chain(titles.iter().map(|(filename, _)| filename))
+        .collect::<HashSet<_>>()
+        .len() as u64;
+    let revision = mold_core::time::now_epoch_ms().max(0) as u64;
+    let result = GalleryBulkMutationResult {
+        operation_id: operation_id.clone(),
+        changed,
+        revision,
+    };
+    let response_json = serde_json::to_string(&result)
+        .map_err(|error| ApiError::internal(format!("gallery receipt encoding failed: {error}")))?;
+    let (result, replayed) = tokio::task::spawn_blocking(
+        move || -> Result<(GalleryBulkMutationResult, bool), ApiError> {
+            let db = require_metadata_db(&db)?;
+            let applied = db
+                .apply_gallery_mutation_once(
+                    &operation_id,
+                    &request_sha256,
+                    &response_json,
+                    revision as i64,
+                    &dir,
+                    &titles,
+                    &filenames,
+                    request.favorite,
+                    &request.add_tags,
+                    &request.remove_tags,
+                    request
+                        .add_to_collection
+                        .as_ref()
+                        .and_then(|value| value.id.as_deref()),
+                    request
+                        .add_to_collection
+                        .as_ref()
+                        .and_then(|value| value.name.as_deref()),
+                    request.remove_from_collection_slug.as_deref(),
+                )
+                .map_err(map_org_error)?;
+            match applied {
+                mold_db::GalleryMutationApply::Applied => Ok((result, false)),
+                mold_db::GalleryMutationApply::Replayed(json) => {
+                    let retained = serde_json::from_str(&json).map_err(|error| {
+                        ApiError::internal(format!("gallery receipt decode failed: {error}"))
+                    })?;
+                    Ok((retained, true))
+                }
+            }
+        },
+    )
+    .await
+    .map_err(|error| ApiError::internal(format!("gallery mutation task failed: {error}")))??;
+
+    if !replayed {
+        for filename in event_filenames {
+            state.events.publish(ServerEvent::GalleryUpdated {
+                filename,
+                image: None,
+            });
+        }
+        if collection_may_change {
+            state
+                .events
+                .publish(ServerEvent::GalleryCollectionsChanged {});
+        }
+    }
+    Ok(Json(result))
 }
 
 // ── /api/gallery/collections ────────────────────────────────────────────────

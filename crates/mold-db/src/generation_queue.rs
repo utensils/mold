@@ -88,35 +88,37 @@ pub struct GenerationQueueRow {
 }
 
 pub fn insert(db: &MetadataDb, row: &GenerationQueueRow) -> Result<()> {
-    db.with_conn(|conn| {
-        conn.execute(
-            "INSERT INTO generation_queue (
+    db.with_conn(|conn| insert_on_conn(conn, row))
+}
+
+pub(crate) fn insert_on_conn(conn: &rusqlite::Connection, row: &GenerationQueueRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO generation_queue (
                 id, owner_uuid, state, model, request_json, output_dir,
                 target_gpu, target_device_id, completion_payload, seed_pinned,
                 dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
                 started_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-            params![
-                &row.id,
-                &row.owner_uuid,
-                row.state.as_str(),
-                &row.model,
-                &row.request_json,
-                row.output_dir.to_string_lossy().into_owned(),
-                row.target_gpu.map(|gpu| gpu as i64),
-                row.target_device_id.as_deref(),
-                &row.completion_payload,
-                row.seed_pinned as i64,
-                row.dispatch_attempts as i64,
-                row.replay_seen as i64,
-                row.held_reason.as_deref(),
-                row.created_at_ms,
-                row.updated_at_ms,
-                row.started_at_ms,
-            ],
-        )?;
-        Ok(())
-    })
+        params![
+            &row.id,
+            &row.owner_uuid,
+            row.state.as_str(),
+            &row.model,
+            &row.request_json,
+            row.output_dir.to_string_lossy().into_owned(),
+            row.target_gpu.map(|gpu| gpu as i64),
+            row.target_device_id.as_deref(),
+            &row.completion_payload,
+            row.seed_pinned as i64,
+            row.dispatch_attempts as i64,
+            row.replay_seen as i64,
+            row.held_reason.as_deref(),
+            row.created_at_ms,
+            row.updated_at_ms,
+            row.started_at_ms,
+        ],
+    )?;
+    Ok(())
 }
 
 /// Remove one row. Returns whether it existed.

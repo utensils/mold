@@ -13,6 +13,7 @@ import type { ApiTarget } from "@studio/api/client";
 import {
   createCollection,
   deleteGalleryImageForever,
+  deleteManyForever,
   organizeGallery,
   patchGalleryImage,
   restoreTrashed,
@@ -234,6 +235,17 @@ export function logicalCopiesOf<T extends OrganizationCopyLike>(
   }
   const exact = copies.find((copy) => printOrganizationKey(copy) === key);
   return exact ? [exact] : [];
+}
+
+/** Index every physical key to its logical group in one gallery pass. */
+export function logicalCopyIndex<T extends OrganizationCopyLike>(
+  copies: readonly T[],
+): Map<string, readonly T[]> {
+  const index = new Map<string, readonly T[]>();
+  for (const group of groupLogicalGalleryPrints(copies)) {
+    for (const copy of group.copies) index.set(printOrganizationKey(copy), group.copies);
+  }
+  return index;
 }
 
 // ── Filtering ───────────────────────────────────────────────────────────────
@@ -515,6 +527,7 @@ export interface FanoutApi {
   trashMany: typeof trashMany;
   restoreTrashed: typeof restoreTrashed;
   deleteGalleryImageForever: typeof deleteGalleryImageForever;
+  deleteManyForever?: typeof deleteManyForever;
   /** Hard delete for hosts without a trash (today's `DELETE`). */
   deleteGalleryImage: (target: ApiTarget, filename: string) => Promise<void>;
 }
@@ -527,6 +540,7 @@ export const defaultFanoutApi: FanoutApi = {
   trashMany,
   restoreTrashed,
   deleteGalleryImageForever,
+  deleteManyForever,
   // A host without a trash hard-deletes on the plain `DELETE` it has always
   // answered; `?permanent=true` is never sent to a host that lacks the trash.
   deleteGalleryImage: (target, filename) => trashGalleryImage(target, filename),
@@ -542,7 +556,7 @@ export async function runOrganizationFanout(
   ops: readonly OrganizationFanoutOp[],
   hosts: Record<string, FanoutHost | undefined>,
   api: FanoutApi = defaultFanoutApi,
-  options: { trashHostIds?: ReadonlySet<string> } = {},
+  options: { trashHostIds?: ReadonlySet<string>; bulkHostIds?: ReadonlySet<string> } = {},
 ): Promise<FanoutResult> {
   const result: FanoutResult = { failures: [], createdCollections: [], succeededHostIds: [] };
   await Promise.all(
@@ -557,7 +571,7 @@ export async function runOrganizationFanout(
         return;
       }
       try {
-        await runHostOp(op, host, api, result, options.trashHostIds);
+        await runHostOp(op, host, api, result, options.trashHostIds, options.bulkHostIds);
         result.succeededHostIds.push(host.id);
       } catch (error) {
         result.failures.push({ hostId: host.id, hostName: host.name, error });
@@ -573,6 +587,7 @@ async function runHostOp(
   api: FanoutApi,
   result: FanoutResult,
   trashHostIds: ReadonlySet<string> | undefined,
+  bulkHostIds: ReadonlySet<string> | undefined,
 ): Promise<void> {
   switch (op.kind) {
     case "setTitle":
@@ -619,8 +634,12 @@ async function runHostOp(
       await api.restoreTrashed(host.target, op.filenames);
       return;
     case "deleteForever":
-      for (const filename of op.filenames) {
-        await api.deleteGalleryImageForever(host.target, filename);
+      if (bulkHostIds?.has(host.id) && api.deleteManyForever) {
+        await api.deleteManyForever(host.target, op.filenames);
+      } else {
+        for (const filename of op.filenames) {
+          await api.deleteGalleryImageForever(host.target, filename);
+        }
       }
       return;
   }

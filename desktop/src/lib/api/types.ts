@@ -122,6 +122,8 @@ export interface ServerCapabilities {
     /** Titles / favorites / tags / collections can be edited here. Absent
      * on older servers ⇒ hide the organization UI. */
     organize?: boolean;
+    /** Replay-safe bulk organization endpoint. */
+    bulk_mutations?: boolean;
   };
   /** Server-enforced model families that are not activated in this build. */
   model_access?: {
@@ -183,9 +185,29 @@ export interface ServerCapabilities {
     can_reorder?: boolean;
     cooperative_cancellation?: boolean;
     durable_queue?: boolean;
+    heterogeneous_batch?: boolean;
+    heterogeneous_batch_max_outputs?: number | null;
   } | null;
   /** Absent on older servers means unknown, not unavailable. */
   expand?: ExpandCapabilities | null;
+}
+
+export interface GenerationBatchAdmissionRequest {
+  client_batch_id: string;
+  requests: GenerateRequest[];
+}
+
+export interface GenerationBatchChild {
+  index: number;
+  job_id: string;
+  state: "accepted" | "running" | "complete" | "failed" | "cancelled" | "held";
+  error?: string | null;
+}
+
+export interface GenerationBatchStatus {
+  id: string;
+  client_batch_id: string;
+  children: GenerationBatchChild[];
 }
 
 // ── Models ───────────────────────────────────────────────────────────────

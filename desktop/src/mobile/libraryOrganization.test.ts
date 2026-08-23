@@ -10,6 +10,7 @@ import {
   fanoutFailureMessage,
   filterLibraryPrints,
   libraryOrganizationSupport,
+  logicalCopyIndex,
   logicalCopiesOf,
   mergedCollectionsFor,
   mergeHostTags,
@@ -152,6 +153,9 @@ describe("organization index and filters", () => {
     expect(index.get("plato|b.png")?.title).toBe("Solo");
     expect(logicalCopiesOf(copies, { hostId: "plato", filename: "a.png" })).toHaveLength(2);
     expect(logicalCopiesOf(copies, { hostId: "plato", filename: "b.png" })).toHaveLength(1);
+    const copyIndex = logicalCopyIndex(copies);
+    expect(copyIndex.get("studio|a.png")).toBe(copyIndex.get("plato|a.png"));
+    expect(copyIndex.get("plato|b.png")).toHaveLength(1);
   });
 
   it("filters representatives by favorite, tag, host, and collection", () => {
@@ -336,6 +340,7 @@ describe("runOrganizationFanout", () => {
       trashMany: vi.fn().mockResolvedValue(undefined),
       restoreTrashed: vi.fn().mockResolvedValue(undefined),
       deleteGalleryImageForever: vi.fn().mockResolvedValue(undefined),
+      deleteManyForever: vi.fn().mockResolvedValue(undefined),
       deleteGalleryImage: vi.fn().mockResolvedValue(undefined),
     };
   }
@@ -430,6 +435,21 @@ describe("runOrganizationFanout", () => {
     expect(api.trashMany).toHaveBeenCalledWith(fanoutHosts.studio.target, ["a.png"]);
     expect(api.deleteGalleryImage).toHaveBeenCalledTimes(2);
     expect(api.trashMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("permanently deletes a capable host selection in one request", async () => {
+    const api = fakeApi();
+    await runOrganizationFanout(
+      planOrganizationFanout(targets, { kind: "deleteForever" }),
+      fanoutHosts,
+      api,
+      { bulkHostIds: new Set(["plato"]) },
+    );
+    expect(api.deleteManyForever).toHaveBeenCalledWith(fanoutHosts.plato.target, [
+      "a.png",
+      "b.png",
+    ]);
+    expect(api.deleteGalleryImageForever).toHaveBeenCalledTimes(1);
   });
 
   it("reports a failed host without blocking the others", async () => {

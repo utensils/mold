@@ -20,6 +20,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use mold_db::generation_batches::{
+    self, GenerationBatchChildRow, GenerationBatchDetail, GenerationBatchRow,
+};
 use mold_db::generation_queue::{self, GenerationQueueRow, QueueRowState};
 use mold_db::MetadataDb;
 
@@ -105,6 +108,13 @@ pub struct JournalAdmission<'a> {
     /// True when the request carries reference-upload authority. Those bytes
     /// are bearer secrets staged outside the DB and are never journaled.
     pub carries_reference_authority: bool,
+}
+
+pub struct BatchJournalAdmission<'a> {
+    pub id: &'a str,
+    pub client_batch_id: &'a str,
+    pub request_sha256: &'a str,
+    pub children: &'a [JournalAdmission<'a>],
 }
 
 /// Whether this request carries a face photograph.
@@ -609,6 +619,120 @@ impl QueueJournal {
             id: admission.id.to_string(),
             settled: false,
         })
+    }
+
+    /// Persist one heterogeneous parent index and all ordinary queue children
+    /// in a single SQLite transaction. `None` tickets means this was an
+    /// idempotent retry of an already-admitted parent.
+    pub fn record_batch(
+        self: &Arc<Self>,
+        admission: BatchJournalAdmission<'_>,
+    ) -> Result<(GenerationBatchDetail, Option<Vec<QueueTicket>>), String> {
+        let owner_uuid = self
+            .owner_uuid
+            .as_deref()
+            .ok_or_else(|| "durable generation queue is unavailable".to_string())?;
+        let db = self
+            .db()
+            .ok_or_else(|| "metadata DB is unavailable".to_string())?;
+        if admission.children.is_empty() {
+            return Err("batch must contain at least one child".to_string());
+        }
+        let now = now_ms();
+        let mut rows = Vec::with_capacity(admission.children.len());
+        for (offset, child) in admission.children.iter().enumerate() {
+            let output_dir = child
+                .output_dir
+                .ok_or_else(|| "heterogeneous batches require gallery output".to_string())?;
+            if child.batch_child || child.carries_reference_authority {
+                return Err(
+                    "heterogeneous batches cannot carry temporary reference authority".to_string(),
+                );
+            }
+            if carries_identity_photograph(child.request) {
+                return Err("heterogeneous batches cannot persist identity photographs".to_string());
+            }
+            let request_json = serde_json::to_string(child.request)
+                .map_err(|error| format!("could not serialize batch child: {error}"))?;
+            if request_json.len() > self.max_bytes {
+                return Err(format!(
+                    "batch child {} exceeds the durable queue payload ceiling",
+                    offset + 1
+                ));
+            }
+            let queue_row = GenerationQueueRow {
+                id: child.id.to_string(),
+                owner_uuid: owner_uuid.to_string(),
+                state: QueueRowState::Queued,
+                model: child.request.model.clone(),
+                request_json,
+                output_dir: output_dir.to_path_buf(),
+                target_gpu: child.target_gpu,
+                target_device_id: None,
+                completion_payload: completion_payload_as_str(child.completion_payload).to_string(),
+                seed_pinned: child.request.seed.is_some(),
+                dispatch_attempts: 0,
+                replay_seen: 0,
+                held_reason: None,
+                created_at_ms: now,
+                updated_at_ms: now,
+                started_at_ms: None,
+            };
+            let batch_child = GenerationBatchChildRow {
+                batch_id: admission.id.to_string(),
+                job_id: child.id.to_string(),
+                batch_index: (offset + 1) as u32,
+                state: "accepted".to_string(),
+                error: None,
+                updated_at_ms: now,
+            };
+            rows.push((batch_child, queue_row));
+        }
+        let batch = GenerationBatchRow {
+            id: admission.id.to_string(),
+            client_batch_id: admission.client_batch_id.to_string(),
+            owner_uuid: owner_uuid.to_string(),
+            request_sha256: admission.request_sha256.to_string(),
+            created_at_ms: now,
+        };
+        let (detail, inserted) = generation_batches::insert_or_get(db, &batch, &rows)
+            .map_err(|error| format!("could not persist generation batch: {error:#}"))?;
+        let tickets = inserted.then(|| {
+            rows.iter()
+                .map(|(_, row)| QueueTicket {
+                    journal: Arc::clone(self),
+                    id: row.id.clone(),
+                    settled: false,
+                })
+                .collect()
+        });
+        Ok((detail, tickets))
+    }
+
+    pub fn generation_batch(&self, id: &str) -> Option<GenerationBatchDetail> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return None;
+        };
+        generation_batches::get(db, owner, id).ok().flatten()
+    }
+
+    pub fn generation_batch_by_client(
+        &self,
+        client_batch_id: &str,
+    ) -> Option<GenerationBatchDetail> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return None;
+        };
+        generation_batches::get_by_client(db, owner, client_batch_id)
+            .ok()
+            .flatten()
+    }
+
+    fn set_batch_child_state(&self, id: &str, state: &str, error: Option<&str>) {
+        let Some(db) = self.db() else { return };
+        if let Err(error) = generation_batches::set_child_state(db, id, state, error, now_ms()) {
+            tracing::warn!(job = %id, %error, "could not update generation batch child state");
+        }
     }
 
     /// Re-attach a ticket to a row that already exists. Used by replay, which
@@ -1172,6 +1296,8 @@ impl QueueTicket {
     /// completed job must never be replayed, fence or no fence.
     pub fn complete(mut self) {
         self.settled = true;
+        self.journal
+            .set_batch_child_state(&self.id, "complete", None);
         self.journal.discard_id(&self.id);
     }
 
@@ -1180,6 +1306,8 @@ impl QueueTicket {
     /// fence.
     pub fn discard(mut self) {
         self.settled = true;
+        self.journal
+            .set_batch_child_state(&self.id, "cancelled", Some("Cancelled"));
         self.journal.discard_id(&self.id);
     }
 
@@ -1211,9 +1339,15 @@ impl QueueTicket {
                         "could not hold an exhausted durable queue row"
                     );
                 }
+                self.journal
+                    .set_batch_child_state(&self.id, "held", Some(&reason));
                 DispatchClaim::Exhausted { attempts, cap }
             }
-            Ok(Some(_)) => DispatchClaim::Granted,
+            Ok(Some(_)) => {
+                self.journal
+                    .set_batch_child_state(&self.id, "running", None);
+                DispatchClaim::Granted
+            }
             Ok(None) => DispatchClaim::Untracked,
             Err(error) => {
                 tracing::warn!(
@@ -1229,6 +1363,8 @@ impl QueueTicket {
     /// Park the row: listed, never auto-run, and no longer owned by a ticket.
     pub fn hold(mut self, reason: &str) {
         self.settled = true;
+        self.journal
+            .set_batch_child_state(&self.id, "held", Some(reason));
         let Some(db) = self.journal.db() else {
             return;
         };
@@ -1254,6 +1390,11 @@ impl Drop for QueueTicket {
             );
             return;
         }
+        self.journal.set_batch_child_state(
+            &self.id,
+            "failed",
+            Some("generation ended before publishing an output"),
+        );
         self.journal.discard_id(&self.id);
     }
 }

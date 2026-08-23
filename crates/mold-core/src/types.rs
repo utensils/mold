@@ -7667,6 +7667,79 @@ pub struct GalleryOrganizeRequest {
     pub remove_from_collections: Option<Vec<String>>,
 }
 
+/// One title assignment inside a bulk organization request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GalleryTitleAssignment {
+    pub filename: String,
+    /// Empty clears the title.
+    pub title: String,
+}
+
+/// Capability-gated bulk gallery mutation. `operation_id` is a client-owned
+/// replay key; current mutations are idempotent and servers retain receipts.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GalleryBulkMutationRequest {
+    pub operation_id: String,
+    #[serde(default)]
+    pub filenames: Vec<String>,
+    #[serde(default)]
+    pub titles: Vec<GalleryTitleAssignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favorite: Option<bool>,
+    #[serde(default)]
+    pub add_tags: Vec<String>,
+    #[serde(default)]
+    pub remove_tags: Vec<String>,
+    /// Ensure this collection name/slug exists, then add every filename.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add_to_collection: Option<CollectionRef>,
+    /// Collection slug to remove every filename from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remove_from_collection_slug: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GalleryBulkMutationResult {
+    pub operation_id: String,
+    pub changed: u64,
+    pub revision: u64,
+}
+
+/// Idempotent heterogeneous generation admission. Every child is validated
+/// before any child is persisted; execution remains independent afterwards.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationBatchAdmissionRequest {
+    pub client_batch_id: String,
+    pub requests: Vec<GenerateRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationBatchChildState {
+    Accepted,
+    Running,
+    Complete,
+    Failed,
+    Cancelled,
+    Held,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationBatchChild {
+    pub index: u32,
+    pub job_id: String,
+    pub state: GenerationBatchChildState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationBatchStatus {
+    pub id: String,
+    pub client_batch_id: String,
+    pub children: Vec<GenerationBatchChild>,
+}
+
 /// Body of `POST /api/gallery/collections`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CollectionCreateRequest {
@@ -7764,6 +7837,10 @@ pub struct GalleryCapabilities {
     /// DB is disabled.
     #[serde(default, skip_serializing_if = "is_false")]
     pub organize: bool,
+    /// `POST /api/gallery/mutations` and bulk permanent deletion are
+    /// available. Absent means clients use the legacy routes.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bulk_mutations: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -7820,6 +7897,11 @@ pub struct QueueCapabilities {
     /// servers and whenever live server batches are unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_batch_max_outputs: Option<u32>,
+    /// Server accepts one idempotent heterogeneous prepared-batch admission.
+    #[serde(default)]
+    pub heterogeneous_batch: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heterogeneous_batch_max_outputs: Option<u32>,
 }
 
 /// Authenticated, stable-URL reference-media ingress advertised by current
@@ -9452,6 +9534,7 @@ mod server_event_tests {
                 retention_days: 30,
             }),
             organize: true,
+            bulk_mutations: true,
         };
         let wire = serde_json::to_value(&full).unwrap();
         assert_eq!(
@@ -9459,7 +9542,8 @@ mod server_event_tests {
             serde_json::json!({
                 "can_delete": true,
                 "trash": {"enabled": true, "retention_days": 30},
-                "organize": true
+                "organize": true,
+                "bulk_mutations": true
             })
         );
         let back: GalleryCapabilities = serde_json::from_value(wire).unwrap();

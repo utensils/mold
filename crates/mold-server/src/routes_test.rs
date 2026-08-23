@@ -4230,6 +4230,107 @@ mod tests {
         root.join("gallery")
     }
 
+    #[tokio::test]
+    async fn heterogeneous_batch_admits_thirty_once_and_returns_same_ids_on_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let db_path = root.path().join("mold.db");
+        let first_ids = {
+            let db = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
+            let (mut state, mut rx) = durable_state(db, root.path());
+            state.queue_capacity = 64;
+            let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+            state.scheduled_work = crate::scheduler::ScheduledWorkHandle::new(scheduled_tx);
+            let journal = state.queue_journal.clone();
+            let app = app_with_state(state);
+            let client_batch_id = uuid::Uuid::new_v4().to_string();
+            let requests: Vec<serde_json::Value> = (0..30)
+                .map(|index| {
+                    let mut request: serde_json::Value =
+                        serde_json::from_str(&generate_body(&format!("moon {index}"), 512, 512))
+                            .unwrap();
+                    request["batch_size"] = serde_json::json!(1);
+                    request
+                })
+                .collect();
+            let body = serde_json::json!({
+                "client_batch_id": client_batch_id,
+                "requests": requests,
+            });
+
+            let admitted = app
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/api/generation-batches",
+                    body.clone(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+            let admitted = json_body(admitted).await;
+            let first_ids: Vec<String> = admitted["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|child| child["job_id"].as_str().unwrap().to_string())
+                .collect();
+            assert_eq!(first_ids.len(), 30);
+            assert_eq!(
+                journal.list_all().len(),
+                30,
+                "all rows commit before response"
+            );
+
+            let retry = app
+                .oneshot(json_request("POST", "/api/generation-batches", body))
+                .await
+                .unwrap();
+            assert_eq!(retry.status(), StatusCode::OK);
+            let retry = json_body(retry).await;
+            let retry_ids: Vec<String> = retry["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|child| child["job_id"].as_str().unwrap().to_string())
+                .collect();
+            assert_eq!(retry_ids, first_ids);
+
+            let mut admitted_jobs = Vec::new();
+            for _ in 0..30 {
+                admitted_jobs.push(
+                    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                        .await
+                        .expect("every admitted child reaches the ordinary queue")
+                        .expect("queue remains open"),
+                );
+            }
+            journal.retain_all();
+            drop(admitted_jobs);
+            drop(journal);
+            first_ids
+        };
+
+        let reopened = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
+        let (state, mut rx) = durable_state(reopened, root.path());
+        let replay_state = state.clone();
+        let replay_task =
+            tokio::spawn(async move { crate::queue_journal::replay(&replay_state, true).await });
+        let mut replayed = Vec::new();
+        for _ in 0..30 {
+            replayed.push(
+                tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("replayed batch child")
+                    .expect("queue remains open")
+                    .id,
+            );
+        }
+        let report = replay_task.await.unwrap();
+        assert_eq!(report.resumed, 30);
+        assert_eq!(replayed, first_ids);
+        assert!(rx.try_recv().is_err(), "no child replays twice");
+    }
+
     /// The end-to-end shape: admit jobs, fence, drop the coordinator, rebuild
     /// `AppState` on the same DB, replay. The rows come back under their
     /// original ids, in submit order, through the ordinary queue.
@@ -10053,6 +10154,7 @@ mod tests {
         // Same bytes under the same identity may not silently rewrite
         // provenance.
         let conflict = app
+            .clone()
             .oneshot(
                 Request::put("/api/gallery/import/print.png")
                     .header("content-type", "application/vnd.mold.gallery-import")
@@ -12839,6 +12941,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gallery_mutations_bulk_titles_and_replays_by_operation_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, db) = organized_state(dir.path());
+        let filenames: Vec<String> = (0..30).map(|index| format!("{index}.png")).collect();
+        for filename in &filenames {
+            seed_print(&db, dir.path(), filename, None);
+        }
+        let app = app_with_state(state);
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let request = serde_json::json!({
+            "operation_id": operation_id,
+            "filenames": filenames,
+            "titles": (0..30).map(|index| serde_json::json!({
+                "filename": format!("{index}.png"),
+                "title": format!("Moon {index}")
+            })).collect::<Vec<_>>(),
+            "favorite": true,
+            "add_tags": ["bulk"],
+            "add_to_collection": {"name": "Moon studies"}
+        });
+        let first = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/gallery/mutations",
+                request.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_body = json_body(first).await;
+        assert_eq!(first_body["changed"], 30);
+
+        let retry = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/gallery/mutations",
+                request.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        assert_eq!(json_body(retry).await, first_body);
+
+        let rows = gallery_rows(&app, "/api/gallery").await;
+        assert_eq!(rows.len(), 30);
+        assert!(rows.iter().all(|row| row["favorite"] == true));
+        assert!(rows
+            .iter()
+            .all(|row| row["tags"] == serde_json::json!(["bulk"])));
+        let collections = app
+            .clone()
+            .oneshot(empty_request("GET", "/api/gallery/collections"))
+            .await
+            .unwrap();
+        let collections = json_body(collections).await;
+        assert_eq!(
+            collections.as_array().unwrap().len(),
+            1,
+            "retry creates no duplicate"
+        );
+
+        let mut changed = request;
+        changed["favorite"] = serde_json::json!(false);
+        let conflict = app
+            .clone()
+            .oneshot(json_request("POST", "/api/gallery/mutations", changed))
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+
+        // Conflicting concurrent payloads serialize at the DB transaction:
+        // exactly one applies and the other observes its receipt.
+        let race_id = uuid::Uuid::new_v4().to_string();
+        let race_a = serde_json::json!({
+            "operation_id": race_id.clone(),
+            "filenames": ["0.png"],
+            "add_tags": ["race-a"]
+        });
+        let race_b = serde_json::json!({
+            "operation_id": race_id,
+            "filenames": ["0.png"],
+            "add_tags": ["race-b"]
+        });
+        let (a, b) = tokio::join!(
+            app.clone()
+                .oneshot(json_request("POST", "/api/gallery/mutations", race_a)),
+            app.clone()
+                .oneshot(json_request("POST", "/api/gallery/mutations", race_b)),
+        );
+        let mut statuses = [a.unwrap().status(), b.unwrap().status()];
+        statuses.sort_by_key(|status| status.as_u16());
+        assert_eq!(statuses, [StatusCode::OK, StatusCode::CONFLICT]);
+
+        // Collection creation shares the print-validation transaction and is
+        // rolled back when any selected filename is missing.
+        let invalid = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/gallery/mutations",
+                serde_json::json!({
+                    "operation_id": uuid::Uuid::new_v4().to_string(),
+                    "filenames": ["ghost.png"],
+                    "add_to_collection": {"name": "Must roll back"}
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::NOT_FOUND);
+        let collections = json_body(
+            app.oneshot(empty_request("GET", "/api/gallery/collections"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(collections.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn gallery_collections_crud_and_membership_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let (state, db) = organized_state(dir.path());
@@ -13172,6 +13395,7 @@ mod tests {
         assert_eq!(caps["gallery"]["trash"]["enabled"], true);
         assert_eq!(caps["gallery"]["trash"]["retention_days"], 30);
         assert_eq!(caps["gallery"]["organize"], true);
+        assert_eq!(caps["gallery"]["bulk_mutations"], true);
     }
 
     /// `DELETE /api/gallery/image/:filename` moves to the trash when the
@@ -13241,6 +13465,8 @@ mod tests {
         let (state, db) = organized_state(dir.path());
         seed_print(&db, dir.path(), "binned.png", None);
         seed_print(&db, dir.path(), "live.png", None);
+        seed_print(&db, dir.path(), "bulk-binned.png", None);
+        seed_print(&db, dir.path(), "bulk-live.png", None);
         let mdb = db.as_ref().as_ref().unwrap();
         let mut events = state.events.subscribe();
         let app = app_with_state(state);
@@ -13289,6 +13515,36 @@ mod tests {
             events.try_recv().unwrap(),
             mold_core::ServerEvent::GalleryRemoved { filename } if filename == "live.png"
         ));
+
+        let resp = app
+            .clone()
+            .oneshot(empty_request(
+                "DELETE",
+                "/api/gallery/image/bulk-binned.png",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        drain_events(&mut events);
+        let resp = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/gallery/trash/delete-forever",
+                serde_json::json!({"filenames": ["bulk-binned.png", "bulk-live.png"]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(mdb.get(dir.path(), "bulk-binned.png").unwrap().is_none());
+        assert!(mdb.get(dir.path(), "bulk-live.png").unwrap().is_none());
+        assert_eq!(
+            drain_events(&mut events)
+                .into_iter()
+                .filter(|event| matches!(event, mold_core::ServerEvent::GalleryRemoved { .. }))
+                .count(),
+            2
+        );
         assert!(gallery_rows(&app, "/api/gallery?view=trash")
             .await
             .is_empty());

@@ -1,11 +1,11 @@
 import { reactive } from "vue";
 import { defineStore } from "pinia";
-import { apiFetchTo, currentTarget, type ApiTarget } from "../lib/api/client";
+import { apiFetchTo, apiJsonTo, currentTarget, type ApiTarget } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
 import { evictMedia, galleryMediaPath, streamableMediaUrl } from "../lib/gallery/media";
 import { ipc } from "../lib/ipc";
 import { notifyGenerated, notifyGenerationFailed } from "../lib/notify";
-import { describeTransportError } from "../lib/api/errors";
+import { describeTransportError, isTransportFailure } from "../lib/api/errors";
 import {
   isInterruptedGenerationError,
   reconcileInterruptedGenerationJobs,
@@ -17,6 +17,7 @@ import type {
   ChainProgressEvent,
   CompleteEvent,
   GenerateRequest,
+  GenerationBatchStatus,
   PromptTransformProvenance,
   ProgressEvent,
   SseChainCompleteEvent,
@@ -82,6 +83,8 @@ export interface JobRoute {
   /** Exact server installation and upload protocol captured at submit time. */
   instanceId?: string | null;
   referenceUploads?: ReferenceUploadCapabilities | null;
+  heterogeneousBatch?: boolean;
+  heterogeneousBatchMaxOutputs?: number | null;
 }
 
 interface ReferenceUploadAuthority {
@@ -500,7 +503,64 @@ export const useGenerationStore = defineStore("generation", {
         if (job.status === "error") return Promise.resolve();
         return this.streamJob(job, plans[i]!);
       });
-      const settled = runWithConcurrency(tasks, MAX_STREAMS_PER_TARGET)
+      const serverAdmission =
+        size > 1 &&
+        requestOptions.batchId !== undefined &&
+        route?.heterogeneousBatch === true &&
+        size <= (route.heterogeneousBatchMaxOutputs ?? 0) &&
+        chainRouting?.kind !== "chain" &&
+        !plans.some(requestNeedsReferenceUpload);
+      const submit = serverAdmission
+        ? (async () => {
+            const target = route!.target;
+            const body = {
+              client_batch_id: requestOptions.batchId!,
+              requests: plans,
+            };
+            let admitted: GenerationBatchStatus;
+            try {
+              admitted = await apiJsonTo<GenerationBatchStatus>(target, "/api/generation-batches", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+              });
+            } catch (error) {
+              if (!isTransportFailure(error)) throw error;
+              admitted = await apiJsonTo<GenerationBatchStatus>(target, "/api/generation-batches", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+              });
+            }
+            if (admitted.children.length !== jobs.length) {
+              throw new Error(
+                `The host admitted ${admitted.children.length} of ${jobs.length} prepared variations.`,
+              );
+            }
+            for (const [index, job] of jobs.entries()) {
+              const child = admitted.children[index]!;
+              if (child.index !== index + 1 || !child.job_id) {
+                throw new Error("The host returned an invalid prepared-batch child mapping.");
+              }
+              job.id = child.job_id;
+              job.streamStarted = true;
+              job.status = "error";
+              job.error = "The generation stream closed before completion.";
+              job.interrupted = true;
+              job.retainedByHost = true;
+            }
+            await this.reconcileInterrupted(jobs);
+          })()
+        : runWithConcurrency(tasks, MAX_STREAMS_PER_TARGET);
+      const settled = submit
+        .catch((error) => {
+          for (const job of jobs) {
+            if (job.status === "complete" || job.status === "error") continue;
+            job.status = "error";
+            markJobSettled(job);
+            job.error = error instanceof Error ? error.message : String(error);
+          }
+        })
         // A stream that died while the host kept working is not an outcome.
         // Reconcile against the frozen route BEFORE anyone reads these jobs:
         // every shell renders `status: "error"` as a failure (desktop Create

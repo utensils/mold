@@ -183,6 +183,9 @@ export interface HostRoute {
   instanceId?: string | null;
   /** Frozen authenticated reference-ingress contract for this exact host. */
   referenceUploads?: ReferenceUploadCapabilities | null;
+  /** Exact host supports one durable heterogeneous prepared-batch admission. */
+  heterogeneousBatch?: boolean;
+  heterogeneousBatchMaxOutputs?: number | null;
 }
 
 export interface HostPlacementFailure {
@@ -235,6 +238,8 @@ function hostRoute(host: HostView, capabilities?: ServerCapabilities): HostRoute
     target: { baseUrl: host.baseUrl, apiKey: host.apiKey },
     instanceId: host.instanceId,
     referenceUploads: capabilities?.reference_uploads ?? null,
+    heterogeneousBatch: capabilities?.queue?.heterogeneous_batch === true,
+    heterogeneousBatchMaxOutputs: capabilities?.queue?.heterogeneous_batch_max_outputs ?? null,
   };
 }
 
@@ -631,6 +636,9 @@ export const useHostsStore = defineStore("hosts", {
         target: { baseUrl: chosen.baseUrl, apiKey: chosen.apiKey },
         instanceId: chosen.instanceId,
         referenceUploads: this.capabilities[chosen.id]?.reference_uploads ?? null,
+        heterogeneousBatch: this.capabilities[chosen.id]?.queue?.heterogeneous_batch === true,
+        heterogeneousBatchMaxOutputs:
+          this.capabilities[chosen.id]?.queue?.heterogeneous_batch_max_outputs ?? null,
       };
     },
     async resolveFeasible(

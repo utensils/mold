@@ -17,9 +17,11 @@ import {
   createCollection,
   deleteCollection,
   deleteGalleryImageForever,
+  deleteManyForever,
   emptyTrash,
   listCollections,
   listTags,
+  mutateGalleryBulk,
   organizeGallery,
   patchGalleryImage,
   restoreTrashed,
@@ -41,6 +43,7 @@ import {
   type OrganizationMutation,
   type RetentionHost,
 } from "@studio/lib/libraryOrganization";
+import { galleryBulkRequest } from "@studio/lib/galleryMutationOutbox";
 import {
   hostApiTarget,
   hostCapabilities,
@@ -62,6 +65,8 @@ export interface HostOrganizationSnapshot {
    * deliberately distinguishable from an answered `organize: false`, because
    * unknown hosts stay in the mutation fan-out (codex review). */
   organize: boolean | null;
+  /** Replay-safe organization/permanent-delete batches on current hosts. */
+  bulkMutations: boolean;
   /** `gallery.trash` — DELETE moves to the trash; `null` = permanent delete. */
   trash: { enabled: boolean; retentionDays: number } | null;
   collections: Collection[];
@@ -101,6 +106,7 @@ function emptySnapshot(host: HostEntry): HostOrganizationSnapshot {
     hostId: host.id,
     hostLabel: host.name,
     organize: null,
+    bulkMutations: false,
     trash: null,
     collections: [],
     tags: [],
@@ -121,6 +127,7 @@ async function fetchHostSnapshot(
   // The positive test itself is the shared `fileUnderAvailable`, so the
   // Library's organization gate and Create's "File under" gate cannot drift.
   snapshot.organize = caps ? fileUnderAvailable(caps) : null;
+  snapshot.bulkMutations = gallery?.bulk_mutations === true;
   snapshot.trash = gallery?.trash
     ? {
         enabled: gallery.trash.enabled,
@@ -506,6 +513,19 @@ export async function applyOrganizationMutation(
     mutation,
   );
   return fanout(ops, context.hostById, async (op, _host, target) => {
+    const bulk =
+      snapshotFor(context.snapshots, op.hostId)?.bulkMutations === true;
+    if (bulk) {
+      const request = galleryBulkRequest(crypto.randomUUID(), op);
+      if (request) {
+        await mutateGalleryBulk(target, request);
+        return;
+      }
+      if (op.kind === "deleteForever") {
+        await deleteManyForever(target, op.filenames);
+        return;
+      }
+    }
     switch (op.kind) {
       case "setTitle":
         await Promise.all(

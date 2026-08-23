@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
+import { isTransportFailure } from "../lib/api/errors";
 import {
   evictHostMedia,
   evictMedia,
@@ -35,18 +36,28 @@ import {
 } from "@studio/lib/libraryOrganization";
 import {
   createCollection as createCollectionOn,
+  deleteManyForever,
   deleteCollection as deleteCollectionOn,
   emptyTrash as emptyTrashOn,
   listCollections,
   listTags,
   listTrash,
+  mutateGalleryBulk,
   organizeGallery,
   patchGalleryImage,
   restoreTrashed,
   sweepTrash as sweepTrashOn,
+  trashMany,
   updateCollection,
   updateCollectionHidden,
 } from "@studio/api/galleryOrganization";
+import {
+  enqueueGalleryMutation,
+  galleryBulkRequest,
+  listGalleryMutations,
+  removeGalleryMutation,
+  updateGalleryMutationFailure,
+} from "@studio/lib/galleryMutationOutbox";
 
 export type {
   MergedCollection,
@@ -351,6 +362,8 @@ export const useGalleryStore = defineStore("gallery", {
     collectionsByHost: {} as Record<string, CollectionsBucket>,
     /** Per-host tag counts, merged by case-insensitive name in `mergedTags`. */
     tagsByHost: {} as Record<string, TagsBucket>,
+    /** Organization edits retained in IndexedDB for unreachable hosts. */
+    pendingOrganizationMutations: 0,
   }),
   getters: {
     /**
@@ -991,6 +1004,9 @@ export const useGalleryStore = defineStore("gallery", {
       } else {
         throw new Error("Host is not connected.");
       }
+      this.applyRemovalToBuckets(sourceKey, filename, permanent);
+    },
+    applyRemovalToBuckets(sourceKey: string, filename: string, permanent: boolean) {
       const row = takeRow(this.buckets[sourceKey], filename);
       if (!permanent && this.trashCapable(sourceKey)) {
         const trash = this.trashBuckets[sourceKey];
@@ -1008,29 +1024,58 @@ export const useGalleryStore = defineStore("gallery", {
       takeRow(this.trashBuckets[sourceKey], filename);
       this.evictItemMedia(sourceKey, filename);
     },
+    async removeHostMany(sourceKey: string, filenames: string[], permanent = false) {
+      const target = this.targetOf(sourceKey);
+      const bulk = useHostsStore().capabilities[sourceKey]?.gallery?.bulk_mutations === true;
+      if (target && bulk && (permanent || this.trashCapable(sourceKey))) {
+        try {
+          if (permanent) await deleteManyForever(target, filenames);
+          else await trashMany(target, filenames);
+          for (const filename of filenames) {
+            this.applyRemovalToBuckets(sourceKey, filename, permanent);
+          }
+          return { deleted: [...filenames], failed: [] as string[] };
+        } catch {
+          return { deleted: [] as string[], failed: [...filenames] };
+        }
+      }
+      const results = await Promise.allSettled(
+        filenames.map((filename) => this.remove(sourceKey, filename, { permanent })),
+      );
+      return {
+        deleted: filenames.filter((_, index) => results[index]?.status === "fulfilled"),
+        failed: filenames.filter((_, index) => results[index]?.status === "rejected"),
+      };
+    },
     /**
-     * Bulk delete. Each print is deleted exactly like the single-delete
-     * path — `remove()` per item, routed to that item's represented origin
-     * (IPC for the host-less This-Mac bucket, authed HTTP for a host) — so
-     * bulk semantics can never drift from the tile's Delete action.
+     * Bulk delete. Current hosts receive one request per origin; legacy and
+     * native-only origins preserve the per-file path.
      * Origins whose delete failed are refetched to reconverge with the
      * server (a lost response may still have deleted server-side).
      */
     async removeMany(
       items: Array<{ sourceKey: string; filename: string }>,
     ): Promise<{ deleted: number; failed: number }> {
-      const results = await Promise.allSettled(
-        items.map((i) => this.remove(i.sourceKey, i.filename)),
+      const groups = new Map<string, string[]>();
+      for (const item of items) {
+        const names = groups.get(item.sourceKey) ?? [];
+        names.push(item.filename);
+        groups.set(item.sourceKey, names);
+      }
+      const grouped = [...groups];
+      const results = await Promise.all(
+        grouped.map(([sourceKey, filenames]) => this.removeHostMany(sourceKey, filenames)),
       );
       let deleted = 0;
       const failedOrigins = new Set<string>();
       results.forEach((r, idx) => {
-        if (r.status === "fulfilled") deleted++;
-        else failedOrigins.add(items[idx]!.sourceKey);
+        const [sourceKey] = grouped[idx]!;
+        deleted += r.deleted.length;
+        if (r.failed.length > 0) failedOrigins.add(sourceKey);
       });
       await Promise.all([...failedOrigins].map((key) => this.refreshHost(key)));
       await this.refreshTrash(items.map((i) => i.sourceKey));
-      return { deleted, failed: results.length - deleted };
+      return { deleted, failed: items.length - deleted };
     },
     /**
      * Delete each selected logical print from every device bucket that
@@ -1048,18 +1093,30 @@ export const useGalleryStore = defineStore("gallery", {
         }
       }
       const locations = [...unique.values()];
-      const results = await Promise.allSettled(
-        locations.map((location) =>
-          this.remove(location.sourceKey, location.filename).then(() => location),
+      const byHost = new Map<string, GalleryLocation[]>();
+      for (const location of locations) {
+        const host = byHost.get(location.sourceKey) ?? [];
+        host.push(location);
+        byHost.set(location.sourceKey, host);
+      }
+      const hostGroups = [...byHost];
+      const results = await Promise.all(
+        hostGroups.map(([sourceKey, group]) =>
+          this.removeHostMany(
+            sourceKey,
+            group.map((location) => location.filename),
+          ),
         ),
       );
       const failedKeys = new Set<string>();
       const failedOrigins = new Set<string>();
       results.forEach((result, index) => {
-        if (result.status === "fulfilled") return;
-        const location = locations[index]!;
-        failedKeys.add(`${location.sourceKey}::${location.filename}`);
-        failedOrigins.add(location.sourceKey);
+        if (result.failed.length === 0) return;
+        const [sourceKey] = hostGroups[index]!;
+        failedOrigins.add(sourceKey);
+        for (const filename of result.failed) {
+          failedKeys.add(`${sourceKey}::${filename}`);
+        }
       });
       await Promise.all([...failedOrigins].map((key) => this.refreshHost(key)));
       await this.refreshTrash(locations.map((l) => l.sourceKey));
@@ -1069,7 +1126,7 @@ export const useGalleryStore = defineStore("gallery", {
       return {
         deletedPrints: entries.length - failedPrints,
         failedPrints,
-        deletedCopies: results.length - failedKeys.size,
+        deletedCopies: locations.length - failedKeys.size,
       };
     },
     evictItemMedia(sourceKey: string, filename: string) {
@@ -1317,6 +1374,7 @@ export const useGalleryStore = defineStore("gallery", {
     async fetchOrganization() {
       this.syncBuckets();
       await Promise.all([this.fetchCollections(), this.fetchTags(), this.fetchTrash()]);
+      await this.flushOrganizationOutbox();
     },
     // ── Organization: mutate ─────────────────────────────────────────────
     /** Organize-capable per-host targets for a set of copies. Hosts that
@@ -1388,6 +1446,15 @@ export const useGalleryStore = defineStore("gallery", {
       if (!target) throw new Error("Host is not connected.");
       switch (op.kind) {
         case "setTitle": {
+          const bulk = galleryBulkRequest(crypto.randomUUID(), op);
+          if (bulk && useHostsStore().capabilities[op.hostId]?.gallery?.bulk_mutations === true) {
+            await mutateGalleryBulk(target, bulk);
+            for (const filename of op.filenames) {
+              const row = this.rowOf(op.hostId, filename);
+              if (row) row.title = op.title;
+            }
+            return;
+          }
           for (const filename of op.filenames) {
             const echoed = await patchGalleryImage<GalleryImage>(target, filename, {
               title: op.title ?? "",
@@ -1482,6 +1549,49 @@ export const useGalleryStore = defineStore("gallery", {
           throw new Error(`${op.kind} is not an organize mutation; use the trash actions.`);
       }
     },
+    async retainOrganizationOp(op: OrganizationFanoutOp, operationId = crypto.randomUUID()) {
+      const host = this.hostFor(op.hostId);
+      if (!host || host.kind !== "remote") throw new Error("Host is not connected.");
+      await enqueueGalleryMutation({
+        id: operationId,
+        hostId: host.id,
+        hostInstanceId: host.instanceId,
+        hostName: host.label,
+        op,
+      });
+      this.pendingOrganizationMutations = (await listGalleryMutations()).length;
+    },
+    async flushOrganizationOutbox() {
+      const queued = await listGalleryMutations();
+      for (const item of queued) {
+        const host = useHostsStore().all.find((candidate) => candidate.id === item.hostId);
+        if (!host || host.status !== "ready") continue;
+        if (item.hostInstanceId && item.hostInstanceId !== (host.instanceId ?? null)) {
+          await updateGalleryMutationFailure(
+            item.id,
+            "Host identity changed; the retained edit was not sent.",
+          );
+          continue;
+        }
+        try {
+          const target = this.targetOf(item.hostId);
+          const bulk = galleryBulkRequest(item.id, item.op);
+          if (
+            target &&
+            bulk &&
+            useHostsStore().capabilities[item.hostId]?.gallery?.bulk_mutations
+          ) {
+            await mutateGalleryBulk(target, bulk);
+          } else {
+            await this.runOrganizationOp(item.op);
+          }
+          await removeGalleryMutation(item.id);
+        } catch (error) {
+          await updateGalleryMutationFailure(item.id, errorMessage(error));
+        }
+      }
+      this.pendingOrganizationMutations = (await listGalleryMutations()).length;
+    },
     /**
      * One organization mutation over every copy of the given prints: plan
      * per host (`planOrganizationFanout`), run each host's op, refetch the
@@ -1492,7 +1602,21 @@ export const useGalleryStore = defineStore("gallery", {
       mutation: OrganizationMutation,
     ): Promise<FanoutResult> {
       const ops = planOrganizationFanout(this.organizeTargetsFor(entries), mutation);
-      const results = await Promise.allSettled(ops.map((op) => this.runOrganizationOp(op)));
+      const queuedHosts = new Set<string>();
+      const results = await Promise.allSettled(
+        ops.map(async (op) => {
+          try {
+            await this.runOrganizationOp(op);
+          } catch (error) {
+            if (isTransportFailure(error) && this.hostFor(op.hostId)?.kind === "remote") {
+              await this.retainOrganizationOp(op);
+              queuedHosts.add(op.hostId);
+              return;
+            }
+            throw error;
+          }
+        }),
+      );
       const failedHosts: string[] = [];
       let error: string | null = null;
       results.forEach((result, index) => {
@@ -1513,7 +1637,11 @@ export const useGalleryStore = defineStore("gallery", {
         applied: ops.length - failedHosts.length,
         failed: failedHosts.length,
         failedHosts,
-        error,
+        error:
+          error ??
+          (queuedHosts.size > 0
+            ? `${queuedHosts.size} host edit${queuedHosts.size === 1 ? " was" : "s were"} retained and will sync when reachable.`
+            : null),
       };
     },
     setTitle(entry: MergedPrint, title: string | null): Promise<FanoutResult> {
