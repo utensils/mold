@@ -4626,12 +4626,40 @@ impl FrozenH3FactoryAuthority {
         // and proves the adapter tier with `media_model_matches_h3_authority`.
         let model_matches = request_contract.canonical_model == self.canonical_model()
             || media_model_matches_h3_authority(model, self);
-        if !model_matches
-            || request_contract.task != self.task()
-            || gpu_ordinal != self.device_ordinal
-            || offload != self.block_offload
-        {
-            bail!("MiniMax H3 frozen engine authority changed before construction");
+        let mut drift = Vec::new();
+        if !model_matches {
+            drift.push(format!(
+                "model {model:?} is not the frozen partition {:?}",
+                self.canonical_model()
+            ));
+        }
+        if request_contract.task != self.task() {
+            drift.push(format!(
+                "task {:?} vs frozen {:?}",
+                request_contract.task,
+                self.task()
+            ));
+        }
+        if gpu_ordinal != self.device_ordinal {
+            drift.push(format!(
+                "device ordinal {gpu_ordinal} vs frozen {}",
+                self.device_ordinal
+            ));
+        }
+        if offload != self.block_offload {
+            drift.push(format!(
+                "block offload {offload} vs frozen {}",
+                self.block_offload
+            ));
+        }
+        if !drift.is_empty() {
+            // Name every field that moved: a bare "authority changed" cannot be
+            // acted on, and an ordinal or offload drift is a very different
+            // bug from a model-identity drift.
+            bail!(
+                "MiniMax H3 frozen engine authority changed before construction: {}",
+                drift.join("; ")
+            );
         }
         Ok(())
     }
@@ -4764,16 +4792,51 @@ impl FrozenH3FactoryAuthority {
         self.validate_frozen()?;
         let request_contract = contract::capability_contract_for_model(model)
             .ok_or_else(|| anyhow!("{model:?} has no MiniMax H3 capability contract"))?;
-        if !contract::is_family(family)
-            || !media_model_matches_h3_authority(model, self)
-            || request_contract.task != self.task()
-            || gpu_ordinal != self.device_ordinal
-            || offload != self.block_offload
-            || attention_backend != self.attention_backend
-            || attention_chunk != self.attention_chunk
-        {
+        let mut drift = Vec::new();
+        if !contract::is_family(family) {
+            drift.push(format!("family {family:?} is not MiniMax H3"));
+        }
+        if !media_model_matches_h3_authority(model, self) {
+            drift.push(format!(
+                "model {model:?} does not match the frozen partition {:?}",
+                self.canonical_model()
+            ));
+        }
+        if request_contract.task != self.task() {
+            drift.push(format!(
+                "task {:?} vs frozen {:?}",
+                request_contract.task,
+                self.task()
+            ));
+        }
+        if gpu_ordinal != self.device_ordinal {
+            drift.push(format!(
+                "device ordinal {gpu_ordinal} vs frozen {}",
+                self.device_ordinal
+            ));
+        }
+        if offload != self.block_offload {
+            drift.push(format!(
+                "block offload {offload} vs frozen {}",
+                self.block_offload
+            ));
+        }
+        if attention_backend != self.attention_backend {
+            drift.push(format!(
+                "attention backend {attention_backend:?} vs frozen {:?}",
+                self.attention_backend
+            ));
+        }
+        if attention_chunk != self.attention_chunk {
+            drift.push(format!(
+                "attention chunk {attention_chunk:?} vs frozen {:?}",
+                self.attention_chunk
+            ));
+        }
+        if !drift.is_empty() {
             bail!(
-                "MiniMax H3 frozen route, attention, or offload authority changed before dispatch"
+                "MiniMax H3 frozen route, attention, or offload authority changed before dispatch: {}",
+                drift.join("; ")
             );
         }
         let missing_prepared_attempt = self.prepared_attempt.is_none();
@@ -6792,6 +6855,65 @@ mod tests {
 
     /// Media facts keep the request's full reviewed identity, so the pairing
     /// between that identity and the frozen authority's adapter tier is the
+    /// A seam refusal must name what moved. The message is the only evidence
+    /// an operator gets when an admitted job is refused at construction, and
+    /// a device-ordinal drift, an offload drift, and a model-identity drift
+    /// are three different bugs.
+    #[test]
+    fn seam_refusals_name_every_field_that_drifted() {
+        let frozen = FrozenH3FactoryAuthority::new_contract_only(exact_input()).unwrap();
+        assert!(frozen
+            .validate_engine_seam(
+                contract::FL2VA_COMFY,
+                frozen.device_ordinal,
+                frozen.block_offload
+            )
+            .is_ok());
+
+        let message = frozen
+            .validate_engine_seam(
+                contract::FL2VA_COMFY,
+                frozen.device_ordinal + 3,
+                !frozen.block_offload,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("authority changed before construction"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!(
+                "device ordinal {} vs frozen {}",
+                frozen.device_ordinal + 3,
+                frozen.device_ordinal
+            )),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!(
+                "block offload {} vs frozen {}",
+                !frozen.block_offload, frozen.block_offload
+            )),
+            "{message}"
+        );
+        assert!(
+            !message.contains("task"),
+            "an agreeing field is not named: {message}"
+        );
+
+        let message = frozen
+            .validate_engine_seam(
+                contract::REF2VA_COMFY,
+                frozen.device_ordinal,
+                frozen.block_offload,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("task"), "{message}");
+        assert!(message.contains("is not the frozen partition"), "{message}");
+    }
+
     /// gate that stops a Turbo tag rendering without its adapter (or with the
     /// wrong tier) and a base render claiming a Turbo identity.
     #[test]
