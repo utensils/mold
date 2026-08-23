@@ -374,8 +374,8 @@ impl SdxlPulidAdapter {
     /// mechanism is not free: `VarBuilder::from_mmaped_safetensors` takes
     /// paths, so authenticating means either a 1 GB private read (which
     /// defeats the mmap the residency accounting is built on) or a candle API
-    /// that accepts a retained descriptor. Tracked as a follow-up in
-    /// `docs/architecture/pulid-1228-docs.md`; do not fix it here alone.
+    /// that accepts a retained descriptor. Tracked as #1308 and recorded under
+    /// "Not yet built" in `docs/architecture/pulid.md`; do not fix it here alone.
     pub fn load(
         path: &Path,
         config: &UNet2DConditionModelConfig,
