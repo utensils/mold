@@ -290,4 +290,24 @@ describe("InstalledTab model info drawer", () => {
       ),
     ).toBe(true);
   });
+
+  it("hides Load/Unload and shows an inline reason for a download-only (runtime_available: false) row", async () => {
+    setActivePinia(createPinia());
+    const wrapper = mount(InstalledTab, {
+      props: {
+        entries: [
+          model({
+            name: "minimax-h3-fl2va:comfy-pruned-nvfp4",
+            family: "minimax-h3",
+            runtime_available: false,
+          }),
+        ],
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='load-btn']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='unload-btn']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='runtime-unavailable-note']").text()).toContain("No runtime");
+  });
 });

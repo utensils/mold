@@ -406,7 +406,11 @@ const queueCapacity = computed(
   () => status.value?.queue_capacity ?? host.value?.queueCapacity ?? null,
 );
 const modelsLoaded = computed(() => telemetry.value?.modelsLoaded ?? []);
-const installedModels = computed(() => hostModels.installedOn(hostId.value));
+// This is an inventory surface (drill-in opens the read-only Pull/Repair
+// drawer, never a Load action), so it must show every downloaded artifact —
+// including a runtime-restricted download-only row such as an NVFP4 H3
+// partition — never `installedOn`'s runtime-filtered view Create/routing use.
+const installedModels = computed(() => hostModels.downloadedOn(hostId.value));
 const modelLabel = (name: string) => modelDisplayNameForId(name, hostModels.modelsOn(hostId.value));
 const h3Host = computed(() => [
   {

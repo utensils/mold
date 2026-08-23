@@ -26,20 +26,25 @@ pub fn rank_model_suggestions(
     let lower = partial.to_lowercase();
     let matches_partial =
         |name: &str| -> bool { lower.is_empty() || name.to_lowercase().contains(&lower) };
+    // Download-only rows (`runtime_available: Some(false)` — e.g. the pruned
+    // NVFP4 H3 partitions) can be pulled and inspected but never generated
+    // with; offering them here would only earn a 501 at submit time. `None`
+    // (older servers, every other family) stays runnable.
+    let runnable = |m: &ModelInfoExtended| -> bool { m.runtime_available != Some(false) };
 
     // When we have a populated cache, prefer downloaded models and fall back
     // to undownloaded (they still work — the server auto-pulls on demand).
     if !cached.is_empty() {
         let mut downloaded: Vec<String> = cached
             .iter()
-            .filter(|m| m.downloaded && matches_partial(&m.info.name))
+            .filter(|m| m.downloaded && runnable(m) && matches_partial(&m.info.name))
             .map(|m| m.info.name.clone())
             .collect();
         if downloaded.len() < 25 {
             let room = 25 - downloaded.len();
             let also: Vec<String> = cached
                 .iter()
-                .filter(|m| !m.downloaded && matches_partial(&m.info.name))
+                .filter(|m| !m.downloaded && runnable(m) && matches_partial(&m.info.name))
                 .take(room)
                 .map(|m| m.info.name.clone())
                 .collect();
@@ -715,6 +720,7 @@ fn resolve_default_model(models: &[mold_core::ModelInfoExtended]) -> String {
         .iter()
         .filter(|m| {
             m.downloaded
+                && m.runtime_available != Some(false)
                 && m.info.family != "controlnet"
                 && !mold_core::manifest::UTILITY_FAMILIES.contains(&m.info.family.as_str())
         })
@@ -2385,6 +2391,7 @@ mod tests {
 
     fn mk_model(name: &str, family: &str, downloaded: bool) -> ModelInfoExtended {
         ModelInfoExtended {
+            runtime_available: None,
             info: mold_core::ModelInfo {
                 name: name.to_string(),
                 family: family.to_string(),
@@ -2410,6 +2417,44 @@ mod tests {
             generation_profile: None,
             supports_identity: None,
         }
+    }
+
+    fn mk_model_with_runtime(
+        name: &str,
+        family: &str,
+        downloaded: bool,
+        runtime_available: Option<bool>,
+    ) -> ModelInfoExtended {
+        ModelInfoExtended {
+            runtime_available,
+            ..mk_model(name, family, downloaded)
+        }
+    }
+
+    #[test]
+    fn rank_excludes_runtime_unavailable_downloaded_rows() {
+        // A download-only row (the pruned NVFP4 H3 partition) is on disk but
+        // has no engine arm — offering it here would only earn a 501.
+        let models = vec![
+            mk_model("flux-schnell:q8", "flux", true),
+            mk_model_with_runtime(
+                "minimax-h3-fl2va:comfy-pruned-nvfp4",
+                "minimax-h3",
+                true,
+                Some(false),
+            ),
+        ];
+        let out = rank_model_suggestions(&models, &[], "");
+        assert_eq!(out, vec!["flux-schnell:q8".to_string()]);
+    }
+
+    #[test]
+    fn rank_keeps_runtime_available_none_as_runnable() {
+        // Older servers omit the field entirely — absence must keep meaning
+        // runnable, never silently hide every pre-existing model.
+        let models = vec![mk_model_with_runtime("flux-schnell:q8", "flux", true, None)];
+        let out = rank_model_suggestions(&models, &[], "");
+        assert_eq!(out, vec!["flux-schnell:q8".to_string()]);
     }
 
     #[test]
@@ -2555,6 +2600,7 @@ mod tests {
     #[test]
     fn family_for_model_lookup() {
         let models = vec![ModelInfoExtended {
+            runtime_available: None,
             info: mold_core::ModelInfo {
                 name: "ltx-2-19b-distilled:fp8".to_string(),
                 family: "ltx2".to_string(),
@@ -2593,6 +2639,7 @@ mod tests {
     fn resolve_default_prefers_loaded() {
         let models = vec![
             ModelInfoExtended {
+                runtime_available: None,
                 info: mold_core::ModelInfo {
                     name: "flux-dev:q4".to_string(),
                     family: "flux".to_string(),
@@ -2619,6 +2666,7 @@ mod tests {
                 supports_identity: None,
             },
             ModelInfoExtended {
+                runtime_available: None,
                 info: mold_core::ModelInfo {
                     name: "flux2-klein:q8".to_string(),
                     family: "flux".to_string(),
@@ -2651,6 +2699,7 @@ mod tests {
     #[test]
     fn resolve_default_falls_back_to_downloaded() {
         let models = vec![ModelInfoExtended {
+            runtime_available: None,
             info: mold_core::ModelInfo {
                 name: "flux-dev:q4".to_string(),
                 family: "flux".to_string(),
@@ -2685,9 +2734,27 @@ mod tests {
     }
 
     #[test]
+    fn resolve_default_skips_runtime_unavailable_downloaded_model() {
+        // The download-only NVFP4 row is smaller and would otherwise win the
+        // smallest-downloaded tiebreak; a build with no engine arm for it
+        // must never become the auto-picked default for `/generate`.
+        let models = vec![
+            mk_model_with_runtime(
+                "minimax-h3-fl2va:comfy-pruned-nvfp4",
+                "minimax-h3",
+                true,
+                Some(false),
+            ),
+            mk_model_with_runtime("flux-dev:q4", "flux", true, None),
+        ];
+        assert_eq!(resolve_default_model(&models), "flux-dev:q4");
+    }
+
+    #[test]
     fn resolve_default_skips_utility_models() {
         let models = vec![
             ModelInfoExtended {
+                runtime_available: None,
                 info: mold_core::ModelInfo {
                     name: "qwen3-expand:q8".to_string(),
                     family: "qwen3-expand".to_string(),
@@ -2714,6 +2781,7 @@ mod tests {
                 supports_identity: None,
             },
             ModelInfoExtended {
+                runtime_available: None,
                 info: mold_core::ModelInfo {
                     name: "flux2-klein:q8".to_string(),
                     family: "flux".to_string(),
@@ -2747,6 +2815,7 @@ mod tests {
     fn resolve_default_skips_controlnet() {
         let models = vec![
             ModelInfoExtended {
+                runtime_available: None,
                 info: mold_core::ModelInfo {
                     name: "controlnet-canny-sd15:fp16".to_string(),
                     family: "controlnet".to_string(),
@@ -2773,6 +2842,7 @@ mod tests {
                 supports_identity: None,
             },
             ModelInfoExtended {
+                runtime_available: None,
                 info: mold_core::ModelInfo {
                     name: "flux2-klein:q8".to_string(),
                     family: "flux".to_string(),

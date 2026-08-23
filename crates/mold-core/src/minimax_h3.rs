@@ -24,6 +24,25 @@ pub const OFFICIAL_IMPLEMENTATION_REPO: &str = "MiniMax-AI/MiniMax-H3";
 pub const OFFICIAL_IMPLEMENTATION_REVISION: &str = "8d8824efaf94586c0cc9ac7ad8d0723d4d6420ea";
 pub const DIFFUSERS_REFERENCE_REPO: &str = "huggingface/diffusers";
 pub const DIFFUSERS_REFERENCE_REVISION: &str = "9c6a68c32b3b2a64db91800b624d33cec6e25ab8";
+/// Third-party repository publishing the pruned NVFP4 compact transformers.
+///
+/// This is the first source mold pins that is neither MiniMaxAI nor
+/// Comfy-Org, and only the transformer comes from it: the conditioner, both
+/// VAEs, and every config still resolve to [`COMFY_REPO`] and
+/// [`OFFICIAL_REPO`]. Comfy-Org publishes no NVFP4 diffusion model at all,
+/// so there is no first-party artifact to prefer.
+///
+/// Every object in this repository carries an appended
+/// `\nL2P_bypass_<filename>_<unix_ts>\n` marker past the safetensors
+/// payload. It is content-dedup defeat, not tampering — the same repository's
+/// INT8 copy has its payload end at exactly the byte count
+/// `H3ComfyPublishedArtifact::file_bytes()` pins, and its header hashes to
+/// exactly `H3_COMFY_PUBLISHED_INT8_HEADER_SHA256`. The marker is *inside*
+/// the pinned digest below, so it is part of the reviewed content identity:
+/// a future re-upload without it is a different artifact and must be
+/// re-pinned rather than silently accepted.
+pub const NVFP4_REPO: &str = "Abiray/Minimax-H3-nvfp4-INT4-INT8-Convrot";
+pub const NVFP4_REVISION: &str = "908eccad7e68751190d04c171956f163bfeed741";
 pub const LICENSE_SHA256: &str = MINIMAX_H3_LICENSE_SHA256;
 
 pub const FL2VA_OFFICIAL: &str = "minimax-h3-fl2va:official-bf16";
@@ -33,6 +52,12 @@ pub const REF2VA_COMFY: &str = "minimax-h3-ref2va:comfy-pruned-int8";
 pub const FL2VA_COMFY_TURBO_8STEP: &str = "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step";
 pub const FL2VA_COMFY_TURBO_4STEP_768P: &str =
     "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p";
+/// Pruned NVFP4 compact transformers. Deliberately absent from
+/// [`REVIEWED_COMPACT_MODELS`]: they download, verify, inventory, and remove
+/// like any other pinned model, but mold has no engine arm for the weight
+/// layout, so execution is refused at the route.
+pub const FL2VA_COMFY_NVFP4: &str = "minimax-h3-fl2va:comfy-pruned-nvfp4";
+pub const REF2VA_COMFY_NVFP4: &str = "minimax-h3-ref2va:comfy-pruned-nvfp4";
 
 /// Every reviewed compact identity admissible on the H3 runtime route: the
 /// two base task partitions plus the reviewed FL2VA Turbo LoRA tags. Aliases
@@ -349,6 +374,14 @@ pub enum Task {
 pub enum Layout {
     OfficialBf16,
     ComfyPrunedInt8ConvrotNvfp4Awq,
+    /// Pruned NVFP4 transformer beside the same NVFP4-AWQ conditioner.
+    ///
+    /// Recognized end to end as a model identity — manifest, provenance,
+    /// artifact dtypes, storage, download, removal — and refused at the
+    /// route, because no engine arm reads this weight layout.
+    /// [`base_compact_model`] answers `None` for it, which is what stops
+    /// admission before any checkpoint is opened.
+    ComfyPrunedNvfp4ConvrotNvfp4Awq,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -483,6 +516,27 @@ pub struct ModelCapabilityContract {
     pub generation: Capabilities,
 }
 
+/// Whether mold ships an engine arm that can read this weight layout.
+///
+/// [`capabilities`] is keyed on the task alone, because for every layout that
+/// predates this one the task was the whole question. It is not any more: the
+/// pruned NVFP4 transformer is an FL2VA/Ref2VA checkpoint mold can download,
+/// verify, and store while having no loader for its linears. Without this
+/// narrowing, `minimax-h3-fl2va:comfy-pruned-nvfp4` would advertise
+/// `runtime_available: true` on a build whose route refuses it.
+pub const fn layout_runtime_available(layout: Layout) -> bool {
+    match layout {
+        Layout::OfficialBf16 | Layout::ComfyPrunedInt8ConvrotNvfp4Awq => true,
+        Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq => false,
+    }
+}
+
+fn generation_capabilities(task: Task, layout: Layout) -> Capabilities {
+    let mut generation = capabilities(task);
+    generation.runtime_available &= layout_runtime_available(layout);
+    generation
+}
+
 pub fn capability_contract_for_model(model: &str) -> Option<ModelCapabilityContract> {
     let canonical_model = resolve_model_name(model)?;
     let task = task_for_model(canonical_model)?;
@@ -491,7 +545,7 @@ pub fn capability_contract_for_model(model: &str) -> Option<ModelCapabilityContr
         canonical_model,
         task,
         layout,
-        generation: capabilities(task),
+        generation: generation_capabilities(task, layout),
     })
 }
 
@@ -517,6 +571,7 @@ pub fn repo_revision(repo: &str) -> Option<&'static str> {
     match repo {
         OFFICIAL_REPO => Some(OFFICIAL_REVISION),
         COMFY_REPO => Some(COMFY_REVISION),
+        NVFP4_REPO => Some(NVFP4_REVISION),
         _ => None,
     }
 }
@@ -567,6 +622,8 @@ pub fn layout_for_model(model: &str) -> Option<Layout> {
     let canonical = resolve_model_name(model)?;
     if canonical.ends_with(":official-bf16") {
         Some(Layout::OfficialBf16)
+    } else if canonical.ends_with(":comfy-pruned-nvfp4") {
+        Some(Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq)
     } else if canonical.ends_with(":comfy-pruned-int8")
         || REVIEWED_TURBO_MANIFEST_TIERS
             .iter()
@@ -589,6 +646,8 @@ pub fn resolve_model_name(input: &str) -> Option<&'static str> {
         value if value == REF2VA_OFFICIAL => Some(REF2VA_OFFICIAL),
         value if value == FL2VA_COMFY => Some(FL2VA_COMFY),
         value if value == REF2VA_COMFY => Some(REF2VA_COMFY),
+        value if value == FL2VA_COMFY_NVFP4 => Some(FL2VA_COMFY_NVFP4),
+        value if value == REF2VA_COMFY_NVFP4 => Some(REF2VA_COMFY_NVFP4),
         value if value == FL2VA_COMFY_TURBO_8STEP => Some(FL2VA_COMFY_TURBO_8STEP),
         value if value == FL2VA_COMFY_TURBO_4STEP_768P => Some(FL2VA_COMFY_TURBO_4STEP_768P),
         _ => None,
@@ -1918,6 +1977,15 @@ pub fn manifest_contract(manifest: &ModelManifest) -> Option<ManifestContract<'_
             COMFY_IMPLEMENTATION_REPO,
             COMFY_IMPLEMENTATION_REVISION,
         ),
+        // Only the transformer is third-party. The implementation reference
+        // stays Comfy-Org: the quantization schema is comfy-kitchen's and
+        // every other artifact in the stack is Comfy-Org's own.
+        Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq => (
+            NVFP4_REPO,
+            NVFP4_REVISION,
+            COMFY_IMPLEMENTATION_REPO,
+            COMFY_IMPLEMENTATION_REVISION,
+        ),
     };
     Some(ManifestContract {
         manifest_name: &manifest.name,
@@ -1932,7 +2000,7 @@ pub fn manifest_contract(manifest: &ModelManifest) -> Option<ManifestContract<'_
         diffusers_reference_repo: DIFFUSERS_REFERENCE_REPO,
         diffusers_reference_revision: DIFFUSERS_REFERENCE_REVISION,
         shared_identity_scheme: "hf-repo+revision+path+sha256",
-        runtime_available: capabilities(task).runtime_available,
+        runtime_available: generation_capabilities(task, layout).runtime_available,
     })
 }
 
@@ -1998,6 +2066,7 @@ pub fn artifact_contract<'a>(
             match layout {
                 Layout::OfficialBf16 => "bf16",
                 Layout::ComfyPrunedInt8ConvrotNvfp4Awq => "int8-convrot-pruned",
+                Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq => "nvfp4-pruned",
             },
             "50 blocks; hidden=5376; 56 heads x 128",
         ),
@@ -2010,7 +2079,8 @@ pub fn artifact_contract<'a>(
             ArtifactRole::Qwen3VlConditioner,
             match layout {
                 Layout::OfficialBf16 => "bf16",
-                Layout::ComfyPrunedInt8ConvrotNvfp4Awq => "nvfp4-awq",
+                Layout::ComfyPrunedInt8ConvrotNvfp4Awq
+                | Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq => "nvfp4-awq",
             },
             "Qwen3-VL-32B; H3 hidden-state contract",
         ),
@@ -2018,7 +2088,8 @@ pub fn artifact_contract<'a>(
             ArtifactRole::VideoVae,
             match layout {
                 Layout::OfficialBf16 => "fp32",
-                Layout::ComfyPrunedInt8ConvrotNvfp4Awq => "fp16",
+                Layout::ComfyPrunedInt8ConvrotNvfp4Awq
+                | Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq => "fp16",
             },
             "24 latent channels; spatial /16; temporal 17->5 (+2)",
         ),
@@ -2497,25 +2568,16 @@ fn official_runtime_support_files() -> Vec<ModelFile> {
         .collect()
 }
 
-fn comfy_files(task: Task) -> Vec<ModelFile> {
-    let (filename, transformer_sha) = match task {
-        Task::Fl2va => (
-            "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
-            "e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a",
-        ),
-        Task::Ref2va => (
-            "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
-            "9255f52b6677845ad238f20dfaafa94727053694127ab7f255c048f0f9365779",
-        ),
-    };
+/// The compact shared graph: the NVFP4-AWQ conditioner, both VAEs, the
+/// task architecture config, and the runtime support files.
+///
+/// Every compact layout names byte-identical entries here, which is what
+/// makes them share one on-disk copy under `shared/minimax-h3/` and lets
+/// removal ref-counting protect those bytes in every direction. Keep this a
+/// single authority rather than duplicating the digests per layout: a
+/// divergent copy would silently install a second 21.5 GB graph.
+fn compact_shared_files(task: Task) -> Vec<ModelFile> {
     let mut files = vec![
-        file(
-            COMFY_REPO,
-            filename,
-            ModelComponent::Transformer,
-            20_970_379_616,
-            transformer_sha,
-        ),
         file(
             COMFY_REPO,
             "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
@@ -2543,10 +2605,63 @@ fn comfy_files(task: Task) -> Vec<ModelFile> {
     files
 }
 
+fn comfy_files(task: Task) -> Vec<ModelFile> {
+    let (filename, transformer_sha) = match task {
+        Task::Fl2va => (
+            "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+            "e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a",
+        ),
+        Task::Ref2va => (
+            "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+            "9255f52b6677845ad238f20dfaafa94727053694127ab7f255c048f0f9365779",
+        ),
+    };
+    let mut files = vec![file(
+        COMFY_REPO,
+        filename,
+        ModelComponent::Transformer,
+        20_970_379_616,
+        transformer_sha,
+    )];
+    files.extend(compact_shared_files(task));
+    files
+}
+
+/// The pruned NVFP4 compact stack: a third-party transformer on the exact
+/// shared graph [`comfy_files`] names.
+///
+/// The sizes include the appended `L2P_bypass` marker documented on
+/// [`NVFP4_REPO`]; the digests are over the published bytes, marker and all.
+fn nvfp4_files(task: Task) -> Vec<ModelFile> {
+    let (filename, size_bytes, transformer_sha) = match task {
+        Task::Fl2va => (
+            "MiniMax_H3_FL2VA_pruned_nvfp4.safetensors",
+            12_528_636_865,
+            "6ab7f0c48141e7919b32f925ca3def22e06a6aebeb9e0b6f5a0be0fe8409976f",
+        ),
+        Task::Ref2va => (
+            "MiniMax_H3_Ref2VA_pruned_nvfp4.safetensors",
+            12_528_636_866,
+            "3e1be702c95bc057c05a7d1867e8aeea33073dcf5743835f2f27f06a2f34c596",
+        ),
+    };
+    let mut files = vec![file(
+        NVFP4_REPO,
+        filename,
+        ModelComponent::Transformer,
+        size_bytes,
+        transformer_sha,
+    )];
+    files.extend(compact_shared_files(task));
+    files
+}
+
 fn defaults(layout: Layout) -> ManifestDefaults {
     defaults_with_steps(match layout {
         Layout::OfficialBf16 => DEFAULT_STEPS,
-        Layout::ComfyPrunedInt8ConvrotNvfp4Awq => COMFY_DEFAULT_STEPS,
+        Layout::ComfyPrunedInt8ConvrotNvfp4Awq | Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq => {
+            COMFY_DEFAULT_STEPS
+        }
     })
 }
 
@@ -2589,6 +2704,16 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
             Task::Ref2va,
             Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
         ),
+        (
+            FL2VA_COMFY_NVFP4,
+            Task::Fl2va,
+            Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq,
+        ),
+        (
+            REF2VA_COMFY_NVFP4,
+            Task::Ref2va,
+            Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq,
+        ),
     ]
     .into_iter()
     .map(|(name, task, layout)| ModelManifest {
@@ -2599,11 +2724,14 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
             (Task::Ref2va, Layout::OfficialBf16) => "MiniMax H3 Ref2VA official BF16 transformer/conditioner + FP32 VAEs (downloadable qualification reference; execution unavailable)",
             (Task::Fl2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq) => "MiniMax H3 FL2VA Comfy pruned INT8-convrot + NVFP4-AWQ (downloadable; CUDA or Apple Metal)",
             (Task::Ref2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq) => "MiniMax H3 Ref2VA Comfy pruned INT8-convrot + NVFP4-AWQ (downloadable; execution requires a qualified CUDA host)",
+            (Task::Fl2va, Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq) => "MiniMax H3 FL2VA pruned NVFP4 transformer + NVFP4-AWQ conditioner (downloadable; execution not implemented in this build)",
+            (Task::Ref2va, Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq) => "MiniMax H3 Ref2VA pruned NVFP4 transformer + NVFP4-AWQ conditioner (downloadable; execution not implemented in this build)",
         }
         .to_string(),
         files: match layout {
             Layout::OfficialBf16 => official_files(task),
             Layout::ComfyPrunedInt8ConvrotNvfp4Awq => comfy_files(task),
+            Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq => nvfp4_files(task),
         },
         defaults: defaults(layout),
         hidden: false,
@@ -3749,6 +3877,8 @@ mod tests {
                 REF2VA_OFFICIAL,
                 FL2VA_COMFY,
                 REF2VA_COMFY,
+                FL2VA_COMFY_NVFP4,
+                REF2VA_COMFY_NVFP4,
                 FL2VA_COMFY_TURBO_8STEP,
                 FL2VA_COMFY_TURBO_4STEP_768P,
             ])
@@ -3767,6 +3897,10 @@ mod tests {
         let ref_comfy = find_manifest(REF2VA_COMFY).unwrap();
         let fl_turbo_8 = find_manifest(FL2VA_COMFY_TURBO_8STEP).unwrap();
         let fl_turbo_4 = find_manifest(FL2VA_COMFY_TURBO_4STEP_768P).unwrap();
+        let fl_nvfp4 = find_manifest(FL2VA_COMFY_NVFP4).unwrap();
+        let ref_nvfp4 = find_manifest(REF2VA_COMFY_NVFP4).unwrap();
+        assert!(!fl_nvfp4.hidden);
+        assert!(!ref_nvfp4.hidden);
         assert!(!fl_official.hidden);
         assert!(!ref_official.hidden);
         assert!(!fl_comfy.hidden);
@@ -3780,11 +3914,17 @@ mod tests {
             ref_comfy,
             fl_turbo_8,
             fl_turbo_4,
+            fl_nvfp4,
+            ref_nvfp4,
         ] {
             let contract = manifest_contract(manifest).unwrap();
+            // A layout with no engine arm never advertises a runtime, however
+            // runnable its task is.
             assert_eq!(
                 contract.runtime_available,
-                cfg!(feature = "h3") && contract.task == Task::Fl2va
+                cfg!(feature = "h3")
+                    && contract.task == Task::Fl2va
+                    && layout_runtime_available(contract.layout)
             );
             assert_eq!(contract.license_url, MINIMAX_H3_LICENSE_URL);
             assert_eq!(contract.license_sha256, LICENSE_SHA256);
@@ -3859,6 +3999,8 @@ mod tests {
                 REF2VA_OFFICIAL,
                 FL2VA_COMFY,
                 REF2VA_COMFY,
+                FL2VA_COMFY_NVFP4,
+                REF2VA_COMFY_NVFP4,
                 FL2VA_COMFY_TURBO_8STEP,
                 FL2VA_COMFY_TURBO_4STEP_768P,
             ])
@@ -4038,6 +4180,100 @@ mod tests {
     /// file, naming the tag that still uses it. A half-installed Turbo tag
     /// (its adapter deleted) is not a complete install and owns nothing.
     #[test]
+    fn removing_one_compact_layout_keeps_the_other_layouts_shared_graph() {
+        use crate::removal::plan_removal;
+        use crate::{Config, ModelConfig};
+
+        // Ownership is read from the manifest and requires a COMPLETE install,
+        // so this must be pinned to a temp root and materialize both stacks
+        // whole: the audio VAE and the runtime support configs count even
+        // though no `ModelConfig` field can name them, and without the pin the
+        // test consults whatever the host's real models dir happens to hold.
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root =
+            std::env::temp_dir().join(format!("mold-h3-nvfp4-removal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("MOLD_MODELS_DIR", &root);
+        let int8 = find_manifest(FL2VA_COMFY).unwrap();
+        let nvfp4 = find_manifest(FL2VA_COMFY_NVFP4).unwrap();
+        let path_of = |manifest: &ModelManifest, component: ModelComponent| {
+            let file = manifest
+                .files
+                .iter()
+                .find(|file| file.component == component)
+                .unwrap();
+            root.join(storage_path(manifest, file))
+                .to_string_lossy()
+                .to_string()
+        };
+        for manifest in [int8, nvfp4] {
+            for file in &manifest.files {
+                let path = root.join(storage_path(manifest, file));
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, b"weights").unwrap();
+            }
+        }
+
+        let int8_transformer = path_of(int8, ModelComponent::Transformer);
+        let nvfp4_transformer = path_of(nvfp4, ModelComponent::Transformer);
+        let shared_encoder = path_of(int8, ModelComponent::TextEncoder);
+        assert_eq!(shared_encoder, path_of(nvfp4, ModelComponent::TextEncoder));
+        assert_ne!(int8_transformer, nvfp4_transformer);
+
+        let mut config = Config::default();
+        for (name, transformer) in [
+            (FL2VA_COMFY, &int8_transformer),
+            (FL2VA_COMFY_NVFP4, &nvfp4_transformer),
+        ] {
+            config.models.insert(
+                name.to_string(),
+                ModelConfig {
+                    transformer: Some(transformer.clone()),
+                    text_encoder_files: Some(vec![shared_encoder.clone()]),
+                    ..ModelConfig::default()
+                },
+            );
+        }
+
+        // Removing the NVFP4 layout frees its own transformer and nothing
+        // else: the conditioner is still owned by the INT8 stack.
+        let plan = plan_removal(&config, FL2VA_COMFY_NVFP4);
+        let unique: Vec<&str> = plan
+            .unique_files
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect();
+        assert!(unique.contains(&nvfp4_transformer.as_str()));
+        assert!(!unique.contains(&shared_encoder.as_str()));
+        assert!(!unique.contains(&int8_transformer.as_str()));
+        assert!(plan
+            .shared_files
+            .iter()
+            .any(|(path, owners)| path == &shared_encoder
+                && owners.iter().any(|owner| owner == FL2VA_COMFY)));
+
+        // ...and the same holds in the other direction.
+        let reverse = plan_removal(&config, FL2VA_COMFY);
+        let reverse_unique: Vec<&str> = reverse
+            .unique_files
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect();
+        assert!(reverse_unique.contains(&int8_transformer.as_str()));
+        assert!(!reverse_unique.contains(&shared_encoder.as_str()));
+        assert!(reverse
+            .shared_files
+            .iter()
+            .any(|(path, owners)| path == &shared_encoder
+                && owners.iter().any(|owner| owner == FL2VA_COMFY_NVFP4)));
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn turbo_removal_refcounts_protect_the_shared_base_stack() {
         use crate::removal::plan_removal;
         use crate::{Config, ModelConfig};
@@ -4166,7 +4402,14 @@ mod tests {
             ArtifactRole::SharedConfig,
             ArtifactRole::TaskConfig,
         ];
-        for manifest_name in [FL2VA_OFFICIAL, REF2VA_OFFICIAL, FL2VA_COMFY, REF2VA_COMFY] {
+        for manifest_name in [
+            FL2VA_OFFICIAL,
+            REF2VA_OFFICIAL,
+            FL2VA_COMFY,
+            REF2VA_COMFY,
+            FL2VA_COMFY_NVFP4,
+            REF2VA_COMFY_NVFP4,
+        ] {
             let manifest = find_manifest(manifest_name).unwrap();
             for role in required_roles {
                 assert!(
@@ -4185,7 +4428,12 @@ mod tests {
         for name in [FL2VA_OFFICIAL, REF2VA_OFFICIAL] {
             assert_eq!(find_manifest(name).unwrap().defaults.steps, DEFAULT_STEPS);
         }
-        for name in [FL2VA_COMFY, REF2VA_COMFY] {
+        for name in [
+            FL2VA_COMFY,
+            REF2VA_COMFY,
+            FL2VA_COMFY_NVFP4,
+            REF2VA_COMFY_NVFP4,
+        ] {
             assert_eq!(
                 find_manifest(name).unwrap().defaults.steps,
                 COMFY_DEFAULT_STEPS
@@ -4198,6 +4446,8 @@ mod tests {
         for (official_name, comfy_name) in [
             (FL2VA_OFFICIAL, FL2VA_COMFY),
             (REF2VA_OFFICIAL, REF2VA_COMFY),
+            (FL2VA_OFFICIAL, FL2VA_COMFY_NVFP4),
+            (REF2VA_OFFICIAL, REF2VA_COMFY_NVFP4),
         ] {
             let official = find_manifest(official_name).unwrap();
             let comfy = find_manifest(comfy_name).unwrap();
@@ -4258,6 +4508,7 @@ mod tests {
         for (fl_name, ref_name) in [
             (FL2VA_OFFICIAL, REF2VA_OFFICIAL),
             (FL2VA_COMFY, REF2VA_COMFY),
+            (FL2VA_COMFY_NVFP4, REF2VA_COMFY_NVFP4),
         ] {
             let fl = find_manifest(fl_name).unwrap();
             let reference = find_manifest(ref_name).unwrap();
@@ -4286,6 +4537,159 @@ mod tests {
     }
 
     #[test]
+    fn pruned_nvfp4_is_downloadable_and_never_runnable() {
+        for (name, task) in [
+            (FL2VA_COMFY_NVFP4, Task::Fl2va),
+            (REF2VA_COMFY_NVFP4, Task::Ref2va),
+        ] {
+            // Recognized as an exact identity, which is what grants
+            // acquisition. Aliases deliberately do not reach this layout.
+            assert_eq!(resolve_model_name(name), Some(name));
+            assert_eq!(task_for_model(name), Some(task));
+            assert_eq!(
+                layout_for_model(name),
+                Some(Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq)
+            );
+
+            // ...and refused at the route: no engine partition, no runtime.
+            assert!(base_compact_model(name).is_none(), "{name}");
+            assert!(!layout_runtime_available(
+                layout_for_model(name).expect("a pinned layout")
+            ));
+            assert!(
+                runnable_capability_contract_for_model(name).is_none(),
+                "{name}"
+            );
+            assert!(turbo_tier_for_model(name).is_none(), "{name}");
+        }
+    }
+
+    #[test]
+    fn pruned_nvfp4_keeps_the_reviewed_compact_envelope() {
+        // The whole reason metadata must be right before the runtime exists:
+        // a row that advertises the official ladder would offer sizes the
+        // engine could never render.
+        for name in [FL2VA_COMFY_NVFP4, REF2VA_COMFY_NVFP4] {
+            assert!(uses_reviewed_compact_envelope(FAMILY, name), "{name}");
+            assert_eq!(
+                fixed_frames_for_model(FAMILY, name),
+                Some(REVIEWED_COMPACT_FRAMES)
+            );
+            assert_eq!(
+                recommended_frames_for_model(FAMILY, name, 200),
+                REVIEWED_COMPACT_FRAMES
+            );
+            assert!(valid_frame_count_for_model(
+                FAMILY,
+                name,
+                REVIEWED_COMPACT_FRAMES
+            ));
+            assert!(!valid_frame_count_for_model(FAMILY, name, 121), "{name}");
+            // A source image never moves the canvas off the reviewed one.
+            assert_eq!(
+                source_fit_dimensions(name, 1920, 1080),
+                (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+            );
+            assert_eq!(
+                source_fit_dimensions(name, 512, 900),
+                (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+            );
+
+            let defaults = &find_manifest(name).unwrap().defaults;
+            assert_eq!(defaults.width, DEFAULT_WIDTH);
+            assert_eq!(defaults.height, DEFAULT_HEIGHT);
+            assert_eq!(defaults.frames, Some(REVIEWED_COMPACT_FRAMES));
+            assert_eq!(defaults.fps, Some(FIXED_FPS));
+            assert_eq!(defaults.steps, COMFY_DEFAULT_STEPS);
+        }
+    }
+
+    #[test]
+    fn pruned_nvfp4_shares_the_compact_graph_and_owns_only_its_transformer() {
+        for (int8_name, nvfp4_name) in [
+            (FL2VA_COMFY, FL2VA_COMFY_NVFP4),
+            (REF2VA_COMFY, REF2VA_COMFY_NVFP4),
+        ] {
+            let int8 = find_manifest(int8_name).unwrap();
+            let nvfp4 = find_manifest(nvfp4_name).unwrap();
+
+            // Every non-transformer file is byte-identical to the INT8 stack
+            // and lands on the same shared path, so an installed compact
+            // variant makes this pull exactly one file.
+            let non_transformer = |manifest: &ModelManifest| {
+                manifest
+                    .files
+                    .iter()
+                    .filter(|file| file.component != ModelComponent::Transformer)
+                    .map(|file| {
+                        (
+                            file.hf_repo.clone(),
+                            file.hf_filename.clone(),
+                            file.size_bytes,
+                            file.sha256,
+                            storage_path(manifest, file),
+                        )
+                    })
+                    .collect::<std::collections::BTreeSet<_>>()
+            };
+            assert_eq!(non_transformer(int8), non_transformer(nvfp4));
+
+            // The transformers are the only difference, and they never
+            // collide on disk.
+            let transformer = |manifest: &ModelManifest| {
+                manifest
+                    .files
+                    .iter()
+                    .find(|file| file.component == ModelComponent::Transformer)
+                    .map(|file| (file.hf_repo.clone(), storage_path(manifest, file)))
+                    .expect("every compact manifest pins one transformer")
+            };
+            let (int8_repo, int8_path) = transformer(int8);
+            let (nvfp4_repo, nvfp4_path) = transformer(nvfp4);
+            assert_eq!(int8_repo, COMFY_REPO);
+            assert_eq!(nvfp4_repo, NVFP4_REPO);
+            assert_ne!(int8_path, nvfp4_path);
+
+            // Turbo tiers collapse onto the INT8 base directory; an NVFP4
+            // base must keep its own.
+            assert_eq!(storage_identity(nvfp4_name), nvfp4_name);
+        }
+    }
+
+    #[test]
+    fn pruned_nvfp4_transformer_pins_its_published_bytes() {
+        for (name, filename, size, sha) in [
+            (
+                FL2VA_COMFY_NVFP4,
+                "MiniMax_H3_FL2VA_pruned_nvfp4.safetensors",
+                12_528_636_865_u64,
+                "6ab7f0c48141e7919b32f925ca3def22e06a6aebeb9e0b6f5a0be0fe8409976f",
+            ),
+            (
+                REF2VA_COMFY_NVFP4,
+                "MiniMax_H3_Ref2VA_pruned_nvfp4.safetensors",
+                12_528_636_866,
+                "3e1be702c95bc057c05a7d1867e8aeea33073dcf5743835f2f27f06a2f34c596",
+            ),
+        ] {
+            let manifest = find_manifest(name).unwrap();
+            let transformer = manifest
+                .files
+                .iter()
+                .find(|file| file.component == ModelComponent::Transformer)
+                .unwrap();
+            assert_eq!(transformer.hf_repo, NVFP4_REPO);
+            assert_eq!(transformer.hf_filename, filename);
+            // The size and digest cover the appended `L2P_bypass` marker
+            // documented on `NVFP4_REPO`; a re-upload without it is a
+            // different artifact and must be re-pinned.
+            assert_eq!(transformer.size_bytes, size);
+            assert_eq!(transformer.sha256, Some(sha));
+            assert_eq!(file_revision(NVFP4_REPO, filename), Some(NVFP4_REVISION));
+        }
+    }
+
+    #[test]
     fn artifact_dtypes_are_exact_per_concrete_layout() {
         let assert_dtype = |manifest_name: &str, component: ModelComponent, expected: &str| {
             let manifest = find_manifest(manifest_name).unwrap();
@@ -4306,6 +4710,15 @@ mod tests {
         }
         for manifest in [FL2VA_COMFY, REF2VA_COMFY] {
             assert_dtype(manifest, ModelComponent::Transformer, "int8-convrot-pruned");
+            assert_dtype(manifest, ModelComponent::TextEncoder, "nvfp4-awq");
+            assert_dtype(manifest, ModelComponent::Vae, "fp16");
+            assert_dtype(manifest, ModelComponent::AudioVae, "fp32");
+        }
+        // Only the transformer differs from the INT8 stack. The conditioner
+        // and both VAEs are the same Comfy-Org artifacts at the same dtypes,
+        // which is what lets the two layouts share one on-disk graph.
+        for manifest in [FL2VA_COMFY_NVFP4, REF2VA_COMFY_NVFP4] {
+            assert_dtype(manifest, ModelComponent::Transformer, "nvfp4-pruned");
             assert_dtype(manifest, ModelComponent::TextEncoder, "nvfp4-awq");
             assert_dtype(manifest, ModelComponent::Vae, "fp16");
             assert_dtype(manifest, ModelComponent::AudioVae, "fp32");

@@ -644,6 +644,13 @@ pub async fn run(
     let audio_only_pipeline = ltx2
         .pipeline
         .is_some_and(mold_core::Ltx2PipelineMode::is_audio_only);
+    if local {
+        // Ask the activation question before the profile lookup. A model this
+        // build cannot execute has no runtime recipe *because* it is refused,
+        // so looking the recipe up first reports the symptom ("no generation
+        // profile") instead of the cause ("no runtime for this layout").
+        mold_core::require_model_activation(model, family.as_deref())?;
+    }
     let local_profile = if local {
         let profile = local_generation_profile(&config, model).ok_or_else(|| {
             anyhow::anyhow!("no generation profile is available for local model '{model}'")

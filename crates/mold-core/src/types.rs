@@ -2807,6 +2807,17 @@ pub struct ModelInfoExtended {
     /// that predate identity conditioning, which clients read as "no".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_identity: Option<bool>,
+    /// Whether this build can execute this model at all.
+    ///
+    /// `false` marks a model that downloads, verifies, inventories, and
+    /// removes normally while having no engine arm — the pinned
+    /// `official-bf16` qualification references and the pruned NVFP4 compact
+    /// layout. `None` on servers that predate the field and for every family
+    /// whose rows are all runnable, which clients read as "runnable": the
+    /// browser contract is `runtime_available !== false`, so an older server
+    /// keeps behaving exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_available: Option<bool>,
     /// Whether this model can continue an existing video in one request
     /// (`GenerateRequest.extend_video`). `None` on servers that predate
     /// continuation support, which clients must read as "no" — offering the
@@ -3046,6 +3057,7 @@ mod model_display_name_tests {
 
     fn model(name: &str, display_name: Option<&str>, description: &str) -> ModelInfoExtended {
         ModelInfoExtended {
+            runtime_available: None,
             info: ModelInfo {
                 name: name.to_string(),
                 family: "sdxl".to_string(),

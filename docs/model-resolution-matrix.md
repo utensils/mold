@@ -1381,11 +1381,11 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 
 ## `minimax-h3`
 
-### `minimax-h3-fl2va:comfy-pruned-int8`
+### Profile `minimax-h3.minimax-h3-fl2va`
 
 Schema 1 · hash `0416694a3bd93aac1a559ddf54914c3441d8cea1331049104fab6b89f9bb4085` · default recipe `default`
 
-Models: `minimax-h3-fl2va:comfy-pruned-int8`.
+Models: `minimax-h3-fl2va:comfy-pruned-int8`, `minimax-h3-fl2va:comfy-pruned-nvfp4`.
 
 #### Default (`default`)
 
@@ -1462,11 +1462,11 @@ Models: `minimax-h3-fl2va:official-bf16`.
 
 Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cdaaa03fa4497e89ac64ff169219acf`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
-### `minimax-h3-ref2va:comfy-pruned-int8`
+### Profile `minimax-h3.minimax-h3-ref2va`
 
 Schema 1 · hash `66e6cd39a81e0b416c58951089a187a03d3bfb1889bf2aabf5977c1ea3eb09c2` · default recipe `default`
 
-Models: `minimax-h3-ref2va:comfy-pruned-int8`.
+Models: `minimax-h3-ref2va:comfy-pruned-int8`, `minimax-h3-ref2va:comfy-pruned-nvfp4`.
 
 #### Default (`default`)
 

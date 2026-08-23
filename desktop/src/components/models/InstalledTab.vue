@@ -112,6 +112,14 @@ function hostLabels(m: LibraryModelEntry): string[] {
   );
 }
 
+/** `runtime_available: false` (download-only rows such as the NVFP4 H3
+ * partitions) means the server rejects every load/generate attempt with a
+ * 501 — hide Load/Unload for the row and say why instead of a toast. Pull,
+ * Repair, and Remove stay reachable. */
+function runtimeUnavailable(m: LibraryModelEntry): boolean {
+  return m.runtime_available === false;
+}
+
 function modelAccessibilityLabel(m: LibraryModelEntry): string {
   const kind = modelKindLabel(modelKindValue(m));
   return `${modelDisplayName(m)} — ${kind}${m.nsfw ? ", 18+ NSFW" : ""} — view details`;
@@ -285,9 +293,18 @@ async function unload(m: LibraryModelEntry) {
                 >
                   Install
                 </button>
+                <span
+                  v-if="runtimeUnavailable(m)"
+                  data-test="runtime-unavailable-note"
+                  class="flex h-7 items-center text-caption text-ink-3"
+                  title="This build has no runtime for this model's layout"
+                >
+                  No runtime for this build
+                </span>
                 <button
-                  v-if="!m.is_loaded"
+                  v-else-if="!m.is_loaded"
                   type="button"
+                  data-test="load-btn"
                   class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink active:translate-y-px disabled:opacity-40"
                   :disabled="busy === m.name"
                   @click="load(m)"
@@ -297,6 +314,7 @@ async function unload(m: LibraryModelEntry) {
                 <button
                   v-else
                   type="button"
+                  data-test="unload-btn"
                   class="border-edge h-7 rounded-control border px-2 text-caption text-ink-2 hover:text-ink active:translate-y-px disabled:opacity-40"
                   :disabled="busy === m.name"
                   @click="unload(m)"

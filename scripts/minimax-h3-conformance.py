@@ -60,6 +60,8 @@ EXPECTED_REVISIONS = {
     "transformers": "42f189ded85d18d00b51161d694cafd325e32b91",
     "comfyui": "a464ac33588ae182f81a090d910cfbf21e255b73",
     "comfy-checkpoints": "eb8a16107c595128b3a578f82d2ce2f75920c355",
+    # Third-party pruned NVFP4 transformers (#1319): downloadable, no runtime arm.
+    "nvfp4-checkpoints": "908eccad7e68751190d04c171956f163bfeed741",
     "sglang": "0c3a76fa0a5bfab410b645f4143e7e8e3cc25c77",
     "vllm-omni": "3d7fc3b9ba3cac88d579d4dc35b78b0b641675fc",
 }

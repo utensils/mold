@@ -247,6 +247,13 @@ pub fn build_model_catalog(
 
         models.push(ModelInfoExtended {
             downloaded,
+            // `base_compact_model` is the same authority admission consults
+            // for an engine partition, so a row can never advertise runnable
+            // while the route refuses it. Scoped to H3: no other family has a
+            // pinned identity it cannot execute, and `None` keeps every other
+            // row byte-identical on the wire.
+            runtime_available: crate::minimax_h3::is_family(&manifest.family)
+                .then(|| crate::minimax_h3::base_compact_model(&manifest.name).is_some()),
             defaults: ModelDefaults {
                 default_steps,
                 default_guidance,
@@ -455,6 +462,9 @@ pub fn build_model_catalog(
 
         models.push(ModelInfoExtended {
             downloaded: true,
+            // Catalog-installed `cv:`/`hf:` rows are never H3 manifest
+            // identities; H3 is manifest-pinned only.
+            runtime_available: None,
             defaults: ModelDefaults {
                 default_steps,
                 default_guidance,
@@ -1217,6 +1227,7 @@ mod tests {
 
         fn stub(name: &str) -> ModelInfoExtended {
             ModelInfoExtended {
+                runtime_available: None,
                 info: ModelInfo {
                     name: name.to_string(),
                     family: "flux".to_string(),

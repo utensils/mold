@@ -75,6 +75,7 @@ impl From<minimax_h3::Task> for H3FrozenTask {
 pub(crate) enum H3PublishedLayout {
     OfficialFullBf16,
     ComfyPrunedInt8ConvrotNvfp4Awq,
+    ComfyPrunedNvfp4ConvrotNvfp4Awq,
 }
 
 impl From<minimax_h3::Layout> for H3PublishedLayout {
@@ -83,6 +84,9 @@ impl From<minimax_h3::Layout> for H3PublishedLayout {
             minimax_h3::Layout::OfficialBf16 => Self::OfficialFullBf16,
             minimax_h3::Layout::ComfyPrunedInt8ConvrotNvfp4Awq => {
                 Self::ComfyPrunedInt8ConvrotNvfp4Awq
+            }
+            minimax_h3::Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq => {
+                Self::ComfyPrunedNvfp4ConvrotNvfp4Awq
             }
         }
     }
@@ -2469,7 +2473,11 @@ mod tests {
         let error = plan_normal_h3_admission_with_gates(
             minimax_h3::FL2VA_COMFY,
             minimax_h3::FAMILY,
-            || Err(mold_core::ModelActivationError),
+            || {
+                Err(mold_core::ModelActivationError(
+                    mold_core::ActivationRefusal::ComplianceGated,
+                ))
+            },
             true,
             || {
                 source_calls.set(source_calls.get() + 1);

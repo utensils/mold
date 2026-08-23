@@ -772,6 +772,18 @@ describe("HostDetailView models", () => {
     expect(rows[1]!.text()).toContain("z-image:q8");
   });
 
+  it("keeps a downloaded runtime_available:false row in the host inventory (Models/repair surface, never the runtime filter)", async () => {
+    const h3Nvfp4: ModelEntry = {
+      ...model("minimax-h3-fl2va:comfy-pruned-nvfp4", "minimax-h3"),
+      runtime_available: false,
+    };
+    installApi({}, [], [h3Nvfp4]);
+    const wrapper = await mountView(`/hosts/${REMOTE_ID}`, [h3Nvfp4]);
+    const rows = wrapper.findAll("[data-test='model-row']");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.text()).toContain("minimax-h3-fl2va:comfy-pruned-nvfp4");
+  });
+
   it("repeats model kind and mature-content classification in the host inventory", async () => {
     const matureLora = {
       ...model("cv:8001", "flux2"),

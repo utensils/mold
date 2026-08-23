@@ -837,6 +837,22 @@ describe("ModelDetailDrawer", () => {
       expect(mockUnload).toHaveBeenCalledWith("flux-schnell:q8");
     });
 
+    it("hides Load/Unload and shows an inline reason for a download-only (runtime_available: false) row", () => {
+      mockDetail.value = {
+        kind: "installed",
+        model: makeModel({ runtime_available: false }),
+        components: [],
+      };
+      const w = mount(ModelDetailDrawer);
+      expect(w.find("[data-test=load-btn]").exists()).toBe(false);
+      expect(w.find("[data-test=unload-btn]").exists()).toBe(false);
+      expect(w.get("[data-test=runtime-unavailable-note]").text()).toContain(
+        "No runtime",
+      );
+      // Pull/Repair/Remove stay reachable — only the runtime actions hide.
+      expect(w.find("[data-test=delete-btn]").exists()).toBe(true);
+    });
+
     it("Delete confirms first, then calls deleteInstalled", async () => {
       mockDetail.value = {
         kind: "installed",
