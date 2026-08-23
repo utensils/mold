@@ -1270,6 +1270,10 @@ pub enum ExecutionPlanError {
         /// compares this against device *total* VRAM: a peak no device could
         /// ever hold is terminal, anything else is transient pressure.
         required_peak_bytes: u64,
+        /// Stable IDs of the devices that were actually considered for this
+        /// request. Physical-impossibility classification must not borrow
+        /// capacity from a sibling excluded by placement or preparation.
+        eligible_device_ids: Vec<String>,
     },
     #[error("execution plan was invalidated before CUDA work: {0}")]
     PlanInvalidated(String),
@@ -1817,6 +1821,7 @@ pub(crate) fn insufficient_vram_error(rejections: &[DeviceInfeasibility]) -> Exe
         return ExecutionPlanError::InsufficientVram {
             reason: "no request-eligible device produced a concrete execution plan".to_string(),
             required_peak_bytes: 0,
+            eligible_device_ids: Vec::new(),
         };
     }
     let reason = rejections
@@ -1843,6 +1848,10 @@ pub(crate) fn insufficient_vram_error(rejections: &[DeviceInfeasibility]) -> Exe
             .map(|rejection| rejection.predicted_peak_bytes)
             .min()
             .unwrap_or(0),
+        eligible_device_ids: rejections
+            .iter()
+            .map(|rejection| rejection.device_id.clone())
+            .collect(),
     }
 }
 
@@ -5422,6 +5431,38 @@ mod tests {
             ),
             "automatic CPU fallback must never override an explicit VAE GPU pin"
         );
+    }
+
+    #[test]
+    fn insufficient_vram_preserves_stable_and_ordinal_pin_eligibility() {
+        let root = TempDir::new().unwrap();
+        let (config, base_request) = sized_config(root.path(), "unknown-family", 10, 1, 1);
+        let candidates = devices(&[8 * GIB, 24 * GIB]);
+
+        assert!(
+            resolve_execution_plans(&config, &base_request, &candidates, false).is_ok(),
+            "Auto must retain the larger eligible sibling"
+        );
+
+        for pin in [DeviceRef::device("cuda:0"), DeviceRef::gpu(0)] {
+            let mut request = base_request.clone();
+            request.placement = Some(DevicePlacement {
+                text_encoders: DeviceRef::Auto,
+                advanced: Some(AdvancedPlacement {
+                    transformer: pin,
+                    ..AdvancedPlacement::default()
+                }),
+            });
+            let error = resolve_execution_plans(&config, &request, &candidates, false)
+                .expect_err("the 8 GiB pinned device cannot hold this request");
+            assert!(matches!(
+                error,
+                ExecutionPlanError::InsufficientVram {
+                    eligible_device_ids,
+                    ..
+                } if eligible_device_ids == ["cuda:0"]
+            ));
+        }
     }
 
     #[test]

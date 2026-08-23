@@ -78,6 +78,19 @@ pub(crate) fn generation_hard_ordinal(
     request_pin.or_else(|| state.job_registry.target_gpu(id).flatten())
 }
 
+fn constrained_generation_device_facts(
+    devices: &[crate::execution_plan::DeviceFact],
+    hard_ordinal: Option<usize>,
+    required_device_id: Option<&str>,
+) -> Vec<crate::execution_plan::DeviceFact> {
+    devices
+        .iter()
+        .filter(|device| hard_ordinal.is_none_or(|ordinal| device.ordinal == ordinal))
+        .filter(|device| required_device_id.is_none_or(|id| device.id == id))
+        .cloned()
+        .collect()
+}
+
 fn wire_estimate_confidence(
     confidence: mold_scheduler::EstimateConfidence,
 ) -> mold_core::QueueEstimateConfidence {
@@ -2774,17 +2787,17 @@ impl Coordinator {
         snapshots
     }
 
-    /// Largest physical VRAM capacity in the pool. A predicted peak above this
-    /// can never be satisfied by waiting, no matter how much other work
-    /// finishes.
-    fn largest_total_vram_bytes(&self) -> u64 {
+    /// Physical VRAM keyed by the same stable worker IDs carried by execution
+    /// planning. Eligibility is retained by `InsufficientVram`; keeping the
+    /// pool facts separate prevents an excluded sibling from lending capacity
+    /// to a pinned request's terminal/transient verdict.
+    fn total_vram_bytes_by_device_id(&self) -> BTreeMap<String, u64> {
         self.state
             .gpu_pool
             .workers
             .iter()
-            .map(|worker| worker.gpu.total_vram_bytes)
-            .max()
-            .unwrap_or(0)
+            .map(|worker| (worker_device_id(&worker), worker.gpu.total_vram_bytes))
+            .collect()
     }
 
     fn device_facts(&self) -> Vec<crate::execution_plan::DeviceFact> {
@@ -2846,10 +2859,14 @@ impl Coordinator {
             mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
             Some("1") | Some("true") | Some("yes")
         );
+        let hard_ordinal =
+            generation_hard_ordinal(&self.state, &pending.job.id, &pending.job.request);
+        let eligible_device_facts =
+            constrained_generation_device_facts(device_facts, hard_ordinal, None);
         let resolved = crate::execution_plan::resolve_execution_plans_for_coordinator(
             &config,
             &pending.job.request,
-            device_facts,
+            &eligible_device_facts,
             offload_requested,
             pending.prepared_inputs.as_ref(),
         );
@@ -2876,7 +2893,7 @@ impl Coordinator {
             // no filesystem model. Keep their transport/fencing focus without
             // weakening production admission.
             let estimate = crate::queue::estimate_model_vram(&pending.job.request.model);
-            return Ok(device_facts
+            return Ok(eligible_device_facts
                 .iter()
                 .filter(|device| device.available_vram_bytes >= estimate)
                 .cloned()
@@ -2983,7 +3000,7 @@ impl Coordinator {
                 .collect());
         }
         resolved.map_err(|error| {
-            classify_generation_plan_failure(error, self.largest_total_vram_bytes())
+            classify_generation_plan_failure(error, &self.total_vram_bytes_by_device_id())
         })
     }
 
@@ -4047,6 +4064,8 @@ impl Coordinator {
             return self.cancelled_placement_preview();
         }
         let device_facts = self.device_facts_from_snapshots(&snapshot.devices);
+        let device_facts =
+            constrained_generation_device_facts(&device_facts, None, required_device_id);
         let config = match self.state.config.try_read() {
             Ok(config) => config,
             Err(_) => {
@@ -4070,7 +4089,7 @@ impl Coordinator {
             Ok(plans) => plans,
             Err(error) => {
                 let failure =
-                    classify_generation_plan_failure(error, self.largest_total_vram_bytes());
+                    classify_generation_plan_failure(error, &self.total_vram_bytes_by_device_id());
                 let outcome = placement_preview_outcome_for_plan_failure(&failure);
                 return empty(outcome, failure.to_string());
             }
@@ -6439,24 +6458,53 @@ fn failure_only_vram_floor(estimates: &EstimateStore, key: &EstimateKey) -> u64 
 /// honest estimate an impossible shape would otherwise sit in the queue
 /// forever, re-resolving on every scheduler tick and never becoming feasible.
 ///
-/// A peak above the largest device's *physical* capacity can never be
-/// satisfied by waiting; a peak that only exceeds what is currently free is
-/// ordinary pressure and stays transient. An unknown capacity (`0`) stays
+/// A peak above the largest *eligible* device's physical capacity can never
+/// be satisfied by waiting; a peak that only exceeds what is currently free
+/// is ordinary pressure and stays transient. An unknown capacity (`0`) stays
 /// transient — never reject on missing evidence.
-fn insufficient_vram_is_terminal(required_peak_bytes: u64, largest_total_vram_bytes: u64) -> bool {
-    largest_total_vram_bytes > 0 && required_peak_bytes > largest_total_vram_bytes
+fn insufficient_vram_is_terminal(
+    required_peak_bytes: u64,
+    largest_eligible_total_vram_bytes: u64,
+) -> bool {
+    largest_eligible_total_vram_bytes > 0 && required_peak_bytes > largest_eligible_total_vram_bytes
+}
+
+fn largest_eligible_total_vram_bytes(
+    eligible_device_ids: &[String],
+    total_vram_bytes_by_device_id: &BTreeMap<String, u64>,
+) -> u64 {
+    let mut largest = 0;
+    for device_id in eligible_device_ids {
+        let Some(capacity) = total_vram_bytes_by_device_id
+            .get(device_id)
+            .copied()
+            .filter(|capacity| *capacity > 0)
+        else {
+            return 0;
+        };
+        largest = largest.max(capacity);
+    }
+    largest
 }
 
 fn classify_generation_plan_failure(
     error: crate::execution_plan::ExecutionPlanError,
-    largest_total_vram_bytes: u64,
+    total_vram_bytes_by_device_id: &BTreeMap<String, u64>,
 ) -> GenerationPlanFailure {
-    match error {
+    match &error {
         crate::execution_plan::ExecutionPlanError::InsufficientVram {
             required_peak_bytes,
+            eligible_device_ids,
             ..
         } => {
-            if insufficient_vram_is_terminal(required_peak_bytes, largest_total_vram_bytes) {
+            let largest_eligible_total_vram_bytes = largest_eligible_total_vram_bytes(
+                eligible_device_ids,
+                total_vram_bytes_by_device_id,
+            );
+            if insufficient_vram_is_terminal(
+                *required_peak_bytes,
+                largest_eligible_total_vram_bytes,
+            ) {
                 GenerationPlanFailure::Terminal(error)
             } else {
                 GenerationPlanFailure::Transient(error.to_string())
@@ -9330,8 +9378,9 @@ mod tests {
             crate::execution_plan::ExecutionPlanError::InsufficientVram {
                 reason: "metal:0 is currently busy".to_string(),
                 required_peak_bytes: 20 * GIB,
+                eligible_device_ids: vec!["metal:0".to_string()],
             },
-            24 * GIB,
+            &BTreeMap::from([("metal:0".to_string(), 24 * GIB)]),
         );
         assert!(
             matches!(&failure, GenerationPlanFailure::Transient(_)),
@@ -9356,8 +9405,12 @@ mod tests {
             crate::execution_plan::ExecutionPlanError::InsufficientVram {
                 reason: "both CUDA lanes are currently busy".to_string(),
                 required_peak_bytes: 18 * GIB,
+                eligible_device_ids: vec!["cuda:0".to_string(), "cuda:1".to_string()],
             },
-            24 * GIB,
+            &BTreeMap::from([
+                ("cuda:0".to_string(), 24 * GIB),
+                ("cuda:1".to_string(), 24 * GIB),
+            ]),
         );
         assert!(matches!(failure, GenerationPlanFailure::Transient(_)));
     }
@@ -9653,6 +9706,42 @@ mod tests {
             worker_a_rx.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn generation_device_facts_apply_ordinal_and_stable_worker_constraints() {
+        let facts = vec![
+            crate::execution_plan::DeviceFact {
+                id: "cuda:stable-small".to_string(),
+                ordinal: 0,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
+                available_vram_bytes: 8 << 30,
+            },
+            crate::execution_plan::DeviceFact {
+                id: "cuda:stable-large".to_string(),
+                ordinal: 1,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 9)),
+                available_vram_bytes: 24 << 30,
+            },
+        ];
+
+        assert_eq!(
+            constrained_generation_device_facts(&facts, None, None),
+            facts,
+            "Auto retains every schedulable worker"
+        );
+        assert_eq!(
+            constrained_generation_device_facts(&facts, Some(0), None),
+            vec![facts[0].clone()],
+            "queue/request ordinal pins constrain planning before admission"
+        );
+        assert_eq!(
+            constrained_generation_device_facts(&facts, None, Some("cuda:stable-large"),),
+            vec![facts[1].clone()],
+            "per-worker planning uses the stable worker identity"
+        );
     }
 
     #[tokio::test]
@@ -14827,8 +14916,9 @@ mod tests {
             crate::execution_plan::ExecutionPlanError::InsufficientVram {
                 reason: "larger than every device".to_string(),
                 required_peak_bytes: 33_474_340_818,
+                eligible_device_ids: vec!["cuda:0".to_string()],
             },
-            RTX_4090_TOTAL,
+            &BTreeMap::from([("cuda:0".to_string(), RTX_4090_TOTAL)]),
         );
         assert_eq!(
             placement_preview_outcome_for_plan_failure(&impossible),
@@ -14842,6 +14932,45 @@ mod tests {
             !insufficient_vram_is_terminal(33_474_340_818, 0),
             "unknown capacity must never reject on missing evidence"
         );
+    }
+
+    #[test]
+    fn insufficient_vram_uses_only_request_eligible_physical_capacity() {
+        const GIB: u64 = 1 << 30;
+        let capacities = BTreeMap::from([
+            ("cuda:small".to_string(), 8 * GIB),
+            ("cuda:large".to_string(), 24 * GIB),
+        ]);
+        let failure = |eligible_device_ids: &[&str]| {
+            classify_generation_plan_failure(
+                crate::execution_plan::ExecutionPlanError::InsufficientVram {
+                    reason: "currently short of VRAM".to_string(),
+                    required_peak_bytes: 12 * GIB,
+                    eligible_device_ids: eligible_device_ids
+                        .iter()
+                        .map(|id| (*id).to_string())
+                        .collect(),
+                },
+                &capacities,
+            )
+        };
+
+        assert!(matches!(
+            failure(&["cuda:small"]),
+            GenerationPlanFailure::Terminal(_)
+        ));
+        assert!(matches!(
+            failure(&["cuda:small", "cuda:large"]),
+            GenerationPlanFailure::Transient(_)
+        ));
+        assert!(matches!(
+            failure(&["cuda:large"]),
+            GenerationPlanFailure::Transient(_)
+        ));
+        assert!(matches!(
+            failure(&["cuda:unknown"]),
+            GenerationPlanFailure::Transient(_)
+        ));
     }
 
     /// #641: `mold.db` held a `scheduler_estimates` row for the failing shape
