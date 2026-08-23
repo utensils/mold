@@ -31,6 +31,8 @@ on:
       - "package.json"
       - "bun.lock"
       - "bun.nix"
+      - ".cargo/config.toml"
+      - ".gitattributes"
       - "crates/mold-core/**"
       - "crates/mold-catalog/**"
       - "crates/mold-db/**"
@@ -141,6 +143,8 @@ jobs:
               - 'crates/mold-server/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.cargo/config.toml'
+              - '.gitattributes'
               - 'flake.nix'
               - 'scripts/verify-h3-release-exclusion.sh'
               - 'scripts/windows.ps1'

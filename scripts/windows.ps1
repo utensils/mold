@@ -101,7 +101,11 @@ function Test-IsX64Host {
 function Get-VsInstallPath {
   $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
   if (-not (Test-Path $vswhere)) { return $null }
-  $found = & $vswhere -latest -products * -property installationPath 2>$null
+  # Finding any Visual Studio product is not enough: a web/.NET-only install
+  # has an installation path but no MSVC compiler, linker, or Windows SDK, so
+  # `doctor` would report success and the first cargo command would fail later.
+  # Require the workload that the install command below names.
+  $found = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Workload.VCTools -property installationPath 2>$null
   if ($found) { return ($found | Select-Object -First 1) }
   return $null
 }

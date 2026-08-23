@@ -564,7 +564,8 @@ protoc is on PATH. `MOLD_WINDOWS_FEATURES` replaces the whole recipe;
 
 ### What is not there yet
 
-Two capabilities are absent rather than degraded, and both say so by name:
+These capabilities and gates are absent or intentionally excluded, and each
+says so by name:
 
 - **Generated AAC audio tracks.** The `mp4` feature pulls `fdk-aac-sys`, whose
   `FDK_archdef.h` recognises only GCC/Clang architecture macros and falls
