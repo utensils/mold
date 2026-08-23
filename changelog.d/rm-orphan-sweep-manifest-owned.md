@@ -10,4 +10,6 @@
   shared components is asked of its manifest for the same reason. The sweep now
   prints every path it unlinks — the shared file plus an hf-cache-backed
   orphan's blob and snapshot links, which it also stopped leaving dangling —
-  instead of only counting them.
+  instead of only counting them. A removed file's `.sha256-verified` marker is
+  now deleted with it and the emptied model directory is cleaned up, so no
+  stale attestation is left behind.
