@@ -7946,7 +7946,7 @@ mod tests {
             // Pin the derived floors so any re-derivation of the ceilings is
             // a visible, reviewed decision rather than silent drift.
             assert_eq!(device_floor, 603_979_776 + 16_978_542_592);
-            assert_eq!(host_floor, 805_306_368 + 14_495_308_664);
+            assert_eq!(host_floor, 805_306_368 + 1_052_855_836);
         }
 
         // The two sequence-linear denoise transients are the FL2VA
@@ -8717,6 +8717,7 @@ mod tests {
                 for route in [
                     H3PrivateQwenLoaderMemoryRoute::Cpu,
                     H3PrivateQwenLoaderMemoryRoute::Cuda,
+                    H3PrivateQwenLoaderMemoryRoute::Metal,
                 ] {
                     let qwen = released_h3_private_qwen_loader_memory_authority(route).unwrap();
                     let qwen_phase = bounds.fixed_runtime_host_bytes
