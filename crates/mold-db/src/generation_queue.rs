@@ -23,6 +23,7 @@ use anyhow::{bail, ensure, Result};
 use rusqlite::{params, OptionalExtension, Row};
 
 use crate::db::MetadataDb;
+use crate::generation_queue_media::{self, QueueMediaObligation};
 
 const COMPLETED_JOB_ID_LOOKUP_SQL: &str = "SELECT 1 FROM generations
       WHERE queue_job_metadata_state = 1
@@ -132,6 +133,9 @@ pub struct GenerationQueueRow {
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub started_at_ms: Option<i64>,
+    /// Opaque staged-media set owned by this queue row. The database never
+    /// stores or interprets the set's members or filesystem layout.
+    pub media_set_id: Option<String>,
 }
 
 /// Payload-free row used by the hot queue-listing path.
@@ -224,6 +228,30 @@ pub fn insert(db: &MetadataDb, row: &GenerationQueueRow) -> Result<()> {
 }
 
 pub(crate) fn insert_on_conn(conn: &rusqlite::Connection, row: &GenerationQueueRow) -> Result<()> {
+    ensure_media_free(row)?;
+    insert_on_conn_with_claim(conn, row, None)
+}
+
+/// Atomically create an active staged-media obligation and its queue row.
+pub fn insert_with_media(
+    db: &MetadataDb,
+    row: &GenerationQueueRow,
+    obligation: &QueueMediaObligation,
+) -> Result<()> {
+    db.transact_immediate(|conn| insert_on_conn_with_media(conn, row, obligation))
+}
+
+pub(crate) fn insert_on_conn_with_media(
+    conn: &rusqlite::Connection,
+    row: &GenerationQueueRow,
+    obligation: &QueueMediaObligation,
+) -> Result<()> {
+    generation_queue_media::validate_row_obligation(
+        row.media_set_id.as_deref(),
+        &row.owner_uuid,
+        obligation,
+    )?;
+    generation_queue_media::insert_active_on_conn(conn, obligation)?;
     insert_on_conn_with_claim(conn, row, None)
 }
 
@@ -237,7 +265,38 @@ pub fn insert_claimed(db: &MetadataDb, row: &GenerationQueueRow, claim_token: &s
     if claim_token.is_empty() {
         bail!("queue claim token must not be empty");
     }
+    ensure_media_free(row)?;
     db.with_conn(|conn| insert_on_conn_with_claim(conn, row, Some(claim_token)))
+}
+
+/// Atomically create an active staged-media obligation and a queue row already
+/// reserved by the live runtime that admitted it.
+pub fn insert_claimed_with_media(
+    db: &MetadataDb,
+    row: &GenerationQueueRow,
+    claim_token: &str,
+    obligation: &QueueMediaObligation,
+) -> Result<()> {
+    if claim_token.is_empty() {
+        bail!("queue claim token must not be empty");
+    }
+    db.transact_immediate(|conn| {
+        generation_queue_media::validate_row_obligation(
+            row.media_set_id.as_deref(),
+            &row.owner_uuid,
+            obligation,
+        )?;
+        generation_queue_media::insert_active_on_conn(conn, obligation)?;
+        insert_on_conn_with_claim(conn, row, Some(claim_token))
+    })
+}
+
+fn ensure_media_free(row: &GenerationQueueRow) -> Result<()> {
+    ensure!(
+        row.media_set_id.is_none(),
+        "queue rows with staged media require an atomic media insertion API"
+    );
+    Ok(())
 }
 
 fn insert_on_conn_with_claim(
@@ -250,8 +309,8 @@ fn insert_on_conn_with_claim(
                 id, owner_uuid, state, model, request_json, output_dir,
                 target_gpu, target_device_id, completion_payload, seed_pinned,
                 dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
-                started_at, claim_token
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                started_at, claim_token, media_set_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             &row.id,
             &row.owner_uuid,
@@ -270,6 +329,7 @@ fn insert_on_conn_with_claim(
             row.updated_at_ms,
             row.started_at_ms,
             claim_token,
+            row.media_set_id.as_deref(),
         ],
     )?;
     Ok(())
@@ -328,7 +388,7 @@ pub fn get(db: &MetadataDb, id: &str) -> Result<Option<GenerationQueueRow>> {
             "SELECT id, owner_uuid, state, model, request_json, output_dir,
                     target_gpu, target_device_id, completion_payload, seed_pinned,
                     dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
-                    started_at
+                    started_at, media_set_id
              FROM generation_queue WHERE id = ?1",
             params![id],
             row_to_queue_row,
@@ -348,7 +408,7 @@ pub fn list_all(db: &MetadataDb, owner_uuid: &str) -> Result<Vec<GenerationQueue
             "SELECT id, owner_uuid, state, model, request_json, output_dir,
                     target_gpu, target_device_id, completion_payload, seed_pinned,
                     dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
-                    started_at
+                    started_at, media_set_id
              FROM generation_queue
              WHERE owner_uuid = ?1
              ORDER BY created_at, rowid",
@@ -461,7 +521,7 @@ pub fn list_replayable(db: &MetadataDb, owner_uuid: &str) -> Result<Vec<Generati
             "SELECT id, owner_uuid, state, model, request_json, output_dir,
                     target_gpu, target_device_id, completion_payload, seed_pinned,
                     dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
-                    started_at
+                    started_at, media_set_id
              FROM generation_queue
              WHERE owner_uuid = ?1 AND state IN ('queued', 'running')
              ORDER BY created_at, rowid",
@@ -531,7 +591,7 @@ pub fn claim_next(
           RETURNING id, owner_uuid, state, model, request_json, output_dir,
                     target_gpu, target_device_id, completion_payload, seed_pinned,
                     dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
-                    started_at",
+                    started_at, media_set_id",
             params![owner_uuid, claim_token, now_ms],
             |row| {
                 Ok(QueueClaim {
@@ -680,6 +740,42 @@ pub fn hold(db: &MetadataDb, id: &str, reason: &str, now_ms: i64) -> Result<bool
             params![id, reason, now_ms],
         )?;
         Ok(updated > 0)
+    })
+}
+
+/// Atomically quarantine selected staged-media jobs during startup.
+///
+/// The owner and non-NULL media marker fences prevent a corrupt/missing set
+/// report from parking another installation's row or an ordinary media-free
+/// job. Held rows retain their marker and active cleanup obligation because
+/// the user may inspect or explicitly cancel them later.
+pub fn hold_media_jobs(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    job_ids: &[String],
+    reason: &str,
+    now_ms: i64,
+) -> Result<usize> {
+    if job_ids.is_empty() {
+        return Ok(0);
+    }
+    db.transact_immediate(|conn| {
+        let mut seen = HashSet::new();
+        let mut stmt = conn.prepare(
+            "UPDATE generation_queue
+                SET state = 'held', held_reason = ?3, claim_token = NULL,
+                    started_at = NULL, updated_at = ?4
+              WHERE id = ?1 AND owner_uuid = ?2
+                AND media_set_id IS NOT NULL
+                AND state IN ('queued', 'running')",
+        )?;
+        let mut held = 0;
+        for job_id in job_ids {
+            if seen.insert(job_id.as_str()) {
+                held += stmt.execute(params![job_id, owner_uuid, reason, now_ms])?;
+            }
+        }
+        Ok(held)
     })
 }
 
@@ -1190,6 +1286,7 @@ fn row_to_queue_row(row: &Row<'_>) -> rusqlite::Result<GenerationQueueRow> {
         created_at_ms: row.get(13)?,
         updated_at_ms: row.get(14)?,
         started_at_ms: row.get(15)?,
+        media_set_id: row.get(16)?,
     })
 }
 
@@ -1217,6 +1314,7 @@ mod tests {
             created_at_ms,
             updated_at_ms: created_at_ms,
             started_at_ms: None,
+            media_set_id: None,
         }
     }
 

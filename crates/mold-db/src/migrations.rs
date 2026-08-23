@@ -620,6 +620,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 25,
         kind: MigrationKind::Rust(add_generation_job_lookup_indexes),
     },
+    Migration {
+        version: 26,
+        kind: MigrationKind::Sql(V26_GENERATION_QUEUE_MEDIA),
+    },
 ];
 
 /// #1227 phase 2 moved face-identity extraction from admission onto the
@@ -697,7 +701,85 @@ ALTER TABLE generation_batch_children ADD COLUMN completed_at_ms INTEGER;
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 25;
+pub const SCHEMA_VERSION: i64 = 26;
+
+/// Opaque staged-media ownership for durable queue rows.
+///
+/// SQLite records only the random set identifier and cleanup obligation. The
+/// staging format, members, roles, names, digests, paths, and byte counts stay
+/// outside the database. A partial unique index makes one non-NULL marker
+/// belong to one queue row while preserving every legacy/media-free NULL.
+///
+/// Cleanup cannot cascade from `generation_queue`: the obligation must
+/// survive authority deletion until the filesystem cleanup has succeeded.
+/// The AFTER DELETE trigger is therefore the singular retirement authority
+/// for direct, bulk, legacy, batch, and claimed deletion paths.
+const V26_GENERATION_QUEUE_MEDIA: &str = r#"
+CREATE TABLE generation_queue_media (
+    media_set_id  TEXT PRIMARY KEY NOT NULL CHECK (length(media_set_id) > 0),
+    owner_uuid    TEXT NOT NULL CHECK (length(owner_uuid) > 0),
+    state         TEXT NOT NULL CHECK (state IN ('active', 'gc_pending')),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX generation_queue_media_owner_state
+ON generation_queue_media(owner_uuid, state, created_at_ms, media_set_id);
+
+ALTER TABLE generation_queue ADD COLUMN media_set_id TEXT
+    REFERENCES generation_queue_media(media_set_id);
+
+CREATE UNIQUE INDEX generation_queue_media_set
+ON generation_queue(media_set_id)
+WHERE media_set_id IS NOT NULL;
+
+CREATE TRIGGER generation_queue_media_reference_insert
+BEFORE INSERT ON generation_queue
+WHEN NEW.media_set_id IS NOT NULL
+ AND NOT EXISTS (
+        SELECT 1 FROM generation_queue_media AS media
+         WHERE media.media_set_id = NEW.media_set_id
+           AND media.owner_uuid = NEW.owner_uuid
+           AND media.state = 'active'
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'queue media obligation is not active for this owner');
+END;
+
+CREATE TRIGGER generation_queue_media_marker_immutable
+BEFORE UPDATE OF media_set_id ON generation_queue
+WHEN OLD.media_set_id IS NOT NEW.media_set_id
+BEGIN
+    SELECT RAISE(ABORT, 'queue media marker is immutable');
+END;
+
+CREATE TRIGGER generation_queue_media_owner_update
+BEFORE UPDATE OF owner_uuid ON generation_queue
+WHEN NEW.media_set_id IS NOT NULL
+ AND NOT EXISTS (
+        SELECT 1 FROM generation_queue_media AS media
+         WHERE media.media_set_id = NEW.media_set_id
+           AND media.owner_uuid = NEW.owner_uuid
+           AND media.state = 'active'
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'queue media obligation is not active for this owner');
+END;
+
+CREATE TRIGGER generation_queue_media_retire
+AFTER DELETE ON generation_queue
+WHEN OLD.media_set_id IS NOT NULL
+BEGIN
+    UPDATE generation_queue_media
+       SET state = 'gc_pending',
+           updated_at_ms = MAX(
+               updated_at_ms,
+               CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)
+           )
+     WHERE media_set_id = OLD.media_set_id
+       AND state = 'active';
+END;
+"#;
 
 /// Build a serde-compatible reverse lookup for durable publication recovery.
 ///
@@ -1155,7 +1237,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 25);
+        assert_eq!(SCHEMA_VERSION, 26);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1309,7 +1391,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 25);
+        assert_eq!(SCHEMA_VERSION, 26);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1444,7 +1526,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 25);
+        assert_eq!(SCHEMA_VERSION, 26);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -1705,7 +1787,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 25);
+        assert_eq!(SCHEMA_VERSION, 26);
     }
 
     #[test]
@@ -1921,5 +2003,159 @@ mod v25_tests {
             (None, None),
             "an older writer must make the projection explicitly reparsable, never stale"
         );
+    }
+}
+
+#[cfg(test)]
+mod v26_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn column_names(conn: &Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    fn migrate_through(conn: &mut Connection, version: i64) {
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= version)
+        {
+            let tx = conn.transaction().unwrap();
+            match migration.kind {
+                MigrationKind::Sql(sql) => tx.execute_batch(sql).unwrap(),
+                MigrationKind::Rust(function) => function(&tx).unwrap(),
+            }
+            tx.pragma_update(None, "user_version", migration.version)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+    }
+
+    fn insert_legacy_queue_row(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO generation_queue (
+                id, owner_uuid, state, model, request_json, output_dir,
+                completion_payload, created_at, updated_at
+             ) VALUES (?1, 'owner', 'queued', 'model', ?2, '/gallery', ?3, 7, 7)",
+            rusqlite::params![id, r#"{"prompt":"unchanged"}"#, "metadata_only"],
+        )
+        .unwrap();
+    }
+
+    fn assert_legacy_row_is_payload_identical(conn: &Connection, id: &str) {
+        let row: (String, String, String, Option<String>) = conn
+            .query_row(
+                "SELECT request_json, output_dir, completion_payload, media_set_id
+                   FROM generation_queue WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                r#"{"prompt":"unchanged"}"#.to_string(),
+                "/gallery".to_string(),
+                "metadata_only".to_string(),
+                None,
+            )
+        );
+        let obligations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM generation_queue_media", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(obligations, 0, "legacy rows must not invent media work");
+    }
+
+    #[test]
+    fn fresh_v26_schema_is_opaque_and_payload_free() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        apply_pending(&mut conn).unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), 26);
+        assert_eq!(
+            column_names(&conn, "generation_queue_media"),
+            [
+                "media_set_id",
+                "owner_uuid",
+                "state",
+                "created_at_ms",
+                "updated_at_ms",
+            ]
+        );
+        assert!(column_names(&conn, "generation_queue")
+            .iter()
+            .any(|column| column == "media_set_id"));
+        for invalid in [None, Some("")] {
+            assert!(conn
+                .execute(
+                    "INSERT INTO generation_queue_media
+                        (media_set_id, owner_uuid, state, created_at_ms, updated_at_ms)
+                     VALUES (?1, 'owner', 'active', 1, 1)",
+                    [invalid],
+                )
+                .is_err());
+        }
+        let trigger: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                  WHERE type = 'trigger' AND name = 'generation_queue_media_retire'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(trigger.contains("AFTER DELETE ON generation_queue"));
+
+        let normalized = conn
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                  WHERE type = 'table' AND name = 'generation_queue_media'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+            .to_ascii_lowercase();
+        for forbidden in [
+            "path", "byte", "digest", "role", "name", "member", "payload", "request",
+        ] {
+            assert!(
+                !normalized.contains(forbidden),
+                "queue-media schema leaked forbidden field {forbidden}: {normalized}"
+            );
+        }
+    }
+
+    #[test]
+    fn shipped_v23_upgrades_through_v26_without_touching_legacy_payloads() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        migrate_through(&mut conn, 23);
+        insert_legacy_queue_row(&conn, "from-v23");
+
+        apply_pending(&mut conn).unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), 26);
+        assert_legacy_row_is_payload_identical(&conn, "from-v23");
+    }
+
+    #[test]
+    fn feature_v25_upgrades_to_v26_without_touching_legacy_payloads() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        migrate_through(&mut conn, 25);
+        insert_legacy_queue_row(&conn, "from-v25");
+
+        apply_pending(&mut conn).unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), 26);
+        assert_legacy_row_is_payload_identical(&conn, "from-v25");
     }
 }

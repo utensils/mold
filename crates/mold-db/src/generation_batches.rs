@@ -4,11 +4,12 @@
 //! make one client admission idempotent and retain terminal child summaries
 //! after the queue rows are removed.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use rusqlite::{params, OptionalExtension};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::generation_queue::{self, GenerationQueueRow};
+use crate::generation_queue_media::{self, QueueMediaObligation};
 use crate::MetadataDb;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +35,26 @@ pub struct GenerationBatchChildRow {
 pub struct GenerationBatchDetail {
     pub batch: GenerationBatchRow,
     pub children: Vec<GenerationBatchChildRow>,
+}
+
+/// Outcome of a file-first batch admission carrying staged media.
+///
+/// An idempotency loser is not an error from the cleanup perspective: its
+/// distinct staged sets are durably recorded as gc-pending in the same
+/// transaction that observes the winner. A request-hash conflict is explicit
+/// for the caller but retains the same cleanup guarantee.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GenerationBatchMediaInsertOutcome {
+    Inserted(GenerationBatchDetail),
+    Existing {
+        detail: GenerationBatchDetail,
+        gc_pending_media_set_ids: Vec<String>,
+        colliding_media_set_ids: Vec<String>,
+    },
+    Conflict {
+        gc_pending_media_set_ids: Vec<String>,
+        colliding_media_set_ids: Vec<String>,
+    },
 }
 
 /// Additive reconnect view. The legacy detail remains unchanged for callers
@@ -168,6 +189,136 @@ pub fn insert_or_get(
                 children: children.iter().map(|(child, _)| child.clone()).collect(),
             },
             true,
+        ))
+    })
+}
+
+/// Insert a batch, every queue row, and every active media obligation in one
+/// immediate transaction.
+///
+/// `obligations` contains exactly one entry for each child whose queue row has
+/// a non-NULL media marker. On an idempotent or conflicting retry the incoming
+/// obligations belong to the losing file-first contender, so they are instead
+/// committed as gc-pending and returned by id for immediate cleanup.
+pub fn insert_or_get_with_media(
+    db: &MetadataDb,
+    batch: &GenerationBatchRow,
+    children: &[(GenerationBatchChildRow, GenerationQueueRow)],
+    obligations: &[QueueMediaObligation],
+) -> Result<GenerationBatchMediaInsertOutcome> {
+    let mut obligations_by_id = HashMap::new();
+    for obligation in obligations {
+        if obligations_by_id
+            .insert(obligation.media_set_id.as_str(), obligation)
+            .is_some()
+        {
+            bail!(
+                "duplicate queue media obligation {}",
+                obligation.media_set_id
+            );
+        }
+    }
+    let mut referenced = HashSet::new();
+    for (child, queue_row) in children {
+        ensure!(
+            child.batch_id == batch.id,
+            "batch child points at a different batch"
+        );
+        ensure!(
+            child.job_id == queue_row.id,
+            "batch child and queue row have different job ids"
+        );
+        ensure!(
+            queue_row.owner_uuid == batch.owner_uuid,
+            "batch and queue row have different owners"
+        );
+        let Some(media_set_id) = queue_row.media_set_id.as_deref() else {
+            continue;
+        };
+        let obligation = obligations_by_id.get(media_set_id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "queue row {0} is missing its media obligation",
+                queue_row.id
+            )
+        })?;
+        generation_queue_media::validate_row_obligation(
+            Some(media_set_id),
+            &queue_row.owner_uuid,
+            obligation,
+        )?;
+        referenced.insert(media_set_id);
+    }
+    ensure!(
+        referenced.len() == obligations_by_id.len(),
+        "batch includes an unreferenced queue media obligation"
+    );
+
+    db.transact_immediate(|conn| {
+        if let Some(existing) =
+            get_by_client_on_conn(conn, &batch.owner_uuid, &batch.client_batch_id)?
+        {
+            let mut gc_pending_media_set_ids = Vec::new();
+            let mut colliding_media_set_ids = Vec::new();
+            for obligation in obligations {
+                if generation_queue_media::ensure_gc_pending_on_conn(conn, obligation)? {
+                    gc_pending_media_set_ids.push(obligation.media_set_id.clone());
+                } else {
+                    colliding_media_set_ids.push(obligation.media_set_id.clone());
+                }
+            }
+            if existing.batch.request_sha256 != batch.request_sha256 {
+                return Ok(GenerationBatchMediaInsertOutcome::Conflict {
+                    gc_pending_media_set_ids,
+                    colliding_media_set_ids,
+                });
+            }
+            return Ok(GenerationBatchMediaInsertOutcome::Existing {
+                detail: existing,
+                gc_pending_media_set_ids,
+                colliding_media_set_ids,
+            });
+        }
+        conn.execute(
+            "INSERT INTO generation_batches
+                (id, client_batch_id, owner_uuid, request_sha256, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                batch.id,
+                batch.client_batch_id,
+                batch.owner_uuid,
+                batch.request_sha256,
+                batch.created_at_ms,
+            ],
+        )?;
+        for (child, queue_row) in children {
+            if let Some(media_set_id) = queue_row.media_set_id.as_deref() {
+                generation_queue::insert_on_conn_with_media(
+                    conn,
+                    queue_row,
+                    obligations_by_id[media_set_id],
+                )?;
+            } else {
+                generation_queue::insert_on_conn(conn, queue_row)?;
+            }
+            conn.execute(
+                "INSERT INTO generation_batch_children
+                    (batch_id, job_id, batch_index, state, error, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    child.batch_id,
+                    child.job_id,
+                    child.batch_index,
+                    child.state,
+                    child.error,
+                    child.updated_at_ms,
+                ],
+            )?;
+        }
+        Ok(GenerationBatchMediaInsertOutcome::Inserted(
+            GenerationBatchDetail {
+                batch: batch.clone(),
+                children: children.iter().map(|(child, _)| child.clone()).collect(),
+            },
         ))
     })
 }
@@ -870,6 +1021,7 @@ mod tests {
 
     use super::*;
     use crate::generation_queue::QueueRowState;
+    use crate::generation_queue_media::{list_obligations, QueueMediaObligationState};
 
     fn rows(count: usize) -> Vec<(GenerationBatchChildRow, GenerationQueueRow)> {
         (0..count)
@@ -901,6 +1053,7 @@ mod tests {
                         created_at_ms: 1,
                         updated_at_ms: 1,
                         started_at_ms: None,
+                        media_set_id: None,
                     },
                 )
             })
@@ -915,6 +1068,176 @@ mod tests {
             request_sha256: hash.into(),
             created_at_ms: 1,
         }
+    }
+
+    fn media_obligation(id: &str) -> QueueMediaObligation {
+        QueueMediaObligation {
+            media_set_id: id.to_string(),
+            owner_uuid: "owner-1".to_string(),
+            state: QueueMediaObligationState::Active,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        }
+    }
+
+    fn media_rows(
+        prefix: &str,
+        count: usize,
+    ) -> Vec<(GenerationBatchChildRow, GenerationQueueRow)> {
+        let mut rows = rows(count);
+        for (index, (child, queue)) in rows.iter_mut().enumerate() {
+            let job_id = format!("{prefix}-job-{index}");
+            child.job_id = job_id.clone();
+            queue.id = job_id;
+            queue.media_set_id = Some(format!("{prefix}-set-{index}"));
+        }
+        rows
+    }
+
+    fn media_for_rows(
+        rows: &[(GenerationBatchChildRow, GenerationQueueRow)],
+    ) -> Vec<QueueMediaObligation> {
+        rows.iter()
+            .map(|(_, queue)| media_obligation(queue.media_set_id.as_deref().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn media_batch_insert_is_atomic_and_idempotency_losers_become_gc_pending() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let winner_rows = media_rows("winner", 2);
+        let winner_media = media_for_rows(&winner_rows);
+        assert!(matches!(
+            insert_or_get_with_media(&db, &batch("hash"), &winner_rows, &winner_media).unwrap(),
+            GenerationBatchMediaInsertOutcome::Inserted(_)
+        ));
+
+        let loser_rows = media_rows("loser", 2);
+        let loser_media = media_for_rows(&loser_rows);
+        let outcome =
+            insert_or_get_with_media(&db, &batch("hash"), &loser_rows, &loser_media).unwrap();
+        assert!(matches!(
+            outcome,
+            GenerationBatchMediaInsertOutcome::Existing {
+                gc_pending_media_set_ids,
+                ..
+            } if gc_pending_media_set_ids == vec!["loser-set-0", "loser-set-1"]
+        ));
+
+        let active = list_obligations(&db, "owner-1", QueueMediaObligationState::Active)
+            .unwrap()
+            .into_iter()
+            .map(|media| media.media_set_id)
+            .collect::<Vec<_>>();
+        assert_eq!(active, vec!["winner-set-0", "winner-set-1"]);
+        let pending = list_obligations(&db, "owner-1", QueueMediaObligationState::GcPending)
+            .unwrap()
+            .into_iter()
+            .map(|media| media.media_set_id)
+            .collect::<Vec<_>>();
+        assert_eq!(pending, vec!["loser-set-0", "loser-set-1"]);
+        assert!(crate::generation_queue::get(&db, "loser-job-0")
+            .unwrap()
+            .is_none());
+
+        let conflict_rows = media_rows("conflict", 1);
+        let conflict_media = media_for_rows(&conflict_rows);
+        assert_eq!(
+            insert_or_get_with_media(
+                &db,
+                &batch("different-hash"),
+                &conflict_rows,
+                &conflict_media,
+            )
+            .unwrap(),
+            GenerationBatchMediaInsertOutcome::Conflict {
+                gc_pending_media_set_ids: vec!["conflict-set-0".to_string()],
+                colliding_media_set_ids: Vec::new(),
+            }
+        );
+        assert!(matches!(
+            insert_or_get_with_media(&db, &batch("hash"), &loser_rows, &loser_media).unwrap(),
+            GenerationBatchMediaInsertOutcome::Existing {
+                gc_pending_media_set_ids,
+                colliding_media_set_ids,
+                ..
+            } if gc_pending_media_set_ids == vec!["loser-set-0", "loser-set-1"]
+                && colliding_media_set_ids.is_empty()
+        ));
+        assert_eq!(
+            list_obligations(&db, "owner-1", QueueMediaObligationState::GcPending)
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn media_batch_failure_rolls_back_queue_rows_and_obligations() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut broken_rows = media_rows("broken", 2);
+        broken_rows[1].0.batch_index = broken_rows[0].0.batch_index;
+        let media = media_for_rows(&broken_rows);
+
+        assert!(insert_or_get_with_media(&db, &batch("hash"), &broken_rows, &media).is_err());
+        assert!(get_by_client(&db, "owner-1", "client-1").unwrap().is_none());
+        assert!(crate::generation_queue::list_all(&db, "owner-1")
+            .unwrap()
+            .is_empty());
+        assert!(
+            list_obligations(&db, "owner-1", QueueMediaObligationState::Active)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            list_obligations(&db, "owner-1", QueueMediaObligationState::GcPending)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn loser_set_id_collision_cannot_retire_the_winner() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let winner_rows = media_rows("winner", 1);
+        let winner_media = media_for_rows(&winner_rows);
+        insert_or_get_with_media(&db, &batch("hash"), &winner_rows, &winner_media).unwrap();
+
+        let mut loser_rows = media_rows("loser", 2);
+        loser_rows[0].1.media_set_id = Some("winner-set-0".to_string());
+        let contender = vec![
+            media_obligation("winner-set-0"),
+            media_obligation("loser-set-1"),
+        ];
+        assert!(matches!(
+            insert_or_get_with_media(&db, &batch("hash"), &loser_rows, &contender).unwrap(),
+            GenerationBatchMediaInsertOutcome::Existing {
+                gc_pending_media_set_ids,
+                colliding_media_set_ids,
+                ..
+            } if gc_pending_media_set_ids == vec!["loser-set-1"]
+                && colliding_media_set_ids == vec!["winner-set-0"]
+        ));
+
+        assert_eq!(
+            list_obligations(&db, "owner-1", QueueMediaObligationState::Active)
+                .unwrap()
+                .into_iter()
+                .map(|media| media.media_set_id)
+                .collect::<Vec<_>>(),
+            vec!["winner-set-0"]
+        );
+        assert_eq!(
+            list_obligations(&db, "owner-1", QueueMediaObligationState::GcPending)
+                .unwrap()
+                .into_iter()
+                .map(|media| media.media_set_id)
+                .collect::<Vec<_>>(),
+            vec!["loser-set-1"]
+        );
+        assert!(crate::generation_queue::get(&db, "winner-job-0")
+            .unwrap()
+            .is_some());
     }
 
     #[test]

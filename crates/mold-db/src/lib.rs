@@ -14,6 +14,7 @@ mod device_preferences;
 pub mod gallery_mutations;
 pub mod generation_batches;
 pub mod generation_queue;
+pub mod generation_queue_media;
 pub mod metadata_io;
 pub mod migrations;
 mod model_prefs;
