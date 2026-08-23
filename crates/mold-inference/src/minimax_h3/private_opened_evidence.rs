@@ -1877,24 +1877,21 @@ fn build_canonical_private_fl2va_target_budget(
         bounds.fixed_runtime_device_bytes,
         retained_vaes,
         bounds.vae_construction_device_workspace_bytes,
+        qwen_output_state_device_bytes,
     ])?;
     let qwen_encode_phase_device_bytes = match qwen.placement() {
         H3QwenNvfp4RuntimePlacement::Accelerated => checked_sum([
             bounds.fixed_runtime_device_bytes,
-            retained_vaes,
             qwen_device_parameter_bytes,
             qwen_activation_device_bytes,
             qwen_output_state_device_bytes,
         ])?,
-        H3QwenNvfp4RuntimePlacement::Cpu => {
-            checked_sum([bounds.fixed_runtime_device_bytes, retained_vaes])?
-        }
+        H3QwenNvfp4RuntimePlacement::Cpu => bounds.fixed_runtime_device_bytes,
     };
     let qwen_transfer_phase_device_bytes = match qwen.placement() {
         H3QwenNvfp4RuntimePlacement::Accelerated => 0,
         H3QwenNvfp4RuntimePlacement::Cpu => checked_sum([
             bounds.fixed_runtime_device_bytes,
-            retained_vaes,
             qwen_output_transfer_device_bytes,
         ])?,
     };
@@ -2039,7 +2036,7 @@ fn build_canonical_private_fl2va_target_budget(
     ])?;
     let vae_load_phase_host_bytes = checked_sum([
         attempt_host_bytes,
-        qwen_alive_metadata_host_bytes,
+        transformer_alive_metadata_host_bytes,
         vae_memory.peak_host_io_buffer_bytes,
     ])?;
     let qwen_encode_phase_host_bytes = checked_sum([
@@ -2271,9 +2268,9 @@ fn build_canonical_private_fl2va_target_budget(
     let mut budget = H3FactoryTargetBudgetInput {
         identity_sha256: String::new(),
         load_drop_policy: if ref2va {
-            H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadVaesLoadQwenEncodeVisionTransferDropQwenEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+            H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadQwenEncodeVisionTransferDropQwenLoadVaesEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
         } else {
-            H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+            H3FactoryTargetLoadDropPolicy::LoadQwenEncodeTransferDropQwenLoadVaesEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
         },
         artifacts,
         artifact_host_bytes,

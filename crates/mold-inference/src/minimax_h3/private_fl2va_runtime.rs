@@ -1386,9 +1386,9 @@ fn validate_prepared_overlap_binding(
         || overlap.visual_decode_peak_device_bytes != budget.visual_decode_phase_device_bytes
         || overlap.normalized_endpoint_host_bytes != budget.normalized_endpoint_host_bytes
         || budget.load_drop_policy
-            != H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+            != H3FactoryTargetLoadDropPolicy::LoadQwenEncodeTransferDropQwenLoadVaesEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
     {
-        bail!("private H3 prepared attempt, target budget, and overlap authority differ before VAE allocation")
+        bail!("private H3 prepared attempt, target budget, and overlap authority differ before component allocation")
     }
     Ok(())
 }
@@ -1721,7 +1721,7 @@ impl H3PrivatePhaseLedger {
     fn references_encoded(&mut self) -> Result<()> {
         self.transition(
             &[
-                H3PrivatePhaseState::QwenDropped,
+                H3PrivatePhaseState::VaesLoaded,
                 H3PrivatePhaseState::ReferencesEncoded,
             ],
             H3PrivatePhaseState::ReferencesEncoded,
@@ -1731,12 +1731,7 @@ impl H3PrivatePhaseLedger {
 
     fn vaes_loaded(&mut self) -> Result<()> {
         self.transition(
-            // Ref2VA has already normalized its media by this point; FL2VA
-            // constructs the VAEs first.
-            &[
-                H3PrivatePhaseState::Bound,
-                H3PrivatePhaseState::ReferencesPreprocessed,
-            ],
+            &[H3PrivatePhaseState::QwenDropped],
             H3PrivatePhaseState::VaesLoaded,
             "VAE load",
         )
@@ -1744,7 +1739,10 @@ impl H3PrivatePhaseLedger {
 
     fn qwen_loaded(&mut self) -> Result<()> {
         self.transition(
-            &[H3PrivatePhaseState::VaesLoaded],
+            &[
+                H3PrivatePhaseState::Bound,
+                H3PrivatePhaseState::ReferencesPreprocessed,
+            ],
             H3PrivatePhaseState::QwenLoaded,
             "Qwen load",
         )
@@ -1761,7 +1759,7 @@ impl H3PrivatePhaseLedger {
     fn conditions_encoded(&mut self) -> Result<()> {
         self.transition(
             &[
-                H3PrivatePhaseState::QwenDropped,
+                H3PrivatePhaseState::VaesLoaded,
                 H3PrivatePhaseState::ConditionsEncoded,
             ],
             H3PrivatePhaseState::ConditionsEncoded,
@@ -1772,7 +1770,7 @@ impl H3PrivatePhaseLedger {
     fn vaes_parked(&mut self) -> Result<()> {
         self.transition(
             &[
-                H3PrivatePhaseState::QwenDropped,
+                H3PrivatePhaseState::VaesLoaded,
                 H3PrivatePhaseState::ConditionsEncoded,
                 H3PrivatePhaseState::ReferencesEncoded,
             ],
@@ -2227,13 +2225,6 @@ where
         checkpoint: &mut dyn H3PipelineCheckpoint,
     ) -> Result<H3TextConditioning> {
         self.validate_continuing_authority()?;
-        self.ledger.vaes_loaded()?;
-        let opened_vae = self
-            .opened_vae
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("private H3 VAE authority was already consumed"))?;
-        self.construct_vaes(opened_vae, checkpoint)?;
-
         self.ledger.qwen_loaded()?;
         checkpoint.checkpoint(H3PipelineEvent {
             phase: H3PipelinePhase::QwenLoad,
@@ -2292,6 +2283,12 @@ where
         self.ledger.qwen_dropped()?;
         let text = text?;
         self.validate_continuing_authority()?;
+        self.ledger.vaes_loaded()?;
+        let opened_vae = self
+            .opened_vae
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("private H3 VAE authority was already consumed"))?;
+        self.construct_vaes(opened_vae, checkpoint)?;
         Ok(text)
     }
 
@@ -2304,9 +2301,9 @@ where
         self.validate_continuing_authority()?;
         if !matches!(
             self.ledger.state,
-            H3PrivatePhaseState::QwenDropped | H3PrivatePhaseState::ConditionsEncoded
+            H3PrivatePhaseState::VaesLoaded | H3PrivatePhaseState::ConditionsEncoded
         ) {
-            bail!("private H3 condition encode occurred before Qwen drop")
+            bail!("private H3 condition encode occurred before VAE load")
         }
         let result = self
             .vae
@@ -2507,13 +2504,6 @@ where
     ) -> Result<H3TextConditioning> {
         self.require_ref2va()?;
         self.validate_continuing_authority()?;
-        self.ledger.vaes_loaded()?;
-        let opened_vae = self
-            .opened_vae
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("private H3 VAE authority was already consumed"))?;
-        self.construct_vaes(opened_vae, checkpoint)?;
-
         self.ledger.qwen_loaded()?;
         checkpoint.checkpoint(H3PipelineEvent {
             phase: H3PipelinePhase::QwenLoad,
@@ -2575,6 +2565,12 @@ where
         self.ledger.qwen_dropped()?;
         let text = text?;
         self.validate_continuing_authority()?;
+        self.ledger.vaes_loaded()?;
+        let opened_vae = self
+            .opened_vae
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("private H3 VAE authority was already consumed"))?;
+        self.construct_vaes(opened_vae, checkpoint)?;
         Ok(text)
     }
 
@@ -2588,9 +2584,9 @@ where
         self.validate_continuing_authority()?;
         if !matches!(
             self.ledger.state,
-            H3PrivatePhaseState::QwenDropped | H3PrivatePhaseState::ReferencesEncoded
+            H3PrivatePhaseState::VaesLoaded | H3PrivatePhaseState::ReferencesEncoded
         ) {
-            bail!("private H3 reference encode occurred before Qwen drop")
+            bail!("private H3 reference encode occurred before VAE load")
         }
         let frames = reference_visual_frames(&self.reference_media, reference)?;
         let condition = self
@@ -2613,9 +2609,9 @@ where
         self.validate_continuing_authority()?;
         if !matches!(
             self.ledger.state,
-            H3PrivatePhaseState::QwenDropped | H3PrivatePhaseState::ReferencesEncoded
+            H3PrivatePhaseState::VaesLoaded | H3PrivatePhaseState::ReferencesEncoded
         ) {
-            bail!("private H3 reference encode occurred before Qwen drop")
+            bail!("private H3 reference encode occurred before VAE load")
         }
         let H3AudioConditionEncodeMode::OfficialPosteriorModeF32 = mode;
         let waveform = reference_audio_waveform(
@@ -4825,18 +4821,10 @@ mod tests {
         let mux_calls = AtomicUsize::new(0);
         let mut ledger = H3PrivatePhaseLedger::new(3).unwrap();
         assert!(H3PrivatePhaseLedger::new(0).is_err());
-        assert!(ledger.qwen_loaded().is_err());
+        assert!(ledger.vaes_loaded().is_err());
         assert!(ledger.denoise_completed().is_err());
         assert!(ledger.visual_decoded().is_err());
         assert!(ledger.vaes_dropped().is_err());
-        assert!(try_mux(&ledger, &mux_calls).is_err());
-
-        let vae = DropCount {
-            name: "vae",
-            events: Arc::clone(&events),
-        };
-        ledger.vaes_loaded().unwrap();
-        assert!(ledger.vaes_loaded().is_err());
         assert!(try_mux(&ledger, &mux_calls).is_err());
 
         let qwen = DropCount {
@@ -4848,6 +4836,17 @@ mod tests {
         drop(qwen);
         ledger.qwen_dropped().unwrap();
         assert_eq!(*events.lock().unwrap(), ["qwen"]);
+        assert!(ledger.conditions_encoded().is_err());
+
+        // Both VAEs are constructed only after Qwen has been released, so
+        // their multi-gigabyte residents never overlap its packed weights.
+        let vae = DropCount {
+            name: "vae",
+            events: Arc::clone(&events),
+        };
+        ledger.vaes_loaded().unwrap();
+        assert!(ledger.vaes_loaded().is_err());
+        assert!(try_mux(&ledger, &mux_calls).is_err());
         ledger.conditions_encoded().unwrap();
         ledger.conditions_encoded().unwrap();
 

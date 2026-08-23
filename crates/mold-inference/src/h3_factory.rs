@@ -254,14 +254,14 @@ pub struct H3FactoryRawCheckpointInput {
 /// weights on either side of denoise but never across it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum H3FactoryTargetLoadDropPolicy {
-    LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
+    LoadQwenEncodeTransferDropQwenLoadVaesEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
     /// Ref2VA's real order. It diverges from FL2VA before the conditioner:
     /// media is decoded and normalized on the host first (that retained media
     /// is what the two reference encoders later consume), Qwen encodes the
     /// prompt *with* the reference vision pads, and conditioning is then
     /// encoded twice — once through the visual VAE and once through the audio
     /// VAE — before the VAEs park for denoise and reload for decode.
-    DecodeReferencesPreprocessReferencesLoadVaesLoadQwenEncodeVisionTransferDropQwenEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
+    DecodeReferencesPreprocessReferencesLoadQwenEncodeVisionTransferDropQwenLoadVaesEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
     /// Test-only marker proving that the policy discriminator participates in
     /// the target-budget identity without advertising another executable plan.
     #[cfg(test)]
@@ -613,11 +613,11 @@ impl H3FactoryTargetBudgetInput {
         } = self;
 
         hash.update(match load_drop_policy {
-            H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux => {
-                b"load-vaes-load-qwen-encode-transfer-drop-qwen-encode-conditions-park-vaes-allocate-noise-load-transformer-denoise-drop-transformer-reload-vaes-decode-visual-audio-drop-vaes-mux".as_slice()
+            H3FactoryTargetLoadDropPolicy::LoadQwenEncodeTransferDropQwenLoadVaesEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux => {
+                b"load-qwen-encode-transfer-drop-qwen-load-vaes-encode-conditions-park-vaes-allocate-noise-load-transformer-denoise-drop-transformer-reload-vaes-decode-visual-audio-drop-vaes-mux".as_slice()
             }
-            H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadVaesLoadQwenEncodeVisionTransferDropQwenEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux => {
-                b"decode-references-preprocess-references-load-vaes-load-qwen-encode-vision-transfer-drop-qwen-encode-visual-references-encode-audio-references-park-vaes-allocate-noise-load-transformer-denoise-drop-transformer-reload-vaes-decode-visual-audio-drop-vaes-mux".as_slice()
+            H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadQwenEncodeVisionTransferDropQwenLoadVaesEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux => {
+                b"decode-references-preprocess-references-load-qwen-encode-vision-transfer-drop-qwen-load-vaes-encode-visual-references-encode-audio-references-park-vaes-allocate-noise-load-transformer-denoise-drop-transformer-reload-vaes-decode-visual-audio-drop-vaes-mux".as_slice()
             }
             #[cfg(test)]
             H3FactoryTargetLoadDropPolicy::IdentityMutationSentinel => {
@@ -2351,7 +2351,7 @@ fn validate_target_budget(
     let vae_load_host = checked_u64_sum(
         [
             attempt_host,
-            qwen_alive_metadata_host,
+            transformer_alive_metadata_host,
             memory.vae_peak_host_io_buffer_bytes,
         ],
         "H3 VAE load host phase",
@@ -2579,7 +2579,7 @@ fn validate_target_budget(
     // Host-only phases: nothing model-sized is resident on the device yet.
     let reference_decode = memory.fixed_runtime_device_bytes;
     let reference_preprocess = memory.fixed_runtime_device_bytes;
-    // Both reference encoders run against the parked-in VAEs with the Qwen
+    // Both reference encoders run against the resident VAEs with the Qwen
     // output already transferred, exactly as FL2VA's condition encode does.
     let reference_visual_encode = checked_u64_sum(
         [
@@ -2608,6 +2608,7 @@ fn validate_target_budget(
             memory.fixed_runtime_device_bytes,
             retained_vaes,
             memory.vae_construction_device_workspace_bytes,
+            memory.qwen_output_state_device_bytes,
         ],
         "H3 VAE load phase",
     )?;
@@ -2616,17 +2617,13 @@ fn validate_target_budget(
         | H3FactoryConditionerPlacement::AssignedMetalThenDrop => checked_u64_sum(
             [
                 memory.fixed_runtime_device_bytes,
-                retained_vaes,
                 memory.qwen_device_parameter_bytes,
                 memory.qwen_activation_device_bytes,
                 memory.qwen_output_state_device_bytes,
             ],
             "H3 Qwen encode phase",
         )?,
-        H3FactoryConditionerPlacement::HostCpuThenDrop => checked_u64_sum(
-            [memory.fixed_runtime_device_bytes, retained_vaes],
-            "H3 host Qwen encode phase",
-        )?,
+        H3FactoryConditionerPlacement::HostCpuThenDrop => memory.fixed_runtime_device_bytes,
     };
     let qwen_transfer = match conditioner_placement {
         H3FactoryConditionerPlacement::AssignedCudaThenDrop
@@ -2634,7 +2631,6 @@ fn validate_target_budget(
         H3FactoryConditionerPlacement::HostCpuThenDrop => checked_u64_sum(
             [
                 memory.fixed_runtime_device_bytes,
-                retained_vaes,
                 memory.qwen_output_transfer_device_bytes,
             ],
             "H3 Qwen transfer phase",
@@ -2811,8 +2807,8 @@ fn validate_target_budget(
     // Each task has exactly one executable load/drop order, and the budget's
     // phase ledgers are only meaningful against that order.
     let expected_load_drop_policy = match request.task {
-        Task::Fl2va => H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
-        Task::Ref2va => H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadVaesLoadQwenEncodeVisionTransferDropQwenEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
+        Task::Fl2va => H3FactoryTargetLoadDropPolicy::LoadQwenEncodeTransferDropQwenLoadVaesEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
+        Task::Ref2va => H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadQwenEncodeVisionTransferDropQwenLoadVaesEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
     };
     expect_eq!(
         "load_drop_policy",
@@ -5235,8 +5231,8 @@ mod tests {
 
     #[test]
     fn each_task_pins_exactly_one_executable_load_drop_order() {
-        let fl2va = H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux;
-        let ref2va = H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadVaesLoadQwenEncodeVisionTransferDropQwenEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux;
+        let fl2va = H3FactoryTargetLoadDropPolicy::LoadQwenEncodeTransferDropQwenLoadVaesEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux;
+        let ref2va = H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadQwenEncodeVisionTransferDropQwenLoadVaesEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux;
         assert_ne!(fl2va, ref2va);
 
         // The discriminator participates in the target-budget identity, so a
@@ -5509,7 +5505,7 @@ mod tests {
             |budget| budget.reference_audio_encode_phase_device_bytes = 0,
             |budget| budget.condition_encode_phase_device_bytes = 4_096,
             |budget| {
-                budget.load_drop_policy = H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+                budget.load_drop_policy = H3FactoryTargetLoadDropPolicy::LoadQwenEncodeTransferDropQwenLoadVaesEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
             },
         ] {
             let mut budget = ref2va_budget.clone();
@@ -5626,7 +5622,7 @@ mod tests {
     ///
     /// Two pinned literals, each with its own coverage:
     ///
-    /// * The prepared-attempt digest (862ae3c2…) is
+    /// * The prepared-attempt digest (dc56e0a5…) is
     ///   `expected_h3_factory_prepared_attempt_identity` over the
     ///   hand-assembled fixture, so it covers the identity FUNCTIONS — the
     ///   request, endpoint, raw-checkpoint, and target-budget hash layouts and
@@ -5655,7 +5651,7 @@ mod tests {
         let attempt = prepared_attempt();
         assert_eq!(
             expected_h3_factory_prepared_attempt_identity(&attempt),
-            "862ae3c24e6956fece01b429f8361da5028a0efa8b175470900cb7cb0087219c"
+            "dc56e0a589b99d03fcb5d8415094690bcd7a85c6572afe15cb729e75a8456fd3"
         );
 
         // Through the production builder: the frozen authority must preserve
@@ -5795,10 +5791,11 @@ mod tests {
         let turbo_adapter_device_bytes = 0;
         let turbo_adapter_device_staging_bytes = 0;
         let turbo_adapter_host_staging_bytes = 0;
-        let vae_load_phase_device_bytes = fixed_runtime_device_bytes + retained_vaes + 100;
-        let qwen_encode_phase_device_bytes = fixed_runtime_device_bytes + retained_vaes;
+        let vae_load_phase_device_bytes =
+            fixed_runtime_device_bytes + retained_vaes + 100 + qwen_output_state_device_bytes;
+        let qwen_encode_phase_device_bytes = fixed_runtime_device_bytes;
         let qwen_transfer_phase_device_bytes =
-            fixed_runtime_device_bytes + retained_vaes + qwen_output_state_device_bytes;
+            fixed_runtime_device_bytes + qwen_output_state_device_bytes;
         let condition_encode_phase_device_bytes = sum(&[
             fixed_runtime_device_bytes,
             retained_vaes,
@@ -5953,7 +5950,8 @@ mod tests {
             endpoint_encoded_host_bytes,
             normalized_endpoint_host_bytes,
         ]);
-        let vae_load_phase_host_bytes = attempt_host_bytes + qwen_alive_metadata_host_bytes + 1_000;
+        let vae_load_phase_host_bytes =
+            attempt_host_bytes + transformer_alive_metadata_host_bytes + 1_000;
         let qwen_encode_phase_host_bytes = sum(&[
             attempt_host_bytes,
             qwen_alive_metadata_host_bytes,
@@ -6171,9 +6169,9 @@ mod tests {
         let mut budget = H3FactoryTargetBudgetInput {
             identity_sha256: String::new(),
             load_drop_policy: if ref2va {
-                H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadVaesLoadQwenEncodeVisionTransferDropQwenEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+                H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadQwenEncodeVisionTransferDropQwenLoadVaesEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
             } else {
-                H3FactoryTargetLoadDropPolicy::LoadVaesLoadQwenEncodeTransferDropQwenEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+                H3FactoryTargetLoadDropPolicy::LoadQwenEncodeTransferDropQwenLoadVaesEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
             },
             artifacts,
             artifact_host_bytes,
@@ -6505,7 +6503,6 @@ mod tests {
         budget.qwen_output_transfer_device_bytes = 0;
         budget.qwen_encode_phase_device_bytes = sum(&[
             budget.fixed_runtime_device_bytes,
-            budget.attempt_resident_vae_device_bytes,
             budget.qwen_device_parameter_bytes,
             budget.qwen_activation_device_bytes,
             budget.qwen_output_state_device_bytes,
@@ -7793,10 +7790,20 @@ mod tests {
             heavier.attempt_resident_vae_device_bytes - base.attempt_resident_vae_device_bytes;
         assert_eq!(delta, 2);
 
-        // The load/drop policy parks both VAEs from the moment conditions are
-        // encoded until the transformer is dropped, so heavier weights cannot
-        // move a phase that runs while they are parked.
+        // Qwen runs before either VAE is constructed. After condition encode,
+        // both VAEs park until the transformer is dropped. Heavier VAE weights
+        // therefore cannot move any of these disjoint phases.
         for (phase, base_bytes, heavier_bytes) in [
+            (
+                "Qwen encode",
+                base.qwen_encode_phase_device_bytes,
+                heavier.qwen_encode_phase_device_bytes,
+            ),
+            (
+                "Qwen transfer",
+                base.qwen_transfer_phase_device_bytes,
+                heavier.qwen_transfer_phase_device_bytes,
+            ),
             (
                 "noise allocation",
                 base.noise_allocation_phase_device_bytes,
@@ -7815,7 +7822,7 @@ mod tests {
         ] {
             assert_eq!(
                 base_bytes, heavier_bytes,
-                "{phase} still charges the parked VAE pair"
+                "{phase} still overlaps the VAE pair"
             );
         }
 
@@ -7824,16 +7831,6 @@ mod tests {
                 "VAE load",
                 base.vae_load_phase_device_bytes,
                 heavier.vae_load_phase_device_bytes,
-            ),
-            (
-                "Qwen encode",
-                base.qwen_encode_phase_device_bytes,
-                heavier.qwen_encode_phase_device_bytes,
-            ),
-            (
-                "Qwen transfer",
-                base.qwen_transfer_phase_device_bytes,
-                heavier.qwen_transfer_phase_device_bytes,
             ),
             (
                 "condition encode",
@@ -7993,9 +7990,13 @@ mod tests {
                 AttentionChunkPolicy::Off,
             )
             .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("registry remains runtime unavailable"));
+        let error = error.to_string();
+        let expected = if cfg!(feature = "h3") {
+            "public runtime registry is incomplete"
+        } else {
+            "registry remains runtime unavailable"
+        };
+        assert!(error.contains(expected), "{error}");
 
         let mut exact_ref2va = exact_input();
         exact_ref2va.model = contract::REF2VA_COMFY.into();
