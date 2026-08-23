@@ -1063,6 +1063,7 @@ fn build_request(
         canonicalize_generation_authority(params.clone(), negative_prompt.clone(), &config);
     let params = &normalized_params;
     let family = crate::model_info::family_for_model(&params.model, &config);
+    let supports_video = crate::model_info::capabilities_for_family(&family).supports_video;
 
     let lora = params.lora_path.as_ref().map(|path| LoraWeight {
         path: path.clone(),
@@ -1190,8 +1191,11 @@ fn build_request(
         batch_index: params.batch_index,
         batch_count: params.batch_count,
         lora,
-        frames: Some(params.frames),
-        fps: Some(params.fps),
+        // Image recipes reject video timing even when the values happen to
+        // match the TUI's hidden defaults. Only put these fields on the wire
+        // when the selected family exposes the Frames/FPS controls.
+        frames: supports_video.then_some(params.frames),
+        fps: supports_video.then_some(params.fps),
         upscale_model: params.upscale_model.clone(),
         gif_preview: true,
         enable_audio: params.enable_audio,
@@ -1632,6 +1636,19 @@ mod tests {
             req.upscale_model.as_deref(),
             Some("real-esrgan-x4plus:fp16")
         );
+    }
+
+    #[test]
+    fn build_request_omits_video_timing_for_image_models() {
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+
+        params.model = "sdxl-base:fp16".to_string();
+        params.frames = 25;
+        params.fps = 24;
+        let image = build_request(&params, "p", &None).unwrap();
+        assert_eq!(image.frames, None);
+        assert_eq!(image.fps, None);
     }
 
     /// The four identity fields ship as one group. A request carrying a knob
