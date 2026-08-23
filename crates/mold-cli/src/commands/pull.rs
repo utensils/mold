@@ -411,7 +411,12 @@ pub async fn run(
         },
     }
 
-    status!("  mold run \"your prompt\"");
+    // A download-only model (no engine arm in this build) must not be handed
+    // a `mold run` hint it will refuse; say what it is instead.
+    match mold_core::require_model_activation(&manifest.name, Some(&manifest.family)) {
+        Ok(()) => status!("  mold run \"your prompt\""),
+        Err(error) => status!("  Downloaded and verified. {error}"),
+    }
     Ok(())
 }
 
