@@ -5313,15 +5313,200 @@ async fn health() -> impl IntoResponse {
     get,
     path = "/api/queue",
     tag = "queue",
+    params(
+        ("limit" = Option<usize>, Query, description = "Positive durable-row page size; omit for the legacy full snapshot"),
+        ("cursor" = Option<String>, Query, description = "Opaque exclusive cursor returned by the preceding page"),
+    ),
     responses(
-        (status = 200, description = "Queue snapshot", body = crate::job_registry::QueueListing),
+        (status = 200, description = "Queue snapshot", body = QueueListingResponse),
+        (status = 400, description = "Invalid pagination request"),
     )
 )]
-async fn list_queue(State(state): State<AppState>) -> Json<crate::job_registry::QueueListing> {
+async fn list_queue(
+    State(state): State<AppState>,
+    Query(query): Query<QueueListQuery>,
+) -> Result<Json<QueueListingResponse>, ApiError> {
     let mut listing = state.job_registry.snapshot();
     listing.plan = state.scheduled_work.latest_plan();
-    project_durable_queue_state(&state, &mut listing);
-    Json(listing)
+    let Some(requested_page) = QueuePageRequest::parse(query)? else {
+        let journal = state.queue_journal.clone();
+        let journal_enabled = journal.is_enabled();
+        let rows = if journal_enabled {
+            spawn_queue_read(move || Ok(journal.list_all())).await?
+        } else {
+            Vec::new()
+        };
+        project_durable_queue_state(journal_enabled, &rows, &mut listing);
+        return Ok(Json(QueueListingResponse::legacy(listing)));
+    };
+
+    let live_ids = listing
+        .entries
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect::<Vec<_>>();
+    let journal = state.queue_journal.clone();
+    let durable_cursor = requested_page.cursor.map(|cursor| cursor.durable);
+    let limit = requested_page.limit;
+    let (durable_page, durable_live_ids) = spawn_queue_read(move || {
+        let page = journal.projection_page(durable_cursor, limit)?;
+        let durable_live_ids = journal.owned_row_ids(&live_ids)?;
+        Ok((page, durable_live_ids))
+    })
+    .await?;
+
+    let offset = requested_page.cursor.map_or(0, |cursor| cursor.offset);
+    let next_offset = offset.checked_add(durable_page.rows.len()).ok_or_else(|| {
+        invalid_queue_page("queue cursor offset cannot represent the returned page")
+    })?;
+    let next_cursor = durable_page.next_cursor.map(|durable| {
+        encode_queue_cursor(QueuePageCursor {
+            durable,
+            offset: next_offset,
+        })
+    });
+    let returned = durable_page.rows.len();
+    let live_count = listing.entries.len();
+    let (entries, live_only_entries) = project_durable_queue_page(
+        durable_page.rows,
+        listing.entries,
+        &durable_live_ids,
+        live_count,
+        offset,
+    )?;
+
+    Ok(Json(QueueListingResponse {
+        entries,
+        live_only_entries: Some(live_only_entries),
+        plan: listing.plan,
+        page: Some(mold_core::QueuePage {
+            limit,
+            offset,
+            returned,
+            next_cursor,
+        }),
+    }))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct QueueListQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QueuePageCursor {
+    durable: mold_db::generation_queue::QueueProjectionCursor,
+    offset: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QueuePageRequest {
+    limit: usize,
+    cursor: Option<QueuePageCursor>,
+}
+
+impl QueuePageRequest {
+    fn parse(query: QueueListQuery) -> Result<Option<Self>, ApiError> {
+        match (query.limit, query.cursor) {
+            (None, None) => Ok(None),
+            (None, Some(_)) => Err(invalid_queue_page("cursor requires a positive limit")),
+            (Some(0), _) => Err(invalid_queue_page("limit must be positive")),
+            (Some(limit), cursor) => {
+                i64::try_from(limit)
+                    .map_err(|_| invalid_queue_page("limit is outside SQLite's supported range"))?;
+                Ok(Some(Self {
+                    limit,
+                    cursor: cursor.as_deref().map(decode_queue_cursor).transpose()?,
+                }))
+            }
+        }
+    }
+}
+
+fn invalid_queue_page(message: impl Into<String>) -> ApiError {
+    ApiError::with_code(message, "INVALID_QUEUE_PAGE", StatusCode::BAD_REQUEST)
+}
+
+/// Cursor layout: one version byte, then signed big-endian SQLite ordering
+/// keys and an unsigned traversal offset. URL-safe base64 keeps every cursor
+/// opaque and query-string safe; clients never construct or inspect it.
+fn encode_queue_cursor(cursor: QueuePageCursor) -> String {
+    const VERSION: u8 = 1;
+    let mut bytes = [0_u8; 25];
+    bytes[0] = VERSION;
+    bytes[1..9].copy_from_slice(&cursor.durable.created_at_ms.to_be_bytes());
+    bytes[9..17].copy_from_slice(&cursor.durable.rowid.to_be_bytes());
+    bytes[17..25].copy_from_slice(&(cursor.offset as u64).to_be_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn decode_queue_cursor(raw: &str) -> Result<QueuePageCursor, ApiError> {
+    const VERSION: u8 = 1;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(raw)
+        .map_err(|_| invalid_queue_page("cursor is malformed"))?;
+    let bytes: [u8; 25] = bytes
+        .try_into()
+        .map_err(|_| invalid_queue_page("cursor is malformed"))?;
+    if bytes[0] != VERSION {
+        return Err(invalid_queue_page("cursor version is unsupported"));
+    }
+    let created_at_ms = i64::from_be_bytes(bytes[1..9].try_into().expect("fixed cursor slice"));
+    let rowid = i64::from_be_bytes(bytes[9..17].try_into().expect("fixed cursor slice"));
+    if rowid <= 0 {
+        return Err(invalid_queue_page("cursor is malformed"));
+    }
+    let offset = usize::try_from(u64::from_be_bytes(
+        bytes[17..25].try_into().expect("fixed cursor slice"),
+    ))
+    .map_err(|_| invalid_queue_page("cursor offset is unsupported on this server"))?;
+    Ok(QueuePageCursor {
+        durable: mold_db::generation_queue::QueueProjectionCursor {
+            created_at_ms,
+            rowid,
+        },
+        offset,
+    })
+}
+
+async fn spawn_queue_read<T, F>(read: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(read)
+        .await
+        .map_err(|error| ApiError::internal(format!("queue read task failed: {error}")))?
+        .map_err(|error| ApiError::internal(format!("queue read failed: {error:#}")))
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+struct QueueListingResponse {
+    entries: Vec<crate::job_registry::JobEntry>,
+    /// Active jobs that intentionally have no durable row (for example H3,
+    /// identity, reference-authority, or oversized requests). Repeated on
+    /// every explicit page and bounded by the runtime queue capacity; clients
+    /// merge both arrays by job id before reconciling local work.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_only_entries: Option<Vec<crate::job_registry::JobEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plan: Option<mold_core::QueuePlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page: Option<mold_core::QueuePage>,
+}
+
+impl QueueListingResponse {
+    fn legacy(listing: crate::job_registry::QueueListing) -> Self {
+        Self {
+            entries: listing.entries,
+            live_only_entries: None,
+            plan: listing.plan,
+            page: None,
+        }
+    }
 }
 
 #[utoipa::path(
@@ -5351,11 +5536,14 @@ async fn get_queue_job_preview(
 /// worker has claimed them; held rows are appended, because they exist only in
 /// the journal and would otherwise be invisible — a job that is never going to
 /// run and that nothing reports is worse than one that failed.
-fn project_durable_queue_state(state: &AppState, listing: &mut crate::job_registry::QueueListing) {
-    if !state.queue_journal.is_enabled() {
+fn project_durable_queue_state(
+    journal_enabled: bool,
+    rows: &[mold_db::generation_queue::GenerationQueueRow],
+    listing: &mut crate::job_registry::QueueListing,
+) {
+    if !journal_enabled {
         return;
     }
-    let rows = state.queue_journal.list_all();
     if rows.is_empty() {
         for entry in listing.entries.iter_mut() {
             entry.durable = Some(false);
@@ -5417,6 +5605,76 @@ fn project_durable_queue_state(state: &AppState, listing: &mut crate::job_regist
         })
         .collect();
     listing.entries.extend(unlisted);
+}
+
+/// Turn a payload-free durable page into public queue rows, overlaying the
+/// registry only when that exact durable id is live. The complementary
+/// registry-only set is returned separately because those jobs have no
+/// `(created_at,rowid)` key and therefore cannot honestly participate in the
+/// durable cursor order.
+fn project_durable_queue_page(
+    durable_rows: Vec<mold_db::generation_queue::GenerationQueueProjection>,
+    live_entries: Vec<crate::job_registry::JobEntry>,
+    durable_live_ids: &std::collections::HashSet<String>,
+    live_count: usize,
+    offset: usize,
+) -> Result<
+    (
+        Vec<crate::job_registry::JobEntry>,
+        Vec<crate::job_registry::JobEntry>,
+    ),
+    ApiError,
+> {
+    let mut live_by_id = std::collections::HashMap::with_capacity(durable_live_ids.len());
+    let mut live_only_entries = Vec::new();
+    for mut entry in live_entries {
+        if durable_live_ids.contains(&entry.id) {
+            live_by_id.insert(entry.id.clone(), entry);
+        } else {
+            entry.durable = Some(false);
+            live_only_entries.push(entry);
+        }
+    }
+
+    let mut entries = Vec::with_capacity(durable_rows.len());
+    for (page_index, row) in durable_rows.into_iter().enumerate() {
+        if let Some(mut entry) = live_by_id.remove(&row.id) {
+            entry.durable = Some(true);
+            entry.replayed = Some(row.replay_seen > 0);
+            entry.dispatch_attempts = Some(row.dispatch_attempts);
+            entries.push(entry);
+            continue;
+        }
+
+        let state = match row.state {
+            mold_db::generation_queue::QueueRowState::Held => {
+                crate::job_registry::JobLifecycle::Held
+            }
+            // Preserve the legacy projection: a durable `running` row with no
+            // live registry owner is interrupted work awaiting the next boot.
+            _ => crate::job_registry::JobLifecycle::Queued,
+        };
+        let position = live_count
+            .checked_add(offset)
+            .and_then(|position| position.checked_add(page_index))
+            .ok_or_else(|| invalid_queue_page("queue cursor position is out of range"))?;
+        entries.push(crate::job_registry::JobEntry {
+            id: row.id,
+            model: row.model,
+            state,
+            started_at_unix_ms: row.created_at_ms.max(0) as u64,
+            position,
+            gpu: None,
+            target_gpu: row.target_gpu,
+            seed_pinned: Some(row.seed_pinned),
+            metadata: None,
+            durable: Some(true),
+            replayed: Some(row.replay_seen > 0),
+            dispatch_attempts: Some(row.dispatch_attempts),
+            held_reason: row.held_reason,
+        });
+    }
+    Ok((entries, live_only_entries))
 }
 
 /// Wrap any present JSON value (including `null`) in `Some`, so a field using
@@ -8818,6 +9076,18 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queue_sql_work_runs_off_the_async_runtime_thread() {
+        let runtime_thread = std::thread::current().id();
+        let blocking_thread = spawn_queue_read(|| Ok(std::thread::current().id()))
+            .await
+            .unwrap();
+        assert_ne!(
+            blocking_thread, runtime_thread,
+            "SQLite queue reads must execute on Tokio's blocking pool"
+        );
     }
 
     #[test]

@@ -3628,6 +3628,21 @@ pub struct QueuePlan {
     pub host_memory: Option<HostMemorySnapshot>,
 }
 
+/// Metadata for an explicitly requested durable queue page.
+///
+/// The cursor is opaque: clients persist and return it unchanged. `offset`
+/// counts durable rows traversed by this cursor chain and is informational;
+/// continuation is always defined by `next_cursor`, never by arithmetic on
+/// the offset.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct QueuePage {
+    pub limit: usize,
+    pub offset: usize,
+    pub returned: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
 /// Whole-queue listing returned by `GET /api/queue` — the client-side twin of
 /// mold-server's `job_registry::QueueListing`. The server wraps the rows in
 /// an object (not a bare array) so the response can grow extra fields without
@@ -4767,6 +4782,30 @@ mod tests {
         // Tolerate a hypothetical minimal wrapper — `entries` defaults empty.
         let listing: QueueListingWire = serde_json::from_str("{}").unwrap();
         assert!(listing.entries.is_empty());
+    }
+
+    #[test]
+    fn queue_page_keeps_the_cursor_opaque_and_omits_an_absent_continuation() {
+        let terminal = QueuePage {
+            limit: 32,
+            offset: 64,
+            returned: 7,
+            next_cursor: None,
+        };
+        let json = serde_json::to_value(&terminal).unwrap();
+        assert_eq!(json["limit"], 32);
+        assert_eq!(json["offset"], 64);
+        assert_eq!(json["returned"], 7);
+        assert!(json.get("next_cursor").is_none());
+
+        let continued: QueuePage = serde_json::from_value(serde_json::json!({
+            "limit": 32,
+            "offset": 32,
+            "returned": 32,
+            "next_cursor": "opaque-token"
+        }))
+        .unwrap();
+        assert_eq!(continued.next_cursor.as_deref(), Some("opaque-token"));
     }
 
     #[test]

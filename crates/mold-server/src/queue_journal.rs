@@ -18,6 +18,7 @@
 //! requests are excluded too: replay cannot reconstruct their authenticated
 //! ingress grant, so claiming they are durable would be false.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -25,7 +26,9 @@ use std::sync::Arc;
 use mold_db::generation_batches::{
     self, GenerationBatchChildRow, GenerationBatchDetail, GenerationBatchRow,
 };
-use mold_db::generation_queue::{self, GenerationQueueRow, QueueRowState};
+use mold_db::generation_queue::{
+    self, GenerationQueueProjectionPage, GenerationQueueRow, QueueProjectionCursor, QueueRowState,
+};
 use mold_db::MetadataDb;
 
 use crate::state::SseCompletionPayload;
@@ -1058,6 +1061,32 @@ impl QueueJournal {
             );
             Vec::new()
         })
+    }
+
+    /// Read one payload-free durable page. This method is synchronous because
+    /// SQLite is synchronous; async callers must run it on a blocking worker.
+    pub fn projection_page(
+        &self,
+        cursor: Option<QueueProjectionCursor>,
+        limit: usize,
+    ) -> anyhow::Result<GenerationQueueProjectionPage> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(GenerationQueueProjectionPage {
+                rows: Vec::new(),
+                next_cursor: None,
+            });
+        };
+        generation_queue::list_projection_page(db, owner, cursor, limit)
+    }
+
+    /// Identify active registry rows that are durable without reading their
+    /// payload columns or scanning the deep journal. Synchronous for the same
+    /// reason as [`Self::projection_page`].
+    pub fn owned_row_ids(&self, ids: &[String]) -> anyhow::Result<HashSet<String>> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(HashSet::new());
+        };
+        generation_queue::find_owned_ids(db, owner, ids)
     }
 }
 

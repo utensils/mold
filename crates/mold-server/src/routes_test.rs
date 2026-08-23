@@ -2728,7 +2728,30 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = json_body(resp).await;
-        assert_eq!(body["entries"], serde_json::json!([]));
+        assert_eq!(
+            body,
+            serde_json::json!({"entries": []}),
+            "omitting pagination must preserve the legacy response shape"
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_pagination_rejects_zero_missing_and_malformed_inputs() {
+        let app = app_empty();
+        for uri in [
+            "/api/queue?limit=0",
+            "/api/queue?cursor=opaque-without-a-limit",
+            "/api/queue?limit=1&cursor=not-a-valid-cursor",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "INVALID_QUEUE_PAGE", "{uri}");
+        }
     }
 
     #[tokio::test]
@@ -4228,6 +4251,133 @@ mod tests {
 
     fn durable_gallery_dir(root: &std::path::Path) -> PathBuf {
         root.join("gallery")
+    }
+
+    fn seed_durable_projection_row(
+        db: &Arc<Option<mold_db::MetadataDb>>,
+        owner: &str,
+        id: &str,
+        state: mold_db::generation_queue::QueueRowState,
+        created_at_ms: i64,
+        payload_bytes: usize,
+    ) {
+        mold_db::generation_queue::insert(
+            db.as_ref().as_ref().unwrap(),
+            &mold_db::generation_queue::GenerationQueueRow {
+                id: id.to_string(),
+                owner_uuid: owner.to_string(),
+                state,
+                model: format!("model-{id}"),
+                request_json: format!(
+                    r#"{{"prompt":"{id}","source_image":"{}"}}"#,
+                    "x".repeat(payload_bytes)
+                ),
+                output_dir: PathBuf::from(format!("/large-payload/{id}")),
+                target_gpu: (id == "live-running").then_some(2),
+                target_device_id: None,
+                completion_payload: "full".repeat(1024),
+                seed_pinned: id == "queued",
+                dispatch_attempts: (id == "live-running") as u32,
+                replay_seen: (id == "retained-running") as u32,
+                held_reason: (state == mold_db::generation_queue::QueueRowState::Held)
+                    .then(|| "held for review".to_string()),
+                created_at_ms,
+                updated_at_ms: created_at_ms,
+                started_at_ms: (state == mold_db::generation_queue::QueueRowState::Running)
+                    .then_some(created_at_ms),
+            },
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn paginated_queue_reads_payload_free_pages_and_keeps_live_only_work_visible() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        for (id, row_state) in [
+            (
+                "live-running",
+                mold_db::generation_queue::QueueRowState::Running,
+            ),
+            ("queued", mold_db::generation_queue::QueueRowState::Queued),
+            (
+                "retained-running",
+                mold_db::generation_queue::QueueRowState::Running,
+            ),
+            ("held", mold_db::generation_queue::QueueRowState::Held),
+            ("tail-a", mold_db::generation_queue::QueueRowState::Queued),
+            ("tail-b", mold_db::generation_queue::QueueRowState::Queued),
+        ] {
+            // Six MiB of payload would dominate the legacy `list_all` result.
+            // The paginated SQL/type regression test proves these columns are
+            // absent; this route test proves the deep rows still page cleanly.
+            seed_durable_projection_row(&db, &owner, id, row_state, 500, 1024 * 1024);
+        }
+        state
+            .job_registry
+            .register("live-running", "model-live-running");
+        state.job_registry.mark_running("live-running", Some(2));
+        // Models whose replay authority cannot be reconstructed (H3,
+        // identity/reference requests) remain live in the registry only.
+        state.job_registry.register("h3-live-only", "minimax-h3");
+        let app = app_with_state(state.clone());
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::get("/api/queue?limit=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let first = json_body(first).await;
+        assert_eq!(first["page"]["limit"], 2);
+        assert_eq!(first["page"]["offset"], 0);
+        assert_eq!(first["page"]["returned"], 2);
+        let cursor = first["page"]["next_cursor"]
+            .as_str()
+            .expect("deep queue has a next page")
+            .to_string();
+        assert!(!cursor.contains(':'));
+        assert_eq!(first["entries"][0]["id"], "live-running");
+        assert_eq!(first["entries"][0]["state"], "running");
+        assert_eq!(first["entries"][0]["gpu"], 2);
+        assert_eq!(first["entries"][0]["durable"], true);
+        assert_eq!(first["entries"][1]["id"], "queued");
+        assert_eq!(first["entries"][1]["seed_pinned"], true);
+        assert_eq!(first["live_only_entries"].as_array().unwrap().len(), 1);
+        assert_eq!(first["live_only_entries"][0]["id"], "h3-live-only");
+        assert_eq!(first["live_only_entries"][0]["durable"], false);
+
+        // The keyset is coordinates, not a foreign key. Deleting the row that
+        // emitted the cursor cannot invalidate or rewind continuation.
+        mold_db::generation_queue::delete(db.as_ref().as_ref().unwrap(), "queued").unwrap();
+        let second = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/queue?limit=2&cursor={cursor}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        let second = json_body(second).await;
+        assert_eq!(second["page"]["offset"], 2);
+        assert_eq!(second["entries"][0]["id"], "retained-running");
+        assert_eq!(
+            second["entries"][0]["state"], "queued",
+            "an unowned interrupted running row keeps the legacy queued projection"
+        );
+        assert_eq!(second["entries"][0]["replayed"], true);
+        assert_eq!(second["entries"][1]["id"], "held");
+        assert_eq!(second["entries"][1]["state"], "held");
+        assert_eq!(second["entries"][1]["held_reason"], "held for review");
+        assert_eq!(second["live_only_entries"][0]["id"], "h3-live-only");
     }
 
     #[tokio::test]

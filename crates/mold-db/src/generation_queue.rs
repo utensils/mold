@@ -87,6 +87,62 @@ pub struct GenerationQueueRow {
     pub started_at_ms: Option<i64>,
 }
 
+/// Payload-free row used by the hot queue-listing path.
+///
+/// This is intentionally not a partial [`GenerationQueueRow`]. Keeping a
+/// separate type makes it impossible for the listing query to accidentally
+/// grow `request_json`, `output_dir`, or `completion_payload` back into the
+/// async HTTP read path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationQueueProjection {
+    pub id: String,
+    pub state: QueueRowState,
+    pub model: String,
+    pub target_gpu: Option<usize>,
+    pub seed_pinned: bool,
+    pub dispatch_attempts: u32,
+    pub replay_seen: u32,
+    pub held_reason: Option<String>,
+    pub created_at_ms: i64,
+}
+
+/// Exclusive keyset cursor for [`list_projection_page`]. `rowid` is SQLite's
+/// stable tie-break for rows admitted in the same millisecond. The HTTP layer
+/// encodes this value opaquely; database callers never parse wire cursors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueProjectionCursor {
+    pub created_at_ms: i64,
+    pub rowid: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationQueueProjectionPage {
+    pub rows: Vec<GenerationQueueProjection>,
+    pub next_cursor: Option<QueueProjectionCursor>,
+}
+
+/// The only column projection allowed on the paginated queue-listing path.
+/// Keep this as a literal so the regression test can prove that none of the
+/// durable payload columns are selected.
+const QUEUE_PROJECTION_PAGE_SQL: &str = "
+    SELECT q.id, q.state, q.model, q.target_gpu, q.seed_pinned,
+           q.dispatch_attempts, q.replay_seen, q.held_reason, q.created_at,
+           q.rowid,
+           EXISTS (
+               SELECT 1
+                 FROM generation_queue AS later
+                WHERE later.owner_uuid = q.owner_uuid
+                  AND (later.created_at > q.created_at
+                       OR (later.created_at = q.created_at AND later.rowid > q.rowid))
+           ) AS has_later
+      FROM generation_queue AS q
+     WHERE q.owner_uuid = ?1
+       AND (?2 IS NULL
+            OR q.created_at > ?2
+            OR (q.created_at = ?2 AND q.rowid > ?3))
+     ORDER BY q.created_at, q.rowid
+     LIMIT ?4";
+
 /// One runtime reservation of an oldest queued row.
 ///
 /// The token is deliberately kept outside [`GenerationQueueRow`] so existing
@@ -192,6 +248,101 @@ pub fn list_all(db: &MetadataDb, owner_uuid: &str) -> Result<Vec<GenerationQueue
         let rows = stmt.query_map(params![owner_uuid], row_to_queue_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    })
+}
+
+/// One payload-free page of rows this installation owns, oldest first.
+///
+/// The cursor is an exclusive `(created_at, rowid)` key rather than a row id.
+/// Deleting the row that produced a cursor therefore has no special case: a
+/// later request deterministically continues after the same ordering key.
+/// Inserts after that key are visible; inserts or reorders before it are not.
+///
+/// `limit` has no implicit default or server-side cap. The caller must supply
+/// a positive value, and this query returns at most that many rows. `has_later`
+/// is computed in the same SQLite statement so discovering the next page does
+/// not require materializing a `limit + 1` row.
+pub fn list_projection_page(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    cursor: Option<QueueProjectionCursor>,
+    limit: usize,
+) -> Result<GenerationQueueProjectionPage> {
+    if limit == 0 {
+        bail!("queue projection page limit must be positive");
+    }
+    let sql_limit = i64::try_from(limit)
+        .map_err(|_| anyhow::anyhow!("queue projection page limit is outside SQLite's range"))?;
+    let cursor_created_at = cursor.map(|cursor| cursor.created_at_ms);
+    let cursor_rowid = cursor.map(|cursor| cursor.rowid);
+
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare(QUEUE_PROJECTION_PAGE_SQL)?;
+        let mapped = stmt.query_map(
+            params![owner_uuid, cursor_created_at, cursor_rowid, sql_limit],
+            |row| {
+                let state_raw: String = row.get(1)?;
+                let state = QueueRowState::parse(&state_raw).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        format!("unknown generation_queue state '{state_raw}'").into(),
+                    )
+                })?;
+                Ok((
+                    GenerationQueueProjection {
+                        id: row.get(0)?,
+                        state,
+                        model: row.get(2)?,
+                        target_gpu: row.get::<_, Option<i64>>(3)?.map(|gpu| gpu as usize),
+                        seed_pinned: row.get::<_, i64>(4)? != 0,
+                        dispatch_attempts: row.get::<_, i64>(5)? as u32,
+                        replay_seen: row.get::<_, i64>(6)? as u32,
+                        held_reason: row.get(7)?,
+                        created_at_ms: row.get(8)?,
+                    },
+                    QueueProjectionCursor {
+                        created_at_ms: row.get(8)?,
+                        rowid: row.get(9)?,
+                    },
+                    row.get::<_, i64>(10)? != 0,
+                ))
+            },
+        )?;
+        let rows_with_keys = mapped.collect::<rusqlite::Result<Vec<_>>>()?;
+        let next_cursor = rows_with_keys
+            .last()
+            .filter(|(_, _, has_later)| *has_later)
+            .map(|(_, cursor, _)| *cursor);
+        let rows = rows_with_keys.into_iter().map(|(row, _, _)| row).collect();
+        Ok(GenerationQueueProjectionPage { rows, next_cursor })
+    })
+}
+
+/// Which live registry ids also have a durable row owned by this server.
+///
+/// The registry is bounded by the runtime queue capacity. Probe only those
+/// ids so the paginated route can expose the complementary active,
+/// non-durable set without scanning or materializing the deep journal.
+pub fn find_owned_ids(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    ids: &[String],
+) -> Result<HashSet<String>> {
+    db.with_conn(|conn| {
+        let mut found = HashSet::new();
+        let mut stmt = conn
+            .prepare("SELECT 1 FROM generation_queue WHERE owner_uuid = ?1 AND id = ?2 LIMIT 1")?;
+        for id in ids {
+            if stmt
+                .query_row(params![owner_uuid, id], |_| Ok(()))
+                .optional()?
+                .is_some()
+            {
+                found.insert(id.clone());
+            }
+        }
+        Ok(found)
     })
 }
 
@@ -633,6 +784,126 @@ mod tests {
             .collect();
         assert_eq!(ids, vec!["mine"]);
         assert_eq!(list_all(&db, "owner-a").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn projection_page_is_payload_free_bounded_and_keeps_all_states() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        for (id, state) in [
+            ("queued", QueueRowState::Queued),
+            ("running", QueueRowState::Running),
+            ("held", QueueRowState::Held),
+        ] {
+            let mut stored = row(id, "owner-a", 500);
+            stored.state = state;
+            stored.request_json = format!(
+                r#"{{"source_image":"{}"}}"#,
+                "inline-media".repeat(256 * 1024)
+            );
+            stored.output_dir = PathBuf::from(format!("/payload/{id}"));
+            stored.completion_payload = format!("full-{id}");
+            stored.target_gpu = Some(2);
+            stored.seed_pinned = true;
+            stored.dispatch_attempts = 3;
+            stored.replay_seen = 1;
+            stored.held_reason = (state == QueueRowState::Held).then(|| "review".to_string());
+            insert(&db, &stored).unwrap();
+        }
+
+        let first = list_projection_page(&db, "owner-a", None, 2).unwrap();
+        assert_eq!(first.rows.len(), 2, "the SQL limit is the result bound");
+        assert!(first.next_cursor.is_some());
+        assert_eq!(
+            first.rows.iter().map(|row| row.state).collect::<Vec<_>>(),
+            vec![QueueRowState::Queued, QueueRowState::Running]
+        );
+
+        // Exhaustive destructuring makes this test fail to compile if payload
+        // fields are ever added to the projection type.
+        let GenerationQueueProjection {
+            id,
+            state: _,
+            model: _,
+            target_gpu,
+            seed_pinned,
+            dispatch_attempts,
+            replay_seen,
+            held_reason: _,
+            created_at_ms: _,
+        } = &first.rows[0];
+        assert_eq!(id, "queued");
+        assert_eq!(*target_gpu, Some(2));
+        assert!(*seed_pinned);
+        assert_eq!(*dispatch_attempts, 3);
+        assert_eq!(*replay_seen, 1);
+
+        let second = list_projection_page(&db, "owner-a", first.next_cursor, 2).unwrap();
+        assert_eq!(
+            second
+                .rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["held"]
+        );
+        assert!(second.next_cursor.is_none());
+    }
+
+    #[test]
+    fn projection_sql_never_selects_durable_payload_columns() {
+        let normalized = QUEUE_PROJECTION_PAGE_SQL.to_ascii_lowercase();
+        for forbidden in ["request_json", "output_dir", "completion_payload"] {
+            assert!(
+                !normalized.contains(forbidden),
+                "projection SQL selected {forbidden}: {QUEUE_PROJECTION_PAGE_SQL}"
+            );
+        }
+    }
+
+    #[test]
+    fn projection_cursor_continues_after_its_row_is_deleted() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        for id in ["first", "second", "third"] {
+            insert(&db, &row(id, "owner-a", 500)).unwrap();
+        }
+
+        let first = list_projection_page(&db, "owner-a", None, 2).unwrap();
+        let cursor = first.next_cursor.expect("third row requires another page");
+        assert_eq!(first.rows[1].id, "second");
+        delete(&db, "second").unwrap();
+        insert(&db, &row("admitted-after-cursor", "owner-a", 500)).unwrap();
+
+        let second = list_projection_page(&db, "owner-a", Some(cursor), 10).unwrap();
+        assert_eq!(
+            second
+                .rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["third", "admitted-after-cursor"]
+        );
+        assert!(second.next_cursor.is_none());
+    }
+
+    #[test]
+    fn projection_page_rejects_a_zero_limit_and_scopes_live_id_probes() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert(&db, &row("mine", "owner-a", 1)).unwrap();
+        insert(&db, &row("theirs", "owner-b", 2)).unwrap();
+        assert!(list_projection_page(&db, "owner-a", None, 0).is_err());
+        assert_eq!(
+            find_owned_ids(
+                &db,
+                "owner-a",
+                &[
+                    "mine".to_string(),
+                    "theirs".to_string(),
+                    "missing".to_string()
+                ]
+            )
+            .unwrap(),
+            HashSet::from(["mine".to_string()])
+        );
     }
 
     #[test]
