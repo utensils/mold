@@ -1,0 +1,1 @@
+- **Bound MiniMax H3 memory on Apple Metal.** The reviewed Metal runtime now streams Qwen, transformer, and Turbo adapter blocks from authenticated model files, sweeps pooled buffers between large pipeline phases, and cancels under sampled host-memory pressure while preserving CUDA behavior ([#1296](https://github.com/utensils/mold/issues/1296)).
