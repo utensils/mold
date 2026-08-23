@@ -1,1 +1,0 @@
-- **Gallery authority checkpoints remain readable across additive metadata updates.** The server now verifies the exact stored snapshot bytes before applying current-schema defaults, preventing valid pre-upgrade galleries from blocking desktop startup and hiding This Mac from the machine picker.

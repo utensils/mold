@@ -1,1 +1,0 @@
-- **Keep iPhone editors and wide media in view.** Tag and collection editors now stay above the keyboard with aligned actions, while wide photos and videos remain centered inside the Library viewer ([#1259](https://github.com/utensils/mold/pull/1259)).

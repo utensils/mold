@@ -1,1 +1,0 @@
-- **Natural desktop Library selection.** Filtered Command-A, Command/Control-click, Shift ranges, and Apple Photos-style drag selection now build multi-print selections; right-click exposes group-safe organization and delete actions. Completed stills on Create also offer **Use as source** from their context menu.

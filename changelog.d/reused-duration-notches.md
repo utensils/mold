@@ -1,1 +1,0 @@
-- **Keep video duration notches when reusing settings.** Reusing an ordinary LTX video now retains automatic duration chaining instead of treating the runtime pipeline as a manual override.

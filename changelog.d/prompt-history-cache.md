@@ -1,1 +1,0 @@
-- **Prompt history across machines.** Desktop and web now recall prompts from every configured machine in chronological order and keep a bounded local cache so history remains available while machines are offline.

@@ -1,1 +1,0 @@
-- **Mobile Library no longer stalls while loading older prints.** iPhone and Android now time out an unresponsive thumbnail request, clear the loading state reliably, and continue paging until every reachable older print can load.

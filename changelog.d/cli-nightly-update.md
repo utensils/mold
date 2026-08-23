@@ -1,1 +1,0 @@
-- **CLI nightly channel.** `mold update --nightly` now installs the latest verified rolling CLI build from `main`, and the one-line installer accepts `MOLD_CHANNEL=nightly` for fresh nightly installs.

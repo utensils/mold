@@ -1,1 +1,0 @@
-- **Made macOS desktop packaging recover from transient DiskImages failures.** Stable and Nightly distribution now create the signed drag-to-Applications DMG with visible, bounded retries instead of failing through Tauri's opaque writable-image helper.

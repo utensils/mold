@@ -1,1 +1,0 @@
-- **Reliable first-run model downloads.** Fixed the Z-Image Turbo and SDXL starter buttons so every first-run model can be downloaded, with visible errors when a pull cannot start.
