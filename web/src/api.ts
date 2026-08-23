@@ -32,6 +32,11 @@ import type {
 } from "@studio/lib/api/chainTypes";
 import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
 import { conditionalApiJsonTo } from "@studio/api/client";
+import {
+  parseQueueListing,
+  queueListingPath,
+  type QueuePageRequest,
+} from "@studio/api/queuePlan";
 export type {
   ChainValidationResponse,
   ChainValidationStage,
@@ -124,14 +129,17 @@ export async function fetchStatus(signal?: AbortSignal): Promise<ServerStatus> {
 export async function fetchQueue(
   target?: StreamTarget,
   signal?: AbortSignal,
+  page?: QueuePageRequest,
 ): Promise<QueueListing> {
   const headers = targetHeaders(target);
-  const res = await fetch(`${targetBase(target)}/api/queue`, {
+  const res = await fetch(`${targetBase(target)}${queueListingPath(page)}`, {
     ...(Object.keys(headers).length ? { headers } : {}),
     signal,
   });
   if (!res.ok) throw new Error(`GET /api/queue failed: ${res.status}`);
-  return (await res.json()) as QueueListing;
+  const value: unknown = await res.json();
+  parseQueueListing(value);
+  return value as QueueListing;
 }
 
 /** Read a specific host's gallery. Reconciliation uses this to ask whether a

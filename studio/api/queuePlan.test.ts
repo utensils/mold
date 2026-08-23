@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { IncompatibleHostError } from "./client";
 import {
   cancelQueueJob,
+  listQueue,
+  mergeQueueEntries,
   parseQueueListing,
   predictedCompletionUnixMs,
   reduceQueuePlanEvent,
@@ -59,6 +62,133 @@ describe("queue plan contract", () => {
     });
     expect(listing.entries[0]?.id).toBe("j1");
     expect(listing.plan).toBeNull();
+    expect(listing.page).toBeUndefined();
+    expect(listing.live_only_entries).toBeUndefined();
+  });
+
+  it("parses an additive page and live-only entries", () => {
+    const listing = parseQueueListing({
+      entries: [
+        {
+          id: "durable-1",
+          model: "flux-dev:q8",
+          state: "queued",
+          started_at_unix_ms: 1,
+          position: 4,
+        },
+      ],
+      live_only_entries: [
+        {
+          id: "live-1",
+          model: "minimax-h3:nvfp4",
+          state: "running",
+          started_at_unix_ms: 2,
+          position: 0,
+        },
+      ],
+      page: {
+        limit: 8,
+        offset: 16,
+        returned: 1,
+        next_cursor: "opaque-cursor",
+      },
+    });
+
+    expect(listing.page).toEqual({
+      limit: 8,
+      offset: 16,
+      returned: 1,
+      next_cursor: "opaque-cursor",
+    });
+    expect(listing.live_only_entries?.map(({ id }) => id)).toEqual(["live-1"]);
+  });
+
+  it.each([
+    [null, "page.limit"],
+    [{ limit: 0, offset: 0, returned: 0 }, "page.limit"],
+    [{ limit: 2.5, offset: 0, returned: 0 }, "page.limit"],
+    [{ limit: 2, offset: -1, returned: 0 }, "page.offset"],
+    [
+      { limit: 2, offset: Number.POSITIVE_INFINITY, returned: 0 },
+      "page.offset",
+    ],
+    [{ limit: 2, offset: 0, returned: 3 }, "page.returned"],
+    [{ limit: 2, offset: 0, returned: 1, next_cursor: "" }, "page.next_cursor"],
+  ])("rejects an invalid additive queue page %#", (page, field) => {
+    const parse = () => parseQueueListing({ entries: [], page });
+    expect(parse).toThrowError(IncompatibleHostError);
+    expect(parse).toThrow(field);
+  });
+
+  it("rejects malformed additive live-only rows as an incompatible host", () => {
+    expect(() =>
+      parseQueueListing({ entries: [], live_only_entries: [{ id: "bad" }] }),
+    ).toThrowError(IncompatibleHostError);
+  });
+
+  it("merges durable order with stable, cross-page live-only deduplication", () => {
+    const entry = (id: string): import("./queuePlan").QueueEntry => ({
+      id,
+      model: "flux-dev:q8",
+      state: "queued",
+      started_at_unix_ms: 1,
+      position: 0,
+    });
+    const durable = [entry("durable-2"), entry("durable-1")];
+    const repeatedLiveOnlyRows = [
+      entry("live-1"),
+      entry("durable-1"),
+      entry("live-1"),
+      entry("live-2"),
+    ];
+
+    expect(
+      mergeQueueEntries(durable, repeatedLiveOnlyRows).map(({ id }) => id),
+    ).toEqual(["durable-2", "durable-1", "live-1", "live-2"]);
+  });
+
+  it("keeps the legacy listQueue URL and authenticated target unchanged", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({ entries: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await listQueue({ baseUrl: "https://gpu.example", apiKey: "secret" });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://gpu.example/api/queue",
+      expect.objectContaining({
+        headers: expect.any(Headers),
+      }),
+    );
+    const headers = fetchMock.mock.calls[0]?.[1]?.headers as Headers;
+    expect(headers.get("x-api-key")).toBe("secret");
+  });
+
+  it("encodes a caller-supplied cursor and rejects invalid limits before fetch", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      Response.json({
+        entries: [],
+        page: { limit: 7, offset: 0, returned: 0 },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await listQueue(
+      { baseUrl: "https://gpu.example", apiKey: "secret" },
+      { limit: 7, cursor: "opaque/+ token=" },
+    );
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "https://gpu.example/api/queue?limit=7&cursor=opaque%2F%2B+token%3D",
+    );
+
+    for (const limit of [0, -1, 1.5, Number.POSITIVE_INFINITY]) {
+      await expect(
+        listQueue(
+          { baseUrl: "https://gpu.example", apiKey: "secret" },
+          { limit },
+        ),
+      ).rejects.toThrow("positive integer");
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("preserves typed host lanes without treating them as device identities", () => {

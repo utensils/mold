@@ -598,6 +598,8 @@ export interface QueueEntry {
 export interface QueueListing {
   entries: QueueEntry[];
   plan?: import("@studio/api/queuePlan").QueuePlan | null;
+  live_only_entries?: QueueEntry[];
+  page?: import("@studio/api/queuePlan").QueuePage;
 }
 
 export type SseProgressEvent =
