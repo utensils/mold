@@ -8,6 +8,14 @@ pinned numerical authorities, synthetic CI fixture, and external evidence
 schema are documented separately in
 [MiniMax H3 conformance evidence](./minimax-h3-conformance.md).
 
+The NVFP4 scale layout, its divergence from the pruned BF16 base, and the cost
+of moving its dequantize onto the device are recorded separately in
+[MiniMax H3 NVFP4 layout probe](./minimax-h3-nvfp4-layout-probe.md), whose
+`minimax-h3-nvfp4-layout-probe.json` companion is the verbatim output of the
+unregistered `crates/mold-candle/examples/h3_nvfp4_layout_probe.rs`. That probe
+qualifies no hardware and activates no runtime; it is numerical evidence for
+issue #1317.
+
 The status record preserves #868's historical landing at main `50f28de3` and
 records the exact, merged attention release candidate from PR #871, its
 weight-free private UAT host qualification, and its landing at main `ff927086`. Its
