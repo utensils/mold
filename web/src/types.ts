@@ -274,6 +274,11 @@ export interface ServerCapabilities {
      * and runs them whether or not a client is still attached. Absent on
      * servers that predate the durable queue. */
     durable_queue?: boolean;
+    /** Atomic heterogeneous admission, including singleton requests. */
+    heterogeneous_batch?: boolean;
+    heterogeneous_batch_max_outputs?: number | null;
+    /** Enriched durable outcomes, by-client recovery and bulk reconciliation. */
+    durable_batch_outcomes?: boolean;
   };
   /** Prompt expansion. `model_present` is the routing input: a host that is
    * known to lack the expander is the one case expansion leaves the

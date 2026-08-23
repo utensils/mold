@@ -1,0 +1,320 @@
+import { ApiError, apiJsonTo, type ApiTarget } from "./client";
+
+export type GenerationLifecyclePhase =
+  | "accepted"
+  | "queued"
+  | "running"
+  | "held"
+  | "complete"
+  | "failed"
+  | "cancelled";
+
+export interface GenerationBatchResult {
+  filename?: string;
+  original_filename?: string;
+}
+
+export interface GenerationBatchChild {
+  index: number;
+  job_id: string;
+  state: GenerationLifecyclePhase;
+  /** Legacy human-readable failure retained for mixed-version callers. */
+  error?: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+  completed_at_ms?: number | null;
+  /** Structured terminal error. Its schema is intentionally server-owned. */
+  terminal_error?: unknown;
+  result?: GenerationBatchResult | null;
+}
+
+export interface GenerationBatchStatus {
+  id: string;
+  client_batch_id: string;
+  instance_id: string;
+  durable: true;
+  children: GenerationBatchChild[];
+}
+
+export interface GenerationBatchAdmissionRequest<TRequest = unknown> {
+  client_batch_id: string;
+  requests: TRequest[];
+}
+
+export interface GenerationBatchStatusRequest {
+  client_batch_ids: string[];
+  batch_ids?: string[];
+}
+
+export interface GenerationBatchStatusResponse {
+  instance_id: string;
+  batches: GenerationBatchStatus[];
+  missing: {
+    client_batch_ids: string[];
+    batch_ids: string[];
+  };
+}
+
+export type GenerationBatchLookup =
+  { kind: "found"; batch: GenerationBatchStatus } | { kind: "missing" };
+
+export interface DurableGenerationQueueCapabilities {
+  heterogeneous_batch?: boolean;
+  durable_batch_outcomes?: boolean;
+}
+
+/**
+ * Mixed-version capability fence for the complete streamless lifecycle.
+ * `heterogeneous_batch` alone only promises the older admission endpoint;
+ * it does not promise ambiguity recovery or terminal outcomes.
+ */
+export function supportsDurableGenerationLifecycle(
+  queue: DurableGenerationQueueCapabilities | null | undefined,
+): boolean {
+  return (
+    queue?.heterogeneous_batch === true && queue.durable_batch_outcomes === true
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function finiteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isLifecyclePhase(value: unknown): value is GenerationLifecyclePhase {
+  return (
+    value === "accepted" ||
+    value === "queued" ||
+    value === "running" ||
+    value === "held" ||
+    value === "complete" ||
+    value === "failed" ||
+    value === "cancelled"
+  );
+}
+
+function parseResult(
+  value: unknown,
+  path: string,
+): GenerationBatchResult | null {
+  if (value == null) return null;
+  if (!isRecord(value)) throw new Error(`${path}.result is incompatible`);
+  if (value.filename !== undefined && !nonEmptyString(value.filename)) {
+    throw new Error(`${path}.result.filename is incompatible`);
+  }
+  if (
+    value.original_filename !== undefined &&
+    !nonEmptyString(value.original_filename)
+  ) {
+    throw new Error(`${path}.result.original_filename is incompatible`);
+  }
+  return {
+    ...(value.filename === undefined ? {} : { filename: value.filename }),
+    ...(value.original_filename === undefined
+      ? {}
+      : { original_filename: value.original_filename }),
+  };
+}
+
+export function parseGenerationBatchStatus(
+  value: unknown,
+  path = "generation batch",
+): GenerationBatchStatus {
+  if (
+    !isRecord(value) ||
+    !nonEmptyString(value.id) ||
+    !nonEmptyString(value.client_batch_id) ||
+    !nonEmptyString(value.instance_id) ||
+    value.durable !== true ||
+    !Array.isArray(value.children)
+  ) {
+    throw new Error(`${path} is incompatible`);
+  }
+
+  const seenIndexes = new Set<number>();
+  const seenJobIds = new Set<string>();
+  const children = value.children.map((raw, offset) => {
+    const childPath = `${path}.children[${offset}]`;
+    if (
+      !isRecord(raw) ||
+      !Number.isInteger(raw.index) ||
+      (raw.index as number) < 1 ||
+      !nonEmptyString(raw.job_id) ||
+      !isLifecyclePhase(raw.state) ||
+      !finiteNumber(raw.created_at_ms) ||
+      !finiteNumber(raw.updated_at_ms) ||
+      (raw.completed_at_ms !== undefined &&
+        raw.completed_at_ms !== null &&
+        !finiteNumber(raw.completed_at_ms)) ||
+      (raw.error !== undefined &&
+        raw.error !== null &&
+        typeof raw.error !== "string")
+    ) {
+      throw new Error(`${childPath} is incompatible`);
+    }
+    if (seenIndexes.has(raw.index as number) || seenJobIds.has(raw.job_id)) {
+      throw new Error(`${childPath} duplicates a child identity`);
+    }
+    seenIndexes.add(raw.index as number);
+    seenJobIds.add(raw.job_id);
+    return {
+      index: raw.index as number,
+      job_id: raw.job_id,
+      state: raw.state,
+      created_at_ms: raw.created_at_ms,
+      updated_at_ms: raw.updated_at_ms,
+      ...(raw.completed_at_ms === undefined
+        ? {}
+        : { completed_at_ms: raw.completed_at_ms as number | null }),
+      ...(raw.error === undefined ? {} : { error: raw.error as string | null }),
+      ...(raw.terminal_error === undefined
+        ? {}
+        : { terminal_error: raw.terminal_error }),
+      ...(raw.result === undefined
+        ? {}
+        : { result: parseResult(raw.result, childPath) }),
+    } satisfies GenerationBatchChild;
+  });
+
+  return {
+    id: value.id,
+    client_batch_id: value.client_batch_id,
+    instance_id: value.instance_id,
+    durable: true,
+    children,
+  };
+}
+
+export function parseGenerationBatchStatusResponse(
+  value: unknown,
+): GenerationBatchStatusResponse {
+  if (
+    !isRecord(value) ||
+    !nonEmptyString(value.instance_id) ||
+    !Array.isArray(value.batches) ||
+    !isRecord(value.missing) ||
+    !Array.isArray(value.missing.client_batch_ids) ||
+    !Array.isArray(value.missing.batch_ids) ||
+    !value.missing.client_batch_ids.every(nonEmptyString) ||
+    !value.missing.batch_ids.every(nonEmptyString)
+  ) {
+    throw new Error("generation batch status response is incompatible");
+  }
+  const batches = value.batches.map((batch, index) =>
+    parseGenerationBatchStatus(batch, `generation batches[${index}]`),
+  );
+  const seen = new Set<string>();
+  const seenClients = new Set<string>();
+  for (const batch of batches) {
+    if (batch.instance_id !== value.instance_id) {
+      throw new Error(
+        "generation batch status response mixes server instances",
+      );
+    }
+    if (seen.has(batch.id)) {
+      throw new Error("generation batch status response duplicates a batch");
+    }
+    if (seenClients.has(batch.client_batch_id)) {
+      throw new Error(
+        "generation batch status response duplicates a client batch",
+      );
+    }
+    seen.add(batch.id);
+    seenClients.add(batch.client_batch_id);
+  }
+  return {
+    instance_id: value.instance_id,
+    batches,
+    missing: {
+      client_batch_ids: [...value.missing.client_batch_ids],
+      batch_ids: [...value.missing.batch_ids],
+    },
+  };
+}
+
+export async function admitGenerationBatch<TRequest>(
+  target: ApiTarget,
+  request: GenerationBatchAdmissionRequest<TRequest>,
+  signal?: AbortSignal,
+): Promise<GenerationBatchStatus> {
+  return parseGenerationBatchStatus(
+    await apiJsonTo<unknown>(target, "/api/generation-batches", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+      ...(signal ? { signal } : {}),
+    }),
+  );
+}
+
+/** Authoritative idempotency lookup after a POST response was lost. */
+export async function lookupGenerationBatchByClientId(
+  target: ApiTarget,
+  clientBatchId: string,
+  signal?: AbortSignal,
+): Promise<GenerationBatchLookup> {
+  try {
+    return {
+      kind: "found",
+      batch: parseGenerationBatchStatus(
+        await apiJsonTo<unknown>(
+          target,
+          `/api/generation-batches/by-client/${encodeURIComponent(clientBatchId)}`,
+          signal ? { signal } : {},
+        ),
+      ),
+    };
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return { kind: "missing" };
+    }
+    throw error;
+  }
+}
+
+export async function getGenerationBatch(
+  target: ApiTarget,
+  batchId: string,
+  signal?: AbortSignal,
+): Promise<GenerationBatchLookup> {
+  try {
+    return {
+      kind: "found",
+      batch: parseGenerationBatchStatus(
+        await apiJsonTo<unknown>(
+          target,
+          `/api/generation-batches/${encodeURIComponent(batchId)}`,
+          signal ? { signal } : {},
+        ),
+      ),
+    };
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return { kind: "missing" };
+    }
+    throw error;
+  }
+}
+
+/** One bounded HTTP exchange chosen by the caller's actual tracked set. */
+export async function reconcileGenerationBatches(
+  target: ApiTarget,
+  request: GenerationBatchStatusRequest,
+  signal?: AbortSignal,
+): Promise<GenerationBatchStatusResponse> {
+  return parseGenerationBatchStatusResponse(
+    await apiJsonTo<unknown>(target, "/api/generation-batches/status", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+      ...(signal ? { signal } : {}),
+    }),
+  );
+}

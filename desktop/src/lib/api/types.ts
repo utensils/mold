@@ -33,6 +33,18 @@ export type {
   GalleryTrashCapabilities,
   TagCount,
 } from "@studio/lib/api/galleryOrganization";
+// Durable generation admission and outcome types are singular across web,
+// desktop and mobile. Surfaces may keep importing them from this desktop
+// facade while the shared client/reducer remains the authority.
+export type {
+  GenerationBatchAdmissionRequest,
+  GenerationBatchChild,
+  GenerationBatchResult,
+  GenerationBatchStatus,
+  GenerationBatchStatusRequest,
+  GenerationBatchStatusResponse,
+  GenerationLifecyclePhase,
+} from "@studio/api/generationAdmission";
 
 export interface GpuSnapshot {
   ordinal: number;
@@ -190,27 +202,11 @@ export interface ServerCapabilities {
     durable_queue?: boolean;
     heterogeneous_batch?: boolean;
     heterogeneous_batch_max_outputs?: number | null;
+    /** Enriched durable outcomes, by-client recovery and bulk reconciliation. */
+    durable_batch_outcomes?: boolean;
   } | null;
   /** Absent on older servers means unknown, not unavailable. */
   expand?: ExpandCapabilities | null;
-}
-
-export interface GenerationBatchAdmissionRequest {
-  client_batch_id: string;
-  requests: GenerateRequest[];
-}
-
-export interface GenerationBatchChild {
-  index: number;
-  job_id: string;
-  state: "accepted" | "running" | "complete" | "failed" | "cancelled" | "held";
-  error?: string | null;
-}
-
-export interface GenerationBatchStatus {
-  id: string;
-  client_batch_id: string;
-  children: GenerationBatchChild[];
 }
 
 // ── Models ───────────────────────────────────────────────────────────────
