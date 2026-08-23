@@ -37,7 +37,7 @@ import { catalogFamily, familyLabel, matchesCatalogFamily } from "@studio/lib/mo
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
 import {
   modelRuntimeNotice,
-  modelRuntimeNoticeForId,
+  modelRuntimeNoticeAcrossHosts,
   RUNTIME_UNAVAILABLE_BADGE,
 } from "@studio/lib/modelRuntimeAvailability";
 import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Authoring";
@@ -502,20 +502,20 @@ const detailRuntimeAvailable = computed(() => {
 const detailRuntimeNotice = computed(() => {
   const entry = detailEntry.value;
   if (!entry) return null;
-  const host = owningHost(entry);
-  const rows = modelsByHost.value[host?.id ?? props.selectedHostId] ?? [];
-  return (
-    modelRuntimeNotice(detailModel.value) ??
-    modelRuntimeNoticeForId(entry.name, rows) ??
-    modelRuntimeNoticeForId(entry.id, rows)
-  );
+  return modelRuntimeNotice(detailModel.value) ?? runtimeNoticeFor(entry);
 });
 
-/** The same answer for one grid row, rendered as a compact badge. */
+/**
+ * The same answer for one grid row, rendered as a compact badge. A pull can
+ * land on any connected machine, so one machine that can run the model
+ * withdraws the warning and an unread inventory is no evidence at all.
+ */
 function runtimeNoticeFor(entry: MobileCatalogEntry) {
-  const host = owningHost(entry);
-  const rows = modelsByHost.value[host?.id ?? props.selectedHostId] ?? [];
-  return modelRuntimeNoticeForId(entry.name, rows) ?? modelRuntimeNoticeForId(entry.id, rows);
+  const lists = Object.values(modelsByHost.value);
+  return (
+    modelRuntimeNoticeAcrossHosts(entry.name, lists) ??
+    modelRuntimeNoticeAcrossHosts(entry.id, lists)
+  );
 }
 
 /** Runnable manifest siblings (`base:tag`) become exact pull targets. */

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   isModelRuntimeUnavailable,
   modelRuntimeNotice,
+  modelRuntimeNoticeAcrossHosts,
   modelRuntimeNoticeForId,
   RUNTIME_UNAVAILABLE_FALLBACK,
 } from "./modelRuntimeAvailability";
@@ -83,6 +84,66 @@ describe("model runtime availability", () => {
       modelRuntimeNoticeForId("minimax-h3-fl2va:comfy-pruned-int8", rows),
     ).toBeNull();
     expect(modelRuntimeNoticeForId("flux-dev:q8", rows)).toBeNull();
+  });
+
+  describe("across a fleet", () => {
+    // Pull can target any connected machine, so the local answer alone is
+    // materially wrong wording on a mixed fleet.
+    const cannot = [
+      {
+        name: "minimax-h3-fl2va:comfy-pruned-int8",
+        runtime_available: false,
+        runtime_unavailable_reason: "This build has no H3 engine.",
+      },
+    ];
+    const can = [
+      {
+        name: "minimax-h3-fl2va:comfy-pruned-int8",
+        runtime_available: true,
+      },
+    ];
+
+    it("stays silent when any listing machine can run the model", () => {
+      expect(
+        modelRuntimeNoticeAcrossHosts("minimax-h3-fl2va:comfy-pruned-int8", [
+          cannot,
+          can,
+        ]),
+      ).toBeNull();
+      expect(
+        modelRuntimeNoticeAcrossHosts("minimax-h3-fl2va:comfy-pruned-int8", [
+          can,
+          cannot,
+        ]),
+      ).toBeNull();
+    });
+
+    it("warns only when every listing machine refuses, naming the obstacle", () => {
+      expect(
+        modelRuntimeNoticeAcrossHosts("minimax-h3-fl2va:comfy-pruned-int8", [
+          cannot,
+          cannot,
+        ]),
+      ).toEqual({ message: "This build has no H3 engine.", fromServer: true });
+    });
+
+    it("treats an unread inventory as no evidence at all", () => {
+      expect(
+        modelRuntimeNoticeAcrossHosts("minimax-h3-fl2va:comfy-pruned-int8", [
+          null,
+          undefined,
+          [],
+        ]),
+      ).toBeNull();
+      // An unread machine beside a refusing one keeps the refusal: only a
+      // positive "I can run this" withdraws the warning.
+      expect(
+        modelRuntimeNoticeAcrossHosts("minimax-h3-fl2va:comfy-pruned-int8", [
+          cannot,
+          null,
+        ]),
+      ).not.toBeNull();
+    });
   });
 
   it("never guesses for an id or a listing it does not have", () => {

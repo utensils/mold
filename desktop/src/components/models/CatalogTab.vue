@@ -10,7 +10,8 @@ import { useDownloadsStore } from "../../stores/downloads";
 import { useHostsStore, type HostView } from "../../stores/hosts";
 import { useInventoryKnown } from "../../lib/modelInventory";
 import { isGenerationModel, useModelStore } from "../../stores/models";
-import { modelRuntimeNoticeForId } from "@studio/lib/modelRuntimeAvailability";
+import { useHostModelsStore } from "../../stores/hostModels";
+import { modelRuntimeNoticeAcrossHosts } from "@studio/lib/modelRuntimeAvailability";
 import { useToastStore } from "../../stores/toasts";
 import { useUiStore } from "../../stores/ui";
 import { ApiError, type ApiTarget } from "../../lib/api/client";
@@ -52,6 +53,7 @@ const downloads = useDownloadsStore();
 const toasts = useToastStore();
 const hosts = useHostsStore();
 const models = useModelStore();
+const hostModels = useHostModelsStore();
 const ui = useUiStore();
 const inventoryKnown = useInventoryKnown();
 
@@ -211,12 +213,16 @@ function hostLabelsFor(entry: CatalogListEntry): string[] {
   );
 }
 
-/** Whether this machine can run the model behind a Discover row, from its
- *  own `/api/models` listing. Knowable before the pull — which for the
- *  affected checkpoints is 21-42 GB (#1276). A live catalog id nobody lists
- *  is unknown and gets no badge rather than a guess. */
+/** Whether the FLEET can run the model behind a Discover row, from each
+ *  machine's own `/api/models` listing. Knowable before the pull — which for
+ *  the affected checkpoints is 21-42 GB (#1276). Pull targets any connected
+ *  machine, so one machine that can run it withdraws the warning; a live
+ *  catalog id nobody lists is unknown and gets no badge rather than a guess. */
 function runtimeNoticeFor(id: string) {
-  return modelRuntimeNoticeForId(id, models.all);
+  return modelRuntimeNoticeAcrossHosts(id, [
+    models.all,
+    ...Object.values(hostModels.byHost).map((list) => list?.entries),
+  ]);
 }
 
 const manifestEntries = computed<CatalogEntry[]>(() => {

@@ -21,9 +21,11 @@ const mockHosts = ref<RoutableHost[]>([
     gpu: null,
   },
 ]);
+const mockTargetModels = ref<any[]>([]);
 vi.mock("../composables/useHostRouting", () => ({
   useHostRouting: () => ({
     hosts: mockHosts,
+    targetModels: mockTargetModels,
     modelOwnerIds: () => [],
     inventoryKnown: () => true,
   }),
@@ -95,6 +97,7 @@ vi.mock("../composables/useCatalog", () => ({
 beforeEach(() => {
   toastMock.mockReset();
   (globalThis as any).IntersectionObserver = FakeIntersectionObserver;
+  mockTargetModels.value = [];
   mockState = {
     entries: ref([baseEntry]),
     visibleEntries: ref([baseEntry]),
@@ -290,6 +293,23 @@ describe("CatalogCardGrid client-side filtering", () => {
     expect(
       w.get("[data-test=pull-btn]").attributes("disabled"),
     ).toBeUndefined();
+  });
+
+  it("keeps quiet when another connected machine can run the model (#1276)", () => {
+    // A Pull can land on any reachable machine, so the origin's own answer
+    // alone would be materially wrong wording on a mixed fleet.
+    mockState.availableManifests = ref([
+      {
+        name: baseEntry.id,
+        runtime_available: false,
+        runtime_unavailable_reason: "This build has no H3 engine.",
+      },
+    ]);
+    mockTargetModels.value = [{ name: baseEntry.id, runtime_available: true }];
+    const w = mount(CatalogCardGrid);
+    expect(w.find("[data-test=runtime-unavailable-badge]").exists()).toBe(
+      false,
+    );
   });
 
   it("badges nothing for a row the host lists as runnable", () => {

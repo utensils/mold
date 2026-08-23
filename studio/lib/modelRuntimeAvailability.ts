@@ -74,8 +74,48 @@ export function modelRuntimeNoticeForId(
   rows:
     readonly (ModelRuntimeRow & { name?: string | null })[] | null | undefined,
 ): ModelRuntimeNotice | null {
+  const row = findRuntimeRow(id, rows);
+  return row ? modelRuntimeNotice(row) : null;
+}
+
+function findRuntimeRow(
+  id: string | null | undefined,
+  rows:
+    readonly (ModelRuntimeRow & { name?: string | null })[] | null | undefined,
+): (ModelRuntimeRow & { name?: string | null }) | null {
   const wanted = id?.trim();
   if (!wanted || !rows) return null;
-  const row = rows.find((candidate) => candidate.name?.trim() === wanted);
-  return row ? modelRuntimeNotice(row) : null;
+  return rows.find((candidate) => candidate.name?.trim() === wanted) ?? null;
+}
+
+/**
+ * The same answer for a fleet, which is what a Discover row actually needs:
+ * Pull can target any connected machine, so a row is "download only" ONLY
+ * when every machine that has listed it says so. One reachable machine that
+ * can run it makes the badge wrong — and a machine whose `/api/models` has
+ * not been read is not evidence of anything, exactly as
+ * `planModelInstall` treats an unread inventory.
+ *
+ * `hostRows` is one entry per machine, in whatever order the surface holds
+ * them; the reported sentence is the first unavailable one, so a homogeneous
+ * fleet reports its single real obstacle.
+ */
+export function modelRuntimeNoticeAcrossHosts(
+  id: string | null | undefined,
+  hostRows: readonly (
+    readonly (ModelRuntimeRow & { name?: string | null })[] | null | undefined
+  )[],
+): ModelRuntimeNotice | null {
+  let unavailable: ModelRuntimeNotice | null = null;
+  let listed = false;
+  for (const rows of hostRows) {
+    const row = findRuntimeRow(id, rows);
+    if (!row) continue;
+    listed = true;
+    const notice = modelRuntimeNotice(row);
+    // Some machine in the fleet can run it. Nothing to warn about.
+    if (!notice) return null;
+    unavailable ??= notice;
+  }
+  return listed ? unavailable : null;
 }

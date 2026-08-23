@@ -112,9 +112,11 @@ vi.mock("../../lib/toasts", () => ({
  */
 const mockHosts = ref<RoutableHost[]>([]);
 const mockOwners = ref<Record<string, string[]>>({});
+const mockTargetModels = ref<ModelInfoExtended[]>([]);
 vi.mock("../../composables/useHostRouting", () => ({
   useHostRouting: () => ({
     hosts: mockHosts,
+    targetModels: mockTargetModels,
     modelOwnerIds: (name: string) => mockOwners.value[name] ?? [],
     inventoryKnown: () => true,
   }),
@@ -148,6 +150,7 @@ describe("ModelDetailDrawer", () => {
     mockHosts.value = [host("origin")];
     mockOwners.value = {};
     mockAvailableManifests.value = [];
+    mockTargetModels.value = [];
     useModelInstallTargets().cancel();
   });
 
@@ -236,6 +239,35 @@ describe("ModelDetailDrawer", () => {
       );
       const pull = w.get("[data-test=pull-btn]");
       expect(pull.attributes("disabled")).toBeUndefined();
+    });
+
+    it("keeps quiet when another connected machine can run the model (#1276)", () => {
+      // Pull can land on any reachable machine, so the origin's own answer
+      // alone would be materially wrong wording on a mixed fleet.
+      mockAvailableManifests.value = [
+        makeModel({
+          name: "minimax-h3-fl2va:comfy-pruned-int8",
+          downloaded: false,
+          runtime_available: false,
+          runtime_unavailable_reason: "This build has no H3 engine.",
+        }),
+      ];
+      mockTargetModels.value = [
+        makeModel({
+          name: "minimax-h3-fl2va:comfy-pruned-int8",
+          runtime_available: true,
+        }),
+      ];
+      mockDetail.value = catalogDetail(
+        makeEntry({
+          id: "minimax-h3-fl2va:comfy-pruned-int8",
+          supported: true,
+        }),
+      );
+      const w = mount(ModelDetailDrawer);
+      expect(w.find("[data-test=runtime-unavailable-note]").exists()).toBe(
+        false,
+      );
     });
 
     it("says nothing about runtime for a model the host can run", () => {

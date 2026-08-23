@@ -14,12 +14,13 @@ import DrawerPanel from "@ui/components/DrawerPanel.vue";
 import SheetPanel from "@ui/components/SheetPanel.vue";
 import Icon from "@ui/components/Icon.vue";
 import { useCatalog } from "../../composables/useCatalog";
+import { useHostRouting } from "../../composables/useHostRouting";
 import { useModelInstallTargets } from "../../composables/useModelInstallTargets";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import { modelDisplayName } from "@studio/lib/modelDisplay";
 import {
   modelRuntimeNotice,
-  modelRuntimeNoticeForId,
+  modelRuntimeNoticeAcrossHosts,
 } from "@studio/lib/modelRuntimeAvailability";
 import { requestConfirm, toast } from "../../lib/toasts";
 import type {
@@ -30,6 +31,9 @@ import type {
 import { formatGB } from "../../util/format";
 
 const cat = useCatalog();
+// Pull can land on any reachable machine, so a Discover row's runtime answer
+// is the fleet's, never this origin's alone (#1276 review).
+const routing = useHostRouting();
 
 /**
  * One explicit state for the whole drawer, so the template's branches cover
@@ -142,7 +146,10 @@ const isLoaded = computed(() => installedModel.value?.is_loaded ?? false);
 const runtimeNotice = computed(
   () =>
     modelRuntimeNotice(installedModel.value) ??
-    modelRuntimeNoticeForId(entry.value?.id, cat.availableManifests.value),
+    modelRuntimeNoticeAcrossHosts(entry.value?.id, [
+      cat.availableManifests.value,
+      routing.targetModels.value,
+    ]),
 );
 const runtimeUnavailable = computed(() => runtimeNotice.value !== null);
 

@@ -1121,6 +1121,76 @@ describe("CatalogTab install on a machine that is missing the model", () => {
   });
 });
 
+describe("CatalogTab runtime availability (#1276)", () => {
+  const h3 = "minimax-h3-fl2va:comfy-pruned-int8";
+  const reason = "This mold build was compiled without the MiniMax H3 engine.";
+
+  function coldRow(runtimeAvailable: boolean) {
+    return {
+      name: h3,
+      family: "minimax-h3",
+      size_gb: 42,
+      is_loaded: false,
+      hf_repo: "Comfy-Org/MiniMax-H3",
+      default_steps: 8,
+      default_guidance: 0,
+      default_width: 512,
+      default_height: 512,
+      description: "MiniMax H3",
+      downloaded: false,
+      remaining_download_bytes: 42_482_090_318,
+      runtime_available: runtimeAvailable,
+      ...(runtimeAvailable ? {} : { runtime_unavailable_reason: reason }),
+    } as never;
+  }
+
+  async function mountWith(byHost: Record<string, unknown[]>) {
+    setActivePinia(createPinia());
+    const connection = useConnectionStore();
+    connection.info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "local-key",
+    };
+    connection.status = "ready";
+    // The Discover row itself comes from the primary's `/api/models`; the
+    // per-host lists are what make the answer a fleet answer.
+    useModelStore().all = (byHost.local ?? []) as never;
+    const hostModels = useHostModelsStore();
+    for (const [id, entries] of Object.entries(byHost)) {
+      hostModels.byHost[id] = { entries: entries as never, fetchedAt: Date.now(), error: null };
+    }
+    searchCatalog.mockResolvedValue({
+      entries: [entry("flux-one", "flux")],
+      page: 1,
+      page_size: PAGE_SIZE,
+      total: 1,
+    });
+    const wrapper = mount(CatalogTab, { props: { query: "", layout: "grid" as const } });
+    await flushPromises();
+    return wrapper;
+  }
+
+  it("badges a Discover row no reachable machine can run", async () => {
+    const wrapper = await mountWith({ local: [coldRow(false)] });
+    const badge = wrapper.find("[data-test='runtime-unavailable-badge']");
+    expect(badge.exists()).toBe(true);
+    expect(badge.attributes("title")).toBe(reason);
+    wrapper.unmount();
+  });
+
+  it("keeps quiet when another connected machine can run it", async () => {
+    // Pull targets any connected machine, so the local answer alone would be
+    // materially wrong wording on a mixed fleet.
+    const wrapper = await mountWith({
+      local: [coldRow(false)],
+      "render-7680": [coldRow(true)],
+    });
+    expect(wrapper.find("[data-test='runtime-unavailable-badge']").exists()).toBe(false);
+    wrapper.unmount();
+  });
+});
+
 describe("CatalogTab batch downloads", () => {
   it("queues every checked model on the selected target machine", async () => {
     setActivePinia(createPinia());

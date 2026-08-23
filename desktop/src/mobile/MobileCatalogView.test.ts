@@ -410,6 +410,34 @@ describe("MobileCatalogView", () => {
     ).toContain("Ref2VA");
   });
 
+  it("keeps quiet when another connected machine can run the model", async () => {
+    // A pull can land on any connected machine, so one machine's refusal is
+    // not the fleet's answer (#1276).
+    const cold = h3Model("ref2va", false, {
+      runtime_unavailable_reason: "This build has no H3 engine.",
+    });
+    const runnable = { ...cold, runtime_available: true };
+    delete (runnable as Partial<ModelEntry>).runtime_unavailable_reason;
+    apiFetchTo.mockImplementation((target: ApiTarget, path: string) => {
+      if (path === "/api/models") {
+        return Promise.resolve(
+          jsonResponse(target.baseUrl === studio.baseUrl ? [cold] : [runnable]),
+        );
+      }
+      if (path === "/api/capabilities") return Promise.resolve(jsonResponse({}));
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    fetchCatalogDetail.mockRejectedValue(new Error("manifest detail unavailable"));
+
+    wrapper = mountCatalog(studio.id, [studio, renderBox]);
+    await flushPromises();
+
+    const card = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes(cold.name))!;
+    expect(card.find("[data-test='mobile-catalog-runtime-badge']").exists()).toBe(false);
+  });
+
   it("keeps acquired H3 inventory repair and removal while hiding runtime load", async () => {
     const installed = h3Model("ref2va", true, {
       disk_usage_bytes: 42_482_090_318,
