@@ -1,1 +1,0 @@
-- **Bulk work now survives disconnects and offline hosts.** Prepared iPhone batches are admitted atomically to the durable host queue, while gallery selections use replay-safe bulk operations and retain organization edits across app restarts until the exact target host returns.

@@ -1,1 +1,0 @@
-- **Android APKs can now be installed directly from every release channel.** Stable and Nightly GitHub releases publish a signed, universal `Mold-android.apk` as an uncompressed asset with checksums and in-place upgrade compatibility; the repository README and website link directly to both downloads.

@@ -1,1 +1,0 @@
-- **Batch in general settings.** Batch controls now live in the main Create form on mobile, and each surface's primary Reset returns Batch to one without letting Advanced Reset change it.

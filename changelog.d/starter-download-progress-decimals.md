@@ -1,1 +1,0 @@
-- **Cleaner first-run download progress.** Starter model downloads now show a whole-number percentage instead of exposing floating-point decimals in the desktop app.

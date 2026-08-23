@@ -1,1 +1,0 @@
-- **iPhone gallery source images are selectable again.** The source picker now falls back to its authenticated HTTP thumbnail route when the iOS shell does not provide the desktop-only native thumbnail command, instead of rendering every gallery print as unreadable.

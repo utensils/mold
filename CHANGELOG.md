@@ -11,6 +11,889 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-08-23
+
+- **Bound MiniMax H3 memory on Apple Metal.** The reviewed Metal runtime now streams Qwen, transformer, and Turbo adapter blocks from authenticated model files, sweeps pooled buffers between large pipeline phases, and uses a best-effort sampled host-memory guard to cancel sustained pressure. The shared FL2VA sequence now finishes and drops Qwen before constructing the VAEs, reducing peak overlap on CUDA too without changing its kernels or placement ([#1296](https://github.com/utensils/mold/issues/1296)).
+- **`mold rm` no longer deletes shared files that installed models still own.**
+  Ownership is now read from the model's own manifest instead of its
+  `[models]` config projection, which had no slot for an audio VAE,
+  task/processor/scheduler/architecture configs, or a second file of a role
+  (LTX-2.3 ships two spatial upscalers) — so the post-removal sweep read those
+  files as orphans and deleted them out from under installed MiniMax H3 and
+  LTX-2.3 checkpoints. A partially installed model now also keeps its shared
+  dependencies so `mold pull` can repair it, `.sha256-verified` markers are
+  kept with the files they attest. Whether a model is complete enough to own
+  shared components is asked of its manifest for the same reason. The sweep now
+  prints every path it unlinks — the shared file plus an hf-cache-backed
+  orphan's blob and snapshot links, which it also stopped leaving dangling —
+  instead of only counting them. A removed file's `.sha256-verified` marker is
+  now deleted with it and the emptied model directory is cleaned up, so no
+  stale attestation is left behind.
+- **Android APKs can now be installed directly from every release channel.** Stable and Nightly GitHub releases publish a signed, universal `Mold-android.apk` as an uncompressed asset with checksums and in-place upgrade compatibility; the repository README and website link directly to both downloads.
+- **MiniMax H3 needs 4.57 GB less host RAM.** The Qwen3-VL NVFP4 text encoder
+  kept the checkpoint's one-byte FP8 block scales in a four-byte host cache,
+  and admission charged that expansion, so an H3 print could be refused for
+  memory it never actually needed. Mold now retains the scales at their own
+  width and widens them through a fixed lookup table at use, which is exactly
+  bit-identical arithmetic — the same seed renders the same frames. The
+  conditioner's host-resident parameters drop from 19.07 GB to 14.50 GB and
+  the H3 admission host floor from 19.87 GB to 15.30 GB, so a host that was
+  short by less than that now runs ([#1316](https://github.com/utensils/mold/issues/1316),
+  complementing [#1289](https://github.com/utensils/mold/issues/1289))
+- **TUI image requests no longer carry video timing.** Image-only recipes such
+  as SDXL now omit the TUI's hidden frame and FPS defaults, so identity and
+  ordinary image generations reach the server without a video-field refusal
+  ([#1309](https://github.com/utensils/mold/issues/1309)).
+- **Bulk work now survives disconnects and offline hosts.** Prepared iPhone batches are admitted atomically to the durable host queue, while gallery selections use replay-safe bulk operations and retain organization edits across app restarts until the exact target host returns.
+- **The desktop app builds and runs on Windows.** Mold Studio is now a
+  three-platform desktop app: `scripts\windows.ps1` is the Windows peer of the
+  Nix devshell's `desktop-*` commands (`doctor`, `setup`, `dev`, `ui`, `check`,
+  `test`, `build`), a `tauri.windows.conf.json` bundles a decorated window into
+  an NSIS installer, and a `windows-latest` CI job runs clippy and the tests on
+  every relevant pull request and builds the installer on `main`. Windows gets
+  native click-to-route toast notifications, a Window menu whose items all do
+  something, and Ctrl+A now drives Library's Select All (it was recognised only
+  as ⌘A, so it did nothing off macOS — **Linux gains this too, and Meta+A stops
+  triggering it there**). Two capabilities are honestly absent for
+  now: generated AAC audio tracks (`fdk-aac` does not compile with MSVC — video
+  still renders), and in-app updates, which stay macOS-only.
+- **The embedded engine starts on Windows.** Three separate defects stopped it
+  before it could serve a request, and each of them reported something other
+  than what was wrong. Gallery lock probing classified contention by
+  `ErrorKind::WouldBlock`, which is only the unix spelling — Windows reports
+  `ERROR_LOCK_VIOLATION`, so the probe read its own expected answer as a fatal
+  error and refused to start. Startup recovery flushed a directory by opening
+  it read-only, which Windows answers with a bare "Access is denied". And the
+  scheduler's artifact-identity check used two nightly-only APIs. All three are
+  fixed, and the engine now boots, authenticates, and shuts down cleanly.
+- **Publishing a print, a chain output, or a batch record is durable on
+  Windows.** Five copies of the post-rename directory fsync each assumed a unix
+  handle: four were `#[cfg(unix)]` with a silent no-op twin, so nothing ran,
+  and the fifth failed outright. They now share one implementation that opens
+  the directory the way Windows requires and flushes it on both platforms.
+- **Gallery filenames can no longer address a second location on Windows.**
+  The desktop reveal-in-folder command carried its own weaker traversal check
+  that missed `\` and `:`; every gallery path now shares one rule, which also
+  refuses a drive-relative `C:name.png` — a form `Path::join` resolves against
+  that drive's working directory rather than the gallery.
+- **A `mold serve` on Windows shuts down gracefully.** With no SIGTERM there,
+  the graceful path — and with it the queue journal's retention fence — was
+  reachable only through `POST /api/shutdown`, so closing the console window or
+  shutting the machine down discarded every retained queue row. Ctrl-C, console
+  close, and system shutdown now all take the same path SIGTERM takes.
+- **A Windows clone no longer fails every formatting gate.** Git's default
+  `core.autocrlf` checked the tree out as CRLF, which prettier rejects for
+  every file and which makes a `#!/usr/bin/env bash` shebang invalid. A
+  `.gitattributes` pins LF in the working tree on all platforms.
+- **`scripts\windows.ps1` gives the same answers in both PowerShell editions.**
+  A `.ps1` runs under whichever edition the user's shell is, and the helper's
+  architecture probe did not survive that: under Windows PowerShell 5.1
+  `RuntimeInformation::OSArchitecture` reports **X64 on an ARM64 machine**
+  (pwsh 7 reports Arm64 on the same box), and on some .NET Framework builds the
+  property is missing entirely, which under `Set-StrictMode` crashed the script
+  outright. Since that probe gates whether `cuda` enters the build recipe, the
+  quiet wrong answer was the worse half. Architecture now comes from WMI, the
+  x64 question is answered by the Rust host triple that actually decides what
+  cargo builds, and a new test refuses to let the two editions disagree.
+- **Windows downloads now ship from rolling and tagged releases.** The x64
+  NSIS desktop installer and the separate CPU/remote-client CLI zip share one
+  pinned self-signed Authenticode identity; releases include its public
+  certificate, SHA-256 coverage, explicit trust instructions, and Windows-logo
+  download cards alongside macOS. CI fails closed when the retained PFX or
+  either signature is missing. Public-trust signing remains future work.
+- **The Windows CLI now compiles without pretending Unix self-update semantics
+  apply.** Running executables cannot be renamed in place on Windows, so the
+  command reports manual zip installation until a post-exit updater exists.
+- **Cleaner first-run download progress.** Starter model downloads now show a whole-number percentage instead of exposing floating-point decimals in the desktop app.
+- **Reliable first-run model downloads.** Fixed the Z-Image Turbo and SDXL starter buttons so every first-run model can be downloaded, with visible errors when a pull cannot start.
+- **Queue selection restores the whole print and follows its live render.**
+  Selecting an in-flight print on desktop, web, or phone now sends its saved
+  metadata through the same complete settings-reuse path as Library, including
+  title, prompt, model, negative prompt, dimensions, sampler controls, source
+  media provenance, identity controls, LoRAs, and filing. While that selected
+  job is developing, Create also follows the server's latest denoise preview
+  and progress instead of showing an unrelated local print or an empty canvas.
+- **Collections keep generation order.** Desktop collection drill-ins now stay
+  sorted newest-first by when each print was generated, rather than by when it
+  was added to the collection.
+- **PuLID face-identity conditioning for SDXL.** `--id-image` now works on
+  `sdxl-base:fp16`, `juggernaut-xl:fp16`, `realvis-xl:fp16`, and
+  `dreamshaper-xl:fp16` — the checkpoints upstream's own PuLID v1.1 release
+  qualifies — alongside the existing FLUX support. `mold pull pulid-sdxl` adds
+  only the 984 MB v1.1 adapter on a machine that already has `pulid-flux`,
+  because the face extractor is shared. Clients need no change: every surface
+  already gates on the server's advertised
+  `/api/models[].supports_identity`. `true_cfg` / `cfg_start_step` stay FLUX-only
+  — SDXL's ordinary `guidance` already is the classifier-free scale
+  ([#1228](https://github.com/utensils/mold/issues/1228)).
+- **Compile the reviewed MiniMax H3 Metal server.** The Apple Silicon H3 recipe now keeps CUDA-only preparation containment out of Metal builds, and macOS CI compiles that exact feature set to prevent drift ([#1296](https://github.com/utensils/mold/issues/1296)).
+- **Mobile Library no longer stalls while loading older prints.** iPhone and Android now time out an unresponsive thumbnail request, clear the loading state reliably, and continue paging until every reachable older print can load.
+- **Batch in general settings.** Batch controls now live in the main Create form on mobile, and each surface's primary Reset returns Batch to one without letting Advanced Reset change it.
+- Fixed: MiniMax H3's minimum clip length now matches the published model card. H3's spec states an output duration of 4–15 seconds, but Mold's floor was 5 seconds, which refused the 107-frame (4.46 s) clip the model permits. The family floor and the reviewed compact runtime's fixed 124-frame clip were also the same constant — equal by coincidence, so widening one would silently have widened what the runtime admits — and are now separate authorities.
+- **Queued generations survive app disconnects.** Desktop and mobile no longer cancel accepted work when a generation stream drops, the app is backgrounded, or the app closes; reference and identity-photo jobs continue on their selected host.
+- **Face-identity conditioning is 7x faster to set up.** PuLID extraction now
+  runs on the render's own GPU instead of the host, and the derived
+  EVA02-CLIP tower is proven once per process instead of being re-hashed on
+  every conditioned request. One extraction on an M4 Max went from 3,074 ms to
+  **395 ms**; a CPU-only host still improves to 1,907 ms. Repeating the same
+  reference photograph within a session is served from a small in-memory cache
+  in **under 2 ms**, opening no models at all. On an NVIDIA L40S the same
+  extraction is **573 ms**, against 6.0 s on that machine's CPU
+  ([#1227](https://github.com/utensils/mold/issues/1227)).
+- **Identity extraction is a scheduled phase.** It is reported as its own
+  progress stage, its runtime feeds the queue's learned time estimates
+  (`mold.db` schema v22), and its device memory is charged to the plan the
+  scheduler admits, so a conditioned render is queued against what it actually
+  needs rather than gated by a second, separate memory check
+  ([#1227](https://github.com/utensils/mold/issues/1227)).
+- **`pulid_face_probe bench` measures the device path.** New `--device
+  cpu|metal|cuda`, a `--regress-against-full` check stated over the whole
+  extraction rather than the face stack alone, and three rows decomposing the
+  tower's setup cost
+  ([#1227](https://github.com/utensils/mold/issues/1227)).
+- **PuLID identity conditioning now masks the face crop the way upstream does.**
+  The aligned 512 crop is segmented by facexlib's BiSeNet parser before the
+  vision tower sees it — background painted white, face converted to greyscale
+  — which is what PuLID conditions on. Mold's identity now reproduces
+  upstream's to within 1.0e-5 of its own peak, against 1.5e-2 before, so a
+  generated face follows the reference photograph much more closely. The parser
+  arrives as a fifth file in the hidden `pulid-flux` bundle; run
+  `mold pull pulid-flux` to repair an existing install
+  ([#1225](https://github.com/utensils/mold/issues/1225)).
+- **`mold pull pulid-flux` needs no extra licence acceptance for the parser.**
+  facexlib is MIT, weights included, so only the two InsightFace antelopev2
+  models keep their recorded non-commercial acceptance
+  ([#1225](https://github.com/utensils/mold/issues/1225)).
+- Fixed: MiniMax H3's reviewed compact models no longer advertise the official BF16 ladder's duration and resolution ceilings. `/api/models` rows and generation profiles for the compact FL2VA and Ref2VA tags now report the envelope those checkpoints actually admit — 124 frames and 1344x768 — instead of 345 frames and an unbounded axis, so a client can no longer offer a size or duration the engine refuses after the model load has been paid for.
+- **Several identity photographs, averaged.** `mold run --id-image` now repeats
+  up to four times (and the API gains `id_images`), conditioning one render on
+  several references of the same person. Each photograph is extracted
+  independently and the identity token sets are averaged, matching
+  `cubiq/PuLID_ComfyUI`; two or three angles usually hold a likeness better
+  across poses than one does. Saved metadata records every photograph's name and
+  digest in request order
+  ([#1226](https://github.com/utensils/mold/issues/1226)).
+- **True classifier-free guidance for identity renders.** `--true-cfg` (with
+  `--cfg-start-step`) restores a real negative branch on FLUX's otherwise
+  guidance-distilled path, so `--negative-prompt` finally does something on an
+  identity render. Upstream's advice is to drop `--guidance` to `1.0` when you
+  turn it on. It roughly doubles denoise time, which admission now accounts for;
+  the default `1.0` is inert and renders bit-identically to before
+  ([#1226](https://github.com/utensils/mold/issues/1226)).
+- **Identity request shapes are capability-gated.** `GET /api/capabilities` now
+  reports `identity: { multi_photo, max_photos, true_cfg }`, and `mold run`
+  refuses several photographs or `--true-cfg` against a server that does not
+  advertise them instead of submitting fields that server would silently drop
+  ([#1226](https://github.com/utensils/mold/issues/1226)).
+- **Bounded the shared CPU weight cache so host RAM is actually returned.** `SharedPool`'s cross-engine safetensors cache had no budget and no eviction, so the first FLUX generation parked the whole 9.79 GB `t5xxl_fp16` text encoder in anonymous host RAM for the life of the process — `DELETE /api/models/unload` did not touch it, dropping the engine did not touch it, and a 64 GB host that had rendered a few images could no longer admit MiniMax H3 without a restart. The cache now retains at most 2 GiB in total, weighs a component by its on-disk size *before* reading it so an encoder-sized load is never materialized as a second unreclaimable copy at all, evicts least-recently-used entries that nothing else holds, and never takes an entry from an engine still streaming from it. `DELETE /api/models/unload` additionally releases every unreferenced cached component and trims idle allocator arenas, so it observably reduces resident memory instead of reporting success and changing nothing.
+- **PuLID face extraction now runs as resident candle modules, and the whole
+  extraction is measured for the first time.** SCRFD and `glintr100` are built
+  once from the same SHA-pinned ONNX files instead of re-materializing 278 MB of
+  initializers on every conditioned request; the port is parity-exact (SCRFD
+  bit-identical to the evaluator it replaces, ArcFace cosine 1.0) and is what
+  makes a future device path possible at all. `pulid_face_probe bench` gained
+  `--full`, `--compare`, and `--regress-against`, which together show that the
+  re-materialization was worth ~4% and that the EVA02-CLIP vision tower — which
+  had no number anywhere in the repository — is 79% of a real extraction
+  ([#1227](https://github.com/utensils/mold/issues/1227)).
+- **A queued print is never silently abandoned.** A generation whose execution
+  plan could not be resolved used to be reported as an untyped
+  `no_schedulable_device` and retried forever with the real reason discarded, so
+  an H3 print sat `queued` on an idle RTX 4090 past its client's forty-minute
+  timeout with no failure and no message. The scheduler still retries — a job
+  waiting behind running work is untouched and is dispatched the moment capacity
+  returns — but once nothing is leased or preparing it settles the job after a
+  grace window with the plan's own named shortfall instead of leaving it queued
+  with no explanation. A MiniMax H3 job blocked on host RAM is also now
+  identified as a host-memory shortfall, naming required and available bytes,
+  rather than being filed as a VRAM shortfall it did not have
+  ([#1272](https://github.com/utensils/mold/issues/1272)).
+- **SDXL Turbo follows the prompt again at its default guidance.** Its `0.0`
+  guidance was mistakenly treated as active classifier-free guidance, which
+  selected the unconditional prediction at every denoise step. Guidance at or
+  below `1.0` now uses the intended single conditional pass.
+- **Select prints from the iPhone long-press menu.** Press and hold a Library
+  image and choose **Select** to enter multi-select with that print already
+  selected, while retaining the native Share, Save, Copy, and system actions.
+- **`/api/models` now advertises MiniMax H3's synchronized audio.** Every
+  reviewed H3 identity reported `supports_audio: null`, so a client had to know
+  from the family name that H3 always renders audio; the FL2VA rows only looked
+  right because the private-runtime bridge set the flag separately. The row and
+  its generation-profile recipes are now derived from the family's own
+  `synchronized_audio` declaration — including the Ref2VA row and cold,
+  not-yet-downloaded tiers — so a third-party client reads the capability
+  instead of guessing it
+  ([#841](https://github.com/utensils/mold/issues/841)).
+- **Hardened H3 server builds against additive dependency-preparation inputs.**
+  The H3-only placement-preview and scheduler contexts now default optional
+  fields, preventing another shared-struct addition from breaking release
+  compilation.
+- **Hide collections from Prints.** Web, desktop, iPhone, and Android can hide a collection's members from the default Library and search while keeping the collection available to browse or show again.
+- **Fixed the MiniMax H3 server build failing to compile against the PuLID
+  identity work.** `DependencyPreparationContext` gained a `frozen_identity`
+  field; the non-H3 construction sites were updated but their `h3`-gated twins
+  in the placement-preview route and the scheduler were not, so every
+  `h3-cuda` build — the feature set the Linux sm89 release artifact ships —
+  failed to compile while CI stayed green.
+- **Fixed the private H3 claimed-attempt test doubles and the release-contract
+  phase gate.** Under `--features h3-private-uat` ten `claimed_h3_*` /
+  `claimed_ref2va_*` GPU-worker tests failed against two correct production
+  fences: the doubles echoed constant identity digests instead of the run
+  binding the owner scope derives, and their scheduler stand-in never answered
+  the ledger-aware host-memory recheck the owner blocks on before the CUDA
+  allocation boundary. The fixtures now derive the same work-identity,
+  cancellation-scope, and ledger-sequence values the real runtime receives and
+  answer that recheck while forwarding every other worker event untouched
+  ([#1204](https://github.com/utensils/mold/issues/1204)).
+- **The private-UAT release contract now enforces its phase ordering.** Its
+  VAE-drop → terminal-identity → mux markers also matched the Ref2VA twins, so
+  the resolved line numbers were multi-line values that made bash arithmetic
+  error out and pass the whole ordering check silently. Every marker is now
+  anchored to the block that identifies the FL2VA occurrence, the Ref2VA attempt
+  gets its own terminal-before-mux check, and any marker resolving to zero or
+  several lines fails the script by name
+  ([#1207](https://github.com/utensils/mold/issues/1207)).
+- **Face-identity conditioning: `mold run --id-image`.** Give mold a reference
+  photograph and FLUX keeps that person's face across arbitrary prompts. This is
+  PuLID-FLUX ported natively to Rust — SCRFD detection, ArcFace embedding,
+  EVA02-CLIP-L-14-336, and the IDFormer resampler feed twenty cross-attention
+  modules injected between the FLUX transformer blocks. `--id-weight` (0.0–3.0,
+  default 1.0) sets the strength and `--id-start-step` delays it; `--id-weight 0`
+  is completely inert and renders byte-identically to the same seed with no
+  identity at all. Qualified for `flux-dev:q4` and `flux-dev:q8`, on CUDA and
+  Metal, over the CLI, the HTTP API, and forced-local
+  ([#1223](https://github.com/utensils/mold/issues/1223)).
+- **The PuLID bundle is a licence-gated pull.** `mold pull pulid-flux
+  --accept-license insightface-antelopev2` fetches the four auxiliary artifacts
+  (~2.1 GB). The two InsightFace face models are pretrained weights licensed for
+  non-commercial research only, so mold prints the terms and refuses to download
+  them until acceptance is recorded on that machine; `mold licenses` lists what
+  has been accepted, and `mold rm pulid-flux` now also deletes the vision tower
+  mold derived on first use
+  ([#1223](https://github.com/utensils/mold/issues/1223)).
+- **The identity is extracted once per request, not once per print.** Admission
+  resolves the reference photograph into an immutable 32x2048 embedding before
+  batch fan-out and freezes it into the prepared plan, so every sibling — on
+  every device — conditions on the identical value, and a re-prepared batch child
+  never re-extracts. The whole extraction runs on the CPU before a GPU is even
+  leased, so it can never compete with the text encoders for memory
+  ([#1223](https://github.com/utensils/mold/issues/1223)).
+- **Identity provenance is recorded.** A print rendered with a reference
+  photograph records that photograph's file name and SHA-256 plus the applied
+  weight and start step, in embedded metadata and the gallery — never the
+  photograph itself, and never your directory layout
+  ([#1223](https://github.com/utensils/mold/issues/1223)).
+- **PuLID's memory budget is measured rather than declared.** Identity now
+  charges 1.25 GB of VRAM instead of the 2.3 GB placeholder, because the
+  detector, the recognizer, and the vision tower run on the host at admission and
+  are charged there; only the cross-attention adapter is resident on the
+  generation device ([#1223](https://github.com/utensils/mold/issues/1223)).
+- **Face identity works in the desktop app.** The desktop app is its own build
+  and had never compiled the feature, so its **This device** engine never
+  advertised identity and the photo well simply never appeared — a silent
+  absence with nothing in the interface to explain it. It now ships in every
+  desktop recipe ([#1223](https://github.com/utensils/mold/issues/1223)).
+- **Your reference photograph is never written to disk.** A face photo is
+  biometric data supplied for one render, so it is excluded from the durable
+  generation queue and redacted from batch recovery manifests. The cost is
+  honest: a queued identity print is reported as not-resumable rather than
+  quietly replayed, and a batch interrupted mid-flight is refused rather than
+  re-rendered with the face missing
+  ([#1223](https://github.com/utensils/mold/issues/1223)).
+- **Mold tells you when it had to choose a face.** If a reference photograph
+  contains several faces, mold conditions on the largest one and now says so —
+  in the CLI, over HTTP, and in the browser — instead of only writing it to the
+  server log ([#1223](https://github.com/utensils/mold/issues/1223)).
+- **Calmer mobile gallery details.** Gallery Info on iOS and Android now waits to
+  open the keyboard until an editor is selected and shows the complete desktop
+  print metadata set; the iOS Create prompt also scrolls above the keyboard when
+  selected.
+- **Android Create now supports PuLID identity photos.** The shared mobile
+  identity well opens a native 48dp source sheet, then uses Android's Photo
+  Picker or camera without broad photo-library access. The native bridge checks
+  the 16 MiB limit from provider metadata before reading bytes, returns PNG/JPEG
+  data verbatim, and closes cleanly through Android's back gesture. Capability
+  gating, parking, Advanced strength/start-step controls, Batch inheritance,
+  identity-safe automatic routing, Library provenance, and stash-backed reuse
+  remain the same shared Studio contract as iPhone, desktop, and web.
+- **Browser surfaces show accepted-request advisories.** Web and desktop now
+  raise warning notifications for `x-mold-request-warning`, while iPhone keeps
+  each advisory in a dismissible inline banner; advisory prose containing
+  semicolons stays intact.
+- **Literal hash-prefixed tags stay editable.** Library tag normalization now
+  matches the server, so `#blue` remains distinct from `blue` when displayed,
+  filtered, added, or removed.
+- **TUI size guidance uses warning styling.** Accepted off-recipe custom sizes
+  now render in the amber warning slot instead of the red error slot.
+### Fixed
+
+- CI now compiles mold-inference's shipping `h3` feature, so a change to a shared response type can no longer land on `main` with the private MiniMax H3 construction site un-updated (that gap broke every `h3`-featured release build).
+- **Keep iPhone editors and wide media in view.** Tag and collection editors now stay above the keyboard with aligned actions, while wide photos and videos remain centered inside the Library viewer ([#1259](https://github.com/utensils/mold/pull/1259)).
+- **Fixed: reviewed MiniMax H3 renders accept real prompts.** The reviewed
+  compact/Turbo FL2VA envelope budgeted only about forty prompt tokens, so any
+  prompt longer than a sentence was refused as differing from the reviewed
+  envelope — after ninety seconds of artifact verification. The reviewed
+  conditioner budget now carries roughly a thousand prompt tokens, an
+  over-budget prompt is refused immediately and names the budget it has, and an
+  envelope refusal names every axis it differs on instead of one unhelpful
+  sentence ([#1245](https://github.com/utensils/mold/issues/1245)).
+- **Android development now has a reproducible shared-mobile foundation.** The existing remote-only Tauri mobile crate generates an Android Studio project instead of creating a second product implementation, while Nix dev-shell commands cover setup, diagnostics, emulator launch, debug APK checks, native instrumentation tests, development runs, and Play-style AAB builds. Android Studio, SDK/NDK, Pixel 9 Pro Android 17 AVD, Gradle, Cargo, and Bun caches default to external storage. Authenticated hosts use native QR pairing plus API keys encrypted by a non-exportable Android Keystore AES-GCM key; plaintext never enters WebView storage or Android preferences.
+- **Identity photos on iPhone.** Create gains an **Identity** photo well in the
+  primary form beside the source wells, with **Identity strength** (0.0–3.0,
+  default 1.0) and **Identity start step** in the full-screen Advanced sheet,
+  where they count toward its active badge and clear on Reset. Picking uses the
+  native photo/camera picker, and the photo is never cropped or fitted to the
+  canvas — it is a face reference, so the picked bytes travel untouched. The
+  whole control is capability-gated by the host's own `supports_identity`
+  authority: an unqualified checkpoint or an older machine hides it rather than
+  offering work the server would refuse, and a photo already attached is parked
+  — kept in the draft, left off the wire, Develop still enabled — and comes back
+  the moment a qualified model is selected again. Every refusal (a photo
+  alongside a LoRA or a source image, a knob set with no photo, an oversized or
+  unsupported file) reads inline beside the control and blocks Develop, never as
+  a toast. Prepared Batch N siblings inherit the partition
+  ([#1231](https://github.com/utensils/mold/issues/1231)).
+- **iPhone Library shows where a print's likeness came from.** The viewer's
+  **Info** sheet lists the identity photo's name, short digest, effective
+  strength, and start step for any print that carried one, and **Use as prompt**
+  restores both knobs and re-attaches the photo when this device still holds it
+  — saying so in the persistent inline status line when it does not. Saved
+  metadata records the digest, never the face bytes
+  ([#1231](https://github.com/utensils/mold/issues/1231)).
+- **An identity print only ever develops on a machine that can hold the face.**
+  Under **Auto** / **Most capable** the model picker is the deduplicated fleet
+  union, so the machine a photo was staged against is not necessarily the one
+  that runs the print: routing now asks only the machines whose own
+  `/api/models` row advertises identity support for that model, refuses inline
+  (queueing nothing) if the frozen machine cannot hold it, and closes the
+  legacy placement fallback for identity work — a server that predates the
+  partition would ignore the photo and return a print of a stranger rather
+  than an error ([#1231](https://github.com/utensils/mold/issues/1231)).
+- **A changed identity photo stales reviewed prompt work** on every surface,
+  exactly like a changed source image: the client-only conditioning fingerprint
+  now reads `id_image`, so a remix or prepared batch reviewed against one face
+  is never submitted against another
+  ([#1231](https://github.com/utensils/mold/issues/1231)).
+- **Identity photos in the TUI.** The Create form's Advanced accordion gains an
+  **Identity photo** section — a local PNG/JPEG path plus Strength (`0.0`–`3.0`,
+  default `1.0`) and Start step (`0`–`steps-1`) — shown only for a checkpoint the
+  connected server advertises as identity-capable. The photo is opened
+  no-follow and bounds-checked when you enter it, so an unreadable, symlinked,
+  oversized, or non-image file is refused in the picker instead of after a
+  queue slot. Switching to a model that cannot take the photo keeps it and
+  refuses the render with the server's own wording rather than quietly
+  rendering someone else's face; Reset to model defaults clears it. Library
+  Details and the full print view show the reference's name, short digest,
+  strength, and start step
+  ([#1231](https://github.com/utensils/mold/issues/1231)).
+- **`/identity` on the Discord bot.** A new slash command generates from a face
+  reference photo: `identity` (PNG/JPEG attachment), `identity_strength`, and
+  `identity_start_step`, plus the usual prompt/model/size/steps/guidance/seed
+  options. It refuses an oversized or wrong-container upload before
+  downloading it, checks both knobs and the model gate against the server's
+  advertised `supports_identity`, and names the reference in the result embed.
+  It is a separate command because `/generate` already sits at Discord's hard
+  25-option ceiling — and identity is qualified only for the FLUX dev tiers,
+  so none of `/generate`'s video and conditioning options apply
+  ([#1231](https://github.com/utensils/mold/issues/1231)).
+- **Identity photos in Create on web and desktop.** Create gains an
+  **Identity** photo well beside the source-image wells, with **Identity
+  strength** (0.0–3.0, default 1.0) and **Identity start step** in Advanced.
+  The whole control is capability-gated by the server's own
+  `supports_identity` authority, so an unqualified checkpoint or an older host
+  hides it rather than offering work the server would refuse; a photo already
+  attached is parked, not discarded, and comes back when a qualified model is
+  selected again. On a qualified model, attaching a photo alongside a LoRA or
+  a source image, or leaving a knob set with no photo, reports the reason
+  inline beside the control — never a toast — and blocks Generate. The photo is never cropped or fitted to the canvas: it is a
+  face reference, and the picked bytes travel untouched. Batch siblings and
+  prepared variations inherit it
+  ([#1224](https://github.com/utensils/mold/issues/1224)).
+- **The Library shows where a print's likeness came from.** A print rendered
+  with an identity photo records its name, digest, strength, and start step,
+  and the Lightbox aside now shows them. **Reuse settings** restores the two
+  values and re-attaches the photo itself when this device still holds it,
+  saying so plainly when it does not — saved metadata never contains the face
+  bytes ([#1224](https://github.com/utensils/mold/issues/1224)).
+- **File prints under tags and collections at creation.** `GenerateRequest`
+  and the HTTP chain body carry additive `tags` and `collection`, so a print
+  can arrive already organized instead of being filed afterwards. A titled
+  print also picks up its own title slug as a tag — every surface shows that
+  chip before you generate, and every surface can turn it off. Filing is
+  seeded onto the gallery row once, at creation: organization is yours
+  afterwards, and a reconcile never resurrects a tag you removed. Batch
+  siblings and prepared variations inherit the filing of the print they came
+  from, and a sequence files only the stitched print it lands in the Library.
+  Nothing about filing can fail a render — a host with `MOLD_DB_DISABLE=1`, or
+  a collection deleted between listing and Generate, drops the filing and
+  reports it on `x-mold-request-warning`.
+- **Sequences can be titled.** The HTTP chain body accepts `title`, applied to
+  the stitched print exactly like a one-shot's — embedded in its metadata,
+  seeded into its gallery row, and folded into its filename as `~slug`. On
+  iPhone, Sequence output therefore keeps the Title field instead of replacing
+  it with a note.
+- **`mold run` files from the command line.** `--tag <TAG>` is repeatable, up
+  to 20 tags, and `--collection <NAME>` resolves by slug and creates the
+  collection when absent, so one name means one collection across a fleet. A
+  titled run also tags the print with its title slug and says so
+  (`filing under tag "smurf-village"`); `--no-auto-tag` or
+  `mold config set generate.auto_tag_title false` turns that off.
+- **Desktop, web, and iPhone Create file a print before it develops.** A
+  capability-gated **File under** group — the Create inspector between the
+  essentials and Advanced on desktop, the controls region (or the controls
+  sheet on phones) on web, two 44pt rows under Title on iPhone — carries a
+  dashed `{slug} · from title` ghost chip derived from the print title
+  (removable, and the removal sticks), typed tags with autocomplete over every
+  connected machine's tag counts, and a collection row that pre-selects —
+  never creates — the collection whose slug matches the title, with a picker
+  for the fleet's collections and an inline **New collection…** that only
+  records the name. A mono line previews the filename the print will land as,
+  `~title-slug` included. The choice rides one shots, every Batch N sibling,
+  every prepared variation, and a sequence's stitched print, and **Reuse
+  settings** restores what a print was actually filed under. The group hides
+  entirely on a machine whose `capabilities.gallery.organize` is not true; on
+  iPhone under **Auto** or **Most capable** it is offered when any machine
+  that could run the print can file, and if the machine the print actually
+  lands on cannot, the filing is left off that submission and an inline notice
+  names the machine — the print still develops. Settings ▸ Library gains **Tag new prints with their title**
+  (on by default); turning it off changes nothing about prints you already
+  made.
+- **The TUI files a print while you make it.** A **File under** section joins
+  the Create Advanced accordion, last, after the generation parameters:
+  **Title**, comma-separated **Tags**, and one **Collection** by name, each
+  edited in a popup that keeps invalid entry on screen with its reason instead
+  of closing and discarding it. All three are absent until touched, so an
+  untouched form sends exactly the request it always did. A titled print shows
+  the tag it will pick up from its own title (`auto: smurf-village`) on the
+  Tags row before you generate, and Settings ▸ Library gains **Tag by title**
+  to turn that off — the same `generate.auto_tag_title` preference `mold run`
+  reads. Filing is per-print intent: it is not remembered across sessions, is
+  not a per-model default, and only **Reset to model defaults** clears it. A
+  forced-local render files itself the same way and folds the title's slug
+  into the saved filename, exactly as a served one does.
+- **Downloads are named after the print.** Desktop Save / Export and web Save /
+  Download now suggest `{title-slug}__{model}__s{seed}.{ext}` — `mold-core`'s
+  own download grammar — instead of the bare title slug or the raw gallery
+  filename, so two takes of one print no longer collide in a Downloads folder.
+  The file in the gallery is never renamed.
+- **The terminal now shows what a host adjusted or dropped.** Advisories about
+  an accepted request — a lip-dub render retimed to its reference clip, or a
+  filing a host could not apply — ride the `x-mold-request-warning` header, but
+  no client read it. `mold run` and `mold chain` now print each one, and the TUI
+  shows them on the Create view and in the Timeline. `GenerateResponse` and
+  `ChainResponse` gain an additive `request_warnings` list for API consumers.
+- **PuLID cross-attention runs on every FLUX transformer variant.** The
+  twenty-module identity adapter is ported to candle and wired into all four
+  FLUX transformer paths — dense BF16, quantized GGUF, mold's bypass-LoRA GGUF,
+  and block-offloaded — through one shared injection policy, so a face-identity
+  render behaves the same whichever route a machine picks
+  ([#1221](https://github.com/utensils/mold/issues/1221)). An effective
+  `id_weight` of 0, and every step before `id_start_step`, run no identity
+  arithmetic at all: they take the exact transformer call an ordinary request
+  takes, so the render is bit-identical to one that never asked for a face. The
+  adapter stays fully resident rather than streaming with the offloaded blocks,
+  and is dropped as soon as a request stops conditioning on a face. Extracting
+  the identity from a portrait lands separately; until then a face-conditioned
+  request is refused with a message that says so instead of quietly rendering a
+  stranger.
+- **PuLID's identity encoders now run in candle.** Mold ports the
+  EVA02-CLIP-L-14-336 vision tower and PuLID's IDFormer resampler to pure
+  Rust, parity-tested against the upstream reference on the SHA-256-pinned
+  checkpoints — the IDFormer output matches to 1.5e-7 of its scale and the
+  tower's CLIP projection to 1.3e-5 on a unit vector. Nothing user-facing
+  changes yet; this is the encoder half of face-identity conditioning
+  ([#1229](https://github.com/utensils/mold/issues/1229)).
+- **The EVA02-CLIP release is converted, never loaded as a pickle.** Its
+  official distribution is a torch pickle, so Mold converts it once to
+  vision-only safetensors from the SHA-verified source: opened without
+  following symlinks, parsed from a private copy taken from that descriptor and
+  hashed on the same stream — staged under your private temporary directory
+  rather than the model root, so a shared model directory cannot have the
+  verified copy swapped before the parser reads it — and published by renaming
+  between retained directory descriptors, so that neither a symlink planted at
+  the destination nor a directory swapped underneath us can redirect the write. A converted file is reused only when it hashes to the digest this
+  build pins — a tampered one is reconverted even if the provenance record
+  beside it was forged to match
+  ([#1229](https://github.com/utensils/mold/issues/1229)).
+- **Identity conditioning cannot be promised before it can run.**
+  `supports_identity` is advertised, and `id_image` requests admitted, only on
+  a build whose runtime adapter is present — the `pulid` feature alone no
+  longer advertises the capability, and a request on a build that cannot
+  execute it is refused with a distinct message instead of rendering a print
+  with no face in it. Auto-materialized PuLID assets are verified against their
+  manifest SHA-256 pins before the paths are frozen, and the InsightFace
+  license is pinned to an immutable upstream commit so acceptance is bound to
+  exact terms ([#1220](https://github.com/utensils/mold/issues/1220)).
+- **Restore iPhone media viewing.** Keep the full-screen Library viewer aligned to the viewport and recover generated videos from transient iOS loading failures ([#1250](https://github.com/utensils/mold/pull/1250)).
+- **PuLID face detection and identity embedding, in pure Rust.** Builds under
+  the `pulid` feature now detect a face with InsightFace's SCRFD, align it to
+  the ArcFace and FFHQ templates, and produce the 512-d `glintr100` identity
+  embedding plus the 512×512 crop PuLID's vision tower conditions on — all
+  through candle, with no ONNX runtime, no Python, and no new native
+  dependency. Several faces in one photo picks the largest and says so; a
+  photo with no face is refused with a clear error instead of a meaningless
+  embedding, and a photo taken with the phone held sideways is righted from its
+  EXIF tag before the detector sees it. The two InsightFace models are
+  re-verified against their pinned checksums on every load, so a model file
+  modified after download is refused rather than run. Measured against the
+  upstream Python pipeline on four public-domain portraits: landmarks within
+  0.24 px and ArcFace cosine at or above 0.9993
+  ([#1222](https://github.com/utensils/mold/issues/1222)).
+- **Keep video duration notches when reusing settings.** Reusing an ordinary LTX video now retains automatic duration chaining instead of treating the runtime pipeline as a manual override.
+- **Wan memory admission no longer credits inactive block offload on Metal.**
+  Oversized clips are refused before inference unless an explicit override can
+  actually park every transformer block, while CUDA automatic offload keeps
+  receiving the relief it can use ([#1060](https://github.com/utensils/mold/issues/1060)).
+- **Face-identity request contract (PuLID-FLUX, milestone 1).** `GenerateRequest`
+  gains additive `id_image` (base64 PNG/JPEG), `id_image_name`, `id_weight`
+  (`0.0..=3.0`, default 1.0), and `id_start_step` (`< steps`, default 0); saved
+  metadata records the reference's name, SHA-256, and effective values, never
+  the face bytes. `/api/models[].supports_identity` and
+  `generation_profile.capabilities.supports_identity` advertise the
+  identity-qualified checkpoints — `flux-dev:q4` and `flux-dev:q8` on a build
+  with the off-by-default `pulid` feature. Every other model, any LoRA or
+  img2img combination, an identity field without `id_image`, an oversized or
+  non-PNG/JPEG reference, and any identity request on a build without the
+  feature are refused at admission with a named reason — never silently
+  ignored ([#1220](https://github.com/utensils/mold/issues/1220)).
+- **PuLID identity assets are a first-class install.** `pulid-flux` is a
+  hidden auxiliary bundle covering the PuLID-FLUX v0.9.1 adapter, the
+  EVA02-CLIP-L-14-336 vision tower, and the InsightFace antelopev2 face
+  detector and recognizer — every file SHA-256 pinned. `mold pull`,
+  incomplete-pull repair, installed-state reporting, and `mold rm` all handle
+  it, and it is never offered as a checkpoint or picked as a default model
+  ([#1220](https://github.com/utensils/mold/issues/1220)).
+- **Restricted model licenses must be accepted before download.** The
+  InsightFace antelopev2 weights are licensed for non-commercial research only,
+  so Mold refuses to fetch them — from the CLI, the server's auto-pull, or any
+  automatic client pull — until you record acceptance with
+  `mold pull pulid-flux --accept-license insightface-antelopev2`. The record
+  lives in an owner-only `$MOLD_HOME/license-acceptances.json` and is bound to
+  the exact license text, so changed terms require accepting again
+  ([#1220](https://github.com/utensils/mold/issues/1220)).
+- **Identity requests plan and materialize the PuLID bundle themselves.** A
+  request that conditions on a face resolves `pulid-flux` through ordinary
+  dependency preparation: `POST /api/generate/placement-preview` lists whatever
+  is missing under `pending_downloads` without fetching anything, admission
+  materializes it after the InsightFace license gate, and the four exact paths
+  are frozen into the execution plan the worker dispatches. An `id_weight` of 0
+  is completely inert — no assets planned, nothing downloaded, no memory
+  charged ([#1220](https://github.com/utensils/mold/issues/1220)).
+- **Identity assets are verified against their manifest pins before use.**
+  Hugging Face `main` is a mutable branch, so every PuLID file Mold
+  materializes is hashed against the SHA-256 the manifest pinned — after the
+  download, and again for any copy already sitting in the models directory. The
+  bytes are read through a retained no-follow descriptor, so a symlink or path
+  swap cannot substitute different content, and the `.sha256-verified` sidecar
+  is never accepted as proof: model roots are allowed to be group-writable, so
+  anyone who can drop weights there could drop an attestation for them too. A
+  mismatch names the file and both digests, removes the rejected bytes, and
+  fails the job instead of freezing unverified weights into an execution plan.
+  Each file is read once per process, so repeat admissions cost a stat rather
+  than a re-hash ([#1220](https://github.com/utensils/mold/issues/1220)).
+- **License acceptance works against a remote server.**
+  `mold pull <model> --accept-license <id>` now records the acceptance on
+  whichever machine runs the pull: the id travels to `MOLD_HOST` and the server writes it
+  into its own `$MOLD_HOME`, instead of the client accepting on its own behalf
+  and the server refusing anyway. New `GET /api/licenses` lists each license
+  with its pinned terms, `accepted`, and `required_by`; `POST /api/downloads`
+  and `POST /api/models/pull` take an additive `accept_licenses` array of
+  `{ id, url, sha256 }` entries carrying the exact terms the user was shown, so
+  a server on a different release cannot resolve a bare id to its own revision
+  and record consent for text nobody read. A gated download without one is a
+  `403` (`LICENSE_NOT_ACCEPTED`); terms the server does not pin are a `409`
+  (`LICENSE_TERMS_MISMATCH`) carrying the server's own terms to re-display.
+  Both write nothing, and both are structured so web, desktop, and iPhone can
+  offer acceptance in-app. Servers advertise `capabilities.licenses`, and `mold licenses` shows
+  the state along with which machine it read
+  ([#1220](https://github.com/utensils/mold/issues/1220)).
+- **CLI administration now works without a running local server.** `mold gpu
+  list` inspects runtime-visible devices, `gpu enable|disable` persists stable
+  startup preferences, and `ps`, `info`, and idempotent `unload` provide useful
+  standalone behavior without masking configured remote-host failures. GPU
+  stable IDs and completion-shell names also participate in dynamic shell
+  completion.
+- **Sequence clips are capped at each model's own clip size, and the opening
+  image moved out of Advanced.** `GET /api/capabilities/chain-limits` now
+  advertises `frames_per_clip_cap` as the per-model clip size one generation
+  renders (97 for LTX-2; for Wan the checkpoint's own manifest default over a
+  53-frame A14B / 121-frame floor) instead of the family's 20 s duration budget, so the Sequence
+  composer on web, desktop, and iPhone no longer offers a single 481-frame
+  LTX-2 clip that the one-shot Duration slider would have split into five.
+  The Studio pickers lock to the same per-model size even against an older
+  server, and the explicit CLI `--clip-frames` escape hatch keeps its full
+  single-request budget. The **Opening sequence image** (with its source
+  strength and fit controls) now sits in the primary Create form on all three
+  surfaces — where one-shot source media already lives — and the primary
+  ↺ Reset clears it while the Advanced reset leaves it alone.
+- **Right-click menus on the sequence editor.** On desktop and web, a clip
+  pill's context menu offers Play (when a cached render exists), Duplicate,
+  Insert before/after, Move to start/left/right/end, and Remove (disabled at
+  the two-clip floor), and the rail background offers Add clip, Validate plan,
+  Import/Export/Copy TOML, and Clear sequence — the same actions the bench
+  exposes, one click closer. The prompt editor keeps its text menu and a seam
+  right-click still opens the seam editor.
+- **MiniMax H3's reviewed models now advertise the envelope they actually
+  run.** The four compact and Turbo tags offered the official flexible ladder —
+  six aspect presets, 2–100 steps, 124–345 frames — while the engine admits
+  exactly 1344×768, the tier's own step count (21, 9, or 5), and exactly 124
+  frames. Picking anything else queued a print that failed late, after the
+  model was loaded. Create on web, desktop, and iPhone now shows the single
+  canvas and the fixed step and frame counts, snaps a stale saved value onto
+  them, and refuses an off-envelope request at submission with a message that
+  says what the limit is. The hidden official BF16 references keep the flexible
+  canvas unchanged.
+- **Cancel now works before generation starts.** Web, desktop, and iPhone can
+  stop route planning, source preparation, variation planning, model handoff,
+  and sequence setup without allowing a late response to queue hidden work.
+  The active stage is named while it runs, and an unconfirmed server cancel is
+  reported instead of claiming that nothing was queued.
+- **CLI nightly channel.** `mold update --nightly` now installs the latest verified rolling CLI build from `main`, and the one-line installer accepts `MOLD_CHANNEL=nightly` for fresh nightly installs.
+- **An H3 render no longer strands the memory that makes an identical rerun fail.** A completed MiniMax H3 generation left roughly 8 GiB of freed glibc arena pages resident, so `MemAvailable` stayed low and the next identical request was refused by host admission before it could queue; the claimed-H3 path now returns those pages exactly as every other generation path does, and the admission refusal names which resource fell short with its required and sampled bytes instead of one message covering both ([#1214](https://github.com/utensils/mold/issues/1214)).
+- **Desktop notifications open the work they describe.** Finished prints and
+  sequences open Library, generation failures return to Create, model pulls
+  open Models, and update alerts open Settings. A model pulled from Create to
+  resume a waiting generation returns there instead, including remote-host and
+  already-downloading pulls.
+- **Natural desktop Library selection.** Filtered Command-A, Command/Control-click, Shift ranges, and Apple Photos-style drag selection now build multi-print selections; right-click exposes group-safe organization and delete actions. Completed stills on Create also offer **Use as source** from their context menu.
+- **Improved iPhone form spacing.** Labels beneath segmented controls and sliders now keep consistent vertical separation for easier scanning.
+- **Check for Updates opens at the update controls.** Choosing Check for Updates
+  from the desktop app menu now opens Settings with the Updates section aligned
+  at the top of the view instead of leaving it above the visible area.
+- **Reliable iPhone Library pinch resizing.** Pinching anywhere in the Library print area now resizes thumbnails, including unused space below a short final row.
+- Hide generic MiniMax H3 catalog repositories from Create so iPhone, desktop, and web offer only explicit runnable FL2VA or Ref2VA task partitions instead of presenting an impossible partition error.
+- **iPhone gallery source images are selectable again.** The source picker now falls back to its authenticated HTTP thumbnail route when the iOS shell does not provide the desktop-only native thumbnail command, instead of rendering every gallery print as unreadable.
+- **LTX-2 chain anchors now start at the noise level their soft timestep declares.** Smooth multi-clip continuations preserve the intended evolving identity anchor instead of repeatedly pinning its appended token clean ([#1080](https://github.com/utensils/mold/issues/1080)).
+- **MiniMax H3 Turbo requests admit on their engine partition.** Admission
+  refused every Turbo tag with "private artifact qualification requires an
+  exact Comfy H3 canonical model name" because the once-derived route handed
+  the tag itself to artifact qualification; the route now carries both the
+  full reviewed identity (media facts, provenance, adapter selection) and the
+  task-derived compact partition (qualification, Qwen support, factory
+  authority, admission evidence).
+- **H3 source images no longer bend compact requests off the reviewed
+  envelope.** `mold run` and the Discord builder with a first-frame image and
+  no explicit dimensions now submit the fixed `1344x768` canvas for the
+  compact base and Turbo tags (the engine fits the frame internally) instead
+  of an aspect-derived canvas that compact admission rejects; the hidden
+  official BF16 reference keeps its flexible canvas.
+- **MiniMax H3 Turbo tags share the base checkpoint's storage.** Pulling a
+  Turbo tag on a machine with `minimax-h3-fl2va:comfy-pruned-int8` installed
+  downloads only the ~1.96 GB adapter instead of re-downloading ~41 GB into a
+  tag-named copy, and removal ref-counting protects the shared files in both
+  directions.
+- **Model removal only credits complete installs as owners.** A configured
+  model missing any of its files on disk (for example an H3 Turbo tag whose
+  adapter was deleted) no longer holds shared components hostage when a
+  sibling model is removed.
+- **The MiniMax H3 Turbo tiers are first-class model tags.** `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step` (9 steps) and `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p` (5 steps) pull the exact compact FL2VA stack plus one revision-pinned, SHA-256-verified LoRA adapter (stored once under `shared/minimax-h3/loras/`) and resolve the base INT8 transformer, the adapter, and the tier's reviewed step count from the model identity alone — `mold pull`, repair, `/api/models` rows, and the capability graph all advertise them, and Studio surfaces pass each tier's own step count instead of hard-clamping to 21. The `MOLD_H3_TURBO_ADAPTER`/`MOLD_H3_TURBO_TIER` pair is demoted to a capture-scope UAT override honored only under `h3-private-uat`; a set pair in ordinary builds is a hard contradictory-authority error. `mold run` and the Discord builder also stop submitting the official 50-step/generic-image defaults for H3 and take the model's own manifest envelope (1344x768, per-tier steps).
+- **MiniMax H3 Ref2VA gains its prepared-request authority, phase ledgers, and runtime composition.** Ordered reference descriptors (image/video/audio) thread through the frozen factory identity with every row and byte charge re-derived from frozen geometry; four new reference phases charge the retained normalized media until both encoders consume it; the previously unconstructible Ref2VA phase owner now composes over the shared FL2VA backend (load/drop, VAE parking, fatal-CUDA retention, and streamed denoise shared verbatim) — fixing a defect where reference parking silently no-op'd. Execution remains fail-closed on public builds; a capture-scope campaign profile with explicitly provisional ceilings exists only under the private-UAT feature, toward the measured Ref2VA qualification (#825).
+- **MiniMax H3 Turbo renders no longer fail the terminal provenance gate.** The private FL2VA terminal check compared the executed sampler against a hard-coded RES-multistep constant, so a reviewed Turbo attempt — which legitimately runs the first-order Euler integrator — completed its full render and was then rejected. The owner facts now carry the sampler the frozen quantization authority resolved, and the gate compares against that.
+- **Generated MP4s can no longer silently lose frames to H.264 rate control.** The shared streaming encoder left openh264's frame skipping at its default, so under rate-control pressure a frame could produce an empty bitstream and vanish from the sample table — shortening the track duration below the rendered frame count (observed as a MiniMax H3 publication `echo-duration` refusal after a complete render). Skipping is now disabled and a pushed frame that yields no picture NALs fails the encode loudly; a new test pins track duration to exactly frames/fps.
+- **Prompt history across machines.** Desktop and web now recall prompts from every configured machine in chronological order and keep a bounded local cache so history remains available while machines are offline.
+- **Installable Mold Agent Skill.** `mold skill` now lists, installs, removes,
+  and prints the embedded CLI skill for the same ten AI-agent targets and
+  user/project paths supported by nxv.
+- **iPhone Library can reuse saved print settings while a machine is offline.**
+  Library now caches the non-secret model and capability snapshot needed to
+  interpret each server instance's print metadata, restores settings from that
+  snapshot immediately, and refreshes it in the background. A missing snapshot
+  gets a bounded Retry-able load instead of an endless spinner. Print preview's
+  Close control remains available during reuse and source restoration, and a
+  dismissed attempt cannot later alter Create or navigate when its host finally
+  responds ([#1182](https://github.com/utensils/mold/issues/1182)).
+- **Gallery authority checkpoints remain readable across additive metadata updates.** The server now verifies the exact stored snapshot bytes before applying current-schema defaults, preventing valid pre-upgrade galleries from blocking desktop startup and hiding This Mac from the machine picker.
+- **`mold update` works again for older installations.** Release checksum
+  manifests once again record archive names exactly as GitHub publishes them,
+  without a leading `./` that Mold 0.9 and other legacy clients could not
+  match. The release contract now guards every rolling and stable publication
+  phase against reintroducing the incompatible path form.
+- **TUI Library respects the gallery trash.** The Library lists only live
+  prints (trashed ones stay out until restored), shows a print's editable
+  title above the prompt in the Details panel and full detail view, and `d`
+  moves the selected print to the trash instead of deleting it — the local
+  DB-backed `.trash/` move with a tombstone, or the owning server's trash —
+  with the hint and confirm copy honestly falling back to permanent-delete
+  wording whenever any owning machine cannot trash (DB-less local scan,
+  older server, capabilities not yet read). Settings gains a Library ▸
+  Trash (days) row editing the shared `gallery.trash_retention_days`
+  retention window (0 = keep forever).
+- **Desktop Library organization.** The Library header is now **Prints |
+  Collections | Trash**: favorites, tags, and manual collections (merged
+  across every connected machine), a real trash with per-tile purge
+  countdowns, Restore / Delete forever, and Empty trash behind a plain confirm,
+  with titles, ♥, tags, and collection membership edited in the lightbox
+  aside. Deleting a print moves it to that machine's trash instead of erasing
+  it; with the local server off, This device's delete, trash list, restore,
+  and delete-forever still work through the native `.trash/` path. A second
+  print deleted under an already-trashed filename is kept alongside the first
+  (renamed `name-2.ext`) — previously trashed bytes are never overwritten —
+  and Trash-view media, Save, Reveal, and Copy file path always read the
+  trashed copy even when a newer live file reuses its name.
+- **Print titles from Create.** The Create header's "Untitled print" is
+  editable; the name rides every sibling of that print as
+  `GenerateRequest.title`, is restored by Reuse settings, and becomes the
+  suggested filename when you save or export.
+- **Trash retention settings.** Settings ▸ Library sets how long this device
+  keeps deleted prints (`gallery.trash_retention_days`: 1 day … 1 year, or
+  Forever); Machines ▸ machine ▸ Storage sets each remote machine's own
+  retention and shows its trash count with an Empty trash action.
+- **iPhone Library organization: collections, tags, favorites, titles, and
+  trash.** The Library gains a 44pt Prints | Collections | Trash scope row
+  (shown when a connected host advertises `capabilities.gallery.organize` /
+  `.trash`), a filtering chip row (♥ Favorites, tags, machines), collection
+  cards with drill-in, rename, and a two-step delete, and a Trash scope with
+  per-tile purge countdowns, Restore, two-step Delete forever, and a two-step
+  Empty trash. Select mode adds Add to collection, Tag, ♥, and a Trash action
+  that replaces hard delete on trash-capable machines; the full-screen viewer
+  adds an Info sheet editing the title, favorite, tags, and collections, plus
+  restore/delete for trashed prints. Every edit fans out to each copy's exact
+  Keychain-authenticated machine and reports failures inline. Create gains a
+  Title field carried on every mobile request and restored by Use as prompt,
+  and host detail gains a Library card editing that machine's
+  `gallery.trash_retention_days` (the first mobile `/api/config` client) with
+  Prints-in-trash and Empty trash.
+- **MiniMax H3 gains a CorrectnessOnly Metal execution path.** H3 now compiles and passes its unit suite on Apple Silicon: chunked dense math attention (hashed into the frozen plan), the shared rank-aware Metal reduction for the audio VAE, an explicit portable INT8 arm with the native cuBLASLt kernel refused off-CUDA, fp8-scaled weights refused on Metal by name, and a family-scoped BF16 dtype policy. The `h3` feature no longer implies `cuda` (`h3-cuda` is the shipping CUDA edge). The runnable route stays deliberately fail-closed — admission, the SM89 public profile, and engine registration are unchanged — pending qualification on a 64 GB-class Apple Silicon machine.
+- **MiniMax H3 Turbo attempts actually admit, and the tier contract is structural.** The freshly minted Turbo envelope no longer re-validates under the baseline 21-step authority (which rejected every Turbo attempt); the `None`-defaulting validation wrappers are deleted so each call site must name its step authority. The Turbo factory authority is now constructible only from the reviewed tier table (sampler/grid/shift can no longer be paired arbitrarily with a genuine adapter), and load-time transpose transients get their own budgeted staging term.
+- **MiniMax H3 runtime bounds are now derived from a real RTX 4090 render, and hopeless attempts are refused before the 37 GB weight hash.** The workspace caps re-derive from the first measured render (observed × 1.15, 64 MiB grid — a policy that reproduces four of the old caps exactly and lowers attention/FFN by ~6.5 GB combined, putting the predicted device peak near 12.9 GB), and admission runs provable lower-bound device/host floors before the multi-minute SHA-256 artifact pass so an undersized machine is refused in milliseconds instead of after hashing 37 GB.
+- **MiniMax H3 can render with the Turbo distillation tiers.** A reviewed Turbo adapter (selected via `MOLD_H3_TURBO_ADAPTER` + `MOLD_H3_TURBO_TIER` pending catalog manifests) threads from admission through the frozen factory authority into the streamed transformer: new `ComfyEuler` sampler arm on the pinned simple grid, per-tier reviewed step counts (9-point/8-eval and 5-point/4-eval vs the baseline 21/20), the 768p tier's shift-6 schedule, and exact device/host budget terms for the 1.82 GiB resident adapter. Without an adapter every path is byte-identical to before and the 21-step envelope pin is unchanged.
+- **Made macOS desktop packaging recover from transient DiskImages failures.** Stable and Nightly distribution now create the signed drag-to-Applications DMG with visible, bounded retries instead of failing through Tauri's opaque writable-image helper.
+- **Web Library: collections, tags, titles, favorites, and a trash.** The web
+  Library header gains a **Prints | Collections | Trash** scope control (URL
+  synced), a filter-chip row with ♥ Favorites and tag chips, a collections
+  shelf with cover cards and a breadcrumb drill-in, and a Trash scope with a
+  retention banner, per-print purge countdown, Restore / Delete forever, and
+  Empty trash. The print viewer's aside now edits the title, favorite, tags,
+  and collection membership; the selection bar adds Add to collection, Tag,
+  Favorite, and Trash; Create gets a print title field that names the print
+  and its download. Every edit fans out to each connected host that holds a
+  copy; hosts without the capability keep permanent deletes. Trash retention
+  is editable in Settings ▸ Library and per host in Machines ▸ host detail.
+  Destructive confirms are plain danger dialogs — no typed phrases.
+- **MiniMax H3 gains the Turbo LoRA forward machinery.** An authenticated Turbo adapter now applies as an exact parallel low-rank branch (`y = base(x) + (x·Aᵀ)·Bᵀ·(α/rank)`) on all 208 adapted linears — the 200 streamed INT8 block projections and the 8 BF16 token-refiner linears — verified against a merged dense oracle to the same tolerance as the unadapted path. Resident cost 1.82 GiB; an absent adapter is bit-identical to today's forward. Sampler, manifests, and scheduler wiring follow separately.
+- **MiniMax H3 denoise admission charges attention and FFN workspaces as max, not sum.** The block forward runs them strictly sequentially — attention transients are now explicitly dropped before the MLP allocates — so the two bounds never coexist. Cuts the compact FL2VA predicted device peak by ~9 GiB at the qualified envelope, a step toward 24 GB-class (RTX 4090) admission.
+- **MiniMax H3 host-RAM admission now predicts per phase and counts only anonymous bytes.** The old flat sum charged all 42 GB of mmap'd/streamed artifact files and the whole attempt's buffers as if simultaneous, refusing 64 GB hosts; the corrected ledger mirrors the device side's per-phase max, excludes file-backed reclaimable pages, adds two previously unbudgeted load-staging transients, and drops the predicted host demand from ≥69 GiB to ~24.5 GiB at the qualified envelope. The advertised host tier falls from 128 GiB to 64 GiB.
+- **MiniMax H3 parks both VAEs across denoise and advertises the corrected Compact 24 GiB VRAM tier.** The video and audio VAEs (5.8 GB) are dropped after condition encoding and reconstructed from their retained authenticated authority before decode, the transformer's live hidden activations get an explicit denoise charge, and the advisory tier drops from the L40S-era 40 GiB to 24 GiB — the corrected ledger predicts a ~19.4 GB denoise peak at the qualified envelope, within RTX 4090 range (host-RAM admission fixes still pending).
+- **`mold trash` and `mold run --title`.** `mold trash list|restore|empty|sweep`
+  inspects and acts on the serving host's gallery trash over HTTP (`list`
+  shows filename, title, when trashed, the purge countdown — `in 27d`, `kept`,
+  or `due` — and size; `--json` for the raw rows; `empty` confirms unless
+  `--yes`). `mold run --title "…"` names a print at creation: the title is
+  validated at parse time, embedded in the output metadata, seeded into the
+  gallery row, and folded into the default filename as
+  `mold-{model}-{timestamp}~{slug}.{ext}`. `MoldClient` gains typed methods for
+  every library-organization and trash endpoint (`list_gallery_view`,
+  `trash_gallery_image`, `delete_gallery_image_forever`, `restore_trashed`,
+  `empty_trash`, `sweep_trash`, `patch_gallery_image`, `organize_gallery`,
+  collections and tags CRUD).
+- **Library organization API: titles, favorites, tags, and collections.**
+  `PATCH /api/gallery/image/:filename` edits one print's title / favorite /
+  tags, `POST /api/gallery/organize` applies the same edit to many prints in
+  one transaction, `/api/gallery/collections` (+ `/:id`, `/:id/items`) manages
+  manual collections, and `/api/gallery/tags` (+ `/:name`) lists, renames
+  (merging), and deletes tags. `GET /api/gallery` rows now carry additive
+  `title`, `tags`, `favorite`, and `collections`; new SSE events
+  `gallery_updated` and `gallery_collections_changed` announce edits;
+  `GET /api/capabilities` advertises `gallery.organize`.
+- **Gallery trash with retention.** `DELETE /api/gallery/image/:filename` now
+  moves a print to `<output_dir>/.trash/` (tombstone + row flag, thumbnail
+  kept, `gallery_trashed` event) instead of deleting it; `?permanent=true`
+  hard-deletes. `GET /api/gallery?view=trash` lists trashed prints with
+  `trashed_at` / `purge_at`; `POST /api/gallery/trash`,
+  `POST /api/gallery/trash/restore` (`gallery_restored`),
+  `DELETE /api/gallery/trash` (empty), and `POST /api/gallery/trash/sweep`
+  round out the surface, and the media/thumbnail/preview routes still serve
+  trashed prints. An hourly sweeper
+  (plus one pass at startup) purges prints older than the new
+  `gallery.trash_retention_days` setting (default 30, `0` keeps forever,
+  `MOLD_GALLERY_TRASH_RETENTION_DAYS` overrides); capabilities advertise
+  `gallery.trash { enabled, retention_days }`. With the metadata DB disabled,
+  delete stays permanent. `mold clean --older-than` no longer reaches into
+  `.trash/`.
+- **Titled prints get titled filenames.** A `GenerateRequest.title` is
+  validated at admission, embedded in the saved `mold:parameters`, seeded into
+  the gallery row, and folded into the output filename as a lossy slug
+  (`mold-{model}-{ts}[-{idx}]~{slug}.{ext}`); untitled prints keep their
+  byte-identical legacy names.
+- **MiniMax H3 gains the Turbo LoRA adapter contract.** `mold-candle` now parses, validates, and authenticates the three published Minimax-H3-Turbo distillation adapters (FL2VA 8-step, FL2VA 768p 4-step, Ref2VA 4-step; 624 tensors / 208 modules pinned to `Comfy-Org/MiniMax-H3` revision `dc559027`) against the same weight-spec authority as the compact checkpoint. Parser and identity layer only — the parallel low-rank forward, sampler arm, and manifests land separately.
+- **One canonical Shape and Size control across Create.** Attaching a source
+  image now selects the closest model-valid size with the source's shape and
+  keeps following it across model and pipeline changes until you choose a
+  canvas yourself, and the `Source` badge can no longer appear next to a canvas
+  the source did not produce. Shape chips are canonical families (1:1, 5:4,
+  4:3, 3:2, 16:9, 21:9 plus portrait twins, and Source) instead of each model's
+  gcd-reduced buckets, so LTX-2's `19:11`, `30:17` and `20:11` are one 16:9
+  family; the sizes under a family are the model's own authored pixels, labelled
+  `1216×704` with megapixels and any authored mark rather than a positional
+  `Small`/`Standard`/`Native` or `Recommended`/`Max` tier. Web, desktop, and
+  iPhone render one resolver result, so the header chip, shape chips, size
+  pills, badge, and status sentence cannot disagree
+  ([#1166](https://github.com/utensils/mold/issues/1166)).
+- **Auto and Most capable no longer dead-end on a model nobody has.** When
+  every machine can run the print but none has the checkpoint, desktop and web
+  now offer to download it — naming the machine, or asking which one when
+  several could take it — and run the print there once the pull lands, instead
+  of reporting "Nothing was queued". A machine that simply cannot fit the print
+  still says so; only a missing model is answered with a download
+  ([#1162](https://github.com/utensils/mold/issues/1162)).
+- **A slow machine under Auto is no longer reported as one that refused.**
+  While no machine has produced a plan yet, Auto extends its response window
+  once rather than describing a check that is still running as "did not answer"
+  ([#1162](https://github.com/utensils/mold/issues/1162)).
+- **Restoring a print whose model is gone keeps the model.** Dropping a print
+  into Create, or Reuse settings, now shows the recorded model in the selector
+  with a *Not installed* tag and offers the same download, on desktop and web.
+  Web no longer silently swaps in a different model — along with its size,
+  steps, guidance and LoRAs — behind your back
+  ([#1162](https://github.com/utensils/mold/issues/1162)).
+- **iPhone Create can route generations automatically.** With two or more
+  connected machines reachable, the Host control adds **Auto** (the least busy
+  machine that already has the model) and **Most capable** (the strongest GPU
+  that has it — CUDA before Metal, then VRAM), the model picker becomes the
+  union across those machines with a per-model availability tag, and the chosen
+  machine is frozen into the same recovery record a pinned machine uses, so a
+  killed app re-attaches to the exact host. With one machine nothing changes.
+  Desktop, web, and iPhone now share one routing policy in
+  `studio/lib/hostRouting.ts`
+  ([#1163](https://github.com/utensils/mold/issues/1163)).
+- **Prompt expansion routes to a machine that actually has the expander.**
+  Under Auto or Most capable, Create used to send the rewrite to whichever
+  machine the print was routed to and fail with a 422 when only a peer had the
+  expansion model. Desktop and web now follow the generation route unless that
+  machine reports it lacks the model, then re-rank the eligible machines that
+  have it with the same ranking the generation router uses — the print itself
+  still goes where it was routed, and a pinned machine is never left. When no
+  eligible machine has it, Create offers the pull and names the machine
+  (web gains that offer for the first time). Remix follows the same route —
+  it runs on the same model
+  ([#1162](https://github.com/utensils/mold/issues/1162)).
+- **`/api/capabilities.expand` names the expansion model.** The additive
+  `model` field reports the manifest model local expansion resolves, so clients
+  stop hard-coding `qwen3-expand` when they offer to pull it
+  ([#1162](https://github.com/utensils/mold/issues/1162)).
+- **Notification severity is color-coded green / yellow / red.** The
+  notifications bell and the toast shelf on desktop and web now tint ordinary
+  notices and successes green, warnings yellow, and errors red, with the
+  severity also named for screen readers and the unread bell badge taking the
+  worst unread entry's color — so a bell holding only notices reads green rather
+  than alarming red. `--warning` gained proper light-mode and Mold-family values
+  so the yellow stays readable in every theme.
+- **Unreachable machines say they are reconnecting.** Desktop and web already
+  keep polling a machine that drops, so it comes back on its own; that is now
+  visible. Losing a machine raises a yellow "Can't reach `<machine>` — retrying
+  automatically" notice instead of a red error, the Machines card marks the row
+  _reconnecting…_, and when the machine answers again the warning is withdrawn
+  and a green "Reconnected to `<machine>`" confirms it.
+- **Severity is announced, not just tinted.** Warnings now share the error
+  toast's assertive live region — the sticky "your machine is gone" notice no
+  longer waits for a screen-reader user to go idle — and every surface reads one
+  shared severity table, so the same event can no longer show one glyph in a
+  toast and a different one in the bell.
+- **Notifications can be copied.** Every row in the notifications bell has a
+  Copy button that puts the message, its full untruncated body, and the
+  machine/time line on the clipboard, and the notification text itself is
+  selectable again even though the surrounding app chrome is not.
+- **Release notes now live in per-PR `changelog.d/` fragments instead of a shared `[Unreleased]` section.** Every open pull request used to insert its note at the same line of `CHANGELOG.md`, so whichever PR merged second conflicted and lost its CI. Each PR now adds `changelog.d/<slug>.md`; `scripts/release/sync-release-pr.sh` assembles the fragments under the new version heading on the release PR (newest first) and deletes them, and a new advisory `changelog` CI check flags direct `[Unreleased]` edits, lints fragment shape, and asks for a fragment when shipped source changes (`skip-changelog` label opts out). release-plz is untouched: it never read `CHANGELOG.md` (`changelog_update = false`), the trusted release-PR file-scope check now permits the bot's fragment deletions, and the release tag job refuses to tag while an unassembled fragment is still on `main`.
 - **LTX-Video attribution.** The legacy LTX-Video transformer, 3D causal VAE, and flow-match scheduler in `crates/mold-candle/src/ltx_video/` were ported from [FerrisMind/candle-video](https://github.com/FerrisMind/candle-video) (Copyright 2025 FerrisMind, Apache-2.0; itself a Rust port of Hugging Face diffusers), and the LTX-2 video transformer and VAE were adapted from that copy — but only the file headers said so. The README, `THIRD_PARTY_NOTICES.md` (root and `mold-ai-candle`), the LTX-Video and LTX-2 model pages, and the two LTX-2 file headers now carry the attribution, the license link, and the commit the port tracked; `mold-ai-inference` declares `MIT AND Apache-2.0` like `mold-ai-candle` already did.
 - **Legacy LTX-Video 13B BF16 is demoted to a 40 GB-class GPU requirement instead of promising offload** ([#599](https://github.com/utensils/mold/issues/599)). The two `ltx-video-0.9.8-13b-*:bf16` tiers keep the whole ~28.6 GB transformer resident and have never had a block-offload path; the residency guard used to say offload was "not implemented yet". LTX-2's FP8 tiers with adaptive offload are the supported route on 24 GB cards, so the family is not getting one. The manifest descriptions, the guard's error, and the LTX-Video docs now state the requirement and name the alternatives (an LTX-2 model or `ltx-video-0.9.8-2b-distilled:bf16`); the tiers remain listed and runnable on hardware that holds them.
 - **The attention backend defaults to `math` in every build, including one compiled with `flash-attn`** ([#736](https://github.com/utensils/mold/issues/736)). Compiling the kernel used to flip `default_backend()` to `flash`, which coupled "available" to "on": FlashAttention v2 is mathematically equivalent to the math path but not bit-identical (fp32 online-softmax accumulator versus an input-dtype reduce), so any future artifact that shipped the kernel would have silently changed the image every CUDA user gets for a given seed. `MOLD_ATTN=flash` is now the one opt-in, pinned by a feature-independent test, and the decision of which release artifacts enable the kernel is reduced to build time and toolchain requirements. Desktop Settings no longer offers the inert `flash` option its built-in engine could never honour.
@@ -1881,7 +2764,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.23.3...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/utensils/mold/compare/v0.23.3...v0.24.0
 [0.23.3]: https://github.com/utensils/mold/compare/v0.23.2...v0.23.3
 [0.23.2]: https://github.com/utensils/mold/compare/v0.23.1...v0.23.2
 [0.23.1]: https://github.com/utensils/mold/compare/v0.23.0...v0.23.1
