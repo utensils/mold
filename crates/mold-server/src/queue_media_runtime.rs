@@ -212,7 +212,7 @@ mod tests {
                 "job-runtime",
                 &QueueMediaOperationFingerprint::sha256_v1(b"runtime operation"),
                 &projection,
-                &media,
+                media,
             )
             .unwrap();
         let deferred = DeferredQueueMedia::new(store, reference, projection.clone());

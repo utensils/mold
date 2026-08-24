@@ -16,8 +16,10 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -52,6 +54,82 @@ pub(crate) const PROJECTED_EDIT_DIMENSION_SLOTS: usize =
 const PROJECTION_EDIT_SLOTS_END: usize = 20 + PROJECTED_EDIT_DIMENSION_SLOTS * 9;
 
 const _: () = assert!(PROJECTION_EDIT_SLOTS_END <= 56);
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SealFrameKind {
+    Begin,
+    Data,
+    Manifest,
+    Final,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SealTestFailure {
+    MediaRead,
+    Encrypt(SealFrameKind),
+    Write(SealFrameKind),
+    HardLink,
+    HardLinkCollision,
+    DestinationSync,
+    StagingUnlink,
+    StagingSync,
+}
+
+#[cfg(test)]
+const TEST_COLLISION_BYTES: &[u8] = b"pre-existing collision must survive";
+
+#[cfg(test)]
+thread_local! {
+    static SEAL_TEST_FAILURE: std::cell::Cell<Option<SealTestFailure>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+struct SealTestFailureGuard;
+
+#[cfg(test)]
+impl Drop for SealTestFailureGuard {
+    fn drop(&mut self) {
+        SEAL_TEST_FAILURE.set(None);
+    }
+}
+
+#[cfg(test)]
+fn inject_seal_test_failure(failure: SealTestFailure) -> SealTestFailureGuard {
+    SEAL_TEST_FAILURE.set(Some(failure));
+    SealTestFailureGuard
+}
+
+#[cfg(test)]
+fn take_seal_test_failure(failure: SealTestFailure) -> bool {
+    SEAL_TEST_FAILURE.get() == Some(failure) && {
+        SEAL_TEST_FAILURE.set(None);
+        true
+    }
+}
+
+#[cfg(test)]
+fn injected_seal_error(failure: SealTestFailure) -> Result<(), QueueMediaError> {
+    if take_seal_test_failure(failure) {
+        Err(std::io::Error::other(format!("injected queue-media failure: {failure:?}")).into())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+fn seal_frame_kind(plaintext: &[u8]) -> SealFrameKind {
+    match plaintext.first() {
+        Some(b'B') => SealFrameKind::Begin,
+        Some(b'D') => SealFrameKind::Data,
+        Some(b'M') => SealFrameKind::Manifest,
+        Some(b'F') => SealFrameKind::Final,
+        _ => panic!("seal plaintext has an unknown record kind"),
+    }
+}
 
 type Cipher = XChaCha20Poly1305;
 type StreamNonce = aead_stream::Nonce<Cipher, StreamBE32<Cipher>>;
@@ -153,13 +231,60 @@ pub struct MediaSetRef {
     pub set_id: String,
 }
 
-#[derive(Debug, Clone)]
-pub enum SealMediaSource {
-    Path(PathBuf),
-    Bytes(Vec<u8>),
+pub struct SealMediaBytes {
+    bytes: Zeroizing<Vec<u8>>,
+    #[cfg(test)]
+    zeroized: Option<Arc<AtomicBool>>,
 }
 
-#[derive(Debug, Clone)]
+impl SealMediaBytes {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes: Zeroizing::new(bytes),
+            #[cfg(test)]
+            zeroized: None,
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        self.bytes.as_slice()
+    }
+
+    #[cfg(test)]
+    fn with_zeroize_probe(bytes: Vec<u8>, zeroized: Arc<AtomicBool>) -> Self {
+        Self {
+            bytes: Zeroizing::new(bytes),
+            zeroized: Some(zeroized),
+        }
+    }
+}
+
+impl fmt::Debug for SealMediaBytes {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SealMediaBytes")
+            .field("len", &self.bytes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for SealMediaBytes {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+        #[cfg(test)]
+        if let Some(zeroized) = &self.zeroized {
+            zeroized.store(self.bytes.iter().all(|byte| *byte == 0), Ordering::SeqCst);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum SealMediaSource {
+    OpenFile(File),
+    Bytes(SealMediaBytes),
+}
+
+#[derive(Debug)]
 pub struct SealMedia {
     pub role: String,
     pub name: String,
@@ -167,25 +292,53 @@ pub struct SealMedia {
     pub sink: QueueMediaSink,
 }
 
+impl Drop for SealMedia {
+    fn drop(&mut self) {
+        self.role.zeroize();
+        self.name.zeroize();
+    }
+}
+
 impl SealMedia {
+    #[cfg(unix)]
     pub fn path(
         role: impl Into<String>,
         name: impl Into<String>,
         path: impl Into<PathBuf>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, QueueMediaError> {
+        let mut path = path.into();
+        let file = mold_core::secure_file::open_regular_file_no_follow(&path)
+            .map_err(|error| QueueMediaError::InsecurePath(error.to_string()));
+        scrub_path_buf(&mut path);
+        let file = file?;
+        Ok(Self {
             role: role.into(),
             name: name.into(),
-            source: SealMediaSource::Path(path.into()),
+            source: SealMediaSource::OpenFile(file),
             sink: QueueMediaSink::PrivateStaging,
-        }
+        })
     }
 
     pub fn bytes(role: impl Into<String>, name: impl Into<String>, bytes: Vec<u8>) -> Self {
         Self {
             role: role.into(),
             name: name.into(),
-            source: SealMediaSource::Bytes(bytes),
+            source: SealMediaSource::Bytes(SealMediaBytes::new(bytes)),
+            sink: QueueMediaSink::Memory,
+        }
+    }
+
+    #[cfg(test)]
+    fn bytes_with_zeroize_probe(
+        role: impl Into<String>,
+        name: impl Into<String>,
+        bytes: Vec<u8>,
+        zeroized: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            role: role.into(),
+            name: name.into(),
+            source: SealMediaSource::Bytes(SealMediaBytes::with_zeroize_probe(bytes, zeroized)),
             sink: QueueMediaSink::Memory,
         }
     }
@@ -198,10 +351,18 @@ impl SealMedia {
         Self {
             role: role.into(),
             name: name.into(),
-            source: SealMediaSource::Bytes(bytes),
+            source: SealMediaSource::Bytes(SealMediaBytes::new(bytes)),
             sink: QueueMediaSink::PrivateStaging,
         }
     }
+}
+
+#[cfg(unix)]
+fn scrub_path_buf(path: &mut PathBuf) {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let mut bytes = std::mem::take(path).into_os_string().into_vec();
+    bytes.zeroize();
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -389,6 +550,57 @@ pub struct DecryptedQueueMediaSet {
 
 struct PlaintextStagingGuard {
     path: Option<PathBuf>,
+}
+
+struct SealPublicationGuard {
+    staging: PathBuf,
+    active: Option<PathBuf>,
+    committed: bool,
+}
+
+impl SealPublicationGuard {
+    fn new(staging: PathBuf) -> Self {
+        Self {
+            staging,
+            active: None,
+            committed: false,
+        }
+    }
+
+    fn published(&mut self, active: PathBuf) {
+        self.active = Some(active);
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for SealPublicationGuard {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if let Some(active) = self.active.take() {
+            cleanup_owned_publication_path(&active);
+        }
+        cleanup_owned_publication_path(&self.staging);
+    }
+}
+
+fn cleanup_owned_publication_path(path: &Path) {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "failed to roll back queue-media publication");
+        }
+    }
+    if let Some(parent) = path.parent() {
+        if let Err(error) = crate::dir_sync::sync_directory(parent) {
+            tracing::warn!(%error, path = %parent.display(), "failed to sync queue-media rollback");
+        }
+    }
 }
 
 impl PlaintextStagingGuard {
@@ -744,7 +956,7 @@ impl QueueMediaStore {
         &self,
         owner_id: &str,
         job_id: &str,
-        media: &[SealMedia],
+        media: Vec<SealMedia>,
     ) -> Result<MediaSetRef, QueueMediaError> {
         self.seal_inner(owner_id, job_id, None, None, media)
     }
@@ -756,7 +968,7 @@ impl QueueMediaStore {
         owner_id: &str,
         job_id: &str,
         operation_fingerprint: &QueueMediaOperationFingerprint,
-        media: &[SealMedia],
+        media: Vec<SealMedia>,
     ) -> Result<MediaSetRef, QueueMediaError> {
         self.seal_inner(owner_id, job_id, Some(operation_fingerprint), None, media)
     }
@@ -769,7 +981,7 @@ impl QueueMediaStore {
         job_id: &str,
         operation_fingerprint: &QueueMediaOperationFingerprint,
         projection: &QueueMediaProjection,
-        media: &[SealMedia],
+        media: Vec<SealMedia>,
     ) -> Result<MediaSetRef, QueueMediaError> {
         self.seal_inner(
             owner_id,
@@ -872,11 +1084,11 @@ impl QueueMediaStore {
         job_id: &str,
         operation_fingerprint: Option<&QueueMediaOperationFingerprint>,
         projection: Option<&QueueMediaProjection>,
-        media: &[SealMedia],
+        media: Vec<SealMedia>,
     ) -> Result<MediaSetRef, QueueMediaError> {
         validate_identity("owner", owner_id)?;
         validate_identity("job", job_id)?;
-        for item in media {
+        for item in &media {
             validate_manifest_label("role", &item.role)?;
             validate_manifest_label("name", &item.name)?;
         }
@@ -901,24 +1113,29 @@ impl QueueMediaStore {
         };
         let staging_path = self.bundle_path(StoredState::Staging, &media_set);
         ensure_private_dir(staging_path.parent().expect("bundle has parent"))?;
-        let result = self.seal_file(
+        let file = create_private_file(&staging_path)?;
+        let mut publication = SealPublicationGuard::new(staging_path.clone());
+        self.seal_file(
             &media_set,
             operation_fingerprint.cloned(),
             projection,
-            media,
-            &staging_path,
-        );
-        if result.is_err() {
-            let _ = fs::remove_file(&staging_path);
-        }
-        result?;
+            &media,
+            file,
+        )?;
 
         let destination = self.bundle_path(StoredState::Active, &media_set);
         ensure_private_dir(destination.parent().expect("bundle has parent"))?;
+        #[cfg(test)]
+        injected_seal_error(SealTestFailure::HardLink)?;
+        #[cfg(test)]
+        if take_seal_test_failure(SealTestFailure::HardLinkCollision) {
+            let mut collision = create_private_file(&destination)?;
+            collision.write_all(TEST_COLLISION_BYTES)?;
+            collision.sync_all()?;
+        }
         match fs::hard_link(&staging_path, &destination) {
-            Ok(()) => {}
+            Ok(()) => publication.published(destination.clone()),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let _ = fs::remove_file(&staging_path);
                 return Err(QueueMediaError::JobAlreadySealed {
                     owner_id: owner_id.into(),
                     job_id: job_id.into(),
@@ -926,10 +1143,17 @@ impl QueueMediaStore {
             }
             Err(error) => return Err(error.into()),
         }
+        #[cfg(test)]
+        injected_seal_error(SealTestFailure::DestinationSync)?;
         crate::dir_sync::sync_directory(destination.parent().expect("bundle has parent"))?;
+        #[cfg(test)]
+        injected_seal_error(SealTestFailure::StagingUnlink)?;
         fs::remove_file(&staging_path)?;
+        #[cfg(test)]
+        injected_seal_error(SealTestFailure::StagingSync)?;
         crate::dir_sync::sync_directory(staging_path.parent().expect("bundle has parent"))?;
         drop(lock);
+        publication.commit();
         Ok(media_set)
     }
 
@@ -1278,18 +1502,11 @@ impl QueueMediaStore {
         operation_fingerprint: Option<QueueMediaOperationFingerprint>,
         projection: Option<&QueueMediaProjection>,
         media: &[SealMedia],
-        staging_path: &Path,
+        file: File,
     ) -> Result<(), QueueMediaError> {
         if let Some(projection) = projection {
-            return self.seal_file_v2(
-                media_set,
-                operation_fingerprint,
-                projection,
-                media,
-                staging_path,
-            );
+            return self.seal_file_v2(media_set, operation_fingerprint, projection, media, file);
         }
-        let file = create_private_file(staging_path)?;
         let mut writer = BufWriter::new(file);
         writer.write_all(MAGIC)?;
         let mut nonce_bytes = [0_u8; NONCE_PREFIX_BYTES];
@@ -1307,17 +1524,20 @@ impl QueueMediaStore {
                 QueueMediaError::Corrupt("too many media entries for the stream format".into())
             })?;
             let mut reader: Box<dyn Read> = match &item.source {
-                SealMediaSource::Path(path) => Box::new(
-                    mold_core::secure_file::open_regular_file_no_follow(path)
-                        .map_err(|error| QueueMediaError::InsecurePath(error.to_string()))?,
-                ),
-                SealMediaSource::Bytes(bytes) => Box::new(std::io::Cursor::new(bytes)),
+                SealMediaSource::OpenFile(file) => {
+                    let mut file = file.try_clone()?;
+                    file.seek(SeekFrom::Start(0))?;
+                    Box::new(file)
+                }
+                SealMediaSource::Bytes(bytes) => Box::new(std::io::Cursor::new(bytes.as_slice())),
             };
             let mut digest = Sha256::new();
             let mut size_bytes = 0_u64;
             let mut chunk_count = 0_u32;
-            let mut buffer = vec![0_u8; CHUNK_BYTES];
+            let mut buffer = Zeroizing::new(vec![0_u8; CHUNK_BYTES]);
             loop {
+                #[cfg(test)]
+                injected_seal_error(SealTestFailure::MediaRead)?;
                 let read = reader.read(&mut buffer)?;
                 if read == 0 {
                     break;
@@ -1326,7 +1546,7 @@ impl QueueMediaStore {
                 size_bytes = size_bytes
                     .checked_add(read as u64)
                     .ok_or_else(|| QueueMediaError::Corrupt("media size overflow".into()))?;
-                let mut plaintext = Vec::with_capacity(DATA_HEADER_BYTES + read);
+                let mut plaintext = Zeroizing::new(Vec::with_capacity(DATA_HEADER_BYTES + read));
                 plaintext.push(b'D');
                 plaintext.extend_from_slice(&index.to_be_bytes());
                 plaintext.extend_from_slice(&chunk_count.to_be_bytes());
@@ -1342,7 +1562,6 @@ impl QueueMediaStore {
                     QueueMediaError::Corrupt("media chunk counter overflow".into())
                 })?;
             }
-            buffer.zeroize();
             manifest_entries.push(WireManifestEntry {
                 index,
                 role: item.role.clone(),
@@ -1367,10 +1586,10 @@ impl QueueMediaStore {
             }),
             entries: manifest_entries,
         };
-        let mut manifest_bytes = Zeroizing::new(serde_json::to_vec(&manifest)?);
+        let manifest_bytes = Zeroizing::new(serde_json::to_vec(&manifest)?);
         let manifest_digest = Sha256::digest(&*manifest_bytes);
         for chunk in manifest_bytes.chunks(CHUNK_BYTES) {
-            let mut plaintext = Vec::with_capacity(1 + chunk.len());
+            let mut plaintext = Zeroizing::new(Vec::with_capacity(1 + chunk.len()));
             plaintext.push(b'M');
             plaintext.extend_from_slice(chunk);
             write_encrypted_frame(
@@ -1381,7 +1600,7 @@ impl QueueMediaStore {
                 plaintext,
             )?;
         }
-        let mut final_plaintext = Vec::with_capacity(1 + 8 + 32);
+        let mut final_plaintext = Zeroizing::new(Vec::with_capacity(1 + 8 + 32));
         final_plaintext.push(b'F');
         final_plaintext.extend_from_slice(&(manifest_bytes.len() as u64).to_be_bytes());
         final_plaintext.extend_from_slice(&manifest_digest);
@@ -1391,15 +1610,17 @@ impl QueueMediaStore {
             true,
             final_plaintext.len() + AEAD_TAG_BYTES,
         );
+        #[cfg(test)]
+        injected_seal_error(SealTestFailure::Encrypt(SealFrameKind::Final))?;
         let ciphertext = encryptor
             .encrypt_last(aead_stream::aead::Payload {
                 msg: &final_plaintext,
                 aad: &aad,
             })
             .map_err(|_| QueueMediaError::Authentication)?;
+        #[cfg(test)]
+        injected_seal_error(SealTestFailure::Write(SealFrameKind::Final))?;
         write_frame(&mut writer, true, &ciphertext)?;
-        final_plaintext.zeroize();
-        manifest_bytes.zeroize();
         writer.flush()?;
         writer.get_ref().sync_all()?;
         Ok(())
@@ -1411,13 +1632,12 @@ impl QueueMediaStore {
         operation_fingerprint: Option<QueueMediaOperationFingerprint>,
         projection: &QueueMediaProjection,
         media: &[SealMedia],
-        staging_path: &Path,
+        file: File,
     ) -> Result<(), QueueMediaError> {
-        let file = create_private_file(staging_path)?;
         let mut writer = BufWriter::new(file);
         writer.write_all(V2_MAGIC)?;
 
-        let projection_plaintext = encode_projection(projection)?;
+        let projection_plaintext = Zeroizing::new(encode_projection(projection)?);
         let mut projection_nonce = [0_u8; PROJECTION_NONCE_BYTES];
         random_fill(&mut projection_nonce)?;
         let cipher = Cipher::new_from_slice(self.key.as_ref().as_ref())
@@ -1427,7 +1647,7 @@ impl QueueMediaStore {
             .encrypt(
                 &nonce,
                 Payload {
-                    msg: &projection_plaintext,
+                    msg: &projection_plaintext[..],
                     aad: &projection_aad(media_set),
                 },
             )
@@ -1451,7 +1671,7 @@ impl QueueMediaStore {
             let index = u32::try_from(index).map_err(|_| {
                 QueueMediaError::Corrupt("too many media entries for the stream format".into())
             })?;
-            let begin_plaintext = vec![
+            let begin_plaintext = Zeroizing::new(vec![
                 b'B',
                 index.to_be_bytes()[0],
                 index.to_be_bytes()[1],
@@ -1461,7 +1681,7 @@ impl QueueMediaStore {
                     QueueMediaSink::Memory => 0,
                     QueueMediaSink::PrivateStaging => 1,
                 },
-            ];
+            ]);
             write_encrypted_frame_for_version(
                 &mut writer,
                 &mut encryptor,
@@ -1471,17 +1691,20 @@ impl QueueMediaStore {
                 begin_plaintext,
             )?;
             let mut reader: Box<dyn Read> = match &item.source {
-                SealMediaSource::Path(path) => Box::new(
-                    mold_core::secure_file::open_regular_file_no_follow(path)
-                        .map_err(|error| QueueMediaError::InsecurePath(error.to_string()))?,
-                ),
-                SealMediaSource::Bytes(bytes) => Box::new(std::io::Cursor::new(bytes)),
+                SealMediaSource::OpenFile(file) => {
+                    let mut file = file.try_clone()?;
+                    file.seek(SeekFrom::Start(0))?;
+                    Box::new(file)
+                }
+                SealMediaSource::Bytes(bytes) => Box::new(std::io::Cursor::new(bytes.as_slice())),
             };
             let mut digest = Sha256::new();
             let mut size_bytes = 0_u64;
             let mut chunk_count = 0_u32;
-            let mut buffer = vec![0_u8; CHUNK_BYTES];
+            let mut buffer = Zeroizing::new(vec![0_u8; CHUNK_BYTES]);
             loop {
+                #[cfg(test)]
+                injected_seal_error(SealTestFailure::MediaRead)?;
                 let read = reader.read(&mut buffer)?;
                 if read == 0 {
                     break;
@@ -1490,7 +1713,7 @@ impl QueueMediaStore {
                 size_bytes = size_bytes
                     .checked_add(read as u64)
                     .ok_or_else(|| QueueMediaError::Corrupt("media size overflow".into()))?;
-                let mut plaintext = Vec::with_capacity(DATA_HEADER_BYTES + read);
+                let mut plaintext = Zeroizing::new(Vec::with_capacity(DATA_HEADER_BYTES + read));
                 plaintext.push(b'D');
                 plaintext.extend_from_slice(&index.to_be_bytes());
                 plaintext.extend_from_slice(&chunk_count.to_be_bytes());
@@ -1507,7 +1730,6 @@ impl QueueMediaStore {
                     QueueMediaError::Corrupt("media chunk counter overflow".into())
                 })?;
             }
-            buffer.zeroize();
             manifest_entries.push(WireManifestEntry {
                 index,
                 role: item.role.clone(),
@@ -1532,10 +1754,10 @@ impl QueueMediaStore {
             }),
             entries: manifest_entries,
         };
-        let mut manifest_bytes = Zeroizing::new(serde_json::to_vec(&manifest)?);
+        let manifest_bytes = Zeroizing::new(serde_json::to_vec(&manifest)?);
         let manifest_digest = Sha256::digest(&*manifest_bytes);
         for chunk in manifest_bytes.chunks(CHUNK_BYTES) {
-            let mut plaintext = Vec::with_capacity(1 + chunk.len());
+            let mut plaintext = Zeroizing::new(Vec::with_capacity(1 + chunk.len()));
             plaintext.push(b'M');
             plaintext.extend_from_slice(chunk);
             write_encrypted_frame_for_version(
@@ -1547,7 +1769,7 @@ impl QueueMediaStore {
                 plaintext,
             )?;
         }
-        let mut final_plaintext = Vec::with_capacity(1 + 8 + 32);
+        let mut final_plaintext = Zeroizing::new(Vec::with_capacity(1 + 8 + 32));
         final_plaintext.push(b'F');
         final_plaintext.extend_from_slice(&(manifest_bytes.len() as u64).to_be_bytes());
         final_plaintext.extend_from_slice(&manifest_digest);
@@ -1558,15 +1780,17 @@ impl QueueMediaStore {
             true,
             final_plaintext.len() + AEAD_TAG_BYTES,
         );
+        #[cfg(test)]
+        injected_seal_error(SealTestFailure::Encrypt(SealFrameKind::Final))?;
         let ciphertext = encryptor
             .encrypt_last(aead_stream::aead::Payload {
                 msg: &final_plaintext,
                 aad: &aad,
             })
             .map_err(|_| QueueMediaError::Authentication)?;
+        #[cfg(test)]
+        injected_seal_error(SealTestFailure::Write(SealFrameKind::Final))?;
         write_frame(&mut writer, true, &ciphertext)?;
-        final_plaintext.zeroize();
-        manifest_bytes.zeroize();
         writer.flush()?;
         writer.get_ref().sync_all()?;
         Ok(())
@@ -2427,7 +2651,7 @@ fn write_encrypted_frame(
     encryptor: &mut EncryptorBE32<Cipher>,
     media_set: &MediaSetRef,
     ordinal: &mut u32,
-    plaintext: Vec<u8>,
+    plaintext: Zeroizing<Vec<u8>>,
 ) -> Result<(), QueueMediaError> {
     write_encrypted_frame_for_version(
         writer,
@@ -2445,8 +2669,12 @@ fn write_encrypted_frame_for_version(
     media_set: &MediaSetRef,
     format_version: u16,
     ordinal: &mut u32,
-    mut plaintext: Vec<u8>,
+    plaintext: Zeroizing<Vec<u8>>,
 ) -> Result<(), QueueMediaError> {
+    #[cfg(test)]
+    let frame_kind = seal_frame_kind(plaintext.as_slice());
+    #[cfg(test)]
+    injected_seal_error(SealTestFailure::Encrypt(frame_kind))?;
     let ciphertext_len = plaintext
         .len()
         .checked_add(AEAD_TAG_BYTES)
@@ -2454,11 +2682,12 @@ fn write_encrypted_frame_for_version(
     let aad = frame_aad_for_version(media_set, format_version, *ordinal, false, ciphertext_len);
     let ciphertext = encryptor
         .encrypt_next(aead_stream::aead::Payload {
-            msg: &plaintext,
+            msg: plaintext.as_slice(),
             aad: &aad,
         })
         .map_err(|_| QueueMediaError::Authentication)?;
-    plaintext.zeroize();
+    #[cfg(test)]
+    injected_seal_error(SealTestFailure::Write(frame_kind))?;
     write_frame(writer, false, &ciphertext)?;
     *ordinal = ordinal
         .checked_add(1)
@@ -3269,6 +3498,197 @@ mod tests {
         }
     }
 
+    fn seal_test_bundle(
+        store: &QueueMediaStore,
+        v2: bool,
+        job_id: &str,
+        media: Vec<SealMedia>,
+    ) -> Result<MediaSetRef, QueueMediaError> {
+        if v2 {
+            store.seal_v2_with_operation_fingerprint(
+                "owner",
+                job_id,
+                &QueueMediaOperationFingerprint::sha256_v1(b"seal test"),
+                &QueueMediaProjection {
+                    source_image: true,
+                    ..Default::default()
+                },
+                media,
+            )
+        } else {
+            store.seal("owner", job_id, media)
+        }
+    }
+
+    #[test]
+    fn consuming_seal_zeroizes_owned_inline_bytes_on_success_and_every_frame_failure() {
+        for v2 in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let store = open_store(home.path());
+            let success_probe = Arc::new(AtomicBool::new(false));
+            seal_test_bundle(
+                &store,
+                v2,
+                "success",
+                vec![SealMedia::bytes_with_zeroize_probe(
+                    "source_image",
+                    "scalar",
+                    b"success sentinel".to_vec(),
+                    Arc::clone(&success_probe),
+                )],
+            )
+            .unwrap();
+            assert!(success_probe.load(Ordering::SeqCst));
+
+            let mut failures = vec![
+                SealTestFailure::MediaRead,
+                SealTestFailure::Encrypt(SealFrameKind::Data),
+                SealTestFailure::Write(SealFrameKind::Data),
+                SealTestFailure::Encrypt(SealFrameKind::Manifest),
+                SealTestFailure::Write(SealFrameKind::Manifest),
+                SealTestFailure::Encrypt(SealFrameKind::Final),
+                SealTestFailure::Write(SealFrameKind::Final),
+            ];
+            if v2 {
+                failures.extend([
+                    SealTestFailure::Encrypt(SealFrameKind::Begin),
+                    SealTestFailure::Write(SealFrameKind::Begin),
+                ]);
+            }
+            for (index, failure) in failures.into_iter().enumerate() {
+                let job_id = format!("failure-{v2}-{index}");
+                let zeroized = Arc::new(AtomicBool::new(false));
+                let injection = inject_seal_test_failure(failure);
+                assert!(seal_test_bundle(
+                    &store,
+                    v2,
+                    &job_id,
+                    vec![SealMedia::bytes_with_zeroize_probe(
+                        "source_image",
+                        "scalar",
+                        b"failure sentinel".to_vec(),
+                        Arc::clone(&zeroized),
+                    )],
+                )
+                .is_err());
+                drop(injection);
+                assert!(zeroized.load(Ordering::SeqCst), "{failure:?} in V2={v2}");
+                assert!(!store
+                    .job_has_bundle(StoredState::Active, "owner", &job_id)
+                    .unwrap());
+                assert!(!store
+                    .job_has_bundle(StoredState::Staging, "owner", &job_id)
+                    .unwrap());
+                seal_test_bundle(
+                    &store,
+                    v2,
+                    &job_id,
+                    vec![SealMedia::bytes(
+                        "source_image",
+                        "scalar",
+                        b"retry sentinel".to_vec(),
+                    )],
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn publication_failures_roll_back_only_this_attempt_and_allow_retry() {
+        for (index, failure) in [
+            SealTestFailure::HardLink,
+            SealTestFailure::DestinationSync,
+            SealTestFailure::StagingUnlink,
+            SealTestFailure::StagingSync,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let home = tempfile::tempdir().unwrap();
+            let store = open_store(home.path());
+            let job_id = format!("publication-{index}");
+            let zeroized = Arc::new(AtomicBool::new(false));
+            let injection = inject_seal_test_failure(failure);
+            assert!(seal_test_bundle(
+                &store,
+                true,
+                &job_id,
+                vec![SealMedia::bytes_with_zeroize_probe(
+                    "source_image",
+                    "scalar",
+                    b"publication sentinel".to_vec(),
+                    Arc::clone(&zeroized),
+                )],
+            )
+            .is_err());
+            drop(injection);
+            assert!(zeroized.load(Ordering::SeqCst), "{failure:?}");
+            assert!(!store
+                .job_has_bundle(StoredState::Active, "owner", &job_id)
+                .unwrap());
+            assert!(!store
+                .job_has_bundle(StoredState::Staging, "owner", &job_id)
+                .unwrap());
+            seal_test_bundle(
+                &store,
+                true,
+                &job_id,
+                vec![SealMedia::bytes(
+                    "source_image",
+                    "scalar",
+                    b"retry sentinel".to_vec(),
+                )],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn publication_collision_preserves_preexisting_destination() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let zeroized = Arc::new(AtomicBool::new(false));
+        let injection = inject_seal_test_failure(SealTestFailure::HardLinkCollision);
+        assert!(matches!(
+            seal_test_bundle(
+                &store,
+                true,
+                "collision",
+                vec![SealMedia::bytes_with_zeroize_probe(
+                    "source_image",
+                    "scalar",
+                    b"candidate bytes".to_vec(),
+                    Arc::clone(&zeroized),
+                )],
+            ),
+            Err(QueueMediaError::JobAlreadySealed { .. })
+        ));
+        drop(injection);
+        assert!(zeroized.load(Ordering::SeqCst));
+
+        let report = store.inspect_owner("owner");
+        assert_eq!(report.unrecognized.len(), 1);
+        let collision = &report.unrecognized[0].path;
+        assert_eq!(fs::read(collision).unwrap(), TEST_COLLISION_BYTES);
+        assert!(!store
+            .job_has_bundle(StoredState::Staging, "owner", "collision")
+            .unwrap());
+        fs::remove_file(collision).unwrap();
+        crate::dir_sync::sync_directory(collision.parent().unwrap()).unwrap();
+        seal_test_bundle(
+            &store,
+            true,
+            "collision",
+            vec![SealMedia::bytes(
+                "source_image",
+                "scalar",
+                b"retry bytes".to_vec(),
+            )],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn projection_reader_consumes_only_the_exact_authenticated_prefix() {
         let home = tempfile::tempdir().unwrap();
@@ -3280,7 +3700,7 @@ mod tests {
                 "job-v2-prefix",
                 &QueueMediaOperationFingerprint::sha256_v1(b"projection prefix"),
                 &expected,
-                &[SealMedia::bytes(
+                vec![SealMedia::bytes(
                     "source_image",
                     "scalar",
                     media_bytes(CHUNK_BYTES + 17),
@@ -3302,7 +3722,7 @@ mod tests {
             .seal(
                 "owner",
                 "job-v1-prefix",
-                &[SealMedia::bytes(
+                vec![SealMedia::bytes(
                     "source_image",
                     "scalar",
                     media_bytes(CHUNK_BYTES + 17),
@@ -3377,7 +3797,7 @@ mod tests {
                 "job-v2",
                 &fingerprint,
                 &expected,
-                &[SealMedia::bytes("source_image", "scalar", vec![9; 4096])],
+                vec![SealMedia::bytes("source_image", "scalar", vec![9; 4096])],
             )
             .unwrap();
         assert_eq!(store.open_projection(&reference).unwrap(), expected);
@@ -3401,7 +3821,7 @@ mod tests {
             .seal(
                 "owner",
                 "job-v1",
-                &[SealMedia::bytes("source", "scalar", vec![1])],
+                vec![SealMedia::bytes("source", "scalar", vec![1])],
             )
             .unwrap();
         assert!(matches!(
@@ -3497,7 +3917,7 @@ mod tests {
                     source_video_path: true,
                     ..Default::default()
                 },
-                &[SealMedia::path("source_video_path", "scalar", &source)],
+                vec![SealMedia::path("source_video_path", "scalar", &source).unwrap()],
             )
             .unwrap();
         let decrypted = store.decrypt_mixed(&reference).unwrap();
@@ -3526,7 +3946,7 @@ mod tests {
             .seal(
                 "owner",
                 "job-legacy-lifetime",
-                &[SealMedia::path("source", "scalar", &source)],
+                vec![SealMedia::path("source", "scalar", &source).unwrap()],
             )
             .unwrap();
         let decrypted = store.decrypt_to_private_staging(&reference).unwrap();
@@ -3603,9 +4023,9 @@ mod tests {
                 "job-mixed",
                 &fingerprint,
                 &projection(),
-                &[
+                vec![
                     SealMedia::bytes("identity_image", "scalar", b"face-bytes".to_vec()),
-                    SealMedia::path("source_video_path", "scalar", &source),
+                    SealMedia::path("source_video_path", "scalar", &source).unwrap(),
                 ],
             )
             .unwrap();
@@ -3679,6 +4099,7 @@ mod tests {
         assert!(!home.path().join(STORE_DIR).join(KEY_FILE).exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn round_trip_streams_large_paths_and_keeps_the_manifest_encrypted() {
         let home = tempfile::tempdir().unwrap();
@@ -3690,8 +4111,8 @@ mod tests {
             .seal(
                 "queue-owner",
                 "job-large",
-                &[
-                    SealMedia::path("first_frame", "secret-visible-name.png", &input),
+                vec![
+                    SealMedia::path("first_frame", "secret-visible-name.png", &input).unwrap(),
                     SealMedia::bytes("mask", "empty-mask.bin", Vec::new()),
                 ],
             )
@@ -3735,7 +4156,7 @@ mod tests {
                 "owner",
                 "ambiguous-singleton",
                 &fingerprint,
-                &[SealMedia::bytes("source", "secret-name", vec![1, 2, 3])],
+                vec![SealMedia::bytes("source", "secret-name", vec![1, 2, 3])],
             )
             .unwrap();
 
@@ -3759,7 +4180,7 @@ mod tests {
             .seal(
                 "owner",
                 "ordinary-job",
-                &[SealMedia::bytes("source", "one", vec![4])],
+                vec![SealMedia::bytes("source", "one", vec![4])],
             )
             .unwrap();
         assert_eq!(
@@ -3775,8 +4196,8 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let store = open_store(home.path());
         let media = || vec![SealMedia::bytes("source", "same.bin", b"same".to_vec())];
-        let first = store.seal("owner", "job-1", &media()).unwrap();
-        let second = store.seal("owner", "job-2", &media()).unwrap();
+        let first = store.seal("owner", "job-1", media()).unwrap();
+        let second = store.seal("owner", "job-2", media()).unwrap();
         assert_ne!(first.set_id, second.set_id);
         assert_ne!(bundle_bytes(&store, &first), bundle_bytes(&store, &second));
     }
@@ -3785,15 +4206,15 @@ mod tests {
     fn a_job_can_have_only_one_bundle_even_after_retirement() {
         let home = tempfile::tempdir().unwrap();
         let store = open_store(home.path());
-        let media = [SealMedia::bytes("source", "one", vec![1])];
-        let reference = store.seal("owner", "job", &media).unwrap();
+        let media = || vec![SealMedia::bytes("source", "one", vec![1])];
+        let reference = store.seal("owner", "job", media()).unwrap();
         assert!(matches!(
-            store.seal("owner", "job", &media),
+            store.seal("owner", "job", media()),
             Err(QueueMediaError::JobAlreadySealed { .. })
         ));
         store.retire(&reference).unwrap();
         assert!(matches!(
-            store.seal("owner", "job", &media),
+            store.seal("owner", "job", media()),
             Err(QueueMediaError::JobAlreadySealed { .. })
         ));
     }
@@ -3806,7 +4227,7 @@ mod tests {
             .seal(
                 "owner",
                 "job",
-                &[SealMedia::bytes("source", "one", vec![1, 2, 3])],
+                vec![SealMedia::bytes("source", "one", vec![1, 2, 3])],
             )
             .unwrap();
         let source = store.bundle_path(StoredState::Active, &reference);
@@ -3839,7 +4260,7 @@ mod tests {
             .seal(
                 "owner",
                 "job",
-                &[SealMedia::bytes("source", "one", vec![1, 2, 3])],
+                vec![SealMedia::bytes("source", "one", vec![1, 2, 3])],
             )
             .unwrap();
         let second_home = tempfile::tempdir().unwrap();
@@ -3866,7 +4287,7 @@ mod tests {
                 .seal(
                     "owner",
                     "job",
-                    &[SealMedia::bytes(
+                    vec![SealMedia::bytes(
                         "source",
                         "one",
                         media_bytes(CHUNK_BYTES + 8),
@@ -3902,7 +4323,7 @@ mod tests {
             .seal(
                 "owner",
                 "job",
-                &[SealMedia::bytes(
+                vec![SealMedia::bytes(
                     "source",
                     "large",
                     media_bytes(CHUNK_BYTES * 2 + 5),
@@ -3934,7 +4355,7 @@ mod tests {
                 .seal(
                     "owner",
                     "job",
-                    &[SealMedia::bytes("source", "one", vec![1])],
+                    vec![SealMedia::bytes("source", "one", vec![1])],
                 )
                 .unwrap();
             drop(store);
@@ -3970,7 +4391,7 @@ mod tests {
             .seal(
                 "another-owner",
                 "job",
-                &[SealMedia::bytes("source", "one", vec![1])],
+                vec![SealMedia::bytes("source", "one", vec![1])],
             )
             .unwrap();
         drop(store);
@@ -4016,7 +4437,7 @@ mod tests {
             .seal(
                 "owner",
                 "job",
-                &[SealMedia::bytes("source", "one", vec![1])],
+                vec![SealMedia::bytes("source", "one", vec![1])],
             )
             .unwrap();
         store.delete(&reference).unwrap();
@@ -4034,14 +4455,14 @@ mod tests {
             .seal(
                 "owner",
                 "job",
-                &[SealMedia::bytes("source", "one", vec![1])],
+                vec![SealMedia::bytes("source", "one", vec![1])],
             )
             .unwrap();
         let separately_deleted = store
             .seal(
                 "owner",
                 "delete-active",
-                &[SealMedia::bytes("source", "one", vec![1])],
+                vec![SealMedia::bytes("source", "one", vec![1])],
             )
             .unwrap();
         store.delete(&separately_deleted).unwrap();
@@ -4071,13 +4492,14 @@ mod tests {
         };
         let staging = store.bundle_path(StoredState::Staging, &reference);
         ensure_private_dir(staging.parent().unwrap()).unwrap();
+        let file = create_private_file(&staging).unwrap();
         store
             .seal_file(
                 &reference,
                 None,
                 None,
                 &[SealMedia::bytes("source", "one", vec![1, 2, 3])],
-                &staging,
+                file,
             )
             .unwrap();
         let report = store.inspect_owner("owner");
@@ -4095,7 +4517,7 @@ mod tests {
             .seal(
                 "owner",
                 "job",
-                &[SealMedia::bytes("source", "one", vec![1])],
+                vec![SealMedia::bytes("source", "one", vec![1])],
             )
             .unwrap();
         let path = store.bundle_path(StoredState::Active, &reference);
@@ -4145,7 +4567,7 @@ mod tests {
             .seal(
                 "owner",
                 "job",
-                &[SealMedia::bytes("source", "one", vec![1])],
+                vec![SealMedia::bytes("source", "one", vec![1])],
             )
             .unwrap();
         let second_set_id = "a".repeat(32);
@@ -4193,7 +4615,11 @@ mod tests {
         symlink(&source, &link).unwrap();
         let store = open_store(home.path());
         assert!(matches!(
-            store.seal("owner", "job", &[SealMedia::path("source", "source", link)]),
+            SealMedia::path("source", "source", link).and_then(|media| store.seal(
+                "owner",
+                "job",
+                vec![media]
+            )),
             Err(QueueMediaError::InsecurePath(_))
         ));
     }

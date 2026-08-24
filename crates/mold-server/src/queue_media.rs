@@ -117,6 +117,8 @@ pub enum QueueMediaError {
     InvalidStoredText,
     #[error("decrypted queue-media path is not representable as UTF-8")]
     InvalidStoredPath,
+    #[error("queue-media source could not be safely opened: {0}")]
+    SealSource(#[source] crate::queue_media_store::QueueMediaError),
 }
 
 /// Stable semantic role of one extracted request value.
@@ -932,7 +934,22 @@ pub fn into_seal_media(
             QueueMediaPayload::Presence => SealMedia::bytes(role, position, Vec::new()),
             QueueMediaPayload::Bytes(bytes) => SealMedia::bytes(role, position, bytes),
             QueueMediaPayload::Text(value) if record.role.is_path_shaped() => {
-                SealMedia::path(role, position, PathBuf::from(value))
+                #[cfg(unix)]
+                {
+                    SealMedia::path(role, position, PathBuf::from(value))
+                        .map_err(QueueMediaError::SealSource)?
+                }
+                #[cfg(not(unix))]
+                {
+                    let mut value = value;
+                    value.zeroize();
+                    return Err(QueueMediaError::SealSource(
+                        crate::queue_media_store::QueueMediaError::SecurityUnavailable(
+                            "path-shaped queue media requires Unix safe-open and path scrubbing"
+                                .into(),
+                        ),
+                    ));
+                }
             }
             QueueMediaPayload::Text(value) => SealMedia::bytes(role, position, value.into_bytes()),
             QueueMediaPayload::Keyframe(_) => SealMedia::bytes(
