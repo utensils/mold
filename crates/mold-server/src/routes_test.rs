@@ -4129,32 +4129,43 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn capabilities_advertise_exact_v1_only_with_the_complete_runtime_matrix() {
-        let root = tempfile::tempdir().unwrap();
-        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let (mut state, _rx) = durable_state(db, root.path());
-        install_authoritative_v2(&mut state);
+    async fn capabilities_advertise_exact_v1_for_single_and_multi_lane_runtime_matrices() {
+        for ordinals in [vec![0], vec![0, 1, 2]] {
+            let root = tempfile::tempdir().unwrap();
+            let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+            let (mut state, _rx) = durable_state(db, root.path());
+            state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+                workers: ordinals
+                    .iter()
+                    .copied()
+                    .map(gpu_worker_stub)
+                    .collect::<Vec<_>>()
+                    .into(),
+            });
+            install_authoritative_v2(&mut state);
 
-        let response = app_with_state(state)
-            .oneshot(
-                Request::get("/api/capabilities")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            json_body(response).await["durable_media"],
-            serde_json::json!({
-                "protocol_version": 1,
-                "encrypted_at_rest": true,
-                "generate_request_media": true,
-                "identity": true,
-                "h3_references": false,
-                "private_h3": false,
-            })
-        );
+            let response = app_with_state(state)
+                .oneshot(
+                    Request::get("/api/capabilities")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                json_body(response).await["durable_media"],
+                serde_json::json!({
+                    "protocol_version": 1,
+                    "encrypted_at_rest": true,
+                    "generate_request_media": true,
+                    "identity": true,
+                    "h3_references": false,
+                    "private_h3": false,
+                }),
+                "lane count must not darken an otherwise complete runtime"
+            );
+        }
     }
 
     /// The identity block is what stops a client silently degrading a request
