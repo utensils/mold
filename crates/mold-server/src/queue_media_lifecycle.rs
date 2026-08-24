@@ -557,6 +557,66 @@ mod tests {
         lifecycle
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn startup_refuses_a_symlinked_claimed_owner_root_without_cleaning_its_target() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(QueueJournal::new(
+            db.clone(),
+            Some(home.path()),
+            "instance-a",
+        ));
+        let owner = journal.owner_uuid().unwrap().to_string();
+        let store = QueueMediaStore::open(home.path()).unwrap().store;
+        let reference = store
+            .seal(
+                &owner,
+                "unreferenced-job",
+                vec![SealMedia::bytes("source", "source.png", vec![1, 2, 3])],
+            )
+            .unwrap();
+        let active_root = home.path().join("queue-media").join("v1").join("active");
+        let owner_root = fs::read_dir(&active_root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let target = home.path().join("claimed-owner-target");
+        fs::rename(&owner_root, &target).unwrap();
+        symlink(&target, &owner_root).unwrap();
+        let target_bundle = fs::read_dir(&target)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join(format!("{}.qms", reference.set_id));
+        let before = fs::read(&target_bundle).unwrap();
+        drop(store);
+
+        let lifecycle = QueueMediaLifecycle::new(db, home.path().to_path_buf(), owner.clone());
+        let report = reconcile_claimed_owner(&journal, &lifecycle).unwrap();
+
+        assert!(!report.durable_media_ready);
+        assert!(journal.durable_media_capabilities().is_none());
+        assert!(report.issues.iter().any(|issue| {
+            issue.contains("left unrecognized owner entry untouched")
+                && issue.contains("owner root is not a direct directory")
+        }));
+        assert!(report.deleted.is_empty());
+        assert!(report.cleared_gc_pending.is_empty());
+        assert!(fs::symlink_metadata(&owner_root)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(target_bundle).unwrap(), before);
+    }
+
     #[test]
     fn cleanup_requires_trigger_created_gc_pending_before_unlink() {
         let home = tempfile::tempdir().unwrap();

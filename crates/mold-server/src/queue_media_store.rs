@@ -2257,9 +2257,28 @@ impl QueueMediaStore {
             .root
             .join(state.directory())
             .join(encode_component(owner_id));
+        let owner_metadata = match fs::symlink_metadata(&owner_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                report.unrecognized.push(UnrecognizedStoreEntry {
+                    path: owner_path,
+                    set_id_hint: None,
+                    reason: error.to_string(),
+                });
+                return;
+            }
+        };
+        if owner_metadata.file_type().is_symlink() || !owner_metadata.is_dir() {
+            report.unrecognized.push(UnrecognizedStoreEntry {
+                path: owner_path,
+                set_id_hint: None,
+                reason: "owner root is not a direct directory".into(),
+            });
+            return;
+        }
         let jobs = match fs::read_dir(&owner_path) {
             Ok(jobs) => jobs,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
             Err(error) => {
                 report.unrecognized.push(UnrecognizedStoreEntry {
                     path: owner_path,
@@ -4649,6 +4668,48 @@ mod tests {
         assert!(roots
             .iter()
             .all(|root| root.owner_id_hint.as_deref() != Some("claimed-owner")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspection_never_descends_into_a_symlinked_claimed_owner_root() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let reference = store
+            .seal(
+                "owner",
+                "job",
+                vec![SealMedia::bytes("source", "one", vec![1, 2, 3])],
+            )
+            .unwrap();
+        let bundle = store.bundle_path(StoredState::Active, &reference);
+        let owner_root = bundle.parent().unwrap().parent().unwrap().to_path_buf();
+        let target = home.path().join("owner-root-target");
+        fs::rename(&owner_root, &target).unwrap();
+        symlink(&target, &owner_root).unwrap();
+        let target_bundle = target
+            .join(encode_component(&reference.job_id))
+            .join(format!("{}{BUNDLE_SUFFIX}", reference.set_id));
+        let before = fs::read(&target_bundle).unwrap();
+
+        let report = store.inspect_owner(&reference.owner_id);
+
+        assert!(report.active.is_empty());
+        assert!(report.retired.is_empty());
+        assert!(report.staging.is_empty());
+        assert_eq!(report.unrecognized.len(), 1);
+        assert_eq!(report.unrecognized[0].path, owner_root);
+        assert_eq!(
+            report.unrecognized[0].reason,
+            "owner root is not a direct directory"
+        );
+        assert!(fs::symlink_metadata(&owner_root)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(target_bundle).unwrap(), before);
     }
 
     #[test]
