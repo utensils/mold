@@ -3,6 +3,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { reactive } from "vue";
 import InspectorPanel from "./InspectorPanel.vue";
+import ModelPicker from "./ModelPicker.vue";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
@@ -22,6 +23,7 @@ import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useLibraryPrefsStore } from "../../stores/libraryPrefs";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import type { ModelEntry } from "../../lib/api/types";
+import { apiJsonTo } from "../../lib/api/client";
 
 vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 vi.mock("../../lib/api/client", () => ({
@@ -826,6 +828,87 @@ describe("InspectorPanel — model picker", () => {
     expect(option.text()).toBe("RealVisXL V5.0 by SG161222");
     await option.trigger("click");
     expect(form.model).toBe("cv:23423432");
+  });
+
+  it("shows a remote H3 download-only install with readable labels and its refusal", async () => {
+    const h3 = {
+      ...model,
+      name: "minimax-h3-fl2va:comfy-pruned-nvfp4",
+      family: "minimax-h3",
+      runtime_available: false,
+      runtime_unavailable_reason: "This H3 weight layout has no executable loader.",
+    } as ModelEntry;
+    useHostsStore().extras.push({
+      id: "hal9000-7680",
+      label: "HAL 9000",
+      url: "http://hal9000:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    useHostModelsStore().byHost["hal9000-7680"] = {
+      entries: [h3],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    vi.mocked(apiJsonTo).mockResolvedValueOnce([h3]);
+    const form = useGenerateFormStore().form;
+    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
+
+    await wrapper.get('[data-test="selected-model-name"]').trigger("click");
+
+    expect(wrapper.get(".ms-model__group").text()).toBe("MiniMax H3");
+    expect(wrapper.get('[data-test="model-option-name"]').text()).toBe("MiniMax H3 FL2VA · NVFP4");
+    expect(wrapper.get('[data-test="model-disabled-reason"]').text()).toBe(
+      "Download only — This H3 weight layout has no executable loader.",
+    );
+    expect(wrapper.get(".ms-model__option").attributes("disabled")).toBeDefined();
+  });
+
+  it("keeps an unavailable model disabled on the pinned host when another host can run it", () => {
+    const name = "shared-runtime-model";
+    const runnable = {
+      ...model,
+      name,
+      runtime_available: true,
+    } as ModelEntry;
+    const unavailable = {
+      ...runnable,
+      runtime_available: false,
+      runtime_unavailable_reason: "HAL cannot execute this H3 weight layout.",
+    } as ModelEntry;
+    const connection = useConnectionStore();
+    connection.info = { mode: "local", baseUrl: "http://127.0.0.1:7680", apiKey: "k" };
+    connection.status = "ready";
+    useHostsStore().extras.push({
+      id: "hal9000-7680",
+      label: "HAL 9000",
+      url: "http://hal9000:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    const hostModels = useHostModelsStore();
+    hostModels.byHost.local = { entries: [runnable], fetchedAt: Date.now(), error: null };
+    hostModels.byHost["hal9000-7680"] = {
+      entries: [unavailable],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    useModelStore().all = [runnable];
+    useAppPrefsStore().settings = { generateTargetHost: "hal9000-7680" } as never;
+    const form = useGenerateFormStore().form;
+    form.model = name;
+    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
+
+    const disabledReason = wrapper.getComponent(ModelPicker).props("disabledReason");
+    expect(disabledReason).toBeTypeOf("function");
+    if (!disabledReason) throw new Error("ModelPicker disabledReason prop is required");
+    expect(disabledReason(unavailable)).toBe(
+      "Download only — HAL cannot execute this H3 weight layout.",
+    );
   });
 });
 

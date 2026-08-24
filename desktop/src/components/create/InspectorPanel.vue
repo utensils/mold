@@ -13,6 +13,11 @@ import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Authoring";
 import { defaultClipFrames, modelsForOutput, sequenceMotionTailFrames } from "@studio/lib/sequence";
 import { filterRestrictedModels } from "@studio/lib/modelAccess";
+import {
+  isModelRuntimeUnavailable,
+  modelRuntimeNotice,
+  RUNTIME_UNAVAILABLE_BADGE,
+} from "@studio/lib/modelRuntimeAvailability";
 import type { ChainLimits } from "@studio/lib/api/chainTypes";
 import type { GenerateForm } from "../../lib/generateForm";
 import { buildRequest, resetFormToModelDefaults, seedMode } from "../../lib/generateForm";
@@ -27,11 +32,7 @@ import {
   syncCameraMotionLora,
 } from "@studio/lib/cameraMotion";
 import { apiJsonTo } from "../../lib/api/client";
-import {
-  filterModelsForTarget,
-  findInstalledModel,
-  mergeInstalledModels,
-} from "../../lib/generateModels";
+import { findInstalledModel, mergeInstalledModels } from "../../lib/generateModels";
 import { normalizeTargetHost } from "../../lib/hosts";
 import { modelDisplayName } from "../../lib/models";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
@@ -269,12 +270,36 @@ const installedModels = computed(() =>
     hostModels.unionInstalled,
   ),
 );
+/** Keep downloaded-but-unrunnable rows visible in Create. They remain outside
+ * `installedModels`, so routing and submission cannot select them; the picker
+ * only discloses what is already on disk and why generation is unavailable. */
+const downloadOnlyModels = computed(() =>
+  mergeInstalledModels(
+    models.installed.filter(isModelRuntimeUnavailable),
+    hostModels.unionDownloaded.filter(isModelRuntimeUnavailable),
+  ),
+);
 const stickyTarget = computed<string | null>(() =>
   normalizeTargetHost(appPrefs.settings?.generateTargetHost ?? null, hosts.all),
 );
 
 const selectedModel = computed<ModelEntry | null>(() =>
   hostModels.installedEntryForTarget(props.form.model, stickyTarget.value),
+);
+
+const pickerCandidates = computed<ModelEntry[]>(() => {
+  const byName = new Map(installedModels.value.map((model) => [model.name, model]));
+  for (const model of downloadOnlyModels.value) {
+    if (!byName.has(model.name)) byName.set(model.name, model);
+  }
+  return [...byName.values()];
+});
+
+const selectedPickerModel = computed<ModelEntry | null>(
+  () =>
+    selectedModel.value ??
+    pickerCandidates.value.find((model) => model.name === props.form.model) ??
+    null,
 );
 
 /**
@@ -284,20 +309,33 @@ const selectedModel = computed<ModelEntry | null>(() =>
  * request either way.
  */
 const missingModelId = computed<string | null>(() =>
-  props.form.model && !selectedModel.value ? props.form.model : null,
+  props.form.model && !selectedPickerModel.value ? props.form.model : null,
 );
 
 const pickerModels = computed<ModelEntry[]>(() => {
   const target = stickyTarget.value;
   const fetched = target && target !== "capable" && (hostModels.byHost[target]?.fetchedAt ?? 0) > 0;
-  const forTarget = filterModelsForTarget(
-    installedModels.value,
-    target,
-    fetched ? new Set(hostModels.installedOn(target).map((m) => m.name)) : null,
-  );
+  const forTarget = fetched
+    ? hostModels.downloadedOn(target).filter((model) => {
+        const runnable = hostModels
+          .installedOn(target)
+          .some((candidate) => candidate.name === model.name);
+        return runnable || isModelRuntimeUnavailable(model);
+      })
+    : pickerCandidates.value;
   // Sequence output narrows the picker to chain-capable video models.
   return modelsForOutput(forTarget, draft.output);
 });
+
+function pickerDisabledReason(model: ModelEntry): string | null {
+  if (isModelRuntimeUnavailable(model)) {
+    const reason = modelRuntimeNotice(model)?.message ?? "No selected machine can run this model.";
+    return `${RUNTIME_UNAVAILABLE_BADGE} — ${reason}`;
+  }
+  if (installedModels.value.some((candidate) => candidate.name === model.name)) return null;
+  const reason = modelRuntimeNotice(model)?.message ?? "No selected machine can run this model.";
+  return `${RUNTIME_UNAVAILABLE_BADGE} — ${reason}`;
+}
 
 // ── Output (One shot | Sequence) — a setting, not a place ────────────────────
 const draft = useSequenceDraftStore();
@@ -610,8 +648,9 @@ function resetSettings() {
         <div class="ms-field__label">Model</div>
         <ModelPicker
           :models="pickerModels"
-          :selected="selectedModel"
+          :selected="selectedPickerModel"
           :missing-model="missingModelId"
+          :disabled-reason="pickerDisabledReason"
           :show-availability="!stickyTarget || stickyTarget === 'capable'"
           :browse-target="caps.supportsVideo ? '/models?type=video' : '/models'"
           @pick="pickModel"
