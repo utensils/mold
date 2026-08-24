@@ -111,4 +111,33 @@ describe("connection store", () => {
     await store.init();
     expect(mocked.startLocalEngine).toHaveBeenCalledTimes(1);
   });
+
+  it("coalesces overlapping restart requests into one stop/start cycle", async () => {
+    let finishStop!: (value: typeof local) => void;
+    mocked.stopLocalEngine.mockImplementation(
+      () => new Promise((resolve) => (finishStop = resolve)),
+    );
+    mocked.startLocalEngine.mockResolvedValue(local);
+    mocked.appSettingsGet.mockResolvedValue(defaults);
+    mocked.appSettingsSet.mockResolvedValue(undefined);
+
+    const store = useConnectionStore();
+    store.info = local;
+    store.status = "ready";
+    store.localInfo = localServer;
+    store.localStatus = "ready";
+
+    const first = store.restartEngine();
+    const repeated = store.restartEngine();
+
+    expect(store.status).toBe("starting");
+    expect(mocked.stopLocalEngine).toHaveBeenCalledTimes(1);
+
+    finishStop(local);
+    await expect(first).resolves.toBe("restarted");
+    await expect(repeated).resolves.toBe("coalesced");
+    expect(mocked.ensureLocalServer).toHaveBeenCalledTimes(1);
+    expect(mocked.startLocalEngine).toHaveBeenCalledTimes(1);
+    expect(store.ready).toBe(true);
+  });
 });
