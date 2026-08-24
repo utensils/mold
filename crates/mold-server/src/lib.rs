@@ -61,6 +61,7 @@ pub mod model_manager;
 pub mod queue;
 pub mod queue_journal;
 pub mod queue_media;
+pub mod queue_media_runtime;
 // This dependency-free policy seam lands default-dark. The concrete
 // schema/store adapter activates it atomically with queue-media admission.
 #[allow(dead_code)]

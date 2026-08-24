@@ -1464,6 +1464,7 @@ pub async fn replay(state: &crate::state::AppState, dispatch_available: bool) ->
         let job = crate::state::GenerationJob {
             id: row.id.clone(),
             request,
+            deferred_media: None,
             resolved_references: None,
             completion_payload: completion_payload_from_str(&row.completion_payload),
             // No client to stream to. The output still lands in the gallery,

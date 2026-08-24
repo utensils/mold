@@ -75,7 +75,15 @@ fn default_frames(vae: WanVaeGeneration) -> u32 {
 }
 
 impl WanShapeHint {
+    #[allow(dead_code)]
     pub(crate) fn from_request(req: &mold_core::GenerateRequest) -> Self {
+        Self::from_request_with_projection(req, None)
+    }
+
+    pub(crate) fn from_request_with_projection(
+        req: &mold_core::GenerateRequest,
+        projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+    ) -> Self {
         Self {
             width: req.width,
             height: req.height,
@@ -87,7 +95,10 @@ impl WanShapeHint {
                 || req
                     .keyframes
                     .as_ref()
-                    .is_some_and(|keyframes| !keyframes.is_empty()),
+                    .is_some_and(|keyframes| !keyframes.is_empty())
+                || projection.is_some_and(|projection| {
+                    projection.source_image || projection.keyframe_count > 0
+                }),
         }
     }
 }
@@ -344,6 +355,23 @@ mod tests {
 
         // Guidance <= 1 is the Lightning recipe: one forward per step.
         assert!(!WanShapeHint::from_request(&request(832, 480, 53, 1.0)).cfg);
+    }
+
+    #[test]
+    fn projected_source_and_keyframes_match_hydrated_latent_inpaint() {
+        let mut hydrated = request(832, 480, 53, 3.5);
+        hydrated.source_image = Some(vec![1]);
+        let mut sanitized = hydrated.clone();
+        sanitized.source_image = None;
+        let projection = crate::queue_media_store::QueueMediaProjection {
+            source_image: true,
+            keyframe_count: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            WanShapeHint::from_request_with_projection(&hydrated, None),
+            WanShapeHint::from_request_with_projection(&sanitized, Some(&projection)),
+        );
     }
 
     #[test]

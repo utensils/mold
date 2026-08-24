@@ -520,6 +520,7 @@ async fn feed_available(
         let job = GenerationJob {
             id: id.clone(),
             request,
+            deferred_media: None,
             resolved_references: None,
             completion_payload: crate::queue_journal::completion_payload_from_str(
                 &row.completion_payload,

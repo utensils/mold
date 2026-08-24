@@ -118,6 +118,15 @@ const REDUCED_GRANT_DENOMINATOR: u64 = 4;
 
 /// Shape key for OOM cooldowns. Only the dimensions that move VRAM.
 pub(crate) fn oom_shape_bucket(request: &mold_core::GenerateRequest) -> String {
+    oom_shape_bucket_with_projection(request, None)
+}
+
+pub(crate) fn oom_shape_bucket_with_projection(
+    request: &mold_core::GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> String {
+    let has_visual_conditioning = mold_core::validation::has_visual_conditioning(request)
+        || projection.is_some_and(|projection| projection.has_visual_conditioning());
     format!(
         "{}x{}:f{}:b{}:src{}",
         request.width,
@@ -127,7 +136,7 @@ pub(crate) fn oom_shape_bucket(request: &mold_core::GenerateRequest) -> String {
         // Same definition of "conditioned" the optional-prompt rule uses.
         // Conditioning changes the VRAM profile, so two requests that differ
         // here must never share a cooldown or a reduced memory grant.
-        u8::from(mold_core::validation::has_visual_conditioning(request)),
+        u8::from(has_visual_conditioning),
     )
 }
 
@@ -422,6 +431,9 @@ pub struct GpuJob {
     pub id: String,
     pub model: String,
     pub request: mold_core::GenerateRequest,
+    /// Opaque durable-media authority transferred without hydration by the
+    /// scheduler. Only the leased worker may consume it.
+    pub deferred_media: Option<crate::queue_media_runtime::DeferredQueueMedia>,
     pub resolved_references: Option<crate::reference_uploads::ResolvedReferenceSet>,
     pub completion_payload: crate::state::SseCompletionPayload,
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::state::SseMessage>>,
@@ -2867,6 +2879,76 @@ mod tests {
                 oom_shape_bucket(conditioned),
                 unconditioned,
                 "{label} must not share a bucket with an unconditioned render"
+            );
+        }
+    }
+
+    #[test]
+    fn projected_visual_conditioning_exactly_matches_core_predicate() {
+        let base = mold_core::GenerateRequest {
+            source_image: None,
+            ..incident_request()
+        };
+        let plain = oom_shape_bucket(&base);
+
+        for projection in [
+            crate::queue_media_store::QueueMediaProjection {
+                identity_present: true,
+                identity_photograph_count: 1,
+                ..Default::default()
+            },
+            crate::queue_media_store::QueueMediaProjection {
+                edit_images: vec![
+                    crate::queue_media_store::ProjectedImageDimensions::UnreadableHeader,
+                ],
+                ..Default::default()
+            },
+            crate::queue_media_store::QueueMediaProjection {
+                mask_image: true,
+                ..Default::default()
+            },
+            crate::queue_media_store::QueueMediaProjection {
+                control_image: true,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                oom_shape_bucket_with_projection(&base, Some(&projection)),
+                plain,
+                "non-prompt-conditioning media must retain the core predicate's plain bucket"
+            );
+        }
+
+        for projection in [
+            crate::queue_media_store::QueueMediaProjection {
+                source_image: true,
+                ..Default::default()
+            },
+            crate::queue_media_store::QueueMediaProjection {
+                keyframe_count: 1,
+                ..Default::default()
+            },
+            crate::queue_media_store::QueueMediaProjection {
+                source_video_inline: true,
+                ..Default::default()
+            },
+            crate::queue_media_store::QueueMediaProjection {
+                source_video_path: true,
+                ..Default::default()
+            },
+            crate::queue_media_store::QueueMediaProjection {
+                extend_video_inline: true,
+                ..Default::default()
+            },
+            crate::queue_media_store::QueueMediaProjection {
+                extend_video_path: true,
+                ..Default::default()
+            },
+        ] {
+            assert_ne!(
+                oom_shape_bucket_with_projection(&base, Some(&projection)),
+                plain,
+                "core visual-conditioning media must use the conditioned bucket"
             );
         }
     }

@@ -7,7 +7,9 @@
 //! record before any plaintext staging path is returned.
 
 use aead_stream::{DecryptorBE32, EncryptorBE32, StreamBE32};
-use chacha20poly1305::{KeyInit, XChaCha20Poly1305};
+use base64::Engine as _;
+use chacha20poly1305::aead::{Aead, Payload};
+use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -24,6 +26,16 @@ const STORE_VERSION_DIR: &str = "v1";
 const KEY_FILE: &str = "master.key";
 const MAGIC: &[u8; 8] = b"MOLDQMS1";
 const FORMAT_VERSION: u16 = 1;
+const V2_MAGIC: &[u8; 8] = b"MOLDQMS2";
+const V2_FORMAT_VERSION: u16 = 2;
+const PROJECTION_VERSION: u16 = 1;
+const PROJECTION_PLAINTEXT_BYTES: usize = 64;
+const PROJECTION_NONCE_BYTES: usize = 24;
+const PROJECTION_CIPHERTEXT_BYTES: usize = PROJECTION_PLAINTEXT_BYTES + AEAD_TAG_BYTES;
+const PROJECTION_HEADER_BYTES: usize =
+    V2_MAGIC.len() + PROJECTION_NONCE_BYTES + PROJECTION_CIPHERTEXT_BYTES;
+const OPERATION_RECEIPT_VERSION: u16 = 1;
+const OPERATION_RECEIPT_PLAINTEXT_BYTES: usize = 2 + 2 + 64;
 const NONCE_PREFIX_BYTES: usize = 19;
 const KEY_BYTES: usize = 32;
 const CHUNK_BYTES: usize = 1024 * 1024;
@@ -32,6 +44,7 @@ const DATA_HEADER_BYTES: usize = 9;
 const MAX_CIPHERTEXT_FRAME: usize = CHUNK_BYTES + DATA_HEADER_BYTES + AEAD_TAG_BYTES;
 const BUNDLE_SUFFIX: &str = ".qms";
 const OPERATION_FINGERPRINT_VERSION_SHA256_V1: u16 = 1;
+const MAX_PROJECTED_EDIT_IMAGES: usize = mold_core::validation::FLUX2_DEV_MAX_REFERENCE_IMAGES;
 
 type Cipher = XChaCha20Poly1305;
 type StreamNonce = aead_stream::Nonce<Cipher, StreamBE32<Cipher>>;
@@ -60,6 +73,18 @@ pub enum QueueMediaError {
     NotFound,
     #[error("invalid queue-media identity: {0}")]
     InvalidIdentity(String),
+    #[error("queue-media scheduling projection is unavailable: {0:?}")]
+    ProjectionUnavailable(QueueMediaProjectionFailure),
+    #[error("V2 queue media must be hydrated through its authenticated mixed sinks")]
+    MixedSinkHydrationRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueMediaProjectionFailure {
+    LegacyV1,
+    Missing,
+    Malformed,
+    Authentication,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +137,7 @@ pub struct SealMedia {
     pub role: String,
     pub name: String,
     pub source: SealMediaSource,
+    pub sink: QueueMediaSink,
 }
 
 impl SealMedia {
@@ -124,6 +150,7 @@ impl SealMedia {
             role: role.into(),
             name: name.into(),
             source: SealMediaSource::Path(path.into()),
+            sink: QueueMediaSink::PrivateStaging,
         }
     }
 
@@ -132,6 +159,20 @@ impl SealMedia {
             role: role.into(),
             name: name.into(),
             source: SealMediaSource::Bytes(bytes),
+            sink: QueueMediaSink::Memory,
+        }
+    }
+
+    pub fn bytes_to_private_staging(
+        role: impl Into<String>,
+        name: impl Into<String>,
+        bytes: Vec<u8>,
+    ) -> Self {
+        Self {
+            role: role.into(),
+            name: name.into(),
+            source: SealMediaSource::Bytes(bytes),
+            sink: QueueMediaSink::PrivateStaging,
         }
     }
 }
@@ -142,6 +183,7 @@ pub struct MediaManifestEntry {
     pub name: String,
     pub size_bytes: u64,
     pub sha256_hex: String,
+    pub sink: QueueMediaSink,
 }
 
 /// A fingerprint of caller-defined canonical operation bytes.
@@ -171,6 +213,103 @@ impl QueueMediaOperationFingerprint {
     pub fn sha256_hex(&self) -> &str {
         &self.sha256_hex
     }
+
+    /// Compare authenticated operation identities without data-dependent early
+    /// returns. Both values are fixed-width by construction/validation.
+    pub fn constant_time_eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq as _;
+
+        bool::from(
+            self.version
+                .to_be_bytes()
+                .ct_eq(&other.version.to_be_bytes())
+                & self
+                    .sha256_hex
+                    .as_bytes()
+                    .ct_eq(other.sha256_hex.as_bytes()),
+        )
+    }
+}
+
+/// Randomized authenticated ciphertext stored in the existing opaque batch
+/// outcome column. Debug output is deliberately redacted.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct QueueMediaOperationReceipt(String);
+
+impl QueueMediaOperationReceipt {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn parse(encoded: impl Into<String>) -> Result<Self, QueueMediaError> {
+        let encoded = encoded.into();
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded.as_bytes())
+            .map_err(|_| QueueMediaError::Authentication)?;
+        if bytes.len()
+            != PROJECTION_NONCE_BYTES + OPERATION_RECEIPT_PLAINTEXT_BYTES + AEAD_TAG_BYTES
+        {
+            return Err(QueueMediaError::Authentication);
+        }
+        Ok(Self(encoded))
+    }
+}
+
+impl fmt::Debug for QueueMediaOperationReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("QueueMediaOperationReceipt(<redacted>)")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectedImageDimensions {
+    Known { width: u32, height: u32 },
+    UnreadableHeader,
+}
+
+/// Authenticated, payload-free facts used before a worker/device lease.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct QueueMediaProjection {
+    pub source_image: bool,
+    pub source_video_inline: bool,
+    pub source_video_path: bool,
+    pub extend_video_inline: bool,
+    pub extend_video_path: bool,
+    pub keyframe_count: u32,
+    pub identity_present: bool,
+    pub identity_photograph_count: u32,
+    pub edit_images: Vec<ProjectedImageDimensions>,
+    pub mask_image: bool,
+    pub control_image: bool,
+    pub audio_inline: bool,
+    pub audio_path: bool,
+}
+
+impl QueueMediaProjection {
+    pub fn has_keyframes(&self) -> bool {
+        self.keyframe_count > 0
+    }
+
+    pub fn edit_image_count(&self) -> usize {
+        self.edit_images.len()
+    }
+
+    pub fn has_visual_conditioning(&self) -> bool {
+        self.source_image
+            || self.source_video_inline
+            || self.source_video_path
+            || self.extend_video_inline
+            || self.extend_video_path
+            || self.has_keyframes()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueMediaSink {
+    Memory,
+    PrivateStaging,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +333,55 @@ pub struct DecryptedMediaSet {
     pub manifest: MediaSetManifest,
     pub files: Vec<DecryptedMedia>,
     root: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+pub enum DecryptedQueueMediaPayload {
+    Bytes(Vec<u8>),
+    PrivatePath(PathBuf),
+}
+
+#[derive(Debug)]
+pub struct DecryptedQueueMedia {
+    pub role: String,
+    pub name: String,
+    pub payload: DecryptedQueueMediaPayload,
+}
+
+#[derive(Debug)]
+pub struct DecryptedQueueMediaSet {
+    pub manifest: MediaSetManifest,
+    pub media: Vec<DecryptedQueueMedia>,
+    root: Option<PathBuf>,
+}
+
+impl DecryptedQueueMediaSet {
+    pub fn close(mut self) -> Result<(), QueueMediaError> {
+        self.remove_staging()
+    }
+
+    fn remove_staging(&mut self) -> Result<(), QueueMediaError> {
+        if let Some(root) = self.root.take() {
+            match fs::remove_dir_all(&root) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for DecryptedQueueMediaSet {
+    fn drop(&mut self) {
+        for item in &mut self.media {
+            if let DecryptedQueueMediaPayload::Bytes(bytes) = &mut item.payload {
+                bytes.zeroize();
+            }
+        }
+        let _ = self.remove_staging();
+    }
 }
 
 impl DecryptedMediaSet {
@@ -260,6 +448,33 @@ struct WireManifestEntry {
     size_bytes: u64,
     sha256_hex: String,
     chunk_count: u32,
+    #[serde(default)]
+    sink: Option<WireMediaSink>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WireMediaSink {
+    Memory,
+    PrivateStaging,
+}
+
+impl From<QueueMediaSink> for WireMediaSink {
+    fn from(value: QueueMediaSink) -> Self {
+        match value {
+            QueueMediaSink::Memory => Self::Memory,
+            QueueMediaSink::PrivateStaging => Self::PrivateStaging,
+        }
+    }
+}
+
+impl From<WireMediaSink> for QueueMediaSink {
+    fn from(value: WireMediaSink) -> Self {
+        match value {
+            WireMediaSink::Memory => Self::Memory,
+            WireMediaSink::PrivateStaging => Self::PrivateStaging,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -268,6 +483,7 @@ struct DataObservation {
     size_bytes: u64,
     sha256_hex: String,
     chunk_count: u32,
+    sink: Option<QueueMediaSink>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -371,7 +587,7 @@ impl QueueMediaStore {
         job_id: &str,
         media: &[SealMedia],
     ) -> Result<MediaSetRef, QueueMediaError> {
-        self.seal_inner(owner_id, job_id, None, media)
+        self.seal_inner(owner_id, job_id, None, None, media)
     }
 
     /// Seals a bundle whose encrypted manifest carries a versioned operation
@@ -383,7 +599,112 @@ impl QueueMediaStore {
         operation_fingerprint: &QueueMediaOperationFingerprint,
         media: &[SealMedia],
     ) -> Result<MediaSetRef, QueueMediaError> {
-        self.seal_inner(owner_id, job_id, Some(operation_fingerprint), media)
+        self.seal_inner(owner_id, job_id, Some(operation_fingerprint), None, media)
+    }
+
+    /// Seal a V2 bundle with a bounded authenticated projection before the
+    /// media stream. This is the only format eligible for deferred scheduling.
+    pub fn seal_v2_with_operation_fingerprint(
+        &self,
+        owner_id: &str,
+        job_id: &str,
+        operation_fingerprint: &QueueMediaOperationFingerprint,
+        projection: &QueueMediaProjection,
+        media: &[SealMedia],
+    ) -> Result<MediaSetRef, QueueMediaError> {
+        self.seal_inner(
+            owner_id,
+            job_id,
+            Some(operation_fingerprint),
+            Some(projection),
+            media,
+        )
+    }
+
+    pub fn seal_operation_receipt_v1(
+        &self,
+        owner_id: &str,
+        operation_id: &str,
+        fingerprint: &QueueMediaOperationFingerprint,
+    ) -> Result<QueueMediaOperationReceipt, QueueMediaError> {
+        validate_identity("owner", owner_id)?;
+        validate_identity("operation", operation_id)?;
+        validate_operation_fingerprint(WireOperationFingerprint {
+            version: fingerprint.version,
+            sha256_hex: fingerprint.sha256_hex.clone(),
+        })?;
+        let mut plaintext = Zeroizing::new([0_u8; OPERATION_RECEIPT_PLAINTEXT_BYTES]);
+        plaintext[..2].copy_from_slice(&OPERATION_RECEIPT_VERSION.to_be_bytes());
+        plaintext[2..4].copy_from_slice(&fingerprint.version.to_be_bytes());
+        plaintext[4..].copy_from_slice(fingerprint.sha256_hex.as_bytes());
+        let mut nonce = [0_u8; PROJECTION_NONCE_BYTES];
+        random_fill(&mut nonce)?;
+        let cipher = Cipher::new_from_slice(self.key.as_ref().as_ref())
+            .map_err(|_| QueueMediaError::Authentication)?;
+        let nonce = XNonce::try_from(nonce.as_slice()).expect("fixed-size nonce");
+        let ciphertext = cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext.as_slice(),
+                    aad: &operation_receipt_aad(owner_id, operation_id),
+                },
+            )
+            .map_err(|_| QueueMediaError::Authentication)?;
+        let mut receipt = Vec::with_capacity(nonce.len() + ciphertext.len());
+        receipt.extend_from_slice(&nonce);
+        receipt.extend_from_slice(&ciphertext);
+        Ok(QueueMediaOperationReceipt(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(receipt),
+        ))
+    }
+
+    pub fn open_operation_receipt_v1(
+        &self,
+        owner_id: &str,
+        operation_id: &str,
+        receipt: &QueueMediaOperationReceipt,
+    ) -> Result<QueueMediaOperationFingerprint, QueueMediaError> {
+        validate_identity("owner", owner_id)?;
+        validate_identity("operation", operation_id)?;
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(receipt.0.as_bytes())
+            .map_err(|_| QueueMediaError::Authentication)?;
+        if encoded.len()
+            != PROJECTION_NONCE_BYTES + OPERATION_RECEIPT_PLAINTEXT_BYTES + AEAD_TAG_BYTES
+        {
+            return Err(QueueMediaError::Authentication);
+        }
+        let (nonce, ciphertext) = encoded.split_at(PROJECTION_NONCE_BYTES);
+        let nonce = XNonce::try_from(nonce).expect("validated nonce length");
+        let cipher = Cipher::new_from_slice(self.key.as_ref().as_ref())
+            .map_err(|_| QueueMediaError::Authentication)?;
+        let plaintext = Zeroizing::new(
+            cipher
+                .decrypt(
+                    &nonce,
+                    Payload {
+                        msg: ciphertext,
+                        aad: &operation_receipt_aad(owner_id, operation_id),
+                    },
+                )
+                .map_err(|_| QueueMediaError::Authentication)?,
+        );
+        if plaintext.len() != OPERATION_RECEIPT_PLAINTEXT_BYTES
+            || u16::from_be_bytes(plaintext[..2].try_into().expect("sized"))
+                != OPERATION_RECEIPT_VERSION
+        {
+            return Err(QueueMediaError::Authentication);
+        }
+        let version = u16::from_be_bytes(plaintext[2..4].try_into().expect("sized"));
+        let sha256_hex = std::str::from_utf8(&plaintext[4..])
+            .map_err(|_| QueueMediaError::Authentication)?
+            .to_owned();
+        validate_operation_fingerprint(WireOperationFingerprint {
+            version,
+            sha256_hex,
+        })
+        .map_err(|_| QueueMediaError::Authentication)
     }
 
     fn seal_inner(
@@ -391,6 +712,7 @@ impl QueueMediaStore {
         owner_id: &str,
         job_id: &str,
         operation_fingerprint: Option<&QueueMediaOperationFingerprint>,
+        projection: Option<&QueueMediaProjection>,
         media: &[SealMedia],
     ) -> Result<MediaSetRef, QueueMediaError> {
         validate_identity("owner", owner_id)?;
@@ -423,6 +745,7 @@ impl QueueMediaStore {
         let result = self.seal_file(
             &media_set,
             operation_fingerprint.cloned(),
+            projection,
             media,
             &staging_path,
         );
@@ -457,6 +780,66 @@ impl QueueMediaStore {
             .map(|decoded| decoded.manifest)
     }
 
+    /// Authenticate only the fixed-width first V2 record. No media frame or
+    /// trailing manifest byte is read by this operation.
+    pub fn open_projection(
+        &self,
+        media_set: &MediaSetRef,
+    ) -> Result<QueueMediaProjection, QueueMediaError> {
+        validate_media_set_ref(media_set)?;
+        let path = self
+            .locate_bundle(media_set)?
+            .ok_or(QueueMediaError::NotFound)?;
+        let file = mold_core::secure_file::open_regular_file_no_follow(&path)
+            .map_err(|error| QueueMediaError::InsecurePath(error.to_string()))?;
+        let mut reader = BufReader::new(file);
+        let mut header = [0_u8; PROJECTION_HEADER_BYTES];
+        if let Err(error) = reader.read_exact(&mut header[..MAGIC.len()]) {
+            return Err(if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                QueueMediaError::ProjectionUnavailable(QueueMediaProjectionFailure::Missing)
+            } else {
+                error.into()
+            });
+        }
+        if &header[..MAGIC.len()] == MAGIC {
+            return Err(QueueMediaError::ProjectionUnavailable(
+                QueueMediaProjectionFailure::LegacyV1,
+            ));
+        }
+        if let Err(error) = reader.read_exact(&mut header[MAGIC.len()..]) {
+            return Err(if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                QueueMediaError::ProjectionUnavailable(QueueMediaProjectionFailure::Missing)
+            } else {
+                error.into()
+            });
+        }
+        if &header[..V2_MAGIC.len()] != V2_MAGIC {
+            return Err(QueueMediaError::ProjectionUnavailable(
+                QueueMediaProjectionFailure::Malformed,
+            ));
+        }
+        let nonce =
+            XNonce::try_from(&header[V2_MAGIC.len()..V2_MAGIC.len() + PROJECTION_NONCE_BYTES])
+                .expect("fixed projection nonce length");
+        let ciphertext = &header[V2_MAGIC.len() + PROJECTION_NONCE_BYTES..];
+        let cipher = Cipher::new_from_slice(self.key.as_ref().as_ref())
+            .map_err(|_| QueueMediaError::Authentication)?;
+        let plaintext = cipher
+            .decrypt(
+                &nonce,
+                Payload {
+                    msg: ciphertext,
+                    aad: &projection_aad(media_set),
+                },
+            )
+            .map_err(|_| {
+                QueueMediaError::ProjectionUnavailable(QueueMediaProjectionFailure::Authentication)
+            })?;
+        decode_projection(&plaintext).map_err(|_| {
+            QueueMediaError::ProjectionUnavailable(QueueMediaProjectionFailure::Malformed)
+        })
+    }
+
     /// Authenticates the complete bundle before returning its encrypted-at-rest
     /// operation fingerprint.
     pub fn open_operation_fingerprint(
@@ -464,6 +847,76 @@ impl QueueMediaStore {
         media_set: &MediaSetRef,
     ) -> Result<Option<QueueMediaOperationFingerprint>, QueueMediaError> {
         Ok(self.load(media_set)?.operation_fingerprint)
+    }
+
+    /// Decode a V2 bundle into mixed sinks. Inline and identity values remain
+    /// in process memory; only entries sealed as path-shaped media receive an
+    /// owner-only ephemeral path.
+    #[cfg(unix)]
+    pub fn decrypt_mixed(
+        &self,
+        media_set: &MediaSetRef,
+    ) -> Result<DecryptedQueueMediaSet, QueueMediaError> {
+        validate_media_set_ref(media_set)?;
+        let path = self
+            .locate_bundle(media_set)?
+            .ok_or(QueueMediaError::NotFound)?;
+        let partial = self
+            .root
+            .join("ephemeral")
+            .join(format!("{}.partial", random_hex(16)?));
+        ensure_private_dir(&partial)?;
+        let decoded = match self.decode_v2_from_path(media_set, &path, Some(&partial), true) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&partial);
+                return Err(error);
+            }
+        };
+        crate::dir_sync::sync_directory(&partial)?;
+        let ready = partial.with_extension("ready");
+        fs::rename(&partial, &ready)?;
+        crate::dir_sync::sync_directory(&self.root.join("ephemeral"))?;
+        let mut memory = decoded.memory;
+        let mut media = Vec::with_capacity(decoded.manifest.entries.len());
+        for (index, entry) in decoded.manifest.entries.iter().enumerate() {
+            let payload = match entry.sink {
+                QueueMediaSink::Memory => DecryptedQueueMediaPayload::Bytes(
+                    memory
+                        .remove(&(index as u32))
+                        .ok_or(QueueMediaError::Authentication)?
+                        .into_vec(),
+                ),
+                QueueMediaSink::PrivateStaging => {
+                    DecryptedQueueMediaPayload::PrivatePath(ready.join(format!("{index:08}.media")))
+                }
+            };
+            media.push(DecryptedQueueMedia {
+                role: entry.role.clone(),
+                name: entry.name.clone(),
+                payload,
+            });
+        }
+        if !memory.is_empty() {
+            return Err(QueueMediaError::Corrupt(
+                "decoded memory payload has no manifest entry".into(),
+            ));
+        }
+        Ok(DecryptedQueueMediaSet {
+            manifest: decoded.manifest,
+            media,
+            root: Some(ready),
+        })
+    }
+
+    #[cfg(not(unix))]
+    pub fn decrypt_mixed(
+        &self,
+        _media_set: &MediaSetRef,
+    ) -> Result<DecryptedQueueMediaSet, QueueMediaError> {
+        Err(QueueMediaError::SecurityUnavailable(
+            "mixed queue-media hydration requires verified private staging support".into(),
+        ))
     }
 
     /// Authenticates the complete bundle before publishing a private plaintext
@@ -663,9 +1116,19 @@ impl QueueMediaStore {
         &self,
         media_set: &MediaSetRef,
         operation_fingerprint: Option<QueueMediaOperationFingerprint>,
+        projection: Option<&QueueMediaProjection>,
         media: &[SealMedia],
         staging_path: &Path,
     ) -> Result<(), QueueMediaError> {
+        if let Some(projection) = projection {
+            return self.seal_file_v2(
+                media_set,
+                operation_fingerprint,
+                projection,
+                media,
+                staging_path,
+            );
+        }
         let file = create_private_file(staging_path)?;
         let mut writer = BufWriter::new(file);
         writer.write_all(MAGIC)?;
@@ -727,6 +1190,7 @@ impl QueueMediaStore {
                 size_bytes,
                 sha256_hex: hex_encode(&digest.finalize()),
                 chunk_count,
+                sink: None,
             });
         }
 
@@ -781,6 +1245,173 @@ impl QueueMediaStore {
         Ok(())
     }
 
+    fn seal_file_v2(
+        &self,
+        media_set: &MediaSetRef,
+        operation_fingerprint: Option<QueueMediaOperationFingerprint>,
+        projection: &QueueMediaProjection,
+        media: &[SealMedia],
+        staging_path: &Path,
+    ) -> Result<(), QueueMediaError> {
+        let file = create_private_file(staging_path)?;
+        let mut writer = BufWriter::new(file);
+        writer.write_all(V2_MAGIC)?;
+
+        let projection_plaintext = encode_projection(projection)?;
+        let mut projection_nonce = [0_u8; PROJECTION_NONCE_BYTES];
+        random_fill(&mut projection_nonce)?;
+        let cipher = Cipher::new_from_slice(self.key.as_ref().as_ref())
+            .map_err(|_| QueueMediaError::Authentication)?;
+        let nonce = XNonce::try_from(projection_nonce.as_slice()).expect("fixed-size nonce");
+        let projection_ciphertext = cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: &projection_plaintext,
+                    aad: &projection_aad(media_set),
+                },
+            )
+            .map_err(|_| QueueMediaError::Authentication)?;
+        debug_assert_eq!(projection_ciphertext.len(), PROJECTION_CIPHERTEXT_BYTES);
+        writer.write_all(&projection_nonce)?;
+        writer.write_all(&projection_ciphertext)?;
+
+        let mut nonce_bytes = [0_u8; NONCE_PREFIX_BYTES];
+        random_fill(&mut nonce_bytes)?;
+        writer.write_all(&nonce_bytes)?;
+        let nonce = StreamNonce::from(nonce_bytes);
+        let cipher = Cipher::new_from_slice(self.key.as_ref().as_ref())
+            .map_err(|_| QueueMediaError::Authentication)?;
+        let mut encryptor = EncryptorBE32::from_aead(cipher, &nonce);
+        // Projection is record ordinal zero; stream records begin at one.
+        let mut ordinal = 1_u32;
+        let mut manifest_entries = Vec::with_capacity(media.len());
+
+        for (index, item) in media.iter().enumerate() {
+            let index = u32::try_from(index).map_err(|_| {
+                QueueMediaError::Corrupt("too many media entries for the stream format".into())
+            })?;
+            let begin_plaintext = vec![
+                b'B',
+                index.to_be_bytes()[0],
+                index.to_be_bytes()[1],
+                index.to_be_bytes()[2],
+                index.to_be_bytes()[3],
+                match item.sink {
+                    QueueMediaSink::Memory => 0,
+                    QueueMediaSink::PrivateStaging => 1,
+                },
+            ];
+            write_encrypted_frame_for_version(
+                &mut writer,
+                &mut encryptor,
+                media_set,
+                V2_FORMAT_VERSION,
+                &mut ordinal,
+                begin_plaintext,
+            )?;
+            let mut reader: Box<dyn Read> = match &item.source {
+                SealMediaSource::Path(path) => Box::new(
+                    mold_core::secure_file::open_regular_file_no_follow(path)
+                        .map_err(|error| QueueMediaError::InsecurePath(error.to_string()))?,
+                ),
+                SealMediaSource::Bytes(bytes) => Box::new(std::io::Cursor::new(bytes)),
+            };
+            let mut digest = Sha256::new();
+            let mut size_bytes = 0_u64;
+            let mut chunk_count = 0_u32;
+            let mut buffer = vec![0_u8; CHUNK_BYTES];
+            loop {
+                let read = reader.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                digest.update(&buffer[..read]);
+                size_bytes = size_bytes
+                    .checked_add(read as u64)
+                    .ok_or_else(|| QueueMediaError::Corrupt("media size overflow".into()))?;
+                let mut plaintext = Vec::with_capacity(DATA_HEADER_BYTES + read);
+                plaintext.push(b'D');
+                plaintext.extend_from_slice(&index.to_be_bytes());
+                plaintext.extend_from_slice(&chunk_count.to_be_bytes());
+                plaintext.extend_from_slice(&buffer[..read]);
+                write_encrypted_frame_for_version(
+                    &mut writer,
+                    &mut encryptor,
+                    media_set,
+                    V2_FORMAT_VERSION,
+                    &mut ordinal,
+                    plaintext,
+                )?;
+                chunk_count = chunk_count.checked_add(1).ok_or_else(|| {
+                    QueueMediaError::Corrupt("media chunk counter overflow".into())
+                })?;
+            }
+            buffer.zeroize();
+            manifest_entries.push(WireManifestEntry {
+                index,
+                role: item.role.clone(),
+                name: item.name.clone(),
+                size_bytes,
+                sha256_hex: hex_encode(&digest.finalize()),
+                chunk_count,
+                sink: Some(item.sink.into()),
+            });
+        }
+
+        let manifest = WireManifest {
+            format_version: V2_FORMAT_VERSION,
+            owner_id: media_set.owner_id.clone(),
+            job_id: media_set.job_id.clone(),
+            set_id: media_set.set_id.clone(),
+            operation_fingerprint: operation_fingerprint.map(|fingerprint| {
+                WireOperationFingerprint {
+                    version: fingerprint.version,
+                    sha256_hex: fingerprint.sha256_hex,
+                }
+            }),
+            entries: manifest_entries,
+        };
+        let mut manifest_bytes = Zeroizing::new(serde_json::to_vec(&manifest)?);
+        let manifest_digest = Sha256::digest(&*manifest_bytes);
+        for chunk in manifest_bytes.chunks(CHUNK_BYTES) {
+            let mut plaintext = Vec::with_capacity(1 + chunk.len());
+            plaintext.push(b'M');
+            plaintext.extend_from_slice(chunk);
+            write_encrypted_frame_for_version(
+                &mut writer,
+                &mut encryptor,
+                media_set,
+                V2_FORMAT_VERSION,
+                &mut ordinal,
+                plaintext,
+            )?;
+        }
+        let mut final_plaintext = Vec::with_capacity(1 + 8 + 32);
+        final_plaintext.push(b'F');
+        final_plaintext.extend_from_slice(&(manifest_bytes.len() as u64).to_be_bytes());
+        final_plaintext.extend_from_slice(&manifest_digest);
+        let aad = frame_aad_for_version(
+            media_set,
+            V2_FORMAT_VERSION,
+            ordinal,
+            true,
+            final_plaintext.len() + AEAD_TAG_BYTES,
+        );
+        let ciphertext = encryptor
+            .encrypt_last(aead_stream::aead::Payload {
+                msg: &final_plaintext,
+                aad: &aad,
+            })
+            .map_err(|_| QueueMediaError::Authentication)?;
+        write_frame(&mut writer, true, &ciphertext)?;
+        final_plaintext.zeroize();
+        manifest_bytes.zeroize();
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        Ok(())
+    }
+
     fn decode_bundle(
         &self,
         media_set: &MediaSetRef,
@@ -804,6 +1435,12 @@ impl QueueMediaStore {
         let mut reader = BufReader::new(file);
         let mut magic = [0_u8; MAGIC.len()];
         reader.read_exact(&mut magic).map_err(map_truncation)?;
+        if &magic == V2_MAGIC {
+            if output.is_some() {
+                return Err(QueueMediaError::MixedSinkHydrationRequired);
+            }
+            return self.decode_v2_from_reader(media_set, reader, output, false);
+        }
         if &magic != MAGIC {
             return Err(QueueMediaError::Corrupt("unknown bundle format".into()));
         }
@@ -828,21 +1465,23 @@ impl QueueMediaStore {
             };
             let aad = frame_aad(media_set, ordinal, is_final, ciphertext.len());
             let stream = decryptor.take().expect("stream exists until final frame");
-            let mut plaintext = if is_final {
-                stream.decrypt_last(aead_stream::aead::Payload {
-                    msg: &ciphertext,
-                    aad: &aad,
-                })
-            } else {
-                let mut stream = stream;
-                let result = stream.decrypt_next(aead_stream::aead::Payload {
-                    msg: &ciphertext,
-                    aad: &aad,
-                });
-                decryptor = Some(stream);
-                result
-            }
-            .map_err(|_| QueueMediaError::Authentication)?;
+            let plaintext = Zeroizing::new(
+                if is_final {
+                    stream.decrypt_last(aead_stream::aead::Payload {
+                        msg: &ciphertext,
+                        aad: &aad,
+                    })
+                } else {
+                    let mut stream = stream;
+                    let result = stream.decrypt_next(aead_stream::aead::Payload {
+                        msg: &ciphertext,
+                        aad: &aad,
+                    });
+                    decryptor = Some(stream);
+                    result
+                }
+                .map_err(|_| QueueMediaError::Authentication)?,
+            );
             ordinal = ordinal
                 .checked_add(1)
                 .ok_or_else(|| QueueMediaError::Corrupt("stream counter overflow".into()))?;
@@ -850,7 +1489,6 @@ impl QueueMediaStore {
             if is_final {
                 finalize_observation(&mut current, &mut observations)?;
                 validate_final_record(&plaintext, &manifest_bytes)?;
-                plaintext.zeroize();
                 let mut trailing = [0_u8; 1];
                 if reader.read(&mut trailing)? != 0 {
                     return Err(QueueMediaError::Corrupt(
@@ -876,7 +1514,6 @@ impl QueueMediaStore {
                 }
                 _ => return Err(QueueMediaError::Corrupt("unknown stream record".into())),
             }
-            plaintext.zeroize();
         }
         if !saw_final {
             return Err(QueueMediaError::Authentication);
@@ -884,7 +1521,156 @@ impl QueueMediaStore {
         let wire: WireManifest = serde_json::from_slice(&manifest_bytes)?;
         let manifest = validate_manifest(media_set, wire, &observations, output)?;
         manifest_bytes.zeroize();
-        Ok(DecodedBundle { manifest })
+        Ok(DecodedBundle {
+            manifest,
+            memory: BTreeMap::new(),
+        })
+    }
+
+    fn decode_v2_from_path(
+        &self,
+        media_set: &MediaSetRef,
+        path: &Path,
+        output: Option<&Path>,
+        mixed: bool,
+    ) -> Result<DecodedBundle, QueueMediaError> {
+        let file = mold_core::secure_file::open_regular_file_no_follow(path)
+            .map_err(|error| QueueMediaError::InsecurePath(error.to_string()))?;
+        let mut reader = BufReader::new(file);
+        let mut magic = [0_u8; V2_MAGIC.len()];
+        reader.read_exact(&mut magic).map_err(map_truncation)?;
+        if &magic != V2_MAGIC {
+            return Err(QueueMediaError::ProjectionUnavailable(if &magic == MAGIC {
+                QueueMediaProjectionFailure::LegacyV1
+            } else {
+                QueueMediaProjectionFailure::Malformed
+            }));
+        }
+        self.decode_v2_from_reader(media_set, reader, output, mixed)
+    }
+
+    fn decode_v2_from_reader(
+        &self,
+        media_set: &MediaSetRef,
+        mut reader: BufReader<File>,
+        output: Option<&Path>,
+        mixed: bool,
+    ) -> Result<DecodedBundle, QueueMediaError> {
+        let mut projection_nonce = [0_u8; PROJECTION_NONCE_BYTES];
+        reader
+            .read_exact(&mut projection_nonce)
+            .map_err(map_truncation)?;
+        let mut projection_ciphertext = [0_u8; PROJECTION_CIPHERTEXT_BYTES];
+        reader
+            .read_exact(&mut projection_ciphertext)
+            .map_err(map_truncation)?;
+        let cipher = Cipher::new_from_slice(self.key.as_ref().as_ref())
+            .map_err(|_| QueueMediaError::Authentication)?;
+        let nonce = XNonce::try_from(projection_nonce.as_slice()).expect("fixed-size nonce");
+        let projection_plaintext = cipher
+            .decrypt(
+                &nonce,
+                Payload {
+                    msg: &projection_ciphertext,
+                    aad: &projection_aad(media_set),
+                },
+            )
+            .map_err(|_| QueueMediaError::Authentication)?;
+        let _projection = decode_projection(&projection_plaintext)?;
+
+        let mut nonce_bytes = [0_u8; NONCE_PREFIX_BYTES];
+        reader
+            .read_exact(&mut nonce_bytes)
+            .map_err(map_truncation)?;
+        let nonce = StreamNonce::from(nonce_bytes);
+        let cipher = Cipher::new_from_slice(self.key.as_ref().as_ref())
+            .map_err(|_| QueueMediaError::Authentication)?;
+        let mut decryptor = Some(DecryptorBE32::from_aead(cipher, &nonce));
+        let mut ordinal = 1_u32;
+        let mut manifest_bytes = Zeroizing::new(Vec::new());
+        let mut observations = Vec::new();
+        let mut current: Option<V2ObservedFile> = None;
+        let mut manifest_started = false;
+        let mut saw_final = false;
+        let mut memory = BTreeMap::new();
+
+        loop {
+            let Some((is_final, ciphertext)) = read_frame(&mut reader)? else {
+                break;
+            };
+            let aad = frame_aad_for_version(
+                media_set,
+                V2_FORMAT_VERSION,
+                ordinal,
+                is_final,
+                ciphertext.len(),
+            );
+            let stream = decryptor.take().expect("stream exists until final frame");
+            let plaintext = Zeroizing::new(
+                if is_final {
+                    stream.decrypt_last(aead_stream::aead::Payload {
+                        msg: &ciphertext,
+                        aad: &aad,
+                    })
+                } else {
+                    let mut stream = stream;
+                    let result = stream.decrypt_next(aead_stream::aead::Payload {
+                        msg: &ciphertext,
+                        aad: &aad,
+                    });
+                    decryptor = Some(stream);
+                    result
+                }
+                .map_err(|_| QueueMediaError::Authentication)?,
+            );
+            ordinal = ordinal
+                .checked_add(1)
+                .ok_or_else(|| QueueMediaError::Corrupt("stream counter overflow".into()))?;
+
+            if is_final {
+                finalize_v2_observation(&mut current, &mut observations, &mut memory)?;
+                validate_final_record(&plaintext, &manifest_bytes)?;
+                let mut trailing = [0_u8; 1];
+                if reader.read(&mut trailing)? != 0 {
+                    return Err(QueueMediaError::Corrupt(
+                        "bytes follow the final authenticated record".into(),
+                    ));
+                }
+                saw_final = true;
+                break;
+            }
+            match plaintext.first().copied() {
+                Some(b'B') if !manifest_started => begin_v2_observation(
+                    &plaintext,
+                    output,
+                    mixed,
+                    &mut current,
+                    &mut observations,
+                    &mut memory,
+                )?,
+                Some(b'D') if !manifest_started => {
+                    consume_v2_data_record(&plaintext, &mut current)?
+                }
+                Some(b'M') => {
+                    manifest_started = true;
+                    finalize_v2_observation(&mut current, &mut observations, &mut memory)?;
+                    manifest_bytes.extend_from_slice(&plaintext[1..]);
+                }
+                Some(b'B' | b'D') => {
+                    return Err(QueueMediaError::Corrupt(
+                        "media record follows manifest data".into(),
+                    ));
+                }
+                _ => return Err(QueueMediaError::Corrupt("unknown stream record".into())),
+            }
+        }
+        if !saw_final {
+            return Err(QueueMediaError::Authentication);
+        }
+        let wire: WireManifest = serde_json::from_slice(&manifest_bytes)?;
+        let manifest = validate_manifest(media_set, wire, &observations, output)?;
+        manifest_bytes.zeroize();
+        Ok(DecodedBundle { manifest, memory })
     }
 
     fn lock_job(&self, owner_id: &str, job_id: &str) -> Result<File, QueueMediaError> {
@@ -1118,6 +1904,22 @@ impl QueueMediaStore {
 #[derive(Debug)]
 struct DecodedBundle {
     manifest: MediaSetManifest,
+    memory: BTreeMap<u32, SensitiveBytes>,
+}
+
+#[derive(Debug)]
+struct SensitiveBytes(Vec<u8>);
+
+impl SensitiveBytes {
+    fn into_vec(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for SensitiveBytes {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
 }
 
 struct ObservedFile {
@@ -1126,6 +1928,130 @@ struct ObservedFile {
     size_bytes: u64,
     digest: Sha256,
     output: Option<File>,
+}
+
+struct V2ObservedFile {
+    index: u32,
+    next_chunk: u32,
+    size_bytes: u64,
+    digest: Sha256,
+    sink: QueueMediaSink,
+    output: Option<File>,
+    memory: Option<SensitiveBytes>,
+}
+
+fn begin_v2_observation(
+    plaintext: &[u8],
+    output_root: Option<&Path>,
+    mixed: bool,
+    current: &mut Option<V2ObservedFile>,
+    observations: &mut Vec<DataObservation>,
+    memory: &mut BTreeMap<u32, SensitiveBytes>,
+) -> Result<(), QueueMediaError> {
+    if plaintext.len() != 6 {
+        return Err(QueueMediaError::Corrupt(
+            "invalid media begin record".into(),
+        ));
+    }
+    finalize_v2_observation(current, observations, memory)?;
+    let index = u32::from_be_bytes(plaintext[1..5].try_into().expect("sized"));
+    if observations
+        .last()
+        .is_some_and(|previous| index <= previous.index)
+    {
+        return Err(QueueMediaError::Corrupt(
+            "media file ordering is not strictly increasing".into(),
+        ));
+    }
+    let sink = match plaintext[5] {
+        0 => QueueMediaSink::Memory,
+        1 => QueueMediaSink::PrivateStaging,
+        _ => return Err(QueueMediaError::Corrupt("invalid media sink".into())),
+    };
+    let write_to_disk = output_root.is_some() && (!mixed || sink == QueueMediaSink::PrivateStaging);
+    let output = write_to_disk
+        .then(|| {
+            create_private_file(
+                &output_root
+                    .expect("write-to-disk requires root")
+                    .join(format!("{index:08}.media")),
+            )
+        })
+        .transpose()?;
+    *current = Some(V2ObservedFile {
+        index,
+        next_chunk: 0,
+        size_bytes: 0,
+        digest: Sha256::new(),
+        sink,
+        output,
+        memory: (mixed && sink == QueueMediaSink::Memory).then(|| SensitiveBytes(Vec::new())),
+    });
+    Ok(())
+}
+
+fn consume_v2_data_record(
+    plaintext: &[u8],
+    current: &mut Option<V2ObservedFile>,
+) -> Result<(), QueueMediaError> {
+    if plaintext.len() < DATA_HEADER_BYTES {
+        return Err(QueueMediaError::Corrupt("short media record".into()));
+    }
+    let index = u32::from_be_bytes(plaintext[1..5].try_into().expect("sized"));
+    let chunk = u32::from_be_bytes(plaintext[5..9].try_into().expect("sized"));
+    let file = current
+        .as_mut()
+        .ok_or_else(|| QueueMediaError::Corrupt("media data precedes begin record".into()))?;
+    if file.index != index || file.next_chunk != chunk {
+        return Err(QueueMediaError::Corrupt(
+            "media chunk ordering is not contiguous".into(),
+        ));
+    }
+    let bytes = &plaintext[DATA_HEADER_BYTES..];
+    file.digest.update(bytes);
+    file.size_bytes = file
+        .size_bytes
+        .checked_add(bytes.len() as u64)
+        .ok_or_else(|| QueueMediaError::Corrupt("media size overflow".into()))?;
+    file.next_chunk = file
+        .next_chunk
+        .checked_add(1)
+        .ok_or_else(|| QueueMediaError::Corrupt("media chunk counter overflow".into()))?;
+    if let Some(output) = &mut file.output {
+        output.write_all(bytes)?;
+    }
+    if let Some(memory) = &mut file.memory {
+        memory.0.extend_from_slice(bytes);
+    }
+    Ok(())
+}
+
+fn finalize_v2_observation(
+    current: &mut Option<V2ObservedFile>,
+    observations: &mut Vec<DataObservation>,
+    memory: &mut BTreeMap<u32, SensitiveBytes>,
+) -> Result<(), QueueMediaError> {
+    let Some(mut file) = current.take() else {
+        return Ok(());
+    };
+    if let Some(output) = &mut file.output {
+        output.sync_all()?;
+    }
+    if let Some(bytes) = file.memory.take() {
+        if memory.insert(file.index, bytes).is_some() {
+            return Err(QueueMediaError::Corrupt(
+                "duplicate in-memory media payload".into(),
+            ));
+        }
+    }
+    observations.push(DataObservation {
+        index: file.index,
+        size_bytes: file.size_bytes,
+        sha256_hex: hex_encode(&file.digest.finalize()),
+        chunk_count: file.next_chunk,
+        sink: Some(file.sink),
+    });
+    Ok(())
 }
 
 fn consume_data_record(
@@ -1202,6 +2128,7 @@ fn finalize_observation(
         size_bytes: file.size_bytes,
         sha256_hex: hex_encode(&file.digest.finalize()),
         chunk_count: file.next_chunk,
+        sink: None,
     });
     Ok(())
 }
@@ -1231,7 +2158,7 @@ fn validate_manifest(
     observations: &[DataObservation],
     output_root: Option<&Path>,
 ) -> Result<MediaSetManifest, QueueMediaError> {
-    if manifest.format_version != FORMAT_VERSION
+    if !matches!(manifest.format_version, FORMAT_VERSION | V2_FORMAT_VERSION)
         || manifest.owner_id != expected.owner_id
         || manifest.job_id != expected.job_id
         || manifest.set_id != expected.set_id
@@ -1251,6 +2178,7 @@ fn validate_manifest(
         .transpose()?;
     let empty_digest = hex_encode(&Sha256::digest([]));
     let mut public_entries = Vec::with_capacity(manifest.entries.len());
+    let format_version = manifest.format_version;
     for (expected_index, entry) in manifest.entries.into_iter().enumerate() {
         let expected_index = u32::try_from(expected_index)
             .map_err(|_| QueueMediaError::Corrupt("manifest has too many entries".into()))?;
@@ -1261,11 +2189,21 @@ fn validate_manifest(
         }
         validate_manifest_label("role", &entry.role)?;
         validate_manifest_label("name", &entry.name)?;
+        let sink = match (format_version, entry.sink) {
+            (FORMAT_VERSION, None) => QueueMediaSink::PrivateStaging,
+            (V2_FORMAT_VERSION, Some(sink)) => sink.into(),
+            _ => {
+                return Err(QueueMediaError::Corrupt(
+                    "manifest media sink does not match bundle version".into(),
+                ))
+            }
+        };
         match observed.get(&entry.index) {
             Some(actual)
                 if actual.size_bytes == entry.size_bytes
                     && actual.sha256_hex == entry.sha256_hex
-                    && actual.chunk_count == entry.chunk_count => {}
+                    && actual.chunk_count == entry.chunk_count
+                    && actual.sink.is_none_or(|actual_sink| actual_sink == sink) => {}
             None if entry.size_bytes == 0
                 && entry.chunk_count == 0
                 && entry.sha256_hex == empty_digest =>
@@ -1285,6 +2223,7 @@ fn validate_manifest(
             name: entry.name,
             size_bytes: entry.size_bytes,
             sha256_hex: entry.sha256_hex,
+            sink,
         });
     }
     if observations
@@ -1328,13 +2267,31 @@ fn write_encrypted_frame(
     encryptor: &mut EncryptorBE32<Cipher>,
     media_set: &MediaSetRef,
     ordinal: &mut u32,
+    plaintext: Vec<u8>,
+) -> Result<(), QueueMediaError> {
+    write_encrypted_frame_for_version(
+        writer,
+        encryptor,
+        media_set,
+        FORMAT_VERSION,
+        ordinal,
+        plaintext,
+    )
+}
+
+fn write_encrypted_frame_for_version(
+    writer: &mut impl Write,
+    encryptor: &mut EncryptorBE32<Cipher>,
+    media_set: &MediaSetRef,
+    format_version: u16,
+    ordinal: &mut u32,
     mut plaintext: Vec<u8>,
 ) -> Result<(), QueueMediaError> {
     let ciphertext_len = plaintext
         .len()
         .checked_add(AEAD_TAG_BYTES)
         .ok_or_else(|| QueueMediaError::Corrupt("frame length overflow".into()))?;
-    let aad = frame_aad(media_set, *ordinal, false, ciphertext_len);
+    let aad = frame_aad_for_version(media_set, format_version, *ordinal, false, ciphertext_len);
     let ciphertext = encryptor
         .encrypt_next(aead_stream::aead::Payload {
             msg: &plaintext,
@@ -1391,11 +2348,21 @@ fn frame_aad(
     is_final: bool,
     ciphertext_len: usize,
 ) -> Vec<u8> {
+    frame_aad_for_version(media_set, FORMAT_VERSION, ordinal, is_final, ciphertext_len)
+}
+
+fn frame_aad_for_version(
+    media_set: &MediaSetRef,
+    format_version: u16,
+    ordinal: u32,
+    is_final: bool,
+    ciphertext_len: usize,
+) -> Vec<u8> {
     let mut aad = Vec::with_capacity(
         64 + media_set.owner_id.len() + media_set.job_id.len() + media_set.set_id.len(),
     );
     aad.extend_from_slice(b"mold.queue-media.stream");
-    aad.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
+    aad.extend_from_slice(&format_version.to_be_bytes());
     append_aad_field(&mut aad, media_set.owner_id.as_bytes());
     append_aad_field(&mut aad, media_set.job_id.as_bytes());
     append_aad_field(&mut aad, media_set.set_id.as_bytes());
@@ -1403,6 +2370,170 @@ fn frame_aad(
     aad.push(u8::from(is_final));
     aad.extend_from_slice(&(ciphertext_len as u64).to_be_bytes());
     aad
+}
+
+fn projection_aad(media_set: &MediaSetRef) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(
+        64 + media_set.owner_id.len() + media_set.job_id.len() + media_set.set_id.len(),
+    );
+    aad.extend_from_slice(b"mold.queue-media.projection");
+    aad.extend_from_slice(&V2_FORMAT_VERSION.to_be_bytes());
+    append_aad_field(&mut aad, media_set.owner_id.as_bytes());
+    append_aad_field(&mut aad, media_set.job_id.as_bytes());
+    append_aad_field(&mut aad, media_set.set_id.as_bytes());
+    aad.extend_from_slice(&0_u32.to_be_bytes());
+    aad
+}
+
+fn operation_receipt_aad(owner_id: &str, operation_id: &str) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(64 + owner_id.len() + operation_id.len());
+    aad.extend_from_slice(b"mold.queue-media.operation-receipt");
+    aad.extend_from_slice(&OPERATION_RECEIPT_VERSION.to_be_bytes());
+    append_aad_field(&mut aad, owner_id.as_bytes());
+    append_aad_field(&mut aad, operation_id.as_bytes());
+    aad
+}
+
+fn encode_projection(
+    projection: &QueueMediaProjection,
+) -> Result<[u8; PROJECTION_PLAINTEXT_BYTES], QueueMediaError> {
+    if projection.edit_images.len() > MAX_PROJECTED_EDIT_IMAGES {
+        return Err(QueueMediaError::Corrupt(format!(
+            "projection has {} edit images; validated Flux.2 maximum is {MAX_PROJECTED_EDIT_IMAGES}",
+            projection.edit_images.len()
+        )));
+    }
+    if projection.identity_present != (projection.identity_photograph_count > 0) {
+        return Err(QueueMediaError::Corrupt(
+            "projection identity presence disagrees with its photograph count".into(),
+        ));
+    }
+    if projection.edit_images.iter().any(|dimensions| {
+        matches!(
+            dimensions,
+            ProjectedImageDimensions::Known { width: 0, .. }
+                | ProjectedImageDimensions::Known { height: 0, .. }
+        )
+    }) {
+        return Err(QueueMediaError::Corrupt(
+            "projection contains zero image dimensions".into(),
+        ));
+    }
+    let mut bytes = [0_u8; PROJECTION_PLAINTEXT_BYTES];
+    bytes[..2].copy_from_slice(&PROJECTION_VERSION.to_be_bytes());
+    let mut flags = 0_u32;
+    for (bit, present) in [
+        projection.source_image,
+        projection.source_video_inline,
+        projection.source_video_path,
+        projection.extend_video_inline,
+        projection.extend_video_path,
+        projection.identity_present,
+        projection.mask_image,
+        projection.control_image,
+        projection.audio_inline,
+        projection.audio_path,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if present {
+            flags |= 1 << bit;
+        }
+    }
+    bytes[4..8].copy_from_slice(&flags.to_be_bytes());
+    bytes[8..12].copy_from_slice(&projection.keyframe_count.to_be_bytes());
+    bytes[12..16].copy_from_slice(&projection.identity_photograph_count.to_be_bytes());
+    bytes[16..20].copy_from_slice(&(projection.edit_images.len() as u32).to_be_bytes());
+    for (index, dimensions) in projection.edit_images.iter().enumerate() {
+        let offset = 20 + index * 9;
+        match dimensions {
+            ProjectedImageDimensions::Known { width, height } => {
+                bytes[offset] = 2;
+                bytes[offset + 1..offset + 5].copy_from_slice(&width.to_be_bytes());
+                bytes[offset + 5..offset + 9].copy_from_slice(&height.to_be_bytes());
+            }
+            ProjectedImageDimensions::UnreadableHeader => bytes[offset] = 1,
+        }
+    }
+    Ok(bytes)
+}
+
+fn decode_projection(bytes: &[u8]) -> Result<QueueMediaProjection, QueueMediaError> {
+    if bytes.len() != PROJECTION_PLAINTEXT_BYTES
+        || u16::from_be_bytes(bytes[..2].try_into().expect("sized")) != PROJECTION_VERSION
+        || bytes[2..4] != [0, 0]
+        || bytes[56..].iter().any(|byte| *byte != 0)
+    {
+        return Err(QueueMediaError::Corrupt("invalid projection record".into()));
+    }
+    let flags = u32::from_be_bytes(bytes[4..8].try_into().expect("sized"));
+    if flags & !0x03ff != 0 {
+        return Err(QueueMediaError::Corrupt(
+            "projection contains unknown flags".into(),
+        ));
+    }
+    let edit_count = u32::from_be_bytes(bytes[16..20].try_into().expect("sized")) as usize;
+    if edit_count > MAX_PROJECTED_EDIT_IMAGES {
+        return Err(QueueMediaError::Corrupt(
+            "projection edit-image count exceeds format bound".into(),
+        ));
+    }
+    let mut edit_images = Vec::with_capacity(edit_count);
+    for index in 0..MAX_PROJECTED_EDIT_IMAGES {
+        let offset = 20 + index * 9;
+        let slot = &bytes[offset..offset + 9];
+        if index >= edit_count {
+            if slot.iter().any(|byte| *byte != 0) {
+                return Err(QueueMediaError::Corrupt(
+                    "unused projection dimension slot is nonzero".into(),
+                ));
+            }
+            continue;
+        }
+        edit_images.push(match slot[0] {
+            1 if slot[1..].iter().all(|byte| *byte == 0) => {
+                ProjectedImageDimensions::UnreadableHeader
+            }
+            2 => {
+                let width = u32::from_be_bytes(slot[1..5].try_into().expect("sized"));
+                let height = u32::from_be_bytes(slot[5..9].try_into().expect("sized"));
+                if width == 0 || height == 0 {
+                    return Err(QueueMediaError::Corrupt(
+                        "projection contains zero image dimensions".into(),
+                    ));
+                }
+                ProjectedImageDimensions::Known { width, height }
+            }
+            _ => {
+                return Err(QueueMediaError::Corrupt(
+                    "invalid projection dimension slot".into(),
+                ))
+            }
+        });
+    }
+    let bit = |index| flags & (1_u32 << index) != 0_u32;
+    let projection = QueueMediaProjection {
+        source_image: bit(0),
+        source_video_inline: bit(1),
+        source_video_path: bit(2),
+        extend_video_inline: bit(3),
+        extend_video_path: bit(4),
+        keyframe_count: u32::from_be_bytes(bytes[8..12].try_into().expect("sized")),
+        identity_present: bit(5),
+        identity_photograph_count: u32::from_be_bytes(bytes[12..16].try_into().expect("sized")),
+        edit_images,
+        mask_image: bit(6),
+        control_image: bit(7),
+        audio_inline: bit(8),
+        audio_path: bit(9),
+    };
+    if projection.identity_present != (projection.identity_photograph_count > 0) {
+        return Err(QueueMediaError::Corrupt(
+            "projection identity presence disagrees with its photograph count".into(),
+        ));
+    }
+    Ok(projection)
 }
 
 fn append_aad_field(aad: &mut Vec<u8>, bytes: &[u8]) {
@@ -1901,6 +3032,162 @@ mod tests {
         ranges
     }
 
+    fn projection() -> QueueMediaProjection {
+        QueueMediaProjection {
+            source_image: true,
+            source_video_inline: true,
+            source_video_path: true,
+            extend_video_inline: false,
+            extend_video_path: true,
+            keyframe_count: 2,
+            identity_present: true,
+            identity_photograph_count: 3,
+            edit_images: vec![
+                ProjectedImageDimensions::Known {
+                    width: 640,
+                    height: 480,
+                },
+                ProjectedImageDimensions::UnreadableHeader,
+            ],
+            mask_image: true,
+            control_image: true,
+            audio_inline: true,
+            audio_path: true,
+        }
+    }
+
+    #[test]
+    fn operation_receipts_are_randomized_bound_and_constant_time_comparable() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let fingerprint = QueueMediaOperationFingerprint::sha256_v1(b"complete request bytes");
+        let different = QueueMediaOperationFingerprint::sha256_v1(b"different request bytes");
+        let first = store
+            .seal_operation_receipt_v1("owner-a", "operation-a", &fingerprint)
+            .unwrap();
+        let second = store
+            .seal_operation_receipt_v1("owner-a", "operation-a", &fingerprint)
+            .unwrap();
+
+        assert_ne!(first, second);
+        assert!(!first.as_str().contains(fingerprint.sha256_hex()));
+        let opened = store
+            .open_operation_receipt_v1("owner-a", "operation-a", &first)
+            .unwrap();
+        assert!(opened.constant_time_eq(&fingerprint));
+        assert!(!opened.constant_time_eq(&different));
+        assert!(store
+            .open_operation_receipt_v1("owner-b", "operation-a", &first)
+            .is_err());
+        assert!(store
+            .open_operation_receipt_v1("owner-a", "operation-b", &first)
+            .is_err());
+        let other_home = tempfile::tempdir().unwrap();
+        let other_store = open_store(other_home.path());
+        assert!(other_store
+            .open_operation_receipt_v1("owner-a", "operation-a", &first)
+            .is_err());
+
+        let mut tampered = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(first.as_str())
+            .unwrap();
+        *tampered.last_mut().unwrap() ^= 1;
+        let tampered = QueueMediaOperationReceipt::parse(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tampered),
+        )
+        .unwrap();
+        assert!(store
+            .open_operation_receipt_v1("owner-a", "operation-a", &tampered)
+            .is_err());
+    }
+
+    #[test]
+    fn v2_projection_is_a_bounded_first_record_and_v1_refuses_projection() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let fingerprint = QueueMediaOperationFingerprint::sha256_v1(b"operation");
+        let expected = projection();
+        let reference = store
+            .seal_v2_with_operation_fingerprint(
+                "owner",
+                "job-v2",
+                &fingerprint,
+                &expected,
+                &[SealMedia::bytes("source_image", "scalar", vec![9; 4096])],
+            )
+            .unwrap();
+        assert_eq!(store.open_projection(&reference).unwrap(), expected);
+
+        let path = store.bundle_path(StoredState::Active, &reference);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        file.seek(SeekFrom::End(-1)).unwrap();
+        let mut tail = [0_u8; 1];
+        file.read_exact(&mut tail).unwrap();
+        file.seek(SeekFrom::End(-1)).unwrap();
+        file.write_all(&[tail[0] ^ 1]).unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(store.open_projection(&reference).unwrap(), expected);
+        assert!(store.load(&reference).is_err());
+
+        let legacy = store
+            .seal(
+                "owner",
+                "job-v1",
+                &[SealMedia::bytes("source", "scalar", vec![1])],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.open_projection(&legacy),
+            Err(QueueMediaError::ProjectionUnavailable(
+                QueueMediaProjectionFailure::LegacyV1
+            ))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn v2_mixed_decoder_keeps_inline_bytes_in_memory_and_drops_private_paths() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let source = home.path().join("source-video.mp4");
+        fs::write(&source, b"path-shaped-private-video").unwrap();
+        let fingerprint = QueueMediaOperationFingerprint::sha256_v1(b"operation");
+        let reference = store
+            .seal_v2_with_operation_fingerprint(
+                "owner",
+                "job-mixed",
+                &fingerprint,
+                &projection(),
+                &[
+                    SealMedia::bytes("identity_image", "scalar", b"face-bytes".to_vec()),
+                    SealMedia::path("source_video_path", "scalar", &source),
+                ],
+            )
+            .unwrap();
+        let hydrated = store.decrypt_mixed(&reference).unwrap();
+        assert!(matches!(
+            store.decrypt_to_private_staging(&reference),
+            Err(QueueMediaError::MixedSinkHydrationRequired)
+        ));
+        assert!(matches!(
+            &hydrated.media[0].payload,
+            DecryptedQueueMediaPayload::Bytes(bytes) if bytes == b"face-bytes"
+        ));
+        let staged = match &hydrated.media[1].payload {
+            DecryptedQueueMediaPayload::PrivatePath(path) => path.clone(),
+            _ => panic!("path-shaped media was not staged"),
+        };
+        assert_eq!(fs::read(&staged).unwrap(), b"path-shaped-private-video");
+        let root = staged.parent().unwrap().to_path_buf();
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        drop(hydrated);
+        assert!(!root.exists());
+    }
+
     #[test]
     fn initializes_once_and_reopens_the_same_key() {
         let home = tempfile::tempdir().unwrap();
@@ -2342,6 +3629,7 @@ mod tests {
         store
             .seal_file(
                 &reference,
+                None,
                 None,
                 &[SealMedia::bytes("source", "one", vec![1, 2, 3])],
                 &staging,

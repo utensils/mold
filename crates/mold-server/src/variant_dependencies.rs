@@ -1557,6 +1557,7 @@ pub(crate) async fn prepare_inputs_for_devices(
                 crate::identity_dependencies::materialize_identity_assets(
                     &dependency_context,
                     request,
+                    context.queue_media_projection.as_ref(),
                     &family,
                     &mut frozen,
                     &mut pending,
@@ -2211,6 +2212,9 @@ const fn h3_preparation_capacity_sensitive(backend: mold_core::GpuBackend) -> bo
 
 #[derive(Clone, Debug, Default)]
 pub struct DependencyPreparationContext {
+    /// Authenticated scheduling facts for durable media that intentionally
+    /// remains encrypted during dependency preparation.
+    pub(crate) queue_media_projection: Option<crate::queue_media_store::QueueMediaProjection>,
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) h3_private_ingress_grant: Option<crate::h3_private_bridge::H3PrivateIngressGrant>,
     /// Staged Ref2VA references, as a payload-free view.

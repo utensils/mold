@@ -1615,7 +1615,10 @@ impl Coordinator {
         let queue_rank = self.synthetic_id;
         self.synthetic_id = self.synthetic_id.saturating_add(1);
         let id = job.id.clone();
-        let shape_bucket = crate::gpu_pool::oom_shape_bucket(&job.request);
+        let shape_bucket = crate::gpu_pool::oom_shape_bucket_with_projection(
+            &job.request,
+            job.deferred_media.as_ref().map(|media| media.projection()),
+        );
         if let Some(error) =
             crate::gpu_pool::model_unschedulable_message(&job.request.model, Some(&shape_bucket))
         {
@@ -1809,6 +1812,11 @@ impl Coordinator {
             pending.preparation = PreparationState::Preparing;
             let state = self.state.clone();
             let request = pending.job.request.clone();
+            let queue_media_projection = pending
+                .job
+                .deferred_media
+                .as_ref()
+                .map(|media| media.projection().clone());
             let progress = pending.job.progress_tx.clone();
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             let context = crate::variant_dependencies::DependencyPreparationContext {
@@ -1847,11 +1855,13 @@ impl Coordinator {
             let context = crate::variant_dependencies::DependencyPreparationContext {
                 frozen_identity,
                 frozen_identity_warning,
+                queue_media_projection,
             };
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             let context = crate::variant_dependencies::DependencyPreparationContext {
                 frozen_identity,
                 frozen_identity_warning,
+                queue_media_projection,
                 ..context
             };
             let preparer = self.preparer.clone();
@@ -2863,13 +2873,19 @@ impl Coordinator {
             generation_hard_ordinal(&self.state, &pending.job.id, &pending.job.request);
         let eligible_device_facts =
             constrained_generation_device_facts(device_facts, hard_ordinal, None);
-        let resolved = crate::execution_plan::resolve_execution_plans_for_coordinator(
-            &config,
-            &pending.job.request,
-            &eligible_device_facts,
-            offload_requested,
-            pending.prepared_inputs.as_ref(),
-        );
+        let resolved =
+            crate::execution_plan::resolve_execution_plans_for_coordinator_with_projection(
+                &config,
+                &pending.job.request,
+                &eligible_device_facts,
+                offload_requested,
+                pending.prepared_inputs.as_ref(),
+                pending
+                    .job
+                    .deferred_media
+                    .as_ref()
+                    .map(|media| media.projection()),
+            );
         let resolved = resolved.map(|plans| {
             let Some(expected) = pending
                 .job
@@ -3628,6 +3644,11 @@ impl Coordinator {
                                     &self.state,
                                     &worker,
                                     &pending.job.request,
+                                    pending
+                                        .job
+                                        .deferred_media
+                                        .as_ref()
+                                        .map(|media| media.projection()),
                                     &plan.execution_fingerprint,
                                 )
                             })
@@ -3636,13 +3657,25 @@ impl Coordinator {
                                 model_family: plan.model_family.clone(),
                                 model_fingerprint: pending.job.request.model.clone(),
                                 work_kind: "generation".into(),
-                                shape_bucket: generation_shape_bucket(&pending.job.request),
+                                shape_bucket: generation_shape_bucket_with_projection(
+                                    &pending.job.request,
+                                    pending
+                                        .job
+                                        .deferred_media
+                                        .as_ref()
+                                        .map(|media| media.projection()),
+                                ),
                                 execution_fingerprint: plan.execution_fingerprint.clone(),
                             });
-                        let static_estimate = static_generation_estimate(
+                        let static_estimate = static_generation_estimate_with_projection(
                             &pending.job.request,
                             plan.predicted_vram_peak_bytes,
                             plan.admission_host_demand_bytes(),
+                            pending
+                                .job
+                                .deferred_media
+                                .as_ref()
+                                .map(|media| media.projection()),
                         );
                         let estimate = self.estimates.estimate(&key, static_estimate);
                         let (cold_setup_ms, warm_setup_ms, predicted_run_ms) =
@@ -4144,6 +4177,7 @@ impl Coordinator {
                     &self.state,
                     &worker,
                     request,
+                    None,
                     &plan.execution_fingerprint,
                 );
                 let static_estimate = static_generation_estimate(
@@ -5031,6 +5065,11 @@ impl Coordinator {
                         &self.state,
                         &worker,
                         &pending.job.request,
+                        pending
+                            .job
+                            .deferred_media
+                            .as_ref()
+                            .map(|media| media.projection()),
                         &execution_plan.execution_fingerprint,
                     );
                     // Admission reserved `max(static, learned)`; carry the
@@ -5449,6 +5488,11 @@ impl Coordinator {
                                     &self.state,
                                     worker.as_ref(),
                                     &pending.job.request,
+                                    pending
+                                        .job
+                                        .deferred_media
+                                        .as_ref()
+                                        .map(|media| media.projection()),
                                     assignment.placement.execution_fingerprint.as_str(),
                                 )
                             })
@@ -5804,6 +5848,7 @@ fn gpu_job_from_generation(
         id: job.id,
         model: job.request.model.clone(),
         request: job.request,
+        deferred_media: job.deferred_media,
         resolved_references: job.resolved_references,
         completion_payload: job.completion_payload,
         progress_tx: job.progress_tx,
@@ -5840,6 +5885,7 @@ fn generation_and_prepared_from_gpu_job(
         GenerationJob {
             id: job.id,
             request: job.request,
+            deferred_media: job.deferred_media,
             resolved_references: job.resolved_references,
             completion_payload: job.completion_payload,
             progress_tx: job.progress_tx,
@@ -6292,6 +6338,7 @@ fn generation_estimate_key(
     state: &AppState,
     worker: &GpuWorker,
     request: &mold_core::GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
     execution_fingerprint: &str,
 ) -> EstimateKey {
     let model_family = state
@@ -6307,7 +6354,7 @@ fn generation_estimate_key(
         model_family,
         model_fingerprint: request.model.clone(),
         work_kind: "generation".into(),
-        shape_bucket: generation_shape_bucket(request),
+        shape_bucket: generation_shape_bucket_with_projection(request, projection),
         execution_fingerprint: execution_fingerprint.to_string(),
     }
 }
@@ -6539,8 +6586,20 @@ fn placement_preview_outcome_for_plan_failure(failure: &GenerationPlanFailure) -
 /// Returns exactly `1_000` for every request that does not engage the branch,
 /// which keeps an inert scale and a zero identity weight byte-identical in the
 /// estimate rather than merely close.
+#[cfg(test)]
 fn denoise_forward_multiplier_permille(request: &mold_core::GenerateRequest) -> u64 {
-    if !mold_core::identity::request_uses_true_cfg(request) {
+    denoise_forward_multiplier_permille_with_projection(request, None)
+}
+
+fn denoise_forward_multiplier_permille_with_projection(
+    request: &mold_core::GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> u64 {
+    let uses_true_cfg = (mold_core::identity::request_carries_identity_photo(request)
+        || projection.is_some_and(|projection| projection.identity_present))
+        && mold_core::identity::effective_id_weight(request) > 0.0
+        && mold_core::identity::true_cfg_engages(mold_core::identity::effective_true_cfg(request));
+    if !uses_true_cfg {
         return 1_000;
     }
     let steps = u64::from(request.steps).max(1);
@@ -6549,7 +6608,15 @@ fn denoise_forward_multiplier_permille(request: &mold_core::GenerateRequest) -> 
     1_000 + branched.saturating_mul(1_000) / steps
 }
 
+#[cfg(test)]
 fn generation_shape_bucket(request: &mold_core::GenerateRequest) -> String {
+    generation_shape_bucket_with_projection(request, None)
+}
+
+fn generation_shape_bucket_with_projection(
+    request: &mold_core::GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> String {
     // The true-CFG arm is part of the bucket KEY, not just the static estimate:
     // a branched run and an ordinary one of the same geometry take roughly
     // twice the denoise time, and letting their samples share a bucket teaches
@@ -6565,6 +6632,16 @@ fn generation_shape_bucket(request: &mold_core::GenerateRequest) -> String {
     // until it failed a second time. An unbranched request must therefore
     // produce the byte-identical legacy key, which
     // `an_ordinary_request_keeps_the_legacy_bucket_key` pins against a literal.
+    let source = request.source_image.is_some()
+        || request.source_video.is_some()
+        || request.source_video_path.is_some()
+        || projection.is_some_and(|projection| {
+            projection.source_image
+                || projection.source_video_inline
+                || projection.source_video_path
+        });
+    let edit_count = request.edit_images.as_ref().map_or(0, Vec::len)
+        + projection.map_or(0, |projection| projection.edit_images.len());
     let base = format!(
         "{}x{}:s{}:f{}:fps{}:a{}:src{}:edit{}:lora{}:b{}",
         request.width,
@@ -6573,18 +6650,26 @@ fn generation_shape_bucket(request: &mold_core::GenerateRequest) -> String {
         request.frames.unwrap_or(1),
         request.fps.unwrap_or(0),
         u8::from(request.enable_audio == Some(true)),
-        u8::from(request.source_image.is_some() || request.source_video.is_some()),
-        request.edit_images.as_ref().map_or(0, Vec::len),
+        u8::from(source),
+        edit_count,
         u8::from(request.lora.is_some() || request.loras.as_ref().is_some_and(|v| !v.is_empty())),
         request.batch_size,
     );
-    match denoise_forward_multiplier_permille(request) {
+    match denoise_forward_multiplier_permille_with_projection(request, projection) {
         1_000 => base,
         multiplier => format!("{base}:cfg{multiplier}"),
     }
 }
 
+#[cfg(test)]
 fn static_generation_time_ms(request: &mold_core::GenerateRequest) -> u64 {
+    static_generation_time_ms_with_projection(request, None)
+}
+
+fn static_generation_time_ms_with_projection(
+    request: &mold_core::GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> u64 {
     let megapixels = (u64::from(request.width) * u64::from(request.height)).div_ceil(1_000_000);
     let frames = u64::from(request.frames.unwrap_or(1));
     // The 1_000 ms term is fixed overhead and is deliberately outside the
@@ -6594,7 +6679,9 @@ fn static_generation_time_ms(request: &mold_core::GenerateRequest) -> u64 {
         .saturating_mul(u64::from(request.steps).max(1))
         .saturating_mul(frames)
         .saturating_mul(125)
-        .saturating_mul(denoise_forward_multiplier_permille(request))
+        .saturating_mul(denoise_forward_multiplier_permille_with_projection(
+            request, projection,
+        ))
         / 1_000;
     1_000u64.saturating_add(denoise_ms)
 }
@@ -6608,8 +6695,18 @@ fn static_generation_estimate(
     vram_bytes: u64,
     host_bytes: u64,
 ) -> StaticEstimate {
+    static_generation_estimate_with_projection(request, vram_bytes, host_bytes, None)
+}
+
+fn static_generation_estimate_with_projection(
+    request: &mold_core::GenerateRequest,
+    vram_bytes: u64,
+    host_bytes: u64,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> StaticEstimate {
     let timing = mold_scheduler::static_timing_for(mold_scheduler::WorkKind::Generation);
-    let predicted_run_ms = static_generation_time_ms(request).max(timing.predicted_run_ms);
+    let predicted_run_ms =
+        static_generation_time_ms_with_projection(request, projection).max(timing.predicted_run_ms);
     StaticEstimate {
         total_ms: timing.cold_setup_ms.saturating_add(predicted_run_ms),
         cold_setup_ms: timing.cold_setup_ms,
@@ -6845,6 +6942,23 @@ fn monotonic_deadline_ms(deadline: Instant) -> u64 {
 mod true_cfg_estimate_tests {
     use super::*;
 
+    #[test]
+    fn scheduler_transport_and_retry_adapters_move_the_opaque_media_handle() {
+        let source = include_str!("mod.rs");
+        let to_gpu = source
+            .find("fn gpu_job_from_generation(")
+            .expect("generation-to-GPU adapter");
+        let from_gpu = source
+            .find("fn generation_and_prepared_from_gpu_job(")
+            .expect("GPU retry adapter");
+        assert!(source[to_gpu..from_gpu].contains("deferred_media: job.deferred_media"));
+        let retry_end = source[from_gpu..]
+            .find("\nfn generation_from_gpu_job(")
+            .map(|offset| from_gpu + offset)
+            .expect("retry adapter boundary");
+        assert!(source[from_gpu..retry_end].contains("deferred_media: job.deferred_media"));
+    }
+
     fn request() -> mold_core::GenerateRequest {
         let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
             "prompt": "a portrait",
@@ -6945,6 +7059,55 @@ mod true_cfg_estimate_tests {
         assert_eq!(
             generation_shape_bucket(&plain),
             generation_shape_bucket(&zero)
+        );
+    }
+
+    #[test]
+    fn authenticated_projection_matches_hydrated_shape_and_true_cfg_timing() {
+        let mut hydrated = request();
+        hydrated.true_cfg = Some(2.0);
+        hydrated.source_image = Some(vec![1, 2, 3]);
+        hydrated.edit_images = Some(vec![vec![4], vec![5]]);
+        let mut sanitized = hydrated.clone();
+        sanitized.id_image = None;
+        sanitized.source_image = None;
+        sanitized.edit_images = None;
+        let projection = crate::queue_media_store::QueueMediaProjection {
+            source_image: true,
+            identity_present: true,
+            identity_photograph_count: 1,
+            edit_images: vec![
+                crate::queue_media_store::ProjectedImageDimensions::UnreadableHeader,
+                crate::queue_media_store::ProjectedImageDimensions::UnreadableHeader,
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            generation_shape_bucket_with_projection(&hydrated, None),
+            generation_shape_bucket_with_projection(&sanitized, Some(&projection)),
+        );
+        assert_eq!(
+            static_generation_time_ms_with_projection(&hydrated, None),
+            static_generation_time_ms_with_projection(&sanitized, Some(&projection)),
+        );
+        assert_eq!(
+            crate::gpu_pool::oom_shape_bucket_with_projection(&hydrated, None),
+            crate::gpu_pool::oom_shape_bucket_with_projection(&sanitized, Some(&projection)),
+        );
+
+        let mut hydrated_path = request();
+        hydrated_path.id_image = None;
+        hydrated_path.source_video_path = Some("/private/video.mp4".into());
+        let mut sanitized_path = hydrated_path.clone();
+        sanitized_path.source_video_path = None;
+        let path_projection = crate::queue_media_store::QueueMediaProjection {
+            source_video_path: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            generation_shape_bucket_with_projection(&hydrated_path, None),
+            generation_shape_bucket_with_projection(&sanitized_path, Some(&path_projection)),
         );
     }
 
@@ -7565,6 +7728,7 @@ mod tests {
             GenerationJob {
                 id: id.to_string(),
                 request,
+                deferred_media: None,
                 resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
@@ -10207,6 +10371,7 @@ mod tests {
                 &coordinator.state,
                 &worker,
                 &coordinator.pending["learned-memory"].job.request,
+                None,
                 &execution.execution_fingerprint,
             ),
             EstimateObservation {
@@ -13893,6 +14058,7 @@ mod tests {
                 &coordinator.state,
                 &worker,
                 &request,
+                None,
                 &execution.execution_fingerprint,
             ),
             EstimateObservation {

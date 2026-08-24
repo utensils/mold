@@ -2812,6 +2812,7 @@ async fn generate(
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
+        deferred_media: None,
         resolved_references,
         completion_payload: SseCompletionPayload::Full,
         progress_tx: None,
@@ -3966,6 +3967,7 @@ async fn generate_stream(
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
+        deferred_media: None,
         resolved_references,
         completion_payload,
         progress_tx: Some(tx.clone()),

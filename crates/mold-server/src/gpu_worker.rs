@@ -3810,22 +3810,6 @@ fn process_job_with_sink(
         job.registry
             .install_running_cancellation(&job_id, cancellation.clone());
     }
-    let reference_bindings = match crate::reference_uploads::inference_bindings_for_request(
-        &job.request,
-        job.resolved_references.as_ref(),
-        inference_cancellation,
-    ) {
-        Ok(bindings) => bindings,
-        Err(error) => {
-            let err_msg = format!("generation reference binding error: {error:#}");
-            if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-            }
-            let _ = job.result_tx.send(Err(err_msg));
-            return false;
-        }
-    };
-
     // Mark the registry entry as running on this specific GPU. The /api/queue
     // listing now shows this row as `state: "running"` with `gpu: <ordinal>`.
     // The V2 coordinator claims the row atomically before transport. Legacy
@@ -3842,6 +3826,44 @@ fn process_job_with_sink(
         finish_generation_cancelled(job, user_requested);
         return false;
     }
+
+    // A GpuJob reaches this function only after the coordinator has granted a
+    // concrete device lease. Hydrate authenticated media now—not while it is
+    // queued, preparing dependencies, retrying transport, or waiting for the
+    // owner thread—and retain the staging owner for the complete attempt.
+    let _hydrated_media_lease = if let Some(deferred) = job.deferred_media.take() {
+        match deferred.hydrate_into(&job_id, &mut job.request) {
+            Ok(lease) => Some(lease),
+            Err(error) => {
+                finish_generation_hydration_failure(job, error);
+                return false;
+            }
+        }
+    } else {
+        None
+    };
+
+    if inference_cancellation.is_some_and(|token| token.is_cancelled()) {
+        let user_requested = job.registry.cancel_requested(&job_id);
+        finish_generation_cancelled(job, user_requested);
+        return false;
+    }
+
+    let reference_bindings = match crate::reference_uploads::inference_bindings_for_request(
+        &job.request,
+        job.resolved_references.as_ref(),
+        inference_cancellation,
+    ) {
+        Ok(bindings) => bindings,
+        Err(error) => {
+            let err_msg = format!("generation reference binding error: {error:#}");
+            if let Some(ref tx) = job.progress_tx {
+                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+            }
+            let _ = job.result_tx.send(Err(err_msg));
+            return false;
+        }
+    };
 
     // Hand the frozen plan's admitted peak down to the engine for this
     // dispatch. Held for the whole job (load + inference) and released on
@@ -4675,6 +4697,35 @@ fn finish_generation_cancelled(mut job: GpuJob, user_requested: bool) {
             SseErrorEvent::failed(message.clone())
         } else {
             SseErrorEvent::retained(message.clone())
+        };
+        let _ = tx.send(SseMessage::Error(event));
+    }
+    let _ = job.result_tx.send(Err(message));
+}
+
+fn finish_generation_hydration_failure(
+    mut job: GpuJob,
+    error: crate::queue_media_runtime::DeferredQueueMediaError,
+) {
+    use crate::queue_media_runtime::DeferredHydrationDisposition;
+
+    let disposition = error.disposition();
+    if let Some(ticket) = job.journal.take() {
+        match disposition {
+            DeferredHydrationDisposition::Hold => {
+                ticket.hold("durable queue-media validation failed")
+            }
+            DeferredHydrationDisposition::Retain => {
+                ticket.retain();
+            }
+        }
+    }
+    tracing::error!(job = %job.id, %error, "durable queue-media hydration failed");
+    let message = error.public_message().to_string();
+    if let Some(ref tx) = job.progress_tx {
+        let event = match disposition {
+            DeferredHydrationDisposition::Hold => SseErrorEvent::failed(message.clone()),
+            DeferredHydrationDisposition::Retain => SseErrorEvent::retained(message.clone()),
         };
         let _ = tx.send(SseMessage::Error(event));
     }
@@ -6080,6 +6131,37 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn durable_media_hydrates_only_inside_the_device_owner_after_two_cancel_fences() {
+        let source = include_str!("gpu_worker.rs");
+        let start = source
+            .find("fn process_job_with_sink(")
+            .expect("GPU generation owner");
+        let end = source[start..]
+            .find("\nfn finish_generation_success(")
+            .map(|offset| start + offset)
+            .expect("GPU generation owner boundary");
+        let body = &source[start..end];
+        let install = body
+            .find("install_running_cancellation")
+            .expect("attempt cancellation installation");
+        let hydrate = body
+            .find("deferred.hydrate_into")
+            .expect("lease-bound durable hydration");
+        let binding = body
+            .find("inference_bindings_for_request")
+            .expect("reference preparation");
+        let cancel_checks = body
+            .match_indices("inference_cancellation.is_some_and(|token| token.is_cancelled())")
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+
+        assert!(install < cancel_checks[0]);
+        assert!(cancel_checks[0] < hydrate);
+        assert!(hydrate < cancel_checks[1]);
+        assert!(cancel_checks[1] < binding);
+    }
+
+    #[test]
     fn claimed_h3_attempt_has_a_cache_free_execution_route() {
         let source = include_str!("gpu_worker.rs");
         let owner_start = source
@@ -6218,6 +6300,7 @@ mod tests {
                     GenerationJob {
                         id: format!("{id}-reserved-{index}"),
                         request: request.clone(),
+                        deferred_media: None,
                         resolved_references: None,
                         completion_payload: SseCompletionPayload::Full,
                         progress_tx: None,
@@ -6241,6 +6324,7 @@ mod tests {
             id: id.to_string(),
             model: request.model.clone(),
             request,
+            deferred_media: None,
             resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: Some(progress_tx),
@@ -8329,6 +8413,7 @@ mod tests {
             id: "job-upscale-test".to_string(),
             model: request.model.clone(),
             request,
+            deferred_media: None,
             resolved_references: None,
             completion_payload: crate::state::SseCompletionPayload::Full,
             progress_tx: None,
@@ -8627,6 +8712,7 @@ mod tests {
                 id: "stale".to_string(),
                 model: request.model.clone(),
                 request,
+                deferred_media: None,
                 resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
@@ -9492,6 +9578,7 @@ mod tests {
                 id: id.to_string(),
                 model: request.model.clone(),
                 request,
+                deferred_media: None,
                 resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
@@ -9624,6 +9711,7 @@ mod tests {
                     id: "barrier-generation".to_string(),
                     model: request.model.clone(),
                     request,
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
@@ -10260,6 +10348,7 @@ mod tests {
                     id: "invalidated".to_string(),
                     model: "test:q4".to_string(),
                     request,
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
@@ -10805,6 +10894,7 @@ mod tests {
                 GenerationJob {
                     id: "generate".to_string(),
                     request: request.clone(),
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
@@ -10827,6 +10917,7 @@ mod tests {
                 id: "generate".to_string(),
                 model: "lifecycle".to_string(),
                 request,
+                deferred_media: None,
                 resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
@@ -11102,6 +11193,7 @@ mod tests {
                 GenerationJob {
                     id: "placeholder".to_string(),
                     request: request.clone(),
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
@@ -11128,6 +11220,7 @@ mod tests {
                 id: "buffered-job".to_string(),
                 model: request.model.clone(),
                 request,
+                deferred_media: None,
                 resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: Some(progress_tx),
@@ -11237,6 +11330,7 @@ mod tests {
             id: "publish-fails".to_string(),
             model: "mock-model".to_string(),
             request,
+            deferred_media: None,
             resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
@@ -11305,6 +11399,7 @@ mod tests {
             id: "publishes".to_string(),
             model: "mock-model".to_string(),
             request,
+            deferred_media: None,
             resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
@@ -11359,6 +11454,7 @@ mod tests {
                     id: "cancelled-job".to_string(),
                     model: "cancel-model".to_string(),
                     request,
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
@@ -11428,6 +11524,7 @@ mod tests {
                 GenerationJob {
                     id: "placeholder".to_string(),
                     request: request.clone(),
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
@@ -11454,6 +11551,7 @@ mod tests {
                     id: "panic-job".to_string(),
                     model: "panic-model".to_string(),
                     request: panic_request,
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
@@ -11501,6 +11599,7 @@ mod tests {
                 GenerationJob {
                     id: "placeholder-2".to_string(),
                     request: request.clone(),
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
@@ -11525,6 +11624,7 @@ mod tests {
                     id: "followup".to_string(),
                     model: "panic-model".to_string(),
                     request,
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
@@ -11944,6 +12044,7 @@ mod tests {
                 GenerationJob {
                     id: "queue-slot".to_string(),
                     request: job.request.clone(),
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,

@@ -1851,6 +1851,44 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         return;
     }
 
+    // The single-worker loop is the execution-slot lease. Keep the durable
+    // bundle opaque through all queueing and cancellation-before-start paths,
+    // then hydrate off Tokio immediately before reference/model preparation.
+    let _hydrated_media_lease = if let Some(deferred) = job.deferred_media.take() {
+        let expected_job_id = job.id.clone();
+        let mut request = job.request.clone();
+        match tokio::task::spawn_blocking(move || {
+            let result = deferred.hydrate_into(&expected_job_id, &mut request);
+            (request, result)
+        })
+        .await
+        {
+            Ok((request, Ok(lease))) => {
+                job.request = request;
+                Some(lease)
+            }
+            Ok((_request, Err(error))) => {
+                finish_single_worker_hydration_failure(job, error);
+                return;
+            }
+            Err(_) => {
+                finish_single_worker_hydration_failure(
+                    job,
+                    crate::queue_media_runtime::DeferredQueueMediaError::worker_failure(),
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    if attempt_cancellation.is_cancelled() {
+        let user_requested = state.job_registry.cancel_requested(&job.id);
+        finish_single_worker_cancelled(job, user_requested);
+        return;
+    }
+
     // Send "now processing" event (position 0). `id` echoes the
     // server-assigned UUID so reconnecting clients can match progress
     // updates to their persisted card.
@@ -2364,6 +2402,35 @@ fn finish_single_worker_cancelled(mut job: GenerationJob, user_requested: bool) 
     let _ = job.result_tx.send(Err(message));
 }
 
+fn finish_single_worker_hydration_failure(
+    mut job: GenerationJob,
+    error: crate::queue_media_runtime::DeferredQueueMediaError,
+) {
+    use crate::queue_media_runtime::DeferredHydrationDisposition;
+
+    let disposition = error.disposition();
+    if let Some(ticket) = job.journal.take() {
+        match disposition {
+            DeferredHydrationDisposition::Hold => {
+                ticket.hold("durable queue-media validation failed")
+            }
+            DeferredHydrationDisposition::Retain => {
+                ticket.retain();
+            }
+        }
+    }
+    tracing::error!(job = %job.id, %error, "durable queue-media hydration failed");
+    let message = error.public_message().to_string();
+    if let Some(ref tx) = job.progress_tx {
+        let event = match disposition {
+            DeferredHydrationDisposition::Hold => SseErrorEvent::failed(message.clone()),
+            DeferredHydrationDisposition::Retain => SseErrorEvent::retained(message.clone()),
+        };
+        let _ = tx.send(SseMessage::Error(event));
+    }
+    let _ = job.result_tx.send(Err(message));
+}
+
 // ── Multi-GPU queue dispatcher ──────────────────────────────────────────────
 
 /// Runs the multi-GPU dispatch loop. Routes each generation job to the best
@@ -2805,7 +2872,10 @@ async fn run_queue_dispatcher_with_tuning(
         let model_name = job.request.model.clone();
         let estimated_vram = estimate_model_vram(&model_name);
 
-        let shape_bucket = crate::gpu_pool::oom_shape_bucket(&job.request);
+        let shape_bucket = crate::gpu_pool::oom_shape_bucket_with_projection(
+            &job.request,
+            job.deferred_media.as_ref().map(|media| media.projection()),
+        );
         if let Some(err_msg) =
             crate::gpu_pool::model_unschedulable_message(&model_name, Some(&shape_bucket))
         {
@@ -2878,6 +2948,7 @@ async fn run_queue_dispatcher_with_tuning(
             id: job.id.clone(),
             model: model_name.clone(),
             request: job.request,
+            deferred_media: job.deferred_media,
             resolved_references: job.resolved_references,
             completion_payload: job.completion_payload,
             progress_tx: job.progress_tx,
@@ -3473,6 +3544,37 @@ pub fn estimate_model_vram(model_name: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn durable_media_hydrates_only_after_the_single_worker_slot_and_cancel_fences() {
+        let source = include_str!("queue.rs");
+        let start = source
+            .find("async fn process_job(")
+            .expect("single-worker generation handler");
+        let end = source[start..]
+            .find("\nfn claim_single_worker_dispatch(")
+            .map(|offset| start + offset)
+            .expect("single-worker generation boundary");
+        let body = &source[start..end];
+        let install = body
+            .find("install_running_cancellation")
+            .expect("attempt cancellation installation");
+        let slot = body.find("mark_running").expect("single-worker slot claim");
+        let hydrate = body
+            .find("deferred.hydrate_into")
+            .expect("slot-bound durable hydration");
+        let binding = body
+            .find("inference_bindings_for_request")
+            .expect("reference preparation");
+        let cancel_checks = body
+            .match_indices("attempt_cancellation.is_cancelled()")
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+
+        assert!(install < slot && slot < cancel_checks[0]);
+        assert!(cancel_checks[0] < hydrate);
+        assert!(hydrate < cancel_checks[1]);
+        assert!(cancel_checks[1] < binding);
+    }
     use super::*;
     use crate::gpu_pool::{GpuPool, GpuWorker};
     use crate::model_cache::ModelCache;
@@ -4357,6 +4459,7 @@ mod tests {
             id: "legacy-sibling-post-upscale".to_string(),
             model: request.model.clone(),
             request,
+            deferred_media: None,
             resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
@@ -6379,6 +6482,7 @@ mod tests {
             id: String::new(),
             model: "busy-model".to_string(),
             request: fake_request("busy-model"),
+            deferred_media: None,
             resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
@@ -6412,6 +6516,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: String::new(),
             request: fake_request("flux-dev:q4"),
+            deferred_media: None,
             resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
@@ -6464,6 +6569,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: String::new(),
             request: fake_request("flux-dev:q4"),
+            deferred_media: None,
             resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
@@ -6547,6 +6653,7 @@ mod tests {
         BufferedJob::new(crate::state::GenerationJob {
             id: String::new(),
             request: fake_request(model),
+            deferred_media: None,
             resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
@@ -6564,6 +6671,7 @@ mod tests {
         BufferedJob::new(crate::state::GenerationJob {
             id: id.to_string(),
             request: fake_request(model),
+            deferred_media: None,
             resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
@@ -6824,6 +6932,7 @@ mod tests {
             let job = crate::state::GenerationJob {
                 id: String::new(),
                 request: fake_request(model),
+                deferred_media: None,
                 resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
@@ -6899,6 +7008,7 @@ mod tests {
             let job = crate::state::GenerationJob {
                 id: id.to_string(),
                 request: fake_request(&format!("model-{id}")),
+                deferred_media: None,
                 resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
@@ -6959,6 +7069,7 @@ mod tests {
             let job = GenerationJob {
                 id: String::new(),
                 request: fake_request(&format!("model-{i}")),
+                deferred_media: None,
                 resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
@@ -7066,6 +7177,7 @@ mod tests {
             let job = crate::state::GenerationJob {
                 id: String::new(),
                 request: fake_request(&format!("model-{i}")),
+                deferred_media: None,
                 resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
@@ -7202,6 +7314,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: String::new(),
             request,
+            deferred_media: None,
             resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
@@ -7245,6 +7358,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: "auto-job".to_string(),
             request: fake_request("flux-dev:q4"),
+            deferred_media: None,
             resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
@@ -7297,6 +7411,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: "paused-job".to_string(),
             request: fake_request("flux-dev:q4"),
+            deferred_media: None,
             resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
@@ -7358,6 +7473,7 @@ mod tests {
                     crate::state::GenerationJob {
                         id: id.to_string(),
                         request: fake_request("flux-dev:q4"),
+                        deferred_media: None,
                         resolved_references: None,
                         completion_payload: SseCompletionPayload::Full,
                         progress_tx: None,
@@ -7421,6 +7537,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: "parked-job".to_string(),
             request: fake_request("flux-dev:q4"),
+            deferred_media: None,
             resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,

@@ -63,6 +63,9 @@ pub struct GenerationJob {
     /// construct `GenerationJob` directly may leave it empty.
     pub id: String,
     pub request: mold_core::GenerateRequest,
+    /// Authenticated durable media remains opaque until this job owns its
+    /// execution slot or concrete device lease.
+    pub deferred_media: Option<crate::queue_media_runtime::DeferredQueueMedia>,
     /// Private, payload-bearing reference authority. The public request is
     /// descriptor-only by the time this exists; this owner keeps safe-open
     /// staging alive without exposing paths to queue metadata or recovery.
@@ -984,6 +987,7 @@ mod tests {
         GenerationJob {
             id: id.to_string(),
             request,
+            deferred_media: None,
             resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,

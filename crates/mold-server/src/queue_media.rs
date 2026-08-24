@@ -15,6 +15,7 @@
 //! be reconstructed from media records, so extraction rejects them explicitly.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 
 use mold_core::{GenerationReference, KeyframeCondition, LoraWeight};
 
@@ -107,6 +108,14 @@ pub enum QueueMediaError {
     MalformedRecords(QueueMediaRole),
     #[error("a media collection is too large to index")]
     CollectionTooLarge,
+    #[error("deferred media cannot overlay a request that already carries authority field {0}")]
+    OverlayAuthorityConflict(&'static str),
+    #[error("decrypted queue-media record has an invalid role or position label")]
+    InvalidStoredRecordLabel,
+    #[error("decrypted queue-media text is not UTF-8")]
+    InvalidStoredText,
+    #[error("decrypted queue-media path is not representable as UTF-8")]
+    InvalidStoredPath,
 }
 
 /// Stable semantic role of one extracted request value.
@@ -140,6 +149,87 @@ pub enum QueueMediaPosition {
     Scalar,
     Collection,
     Item(u32),
+}
+
+impl QueueMediaRole {
+    fn wire_label(self) -> &'static str {
+        match self {
+            Self::SourceImage => "source_image",
+            Self::SourceImageName => "source_image_name",
+            Self::IdentityImage => "identity_image",
+            Self::IdentityImageName => "identity_image_name",
+            Self::IdentityImages => "identity_images",
+            Self::IdentityImageNames => "identity_image_names",
+            Self::EditImages => "edit_images",
+            Self::References => "references",
+            Self::MaskImage => "mask_image",
+            Self::ControlImage => "control_image",
+            Self::AudioFile => "audio_file",
+            Self::AudioFilePath => "audio_file_path",
+            Self::SourceVideo => "source_video",
+            Self::SourceVideoPath => "source_video_path",
+            Self::ExtendVideo => "extend_video",
+            Self::ExtendVideoPath => "extend_video_path",
+            Self::Keyframes => "keyframes",
+            Self::HdrExrDir => "hdr_exr_dir",
+            Self::Lora => "lora",
+            Self::Loras => "loras",
+        }
+    }
+
+    fn from_wire_label(value: &str) -> Option<Self> {
+        Some(match value {
+            "source_image" => Self::SourceImage,
+            "source_image_name" => Self::SourceImageName,
+            "identity_image" => Self::IdentityImage,
+            "identity_image_name" => Self::IdentityImageName,
+            "identity_images" => Self::IdentityImages,
+            "identity_image_names" => Self::IdentityImageNames,
+            "edit_images" => Self::EditImages,
+            "references" => Self::References,
+            "mask_image" => Self::MaskImage,
+            "control_image" => Self::ControlImage,
+            "audio_file" => Self::AudioFile,
+            "audio_file_path" => Self::AudioFilePath,
+            "source_video" => Self::SourceVideo,
+            "source_video_path" => Self::SourceVideoPath,
+            "extend_video" => Self::ExtendVideo,
+            "extend_video_path" => Self::ExtendVideoPath,
+            "keyframes" => Self::Keyframes,
+            "hdr_exr_dir" => Self::HdrExrDir,
+            "lora" => Self::Lora,
+            "loras" => Self::Loras,
+            _ => return None,
+        })
+    }
+
+    fn is_path_shaped(self) -> bool {
+        matches!(
+            self,
+            Self::AudioFilePath | Self::SourceVideoPath | Self::ExtendVideoPath
+        )
+    }
+}
+
+impl QueueMediaPosition {
+    fn wire_label(self) -> String {
+        match self {
+            Self::Scalar => "scalar".to_string(),
+            Self::Collection => "collection".to_string(),
+            Self::Item(index) => format!("item:{index}"),
+        }
+    }
+
+    fn from_wire_label(value: &str) -> Option<Self> {
+        match value {
+            "scalar" => Some(Self::Scalar),
+            "collection" => Some(Self::Collection),
+            _ => value
+                .strip_prefix("item:")
+                .and_then(|index| index.parse().ok())
+                .map(Self::Item),
+        }
+    }
 }
 
 pub(crate) enum QueueMediaPayload {
@@ -596,6 +686,231 @@ fn extract_request_fields(
     })
 }
 
+/// Derive the exact payload-free facts authenticated by the V2 first record.
+pub fn project_request_media(
+    media: &OpaqueQueueMedia,
+) -> Result<crate::queue_media_store::QueueMediaProjection, QueueMediaError> {
+    use crate::queue_media_store::{ProjectedImageDimensions, QueueMediaProjection};
+
+    let mut projection = QueueMediaProjection::default();
+    let mut identity_count = 0_u32;
+    for record in &media.records {
+        match (record.role, record.position, &record.payload) {
+            (
+                QueueMediaRole::SourceImage,
+                QueueMediaPosition::Scalar,
+                QueueMediaPayload::Bytes(_),
+            ) => {
+                projection.source_image = true;
+            }
+            (
+                QueueMediaRole::SourceVideo,
+                QueueMediaPosition::Scalar,
+                QueueMediaPayload::Bytes(_),
+            ) => {
+                projection.source_video_inline = true;
+            }
+            (
+                QueueMediaRole::SourceVideoPath,
+                QueueMediaPosition::Scalar,
+                QueueMediaPayload::Text(_),
+            ) => {
+                projection.source_video_path = true;
+            }
+            (
+                QueueMediaRole::ExtendVideo,
+                QueueMediaPosition::Scalar,
+                QueueMediaPayload::Bytes(_),
+            ) => {
+                projection.extend_video_inline = true;
+            }
+            (
+                QueueMediaRole::ExtendVideoPath,
+                QueueMediaPosition::Scalar,
+                QueueMediaPayload::Text(_),
+            ) => {
+                projection.extend_video_path = true;
+            }
+            (
+                QueueMediaRole::IdentityImage,
+                QueueMediaPosition::Scalar,
+                QueueMediaPayload::Bytes(_),
+            ) => {
+                identity_count = identity_count
+                    .checked_add(1)
+                    .ok_or(QueueMediaError::CollectionTooLarge)?;
+            }
+            (
+                QueueMediaRole::IdentityImages,
+                QueueMediaPosition::Item(_),
+                QueueMediaPayload::Bytes(_),
+            ) => {
+                identity_count = identity_count
+                    .checked_add(1)
+                    .ok_or(QueueMediaError::CollectionTooLarge)?;
+            }
+            (
+                QueueMediaRole::EditImages,
+                QueueMediaPosition::Item(_),
+                QueueMediaPayload::Bytes(bytes),
+            ) => {
+                let dimensions = image::ImageReader::new(std::io::Cursor::new(bytes))
+                    .with_guessed_format()
+                    .ok()
+                    .and_then(|reader| reader.into_dimensions().ok())
+                    .map_or(
+                        ProjectedImageDimensions::UnreadableHeader,
+                        |(width, height)| ProjectedImageDimensions::Known { width, height },
+                    );
+                projection.edit_images.push(dimensions);
+            }
+            (
+                QueueMediaRole::Keyframes,
+                QueueMediaPosition::Item(_),
+                QueueMediaPayload::Keyframe(_),
+            ) => {
+                projection.keyframe_count = projection
+                    .keyframe_count
+                    .checked_add(1)
+                    .ok_or(QueueMediaError::CollectionTooLarge)?;
+            }
+            (
+                QueueMediaRole::MaskImage,
+                QueueMediaPosition::Scalar,
+                QueueMediaPayload::Bytes(_),
+            ) => {
+                projection.mask_image = true;
+            }
+            (
+                QueueMediaRole::ControlImage,
+                QueueMediaPosition::Scalar,
+                QueueMediaPayload::Bytes(_),
+            ) => {
+                projection.control_image = true;
+            }
+            (
+                QueueMediaRole::AudioFile,
+                QueueMediaPosition::Scalar,
+                QueueMediaPayload::Bytes(_),
+            ) => {
+                projection.audio_inline = true;
+            }
+            (
+                QueueMediaRole::AudioFilePath,
+                QueueMediaPosition::Scalar,
+                QueueMediaPayload::Text(_),
+            ) => {
+                projection.audio_path = true;
+            }
+            _ => {}
+        }
+    }
+    projection.identity_present = identity_count > 0;
+    projection.identity_photograph_count = identity_count;
+    Ok(projection)
+}
+
+/// Convert opaque extracted records into store inputs without retaining a
+/// second plaintext request. Path-shaped roles are safe-opened by the store;
+/// all other bytes remain memory-sink records when hydrated.
+pub fn into_seal_media(
+    media: OpaqueQueueMedia,
+) -> Result<Vec<crate::queue_media_store::SealMedia>, QueueMediaError> {
+    use crate::queue_media_store::SealMedia;
+
+    let mut sealed = Vec::with_capacity(media.records.len());
+    for record in media.records {
+        let role = record.role.wire_label();
+        let position = record.position.wire_label();
+        let item = match record.payload {
+            QueueMediaPayload::Presence => SealMedia::bytes(role, position, Vec::new()),
+            QueueMediaPayload::Bytes(bytes) => SealMedia::bytes(role, position, bytes),
+            QueueMediaPayload::Text(value) if record.role.is_path_shaped() => {
+                SealMedia::path(role, position, PathBuf::from(value))
+            }
+            QueueMediaPayload::Text(value) => SealMedia::bytes(role, position, value.into_bytes()),
+            QueueMediaPayload::Keyframe(value) => SealMedia::bytes(
+                role,
+                position,
+                serde_json::to_vec(&value).map_err(QueueMediaError::Serialize)?,
+            ),
+            QueueMediaPayload::Reference(_) => {
+                return Err(QueueMediaError::UnsupportedPreDispatchAuthority(
+                    QueueMediaRole::References,
+                ))
+            }
+            QueueMediaPayload::Lora(_) => {
+                return Err(QueueMediaError::UnsupportedPreDispatchAuthority(
+                    record.role,
+                ))
+            }
+        };
+        sealed.push(item);
+    }
+    Ok(sealed)
+}
+
+pub(crate) fn decrypted_media_into_opaque(
+    job_id: &str,
+    decrypted: &mut crate::queue_media_store::DecryptedQueueMediaSet,
+) -> Result<OpaqueQueueMedia, QueueMediaError> {
+    use crate::queue_media_store::DecryptedQueueMediaPayload;
+
+    let mut records = Vec::with_capacity(decrypted.media.len());
+    for item in std::mem::take(&mut decrypted.media) {
+        let role = QueueMediaRole::from_wire_label(&item.role)
+            .ok_or(QueueMediaError::InvalidStoredRecordLabel)?;
+        let position = QueueMediaPosition::from_wire_label(&item.name)
+            .ok_or(QueueMediaError::InvalidStoredRecordLabel)?;
+        let payload = match item.payload {
+            DecryptedQueueMediaPayload::PrivatePath(path) if role.is_path_shaped() => {
+                QueueMediaPayload::Text(
+                    path.into_os_string()
+                        .into_string()
+                        .map_err(|_| QueueMediaError::InvalidStoredPath)?,
+                )
+            }
+            DecryptedQueueMediaPayload::PrivatePath(_) => {
+                return Err(QueueMediaError::MalformedRecords(role))
+            }
+            DecryptedQueueMediaPayload::Bytes(bytes)
+                if position == QueueMediaPosition::Collection && bytes.is_empty() =>
+            {
+                QueueMediaPayload::Presence
+            }
+            DecryptedQueueMediaPayload::Bytes(bytes) => match role {
+                QueueMediaRole::SourceImage
+                | QueueMediaRole::IdentityImage
+                | QueueMediaRole::IdentityImages
+                | QueueMediaRole::EditImages
+                | QueueMediaRole::MaskImage
+                | QueueMediaRole::ControlImage
+                | QueueMediaRole::AudioFile
+                | QueueMediaRole::SourceVideo
+                | QueueMediaRole::ExtendVideo => QueueMediaPayload::Bytes(bytes),
+                QueueMediaRole::SourceImageName
+                | QueueMediaRole::IdentityImageName
+                | QueueMediaRole::IdentityImageNames => QueueMediaPayload::Text(
+                    String::from_utf8(bytes).map_err(|_| QueueMediaError::InvalidStoredText)?,
+                ),
+                QueueMediaRole::Keyframes => QueueMediaPayload::Keyframe(
+                    serde_json::from_slice(&bytes).map_err(QueueMediaError::Deserialize)?,
+                ),
+                _ => return Err(QueueMediaError::MalformedRecords(role)),
+            },
+        };
+        records.push(OpaqueQueueMediaRecord {
+            role,
+            position,
+            payload,
+        });
+    }
+    Ok(OpaqueQueueMedia {
+        job_id: job_id.to_string(),
+        records,
+    })
+}
+
 fn ensure_json_is_authority_free(request_json: &str) -> Result<(), QueueMediaError> {
     let value: serde_json::Value =
         serde_json::from_str(request_json).map_err(QueueMediaError::Deserialize)?;
@@ -674,12 +989,50 @@ pub fn rehydrate_request_media(
     request_json: &str,
     media: OpaqueQueueMedia,
 ) -> Result<mold_core::GenerateRequest, QueueMediaError> {
-    if media.job_id != expected_job_id {
-        return Err(QueueMediaError::JobScopeMismatch);
-    }
     ensure_json_is_authority_free(request_json)?;
     let mut request: mold_core::GenerateRequest =
         serde_json::from_str(request_json).map_err(QueueMediaError::Deserialize)?;
+    rehydrate_request_media_into(expected_job_id, &mut request, media)?;
+    Ok(request)
+}
+
+/// Overlay deferred media onto the scheduler-mutated request. Only extracted
+/// media fields are touched; prompt/seed and every frozen plan/private
+/// authority field retain their current values.
+pub fn rehydrate_request_media_into(
+    expected_job_id: &str,
+    request: &mut mold_core::GenerateRequest,
+    media: OpaqueQueueMedia,
+) -> Result<(), QueueMediaError> {
+    if media.job_id != expected_job_id {
+        return Err(QueueMediaError::JobScopeMismatch);
+    }
+    for (present, field) in [
+        (request.source_image.is_some(), "source_image"),
+        (request.source_image_name.is_some(), "source_image_name"),
+        (request.id_image.is_some(), "id_image"),
+        (request.id_image_name.is_some(), "id_image_name"),
+        (request.id_images.is_some(), "id_images"),
+        (request.id_image_names.is_some(), "id_image_names"),
+        (request.edit_images.is_some(), "edit_images"),
+        (request.references.is_some(), "references"),
+        (request.mask_image.is_some(), "mask_image"),
+        (request.control_image.is_some(), "control_image"),
+        (request.audio_file.is_some(), "audio_file"),
+        (request.audio_file_path.is_some(), "audio_file_path"),
+        (request.source_video.is_some(), "source_video"),
+        (request.source_video_path.is_some(), "source_video_path"),
+        (request.extend_video.is_some(), "extend_video"),
+        (request.extend_video_path.is_some(), "extend_video_path"),
+        (request.keyframes.is_some(), "keyframes"),
+        (request.hdr_exr_dir.is_some(), "hdr_exr_dir"),
+        (request.lora.is_some(), "lora"),
+        (request.loras.is_some(), "loras"),
+    ] {
+        if present {
+            return Err(QueueMediaError::OverlayAuthorityConflict(field));
+        }
+    }
     let mut grouped: HashMap<_, Vec<_>> = HashMap::new();
     for record in media.records {
         grouped.entry(record.role).or_default().push(record);
@@ -734,12 +1087,21 @@ pub fn rehydrate_request_media(
     if let Some((&role, _)) = grouped.iter().next() {
         return Err(QueueMediaError::MalformedRecords(role));
     }
-    Ok(request)
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(width, height)
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .unwrap();
+        cursor.into_inner()
+    }
 
     #[test]
     fn media_extraction_round_trips_every_request_authority_without_json_leakage() {
@@ -850,6 +1212,81 @@ mod tests {
 
         let restored = extracted.rehydrate("job-a").unwrap();
         assert_eq!(serde_json::to_value(restored).unwrap(), expected);
+    }
+
+    #[test]
+    fn projection_classifies_every_prelease_media_fact_without_payload() {
+        let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "projection",
+            "model": "flux2-dev:bf16",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "source_image": base64::engine::general_purpose::STANDARD.encode(png(4, 5)),
+            "id_image": "ZmFjZQ==",
+            "id_images": ["ZmFjZTE=", "ZmFjZTI="],
+            "edit_images": [
+                base64::engine::general_purpose::STANDARD.encode(png(320, 240)),
+                "bm90LWltYWdl"
+            ],
+            "mask_image": "bWFzaw==",
+            "control_image": "Y29udHJvbA==",
+            "audio_file": "YXVkaW8=",
+            "audio_file_path": "/private/audio.wav",
+            "source_video": "dmlkZW8=",
+            "source_video_path": "/private/source.mp4",
+            "extend_video": "ZXh0ZW5k",
+            "extend_video_path": "/private/extend.mp4",
+            "keyframes": [{"frame": 0, "image": "a2V5"}]
+        }))
+        .unwrap();
+        let extracted = extract_request_fields("job-projection".into(), request).unwrap();
+        let projection = project_request_media(extracted.media()).unwrap();
+
+        assert!(projection.source_image);
+        assert!(projection.source_video_inline && projection.source_video_path);
+        assert!(projection.extend_video_inline && projection.extend_video_path);
+        assert_eq!(projection.keyframe_count, 1);
+        assert!(projection.identity_present);
+        assert_eq!(projection.identity_photograph_count, 3);
+        assert_eq!(
+            projection.edit_images,
+            vec![
+                crate::queue_media_store::ProjectedImageDimensions::Known {
+                    width: 320,
+                    height: 240
+                },
+                crate::queue_media_store::ProjectedImageDimensions::UnreadableHeader
+            ]
+        );
+        assert!(projection.mask_image && projection.control_image);
+        assert!(projection.audio_inline && projection.audio_path);
+    }
+
+    #[test]
+    fn overlay_restores_media_without_reverting_scheduler_mutations() {
+        let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "before preparation",
+            "model": "mock",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "seed": 7,
+            "source_image": "c291cmNl",
+            "id_image": "ZmFjZQ=="
+        }))
+        .unwrap();
+        let extracted = extract_request_fields("job-overlay".into(), request).unwrap();
+        let (json, media) = extracted.into_parts();
+        let mut current: mold_core::GenerateRequest = serde_json::from_str(&json).unwrap();
+        current.prompt = "expanded by scheduler".into();
+        current.seed = Some(99);
+
+        rehydrate_request_media_into("job-overlay", &mut current, media).unwrap();
+        assert_eq!(current.prompt, "expanded by scheduler");
+        assert_eq!(current.seed, Some(99));
+        assert_eq!(current.source_image.as_deref(), Some(b"source".as_slice()));
+        assert_eq!(current.id_image.as_deref(), Some(b"face".as_slice()));
     }
 
     #[test]
