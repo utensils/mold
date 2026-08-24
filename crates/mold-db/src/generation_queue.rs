@@ -1141,10 +1141,10 @@ pub fn set_target_gpu(
 /// the live registry window.
 ///
 /// The state check, affinity replacement, and optional queued-order rewrite
-/// share one IMMEDIATE transaction. A claim may coexist with `queued` while a
-/// live scheduler owns the ticket; the server's scheduler-mutation fence is
-/// the runtime authority for that case. Once the durable state is `running`
-/// or `held`, this method refuses every mutation without a partial write.
+/// share one IMMEDIATE transaction. This deep-row path owns only unclaimed
+/// durable work; claimed rows belong to the live registry handoff even while
+/// their durable state is still `queued`. Claimed, running, and held targets
+/// are refused without a partial write.
 pub fn patch_owned_queued(
     db: &MetadataDb,
     owner_uuid: &str,
@@ -1154,7 +1154,7 @@ pub fn patch_owned_queued(
     db.transact_immediate(|conn| {
         let owned = conn
             .query_row(
-                "SELECT state, created_at, rowid
+                "SELECT state, created_at, rowid, claim_token
                    FROM generation_queue
                   WHERE id = ?1 AND owner_uuid = ?2",
                 params![job_id, owner_uuid],
@@ -1163,14 +1163,15 @@ pub fn patch_owned_queued(
                         row.get::<_, String>(0)?,
                         row.get::<_, i64>(1)?,
                         row.get::<_, i64>(2)?,
+                        row.get::<_, Option<String>>(3)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((state, created_at, rowid)) = owned else {
+        let Some((state, created_at, rowid, claim_token)) = owned else {
             return Ok(OwnedQueuedPatchOutcome::NotOwned);
         };
-        if state != QueueRowState::Queued.as_str() {
+        if state != QueueRowState::Queued.as_str() || claim_token.is_some() {
             return Ok(OwnedQueuedPatchOutcome::NotQueued);
         }
 
@@ -1178,7 +1179,8 @@ pub fn patch_owned_queued(
             let updated = conn.execute(
                 "UPDATE generation_queue
                     SET target_gpu = ?3, target_device_id = ?4, updated_at = ?5
-                  WHERE id = ?1 AND owner_uuid = ?2 AND state = 'queued'",
+                  WHERE id = ?1 AND owner_uuid = ?2
+                    AND state = 'queued' AND claim_token IS NULL",
                 params![
                     job_id,
                     owner_uuid,
@@ -1218,7 +1220,8 @@ pub fn patch_owned_queued(
                 let mut update = conn.prepare(
                     "UPDATE generation_queue
                         SET created_at = ?2, updated_at = ?3
-                      WHERE id = ?1 AND owner_uuid = ?4 AND state = 'queued'",
+                      WHERE id = ?1 AND owner_uuid = ?4 AND state = 'queued'
+                        AND (id != ?5 OR claim_token IS NULL)",
                 )?;
                 let mut moved = 0usize;
                 for (index, id) in order.iter().enumerate() {
@@ -1227,6 +1230,7 @@ pub fn patch_owned_queued(
                         anchor + index as i64,
                         patch.updated_at_ms,
                         owner_uuid,
+                        job_id,
                     ])?;
                 }
                 if moved != order.len() {
@@ -1250,7 +1254,8 @@ pub fn patch_owned_queued(
             "SELECT id, state, model, target_gpu, seed_pinned,
                     dispatch_attempts, replay_seen, held_reason, created_at
                FROM generation_queue
-              WHERE id = ?1 AND owner_uuid = ?2 AND state = 'queued'",
+              WHERE id = ?1 AND owner_uuid = ?2
+                AND state = 'queued' AND claim_token IS NULL",
             params![job_id, owner_uuid],
             |row| {
                 Ok(GenerationQueueProjection {
@@ -2608,6 +2613,50 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["first", "deep"]
         );
+    }
+
+    #[test]
+    fn owned_queued_patch_refuses_a_claimed_handoff_without_mutation() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        for id in ["first", "handoff", "tail"] {
+            insert(&db, &row(id, "owner-a", 500)).unwrap();
+        }
+        claim_by_id(&db, "owner-a", "handoff", "feeder-claim", 600)
+            .unwrap()
+            .unwrap();
+        let before = list_replayable(&db, "owner-a").unwrap();
+
+        let outcome = patch_owned_queued(
+            &db,
+            "owner-a",
+            "handoff",
+            &OwnedQueuedPatch {
+                target: Some(QueueTargetPatch {
+                    target_gpu: Some(7),
+                    target_device_id: Some("cuda:7".into()),
+                }),
+                position: Some(0),
+                updated_at_ms: 700,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome, OwnedQueuedPatchOutcome::NotQueued);
+        assert_eq!(list_replayable(&db, "owner-a").unwrap(), before);
+        let handoff = get(&db, "handoff").unwrap().unwrap();
+        assert_eq!(handoff.target_gpu, None);
+        assert_eq!(handoff.target_device_id, None);
+        let claim_token: Option<String> = db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT claim_token FROM generation_queue WHERE id = 'handoff'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(claim_token.as_deref(), Some("feeder-claim"));
     }
 
     #[test]
