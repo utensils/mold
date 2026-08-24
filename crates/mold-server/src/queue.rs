@@ -3605,6 +3605,7 @@ mod tests {
                 state: mold_db::generation_queue::QueueRowState::Queued,
                 model: request.model,
                 request_json,
+                media_set_id: None,
                 output_dir: root,
                 target_gpu: None,
                 target_device_id: None,

@@ -4549,6 +4549,7 @@ mod tests {
                     r#"{{"prompt":"{id}","source_image":"{}"}}"#,
                     "x".repeat(payload_bytes)
                 ),
+                media_set_id: None,
                 output_dir: PathBuf::from(format!("/large-payload/{id}")),
                 target_gpu: (id == "live-running").then_some(2),
                 target_device_id: None,
@@ -6045,6 +6046,7 @@ mod tests {
                 state: mold_db::generation_queue::QueueRowState::Queued,
                 model: "mock-model".to_string(),
                 request_json: "{\"prompt\":".to_string(),
+                media_set_id: None,
                 output_dir: output_dir.path().to_path_buf(),
                 target_gpu: None,
                 target_device_id: None,
@@ -6084,6 +6086,7 @@ mod tests {
                 model: "mock-model".to_string(),
                 request_json: r#"{"prompt":"a cat","model":"mock-model","width":512,"height":512,"steps":4,"guidance":3.5}"#
                     .to_string(),
+                media_set_id: None,
                 output_dir: output_dir.path().to_path_buf(),
                 target_gpu: None,
                 target_device_id: None,

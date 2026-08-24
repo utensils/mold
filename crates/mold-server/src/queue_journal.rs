@@ -2033,6 +2033,7 @@ mod tests {
                 state: QueueRowState::Queued,
                 model: "flux-dev:q4".to_string(),
                 request_json: "{}".to_string(),
+                media_set_id: None,
                 output_dir: std::path::PathBuf::from("/gallery"),
                 target_gpu: None,
                 target_device_id: None,
