@@ -42,6 +42,10 @@ pub(crate) enum StoreEntryState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoreEntry {
+    /// Authenticated job identity captured by the initial owner inspection.
+    /// Concrete mutations reuse the full owner/job/set tuple under the store's
+    /// owner/job fencing without rescanning every bundle owned by the process.
+    pub job_id: String,
     pub set_id: String,
     pub state: StoreEntryState,
 }
@@ -366,6 +370,19 @@ pub(crate) fn reconcile_claimed_owner(
                             .clone()
                             .expect("active obligations were validated above"),
                     );
+                    continue;
+                }
+                let expected_job_id = obligation
+                    .job_id
+                    .as_deref()
+                    .expect("active obligations were validated above");
+                if unique.is_some_and(|entry| entry.job_id != expected_job_id) {
+                    let entry = unique.expect("mismatched job came from a unique entry");
+                    report.issues.push(format!(
+                        "active media obligation {} belongs to job {expected_job_id}, but its authenticated bundle belongs to job {}",
+                        obligation.set_id, entry.job_id
+                    ));
+                    jobs_to_hold.insert(expected_job_id.to_string());
                     continue;
                 }
                 match unique.map(|entry| entry.state) {
@@ -741,18 +758,22 @@ mod tests {
             Ok(StoreInspection {
                 entries: vec![
                     StoreEntry {
+                        job_id: "active".to_string(),
                         set_id: "active-set".to_string(),
                         state: StoreEntryState::Active,
                     },
                     StoreEntry {
+                        job_id: "restored".to_string(),
                         set_id: "retired-active-set".to_string(),
                         state: StoreEntryState::Retired,
                     },
                     StoreEntry {
+                        job_id: "gc".to_string(),
                         set_id: "gc-set".to_string(),
                         state: StoreEntryState::Retired,
                     },
                     StoreEntry {
+                        job_id: "orphan".to_string(),
                         set_id: "orphan-set".to_string(),
                         state: StoreEntryState::Staging,
                     },
@@ -880,6 +901,7 @@ mod tests {
                 entries: ["shared-set", "first-set", "second-set"]
                     .into_iter()
                     .map(|set_id| StoreEntry {
+                        job_id: format!("job-for-{set_id}"),
                         set_id: set_id.to_string(),
                         state: StoreEntryState::Active,
                     })
@@ -922,6 +944,7 @@ mod tests {
             &owner,
             Ok(StoreInspection {
                 entries: vec![StoreEntry {
+                    job_id: "apparently-unreferenced-job".to_string(),
                     set_id: "apparently-unreferenced-set".to_string(),
                     state: StoreEntryState::Active,
                 }],
@@ -939,6 +962,65 @@ mod tests {
             .actions()
             .iter()
             .all(|(_, verb, _)| verb != "delete"));
+        assert_eq!(journal.durable_media_capabilities(), None);
+    }
+
+    #[test]
+    fn authenticated_store_job_mismatch_holds_active_and_retired_obligations() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let journal = journal(home.path(), db, "instance-a");
+        let owner = journal.owner_uuid().unwrap().to_string();
+        let adapter = FakeAdapter::default();
+        adapter.set_obligations(
+            &owner,
+            vec![
+                MediaObligation {
+                    job_id: Some("active-job".to_string()),
+                    set_id: "active-set".to_string(),
+                    state: ObligationState::Active,
+                },
+                MediaObligation {
+                    job_id: Some("restore-job".to_string()),
+                    set_id: "retired-set".to_string(),
+                    state: ObligationState::Active,
+                },
+            ],
+        );
+        adapter.set_inspection(
+            &owner,
+            Ok(StoreInspection {
+                entries: vec![
+                    StoreEntry {
+                        job_id: "different-active-job".to_string(),
+                        set_id: "active-set".to_string(),
+                        state: StoreEntryState::Active,
+                    },
+                    StoreEntry {
+                        job_id: "different-retired-job".to_string(),
+                        set_id: "retired-set".to_string(),
+                        state: StoreEntryState::Retired,
+                    },
+                ],
+                untouched: Vec::new(),
+            }),
+        );
+
+        let report = reconcile_claimed_owner(&journal, &adapter).unwrap();
+
+        assert_eq!(
+            report.held_jobs,
+            vec!["active-job".to_string(), "restore-job".to_string()]
+        );
+        assert_eq!(report.issues.len(), 2);
+        assert!(report
+            .issues
+            .iter()
+            .all(|issue| issue.contains("authenticated bundle belongs to job")));
+        assert!(adapter
+            .actions()
+            .iter()
+            .all(|(_, verb, _)| verb != "restore" && verb != "delete"));
         assert_eq!(journal.durable_media_capabilities(), None);
     }
 }

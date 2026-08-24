@@ -19,7 +19,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -195,6 +195,8 @@ pub struct QueueMediaStore {
     key: Arc<Zeroizing<[u8; KEY_BYTES]>>,
     #[cfg(unix)]
     runtime_staging: Arc<QueueMediaRuntimeStaging>,
+    #[cfg(test)]
+    inspection_calls: Arc<AtomicUsize>,
 }
 
 #[cfg(unix)]
@@ -962,6 +964,8 @@ impl QueueMediaStore {
                 key: Arc::new(key),
                 #[cfg(unix)]
                 runtime_staging,
+                #[cfg(test)]
+                inspection_calls: Arc::new(AtomicUsize::new(0)),
             },
             key_disposition,
         })
@@ -1454,6 +1458,8 @@ impl QueueMediaStore {
     /// Enumerates and authenticates one owner's sets. Malformed entries are
     /// reported and left untouched so startup/GC can make an explicit choice.
     pub fn inspect_owner(&self, owner_id: &str) -> StoreInspection {
+        #[cfg(test)]
+        self.inspection_calls.fetch_add(1, Ordering::Relaxed);
         let mut report = StoreInspection::default();
         if let Err(error) = validate_identity("owner", owner_id) {
             report.unrecognized.push(UnrecognizedStoreEntry {
@@ -1472,6 +1478,11 @@ impl QueueMediaStore {
         }
         sort_inspection(&mut report);
         report
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inspection_calls(&self) -> usize {
+        self.inspection_calls.load(Ordering::Relaxed)
     }
 
     /// Enumerates every structurally valid owner directory and reports all

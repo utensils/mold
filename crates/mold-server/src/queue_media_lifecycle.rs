@@ -157,34 +157,19 @@ impl QueueMediaLifecycle {
         entry: &StoreEntry,
     ) -> Result<MediaSetRef, AdapterError> {
         self.ensure_owner(owner_uuid)?;
-        let inspection = self.opened_store()?.inspect_owner(owner_uuid);
-        let refs = match entry.state {
-            StoreEntryState::Active => inspection.active,
-            StoreEntryState::Retired => inspection.retired,
-            StoreEntryState::Staging => inspection.staging,
-        };
-        let mut matching = refs
-            .into_iter()
-            .filter(|media_set| media_set.set_id == entry.set_id);
-        let found = matching.next().ok_or_else(|| {
-            AdapterError::new(
-                AdapterFailureKind::Invariant,
-                format!(
-                    "media set {} disappeared during reconciliation",
-                    entry.set_id
-                ),
-            )
-        })?;
-        if matching.next().is_some() {
-            return Err(AdapterError::new(
-                AdapterFailureKind::Invariant,
-                format!(
-                    "media set {} is ambiguous within one store state",
-                    entry.set_id
-                ),
-            ));
-        }
-        Ok(found)
+        Ok(MediaSetRef {
+            owner_id: owner_uuid.to_string(),
+            job_id: entry.job_id.clone(),
+            set_id: entry.set_id.clone(),
+        })
+    }
+
+    fn inspect_store_owner(
+        &self,
+        owner_uuid: &str,
+    ) -> Result<crate::queue_media_store::StoreInspection, AdapterError> {
+        self.ensure_owner(owner_uuid)?;
+        Ok(self.opened_store()?.inspect_owner(owner_uuid))
     }
 }
 
@@ -289,18 +274,20 @@ impl QueueMediaStartupAdapter for QueueMediaLifecycle {
     }
 
     fn inspect_owner(&self, owner_uuid: &str) -> Result<StoreInspection, AdapterError> {
-        self.ensure_owner(owner_uuid)?;
-        let inspection = self.opened_store()?.inspect_owner(owner_uuid);
+        let inspection = self.inspect_store_owner(owner_uuid)?;
         let mut entries = Vec::new();
         entries.extend(inspection.active.into_iter().map(|entry| StoreEntry {
+            job_id: entry.job_id,
             set_id: entry.set_id,
             state: StoreEntryState::Active,
         }));
         entries.extend(inspection.retired.into_iter().map(|entry| StoreEntry {
+            job_id: entry.job_id,
             set_id: entry.set_id,
             state: StoreEntryState::Retired,
         }));
         entries.extend(inspection.staging.into_iter().map(|entry| StoreEntry {
+            job_id: entry.job_id,
             set_id: entry.set_id,
             state: StoreEntryState::Staging,
         }));
@@ -399,7 +386,9 @@ fn store_error(error: QueueMediaError) -> AdapterError {
         QueueMediaError::InsecurePath(_)
         | QueueMediaError::SecurityUnavailable(_)
         | QueueMediaError::InvalidIdentity(_) => AdapterFailureKind::UnsafeLayout,
-        QueueMediaError::JobAlreadySealed { .. } => AdapterFailureKind::Invariant,
+        QueueMediaError::JobAlreadySealed { .. }
+        | QueueMediaError::ProjectionUnavailable(_)
+        | QueueMediaError::MixedSinkHydrationRequired => AdapterFailureKind::Invariant,
         QueueMediaError::Io(_) | QueueMediaError::Json(_) | QueueMediaError::NotFound => {
             AdapterFailureKind::Io
         }
@@ -597,6 +586,74 @@ mod tests {
             .obligations(journal.owner_uuid().unwrap())
             .unwrap_err();
         assert_eq!(error.kind, AdapterFailureKind::Invariant);
+    }
+
+    #[test]
+    fn startup_reconciliation_scans_owner_once_before_all_mutations() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let journal = QueueJournal::new(db.clone(), Some(home.path()), "instance-a");
+        let owner = journal.owner_uuid().unwrap().to_string();
+        let store = QueueMediaStore::open(home.path()).unwrap().store;
+
+        let restore_set = store
+            .seal(
+                &owner,
+                "restore-job",
+                &[SealMedia::bytes("source", "restore.png", vec![1])],
+            )
+            .unwrap();
+        generation_queue::insert_with_media(
+            db.as_ref().as_ref().unwrap(),
+            &queue_row(&owner, "restore-job", &restore_set.set_id),
+            &obligation(&owner, &restore_set.set_id),
+        )
+        .unwrap();
+        store.retire(&restore_set).unwrap();
+
+        let gc_set = store
+            .seal(
+                &owner,
+                "gc-job",
+                &[SealMedia::bytes("source", "gc.png", vec![2])],
+            )
+            .unwrap();
+        generation_queue::insert_with_media(
+            db.as_ref().as_ref().unwrap(),
+            &queue_row(&owner, "gc-job", &gc_set.set_id),
+            &obligation(&owner, &gc_set.set_id),
+        )
+        .unwrap();
+        assert!(generation_queue::delete(db.as_ref().as_ref().unwrap(), "gc-job").unwrap());
+
+        let orphan_set = store
+            .seal(
+                &owner,
+                "orphan-job",
+                &[SealMedia::bytes("source", "orphan.png", vec![3])],
+            )
+            .unwrap();
+
+        let lifecycle =
+            QueueMediaLifecycle::new(db.clone(), home.path().to_path_buf(), owner.clone());
+        let report = reconcile_claimed_owner(&journal, &lifecycle).unwrap();
+
+        assert!(report.durable_media_ready, "{:#?}", report.issues);
+        assert_eq!(report.restored, vec![restore_set.set_id.clone()]);
+        assert_eq!(
+            report.deleted,
+            vec![gc_set.set_id.clone(), orphan_set.set_id.clone()]
+        );
+        assert_eq!(
+            lifecycle.opened_store().unwrap().inspection_calls(),
+            1,
+            "restore and delete must reuse identities authenticated by the initial inspection"
+        );
+
+        let inspection = store.inspect_owner(&owner);
+        assert_eq!(inspection.active, vec![restore_set]);
+        assert!(inspection.retired.is_empty());
+        assert!(inspection.staging.is_empty());
     }
 
     #[test]
