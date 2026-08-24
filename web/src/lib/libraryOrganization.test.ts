@@ -461,6 +461,34 @@ describe("mutations fan out to every copy's host", () => {
     expect(api.deleteGalleryImageForever).not.toHaveBeenCalled();
   });
 
+  it("moves prints to trash when crypto.randomUUID is unavailable", async () => {
+    vi.stubGlobal("crypto", {
+      getRandomValues(bytes: Uint8Array) {
+        bytes.fill(0);
+        return bytes;
+      },
+    });
+    try {
+      await applyOrganizationMutation(
+        copies,
+        { kind: "trash" },
+        {
+          hostById,
+          snapshots: [
+            snapshot("origin", { bulkMutations: true }),
+            snapshot("plato", { bulkMutations: true }),
+          ],
+        },
+      );
+      expect(api.trashMany).toHaveBeenCalledWith(platoTarget, [
+        "twin.png",
+        "other.png",
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("creates a missing collection by name before adding, reusing an existing one by slug", async () => {
     const snapshots = [
       snapshot("origin", { collections: [collection("c-origin", "Smurfs")] }),

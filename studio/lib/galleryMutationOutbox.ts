@@ -2,6 +2,7 @@
 
 import type { OrganizationFanoutOp } from "./libraryOrganization";
 import type { GalleryBulkMutationRequest } from "./api/galleryOrganization";
+import { createUuid } from "./id";
 
 const DB_NAME = "mold-gallery-mutation-outbox";
 const DB_VERSION = 1;
@@ -129,10 +130,7 @@ export function enqueueGalleryMutation(
     );
     const item: QueuedGalleryMutation = {
       ...input,
-      id:
-        input.id ??
-        globalThis.crypto?.randomUUID?.() ??
-        `${createdAt}-${Math.random().toString(16).slice(2)}`,
+      id: input.id ?? createUuid(),
       createdAt,
       sequence,
       attempts: 0,

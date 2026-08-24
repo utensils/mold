@@ -44,6 +44,7 @@ import {
   type RetentionHost,
 } from "@studio/lib/libraryOrganization";
 import { galleryBulkRequest } from "@studio/lib/galleryMutationOutbox";
+import { createUuid } from "@studio/lib/id";
 import {
   hostApiTarget,
   hostCapabilities,
@@ -516,7 +517,7 @@ export async function applyOrganizationMutation(
     const bulk =
       snapshotFor(context.snapshots, op.hostId)?.bulkMutations === true;
     if (bulk) {
-      const request = galleryBulkRequest(crypto.randomUUID(), op);
+      const request = galleryBulkRequest(createUuid(), op);
       if (request) {
         await mutateGalleryBulk(target, request);
         return;
