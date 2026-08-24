@@ -3528,6 +3528,80 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_durable_patch_never_blocks_scheduler_grant_or_cancellation() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        seed_durable_projection_row(
+            &db,
+            &owner,
+            "blocked-patch",
+            mold_db::generation_queue::QueueRowState::Queued,
+            0,
+            0,
+        );
+        state.job_registry.register("grant-live", "model-grant");
+        state.job_registry.register("cancel-live", "model-cancel");
+
+        // Hold the journal's actual SQLite connection mutex so PATCH reaches
+        // its spawn_blocking DB operation and remains there deterministically.
+        let locked_db = db.clone();
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let blocker = tokio::task::spawn_blocking(move || {
+            locked_db.as_ref().as_ref().unwrap().with_conn(|_| {
+                locked_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+        });
+        locked_rx.await.unwrap();
+
+        let journal = state.queue_journal.clone();
+        let patch = tokio::spawn(
+            app_with_state(state.clone()).oneshot(
+                Request::patch("/api/queue/blocked-patch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"position":0}"#))
+                    .unwrap(),
+            ),
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !journal.durable_transition_is_locked() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("PATCH enters the durable transition before waiting on SQLite");
+        assert!(!patch.is_finished(), "the PATCH remains DB-blocked");
+
+        let scheduler = tokio::time::timeout(
+            Duration::from_secs(2),
+            state.scheduler_mutation_fence.lock(),
+        )
+        .await
+        .expect("blocked PATCH must not own the scheduler fence");
+        state.job_registry.reorder_queued("grant-live", 0).unwrap();
+        state.job_registry.cancel_queued("cancel-live").unwrap();
+        state
+            .job_registry
+            .dispatch_if_queued("grant-live", 0, (), |_| Ok(()))
+            .unwrap();
+        drop(scheduler);
+
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap().unwrap();
+        let response = patch.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            state.job_registry.entry("grant-live").unwrap().state,
+            crate::job_registry::JobLifecycle::Running
+        );
+        assert!(state.job_registry.entry("cancel-live").is_none());
+    }
+
     #[tokio::test]
     async fn patch_queue_position_rejects_running_jobs() {
         let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());

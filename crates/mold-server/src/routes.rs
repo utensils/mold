@@ -2531,6 +2531,7 @@ async fn admit_generation_batch(
     let batch_id_for_db = batch_id.clone();
     let client_batch_id = body.client_batch_id.clone();
     let metadata_db = state.metadata_db.clone();
+    let _durable_transition = state.queue_journal.lock_durable_transition().await;
     let (detail, inserted) = tokio::task::spawn_blocking(move || {
         let admissions = admitted_children
             .iter()
@@ -2586,6 +2587,7 @@ async fn admit_generation_batch(
             )
         }
     })?;
+    drop(_durable_transition);
     if !inserted {
         return Ok((
             StatusCode::OK,
@@ -2883,20 +2885,10 @@ async fn generate(
         req.scheduler,
         mold_core::build_info::version_string(),
     ));
-    let cancel = state.job_registry.register_job(
-        &job_id,
-        &req.model,
-        preferred_gpu,
-        Some(req.seed.is_some()),
-        Some(queue_metadata),
-    );
-    // The result channel's receiver is owned by a detached supervisor, not by
-    // this handler: an admitted job runs to completion even if the client hangs
-    // up, and only an explicit `DELETE /api/queue/:id` closes it early.
-    let crate::job_supervisor::SupervisedJob {
-        result_tx,
-        outcome_rx,
-    } = crate::job_supervisor::supervise_job(job_id.clone(), cancel);
+    // Persist first, then publish the bounded registry row under the scheduler
+    // fence while the durable transition gate excludes PATCH/cancellation.
+    // SQLite never runs beneath the scheduler fence.
+    let durable_transition = state.queue_journal.lock_durable_transition().await;
     // Record the durable row BEFORE submit, so a crash between here and the
     // worker still leaves something to replay.
     let target_device_id =
@@ -2918,6 +2910,24 @@ async fn generate(
                 })
         })
         .flatten();
+    let cancel = {
+        let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+        state.job_registry.register_job(
+            &job_id,
+            &req.model,
+            preferred_gpu,
+            Some(req.seed.is_some()),
+            Some(queue_metadata),
+        )
+    };
+    drop(durable_transition);
+    // The result channel's receiver is owned by a detached supervisor, not by
+    // this handler: an admitted job runs to completion even if the client hangs
+    // up, and only an explicit `DELETE /api/queue/:id` closes it early.
+    let crate::job_supervisor::SupervisedJob {
+        result_tx,
+        outcome_rx,
+    } = crate::job_supervisor::supervise_job(job_id.clone(), cancel);
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
@@ -4129,18 +4139,7 @@ async fn generate_stream(
         req.scheduler,
         mold_core::build_info::version_string(),
     ));
-    let cancel = state.job_registry.register_job(
-        &job_id,
-        &req.model,
-        preferred_gpu,
-        Some(req.seed.is_some()),
-        Some(queue_metadata),
-    );
-    // Detached ownership of the result channel — see the non-streaming path.
-    let crate::job_supervisor::SupervisedJob {
-        result_tx,
-        outcome_rx,
-    } = crate::job_supervisor::supervise_job(job_id.clone(), cancel);
+    let durable_transition = state.queue_journal.lock_durable_transition().await;
     let target_device_id =
         crate::queue_journal::stable_device_id_for_ordinal(&state, preferred_gpu);
     let journal = (!crate::queue_media_admission::request_has_durable_media(&req))
@@ -4160,6 +4159,22 @@ async fn generate_stream(
                 })
         })
         .flatten();
+    let cancel = {
+        let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+        state.job_registry.register_job(
+            &job_id,
+            &req.model,
+            preferred_gpu,
+            Some(req.seed.is_some()),
+            Some(queue_metadata),
+        )
+    };
+    drop(durable_transition);
+    // Detached ownership of the result channel — see the non-streaming path.
+    let crate::job_supervisor::SupervisedJob {
+        result_tx,
+        outcome_rx,
+    } = crate::job_supervisor::supervise_job(job_id.clone(), cancel);
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
@@ -6181,55 +6196,50 @@ async fn patch_queue_job(
     }
     let resolved_target_gpu = stable_target_gpu.or(req.target_gpu);
 
-    // A mutation response is also the scheduler acknowledgement: the final
-    // lease claim takes this same fence, so no plan built from the old lane or
-    // order can grant after this guard is acquired.
-    let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
-
     // SQLite owns jobs beyond the hydrated window. Mutate that authority
     // first and fail the request on any persistence error; returning 200 after
     // only changing the registry would acknowledge a lane/order that a restart
     // silently loses. The DB primitive is one owner/state-fenced IMMEDIATE
-    // transaction for target plus position.
+    // transaction for target plus position. The durable-transition gate keeps
+    // this commit and its later bounded runtime projection ordered with feeder
+    // publication and cancellation, but deliberately leaves the scheduler
+    // fence free for unrelated grants while SQLite runs.
+    let _durable_transition = state.queue_journal.lock_durable_transition().await;
+    let runtime_patch_token = {
+        let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+        match state.job_registry.begin_queue_patch(&id) {
+            Ok(token) => Some(token),
+            Err(crate::job_registry::TargetGpuUpdateError::NotFound) => None,
+            Err(crate::job_registry::TargetGpuUpdateError::AlreadyRunning) => {
+                return Err(ApiError::queue_job_running(format!(
+                    "queue job {id} is already running; only queued jobs can be reordered or re-laned"
+                )));
+            }
+        }
+    };
     let journal = state.queue_journal.clone();
     let mutation_id = id.clone();
     let requested_position = req.position;
     let requested_device_id = req.hard_pinned_device_id;
-    let hydrated = state.job_registry.entry(&id).is_some();
-    let durable = spawn_queue_mutation(move || {
-        if hydrated {
-            let outcome = journal.patch_owned_claimed_queued(
-                &mutation_id,
-                resolved_target_gpu,
-                requested_device_id.clone(),
-                requested_position,
-            )?;
-            if matches!(
-                outcome,
-                mold_db::generation_queue::OwnedQueuedPatchOutcome::NotQueued
-            ) {
-                // Legacy startup replay hydrates an unclaimed row directly;
-                // the bounded feeder and direct admission publish claimed
-                // rows. Both alternatives remain owner/state/claim fenced.
-                journal.patch_owned_queued(
-                    &mutation_id,
-                    resolved_target_gpu,
-                    requested_device_id,
-                    requested_position,
-                )
-            } else {
-                Ok(outcome)
-            }
-        } else {
-            journal.patch_owned_queued(
-                &mutation_id,
-                resolved_target_gpu,
-                requested_device_id,
-                requested_position,
-            )
-        }
+    let durable = match spawn_queue_mutation(move || {
+        journal.patch_owned_any_queued(
+            &mutation_id,
+            resolved_target_gpu,
+            requested_device_id,
+            requested_position,
+        )
     })
-    .await?;
+    .await
+    {
+        Ok(durable) => durable,
+        Err(error) => {
+            if let Some(token) = runtime_patch_token {
+                let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+                state.job_registry.finish_queue_patch(&id, token);
+            }
+            return Err(error);
+        }
+    };
 
     let durable_entry = match durable {
         mold_db::generation_queue::OwnedQueuedPatchOutcome::Updated {
@@ -6238,21 +6248,37 @@ async fn patch_queue_job(
         } => Some(job_entry_from_durable_projection(projection, position)),
         mold_db::generation_queue::OwnedQueuedPatchOutcome::NotOwned => None,
         mold_db::generation_queue::OwnedQueuedPatchOutcome::NotQueued => {
+            if let Some(token) = runtime_patch_token {
+                let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+                state.job_registry.finish_queue_patch(&id, token);
+            }
             return Err(ApiError::queue_job_running(format!(
                 "queue job {id} is no longer queued; only queued jobs can be reordered or re-laned"
             )));
         }
     };
 
+    // A mutation response is also the scheduler acknowledgement: the final
+    // lease claim takes this same fence, so no plan built from the old lane or
+    // order can grant after this guard is acquired. All SQLite work above has
+    // completed before this lock is awaited.
+    let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+
     // Hydrated jobs have a second, bounded runtime projection. Apply the same
     // edit only after the durable transaction commits. A durable-only tail row
     // intentionally skips this block and returns its payload-free DB projection.
-    if state.job_registry.entry(&id).is_some() {
-        if let Some(target_gpu) = resolved_target_gpu {
-            state
-                .job_registry
-                .set_target_gpu(&id, target_gpu)
-                .map_err(|error| match error {
+    if let Some(token) = runtime_patch_token {
+        let runtime_result = (|| {
+            if !state.job_registry.queue_patch_token_matches(&id, token) {
+                return Err(ApiError::queue_job_not_found(format!(
+                    "queue job {id} not found"
+                )));
+            }
+            if let Some(target_gpu) = resolved_target_gpu {
+                state
+                    .job_registry
+                    .set_target_gpu(&id, target_gpu)
+                    .map_err(|error| match error {
                     crate::job_registry::TargetGpuUpdateError::NotFound => {
                         ApiError::queue_job_not_found(format!("queue job {id} not found"))
                     }
@@ -6261,28 +6287,30 @@ async fn patch_queue_job(
                             "queue job {id} is already running; lane changes only apply to queued jobs"
                         ))
                     }
-                })?;
-        }
-        if let Some(position) = requested_position {
-            state
-                .job_registry
-                .reorder_queued(&id, position)
-                .map_err(|error| match error {
-                    crate::job_registry::QueueReorderError::NotFound => {
-                        ApiError::queue_job_not_found(format!("queue job {id} not found"))
-                    }
-                    crate::job_registry::QueueReorderError::AlreadyRunning => {
-                        ApiError::queue_job_running(format!(
+                    })?;
+            }
+            if let Some(position) = requested_position {
+                state
+                    .job_registry
+                    .reorder_queued(&id, position)
+                    .map_err(|error| match error {
+                        crate::job_registry::QueueReorderError::NotFound => {
+                            ApiError::queue_job_not_found(format!("queue job {id} not found"))
+                        }
+                        crate::job_registry::QueueReorderError::AlreadyRunning => {
+                            ApiError::queue_job_running(format!(
                             "queue job {id} is already running; only queued jobs can be reordered"
                         ))
-                    }
-                })?;
-        }
-        let entry = state
-            .job_registry
-            .entry(&id)
-            .ok_or_else(|| ApiError::queue_job_not_found(format!("queue job {id} not found")))?;
-        return Ok(Json(entry));
+                        }
+                    })?;
+            }
+            state
+                .job_registry
+                .entry(&id)
+                .ok_or_else(|| ApiError::queue_job_not_found(format!("queue job {id} not found")))
+        })();
+        state.job_registry.finish_queue_patch(&id, token);
+        return runtime_result.map(Json);
     }
 
     durable_entry
@@ -6308,32 +6336,36 @@ async fn cancel_queue_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    // SQLite can block behind another connection. Never hold the global
-    // scheduler mutation fence while probing the durable tail: the feeder
-    // publishes its registry token under that fence, so after this lookup the
-    // guarded registry check closes both possible races.
+    // Serialize the durable probe, bounded registry revocation, and durable
+    // cancellation with feeder publication and PATCH. SQLite can block behind
+    // another connection, so the scheduler fence is acquired only for the
+    // in-memory lifecycle transition and explicitly dropped before the final
+    // DB mutation.
+    let _durable_transition = state.queue_journal.lock_durable_transition().await;
     let journal = state.queue_journal.clone();
     let probe_id = id.clone();
     let durable_candidate =
         spawn_queue_read(move || journal.owns_cancellable_row(&probe_id)).await?;
-    let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
-    match state.job_registry.cancel_queued(&id) {
-        Ok(()) => {}
-        Err(crate::job_registry::QueuedJobCancelError::AlreadyRunning) => {
-            // `cancel_queued` already signalled (or latched) the exact running
-            // attempt token while holding the same lifecycle lock used by
-            // terminal publication.
-        }
-        // Some retained rows have no registry entry: a held job, and a queued
-        // job on a boot with no dispatch owner. This endpoint is the
-        // documented way to clear either, and `/api/queue` lists both — so
-        // falling straight through to 404 would show an operator work they
-        // cannot act on.
-        Err(crate::job_registry::QueuedJobCancelError::NotFound) => {
-            if !durable_candidate {
-                return Err(ApiError::queue_job_not_found(format!(
-                    "queue job {id} not found"
-                )));
+    {
+        let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+        match state.job_registry.cancel_queued(&id) {
+            Ok(()) => {}
+            Err(crate::job_registry::QueuedJobCancelError::AlreadyRunning) => {
+                // `cancel_queued` already signalled (or latched) the exact running
+                // attempt token while holding the same lifecycle lock used by
+                // terminal publication.
+            }
+            // Some retained rows have no registry entry: a held job, and a queued
+            // job on a boot with no dispatch owner. This endpoint is the
+            // documented way to clear either, and `/api/queue` lists both — so
+            // falling straight through to 404 would show an operator work they
+            // cannot act on.
+            Err(crate::job_registry::QueuedJobCancelError::NotFound) => {
+                if !durable_candidate {
+                    return Err(ApiError::queue_job_not_found(format!(
+                        "queue job {id} not found"
+                    )));
+                }
             }
         }
     }
@@ -6430,8 +6462,11 @@ async fn resume_queue(State(state): State<AppState>) -> Result<Json<QueuePauseRe
 async fn cancel_all_queue(
     State(state): State<AppState>,
 ) -> Result<Json<QueueCancelAllResponse>, ApiError> {
-    let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
-    let live_cancelled = state.job_registry.cancel_all_queued_ids();
+    let _durable_transition = state.queue_journal.lock_durable_transition().await;
+    let live_cancelled = {
+        let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+        state.job_registry.cancel_all_queued_ids()
+    };
     let live_count = live_cancelled.len();
     let journal = state.queue_journal.clone();
     let durable_only =

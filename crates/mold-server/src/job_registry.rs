@@ -142,6 +142,9 @@ struct EntryInternal {
     /// hand-off race and cancels the token as soon as it appears.
     running_cancel: Option<mold_inference::InferenceCancellationToken>,
     cancel_requested: bool,
+    /// Exact route-owned token that temporarily excludes this queued row from
+    /// scheduler planning/grant while its durable PATCH is in flight.
+    queue_patch_token: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +195,7 @@ pub struct JobRegistry {
     inner: RwLock<Vec<EntryInternal>>,
     batch_parents: RwLock<HashMap<String, BatchParentEntry>>,
     mutation_sequence: AtomicU64,
+    queue_patch_sequence: AtomicU64,
     mutation_notify: Arc<Notify>,
     /// Optional lifecycle broadcast (`GET /api/events`). Emitting from the
     /// registry — rather than each call site — guarantees every submit /
@@ -222,6 +226,7 @@ impl JobRegistry {
             inner: RwLock::new(Vec::new()),
             batch_parents: RwLock::new(HashMap::new()),
             mutation_sequence: AtomicU64::new(0),
+            queue_patch_sequence: AtomicU64::new(0),
             mutation_notify: Arc::new(Notify::new()),
             events: None,
         })
@@ -234,6 +239,7 @@ impl JobRegistry {
             inner: RwLock::new(Vec::new()),
             batch_parents: RwLock::new(HashMap::new()),
             mutation_sequence: AtomicU64::new(0),
+            queue_patch_sequence: AtomicU64::new(0),
             mutation_notify: Arc::new(Notify::new()),
             events: Some(events),
         })
@@ -338,6 +344,7 @@ impl JobRegistry {
                     cancel: cancel.clone(),
                     running_cancel: None,
                     cancel_requested: false,
+                    queue_patch_token: None,
                 },
             );
         }
@@ -656,7 +663,7 @@ impl JobRegistry {
                 payload,
             ));
         };
-        if entry.state != JobLifecycle::Queued {
+        if entry.state != JobLifecycle::Queued || entry.queue_patch_token.is_some() {
             return Err(DispatchAttemptError::Claim(
                 DispatchClaimError::NotQueued,
                 payload,
@@ -697,6 +704,58 @@ impl JobRegistry {
                 })
         };
         if restored {
+            self.mark_mutated();
+        }
+    }
+
+    /// Exclude one hydrated queued row from scheduler planning and final
+    /// dispatch while its durable PATCH is persisted without the scheduler
+    /// mutation fence. The returned token fences cleanup from any later PATCH.
+    pub(crate) fn begin_queue_patch(&self, id: &str) -> Result<u64, TargetGpuUpdateError> {
+        let token = self
+            .queue_patch_sequence
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1);
+        {
+            let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) else {
+                return Err(TargetGpuUpdateError::NotFound);
+            };
+            if entry.state == JobLifecycle::Running {
+                return Err(TargetGpuUpdateError::AlreadyRunning);
+            }
+            entry.queue_patch_token = Some(token);
+        }
+        self.mark_mutated();
+        Ok(token)
+    }
+
+    pub(crate) fn queue_patch_token_matches(&self, id: &str, token: u64) -> bool {
+        self.inner
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .find(|entry| entry.id == id)
+            .is_some_and(|entry| entry.queue_patch_token == Some(token))
+    }
+
+    /// Release only the exact PATCH exclusion installed by
+    /// [`begin_queue_patch`](Self::begin_queue_patch).
+    pub(crate) fn finish_queue_patch(&self, id: &str, token: u64) {
+        let cleared = {
+            let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            entries
+                .iter_mut()
+                .find(|entry| entry.id == id)
+                .is_some_and(|entry| {
+                    if entry.queue_patch_token != Some(token) {
+                        return false;
+                    }
+                    entry.queue_patch_token = None;
+                    true
+                })
+        };
+        if cleared {
             self.mark_mutated();
         }
     }
@@ -944,7 +1003,11 @@ impl JobRegistry {
             .enumerate()
             .map(|(position, entry)| SchedulerQueueEntry {
                 id: entry.id.clone(),
-                state: entry.state,
+                state: if entry.queue_patch_token.is_some() {
+                    JobLifecycle::Held
+                } else {
+                    entry.state
+                },
                 position,
                 target_gpu: entry.target_gpu,
             })
@@ -961,7 +1024,13 @@ impl JobRegistry {
             .unwrap_or_else(|error| error.into_inner())
             .iter()
             .find(|entry| entry.id == id)
-            .map(|entry| entry.state)
+            .map(|entry| {
+                if entry.queue_patch_token.is_some() {
+                    JobLifecycle::Held
+                } else {
+                    entry.state
+                }
+            })
     }
 
     /// Currently-tracked job count. Exposed for tests and metrics.
@@ -993,6 +1062,39 @@ mod tests {
         assert_eq!(snap.entries[0].state, JobLifecycle::Queued);
         assert_eq!(snap.entries[1].id, "b");
         assert_eq!(snap.entries[1].position, 1);
+    }
+
+    #[test]
+    fn exact_queue_patch_block_excludes_only_its_target_from_dispatch() {
+        let reg = JobRegistry::new();
+        reg.register("patching", "model-a");
+        reg.register("unrelated", "model-b");
+
+        let first = reg.begin_queue_patch("patching").unwrap();
+        assert_eq!(
+            reg.scheduler_lifecycle("patching"),
+            Some(JobLifecycle::Held)
+        );
+        assert!(reg
+            .dispatch_if_queued("patching", 0, (), |_| Ok(()))
+            .is_err());
+        assert!(reg
+            .dispatch_if_queued("unrelated", 0, (), |_| Ok(()))
+            .is_ok());
+
+        reg.finish_queue_patch("patching", first);
+        let second = reg.begin_queue_patch("patching").unwrap();
+        reg.finish_queue_patch("patching", first);
+        assert_eq!(
+            reg.scheduler_lifecycle("patching"),
+            Some(JobLifecycle::Held),
+            "stale cleanup cannot clear a later PATCH exclusion"
+        );
+        reg.finish_queue_patch("patching", second);
+        assert_eq!(
+            reg.scheduler_lifecycle("patching"),
+            Some(JobLifecycle::Queued)
+        );
     }
 
     #[test]

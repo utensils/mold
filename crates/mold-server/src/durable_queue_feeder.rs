@@ -311,29 +311,34 @@ fn projection_failure_holds(error: &crate::queue_media_store::QueueMediaError) -
     )
 }
 
-/// Publish the bounded runtime cancellation token in SQLite's authoritative
-/// queued position under the scheduler fence, then release that global fence
-/// before awaiting the cancellation lookup.
+/// Resolve the exact claim's bounded durable position, then publish its
+/// current affinity and bounded durable position, then publish its runtime
+/// cancellation token under the scheduler fence.
 ///
 /// The order read selects at most `queue_capacity` payload-free ids using the
-/// durable replay index. PATCH and cancellation take the same scheduler fence,
-/// while the database read validates the exact owner/state/claim token in one
-/// snapshot. A deep row moved into the runtime window therefore enters the
-/// registry at that global position instead of the live tail. The job is not
-/// submitted until the caller checks the returned durable cancellation result.
-async fn register_before_durable_cancel_check<F, T>(
+/// durable replay index. The separate durable-transition gate serializes this
+/// DB snapshot and registry publication with PATCH and cancellation, without
+/// making the scheduler fence wait for SQLite. The database read validates the
+/// exact owner/state/claim token in one snapshot. A deep row moved into the
+/// runtime window therefore enters the registry at that global position.
+/// Valid claims outside the bounded prefix are released for a later FIFO pass;
+/// appending them would let an attached deep row bypass unhydrated predecessors.
+enum ClaimRegistration {
+    Registered(Arc<tokio::sync::Notify>),
+    Stale,
+    OutsideRuntimeWindow,
+}
+
+async fn register_claimed_runtime(
     state: &AppState,
     row: &mold_db::generation_queue::GenerationQueueRow,
     claim_token: &str,
-    target_gpu: Option<usize>,
-    metadata: Box<mold_core::OutputMetadata>,
-    durable_check: F,
-) -> anyhow::Result<Option<(Arc<tokio::sync::Notify>, T)>>
-where
-    F: std::future::Future<Output = T>,
-{
+    request: &mut mold_core::GenerateRequest,
+) -> anyhow::Result<ClaimRegistration> {
     let cancel = {
-        let _mutation = state.scheduler_mutation_fence.lock().await;
+        // Strict lock order: durable transition -> completed DB read ->
+        // scheduler fence. Never move this DB await beneath `_mutation`.
+        let _durable_transition = state.queue_journal.lock_durable_transition().await;
         let journal = state.queue_journal.clone();
         let order_id = row.id.clone();
         let order_claim = claim_token.to_string();
@@ -344,18 +349,48 @@ where
         .await
         .map_err(|error| anyhow::anyhow!("durable queue order task failed: {error}"))??;
         let Some(order) = order else {
-            return Ok(None);
+            return Ok(ClaimRegistration::Stale);
         };
+        let Some(position) = order.position else {
+            return Ok(ClaimRegistration::OutsideRuntimeWindow);
+        };
+        let target_gpu = crate::queue_journal::resolve_replay_affinity(
+            request,
+            order.target_gpu,
+            order.target_device_id.as_deref(),
+            |device_id| {
+                state
+                    .gpu_pool
+                    .workers
+                    .iter()
+                    .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
+                    .map(|worker| worker.gpu.ordinal)
+            },
+        );
+        if order.target_gpu.is_some() && target_gpu.is_none() {
+            tracing::warn!(
+                job = %row.id,
+                device = ?order.target_device_id,
+                "durable GPU identity is absent or unavailable; resuming on Auto"
+            );
+        }
+        let metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
+            request,
+            request.seed.unwrap_or(0),
+            request.scheduler,
+            mold_core::build_info::version_string(),
+        ));
+        let _mutation = state.scheduler_mutation_fence.lock().await;
         state.job_registry.register_job_at_queued_position(
             &row.id,
             &row.model,
             target_gpu,
             Some(row.seed_pinned),
             Some(metadata),
-            order.position.unwrap_or(usize::MAX),
+            position,
         )
     };
-    Ok(Some((cancel, durable_check.await)))
+    Ok(ClaimRegistration::Registered(cancel))
 }
 
 async fn feed_available(
@@ -613,32 +648,6 @@ async fn feed_available(
         } else {
             None
         };
-        let target_gpu = crate::queue_journal::resolve_replay_affinity(
-            &mut request,
-            row.target_gpu,
-            row.target_device_id.as_deref(),
-            |device_id| {
-                state
-                    .gpu_pool
-                    .workers
-                    .iter()
-                    .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
-                    .map(|worker| worker.gpu.ordinal)
-            },
-        );
-        if row.target_gpu.is_some() && target_gpu.is_none() {
-            tracing::warn!(
-                job = %row.id,
-                device = ?row.target_device_id,
-                "durable GPU identity is absent or unavailable; resuming on Auto"
-            );
-        }
-        let metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
-            &request,
-            request.seed.unwrap_or(0),
-            request.scheduler,
-            mold_core::build_info::version_string(),
-        ));
         // Registry publication shares the scheduler mutation fence with
         // DELETE /api/queue, but SQLite is synchronous and can be stalled by
         // another connection. Publish the cancellation token under the fence,
@@ -646,22 +655,16 @@ async fn feed_available(
         // runtime queue does not receive this job until the check completes:
         // cancellation before/during the check is observed in SQLite, while a
         // later cancellation observes and trips the registered live token.
-        let journal = state.queue_journal.clone();
-        let cancel_id = row.id.clone();
-        let handoff = register_before_durable_cancel_check(
-            state,
-            &row,
-            &claim_token,
-            target_gpu,
-            metadata,
-            tokio::task::spawn_blocking(move || journal.feeder_cancel_requested(&cancel_id)),
-        )
-        .await;
-        let (cancel, cancel_requested) = match handoff {
-            Ok(Some(handoff)) => handoff,
-            Ok(None) => {
+        let cancel = match register_claimed_runtime(state, &row, &claim_token, &mut request).await {
+            Ok(ClaimRegistration::Registered(cancel)) => cancel,
+            Ok(ClaimRegistration::Stale) => {
                 let _ = tokio::task::spawn_blocking(move || ticket.discard()).await;
                 drop(reservation);
+                continue;
+            }
+            Ok(ClaimRegistration::OutsideRuntimeWindow) => {
+                drop(reservation);
+                retain_for_retry(ticket, shutdown).await;
                 continue;
             }
             Err(error) => {
@@ -672,6 +675,10 @@ async fn feed_available(
                 return report;
             }
         };
+        let journal = state.queue_journal.clone();
+        let cancel_id = row.id.clone();
+        let cancel_requested =
+            tokio::task::spawn_blocking(move || journal.feeder_cancel_requested(&cancel_id)).await;
         match cancel_requested {
             Ok(Ok(true)) => {
                 state.job_registry.remove(&row.id);
@@ -1010,6 +1017,144 @@ mod tests {
         handle.await.unwrap();
         drop(reordered);
         drop(hydrated);
+    }
+
+    #[tokio::test]
+    async fn claimed_row_outside_runtime_prefix_is_released_instead_of_appended() {
+        let (state, _rx) = state(2);
+        let ids = admit(&state, 3);
+        let claim = state
+            .queue_journal
+            .claim_feeder_by_id(&ids[2])
+            .unwrap()
+            .expect("an attached hint can claim a deep row");
+        let mut request = request("deep attached");
+        assert!(matches!(
+            register_claimed_runtime(&state, &claim.row, &claim.claim_token, &mut request,)
+                .await
+                .unwrap(),
+            ClaimRegistration::OutsideRuntimeWindow
+        ));
+        assert!(state.job_registry.entry(&ids[2]).is_none());
+        assert!(matches!(
+            state
+                .queue_journal
+                .attach_claimed(&ids[2], claim.claim_token)
+                .retain(),
+            crate::queue_journal::RetainOutcome::Released
+        ));
+        assert_eq!(
+            state
+                .queue_journal
+                .claim_next_feeder()
+                .unwrap()
+                .unwrap()
+                .row
+                .id,
+            ids[0],
+            "the unhydrated FIFO predecessor remains authoritative"
+        );
+    }
+
+    #[tokio::test]
+    async fn deep_reorder_racing_an_older_handoff_controls_the_next_live_grant_order() {
+        let (state, mut rx) = state(2);
+        let ids = admit(&state, 4);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+
+        let mut first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut second = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!([first.id.as_str(), second.id.as_str()], ["job-0", "job-1"]);
+
+        // Freeze only final scheduler publication. The feeder remains free to
+        // claim job-2 and complete its bounded SQLite order read, then waits
+        // at the scheduler fence while owning the durable transition.
+        let scheduler_guard = state.scheduler_mutation_fence.lock().await;
+        first
+            .journal
+            .take()
+            .expect("first hydrated job owns its exact claim")
+            .discard();
+        state.job_registry.remove(&ids[0]);
+        state.queue.decrement();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !state.queue_journal.durable_transition_is_locked() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the older handoff reaches final scheduler publication");
+
+        // A PATCH of still-deep job-3 queues behind that exact handoff. Once
+        // it commits position zero, its bounded runtime projection remains
+        // authoritative when the next slot opens.
+        let patch_state = state.clone();
+        let deep_id = ids[3].clone();
+        let patch = tokio::spawn(async move {
+            let _transition = patch_state.queue_journal.lock_durable_transition().await;
+            let journal = patch_state.queue_journal.clone();
+            let mutation_id = deep_id.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                journal.patch_owned_queued(&mutation_id, None, None, Some(0))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            let _scheduler = patch_state.scheduler_mutation_fence.lock().await;
+            if patch_state.job_registry.entry(&deep_id).is_some() {
+                patch_state
+                    .job_registry
+                    .reorder_queued(&deep_id, 0)
+                    .unwrap();
+            }
+            outcome
+        });
+        assert!(!patch.is_finished(), "PATCH waits behind the exact handoff");
+        drop(scheduler_guard);
+
+        let third = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the older handoff publishes")
+            .expect("runtime queue remains open");
+        assert_eq!(third.id, ids[2]);
+        let outcome = patch.await.unwrap();
+        assert!(matches!(
+            outcome,
+            mold_db::generation_queue::OwnedQueuedPatchOutcome::Updated { position: 0, .. }
+        ));
+
+        second
+            .journal
+            .take()
+            .expect("second hydrated job owns its exact claim")
+            .discard();
+        state.job_registry.remove(&ids[1]);
+        state.queue.decrement();
+        let reordered = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("deep reordered row hydrates after capacity opens")
+            .expect("runtime queue remains open");
+        assert_eq!(reordered.id, ids[3]);
+        assert_eq!(
+            state.job_registry.queued_ids_in_order(),
+            vec![ids[3].clone(), ids[2].clone()],
+            "the deep durable reorder, not handoff/channel arrival, controls live grant order"
+        );
+
+        state.queue_journal.retain_all();
+        shutdown.cancel();
+        handle.await.unwrap();
+        drop(first);
+        drop(second);
+        drop(third);
+        drop(reordered);
     }
 
     #[tokio::test]
@@ -1869,48 +2014,100 @@ mod tests {
             .unwrap()
             .expect("test row is claimed by the feeder handoff");
         let mold_db::generation_queue::QueueClaim { row, claim_token } = claim;
-        let metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
-            &request("fence"),
-            0,
-            None,
-            "test",
-        ));
+        let mut request = request("fence");
+        let registration = register_claimed_runtime(&state, &row, &claim_token, &mut request)
+            .await
+            .unwrap();
+        let ClaimRegistration::Registered(_cancel) = registration else {
+            panic!("the exact claim belongs to the runtime window");
+        };
         let (release_tx, release_rx) = tokio::sync::oneshot::channel::<bool>();
-        let mut handoff = Box::pin(register_before_durable_cancel_check(
-            &state,
-            &row,
-            &claim_token,
-            None,
-            metadata,
-            async { release_rx.await.unwrap() },
-        ));
+        let mut durable_check = Box::pin(async { release_rx.await.unwrap() });
 
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                assert!(
-                    futures::poll!(handoff.as_mut()).is_pending(),
-                    "the synthetic durable lookup remains blocked"
-                );
-                if state.job_registry.entry(&row.id).is_some() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the bounded order read publishes the registry row");
+        assert!(
+            futures::poll!(durable_check.as_mut()).is_pending(),
+            "the synthetic durable lookup remains blocked"
+        );
         let scheduler_guard = state
             .scheduler_mutation_fence
             .try_lock()
             .expect("durable cancellation lookup must not own the scheduler mutation fence");
         drop(scheduler_guard);
         release_tx.send(false).unwrap();
-        let (_cancel, requested) = handoff
-            .await
-            .unwrap()
-            .expect("the exact claim remains current");
+        let requested = durable_check.await;
         assert!(!requested);
         state.job_registry.remove(&row.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_durable_order_read_never_blocks_scheduler_grant_or_cancellation() {
+        let (state, _rx) = state(1);
+        admit(&state, 1);
+        let claim = state
+            .queue_journal
+            .claim_next_feeder()
+            .unwrap()
+            .expect("test row is claimed by the feeder handoff");
+        let mold_db::generation_queue::QueueClaim { row, claim_token } = claim;
+        let row_id = row.id.clone();
+        state.job_registry.register("grant-live", "model-grant");
+        state.job_registry.register("cancel-live", "model-cancel");
+
+        // Hold the journal's real connection mutex. The handoff can enter its
+        // durable transition, but the bounded exact-claim order read cannot
+        // complete until this blocker is released.
+        let locked_db = state.metadata_db.clone();
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let blocker = tokio::task::spawn_blocking(move || {
+            locked_db.as_ref().as_ref().unwrap().with_conn(|_| {
+                locked_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+        });
+        locked_rx.await.unwrap();
+
+        let handoff_state = state.clone();
+        let handoff = tokio::spawn(async move {
+            let mut request = request("blocked order");
+            register_claimed_runtime(&handoff_state, &row, &claim_token, &mut request).await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !state.queue_journal.durable_transition_is_locked() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("handoff enters the durable transition before waiting on SQLite");
+        assert!(!handoff.is_finished(), "the order read remains DB-blocked");
+
+        let scheduler = tokio::time::timeout(
+            Duration::from_secs(2),
+            state.scheduler_mutation_fence.lock(),
+        )
+        .await
+        .expect("blocked order lookup must not own the scheduler fence");
+        state.job_registry.reorder_queued("grant-live", 0).unwrap();
+        state.job_registry.cancel_queued("cancel-live").unwrap();
+        state
+            .job_registry
+            .dispatch_if_queued("grant-live", 0, (), |_| Ok(()))
+            .unwrap();
+        drop(scheduler);
+
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap().unwrap();
+        assert!(matches!(
+            handoff.await.unwrap().unwrap(),
+            ClaimRegistration::Registered(_)
+        ));
+        assert_eq!(
+            state.job_registry.entry("grant-live").unwrap().state,
+            crate::job_registry::JobLifecycle::Running
+        );
+        assert!(state.job_registry.entry("cancel-live").is_none());
+        state.job_registry.remove(&row_id);
     }
 
     #[tokio::test]

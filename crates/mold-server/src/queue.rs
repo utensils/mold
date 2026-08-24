@@ -1778,17 +1778,20 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         return;
     }
 
-    // DELETE takes this same fence. Keep the durable running transition and
-    // the attempt-token handoff in one critical section so cancellation can
-    // only win on one side of the boundary: either it removes/fences the
-    // queued row first, or it observes and signals this exact attempt.
-    let scheduler_mutation = state.scheduler_mutation_fence.lock().await;
-
     // The single-worker path owns the same durable dispatch transition as a
     // GPU owner thread. In particular, feeder tickets start queued with an
     // exact runtime token and must become running before terminal settlement
-    // can CAS and delete the row.
-    if let Some(claim) = claim_single_worker_dispatch(job.journal.as_ref()) {
+    // can CAS and delete the row. Serialize that DB transition with PATCH and
+    // cancellation, but complete SQLite work before taking the scheduler
+    // fence so lock contention cannot freeze unrelated grants.
+    let _durable_transition = state.queue_journal.lock_durable_transition().await;
+    let dispatch_claim = claim_single_worker_dispatch(job.journal.as_ref());
+
+    // DELETE takes this same fence for the bounded registry transition. The
+    // durable gate remains held, so cancellation can only win before the DB
+    // claim or after the exact attempt token is installed.
+    let scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+    if let Some(claim) = dispatch_claim {
         match claim {
             crate::queue_journal::DispatchClaim::Exhausted { attempts, cap } => {
                 let err_msg = format!(
@@ -1799,6 +1802,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 if let Some(ref tx) = job.progress_tx {
                     let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
                 }
+                drop(scheduler_mutation);
                 if let Some(ticket) = job.journal.take() {
                     ticket.hold("dispatch attempts exhausted");
                 }
@@ -1811,6 +1815,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 if let Some(ref tx) = job.progress_tx {
                     let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
                 }
+                drop(scheduler_mutation);
                 let _ = job.result_tx.send(Err(err_msg));
                 return;
             }
@@ -1844,6 +1849,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     // shape consistent with multi-GPU even when we don't know the ordinal.
     state.job_registry.mark_running(&job.id, None);
     drop(scheduler_mutation);
+    drop(_durable_transition);
 
     if attempt_cancellation.is_cancelled() {
         let user_requested = state.job_registry.cancel_requested(&job.id);

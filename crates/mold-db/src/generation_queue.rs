@@ -260,12 +260,16 @@ pub struct QueueClaim {
 /// Position of an exact feeder claim in SQLite's bounded live-order window.
 ///
 /// `Some(position)` means the row belongs in that queued slot. `None` means
-/// the claim is valid but deeper than the window and therefore belongs at the
-/// current live tail. A missing outer value means the owner/state/token fence
-/// is stale and the row must not be published into the registry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// the claim is valid but deeper than the window and must be released for a
+/// later FIFO claim; appending it would bypass durable predecessors. A missing
+/// outer value means the owner/state/token fence is stale and the row must not
+/// be published into the registry. Affinity is read in the same snapshot so a
+/// claimed row never hydrates a pre-PATCH target from its old claim payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimedQueueRuntimePosition {
     pub position: Option<usize>,
+    pub target_gpu: Option<usize>,
+    pub target_device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -800,18 +804,22 @@ pub fn claimed_runtime_position(
     db.transact(|conn| {
         let current = conn
             .query_row(
-                "SELECT 1
+                "SELECT target_gpu, target_device_id
                    FROM generation_queue
                   WHERE id = ?1 AND owner_uuid = ?2 AND state = 'queued'
                     AND claim_token = ?3",
                 params![job_id, owner_uuid, claim_token],
-                |_| Ok(()),
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?.map(|gpu| gpu as usize),
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
             )
-            .optional()?
-            .is_some();
-        if !current {
+            .optional()?;
+        let Some((target_gpu, target_device_id)) = current else {
             return Ok(None);
-        }
+        };
 
         let ids = conn
             .prepare(CLAIMED_QUEUE_RUNTIME_WINDOW_SQL)?
@@ -821,6 +829,8 @@ pub fn claimed_runtime_position(
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(Some(ClaimedQueueRuntimePosition {
             position: ids.iter().position(|id| id == job_id),
+            target_gpu,
+            target_device_id,
         }))
     })
 }
@@ -1256,10 +1266,34 @@ pub fn patch_owned_claimed_queued(
     )
 }
 
+/// Atomically patch an owner-fenced queued row while preserving whichever
+/// exact claim token the transaction observes.
+///
+/// The server's durable-transition protocol excludes claim publication and
+/// same-id cancellation around this call. Accepting either claim state here
+/// removes the registry-existence TOCTOU without weakening the transaction:
+/// every target update and final projection is still fenced by the exact
+/// token (including NULL) read at the start of the IMMEDIATE transaction.
+pub fn patch_owned_any_queued(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    job_id: &str,
+    patch: &OwnedQueuedPatch,
+) -> Result<OwnedQueuedPatchOutcome> {
+    patch_owned_queued_with_claim_fence(
+        db,
+        owner_uuid,
+        job_id,
+        patch,
+        QueuePatchClaimFence::AnyExact,
+    )
+}
+
 #[derive(Debug, Clone, Copy)]
 enum QueuePatchClaimFence {
     Unclaimed,
     Claimed,
+    AnyExact,
 }
 
 impl QueuePatchClaimFence {
@@ -1267,6 +1301,7 @@ impl QueuePatchClaimFence {
         match self {
             Self::Unclaimed => claim_token.is_none(),
             Self::Claimed => claim_token.is_some(),
+            Self::AnyExact => true,
         }
     }
 
@@ -1284,6 +1319,12 @@ impl QueuePatchClaimFence {
                   WHERE id = ?1 AND owner_uuid = ?2
                     AND state = 'queued' AND claim_token IS NOT NULL"
             }
+            Self::AnyExact => {
+                "UPDATE generation_queue
+                    SET target_gpu = ?3, target_device_id = ?4, updated_at = ?5
+                  WHERE id = ?1 AND owner_uuid = ?2 AND state = 'queued'
+                    AND claim_token IS ?6"
+            }
         }
     }
 
@@ -1300,6 +1341,12 @@ impl QueuePatchClaimFence {
                     SET created_at = ?2, updated_at = ?3
                   WHERE id = ?1 AND owner_uuid = ?4 AND state = 'queued'
                     AND (id != ?5 OR claim_token IS NOT NULL)"
+            }
+            Self::AnyExact => {
+                "UPDATE generation_queue
+                    SET created_at = ?2, updated_at = ?3
+                  WHERE id = ?1 AND owner_uuid = ?4 AND state = 'queued'
+                    AND (id != ?5 OR claim_token IS ?6)"
             }
         }
     }
@@ -1319,6 +1366,13 @@ impl QueuePatchClaimFence {
                    FROM generation_queue
                   WHERE id = ?1 AND owner_uuid = ?2
                     AND state = 'queued' AND claim_token IS NOT NULL"
+            }
+            Self::AnyExact => {
+                "SELECT id, state, model, target_gpu, seed_pinned,
+                        dispatch_attempts, replay_seen, held_reason, created_at
+                   FROM generation_queue
+                  WHERE id = ?1 AND owner_uuid = ?2
+                    AND state = 'queued' AND claim_token IS ?3"
             }
         }
     }
@@ -1356,16 +1410,30 @@ fn patch_owned_queued_with_claim_fence(
         }
 
         if let Some(target) = &patch.target {
-            let updated = conn.execute(
-                claim_fence.affinity_sql(),
-                params![
-                    job_id,
-                    owner_uuid,
-                    target.target_gpu.map(|gpu| gpu as i64),
-                    target.target_device_id.as_deref(),
-                    patch.updated_at_ms,
-                ],
-            )?;
+            let updated = if matches!(claim_fence, QueuePatchClaimFence::AnyExact) {
+                conn.execute(
+                    claim_fence.affinity_sql(),
+                    params![
+                        job_id,
+                        owner_uuid,
+                        target.target_gpu.map(|gpu| gpu as i64),
+                        target.target_device_id.as_deref(),
+                        patch.updated_at_ms,
+                        claim_token.as_deref(),
+                    ],
+                )?
+            } else {
+                conn.execute(
+                    claim_fence.affinity_sql(),
+                    params![
+                        job_id,
+                        owner_uuid,
+                        target.target_gpu.map(|gpu| gpu as i64),
+                        target.target_device_id.as_deref(),
+                        patch.updated_at_ms,
+                    ],
+                )?
+            };
             if updated != 1 {
                 bail!("owned queued row changed during affinity patch");
             }
@@ -1397,13 +1465,24 @@ fn patch_owned_queued_with_claim_fence(
                 let mut update = conn.prepare(claim_fence.reorder_sql())?;
                 let mut moved = 0usize;
                 for (index, id) in order.iter().enumerate() {
-                    moved += update.execute(params![
-                        id,
-                        anchor + index as i64,
-                        patch.updated_at_ms,
-                        owner_uuid,
-                        job_id,
-                    ])?;
+                    moved += if matches!(claim_fence, QueuePatchClaimFence::AnyExact) {
+                        update.execute(params![
+                            id,
+                            anchor + index as i64,
+                            patch.updated_at_ms,
+                            owner_uuid,
+                            job_id,
+                            claim_token.as_deref(),
+                        ])?
+                    } else {
+                        update.execute(params![
+                            id,
+                            anchor + index as i64,
+                            patch.updated_at_ms,
+                            owner_uuid,
+                            job_id,
+                        ])?
+                    };
                 }
                 if moved != order.len() {
                     bail!("owned queued set changed during reorder");
@@ -1422,23 +1501,32 @@ fn patch_owned_queued_with_claim_fence(
                 .map_err(|_| anyhow::anyhow!("queued generation position is outside usize"))?
         };
 
-        let projection = conn.query_row(
-            claim_fence.projection_sql(),
-            params![job_id, owner_uuid],
-            |row| {
-                Ok(GenerationQueueProjection {
-                    id: row.get(0)?,
-                    state: QueueRowState::Queued,
-                    model: row.get(2)?,
-                    target_gpu: row.get::<_, Option<i64>>(3)?.map(|gpu| gpu as usize),
-                    seed_pinned: row.get::<_, i64>(4)? != 0,
-                    dispatch_attempts: row.get::<_, i64>(5)? as u32,
-                    replay_seen: row.get::<_, i64>(6)? as u32,
-                    held_reason: row.get(7)?,
-                    created_at_ms: row.get(8)?,
-                })
-            },
-        )?;
+        let read_projection = |row: &rusqlite::Row<'_>| {
+            Ok(GenerationQueueProjection {
+                id: row.get(0)?,
+                state: QueueRowState::Queued,
+                model: row.get(2)?,
+                target_gpu: row.get::<_, Option<i64>>(3)?.map(|gpu| gpu as usize),
+                seed_pinned: row.get::<_, i64>(4)? != 0,
+                dispatch_attempts: row.get::<_, i64>(5)? as u32,
+                replay_seen: row.get::<_, i64>(6)? as u32,
+                held_reason: row.get(7)?,
+                created_at_ms: row.get(8)?,
+            })
+        };
+        let projection = if matches!(claim_fence, QueuePatchClaimFence::AnyExact) {
+            conn.query_row(
+                claim_fence.projection_sql(),
+                params![job_id, owner_uuid, claim_token.as_deref()],
+                read_projection,
+            )?
+        } else {
+            conn.query_row(
+                claim_fence.projection_sql(),
+                params![job_id, owner_uuid],
+                read_projection,
+            )?
+        };
         Ok(OwnedQueuedPatchOutcome::Updated {
             position,
             projection,
@@ -2384,17 +2472,26 @@ mod tests {
         )
         .unwrap();
 
-        let deep = claim_by_id(&db, "owner-a", "deep", "deep-token", 704)
+        set_target_gpu(&db, "deep", Some(3), Some("cuda:stable"), 704).unwrap();
+        let deep = claim_by_id(&db, "owner-a", "deep", "deep-token", 705)
             .unwrap()
             .unwrap();
         assert_eq!(
             claimed_runtime_position(&db, "owner-a", "deep", &deep.claim_token, 3).unwrap(),
-            Some(ClaimedQueueRuntimePosition { position: Some(2) })
+            Some(ClaimedQueueRuntimePosition {
+                position: Some(2),
+                target_gpu: Some(3),
+                target_device_id: Some("cuda:stable".to_string()),
+            })
         );
         assert_eq!(
             claimed_runtime_position(&db, "owner-a", "deep", &deep.claim_token, 2).unwrap(),
-            Some(ClaimedQueueRuntimePosition { position: None }),
-            "a valid claim beyond the bounded prefix maps to the live tail"
+            Some(ClaimedQueueRuntimePosition {
+                position: None,
+                target_gpu: Some(3),
+                target_device_id: Some("cuda:stable".to_string()),
+            }),
+            "a valid claim beyond the bounded prefix must be released for a later pass"
         );
 
         assert!(
@@ -3010,6 +3107,54 @@ mod tests {
             )
             .unwrap(),
             OwnedQueuedPatchOutcome::NotQueued
+        );
+    }
+
+    #[test]
+    fn owned_any_queued_patch_accepts_both_claim_states_and_preserves_exact_tokens() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        for id in ["unclaimed", "claimed", "tail"] {
+            insert(&db, &row(id, "owner-a", 500)).unwrap();
+        }
+        claim_by_id(&db, "owner-a", "claimed", "exact-claim", 600)
+            .unwrap()
+            .unwrap();
+        let patch = |position, gpu| OwnedQueuedPatch {
+            target: Some(QueueTargetPatch {
+                target_gpu: Some(gpu),
+                target_device_id: Some(format!("cuda:{gpu}")),
+            }),
+            position: Some(position),
+            updated_at_ms: 700 + gpu as i64,
+        };
+
+        assert!(matches!(
+            patch_owned_any_queued(&db, "owner-a", "unclaimed", &patch(2, 1)).unwrap(),
+            OwnedQueuedPatchOutcome::Updated { .. }
+        ));
+        assert!(matches!(
+            patch_owned_any_queued(&db, "owner-a", "claimed", &patch(0, 2)).unwrap(),
+            OwnedQueuedPatchOutcome::Updated { position: 0, .. }
+        ));
+        let claim_token: Option<String> = db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT claim_token FROM generation_queue WHERE id = 'claimed'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(claim_token.as_deref(), Some("exact-claim"));
+        assert_eq!(get(&db, "claimed").unwrap().unwrap().target_gpu, Some(2));
+        assert_eq!(
+            list_replayable(&db, "owner-a")
+                .unwrap()
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            ["claimed", "tail", "unclaimed"]
         );
     }
 

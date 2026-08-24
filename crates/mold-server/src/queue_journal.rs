@@ -488,6 +488,17 @@ pub struct QueueJournal {
     max_dispatch_attempts: u32,
     max_replay_seen: u32,
     feeder_notify: tokio::sync::Notify,
+    /// Serializes durable queue transitions whose SQLite result is later
+    /// projected into the bounded runtime registry.
+    ///
+    /// This gate is always acquired before either authority. A caller may use
+    /// the scheduler fence for a bounded pre-DB lifecycle mark, but must drop
+    /// it before blocking SQLite work; the final projection may take the
+    /// scheduler fence only after SQLite completes. Keeping this gate separate
+    /// means a slow database cannot freeze unrelated grants or in-memory
+    /// cancellation, while PATCH, feeder publication, and durable cancellation
+    /// still agree on one claim/order transition.
+    durable_transition_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl QueueJournal {
@@ -540,6 +551,7 @@ impl QueueJournal {
             ),
             max_replay_seen: env_u32(MAX_REPLAY_SEEN_ENV, DEFAULT_MAX_REPLAY_SEEN),
             feeder_notify: tokio::sync::Notify::new(),
+            durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -562,7 +574,22 @@ impl QueueJournal {
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
             feeder_notify: tokio::sync::Notify::new(),
+            durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Enter the durable-transition protocol without touching the scheduler
+    /// mutation fence. Callers may await SQLite while holding this guard, but
+    /// must finish that work before acquiring the scheduler fence.
+    pub(crate) async fn lock_durable_transition(
+        self: &Arc<Self>,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.durable_transition_gate.clone().lock_owned().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn durable_transition_is_locked(&self) -> bool {
+        self.durable_transition_gate.try_lock().is_err()
     }
 
     /// Whether this server can promise that a queued job survives a restart.
@@ -1646,6 +1673,36 @@ impl QueueJournal {
             },
         )
     }
+
+    /// Patch an owned queued row while fencing every write to the exact claim
+    /// token (including NULL) observed by the DB transaction. The caller must
+    /// own [`Self::lock_durable_transition`] across this call and the bounded
+    /// runtime projection.
+    pub(crate) fn patch_owned_any_queued(
+        &self,
+        id: &str,
+        target_gpu: Option<Option<usize>>,
+        target_device_id: Option<Option<String>>,
+        position: Option<usize>,
+    ) -> anyhow::Result<generation_queue::OwnedQueuedPatchOutcome> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(generation_queue::OwnedQueuedPatchOutcome::NotOwned);
+        };
+        let target = target_gpu.map(|target_gpu| generation_queue::QueueTargetPatch {
+            target_gpu,
+            target_device_id: target_device_id.flatten(),
+        });
+        generation_queue::patch_owned_any_queued(
+            db,
+            owner,
+            id,
+            &generation_queue::OwnedQueuedPatch {
+                target,
+                position,
+                updated_at_ms: now_ms(),
+            },
+        )
+    }
 }
 
 /// What `startup_reconcile` did, for one startup log line.
@@ -2365,6 +2422,7 @@ mod tests {
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
             feeder_notify: tokio::sync::Notify::new(),
+            durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -2872,6 +2930,7 @@ mod tests {
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
             feeder_notify: tokio::sync::Notify::new(),
+            durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
         });
         let mut request = request();
         request.prompt = "x".repeat(4096);
@@ -2900,6 +2959,7 @@ mod tests {
             max_dispatch_attempts: 2,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
             feeder_notify: tokio::sync::Notify::new(),
+            durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
         });
         let request = request();
         let first = journal
