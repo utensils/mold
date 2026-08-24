@@ -4920,7 +4920,7 @@ mod tests {
     #[test]
     fn h3_compact_steps_ignore_a_stale_model_pref_default() {
         let config = Config::default();
-        for (model, expected_steps, adjustable_steps) in [
+        for (model, expected_steps, accepts_explicit_30_steps) in [
             (mold_core::minimax_h3::FL2VA_COMFY, 21, true),
             (mold_core::minimax_h3::REF2VA_COMFY, 21, true),
             (mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP, 9, false),
@@ -4976,7 +4976,7 @@ mod tests {
                         &profile,
                         &explicit_request,
                     );
-                if adjustable_steps {
+                if accepts_explicit_30_steps {
                     validation.unwrap_or_else(|error| panic!("{model}: {error}"));
                 } else {
                     assert!(
