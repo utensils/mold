@@ -2834,11 +2834,37 @@ fn legacy_dispatch_stop_message(state: &AppState) -> String {
 }
 
 async fn run_queue_dispatcher_with_tuning(
+    job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
+    state: AppState,
+    buffer_size: usize,
+    max_deferrals: usize,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    run_queue_dispatcher_with_tuning_inner(
+        job_rx,
+        state,
+        buffer_size,
+        max_deferrals,
+        shutdown,
+        #[cfg(test)]
+        None,
+    )
+    .await;
+}
+
+#[cfg(test)]
+pub(crate) struct LegacyGenerationDispatchHook {
+    pub(crate) selected: Arc<tokio::sync::Notify>,
+    pub(crate) resume: Arc<tokio::sync::Notify>,
+}
+
+async fn run_queue_dispatcher_with_tuning_inner(
     mut job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
     state: AppState,
     buffer_size: usize,
     max_deferrals: usize,
     shutdown: tokio_util::sync::CancellationToken,
+    #[cfg(test)] mut before_final_dispatch: Option<LegacyGenerationDispatchHook>,
 ) {
     let mut buffer: VecDeque<BufferedJob> = VecDeque::with_capacity(buffer_size);
 
@@ -2880,10 +2906,28 @@ async fn run_queue_dispatcher_with_tuning(
         // dispatch order rather than only the `GET /api/queue` snapshot.
         // Reorder is within-host; per-lane `target_gpu` semantics are applied
         // later when a worker is selected for the picked job.
-        align_buffer_to_registry_order(&mut buffer, &state.job_registry.queued_ids_in_order());
-
         let loaded = multi_gpu_loaded_models(&state);
-        let job = pick_next_job(&mut buffer, &loaded, max_deferrals);
+        // Selection is a revocable read. Capture the exact bounded registry
+        // order and target while holding the same scheduler fence used by
+        // PATCH/cancellation. Downloads and worker availability waits happen
+        // after this guard is released; the final send revalidates both facts
+        // before it can promote the registry row to Running.
+        let (job, selected_order, selected_target) = {
+            let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+            let snapshot = state.job_registry.scheduler_snapshot();
+            let order = snapshot
+                .iter()
+                .filter(|entry| entry.state == crate::job_registry::JobLifecycle::Queued)
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>();
+            align_buffer_to_registry_order(&mut buffer, &order);
+            let job = pick_next_job(&mut buffer, &loaded, max_deferrals);
+            let target = snapshot
+                .iter()
+                .find(|entry| entry.id == job.id)
+                .map(|entry| entry.target_gpu);
+            (job, order, target)
+        };
 
         #[cfg(feature = "metrics")]
         crate::metrics::record_queue_depth(state.queue.pending());
@@ -3002,6 +3046,12 @@ async fn run_queue_dispatcher_with_tuning(
         let mut dispatched = false;
         let mut unavailable = LegacyUnavailableBackoff::new();
 
+        #[cfg(test)]
+        if let Some(hook) = before_final_dispatch.take() {
+            hook.selected.notify_one();
+            hook.resume.notified().await;
+        }
+
         while !dispatched {
             if shutdown.is_cancelled()
                 || state
@@ -3088,15 +3138,84 @@ async fn run_queue_dispatcher_with_tuning(
                 &worker,
             );
 
+            // PATCH and cancellation hold the durable-transition gate across
+            // their durable commit and bounded registry acknowledgement. Take
+            // it before the scheduler fence so the final validation + send is
+            // linear with the complete mutation protocol, while doing no DB
+            // or awaited I/O beneath the scheduler fence.
+            let durable_transition = state.queue_journal.lock_durable_transition().await;
+            let scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+            let current_snapshot = state.job_registry.scheduler_snapshot();
+            let current_order = current_snapshot
+                .iter()
+                .filter(|entry| entry.state == crate::job_registry::JobLifecycle::Queued)
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>();
+            let current_target = current_snapshot
+                .iter()
+                .find(|entry| entry.id == job_id)
+                .map(|entry| entry.target_gpu);
+            let tracked = selected_target.is_some();
+            if tracked
+                && (current_order != selected_order
+                    || current_target != selected_target
+                    || current_snapshot.iter().any(|entry| {
+                        entry.id == job_id
+                            && entry.state != crate::job_registry::JobLifecycle::Queued
+                    }))
+            {
+                drop(scheduler_mutation);
+                drop(durable_transition);
+                let pending = gpu_job.take().expect("stale selected job remains pending");
+                if current_snapshot.iter().any(|entry| entry.id == job_id) {
+                    buffer.push_front(BufferedJob::new(generation_from_legacy_gpu_job(pending)));
+                } else {
+                    reject_generation_job(
+                        &state,
+                        generation_from_legacy_gpu_job(pending),
+                        "Cancelled".to_string(),
+                    );
+                }
+                continue 'dispatcher;
+            }
+            let fresh_preferred_gpu = match legacy_generation_preferred_gpu(
+                &state,
+                &job_id,
+                gpu_job
+                    .as_ref()
+                    .and_then(|job| job.request.placement.as_ref()),
+            ) {
+                Ok(target) => target,
+                Err(error) => {
+                    drop(scheduler_mutation);
+                    drop(durable_transition);
+                    reject_generation_job(
+                        &state,
+                        generation_from_legacy_gpu_job(
+                            gpu_job
+                                .take()
+                                .expect("invalid selected job remains pending"),
+                        ),
+                        error,
+                    );
+                    continue 'dispatcher;
+                }
+            };
+            if fresh_preferred_gpu != preferred_gpu {
+                drop(scheduler_mutation);
+                drop(durable_transition);
+                buffer.push_front(BufferedJob::new(generation_from_legacy_gpu_job(
+                    gpu_job
+                        .take()
+                        .expect("retargeted selected job remains pending"),
+                )));
+                continue 'dispatcher;
+            }
+
             // Reserve rollback transport capacity before sending. Execution
-            // ownership remains the owner's binary claim after dequeue.
+            // ownership remains the legacy owner's binary claim after dequeue.
             worker.reserve_legacy_transport();
             let pending = gpu_job.take().expect("gpu_job present in retry loop");
-            if preferred_gpu.is_none() {
-                let _ = state
-                    .job_registry
-                    .set_target_gpu(&job_id, Some(worker.gpu.ordinal));
-            }
             let lease = crate::scheduler::LeaseFence {
                 work_id: pending.id.clone(),
                 device_id: crate::scheduler::worker_device_id(&worker),
@@ -3112,19 +3231,65 @@ async fn run_queue_dispatcher_with_tuning(
                 work: crate::gpu_pool::OwnerWork::Generation(Box::new(pending)),
                 retry: None,
             };
-            match worker.try_send_job(Box::new(grant)) {
-                Ok(()) => {
+            let mut disconnected = false;
+            let dispatch = if tracked {
+                state.job_registry.dispatch_if_queued(
+                    &job_id,
+                    worker.gpu.ordinal,
+                    Box::new(grant),
+                    |grant| {
+                        worker.try_send_job(grant).map_err(|error| match error {
+                            std::sync::mpsc::TrySendError::Full(grant) => grant,
+                            std::sync::mpsc::TrySendError::Disconnected(grant) => {
+                                disconnected = true;
+                                grant
+                            }
+                        })
+                    },
+                )
+            } else {
+                worker
+                    .try_send_job(Box::new(grant))
+                    .map(|()| None)
+                    .map_err(|error| match error {
+                        std::sync::mpsc::TrySendError::Full(grant) => {
+                            crate::job_registry::DispatchAttemptError::Transport(grant)
+                        }
+                        std::sync::mpsc::TrySendError::Disconnected(grant) => {
+                            disconnected = true;
+                            crate::job_registry::DispatchAttemptError::Transport(grant)
+                        }
+                    })
+            };
+            drop(scheduler_mutation);
+            drop(durable_transition);
+            match dispatch {
+                Ok(_) => {
                     if let Some(observation) = observed_dispatch {
                         state.scheduled_work.observations().record(observation);
                     }
                     dispatched = true;
                 }
-                Err(std::sync::mpsc::TrySendError::Full(j)) => {
+                Err(crate::job_registry::DispatchAttemptError::Claim(_, grant)) => {
                     worker.settle_legacy_transport();
-                    if preferred_gpu.is_none() {
-                        let _ = state.job_registry.set_target_gpu(&job_id, None);
+                    let pending = generation_from_legacy_grant(*grant);
+                    if state.job_registry.scheduler_lifecycle(&job_id).is_some() {
+                        buffer
+                            .push_front(BufferedJob::new(generation_from_legacy_gpu_job(pending)));
+                    } else {
+                        reject_generation_job(
+                            &state,
+                            generation_from_legacy_gpu_job(pending),
+                            "Cancelled".to_string(),
+                        );
                     }
-                    gpu_job = Some(generation_from_legacy_grant(*j));
+                    continue 'dispatcher;
+                }
+                Err(crate::job_registry::DispatchAttemptError::Transport(grant))
+                    if !disconnected =>
+                {
+                    worker.settle_legacy_transport();
+                    gpu_job = Some(generation_from_legacy_grant(*grant));
                     if preferred_gpu.is_none() {
                         skip.push(worker.gpu.ordinal);
                         if skip.len() >= state.gpu_pool.worker_count().max(1) {
@@ -3135,16 +3300,13 @@ async fn run_queue_dispatcher_with_tuning(
                         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     }
                 }
-                Err(std::sync::mpsc::TrySendError::Disconnected(j)) => {
+                Err(crate::job_registry::DispatchAttemptError::Transport(grant)) => {
                     worker.settle_legacy_transport();
-                    if preferred_gpu.is_none() {
-                        let _ = state.job_registry.set_target_gpu(&job_id, None);
-                    }
                     tracing::warn!(
                         gpu = worker.gpu.ordinal,
                         "GPU worker disconnected — retrying dispatch"
                     );
-                    gpu_job = Some(generation_from_legacy_grant(*j));
+                    gpu_job = Some(generation_from_legacy_grant(*grant));
                     if preferred_gpu.is_none() {
                         skip.push(worker.gpu.ordinal);
                     } else {
@@ -3205,6 +3367,23 @@ fn generation_from_legacy_grant(grant: crate::gpu_pool::LeaseGrant) -> GpuJob {
     match grant.work {
         crate::gpu_pool::OwnerWork::Generation(job) => *job,
         work => panic!("legacy dispatcher received {:?}", work.kind()),
+    }
+}
+
+fn generation_from_legacy_gpu_job(job: GpuJob) -> GenerationJob {
+    GenerationJob {
+        id: job.id,
+        request: job.request,
+        deferred_media: job.deferred_media,
+        resolved_references: job.resolved_references,
+        completion_payload: job.completion_payload,
+        progress_tx: job.progress_tx,
+        result_tx: job.result_tx,
+        output_dir: job.output_dir,
+        batch_child: job.batch_child,
+        journal: job.journal,
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+        h3_private_ingress_grant: None,
     }
 }
 
@@ -7413,13 +7592,300 @@ mod tests {
             ),
         };
         assert_eq!(dispatched.model, "flux-dev:q4");
-        assert_eq!(
-            state.job_registry.target_gpu("auto-job"),
-            Some(Some(ordinal))
-        );
+        let entry = state.job_registry.entry("auto-job").unwrap();
+        assert_eq!(entry.state, crate::job_registry::JobLifecycle::Running);
+        assert_eq!(entry.gpu, Some(ordinal));
+        assert_eq!(entry.target_gpu, None);
 
         drop(job_tx);
         dispatcher.abort();
+    }
+
+    async fn legacy_dispatch_retargets_after_blocked_patch(
+        mode: crate::dispatch_mode::DispatchMode,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("gallery");
+        std::fs::create_dir_all(&output).unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let (worker0, rx0) = test_worker(0, 2);
+        let (worker1, rx1) = test_worker(1, 2);
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel(4);
+        let queue = QueueHandle::new(job_tx.clone());
+        let mut state = crate::state::AppState::empty(
+            mold_core::Config::default(),
+            queue.clone(),
+            Arc::new(GpuPool {
+                workers: vec![worker0.clone(), worker1.clone()].into(),
+            }),
+            4,
+        );
+        state.metadata_db = db.clone();
+        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            db.clone(),
+            Some(root.path()),
+            "legacy-dispatch-race",
+        ));
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(scheduled_tx, mode);
+
+        let id = format!("{}-blocked-patch", mode.as_str());
+        let request = fake_request("flux-dev:q4");
+        state
+            .job_registry
+            .register_with_target_gpu(&id, &request.model, Some(0));
+        let ticket = state
+            .queue_journal
+            .record(crate::queue_journal::JournalAdmission {
+                id: &id,
+                request: &request,
+                output_dir: Some(&output),
+                target_gpu: Some(0),
+                target_device_id: None,
+                completion_payload: SseCompletionPayload::Full,
+                batch_child: false,
+                carries_reference_authority: false,
+            })
+            .expect("durable test job");
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        queue
+            .submit(
+                GenerationJob {
+                    id: id.clone(),
+                    request,
+                    deferred_media: None,
+                    resolved_references: None,
+                    completion_payload: SseCompletionPayload::Full,
+                    progress_tx: None,
+                    result_tx,
+                    output_dir: Some(output),
+                    batch_child: None,
+                    journal: Some(ticket),
+                    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+                    h3_private_ingress_grant: None,
+                },
+                4,
+            )
+            .await
+            .unwrap();
+
+        let selected = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let dispatcher = tokio::spawn(run_queue_dispatcher_with_tuning_inner(
+            job_rx,
+            state.clone(),
+            4,
+            DEFAULT_MAX_DEFERRALS,
+            tokio_util::sync::CancellationToken::new(),
+            Some(LegacyGenerationDispatchHook {
+                selected: selected.clone(),
+                resume: resume.clone(),
+            }),
+        ));
+        selected.notified().await;
+
+        // Hold the actual SQLite connection after selection. PATCH installs
+        // its exact runtime blocker, then waits in the DB without owning the
+        // scheduler fence.
+        let locked_db = db.clone();
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let blocker = tokio::task::spawn_blocking(move || {
+            locked_db.as_ref().as_ref().unwrap().with_conn(|_| {
+                locked_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+        });
+        locked_rx.await.unwrap();
+
+        let patch_state = state.clone();
+        let patch_id = id.clone();
+        let patch = tokio::spawn(async move {
+            let _durable = patch_state.queue_journal.lock_durable_transition().await;
+            let token = {
+                let _scheduler = patch_state.scheduler_mutation_fence.lock().await;
+                patch_state
+                    .job_registry
+                    .begin_queue_patch(&patch_id)
+                    .unwrap()
+            };
+            let journal = patch_state.queue_journal.clone();
+            let durable_id = patch_id.clone();
+            tokio::task::spawn_blocking(move || {
+                journal.patch_owned_any_queued(&durable_id, Some(Some(1)), None, None)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            let _scheduler = patch_state.scheduler_mutation_fence.lock().await;
+            assert!(patch_state
+                .job_registry
+                .queue_patch_token_matches(&patch_id, token));
+            patch_state
+                .job_registry
+                .set_target_gpu(&patch_id, Some(1))
+                .unwrap();
+            patch_state
+                .job_registry
+                .finish_queue_patch(&patch_id, token);
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while state.job_registry.scheduler_lifecycle(&id)
+                != Some(crate::job_registry::JobLifecycle::Held)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("PATCH installs its dispatch blocker before the DB commit");
+
+        resume.notify_one();
+        assert!(rx0
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+        assert!(rx1
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+
+        state.job_registry.register("unrelated-live", "model-live");
+        let scheduler = state
+            .scheduler_mutation_fence
+            .try_lock()
+            .expect("DB-blocked PATCH leaves unrelated scheduler work live");
+        state
+            .job_registry
+            .dispatch_if_queued("unrelated-live", 0, (), |_| Ok(()))
+            .unwrap();
+        drop(scheduler);
+
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap().unwrap();
+        patch.await.unwrap();
+        let dispatched = recv_worker_job(&rx1, std::time::Duration::from_secs(2))
+            .expect("the freshly retargeted job must reach gpu 1");
+        assert_eq!(dispatched.id, id);
+        assert!(
+            rx0.try_recv().is_err(),
+            "gpu 0 must never see the stale target"
+        );
+        let entry = state.job_registry.entry(&id).unwrap();
+        assert_eq!(entry.state, crate::job_registry::JobLifecycle::Running);
+        assert_eq!(entry.gpu, Some(1));
+        assert_eq!(
+            state.job_registry.entry("unrelated-live").unwrap().state,
+            crate::job_registry::JobLifecycle::Running
+        );
+
+        worker1.settle_legacy_transport();
+        state.job_registry.remove(&id);
+        state.job_registry.remove("unrelated-live");
+        drop(job_tx);
+        dispatcher.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_and_observe_dispatch_never_send_a_db_blocked_stale_patch_target() {
+        for mode in [
+            crate::dispatch_mode::DispatchMode::Legacy,
+            crate::dispatch_mode::DispatchMode::Observe,
+        ] {
+            legacy_dispatch_retargets_after_blocked_patch(mode).await;
+        }
+    }
+
+    async fn legacy_dispatch_drops_cancelled_selection_and_runs_unrelated_work(
+        mode: crate::dispatch_mode::DispatchMode,
+    ) {
+        let (worker0, rx0) = test_worker(0, 4);
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel(4);
+        let queue = QueueHandle::new(job_tx.clone());
+        let mut state = crate::state::AppState::empty(
+            mold_core::Config::default(),
+            queue.clone(),
+            Arc::new(GpuPool {
+                workers: vec![worker0.clone()].into(),
+            }),
+            4,
+        );
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(scheduled_tx, mode);
+
+        let mut results = Vec::new();
+        for id in ["cancel-stale", "unrelated-next"] {
+            state.job_registry.register(id, "flux-dev:q4");
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            results.push(result_rx);
+            queue
+                .submit(
+                    GenerationJob {
+                        id: id.to_string(),
+                        request: fake_request("flux-dev:q4"),
+                        deferred_media: None,
+                        resolved_references: None,
+                        completion_payload: SseCompletionPayload::Full,
+                        progress_tx: None,
+                        result_tx,
+                        output_dir: None,
+                        batch_child: None,
+                        journal: None,
+                        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+                        h3_private_ingress_grant: None,
+                    },
+                    4,
+                )
+                .await
+                .unwrap();
+        }
+
+        let selected = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let dispatcher = tokio::spawn(run_queue_dispatcher_with_tuning_inner(
+            job_rx,
+            state.clone(),
+            4,
+            DEFAULT_MAX_DEFERRALS,
+            tokio_util::sync::CancellationToken::new(),
+            Some(LegacyGenerationDispatchHook {
+                selected: selected.clone(),
+                resume: resume.clone(),
+            }),
+        ));
+        selected.notified().await;
+        {
+            let _scheduler = state.scheduler_mutation_fence.lock().await;
+            state.job_registry.cancel_queued("cancel-stale").unwrap();
+        }
+        resume.notify_one();
+
+        let dispatched = recv_worker_job(&rx0, std::time::Duration::from_secs(2))
+            .expect("the unrelated queued job remains live");
+        assert_eq!(dispatched.id, "unrelated-next");
+        assert_eq!(
+            state.job_registry.entry("unrelated-next").unwrap().state,
+            crate::job_registry::JobLifecycle::Running
+        );
+        assert!(state.job_registry.entry("cancel-stale").is_none());
+        let cancelled = tokio::time::timeout(std::time::Duration::from_secs(1), &mut results[0])
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(cancelled, Err(message) if message == "Cancelled"));
+
+        worker0.settle_legacy_transport();
+        state.job_registry.remove("unrelated-next");
+        drop(job_tx);
+        dispatcher.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_and_observe_dispatch_drop_cancelled_stale_selection_without_stalling() {
+        for mode in [
+            crate::dispatch_mode::DispatchMode::Legacy,
+            crate::dispatch_mode::DispatchMode::Observe,
+        ] {
+            legacy_dispatch_drops_cancelled_selection_and_runs_unrelated_work(mode).await;
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
