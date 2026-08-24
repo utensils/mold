@@ -1146,7 +1146,7 @@ describe("MobileHostDetail remote host data", () => {
     expect(row.text()).not.toContain("unavailable");
   });
 
-  it("uses the live queue count after the queue API responds", async () => {
+  it("keeps durable backlog, loaded page, and runtime window as separate quantities", async () => {
     apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string): Promise<unknown> => {
       if (path === "/api/status") return Promise.resolve(serverStatus({ queue_depth: 7 }));
       if (path === "/api/models") return Promise.resolve([]);
@@ -1156,8 +1156,27 @@ describe("MobileHostDetail remote host data", () => {
 
     const view = await mountDetail();
 
-    expect(view.get("[aria-labelledby='host-queue-title'] .mobile-section-head span").text()).toBe(
-      "1/8",
+    expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("7 total");
+    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
+      "1 loaded · Runtime window 8",
+    );
+  });
+
+  it("does not infer total backlog from an older host's loaded page or runtime window", async () => {
+    apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string): Promise<unknown> => {
+      if (path === "/api/status") {
+        return Promise.resolve(serverStatus({ queue_depth: null, queue_capacity: 2 }));
+      }
+      if (path === "/api/models") return Promise.resolve([]);
+      if (path === "/api/queue?limit=2") return Promise.resolve({ entries: [queueEntries[0]] });
+      return Promise.reject(new Error(`Unexpected API path: ${path} for ${target.baseUrl}`));
+    });
+
+    const view = await mountDetail();
+
+    expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("1 loaded");
+    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
+      "1 loaded · Runtime window 2",
     );
   });
 
@@ -1190,6 +1209,10 @@ describe("MobileHostDetail remote host data", () => {
     });
 
     const view = await mountDetail();
+    expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("3 total");
+    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
+      "2 loaded · Runtime window 2",
+    );
     expect(view.get("[data-test='host-detail-queue']").findAll("li")).toHaveLength(2);
 
     await view.get("[data-test='host-detail-queue-load-more']").trigger("click");
@@ -1214,8 +1237,9 @@ describe("MobileHostDetail remote host data", () => {
 
     const view = await mountDetail();
 
-    expect(view.get("[aria-labelledby='host-queue-title'] .mobile-section-head span").text()).toBe(
-      "7/8",
+    expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("7 total");
+    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
+      "Queue page unavailable · Runtime window 8",
     );
   });
 
@@ -1296,26 +1320,29 @@ describe("MobileHostDetail remote host data", () => {
         const view = await mountDetail();
         expect(view.text()).toContain("stale-cpu-work");
         expect(view.find("[data-test='host-detail-queue']").exists()).toBe(true);
-        expect(
-          view.get("[aria-labelledby='host-queue-title'] .mobile-section-head span").text(),
-        ).toBe("1/8");
+        expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("7 total");
+        expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
+          "1 loaded · Runtime window 8",
+        );
 
         await vi.advanceTimersByTimeAsync(5_000);
         await flushPromises();
 
         expect(view.text()).not.toContain("stale-cpu-work");
         expect(view.find("[data-test='host-detail-queue']").exists()).toBe(false);
-        expect(
-          view.get("[aria-labelledby='host-queue-title'] .mobile-section-head span").text(),
-        ).toBe("7/8");
+        expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("7 total");
+        expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
+          "Queue page unavailable · Runtime window 8",
+        );
 
         await vi.advanceTimersByTimeAsync(5_000);
         await flushPromises();
 
         expect(view.text()).toContain("restored-cpu-work");
-        expect(
-          view.get("[aria-labelledby='host-queue-title'] .mobile-section-head span").text(),
-        ).toBe("1/8");
+        expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("7 total");
+        expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
+          "1 loaded · Runtime window 8",
+        );
       } finally {
         vi.useRealTimers();
       }

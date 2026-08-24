@@ -323,6 +323,8 @@ const durableJobIds = new Map<string, Map<number, number>>();
 const durableSettlements = new Map<string, DurableSettlement>();
 const durableHostStreams = new Map<string, DurableHostStream>();
 const durableReconciles = new Map<string, Promise<void>>();
+const durableReconcileAgain = new Set<string>();
+const durableCancelAttempts = new Map<string, Promise<boolean>>();
 const sharedDurableEventHosts = new Set<string>();
 let durableRecoveryLoaded = false;
 
@@ -465,7 +467,6 @@ export const useGenerationStore = defineStore("generation", {
         if (durableJobIds.has(record.tracker.clientBatchId)) continue;
         const mapping = new Map<number, number>();
         const localBatchId = this.nextBatchId++;
-        const restoredTerminal = recordIsTerminal(record);
         const recoveredHost = useHostsStore().all.find(
           (candidate) =>
             candidate.id === record.tracker.hostId &&
@@ -489,7 +490,13 @@ export const useGenerationStore = defineStore("generation", {
           job.remote = record.hostKind === "remote";
           job.mirrorRemoteOutput = record.mirrorRemoteOutput;
           job.streamStarted = true;
-          job.suppressFreshCompletion = restoredTerminal;
+          const restoredLifecycle = Object.values(record.tracker.jobs).find(
+            (candidate) => candidate.childIndex === summary.index,
+          );
+          job.suppressFreshCompletion = restoredLifecycle
+            ? isTerminalGenerationPhase(restoredLifecycle.phase)
+            : false;
+          job.cancelling = record.cancelRequestedChildIndexes.includes(summary.index);
           mapping.set(summary.index, job.clientId);
           summary.clientId = job.clientId;
           if (recoveredHost?.baseUrl) {
@@ -659,41 +666,46 @@ export const useGenerationStore = defineStore("generation", {
     },
     async reconcileDurableHost(hostId: string): Promise<void> {
       const existing = durableReconciles.get(hostId);
-      if (existing) return existing;
+      if (existing) {
+        durableReconcileAgain.add(hostId);
+        return existing;
+      }
       const operation = (async () => {
-        const records = [...durableRecords.values()].filter(
-          (record) => record.tracker.hostId === hostId && !recordIsTerminal(record),
-        );
-        if (records.length === 0) return;
-        const host = useHostsStore().all.find((candidate) => candidate.id === hostId);
-        if (!host?.baseUrl || host.status !== "ready") return;
-        const matching = records.filter(
-          (record) => host.instanceId === record.tracker.expectedInstanceId,
-        );
-        for (const record of records) {
-          if (host.instanceId === record.tracker.expectedInstanceId) continue;
-          record.tracker = reduceGenerationLifecycle(record.tracker, {
-            type: "event_gap",
-            instanceId: host.instanceId ?? "",
-          });
-          this.applyDurableRecord(record);
-        }
-        if (matching.length === 0) {
-          persistDurableRecords();
-          return;
-        }
-        const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
-        const trackers = matching.map((record) => record.tracker);
-        const request = buildGenerationBatchStatusRequest(trackers, hostId);
-        if (request.client_batch_ids.length === 0 && !request.batch_ids?.length) return;
-        const response = await reconcileGenerationBatches(target, request);
-        const merged = mergeBulkGenerationBatchResponse(trackers, hostId, response);
-        merged.trackers.forEach((tracker, index) => {
-          const record = matching[index]!;
-          record.tracker = tracker;
-          this.applyDurableRecord(record);
-        });
-        persistDurableRecords();
+        do {
+          durableReconcileAgain.delete(hostId);
+          const records = [...durableRecords.values()].filter(
+            (record) => record.tracker.hostId === hostId && !recordIsTerminal(record),
+          );
+          const host = useHostsStore().all.find((candidate) => candidate.id === hostId);
+          if (records.length > 0 && host?.baseUrl && host.status === "ready") {
+            const matching = records.filter(
+              (record) => host.instanceId === record.tracker.expectedInstanceId,
+            );
+            for (const record of records) {
+              if (host.instanceId === record.tracker.expectedInstanceId) continue;
+              record.tracker = reduceGenerationLifecycle(record.tracker, {
+                type: "event_gap",
+                instanceId: host.instanceId ?? "",
+              });
+              this.applyDurableRecord(record);
+            }
+            if (matching.length > 0) {
+              const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
+              const trackers = matching.map((record) => record.tracker);
+              const request = buildGenerationBatchStatusRequest(trackers, hostId);
+              if (request.client_batch_ids.length > 0 || request.batch_ids?.length) {
+                const response = await reconcileGenerationBatches(target, request);
+                const merged = mergeBulkGenerationBatchResponse(trackers, hostId, response);
+                merged.trackers.forEach((tracker, index) => {
+                  const record = matching[index]!;
+                  record.tracker = tracker;
+                  this.applyDurableRecord(record);
+                });
+              }
+            }
+            persistDurableRecords();
+          }
+        } while (durableReconcileAgain.has(hostId));
       })();
       durableReconciles.set(hostId, operation);
       try {
@@ -702,6 +714,7 @@ export const useGenerationStore = defineStore("generation", {
         // Last-good authority remains visible; the next event/reconnect/wake retries.
       } finally {
         if (durableReconciles.get(hostId) === operation) durableReconciles.delete(hostId);
+        if (durableReconcileAgain.delete(hostId)) void this.reconcileDurableHost(hostId);
       }
     },
     applyDurableRecord(record: DurableGenerationRecoveryRecord): void {
@@ -749,6 +762,7 @@ export const useGenerationStore = defineStore("generation", {
             break;
         }
       }
+      this.scheduleDurableCancelIntents(record);
       if (!recordIsTerminal(record)) return;
       const jobs = [...mapping.values()]
         .map((clientId) => this.jobs.find((candidate) => candidate.clientId === clientId))
@@ -756,6 +770,64 @@ export const useGenerationStore = defineStore("generation", {
       durableSettlements.get(record.tracker.clientBatchId)?.resolve(jobs);
       durableSettlements.delete(record.tracker.clientBatchId);
       void this.finishDurableBatchEffects(record, jobs);
+    },
+    async fulfillDurableCancelIntent(
+      record: DurableGenerationRecoveryRecord,
+      childIndex: number,
+    ): Promise<boolean> {
+      const attemptKey = `${record.tracker.clientBatchId}:${childIndex}`;
+      const existing = durableCancelAttempts.get(attemptKey);
+      if (existing) return existing;
+      const attempt = (async () => {
+        const current = durableRecords.get(record.tracker.clientBatchId);
+        if (!current?.cancelRequestedChildIndexes.includes(childIndex)) return false;
+        const clientId = durableJobIds.get(current.tracker.clientBatchId)?.get(childIndex);
+        const job = this.jobs.find((candidate) => candidate.clientId === clientId);
+        if (!job) return false;
+        if (jobHasSettled(job)) {
+          current.cancelRequestedChildIndexes = current.cancelRequestedChildIndexes.filter(
+            (index) => index !== childIndex,
+          );
+          job.cancelling = false;
+          persistDurableRecords();
+          return isCancelledError(job.error);
+        }
+        if (!job.id) return false;
+        const host = useHostsStore().all.find(
+          (candidate) =>
+            candidate.id === current.tracker.hostId &&
+            candidate.instanceId === current.tracker.expectedInstanceId &&
+            candidate.baseUrl &&
+            candidate.status === "ready",
+        );
+        if (!host?.baseUrl) return false;
+        try {
+          await apiFetchTo(
+            { baseUrl: host.baseUrl, apiKey: host.apiKey },
+            `/api/queue/${encodeURIComponent(job.id)}`,
+            { method: "DELETE" },
+          );
+        } catch (error) {
+          await this.reconcileDurableHost(current.tracker.hostId);
+          if (jobHasSettled(job)) return isCancelledError(job.error);
+          throw error;
+        }
+        await this.reconcileDurableHost(current.tracker.hostId);
+        if (jobHasSettled(job)) return isCancelledError(job.error);
+        return false;
+      })().finally(() => {
+        durableCancelAttempts.delete(attemptKey);
+      });
+      durableCancelAttempts.set(attemptKey, attempt);
+      return attempt;
+    },
+    scheduleDurableCancelIntents(record: DurableGenerationRecoveryRecord): void {
+      for (const childIndex of record.cancelRequestedChildIndexes) {
+        void this.fulfillDurableCancelIntent(record, childIndex).catch(() => {
+          // The persisted intent remains authoritative. A later event, wake,
+          // or reconnect retries against the same host instance and job id.
+        });
+      }
     },
     applyDurableTerminal(
       record: DurableGenerationRecoveryRecord,
@@ -1056,6 +1128,7 @@ export const useGenerationStore = defineStore("generation", {
           children: plans.map((plan, index) =>
             durableChildSummary(plan, index + 1, jobs[index]!.clientId),
           ),
+          cancelRequestedChildIndexes: [],
           effectReceipts: [],
         };
         durableRecords.set(clientBatchId, record);
@@ -1272,6 +1345,30 @@ export const useGenerationStore = defineStore("generation", {
           job.clientId,
         ),
       );
+      if (durableRecord) {
+        const childIndex = [...(durableJobIds.get(durableRecord.tracker.clientBatchId) ?? [])].find(
+          ([, durableClientId]) => durableClientId === job.clientId,
+        )?.[0];
+        if (childIndex === undefined) {
+          job.cancelling = false;
+          return false;
+        }
+        if (!durableRecord.cancelRequestedChildIndexes.includes(childIndex)) {
+          durableRecord.cancelRequestedChildIndexes.push(childIndex);
+          // This write is the cancellation authority boundary: it precedes
+          // the by-client reconciliation and any id-keyed DELETE.
+          persistDurableRecords();
+        }
+        await this.reconcileDurableHost(durableRecord.tracker.hostId);
+        try {
+          return await this.fulfillDurableCancelIntent(durableRecord, childIndex);
+        } catch (error) {
+          if (jobHasSettled(job)) return isCancelledError(job.error);
+          // Keep the persisted intent and cancelling affordance. The same
+          // one tap is retried by event/wake/reconnect reconciliation.
+          throw error;
+        }
+      }
       if (job.id) {
         try {
           const chainRoute = chainRoutes.get(job.clientId);
@@ -1293,13 +1390,6 @@ export const useGenerationStore = defineStore("generation", {
       } else if (job.streamStarted) {
         job.cancelling = false;
         throw new Error("Remote cancellation was not confirmed before the queue ID arrived.");
-      }
-      if (durableRecord) {
-        // DELETE is only a cancellation request. A concurrent completion can
-        // win; only the exact host's durable snapshot decides the terminal.
-        await this.reconcileDurableHost(durableRecord.tracker.hostId);
-        job.cancelling = false;
-        return job.error === "Cancelled";
       }
       // A terminal SSE frame may win while DELETE is in flight. Preserve that
       // authoritative outcome, even if the DELETE request itself then fails.
@@ -1462,6 +1552,8 @@ export const useGenerationStore = defineStore("generation", {
       for (const stream of durableHostStreams.values()) stream.abort.abort();
       durableHostStreams.clear();
       durableReconciles.clear();
+      durableReconcileAgain.clear();
+      durableCancelAttempts.clear();
       durableJobIds.clear();
       durableSettlements.clear();
       durableRecords.clear();

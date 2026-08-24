@@ -1047,6 +1047,7 @@ const durableGenerationWatches = new Map<string, MobileGenerationHostWatch>();
 const durableGenerationWatchRoutes = new Map<string, string>();
 const durableGenerationReconciles = new Map<string, Promise<void>>();
 const durableGenerationReconcileAgain = new Set<string>();
+const durableGenerationCancelAttempts = new Map<string, Promise<boolean>>();
 let nextDurableGenerationClientId = -1;
 let selectedDurableGenerationClientId: number | null = null;
 const mobileDownloads = useMobileDownloadsStore();
@@ -1977,6 +1978,7 @@ function syncDurableGenerationJobs(): void {
           continue;
         }
         job.status = "queued";
+        job.cancelling = recovery.cancelRequestedChildIndexes.includes(presentation.index);
         job.stage =
           recovery.tracker.admission.phase === "uncertain"
             ? "Waiting for host confirmation"
@@ -1989,25 +1991,30 @@ function syncDurableGenerationJobs(): void {
         case "queued":
         case "held":
           job.status = "queued";
-          job.stage = lifecycle.phase === "held" ? "Waiting for resources" : null;
+          job.cancelling = recovery.cancelRequestedChildIndexes.includes(presentation.index);
+          job.stage = lifecycle.phase === "held" ? "Held by host — action required" : null;
           break;
         case "running":
           job.status = "loading";
+          job.cancelling = recovery.cancelRequestedChildIndexes.includes(presentation.index);
           job.stage = "Rendering";
           break;
         case "complete":
           job.status = "complete";
+          job.cancelling = false;
           job.error = null;
           job.result ??= durableCompleteEvent(presentation, lifecycle, job);
           job.settledAtMs ??= lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs;
           break;
         case "failed":
           job.status = "error";
+          job.cancelling = false;
           job.error = lifecycle.error ?? "Generation failed";
           job.settledAtMs ??= lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs;
           break;
         case "cancelled":
           job.status = "error";
+          job.cancelling = false;
           job.error = "Cancelled";
           job.settledAtMs ??= lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs;
           break;
@@ -2550,6 +2557,7 @@ const generationStatus = computed(() => {
   if (!active) return progress.value;
   switch (active.status) {
     case "queued": {
+      if (active.stage) return active.stage;
       // Live listing over the one-shot SSE frame, so the number counts down.
       const live = queueStatusFor(
         queueStatusIndex.value,
@@ -2646,8 +2654,112 @@ function markDurableHostGap(hostId: string, instanceId: string): void {
         })
       : recovery,
   );
-  persistDurableGenerationRecoveries();
   syncDurableGenerationJobs();
+  const mismatched = durableGenerationRecoveries.value.filter(
+    (recovery) =>
+      recovery.tracker.hostId === hostId &&
+      recovery.tracker.reconciliation.reason === "instance_mismatch",
+  );
+  if (mismatched.length > 0) {
+    const retired = new Set(mismatched.map((recovery) => recovery.tracker.clientBatchId));
+    for (const recovery of mismatched) {
+      for (const presentation of recovery.presentations) {
+        const key = durableGenerationKey(recovery.tracker.clientBatchId, presentation.index);
+        const job = durableGenerationJobs.get(key);
+        if (job && job.status !== "complete" && job.status !== "error") {
+          job.status = "error";
+          job.stage = "Original machine identity changed";
+          job.error =
+            "The original server instance is no longer at this machine address; its outcome is unknown.";
+          job.cancelling = false;
+          markJobSettled(job);
+        }
+        durableGenerationRequests.delete(key);
+      }
+    }
+    durableGenerationRecoveries.value = durableGenerationRecoveries.value.filter(
+      (recovery) => !retired.has(recovery.tracker.clientBatchId),
+    );
+    setGenerationStatus(
+      "The original server instance changed. Its queued work is no longer shown here because this replacement cannot authoritatively report the outcome.",
+      true,
+    );
+    generationAnnouncement.value =
+      "Generation tracking stopped because the server identity changed.";
+  }
+  persistDurableGenerationRecoveries();
+}
+
+function clearMobileDurableCancelIntent(clientBatchId: string, childIndex: number): void {
+  const recovery = durableGenerationRecoveries.value.find(
+    (candidate) => candidate.tracker.clientBatchId === clientBatchId,
+  );
+  if (!recovery?.cancelRequestedChildIndexes.includes(childIndex)) return;
+  replaceDurableRecovery({
+    ...recovery,
+    cancelRequestedChildIndexes: recovery.cancelRequestedChildIndexes.filter(
+      (index) => index !== childIndex,
+    ),
+  });
+  persistDurableGenerationRecoveries();
+}
+
+async function fulfillMobileDurableCancelIntent(
+  clientBatchId: string,
+  childIndex: number,
+): Promise<boolean> {
+  const attemptKey = durableGenerationKey(clientBatchId, childIndex);
+  const existing = durableGenerationCancelAttempts.get(attemptKey);
+  if (existing) return existing;
+  const attempt = (async () => {
+    const recovery = durableGenerationRecoveries.value.find(
+      (candidate) => candidate.tracker.clientBatchId === clientBatchId,
+    );
+    if (!recovery?.cancelRequestedChildIndexes.includes(childIndex)) return false;
+    const job = durableGenerationJobs.get(attemptKey);
+    if (!job) return false;
+    if (durableGenerationJobIsTerminal(job)) {
+      clearMobileDurableCancelIntent(clientBatchId, childIndex);
+      job.cancelling = false;
+      return isCancelledError(job.error);
+    }
+    if (!job.id) return false;
+    const host = resolveMobileDurableHost(recovery, connectedHosts.value);
+    if (!host?.online) return false;
+    try {
+      await apiFetchTo(mobileHostTarget(host), `/api/queue/${encodeURIComponent(job.id)}`, {
+        method: "DELETE",
+      });
+    } catch (error) {
+      await reconcileMobileDurableHost(recovery.tracker.hostId);
+      if (durableGenerationJobIsTerminal(job)) {
+        clearMobileDurableCancelIntent(clientBatchId, childIndex);
+        return isCancelledError(job.error);
+      }
+      throw error;
+    }
+    await reconcileMobileDurableHost(recovery.tracker.hostId);
+    if (durableGenerationJobIsTerminal(job)) {
+      clearMobileDurableCancelIntent(clientBatchId, childIndex);
+      return isCancelledError(job.error);
+    }
+    return false;
+  })().finally(() => durableGenerationCancelAttempts.delete(attemptKey));
+  durableGenerationCancelAttempts.set(attemptKey, attempt);
+  return attempt;
+}
+
+function scheduleMobileDurableCancelIntents(): void {
+  for (const recovery of durableGenerationRecoveries.value) {
+    for (const childIndex of recovery.cancelRequestedChildIndexes) {
+      void fulfillMobileDurableCancelIntent(recovery.tracker.clientBatchId, childIndex).catch(
+        () => {
+          // Persisted intent remains pending for the next event, wake, or
+          // exact-instance reconnect. No second tap is required.
+        },
+      );
+    }
+  }
 }
 
 async function processDurableGenerationTerminalEffects(): Promise<void> {
@@ -2844,6 +2956,7 @@ async function reconcileMobileDurableHost(hostId: string): Promise<void> {
         );
         persistDurableGenerationRecoveries();
         syncDurableGenerationJobs();
+        scheduleMobileDurableCancelIntents();
         await processDurableGenerationTerminalEffects();
       } catch {
         // A transport failure is not a lifecycle outcome. The retained
@@ -2920,6 +3033,7 @@ async function submitMobileDurableGeneration(input: {
   replaceDurableRecovery(recovery);
   persistDurableGenerationRecoveries();
   syncDurableGenerationJobs();
+  scheduleMobileDurableCancelIntents();
   void processDurableGenerationTerminalEffects();
   ensureDurableGenerationHostWatches();
   if (recovery.tracker.admission.phase === "uncertain") {
@@ -6135,47 +6249,45 @@ async function cancelGeneration(job: Job): Promise<void> {
   const durable = durableRecoveryForJob(job);
   if (durable) {
     if (job.cancelling || job.status === "complete" || job.status === "error") return;
-    const host = resolveMobileDurableHost(durable.recovery, connectedHosts.value);
-    if (!host) {
-      setGenerationStatus("This queued print belongs to a different server instance.", true);
-      return;
+    const clientBatchId = durable.recovery.tracker.clientBatchId;
+    if (!durable.recovery.cancelRequestedChildIndexes.includes(durable.childIndex)) {
+      replaceDurableRecovery({
+        ...durable.recovery,
+        cancelRequestedChildIndexes: [
+          ...durable.recovery.cancelRequestedChildIndexes,
+          durable.childIndex,
+        ],
+      });
+      // Persist intent before the by-client lookup or server-id DELETE.
+      persistDurableGenerationRecoveries();
     }
     job.cancelling = true;
     try {
       if (!job.id) {
         await reconcileMobileDurableHost(durable.recovery.tracker.hostId);
       }
-      // A lost admission response has no safe cancel key yet. It remains
-      // recoverable by client UUID and is never converted into a local abort.
-      if (!job.id) throw new Error("The host has not confirmed this print’s queue ID yet.");
-      try {
-        await apiFetchTo(mobileHostTarget(host), `/api/queue/${encodeURIComponent(job.id)}`, {
-          method: "DELETE",
-        });
-      } catch (error) {
-        // Completion may win while DELETE is in flight. Reconcile first and
-        // preserve that terminal authority rather than painting cancellation.
-        await reconcileMobileDurableHost(durable.recovery.tracker.hostId);
-        if (durableGenerationJobIsTerminal(job)) return;
-        throw error;
-      }
-      await reconcileMobileDurableHost(durable.recovery.tracker.hostId);
+      const cancelled = await fulfillMobileDurableCancelIntent(clientBatchId, durable.childIndex);
       const completedResult = durableGenerationCompletedResult(job);
       if (completedResult) {
         latestResultClientId.value = job.clientId;
         setGenerationStatus(completionSummary(completedResult));
         generationAnnouncement.value = "Generation completed.";
-      } else if (isCancelledError(job.error)) {
+      } else if (cancelled || isCancelledError(job.error)) {
         setGenerationStatus("Cancelled");
         generationAnnouncement.value = "Generation cancelled.";
+      } else {
+        setGenerationStatus("Cancellation requested — waiting for the exact host to confirm it");
       }
     } catch (error) {
       if (!durableGenerationCompletedResult(job) && !isCancelledError(job.error)) {
-        setGenerationStatus(describeTransportError(error, job.hostLabel), true);
-        generationAnnouncement.value = `Cancellation failed. ${progress.value}`;
+        setGenerationStatus(
+          `Cancellation is still pending on ${job.hostLabel}; it will retry against the same server instance. ${describeTransportError(error, job.hostLabel)}`,
+          true,
+        );
+        generationAnnouncement.value = "Cancellation is pending host confirmation.";
       }
     } finally {
-      job.cancelling = false;
+      if (durableGenerationJobIsTerminal(job)) job.cancelling = false;
     }
     return;
   }
@@ -9208,6 +9320,7 @@ onMounted(async () => {
   await hydrateApiKeys();
   if (unmounted) return;
   syncDurableGenerationJobs();
+  scheduleMobileDurableCancelIntents();
   ensureDurableGenerationHostWatches();
   for (const hostId of new Set(
     durableGenerationRecoveries.value.map((recovery) => recovery.tracker.hostId),

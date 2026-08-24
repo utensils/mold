@@ -42,6 +42,9 @@ export interface MobileDurableGenerationRecovery {
   version: 1;
   tracker: GenerationBatchTracker;
   presentations: MobileDurableGenerationPresentation[];
+  /** Persisted user intent for children cancelled before admission returned
+   * their server ids. It contains no route, credential, request, or media. */
+  cancelRequestedChildIndexes: number[];
   /** Effect claims are persisted before side effects run. This makes a wake,
    * reconnect, duplicate event or process restart unable to repeat them. */
   claimedEffects: Record<string, Partial<Record<MobileDurableTerminalEffect, true>>>;
@@ -151,7 +154,14 @@ export function parseMobileDurableGenerationRecovery(
   if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.presentations)) return null;
   if (
     Object.keys(value).some(
-      (key) => !["version", "tracker", "presentations", "claimedEffects"].includes(key),
+      (key) =>
+        ![
+          "version",
+          "tracker",
+          "presentations",
+          "cancelRequestedChildIndexes",
+          "claimedEffects",
+        ].includes(key),
     )
   ) {
     return null;
@@ -160,6 +170,11 @@ export function parseMobileDurableGenerationRecovery(
   const presentations = value.presentations.map(parsePresentation);
   const claimedEffects = parseClaimedEffects(value.claimedEffects);
   if (!tracker || presentations.some((entry) => entry === null) || !claimedEffects) return null;
+  const cancelRequestedChildIndexes = Array.isArray(value.cancelRequestedChildIndexes)
+    ? value.cancelRequestedChildIndexes.filter(
+        (index): index is number => Number.isSafeInteger(index) && Number(index) > 0,
+      )
+    : [];
   const indexes = new Set<number>();
   for (const presentation of presentations as MobileDurableGenerationPresentation[]) {
     if (indexes.has(presentation.index)) return null;
@@ -169,6 +184,7 @@ export function parseMobileDurableGenerationRecovery(
     version: 1,
     tracker,
     presentations: presentations as MobileDurableGenerationPresentation[],
+    cancelRequestedChildIndexes,
     claimedEffects,
   };
 }
@@ -248,6 +264,7 @@ export function createMobileDurableGenerationRecovery(input: {
       submittedAtMs: input.submittedAtMs,
     }),
     presentations: mobileDurablePresentations(input.requests, input.submittedAtMs),
+    cancelRequestedChildIndexes: [],
     claimedEffects: {},
   };
 }

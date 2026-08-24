@@ -27,6 +27,10 @@ export interface DurableGenerationRecoveryRecord {
   hostKind: "local" | "remote";
   mirrorRemoteOutput: boolean;
   children: DurableGenerationChildSummary[];
+  /** Child indexes whose user cancellation must be completed once the
+   * durable admission exposes the server-owned queue id. Persisted before
+   * any lookup/DELETE so one tap survives a lost response or app restart. */
+  cancelRequestedChildIndexes: number[];
   /** At-most-once receipts. They are persisted before performing effects. */
   effectReceipts: string[];
 }
@@ -77,16 +81,25 @@ export function loadDurableGenerationRecovery(
       storage.getItem(DURABLE_GENERATION_STORAGE_KEY) ?? "null",
     ) as DurableGenerationRecoveryEnvelope | null;
     if (parsed?.version !== 1 || !Array.isArray(parsed.records)) return [];
-    return parsed.records.filter(
-      (record) =>
-        record &&
-        typeof record === "object" &&
-        typeof record.tracker?.clientBatchId === "string" &&
-        typeof record.tracker?.hostId === "string" &&
-        typeof record.tracker?.expectedInstanceId === "string" &&
-        Array.isArray(record.children) &&
-        Array.isArray(record.effectReceipts),
-    );
+    return parsed.records.flatMap((record) => {
+      if (
+        !record ||
+        typeof record !== "object" ||
+        typeof record.tracker?.clientBatchId !== "string" ||
+        typeof record.tracker?.hostId !== "string" ||
+        typeof record.tracker?.expectedInstanceId !== "string" ||
+        !Array.isArray(record.children) ||
+        !Array.isArray(record.effectReceipts)
+      ) {
+        return [];
+      }
+      const cancelRequestedChildIndexes = Array.isArray(record.cancelRequestedChildIndexes)
+        ? record.cancelRequestedChildIndexes.filter(
+            (index) => Number.isSafeInteger(index) && index > 0,
+          )
+        : [];
+      return [{ ...record, cancelRequestedChildIndexes }];
+    });
   } catch {
     return [];
   }

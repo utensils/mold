@@ -1801,6 +1801,190 @@ describe("MobileApp generation queue", () => {
     );
   });
 
+  it("persists one pre-admission cancel tap until the exact server job id is reconciled", async () => {
+    const admission = deferred<Record<string, unknown>>();
+    const firstRead = deferred<Record<string, unknown>>();
+    let clientBatchId = "";
+    const batch = (state: "queued" | "cancelled") => ({
+      id: "mobile-pre-id-batch",
+      client_batch_id: clientBatchId,
+      instance_id: "studio-id",
+      durable: true,
+      children: [
+        {
+          index: 1,
+          job_id: "mobile-server-job-id",
+          state,
+          created_at_ms: 10,
+          updated_at_ms: state === "queued" ? 11 : 12,
+          ...(state === "cancelled" ? { completed_at_ms: 12 } : {}),
+        },
+      ],
+    });
+    let statusReads = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+        });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        clientBatchId = JSON.parse(String(init.body)).client_batch_id;
+        return admission.promise;
+      }
+      if (path === "/api/generation-batches/status") {
+        statusReads += 1;
+        if (statusReads === 1) return firstRead.promise;
+        return Promise.resolve({
+          instance_id: "studio-id",
+          batches: [batch("cancelled")],
+          missing: { client_batch_ids: [], batch_ids: [] },
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("cancel before admission returns");
+    await wrapper.get("[data-test='mobile-generation-cancel']").trigger("click");
+    await flushPromises();
+
+    expect(
+      JSON.parse(localStorage.getItem("mold.mobile.durable-generations.v1") ?? "[]")[0],
+    ).toMatchObject({ cancelRequestedChildIndexes: [1] });
+    firstRead.resolve({
+      instance_id: "studio-id",
+      batches: [batch("queued")],
+      missing: { client_batch_ids: [], batch_ids: [] },
+    });
+
+    await vi.waitFor(() =>
+      expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/mobile-server-job-id", {
+        method: "DELETE",
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(wrapper!.find("[data-test='mobile-generation-queue']").exists()).toBe(false),
+    );
+
+    admission.resolve(batch("queued"));
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-generation-queue']").exists()).toBe(false);
+  });
+
+  it("retires a durable tracker when the event authority reports a replacement instance", async () => {
+    let clientBatchId = "";
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+        });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        clientBatchId = JSON.parse(String(init.body)).client_batch_id;
+        return Promise.resolve({
+          id: "mismatch-batch",
+          client_batch_id: clientBatchId,
+          instance_id: "studio-id",
+          durable: true,
+          children: [
+            {
+              index: 1,
+              job_id: "mismatch-job",
+              state: "queued",
+              created_at_ms: 10,
+              updated_at_ms: 11,
+            },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("old instance print");
+    const events = openStreams.find((stream) => stream.path === "/api/events")!;
+    events.options.onEvent("authority", JSON.stringify({ instance_id: "replacement-instance" }));
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-generation-queue']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-generation-error']").text()).toContain(
+      "original server instance changed",
+    );
+    expect(JSON.parse(localStorage.getItem("mold.mobile.durable-generations.v1") ?? "[]")).toEqual(
+      [],
+    );
+    expect(apiFetchTo).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "/api/queue/mismatch-job",
+      expect.anything(),
+    );
+  });
+
+  it("describes a held durable child as action-required rather than resource waiting", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+        });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        const clientBatchId = JSON.parse(String(init.body)).client_batch_id;
+        return Promise.resolve({
+          id: "held-batch",
+          client_batch_id: clientBatchId,
+          instance_id: "studio-id",
+          durable: true,
+          children: [
+            {
+              index: 1,
+              job_id: "held-job",
+              state: "held",
+              held_reason: "model access requires approval",
+              created_at_ms: 10,
+              updated_at_ms: 11,
+            },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("held print");
+
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
+      "Held by host — action required",
+    );
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).not.toContain(
+      "Waiting for resources",
+    );
+  });
+
   it("keeps a bulk-reconciled completion when the older admission response arrives later", async () => {
     const admission = deferred<Record<string, unknown>>();
     let clientBatchId = "";

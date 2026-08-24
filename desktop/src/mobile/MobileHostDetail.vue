@@ -123,8 +123,18 @@ const inFlightDownloads = computed(() => [
 ]);
 const loadedModels = computed(() => status.value?.models_loaded ?? []);
 const uptime = computed(() => status.value?.uptime_secs ?? null);
-const queueDepth = computed(() =>
-  queueApiAvailable.value ? queue.value.length : (status.value?.queue_depth ?? queue.value.length),
+const durableBacklog = computed(() => {
+  const depth = status.value?.queue_depth;
+  return typeof depth === "number" && Number.isSafeInteger(depth) && depth >= 0 ? depth : null;
+});
+const runtimeWindow = computed(() => {
+  const capacity = status.value?.queue_capacity;
+  return typeof capacity === "number" && Number.isSafeInteger(capacity) && capacity > 0
+    ? capacity
+    : null;
+});
+const queueSummary = computed(() =>
+  durableBacklog.value === null ? `${queue.value.length} loaded` : `${durableBacklog.value} total`,
 );
 const modelLabel = (name: string) => modelDisplayNameForId(name, installed.value);
 
@@ -907,11 +917,13 @@ onBeforeUnmount(() => {
       <section class="mobile-detail-section" aria-labelledby="host-queue-title">
         <div class="mobile-section-head">
           <h2 id="host-queue-title">Queue</h2>
-          <span
-            >{{ queueDepth
-            }}<template v-if="status.queue_capacity">/{{ status.queue_capacity }}</template></span
-          >
+          <span data-test="host-detail-queue-total">{{ queueSummary }}</span>
         </div>
+        <p class="mobile-empty-note" data-test="host-detail-queue-scope">
+          <template v-if="queueApiAvailable">{{ queue.length }} loaded</template>
+          <template v-else>Queue page unavailable</template>
+          <template v-if="runtimeWindow"> · Runtime window {{ runtimeWindow }}</template>
+        </p>
         <div
           v-if="devices !== null || queuePlan !== null || deviceError"
           data-test="host-detail-devices"
@@ -974,7 +986,9 @@ onBeforeUnmount(() => {
             </button>
           </li>
         </ul>
-        <p v-else class="mobile-empty-note">Queue is empty.</p>
+        <p v-else class="mobile-empty-note">
+          {{ durableBacklog === 0 ? "Queue is empty." : "No queue rows are loaded." }}
+        </p>
         <button
           v-if="queueNextCursor"
           type="button"

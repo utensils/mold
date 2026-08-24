@@ -162,10 +162,13 @@ describe("mobile durable generation recovery", () => {
         item = value;
       },
     };
-    const uncertain = reduceMobileDurableGenerationRecovery(recovery(), {
-      type: "admission_uncertain",
-      error: "response lost",
-    });
+    const uncertain = {
+      ...reduceMobileDurableGenerationRecovery(recovery(), {
+        type: "admission_uncertain",
+        error: "response lost",
+      }),
+      cancelRequestedChildIndexes: [1],
+    };
     saveMobileDurableGenerationRecoveries(storage, [uncertain]);
     expect(item).not.toContain("print 1");
     expect(item).not.toContain("source_image");
@@ -173,6 +176,7 @@ describe("mobile durable generation recovery", () => {
     expect(item).not.toContain("baseUrl");
     const restored = loadMobileDurableGenerationRecoveries(storage);
     expect(restored[0]?.tracker.admission.phase).toBe("uncertain");
+    expect(restored[0]?.cancelRequestedChildIndexes).toEqual([1]);
     expect(buildMobileDurableHostStatusRequest(restored, "host-1")).toEqual({
       client_batch_ids: ["client-1"],
     });

@@ -85,6 +85,7 @@ describe("desktop durable generation recovery", () => {
           hostKind: "remote",
           mirrorRemoteOutput: true,
           children: [durableChildSummary(request({ seed: 7 }), 1, 42)],
+          cancelRequestedChildIndexes: [],
           effectReceipts: [],
         },
       ],

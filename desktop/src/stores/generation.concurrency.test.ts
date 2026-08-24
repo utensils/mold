@@ -49,6 +49,16 @@ import {
   reduceGenerationLifecycle,
 } from "@studio/lib/generationLifecycle";
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("runWithConcurrency", () => {
   it("never exceeds the concurrency limit", async () => {
     let inFlight = 0;
@@ -456,6 +466,167 @@ describe("submitBatch connection cap", () => {
     expect(mockSse).not.toHaveBeenCalled();
   });
 
+  it("guarantees a follow-up reconcile when an invalidation arrives in flight", async () => {
+    const store = useGenerationStore();
+    useHostsStore().extras = [
+      {
+        id: "hal9000",
+        label: "hal9000",
+        url: "http://hal9000:7680",
+        apiKey: "fresh-key",
+        status: "ready",
+        error: null,
+        instanceId: "instance-1",
+      },
+    ];
+    store.attachSharedDurableEventHost("hal9000");
+    let clientBatchId = "";
+    const firstRead = deferred<Record<string, unknown>>();
+    const batch = (state: "queued" | "running" | "complete") => ({
+      id: "batch-dirty",
+      client_batch_id: clientBatchId,
+      instance_id: "instance-1",
+      durable: true,
+      children: [
+        {
+          index: 1,
+          job_id: "job-dirty",
+          state,
+          created_at_ms: 1,
+          updated_at_ms: state === "queued" ? 1 : state === "running" ? 2 : 3,
+          ...(state === "complete"
+            ? { completed_at_ms: 3, result: { filename: "dirty-finished.png" } }
+            : {}),
+        },
+      ],
+    });
+    durableApi.admit.mockImplementation(async (_target, body) => {
+      clientBatchId = (body as { client_batch_id: string }).client_batch_id;
+      return batch("queued");
+    });
+    durableApi.reconcile
+      .mockImplementationOnce(() => firstRead.promise)
+      .mockImplementationOnce(async () => ({
+        instance_id: "instance-1",
+        batches: [batch("complete")],
+        missing: { client_batch_ids: [], batch_ids: [] },
+      }));
+
+    const submitted = store.submitBatch(req, 1, {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      instanceId: "instance-1",
+      heterogeneousBatch: true,
+      durableBatchOutcomes: true,
+      mirrorRemoteOutput: false,
+    });
+    await flushPromises();
+    store.onDurableEvent("hal9000", "authority", '{"instance_id":"instance-1"}');
+    await flushPromises();
+    expect(durableApi.reconcile).toHaveBeenCalledTimes(1);
+
+    store.onDurableEvent("hal9000", "event", '{"type":"job_started","id":"job-dirty"}');
+    firstRead.resolve({
+      instance_id: "instance-1",
+      batches: [batch("running")],
+      missing: { client_batch_ids: [], batch_ids: [] },
+    });
+
+    await submitted.settled;
+    expect(durableApi.reconcile).toHaveBeenCalledTimes(2);
+    expect(submitted.jobs[0]).toMatchObject({
+      status: "complete",
+      result: { filename: "dirty-finished.png" },
+    });
+  });
+
+  it("persists a pre-admission cancel and deletes the reconciled exact server id", async () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, value),
+    });
+    const store = useGenerationStore();
+    useHostsStore().extras = [
+      {
+        id: "hal9000",
+        label: "hal9000",
+        url: "http://hal9000:7680",
+        apiKey: "fresh-key",
+        status: "ready",
+        error: null,
+        instanceId: "instance-1",
+      },
+    ];
+    store.attachSharedDurableEventHost("hal9000");
+    const admission = deferred<Record<string, unknown>>();
+    const firstRead = deferred<Record<string, unknown>>();
+    let clientBatchId = "";
+    const batch = (state: "queued" | "cancelled") => ({
+      id: "batch-pre-id",
+      client_batch_id: clientBatchId,
+      instance_id: "instance-1",
+      durable: true,
+      children: [
+        {
+          index: 1,
+          job_id: "server-job-pre-id",
+          state,
+          created_at_ms: 1,
+          updated_at_ms: state === "queued" ? 2 : 3,
+          ...(state === "cancelled" ? { completed_at_ms: 3 } : {}),
+        },
+      ],
+    });
+    durableApi.admit.mockImplementation((_target, body) => {
+      clientBatchId = (body as { client_batch_id: string }).client_batch_id;
+      return admission.promise;
+    });
+    durableApi.reconcile
+      .mockImplementationOnce(() => firstRead.promise)
+      .mockImplementationOnce(async () => ({
+        instance_id: "instance-1",
+        batches: [batch("cancelled")],
+        missing: { client_batch_ids: [], batch_ids: [] },
+      }));
+    const submitted = store.submitBatch(req, 1, {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      instanceId: "instance-1",
+      heterogeneousBatch: true,
+      durableBatchOutcomes: true,
+      mirrorRemoteOutput: false,
+    });
+    await flushPromises();
+
+    const cancelled = store.cancel(submitted.jobs[0]!.clientId);
+    await flushPromises();
+    expect(JSON.parse(storage.get(DURABLE_GENERATION_STORAGE_KEY) ?? "null")).toMatchObject({
+      records: [{ cancelRequestedChildIndexes: [1] }],
+    });
+    firstRead.resolve({
+      instance_id: "instance-1",
+      batches: [batch("queued")],
+      missing: { client_batch_ids: [], batch_ids: [] },
+    });
+
+    await expect(cancelled).resolves.toBe(true);
+    expect(apiFetchTo).toHaveBeenCalledWith(
+      { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      "/api/queue/server-job-pre-id",
+      { method: "DELETE" },
+    );
+    expect(submitted.jobs[0]).toMatchObject({ status: "error", error: "Cancelled" });
+
+    admission.resolve(batch("queued"));
+    await flushPromises();
+    expect(submitted.jobs[0]).toMatchObject({ status: "error", error: "Cancelled" });
+  });
+
   it("restores running durable work and accepts a newer queued snapshot after restart", async () => {
     const storage = new Map<string, string>();
     vi.stubGlobal("localStorage", {
@@ -558,6 +729,7 @@ describe("submitBatch connection cap", () => {
             hostKind: "remote",
             mirrorRemoteOutput: false,
             children: [child],
+            cancelRequestedChildIndexes: [],
             effectReceipts: [],
           },
           {
@@ -566,6 +738,7 @@ describe("submitBatch connection cap", () => {
             hostKind: "remote",
             mirrorRemoteOutput: false,
             children: [child],
+            cancelRequestedChildIndexes: [],
             effectReceipts: [],
           },
           {
@@ -574,6 +747,7 @@ describe("submitBatch connection cap", () => {
             hostKind: "remote",
             mirrorRemoteOutput: true,
             children: [child],
+            cancelRequestedChildIndexes: [],
             effectReceipts: [],
           },
         ],
@@ -639,6 +813,80 @@ describe("submitBatch connection cap", () => {
         batch_ids: ["batch-restored"],
       }),
     );
+  });
+
+  it("suppresses restored completion per already-terminal child, not for its live sibling", () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, value),
+    });
+    let tracker = createGenerationBatchTracker({
+      hostId: "hal9000",
+      expectedInstanceId: "instance-1",
+      clientBatchId: "client-partial",
+      submittedAtMs: 1,
+    });
+    tracker = reduceGenerationLifecycle(tracker, {
+      type: "batch_snapshot",
+      batch: {
+        id: "batch-partial",
+        client_batch_id: "client-partial",
+        instance_id: "instance-1",
+        durable: true,
+        children: [
+          {
+            index: 1,
+            job_id: "job-finished-before-restart",
+            state: "complete",
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            completed_at_ms: 2,
+            result: { filename: "restored.png" },
+          },
+          {
+            index: 2,
+            job_id: "job-still-live",
+            state: "queued",
+            created_at_ms: 1,
+            updated_at_ms: 2,
+          },
+        ],
+      },
+    });
+    const child = (index: number) => ({
+      index,
+      clientId: null,
+      model: req.model,
+      width: req.width,
+      height: req.height,
+      steps: req.steps,
+      guidance: 1,
+      seed: (req.seed ?? 0) + index - 1,
+      format: "png" as const,
+    });
+    storage.set(
+      DURABLE_GENERATION_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        records: [
+          {
+            tracker,
+            hostLabel: "hal9000",
+            hostKind: "remote",
+            mirrorRemoteOutput: false,
+            children: [child(1), child(2)],
+            cancelRequestedChildIndexes: [],
+            effectReceipts: [],
+          },
+        ],
+      }),
+    );
+
+    const store = useGenerationStore();
+    store.resumeDurableGenerations();
+
+    expect(store.jobs.map((job) => job.suppressFreshCompletion)).toEqual([true, false]);
   });
 
   it("lets a durable completion win a concurrent cancellation request", async () => {
@@ -715,11 +963,7 @@ describe("submitBatch connection cap", () => {
       error: null,
       result: { filename: "race-winner.png" },
     });
-    expect(vi.mocked(apiFetchTo)).toHaveBeenCalledWith(
-      { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
-      "/api/queue/job-race",
-      { method: "DELETE" },
-    );
+    expect(vi.mocked(apiFetchTo)).not.toHaveBeenCalled();
   });
 
   it("keeps repeated durable submissions off the held-stream pool", async () => {
