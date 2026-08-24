@@ -311,33 +311,51 @@ fn projection_failure_holds(error: &crate::queue_media_store::QueueMediaError) -
     )
 }
 
-/// Publish the bounded runtime cancellation token under the scheduler fence,
-/// then release that global fence before awaiting any durable lookup.
+/// Publish the bounded runtime cancellation token in SQLite's authoritative
+/// queued position under the scheduler fence, then release that global fence
+/// before awaiting the cancellation lookup.
 ///
-/// The job is not submitted to the runtime queue until the caller has checked
-/// the returned durable result, so this ordering closes cancellation races
-/// without letting a stalled SQLite connection freeze unrelated scheduling.
+/// The order read selects at most `queue_capacity` payload-free ids using the
+/// durable replay index. PATCH and cancellation take the same scheduler fence,
+/// while the database read validates the exact owner/state/claim token in one
+/// snapshot. A deep row moved into the runtime window therefore enters the
+/// registry at that global position instead of the live tail. The job is not
+/// submitted until the caller checks the returned durable cancellation result.
 async fn register_before_durable_cancel_check<F, T>(
     state: &AppState,
     row: &mold_db::generation_queue::GenerationQueueRow,
+    claim_token: &str,
     target_gpu: Option<usize>,
     metadata: Box<mold_core::OutputMetadata>,
     durable_check: F,
-) -> (Arc<tokio::sync::Notify>, T)
+) -> anyhow::Result<Option<(Arc<tokio::sync::Notify>, T)>>
 where
     F: std::future::Future<Output = T>,
 {
     let cancel = {
         let _mutation = state.scheduler_mutation_fence.lock().await;
-        state.job_registry.register_job(
+        let journal = state.queue_journal.clone();
+        let order_id = row.id.clone();
+        let order_claim = claim_token.to_string();
+        let window = state.queue_capacity;
+        let order = tokio::task::spawn_blocking(move || {
+            journal.claimed_runtime_position(&order_id, &order_claim, window)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("durable queue order task failed: {error}"))??;
+        let Some(order) = order else {
+            return Ok(None);
+        };
+        state.job_registry.register_job_at_queued_position(
             &row.id,
             &row.model,
             target_gpu,
             Some(row.seed_pinned),
             Some(metadata),
+            order.position.unwrap_or(usize::MAX),
         )
     };
-    (cancel, durable_check.await)
+    Ok(Some((cancel, durable_check.await)))
 }
 
 async fn feed_available(
@@ -395,13 +413,14 @@ async fn feed_available(
         arbiter.prefer_attached = !claim.claimed_as_attached;
 
         let mut row = claim.claim.row;
+        let claim_token = claim.claim.claim_token;
         let observer = state
             .queue_journal
             .queue_media_admission()
             .and_then(|admission| admission.ingress().take_claimed(&row.id));
         let ticket = state
             .queue_journal
-            .attach_claimed(&row.id, claim.claim.claim_token);
+            .attach_claimed(&row.id, claim_token.clone());
         let journal = state.queue_journal.clone();
         let completion_id = row.id.clone();
         let db_completion =
@@ -629,14 +648,30 @@ async fn feed_available(
         // later cancellation observes and trips the registered live token.
         let journal = state.queue_journal.clone();
         let cancel_id = row.id.clone();
-        let (cancel, cancel_requested) = register_before_durable_cancel_check(
+        let handoff = register_before_durable_cancel_check(
             state,
             &row,
+            &claim_token,
             target_gpu,
             metadata,
             tokio::task::spawn_blocking(move || journal.feeder_cancel_requested(&cancel_id)),
         )
         .await;
+        let (cancel, cancel_requested) = match handoff {
+            Ok(Some(handoff)) => handoff,
+            Ok(None) => {
+                let _ = tokio::task::spawn_blocking(move || ticket.discard()).await;
+                drop(reservation);
+                continue;
+            }
+            Err(error) => {
+                drop(reservation);
+                retain_for_retry(ticket, shutdown).await;
+                tracing::error!(job = %row.id, %error, "durable feeder order lookup failed");
+                report.stop = FeederStop::RecoverableFailure;
+                return report;
+            }
+        };
         match cancel_requested {
             Ok(Ok(true)) => {
                 state.job_registry.remove(&row.id);
@@ -891,6 +926,90 @@ mod tests {
         shutdown.cancel();
         handle.await.unwrap();
         drop(jobs);
+    }
+
+    #[tokio::test]
+    async fn deep_reorder_hydrates_at_its_global_position_ahead_of_live_tail() {
+        let (state, mut rx) = state(3);
+        let ids = admit(&state, 4);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+
+        let mut hydrated = Vec::new();
+        for _ in 0..3 {
+            hydrated.push(
+                tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                    .await
+                    .expect("the initial runtime window hydrates")
+                    .expect("the runtime queue remains open"),
+            );
+        }
+        assert_eq!(state.job_registry.queued_ids_in_order(), ids[..3]);
+
+        let outcome = state
+            .queue_journal
+            .patch_owned_queued(&ids[3], None, None, Some(0))
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            mold_db::generation_queue::OwnedQueuedPatchOutcome::Updated { position: 0, .. }
+        ));
+        assert_eq!(
+            state
+                .queue_journal
+                .projection_page(None, 3)
+                .unwrap()
+                .rows
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![ids[3].clone(), ids[0].clone(), ids[1].clone()],
+            "the durable response position and first page share one global order"
+        );
+
+        // Retire one hydrated row to release exactly one bounded runtime slot.
+        // The reordered deep row is then the feeder's next claim, but its
+        // transport necessarily arrives after the two already-buffered jobs.
+        // Registry insertion must nevertheless publish it ahead of both.
+        let mut retired = hydrated.remove(0);
+        retired
+            .journal
+            .take()
+            .expect("hydrated durable row owns its exact claim")
+            .discard();
+        state.job_registry.remove(&ids[0]);
+        state.queue.decrement();
+
+        let reordered = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("released capacity wakes the feeder")
+            .expect("the runtime queue remains open");
+        assert_eq!(reordered.id, ids[3]);
+        assert_eq!(
+            state.job_registry.queued_ids_in_order(),
+            vec![ids[3].clone(), ids[1].clone(), ids[2].clone()],
+            "the deep row enters the actual scheduler order at global position zero"
+        );
+        assert_eq!(
+            state
+                .job_registry
+                .snapshot()
+                .entries
+                .into_iter()
+                .map(|entry| (entry.id, entry.position))
+                .collect::<Vec<_>>(),
+            vec![
+                (ids[3].clone(), 0),
+                (ids[1].clone(), 1),
+                (ids[2].clone(), 2)
+            ]
+        );
+
+        state.queue_journal.retain_all();
+        shutdown.cancel();
+        handle.await.unwrap();
+        drop(reordered);
+        drop(hydrated);
     }
 
     #[tokio::test]
@@ -1744,7 +1863,12 @@ mod tests {
     async fn blocking_durable_cancel_check_does_not_hold_scheduler_mutation_fence() {
         let (state, _rx) = state(1);
         admit(&state, 1);
-        let row = state.queue_journal.list_all().remove(0);
+        let claim = state
+            .queue_journal
+            .claim_next_feeder()
+            .unwrap()
+            .expect("test row is claimed by the feeder handoff");
+        let mold_db::generation_queue::QueueClaim { row, claim_token } = claim;
         let metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
             &request("fence"),
             0,
@@ -1755,23 +1879,36 @@ mod tests {
         let mut handoff = Box::pin(register_before_durable_cancel_check(
             &state,
             &row,
+            &claim_token,
             None,
             metadata,
             async { release_rx.await.unwrap() },
         ));
 
-        assert!(
-            futures::poll!(handoff.as_mut()).is_pending(),
-            "the synthetic durable lookup remains blocked"
-        );
-        assert!(state.job_registry.entry(&row.id).is_some());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                assert!(
+                    futures::poll!(handoff.as_mut()).is_pending(),
+                    "the synthetic durable lookup remains blocked"
+                );
+                if state.job_registry.entry(&row.id).is_some() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the bounded order read publishes the registry row");
         let scheduler_guard = state
             .scheduler_mutation_fence
             .try_lock()
             .expect("durable cancellation lookup must not own the scheduler mutation fence");
         drop(scheduler_guard);
         release_tx.send(false).unwrap();
-        let (_cancel, requested) = handoff.await;
+        let (_cancel, requested) = handoff
+            .await
+            .unwrap()
+            .expect("the exact claim remains current");
         assert!(!requested);
         state.job_registry.remove(&row.id);
     }

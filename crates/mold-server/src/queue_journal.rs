@@ -1049,6 +1049,20 @@ impl QueueJournal {
         generation_queue::claim_by_id(db, owner, id, &token, now_ms())
     }
 
+    /// Locate an exact live feeder claim in SQLite's payload-free runtime
+    /// order window. See [`generation_queue::claimed_runtime_position`].
+    pub(crate) fn claimed_runtime_position(
+        &self,
+        id: &str,
+        claim_token: &str,
+        limit: usize,
+    ) -> anyhow::Result<Option<generation_queue::ClaimedQueueRuntimePosition>> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(None);
+        };
+        generation_queue::claimed_runtime_position(db, owner, id, claim_token, limit)
+    }
+
     pub(crate) fn attach_claimed(self: &Arc<Self>, id: &str, claim_token: String) -> QueueTicket {
         QueueTicket {
             journal: Arc::clone(self),

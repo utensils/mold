@@ -235,6 +235,17 @@ const QUEUE_REORDER_CANDIDATES_SQL: &str = "
      WHERE owner_uuid = ?1 AND state = 'queued'
      ORDER BY created_at, rowid";
 
+/// Payload-free prefix used when a claimed row crosses into the bounded live
+/// registry. The v18 replay index covers `(owner_uuid, state, created_at)` and
+/// SQLite supplies `rowid` as the stable final key, so the read stops at the
+/// runtime window instead of walking or materializing the retained backlog.
+const CLAIMED_QUEUE_RUNTIME_WINDOW_SQL: &str = "
+    SELECT id
+      FROM generation_queue
+     WHERE owner_uuid = ?1 AND state = 'queued'
+     ORDER BY created_at, rowid
+     LIMIT ?2";
+
 /// One runtime reservation of an oldest queued row.
 ///
 /// The token is deliberately kept outside [`GenerationQueueRow`] so existing
@@ -244,6 +255,17 @@ const QUEUE_REORDER_CANDIDATES_SQL: &str = "
 pub struct QueueClaim {
     pub row: GenerationQueueRow,
     pub claim_token: String,
+}
+
+/// Position of an exact feeder claim in SQLite's bounded live-order window.
+///
+/// `Some(position)` means the row belongs in that queued slot. `None` means
+/// the claim is valid but deeper than the window and therefore belongs at the
+/// current live tail. A missing outer value means the owner/state/token fence
+/// is stale and the row must not be published into the registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimedQueueRuntimePosition {
+    pub position: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -748,6 +770,58 @@ pub fn claim_by_id(
         )
         .optional()
         .map_err(Into::into)
+    })
+}
+
+/// Resolve one exact feeder claim against the authoritative durable order,
+/// reading at most `limit` payload-free ids.
+///
+/// The claim validation and prefix read share one SQLite snapshot. Callers
+/// hold the scheduler mutation fence while invoking this primitive, which
+/// serializes it with queue PATCH/cancellation in the owning server; the
+/// owner and exact token predicates keep stale, foreign, running, and held
+/// rows from being published even if a retained database is inspected by a
+/// non-owner process.
+pub fn claimed_runtime_position(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    job_id: &str,
+    claim_token: &str,
+    limit: usize,
+) -> Result<Option<ClaimedQueueRuntimePosition>> {
+    if claim_token.is_empty() {
+        bail!("queue claim token must not be empty");
+    }
+    if limit == 0 {
+        bail!("queue runtime order window must be positive");
+    }
+    let sql_limit = i64::try_from(limit)
+        .map_err(|_| anyhow::anyhow!("queue runtime order window is outside SQLite's range"))?;
+    db.transact(|conn| {
+        let current = conn
+            .query_row(
+                "SELECT 1
+                   FROM generation_queue
+                  WHERE id = ?1 AND owner_uuid = ?2 AND state = 'queued'
+                    AND claim_token = ?3",
+                params![job_id, owner_uuid, claim_token],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !current {
+            return Ok(None);
+        }
+
+        let ids = conn
+            .prepare(CLAIMED_QUEUE_RUNTIME_WINDOW_SQL)?
+            .query_map(params![owner_uuid, sql_limit], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Some(ClaimedQueueRuntimePosition {
+            position: ids.iter().position(|id| id == job_id),
+        }))
     })
 }
 
@@ -1941,6 +2015,34 @@ mod tests {
     }
 
     #[test]
+    fn claimed_runtime_window_is_payload_free_and_uses_the_replay_index() {
+        let normalized = CLAIMED_QUEUE_RUNTIME_WINDOW_SQL.to_ascii_lowercase();
+        for forbidden in ["request_json", "output_dir", "completion_payload"] {
+            assert!(
+                !normalized.contains(forbidden),
+                "runtime order window selected {forbidden}: {CLAIMED_QUEUE_RUNTIME_WINDOW_SQL}"
+            );
+        }
+
+        let db = MetadataDb::open_in_memory().unwrap();
+        let plan = db
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(&format!(
+                    "EXPLAIN QUERY PLAN {CLAIMED_QUEUE_RUNTIME_WINDOW_SQL}"
+                ))?;
+                let rows = stmt
+                    .query_map(params!["owner-a", 3_i64], |row| row.get::<_, String>(3))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows.join("\n"))
+            })
+            .unwrap();
+        assert!(
+            plan.contains("generation_queue_replay"),
+            "runtime window did not use the owner/state/order index: {plan}"
+        );
+    }
+
+    #[test]
     fn projection_cursor_continues_after_its_row_is_deleted() {
         let db = MetadataDb::open_in_memory().unwrap();
         for id in ["first", "second", "third"] {
@@ -2248,6 +2350,74 @@ mod tests {
                 .id,
             "last"
         );
+    }
+
+    #[test]
+    fn claimed_runtime_position_is_bounded_ordered_and_exactly_fenced() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        for (id, created) in [
+            ("first", 100),
+            ("second", 200),
+            ("deep", 300),
+            ("outside", 400),
+            ("running", 500),
+            ("held", 600),
+        ] {
+            insert(&db, &row(id, "owner-a", created)).unwrap();
+        }
+        insert(&db, &row("foreign", "owner-b", 50)).unwrap();
+
+        let running = claim_by_id(&db, "owner-a", "running", "running-token", 700)
+            .unwrap()
+            .unwrap();
+        mark_dispatched_claimed(&db, "running", &running.claim_token, 701).unwrap();
+        let held = claim_by_id(&db, "owner-a", "held", "held-token", 702)
+            .unwrap()
+            .unwrap();
+        hold_claimed(
+            &db,
+            "held",
+            &held.claim_token,
+            QueueRowState::Queued,
+            "operator review",
+            703,
+        )
+        .unwrap();
+
+        let deep = claim_by_id(&db, "owner-a", "deep", "deep-token", 704)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            claimed_runtime_position(&db, "owner-a", "deep", &deep.claim_token, 3).unwrap(),
+            Some(ClaimedQueueRuntimePosition { position: Some(2) })
+        );
+        assert_eq!(
+            claimed_runtime_position(&db, "owner-a", "deep", &deep.claim_token, 2).unwrap(),
+            Some(ClaimedQueueRuntimePosition { position: None }),
+            "a valid claim beyond the bounded prefix maps to the live tail"
+        );
+
+        assert!(
+            claimed_runtime_position(&db, "owner-a", "deep", "stale-token", 3)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            claimed_runtime_position(&db, "owner-b", "deep", &deep.claim_token, 3)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            claimed_runtime_position(&db, "owner-a", "running", &running.claim_token, 3)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            claimed_runtime_position(&db, "owner-a", "held", &held.claim_token, 3)
+                .unwrap()
+                .is_none()
+        );
+        assert!(claimed_runtime_position(&db, "owner-a", "deep", &deep.claim_token, 0).is_err());
     }
 
     #[test]
@@ -2587,7 +2757,9 @@ mod tests {
 
     #[test]
     fn owned_queued_patch_atomically_relanes_and_reorders_a_deep_row() {
-        let db = MetadataDb::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mold.db");
+        let db = MetadataDb::open(&path).unwrap();
         for id in ["first", "second", "deep", "tail"] {
             insert(&db, &row(id, "owner-a", 500)).unwrap();
         }
@@ -2625,6 +2797,18 @@ mod tests {
         let deep = get(&db, "deep").unwrap().unwrap();
         assert_eq!(deep.target_gpu, Some(3));
         assert_eq!(deep.target_device_id.as_deref(), Some("cuda:stable"));
+
+        drop(db);
+        let db = MetadataDb::open(&path).unwrap();
+        assert_eq!(
+            list_replayable(&db, "owner-a")
+                .unwrap()
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            ["deep", "first", "second", "tail"],
+            "the acknowledged order is identical after reopening SQLite"
+        );
 
         let outcome = patch_owned_queued(
             &db,

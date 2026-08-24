@@ -280,6 +280,33 @@ impl JobRegistry {
         seed_pinned: Option<bool>,
         metadata: Option<Box<mold_core::OutputMetadata>>,
     ) -> Arc<Notify> {
+        self.register_job_at_queued_position(
+            id,
+            model,
+            target_gpu,
+            seed_pinned,
+            metadata,
+            usize::MAX,
+        )
+    }
+
+    /// Insert a hydrated durable job at its authoritative queued position.
+    ///
+    /// `position` is interpreted among queued rows, exactly like
+    /// [`reorder_queued`](Self::reorder_queued), and clamps to the live tail.
+    /// The feeder supplies a position from SQLite's bounded runtime-order
+    /// window while holding the scheduler mutation fence. Keeping insertion
+    /// and ordinary PATCH reorders on the same registry lock makes the new
+    /// row visible to the scheduler in one fully ordered mutation.
+    pub(crate) fn register_job_at_queued_position(
+        &self,
+        id: impl Into<String>,
+        model: impl Into<String>,
+        target_gpu: Option<usize>,
+        seed_pinned: Option<bool>,
+        metadata: Option<Box<mold_core::OutputMetadata>>,
+        position: usize,
+    ) -> Arc<Notify> {
         let started_at_unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -289,20 +316,30 @@ impl JobRegistry {
         let cancel = Arc::new(Notify::new());
         {
             let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
-            entries.push(EntryInternal {
-                id: id.clone(),
-                model: model.clone(),
-                state: JobLifecycle::Queued,
-                started_at_unix_ms,
-                gpu: None,
-                target_gpu,
-                seed_pinned,
-                metadata,
-                preview: None,
-                cancel: cancel.clone(),
-                running_cancel: None,
-                cancel_requested: false,
-            });
+            let queued_slots = entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.state == JobLifecycle::Queued)
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            let insert_at = queued_slots.get(position).copied().unwrap_or(entries.len());
+            entries.insert(
+                insert_at,
+                EntryInternal {
+                    id: id.clone(),
+                    model: model.clone(),
+                    state: JobLifecycle::Queued,
+                    started_at_unix_ms,
+                    gpu: None,
+                    target_gpu,
+                    seed_pinned,
+                    metadata,
+                    preview: None,
+                    cancel: cancel.clone(),
+                    running_cancel: None,
+                    cancel_requested: false,
+                },
+            );
         }
         self.mark_mutated();
         self.emit(ServerEvent::JobQueued { id, model });

@@ -11472,6 +11472,65 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn durable_position_insertion_dispatches_before_earlier_transport_rows() {
+        let (worker, worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(3);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 3);
+
+        state.job_registry.register("hydrated-a", "flux-dev:q4");
+        state.job_registry.register("hydrated-b", "flux-dev:q4");
+        state.job_registry.register_job_at_queued_position(
+            "deep-zero",
+            "flux-dev:q4",
+            None,
+            None,
+            None,
+            0,
+        );
+
+        let mut results = Vec::new();
+        for id in ["hydrated-a", "hydrated-b", "deep-zero"] {
+            let (job, result) = fake_generation(id);
+            results.push(result);
+            queue.submit(job, 3).await.unwrap();
+        }
+
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        for _ in 0..3 {
+            coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        }
+        for pending in coordinator.pending.values_mut() {
+            pending.preparation = PreparationState::Ready;
+        }
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: worker_device_id(&worker),
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        coordinator.dispatch_ready().await;
+
+        assert_eq!(
+            recv_grant(&worker_rx).id,
+            "deep-zero",
+            "scheduler dispatch follows the registry's durable position, not channel arrival"
+        );
+        drop(results);
+    }
+
     #[test]
     fn internal_chain_stage_does_not_shift_legacy_queue_positions_or_patch_order() {
         let (worker, _worker_rx) = test_worker(0);
