@@ -624,6 +624,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 26,
         kind: MigrationKind::Sql(V26_GENERATION_QUEUE_MEDIA),
     },
+    Migration {
+        version: 27,
+        kind: MigrationKind::Sql(V27_GENERATION_QUEUE_OWNER_ORDER),
+    },
 ];
 
 /// #1227 phase 2 moved face-identity extraction from admission onto the
@@ -701,7 +705,7 @@ ALTER TABLE generation_batch_children ADD COLUMN completed_at_ms INTEGER;
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 26;
+pub const SCHEMA_VERSION: i64 = 27;
 
 /// Opaque staged-media ownership for durable queue rows.
 ///
@@ -779,6 +783,17 @@ BEGIN
      WHERE media_set_id = OLD.media_set_id
        AND state = 'active';
 END;
+"#;
+
+/// Owner-first stable ordering for payload-free queue pagination.
+///
+/// SQLite appends the table rowid to every ordinary secondary-index entry,
+/// so `(owner_uuid, created_at)` also satisfies the queue's authoritative
+/// `(created_at, rowid)` order without a temporary sort. Unlike the older
+/// replay index, no state column interrupts the owner/order prefix.
+const V27_GENERATION_QUEUE_OWNER_ORDER: &str = r#"
+CREATE INDEX generation_queue_owner_order
+ON generation_queue(owner_uuid, created_at);
 "#;
 
 /// Build a serde-compatible reverse lookup for durable publication recovery.
@@ -1237,7 +1252,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 26);
+        assert_eq!(SCHEMA_VERSION, 27);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1391,7 +1406,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 26);
+        assert_eq!(SCHEMA_VERSION, 27);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1526,7 +1541,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 26);
+        assert_eq!(SCHEMA_VERSION, 27);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -1787,7 +1802,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 26);
+        assert_eq!(SCHEMA_VERSION, 27);
     }
 
     #[test]
@@ -2080,7 +2095,7 @@ mod v26_tests {
         conn.pragma_update(None, "foreign_keys", true).unwrap();
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 26);
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(
             column_names(&conn, "generation_queue_media"),
             [
@@ -2142,7 +2157,7 @@ mod v26_tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 26);
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_legacy_row_is_payload_identical(&conn, "from-v23");
     }
 
@@ -2155,7 +2170,88 @@ mod v26_tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 26);
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_legacy_row_is_payload_identical(&conn, "from-v25");
+    }
+}
+
+#[cfg(test)]
+mod v27_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn migrate_through(conn: &mut Connection, version: i64) {
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= version)
+        {
+            let tx = conn.transaction().unwrap();
+            match migration.kind {
+                MigrationKind::Sql(sql) => tx.execute_batch(sql).unwrap(),
+                MigrationKind::Rust(function) => function(&tx).unwrap(),
+            }
+            tx.pragma_update(None, "user_version", migration.version)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+    }
+
+    #[test]
+    fn v26_upgrade_adds_owner_order_index_without_rewriting_queue_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_through(&mut conn, 26);
+        for (id, owner) in [
+            ("first", "owner-a"),
+            ("second", "owner-a"),
+            ("foreign", "owner-b"),
+        ] {
+            conn.execute(
+                "INSERT INTO generation_queue (
+                    id, owner_uuid, state, model, request_json, output_dir,
+                    completion_payload, created_at, updated_at
+                 ) VALUES (?1, ?2, 'queued', 'model', ?3, '/gallery', 'metadata_only', 7, 7)",
+                rusqlite::params![id, owner, r#"{"prompt":"unchanged"}"#],
+            )
+            .unwrap();
+        }
+
+        apply_pending(&mut conn).unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
+        let index_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                  WHERE type = 'index' AND name = 'generation_queue_owner_order'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(index_sql.contains("owner_uuid, created_at"));
+        let rows = conn
+            .prepare(
+                "SELECT id, owner_uuid, request_json, created_at, rowid
+                   FROM generation_queue ORDER BY rowid",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].0, "first");
+        assert_eq!(rows[1].0, "second");
+        assert_eq!(rows[2].1, "owner-b");
+        assert!(rows.iter().all(|(_, _, request, created_at, _)| request
+            == r#"{"prompt":"unchanged"}"#
+            && *created_at == 7));
+        assert!(rows.windows(2).all(|pair| pair[0].4 < pair[1].4));
     }
 }

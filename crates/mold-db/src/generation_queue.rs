@@ -172,25 +172,58 @@ pub struct GenerationQueueProjectionPage {
     pub next_cursor: Option<QueueProjectionCursor>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnedQueuedLoad {
+    pub queued_count: usize,
+    pub live_overlap: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueTargetPatch {
+    pub target_gpu: Option<usize>,
+    pub target_device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedQueuedPatch {
+    /// `None` leaves affinity untouched; `Some` replaces both the ordinal and
+    /// stable device identity, including clearing both to Auto.
+    pub target: Option<QueueTargetPatch>,
+    /// New zero-based position among this owner's queued rows. Values beyond
+    /// the tail are clamped to the tail.
+    pub position: Option<usize>,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnedQueuedPatchOutcome {
+    Updated {
+        position: usize,
+        projection: GenerationQueueProjection,
+    },
+    NotOwned,
+    NotQueued,
+}
+
 /// The only column projection allowed on the paginated queue-listing path.
 /// Keep this as a literal so the regression test can prove that none of the
 /// durable payload columns are selected.
-const QUEUE_PROJECTION_PAGE_SQL: &str = "
+const QUEUE_PROJECTION_FIRST_PAGE_SQL: &str = "
     SELECT q.id, q.state, q.model, q.target_gpu, q.seed_pinned,
            q.dispatch_attempts, q.replay_seen, q.held_reason, q.created_at,
-           q.rowid,
-           EXISTS (
-               SELECT 1
-                 FROM generation_queue AS later
-                WHERE later.owner_uuid = q.owner_uuid
-                  AND (later.created_at > q.created_at
-                       OR (later.created_at = q.created_at AND later.rowid > q.rowid))
-           ) AS has_later
+           q.rowid
       FROM generation_queue AS q
      WHERE q.owner_uuid = ?1
-       AND (?2 IS NULL
-            OR q.created_at > ?2
-            OR (q.created_at = ?2 AND q.rowid > ?3))
+     ORDER BY q.created_at, q.rowid
+     LIMIT ?2";
+
+const QUEUE_PROJECTION_AFTER_SQL: &str = "
+    SELECT q.id, q.state, q.model, q.target_gpu, q.seed_pinned,
+           q.dispatch_attempts, q.replay_seen, q.held_reason, q.created_at,
+           q.rowid
+      FROM generation_queue AS q
+     WHERE q.owner_uuid = ?1
+       AND (q.created_at, q.rowid) > (?2, ?3)
      ORDER BY q.created_at, q.rowid
      LIMIT ?4";
 
@@ -427,9 +460,9 @@ pub fn list_all(db: &MetadataDb, owner_uuid: &str) -> Result<Vec<GenerationQueue
 /// Inserts after that key are visible; inserts or reorders before it are not.
 ///
 /// `limit` has no implicit default or server-side cap. The caller must supply
-/// a positive value, and this query returns at most that many rows. `has_later`
-/// is computed in the same SQLite statement so discovering the next page does
-/// not require materializing a `limit + 1` row.
+/// a positive value, and this query returns at most that many rows. SQLite
+/// reads one additional ordering key to prove whether another page exists;
+/// the extra row is discarded before returning.
 pub fn list_projection_page(
     db: &MetadataDb,
     owner_uuid: &str,
@@ -439,51 +472,118 @@ pub fn list_projection_page(
     if limit == 0 {
         bail!("queue projection page limit must be positive");
     }
-    let sql_limit = i64::try_from(limit)
+    let fetch_limit = limit
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("queue projection page limit is outside SQLite's range"))?;
+    let sql_limit = i64::try_from(fetch_limit)
         .map_err(|_| anyhow::anyhow!("queue projection page limit is outside SQLite's range"))?;
-    let cursor_created_at = cursor.map(|cursor| cursor.created_at_ms);
-    let cursor_rowid = cursor.map(|cursor| cursor.rowid);
-
     db.with_conn(|conn| {
-        let mut stmt = conn.prepare(QUEUE_PROJECTION_PAGE_SQL)?;
-        let mapped = stmt.query_map(
-            params![owner_uuid, cursor_created_at, cursor_rowid, sql_limit],
-            |row| {
-                let state_raw: String = row.get(1)?;
-                let state = QueueRowState::parse(&state_raw).ok_or_else(|| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        1,
-                        rusqlite::types::Type::Text,
-                        format!("unknown generation_queue state '{state_raw}'").into(),
-                    )
-                })?;
-                Ok((
-                    GenerationQueueProjection {
-                        id: row.get(0)?,
-                        state,
-                        model: row.get(2)?,
-                        target_gpu: row.get::<_, Option<i64>>(3)?.map(|gpu| gpu as usize),
-                        seed_pinned: row.get::<_, i64>(4)? != 0,
-                        dispatch_attempts: row.get::<_, i64>(5)? as u32,
-                        replay_seen: row.get::<_, i64>(6)? as u32,
-                        held_reason: row.get(7)?,
-                        created_at_ms: row.get(8)?,
-                    },
-                    QueueProjectionCursor {
-                        created_at_ms: row.get(8)?,
-                        rowid: row.get(9)?,
-                    },
-                    row.get::<_, i64>(10)? != 0,
-                ))
-            },
-        )?;
-        let rows_with_keys = mapped.collect::<rusqlite::Result<Vec<_>>>()?;
-        let next_cursor = rows_with_keys
-            .last()
-            .filter(|(_, _, has_later)| *has_later)
-            .map(|(_, cursor, _)| *cursor);
-        let rows = rows_with_keys.into_iter().map(|(row, _, _)| row).collect();
+        let mut rows_with_keys = if let Some(cursor) = cursor {
+            let mut stmt = conn.prepare(QUEUE_PROJECTION_AFTER_SQL)?;
+            let rows = stmt
+                .query_map(
+                    params![owner_uuid, cursor.created_at_ms, cursor.rowid, sql_limit],
+                    projection_page_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        } else {
+            let mut stmt = conn.prepare(QUEUE_PROJECTION_FIRST_PAGE_SQL)?;
+            let rows = stmt
+                .query_map(params![owner_uuid, sql_limit], projection_page_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let has_later = rows_with_keys.len() > limit;
+        if has_later {
+            rows_with_keys.pop();
+        }
+        let next_cursor = has_later
+            .then(|| rows_with_keys.last().map(|(_, cursor)| *cursor))
+            .flatten();
+        let rows = rows_with_keys.into_iter().map(|(row, _)| row).collect();
         Ok(GenerationQueueProjectionPage { rows, next_cursor })
+    })
+}
+
+fn projection_page_row(
+    row: &Row<'_>,
+) -> rusqlite::Result<(GenerationQueueProjection, QueueProjectionCursor)> {
+    let state_raw: String = row.get(1)?;
+    let state = QueueRowState::parse(&state_raw).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Text,
+            format!("unknown generation_queue state '{state_raw}'").into(),
+        )
+    })?;
+    Ok((
+        GenerationQueueProjection {
+            id: row.get(0)?,
+            state,
+            model: row.get(2)?,
+            target_gpu: row.get::<_, Option<i64>>(3)?.map(|gpu| gpu as usize),
+            seed_pinned: row.get::<_, i64>(4)? != 0,
+            dispatch_attempts: row.get::<_, i64>(5)? as u32,
+            replay_seen: row.get::<_, i64>(6)? as u32,
+            held_reason: row.get(7)?,
+            created_at_ms: row.get(8)?,
+        },
+        QueueProjectionCursor {
+            created_at_ms: row.get(8)?,
+            rowid: row.get(9)?,
+        },
+    ))
+}
+
+/// Exact owner-fenced durable waiting depth and its bounded overlap with live
+/// registry waiting ids, read from one SQLite connection snapshot.
+///
+/// Claimed queued rows already belong to the live scheduler and are excluded
+/// so callers can add registry-only waiting ids without double counting.
+/// Running and held rows are likewise not waiting backlog. The overlap probes
+/// only caller-supplied bounded ids; this never lists the durable backlog.
+pub fn owned_queued_load(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    live_waiting_ids: &[String],
+) -> Result<OwnedQueuedLoad> {
+    db.transact(|conn| owned_queued_load_on_conn(conn, owner_uuid, live_waiting_ids, || {}))
+}
+
+fn owned_queued_load_on_conn(
+    conn: &rusqlite::Connection,
+    owner_uuid: &str,
+    live_waiting_ids: &[String],
+    after_count: impl FnOnce(),
+) -> Result<OwnedQueuedLoad> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM generation_queue
+          WHERE owner_uuid = ?1 AND state = 'queued' AND claim_token IS NULL",
+        params![owner_uuid],
+        |row| row.get(0),
+    )?;
+    let queued_count = usize::try_from(count)
+        .map_err(|_| anyhow::anyhow!("owned queued generation count is outside usize"))?;
+    after_count();
+    let mut overlap = 0usize;
+    let mut seen = HashSet::with_capacity(live_waiting_ids.len());
+    let mut stmt = conn.prepare(
+        "SELECT 1 FROM generation_queue
+          WHERE id = ?1 AND owner_uuid = ?2
+            AND state = 'queued' AND claim_token IS NULL
+          LIMIT 1",
+    )?;
+    for id in live_waiting_ids {
+        if seen.insert(id.as_str()) && stmt.exists(params![id, owner_uuid])? {
+            overlap = overlap
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("owned queued overlap exceeds usize"))?;
+        }
+    }
+    Ok(OwnedQueuedLoad {
+        queued_count,
+        live_overlap: overlap,
     })
 }
 
@@ -789,14 +889,16 @@ pub fn hold(db: &MetadataDb, id: &str, reason: &str, now_ms: i64) -> Result<bool
     })
 }
 
-/// Atomically quarantine selected staged-media jobs during startup.
+/// Atomically quarantine selected staged-media jobs and their batch summaries
+/// during startup.
 ///
 /// The owner and non-NULL media marker fences prevent a corrupt/missing set
 /// report from parking another installation's row or an ordinary media-free
 /// job. The returned count is the number of unique requested jobs proven held
 /// at commit, including rows a prior startup already held. Held rows retain
 /// their marker and active cleanup obligation because the user may inspect or
-/// explicitly cancel them later.
+/// explicitly cancel them later. A batch child is moved to `held` in the same
+/// transaction; cancellation, terminal, and unknown child states fail closed.
 pub fn hold_media_jobs(
     db: &MetadataDb,
     owner_uuid: &str,
@@ -809,27 +911,60 @@ pub fn hold_media_jobs(
     }
     db.transact_immediate(|conn| {
         let mut seen = HashSet::new();
+        let mut select = conn.prepare(
+            "SELECT q.state,
+                    (SELECT child.state
+                       FROM generation_batch_children AS child
+                      WHERE child.job_id = q.id)
+               FROM generation_queue AS q
+              WHERE q.id = ?1 AND q.owner_uuid = ?2
+                AND q.media_set_id IS NOT NULL",
+        )?;
         let mut stmt = conn.prepare(
             "UPDATE generation_queue
                 SET state = 'held', held_reason = ?3, claim_token = NULL,
                     started_at = NULL, updated_at = ?4
               WHERE id = ?1 AND owner_uuid = ?2
                 AND media_set_id IS NOT NULL
-                AND state IN ('queued', 'running')",
+                AND state = ?5",
         )?;
         let mut held = 0;
-        let mut verify = conn.prepare(
-            "SELECT 1 FROM generation_queue
-              WHERE id = ?1 AND owner_uuid = ?2
-                AND media_set_id IS NOT NULL AND state = 'held'",
+        let mut update_child = conn.prepare(
+            "UPDATE generation_batch_children
+                SET state = 'held', error = ?2, updated_at_ms = ?3
+              WHERE job_id = ?1 AND state = ?4",
         )?;
         for job_id in job_ids {
-            if seen.insert(job_id.as_str()) {
-                stmt.execute(params![job_id, owner_uuid, reason, now_ms])?;
-                if verify.exists(params![job_id, owner_uuid])? {
-                    held += 1;
+            if !seen.insert(job_id.as_str()) {
+                continue;
+            }
+            let row = select
+                .query_row(params![job_id, owner_uuid], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .optional()?;
+            let Some((queue_state, child_state)) = row else {
+                continue;
+            };
+            if !matches!(queue_state.as_str(), "queued" | "running" | "held") {
+                bail!("media queue row {job_id} has invalid state {queue_state}");
+            }
+            if let Some(child_state) = child_state.as_deref() {
+                if !matches!(child_state, "accepted" | "running" | "held") {
+                    bail!(
+                        "media queue row {job_id} cannot be held beside batch child state {child_state}"
+                    );
                 }
             }
+            if stmt.execute(params![job_id, owner_uuid, reason, now_ms, queue_state])? != 1 {
+                bail!("media queue row {job_id} changed during startup hold");
+            }
+            if let Some(child_state) = child_state {
+                if update_child.execute(params![job_id, reason, now_ms, child_state])? != 1 {
+                    bail!("batch child {job_id} changed during startup media hold");
+                }
+            }
+            held += 1;
         }
         Ok(held)
     })
@@ -999,6 +1134,142 @@ pub fn set_target_gpu(
             ],
         )?;
         Ok(updated > 0)
+    })
+}
+
+/// Atomically patch one owner-fenced queued row, including rows deeper than
+/// the live registry window.
+///
+/// The state check, affinity replacement, and optional queued-order rewrite
+/// share one IMMEDIATE transaction. A claim may coexist with `queued` while a
+/// live scheduler owns the ticket; the server's scheduler-mutation fence is
+/// the runtime authority for that case. Once the durable state is `running`
+/// or `held`, this method refuses every mutation without a partial write.
+pub fn patch_owned_queued(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    job_id: &str,
+    patch: &OwnedQueuedPatch,
+) -> Result<OwnedQueuedPatchOutcome> {
+    db.transact_immediate(|conn| {
+        let owned = conn
+            .query_row(
+                "SELECT state, created_at, rowid
+                   FROM generation_queue
+                  WHERE id = ?1 AND owner_uuid = ?2",
+                params![job_id, owner_uuid],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((state, created_at, rowid)) = owned else {
+            return Ok(OwnedQueuedPatchOutcome::NotOwned);
+        };
+        if state != QueueRowState::Queued.as_str() {
+            return Ok(OwnedQueuedPatchOutcome::NotQueued);
+        }
+
+        if let Some(target) = &patch.target {
+            let updated = conn.execute(
+                "UPDATE generation_queue
+                    SET target_gpu = ?3, target_device_id = ?4, updated_at = ?5
+                  WHERE id = ?1 AND owner_uuid = ?2 AND state = 'queued'",
+                params![
+                    job_id,
+                    owner_uuid,
+                    target.target_gpu.map(|gpu| gpu as i64),
+                    target.target_device_id.as_deref(),
+                    patch.updated_at_ms,
+                ],
+            )?;
+            if updated != 1 {
+                bail!("owned queued row changed during affinity patch");
+            }
+        }
+
+        let position = if let Some(requested_position) = patch.position {
+            let queued = {
+                let mut stmt = conn.prepare(QUEUE_REORDER_CANDIDATES_SQL)?;
+                let rows = stmt.query_map(params![owner_uuid], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let current_position = queued
+                .iter()
+                .position(|(id, _)| id == job_id)
+                .ok_or_else(|| anyhow::anyhow!("owned queued row disappeared during reorder"))?;
+            let oldest_created_at = queued[0].1;
+            let mut order = queued.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+            order.remove(current_position);
+            let position = requested_position.min(order.len());
+            order.insert(position, job_id.to_string());
+
+            if position != current_position {
+                let span = i64::try_from(order.len().saturating_sub(1)).map_err(|_| {
+                    anyhow::anyhow!("queued generation count exceeds SQLite's range")
+                })?;
+                let anchor = oldest_created_at.min(i64::MAX - span);
+                let mut update = conn.prepare(
+                    "UPDATE generation_queue
+                        SET created_at = ?2, updated_at = ?3
+                      WHERE id = ?1 AND owner_uuid = ?4 AND state = 'queued'",
+                )?;
+                let mut moved = 0usize;
+                for (index, id) in order.iter().enumerate() {
+                    moved += update.execute(params![
+                        id,
+                        anchor + index as i64,
+                        patch.updated_at_ms,
+                        owner_uuid,
+                    ])?;
+                }
+                if moved != order.len() {
+                    bail!("owned queued set changed during reorder");
+                }
+            }
+            position
+        } else {
+            let before: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM generation_queue
+                  WHERE owner_uuid = ?1 AND state = 'queued'
+                    AND (created_at < ?2 OR (created_at = ?2 AND rowid < ?3))",
+                params![owner_uuid, created_at, rowid],
+                |row| row.get(0),
+            )?;
+            usize::try_from(before)
+                .map_err(|_| anyhow::anyhow!("queued generation position is outside usize"))?
+        };
+
+        let projection = conn.query_row(
+            "SELECT id, state, model, target_gpu, seed_pinned,
+                    dispatch_attempts, replay_seen, held_reason, created_at
+               FROM generation_queue
+              WHERE id = ?1 AND owner_uuid = ?2 AND state = 'queued'",
+            params![job_id, owner_uuid],
+            |row| {
+                Ok(GenerationQueueProjection {
+                    id: row.get(0)?,
+                    state: QueueRowState::Queued,
+                    model: row.get(2)?,
+                    target_gpu: row.get::<_, Option<i64>>(3)?.map(|gpu| gpu as usize),
+                    seed_pinned: row.get::<_, i64>(4)? != 0,
+                    dispatch_attempts: row.get::<_, i64>(5)? as u32,
+                    replay_seen: row.get::<_, i64>(6)? as u32,
+                    held_reason: row.get(7)?,
+                    created_at_ms: row.get(8)?,
+                })
+            },
+        )?;
+        Ok(OwnedQueuedPatchOutcome::Updated {
+            position,
+            projection,
+        })
     })
 }
 
@@ -1348,7 +1619,7 @@ fn row_to_queue_row(row: &Row<'_>) -> rusqlite::Result<GenerationQueueRow> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Barrier};
+    use std::sync::{mpsc, Arc, Barrier};
 
     use super::*;
 
@@ -1491,13 +1762,72 @@ mod tests {
 
     #[test]
     fn projection_sql_never_selects_durable_payload_columns() {
-        let normalized = QUEUE_PROJECTION_PAGE_SQL.to_ascii_lowercase();
-        for forbidden in ["request_json", "output_dir", "completion_payload"] {
-            assert!(
-                !normalized.contains(forbidden),
-                "projection SQL selected {forbidden}: {QUEUE_PROJECTION_PAGE_SQL}"
-            );
+        for sql in [QUEUE_PROJECTION_FIRST_PAGE_SQL, QUEUE_PROJECTION_AFTER_SQL] {
+            let normalized = sql.to_ascii_lowercase();
+            for forbidden in ["request_json", "output_dir", "completion_payload"] {
+                assert!(
+                    !normalized.contains(forbidden),
+                    "projection SQL selected {forbidden}: {sql}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn projection_page_plan_uses_owner_order_index_without_sort_or_correlated_scan() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        db.with_conn(|conn| {
+            let plans = [
+                (
+                    QUEUE_PROJECTION_FIRST_PAGE_SQL,
+                    vec![
+                        rusqlite::types::Value::Text("owner-a".into()),
+                        rusqlite::types::Value::Integer(11),
+                    ],
+                    false,
+                ),
+                (
+                    QUEUE_PROJECTION_AFTER_SQL,
+                    vec![
+                        rusqlite::types::Value::Text("owner-a".into()),
+                        rusqlite::types::Value::Integer(500),
+                        rusqlite::types::Value::Integer(7),
+                        rusqlite::types::Value::Integer(11),
+                    ],
+                    true,
+                ),
+            ];
+            for (query, values, must_seek) in plans {
+                let sql = format!("EXPLAIN QUERY PLAN {query}");
+                let mut stmt = conn.prepare(&sql)?;
+                let details = stmt
+                    .query_map(rusqlite::params_from_iter(values), |row| {
+                        row.get::<_, String>(3)
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let plan = details.join("\n").to_ascii_lowercase();
+                assert!(
+                    plan.contains("generation_queue_owner_order"),
+                    "owner pagination did not use its order index: {plan}"
+                );
+                if must_seek {
+                    assert!(
+                        plan.contains("created_at>?") || plan.contains("created_at>"),
+                        "cursor page scanned the owner's prior backlog instead of seeking: {plan}"
+                    );
+                }
+                assert!(
+                    !plan.contains("temp b-tree"),
+                    "pagination sorted under the DB mutex: {plan}"
+                );
+                assert!(
+                    !plan.contains("correlated"),
+                    "pagination retained a correlated scan: {plan}"
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]
@@ -2059,6 +2389,225 @@ mod tests {
         assert_eq!(auto.target_gpu, None);
         assert_eq!(auto.target_device_id, None);
         assert!(!set_target_gpu(&db, "missing", Some(1), None, 11).unwrap());
+    }
+
+    #[test]
+    fn owned_queued_count_excludes_claimed_running_held_and_foreign_rows() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        for (id, owner, created) in [
+            ("claimed", "owner-a", 1),
+            ("running", "owner-a", 2),
+            ("waiting", "owner-a", 3),
+            ("held", "owner-a", 4),
+            ("foreign", "owner-b", 5),
+        ] {
+            insert(&db, &row(id, owner, created)).unwrap();
+        }
+        claim_by_id(&db, "owner-a", "claimed", "claimed-token", 10)
+            .unwrap()
+            .unwrap();
+        claim_by_id(&db, "owner-a", "running", "running-token", 11)
+            .unwrap()
+            .unwrap();
+        mark_dispatched_claimed(&db, "running", "running-token", 12).unwrap();
+        hold(&db, "held", "review", 13).unwrap();
+
+        assert_eq!(
+            owned_queued_load(
+                &db,
+                "owner-a",
+                &[
+                    "waiting".into(),
+                    "waiting".into(),
+                    "claimed".into(),
+                    "running".into(),
+                    "held".into(),
+                    "foreign".into(),
+                ],
+            )
+            .unwrap(),
+            OwnedQueuedLoad {
+                queued_count: 1,
+                live_overlap: 1,
+            },
+            "bounded overlap deduplicates ids and uses the exact waiting predicate"
+        );
+        assert_eq!(
+            owned_queued_load(&db, "owner-b", &[]).unwrap(),
+            OwnedQueuedLoad {
+                queued_count: 1,
+                live_overlap: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn owned_queued_load_count_and_overlap_share_one_sqlite_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mold.db");
+        let db = MetadataDb::open(&path).unwrap();
+        insert(&db, &row("waiting", "owner-a", 1)).unwrap();
+        let (start_tx, start_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            start_rx.recv().unwrap();
+            let writer_db = MetadataDb::open(&writer_path).unwrap();
+            claim_by_id(&writer_db, "owner-a", "waiting", "live-claim", 2)
+                .unwrap()
+                .unwrap();
+            done_tx.send(()).unwrap();
+        });
+
+        let snapshot = db
+            .transact(|conn| {
+                owned_queued_load_on_conn(conn, "owner-a", &["waiting".into()], || {
+                    start_tx.send(()).unwrap();
+                    done_rx.recv().unwrap();
+                })
+            })
+            .unwrap();
+        writer.join().unwrap();
+        assert_eq!(
+            snapshot,
+            OwnedQueuedLoad {
+                queued_count: 1,
+                live_overlap: 1,
+            },
+            "the writer committed between the two reads, but one read transaction retained one snapshot"
+        );
+        assert_eq!(
+            owned_queued_load(&db, "owner-a", &["waiting".into()]).unwrap(),
+            OwnedQueuedLoad {
+                queued_count: 0,
+                live_overlap: 0,
+            },
+            "a later snapshot observes the committed claim"
+        );
+    }
+
+    #[test]
+    fn owned_queued_patch_atomically_relanes_and_reorders_a_deep_row() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        for id in ["first", "second", "deep", "tail"] {
+            insert(&db, &row(id, "owner-a", 500)).unwrap();
+        }
+
+        let outcome = patch_owned_queued(
+            &db,
+            "owner-a",
+            "deep",
+            &OwnedQueuedPatch {
+                target: Some(QueueTargetPatch {
+                    target_gpu: Some(3),
+                    target_device_id: Some("cuda:stable".into()),
+                }),
+                position: Some(0),
+                updated_at_ms: 900,
+            },
+        )
+        .unwrap();
+        let OwnedQueuedPatchOutcome::Updated {
+            position,
+            projection,
+        } = outcome
+        else {
+            panic!("owned queued row was not updated");
+        };
+        assert_eq!(position, 0);
+        assert_eq!(projection.id, "deep");
+        assert_eq!(projection.target_gpu, Some(3));
+        let replay = list_replayable(&db, "owner-a")
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
+        assert_eq!(replay, ["deep", "first", "second", "tail"]);
+        let deep = get(&db, "deep").unwrap().unwrap();
+        assert_eq!(deep.target_gpu, Some(3));
+        assert_eq!(deep.target_device_id.as_deref(), Some("cuda:stable"));
+
+        let outcome = patch_owned_queued(
+            &db,
+            "owner-a",
+            "deep",
+            &OwnedQueuedPatch {
+                target: Some(QueueTargetPatch {
+                    target_gpu: None,
+                    target_device_id: None,
+                }),
+                position: Some(usize::MAX),
+                updated_at_ms: 901,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            OwnedQueuedPatchOutcome::Updated {
+                position: 3,
+                projection: GenerationQueueProjection {
+                    target_gpu: None,
+                    ..
+                },
+            }
+        ));
+        assert_eq!(
+            list_replayable(&db, "owner-a")
+                .unwrap()
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            ["first", "second", "tail", "deep"]
+        );
+        assert_eq!(get(&db, "deep").unwrap().unwrap().target_gpu, None);
+    }
+
+    #[test]
+    fn owned_queued_patch_is_owner_state_fenced_and_rolls_back_partial_writes() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        for id in ["first", "deep", "tail"] {
+            insert(&db, &row(id, "owner-a", 500)).unwrap();
+        }
+        insert(&db, &row("foreign", "owner-b", 500)).unwrap();
+        hold(&db, "tail", "review", 600).unwrap();
+
+        let patch = OwnedQueuedPatch {
+            target: Some(QueueTargetPatch {
+                target_gpu: Some(7),
+                target_device_id: Some("cuda:7".into()),
+            }),
+            position: Some(0),
+            updated_at_ms: 700,
+        };
+        assert_eq!(
+            patch_owned_queued(&db, "owner-a", "foreign", &patch).unwrap(),
+            OwnedQueuedPatchOutcome::NotOwned
+        );
+        assert_eq!(
+            patch_owned_queued(&db, "owner-a", "tail", &patch).unwrap(),
+            OwnedQueuedPatchOutcome::NotQueued
+        );
+
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER reject_deep_reorder
+                 BEFORE UPDATE OF created_at ON generation_queue
+                 WHEN OLD.id = 'first'
+                 BEGIN SELECT RAISE(ABORT, 'injected reorder failure'); END;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(patch_owned_queued(&db, "owner-a", "deep", &patch).is_err());
+        assert_eq!(get(&db, "deep").unwrap().unwrap().target_gpu, None);
+        assert_eq!(
+            list_replayable(&db, "owner-a")
+                .unwrap()
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            ["first", "deep"]
+        );
     }
 
     #[test]

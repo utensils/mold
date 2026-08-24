@@ -732,7 +732,43 @@ pub fn cancel_all_queued(
     already_counted_live: &[String],
     terminal: GenerationBatchTerminal<'_>,
 ) -> Result<usize> {
+    if terminal.state != GenerationBatchTerminalState::Cancelled {
+        bail!("bulk queue cancellation requires a cancelled terminal outcome");
+    }
     db.transact_immediate(|conn| {
+        let inconsistent_child: Option<(String, String)> = conn
+            .query_row(
+                "SELECT q.id, child.state
+                   FROM generation_queue AS q
+                   JOIN generation_batch_children AS child ON child.job_id = q.id
+                  WHERE q.owner_uuid = ?1 AND q.state = 'queued'
+                    AND child.state NOT IN ('accepted', 'running', 'held', 'cancelling')
+                  LIMIT 1",
+                params![owner_uuid],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((job_id, state)) = inconsistent_child {
+            bail!("queued authority {job_id} retained inconsistent batch child state {state}");
+        }
+        let orphaned_cancellation: Option<String> = conn
+            .query_row(
+                "SELECT child.job_id
+                   FROM generation_batch_children AS child
+                   JOIN generation_batches AS batch ON batch.id = child.batch_id
+                  WHERE batch.owner_uuid = ?1 AND child.state = 'cancelling'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM generation_queue AS q WHERE q.id = child.job_id
+                    )
+                  LIMIT 1",
+                params![owner_uuid],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(job_id) = orphaned_cancellation {
+            bail!("cancelling batch child {job_id} has no durable queue authority");
+        }
+
         let eligible_sql = "SELECT COUNT(*) FROM generation_queue AS q
              WHERE q.owner_uuid = ?1 AND q.state = 'queued'
                AND NOT EXISTS (
@@ -764,12 +800,20 @@ pub fn cancel_all_queued(
         }
         drop(overlap_stmt);
 
-        conn.execute(
+        let unclaimed_children: i64 = conn.query_row(
+            "SELECT COUNT(*)
+               FROM generation_queue AS q
+               JOIN generation_batch_children AS child ON child.job_id = q.id
+              WHERE q.owner_uuid = ?1 AND q.state = 'queued'
+                AND q.claim_token IS NULL",
+            params![owner_uuid],
+            |row| row.get(0),
+        )?;
+        let terminalized = conn.execute(
             "UPDATE generation_batch_children
                 SET state = ?2, error = ?3, terminal_error_json = ?4,
                     result_json = ?5, completed_at_ms = ?6, updated_at_ms = ?6
-              WHERE state != 'cancelling'
-                AND job_id IN (
+              WHERE job_id IN (
                     SELECT q.id FROM generation_queue AS q
                      WHERE q.owner_uuid = ?1 AND q.state = 'queued'
                        AND q.claim_token IS NULL
@@ -783,16 +827,38 @@ pub fn cancel_all_queued(
                 terminal.completed_at_ms,
             ],
         )?;
-        conn.execute(
+        if i64::try_from(terminalized).ok() != Some(unclaimed_children) {
+            bail!(
+                "bulk cancellation terminalized {terminalized} of {unclaimed_children} unclaimed batch children"
+            );
+        }
+        let deleted_children = conn.execute(
             "DELETE FROM generation_queue
               WHERE owner_uuid = ?1 AND state = 'queued' AND claim_token IS NULL
                 AND EXISTS (
                     SELECT 1 FROM generation_batch_children AS child
                      WHERE child.job_id = generation_queue.id
+                       AND child.state = 'cancelled'
+                       AND child.completed_at_ms = ?2
                 )",
-            params![owner_uuid],
+            params![owner_uuid, terminal.completed_at_ms],
         )?;
-        conn.execute(
+        if i64::try_from(deleted_children).ok() != Some(unclaimed_children) {
+            bail!(
+                "bulk cancellation removed {deleted_children} of {unclaimed_children} terminalized queue authorities"
+            );
+        }
+
+        let claimed_children: i64 = conn.query_row(
+            "SELECT COUNT(*)
+               FROM generation_queue AS q
+               JOIN generation_batch_children AS child ON child.job_id = q.id
+              WHERE q.owner_uuid = ?1 AND q.state = 'queued'
+                AND q.claim_token IS NOT NULL AND child.state != 'cancelling'",
+            params![owner_uuid],
+            |row| row.get(0),
+        )?;
+        let cancellation_requested = conn.execute(
             "UPDATE generation_batch_children
                 SET state = 'cancelling', error = 'Cancelled', updated_at_ms = ?2
               WHERE state != 'cancelling'
@@ -803,6 +869,11 @@ pub fn cancel_all_queued(
                 )",
             params![owner_uuid, terminal.completed_at_ms],
         )?;
+        if i64::try_from(cancellation_requested).ok() != Some(claimed_children) {
+            bail!(
+                "bulk cancellation marked {cancellation_requested} of {claimed_children} claimed batch children"
+            );
+        }
         conn.execute(
             "DELETE FROM generation_queue
               WHERE owner_uuid = ?1 AND state = 'queued'
@@ -816,6 +887,20 @@ pub fn cancel_all_queued(
         let remaining: i64 = conn.query_row(eligible_sql, params![owner_uuid], |row| row.get(0))?;
         if remaining != 0 {
             bail!("bulk queue cancellation left {remaining} eligible durable rows");
+        }
+        let invalid_remaining: i64 = conn.query_row(
+            "SELECT COUNT(*)
+               FROM generation_queue AS q
+               JOIN generation_batch_children AS child ON child.job_id = q.id
+              WHERE q.owner_uuid = ?1 AND q.state = 'queued'
+                AND (q.claim_token IS NULL OR child.state != 'cancelling')",
+            params![owner_uuid],
+            |row| row.get(0),
+        )?;
+        if invalid_remaining != 0 {
+            bail!(
+                "bulk queue cancellation left {invalid_remaining} batch children without retained claimed cancellation authority"
+            );
         }
         let total = usize::try_from(total)
             .map_err(|_| anyhow::anyhow!("durable cancellation count is outside usize"))?;
@@ -841,11 +926,11 @@ pub fn child_cancel_requested(db: &MetadataDb, owner_uuid: &str, job_id: &str) -
     })
 }
 
-/// Restore a retained feeder child to `accepted` only while its owning queue
-/// row still exists and cancellation has not won. The queue claim release and
-/// this summary update are separate calls, so both predicates are necessary:
-/// cancellation may either mark the child `cancelling` or terminalize it and
-/// delete the row between them.
+/// Restore a retained feeder child to `accepted` only while its exact owning
+/// queue row is queued and unclaimed and the child is still accepted/running.
+/// The queue claim release and this summary update are separate calls, so all
+/// predicates are necessary: cancellation may mark or terminalize the child,
+/// while a concurrent hold may park both authorities between the calls.
 pub fn restore_child_after_retain(
     db: &MetadataDb,
     owner_uuid: &str,
@@ -857,10 +942,11 @@ pub fn restore_child_after_retain(
             "UPDATE generation_batch_children
                 SET state = 'accepted', error = NULL, updated_at_ms = ?3
               WHERE job_id = ?1
-                AND state NOT IN ('cancelling', 'complete', 'failed', 'cancelled')
+                AND state IN ('accepted', 'running')
                 AND EXISTS (
                     SELECT 1 FROM generation_queue AS q
                      WHERE q.id = ?1 AND q.owner_uuid = ?2
+                       AND q.state = 'queued' AND q.claim_token IS NULL
                 )",
             params![job_id, owner_uuid, updated_at_ms],
         )? > 0)
@@ -2042,5 +2128,220 @@ mod tests {
             0,
             "an already-requested claimed cancellation is not counted twice"
         );
+    }
+
+    #[test]
+    fn repeated_bulk_cancel_settles_a_released_cancelling_child_and_retires_media() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let children = media_rows("cancel", 1);
+        let obligations = media_for_rows(&children);
+        insert_or_get_with_media(&db, &batch("receipt"), &children, &obligations).unwrap();
+        crate::generation_queue::claim_by_id(&db, "owner-1", "cancel-job-0", "live-claim", 2)
+            .unwrap()
+            .unwrap();
+        let cancelled = GenerationBatchTerminal {
+            state: GenerationBatchTerminalState::Cancelled,
+            error: Some("Cancelled"),
+            terminal_error_json: Some(r#"{"message":"Cancelled"}"#),
+            result_json: None,
+            completed_at_ms: 3,
+        };
+
+        assert_eq!(
+            cancel_all_queued(&db, "owner-1", &["cancel-job-0".into()], cancelled).unwrap(),
+            0
+        );
+        assert_eq!(
+            get_durable(&db, "owner-1", "batch-1")
+                .unwrap()
+                .unwrap()
+                .children[0]
+                .state,
+            "cancelling"
+        );
+        assert!(
+            crate::generation_queue::release_claim(&db, "cancel-job-0", "live-claim", 4).unwrap()
+        );
+
+        assert_eq!(
+            cancel_all_queued(
+                &db,
+                "owner-1",
+                &[],
+                GenerationBatchTerminal {
+                    completed_at_ms: 5,
+                    ..cancelled
+                }
+            )
+            .unwrap(),
+            0,
+            "the repeated call converges work already counted by the first cancellation"
+        );
+        let child = &get_durable(&db, "owner-1", "batch-1")
+            .unwrap()
+            .unwrap()
+            .children[0];
+        assert_eq!(child.state, "cancelled");
+        assert_eq!(child.completed_at_ms, Some(5));
+        assert!(crate::generation_queue::get(&db, "cancel-job-0")
+            .unwrap()
+            .is_none());
+        assert!(
+            list_obligations(&db, "owner-1", QueueMediaObligationState::Active)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            list_obligations(&db, "owner-1", QueueMediaObligationState::GcPending)
+                .unwrap()
+                .into_iter()
+                .map(|row| row.media_set_id)
+                .collect::<Vec<_>>(),
+            ["cancel-set-0"]
+        );
+    }
+
+    #[test]
+    fn bulk_cancel_rejects_terminal_child_with_live_queue_authority() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let children = media_rows("inconsistent", 1);
+        let obligations = media_for_rows(&children);
+        insert_or_get_with_media(&db, &batch("receipt"), &children, &obligations).unwrap();
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE generation_batch_children
+                    SET state = 'complete', completed_at_ms = 2
+                  WHERE job_id = 'inconsistent-job-0'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let error = cancel_all_queued(
+            &db,
+            "owner-1",
+            &[],
+            GenerationBatchTerminal {
+                state: GenerationBatchTerminalState::Cancelled,
+                error: Some("Cancelled"),
+                terminal_error_json: Some(r#"{"message":"Cancelled"}"#),
+                result_json: None,
+                completed_at_ms: 3,
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("retained inconsistent batch child state complete"));
+        assert!(crate::generation_queue::get(&db, "inconsistent-job-0")
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            list_obligations(&db, "owner-1", QueueMediaObligationState::Active)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn startup_media_hold_updates_queue_and_child_atomically() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let children = media_rows("hold", 2);
+        let obligations = media_for_rows(&children);
+        insert_or_get_with_media(&db, &batch("receipt"), &children, &obligations).unwrap();
+        crate::generation_queue::claim_by_id(&db, "owner-1", "hold-job-1", "worker", 2)
+            .unwrap()
+            .unwrap();
+        crate::generation_queue::mark_dispatched_claimed(&db, "hold-job-1", "worker", 3).unwrap();
+        set_child_state(&db, "hold-job-1", "running", None, 3).unwrap();
+
+        assert_eq!(
+            crate::generation_queue::hold_media_jobs(
+                &db,
+                "owner-1",
+                &["hold-job-0".into(), "hold-job-1".into()],
+                "media invalid",
+                4,
+            )
+            .unwrap(),
+            2
+        );
+        assert!(crate::generation_queue::list_all(&db, "owner-1")
+            .unwrap()
+            .iter()
+            .all(|row| row.state == QueueRowState::Held));
+        assert!(get_durable(&db, "owner-1", "batch-1")
+            .unwrap()
+            .unwrap()
+            .children
+            .iter()
+            .all(|child| child.state == "held" && child.error.as_deref() == Some("media invalid")));
+    }
+
+    #[test]
+    fn startup_media_hold_rolls_back_queue_when_child_update_fails() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let children = media_rows("rollback", 1);
+        let obligations = media_for_rows(&children);
+        insert_or_get_with_media(&db, &batch("receipt"), &children, &obligations).unwrap();
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER reject_media_child_hold
+                 BEFORE UPDATE ON generation_batch_children
+                 BEGIN SELECT RAISE(ABORT, 'injected child hold failure'); END;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(crate::generation_queue::hold_media_jobs(
+            &db,
+            "owner-1",
+            &["rollback-job-0".into()],
+            "media invalid",
+            4,
+        )
+        .is_err());
+        assert_eq!(
+            crate::generation_queue::get(&db, "rollback-job-0")
+                .unwrap()
+                .unwrap()
+                .state,
+            QueueRowState::Queued
+        );
+        assert_eq!(
+            get_durable(&db, "owner-1", "batch-1")
+                .unwrap()
+                .unwrap()
+                .children[0]
+                .state,
+            "accepted"
+        );
+    }
+
+    #[test]
+    fn restore_after_retain_requires_exact_unclaimed_queue_and_never_overwrites_hold() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
+        crate::generation_queue::claim_next(&db, "owner-1", "worker", 2)
+            .unwrap()
+            .unwrap();
+        set_child_state(&db, "job-0", "running", None, 3).unwrap();
+        assert!(!restore_child_after_retain(&db, "owner-1", "job-0", 4).unwrap());
+
+        assert!(crate::generation_queue::release_claim(&db, "job-0", "worker", 5).unwrap());
+        assert!(restore_child_after_retain(&db, "owner-1", "job-0", 5).unwrap());
+        set_child_state(&db, "job-0", "running", None, 6).unwrap();
+        assert_eq!(
+            hold_owned(&db, "owner-1", "job-0", None, "operator hold", 7).unwrap(),
+            OwnedHold::Held
+        );
+        assert!(!restore_child_after_retain(&db, "owner-1", "job-0", 8).unwrap());
+        let child = &get_durable(&db, "owner-1", "batch-1")
+            .unwrap()
+            .unwrap()
+            .children[0];
+        assert_eq!(child.state, "held");
+        assert_eq!(child.error.as_deref(), Some("operator hold"));
     }
 }
