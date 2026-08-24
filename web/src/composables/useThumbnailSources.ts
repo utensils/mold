@@ -17,8 +17,11 @@ import { resolveThumbnailSrc } from "../lib/galleryMedia";
 import { printKey } from "../lib/multiHostGallery";
 import type { GalleryImage } from "../types";
 
-export function useThumbnailSources() {
+export function useThumbnailSources(maxResolvedSources = 320) {
   const remoteSrc = reactive(new Map<string, string>());
+  // Recency must stay non-reactive: srcFor runs during render, and mutating a
+  // reactive Map on a cache hit recursively invalidates that same render.
+  const recency = new Map<string, true>();
   // Keys with a resolve genuinely in flight. Success settles into
   // `remoteSrc`; failure clears the key so the next render retries — a
   // transient host error must not blank the tile forever (codex review).
@@ -28,13 +31,23 @@ export function useThumbnailSources() {
     const id = (entry as { hostId?: string }).hostId;
     const host = id ? getHost(id) : null;
     if (!host) return thumbnailUrl(entry.filename);
-    const key = printKey(entry as { hostId?: string; filename: string });
+    const print = printKey(entry as { hostId?: string; filename: string });
+    const mediaVersion =
+      entry.media_version ??
+      `${entry.timestamp}:${entry.size_bytes ?? "unknown"}`;
+    // A filename is not a physical-media identity: a restored or overwritten
+    // print can keep its path while its bytes change. Keep the version in both
+    // local maps so a gallery refresh cannot short-circuit to a stale blob URL.
+    const key = `${print}|${mediaVersion}`;
     const resolved = remoteSrc.get(key);
-    if (resolved !== undefined) return resolved;
+    // srcFor runs during Vue render. Reading is safe; mutating the reactive
+    // map here would recursively invalidate the component rendering it.
+    if (resolved !== undefined) {
+      recency.delete(key);
+      recency.set(key, true);
+      return resolved;
+    }
     if (!requested.has(key)) {
-      const mediaVersion =
-        entry.media_version ??
-        `${entry.timestamp}:${entry.size_bytes ?? "unknown"}`;
       const handle = galleryThumbnailScheduler.schedule({
         key: `${host.id}|${entry.filename}|${mediaVersion}`,
         hostKey: host.id,
@@ -46,6 +59,14 @@ export function useThumbnailSources() {
       void handle.promise
         .then((url) => {
           remoteSrc.set(key, url);
+          recency.delete(key);
+          recency.set(key, true);
+          while (recency.size > maxResolvedSources) {
+            const oldest = recency.keys().next().value;
+            if (oldest === undefined) break;
+            recency.delete(oldest);
+            remoteSrc.delete(oldest);
+          }
           requested.delete(key);
         })
         .catch(() => {
@@ -60,6 +81,7 @@ export function useThumbnailSources() {
   onBeforeUnmount(() => {
     for (const handle of requested.values()) handle.cancel();
     requested.clear();
+    recency.clear();
   });
 
   return { srcFor };

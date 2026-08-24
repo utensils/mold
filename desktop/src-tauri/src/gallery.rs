@@ -64,10 +64,15 @@ struct ActiveThumbnailRequest {
 impl ActiveThumbnailRequest {
     fn register(id: String) -> Result<Self, String> {
         let cancellation = Arc::new(ThumbnailCancellation::default());
-        ACTIVE_THUMBNAIL_REQUESTS
+        let mut requests = ACTIVE_THUMBNAIL_REQUESTS
             .lock()
-            .map_err(|_| "The gallery thumbnail cancellation registry is unavailable.".to_string())?
-            .insert(id.clone(), cancellation.clone());
+            .map_err(|_| {
+                "The gallery thumbnail cancellation registry is unavailable.".to_string()
+            })?;
+        if requests.contains_key(&id) {
+            return Err("Duplicate gallery thumbnail request id.".into());
+        }
+        requests.insert(id.clone(), cancellation.clone());
         Ok(Self { id, cancellation })
     }
 }
@@ -2319,6 +2324,18 @@ mod tests {
         offline_trash(dir.path(), None, "mold-flux-dev-1700000000.png", 5).unwrap();
         assert!(!path.exists());
         assert!(!mold_db::trash::trash_dir(dir.path()).exists());
+    }
+
+    #[test]
+    fn thumbnail_request_ids_cannot_replace_active_cancellations() {
+        let id = "gallery-test-duplicate-request-id".to_string();
+        let first = ActiveThumbnailRequest::register(id.clone()).unwrap();
+        let error = ActiveThumbnailRequest::register(id.clone())
+            .err()
+            .expect("a duplicate request id must be rejected");
+        assert!(error.contains("Duplicate"), "{error}");
+        drop(first);
+        assert!(ActiveThumbnailRequest::register(id).is_ok());
     }
 
     #[test]
