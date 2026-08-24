@@ -24,7 +24,10 @@ import {
 import { ORIGIN_HOST_ID } from "./hostRegistry";
 import type { ModelInfoExtended } from "../types";
 import type { ReferenceUploadCapabilities } from "@studio/api/referenceUploads";
-import type { DurableGenerationQueueCapabilities } from "@studio/api/generationAdmission";
+import type {
+  DurableGenerationQueueCapabilities,
+  DurableMediaCapabilities,
+} from "@studio/api/generationAdmission";
 
 // The routing policy itself lives in `@studio/lib/hostRouting`, shared with
 // desktop and the iPhone app; this module binds it to the browser registry,
@@ -74,6 +77,10 @@ export interface HostRoute {
   referenceUploads?: ReferenceUploadCapabilities | null;
   /** Frozen streamless generation contract for this exact server instance. */
   durableGeneration?: DurableGenerationQueueCapabilities | null;
+  /** Frozen encrypted request-media contract for this exact server instance. */
+  durableMedia?: DurableMediaCapabilities | null;
+  /** Authoritative family of the model frozen for this submission. */
+  modelFamily?: string | null;
   /** Whether this host exposes the one-per-host lifecycle event stream. */
   eventsAvailable?: boolean;
 }

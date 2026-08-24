@@ -594,11 +594,19 @@ function normalizeSubmitRoute(
   route: HostRoute | null,
   request?: GenerateRequestWire,
 ): HostRoute | null {
-  return route?.hostId === "origin" &&
+  const normalized =
+    route?.hostId === "origin" &&
     !(request && requestNeedsReferenceUpload(request)) &&
     !supportsDurableGenerationLifecycle(route.durableGeneration)
-    ? null
-    : route;
+      ? null
+      : route;
+  if (!normalized) return null;
+  const modelFamily = (normalized.modelFamily ?? currentFamily.value).trim();
+  return {
+    ...normalized,
+    target: { ...normalized.target },
+    ...(modelFamily ? { modelFamily } : {}),
+  };
 }
 
 function sameRoute(
@@ -886,6 +894,12 @@ function hostRouteFor(hostId: string): HostRoute | null {
       ...(host.apiKey ? { apiKey: host.apiKey } : {}),
     },
     instanceId: host.instanceId ?? null,
+    ...(routing.capabilitiesByHost.value[host.id]?.durable_media
+      ? {
+          durableMedia:
+            routing.capabilitiesByHost.value[host.id]!.durable_media!,
+        }
+      : {}),
     ...(routing.capabilitiesByHost.value[host.id]?.queue
       ? { durableGeneration: routing.capabilitiesByHost.value[host.id]!.queue }
       : {}),
@@ -3376,6 +3390,12 @@ function routeForHostId(hostId: string): HostRoute | null {
     instanceId: host.instanceId ?? null,
     referenceUploads:
       routing.capabilitiesByHost.value[host.id]?.reference_uploads ?? null,
+    ...(routing.capabilitiesByHost.value[host.id]?.durable_media
+      ? {
+          durableMedia:
+            routing.capabilitiesByHost.value[host.id]!.durable_media!,
+        }
+      : {}),
     ...(routing.capabilitiesByHost.value[host.id]?.queue
       ? { durableGeneration: routing.capabilitiesByHost.value[host.id]!.queue }
       : {}),
@@ -3480,7 +3500,17 @@ async function offerMissingModelPull(
     );
     return true;
   }
-  const resumeRoute = routing.multiHost.value ? routeForHostId(hostId) : null;
+  const frozenModelFamily = currentFamily.value.trim();
+  const resolvedResumeRoute = routing.multiHost.value
+    ? routeForHostId(hostId)
+    : null;
+  const resumeRoute = resolvedResumeRoute
+    ? {
+        ...resolvedResumeRoute,
+        target: { ...resolvedResumeRoute.target },
+        ...(frozenModelFamily ? { modelFamily: frozenModelFamily } : {}),
+      }
+    : null;
   const pendingPull = {
     model,
     // A catalog download reports its queue id on both routes; a plain

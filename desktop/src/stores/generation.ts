@@ -55,6 +55,7 @@ import {
   admitGenerationBatch,
   lookupGenerationBatchByClientId,
   reconcileGenerationBatches,
+  type DurableMediaCapabilities,
   type GenerationBatchStatus,
 } from "@studio/api/generationAdmission";
 import {
@@ -115,6 +116,8 @@ export interface JobRoute {
   heterogeneousBatch?: boolean;
   heterogeneousBatchMaxOutputs?: number | null;
   durableBatchOutcomes?: boolean;
+  durableMedia?: DurableMediaCapabilities | null;
+  modelFamily?: string | null;
 }
 
 interface ReferenceUploadAuthority {
@@ -1027,7 +1030,17 @@ export const useGenerationStore = defineStore("generation", {
         (route.heterogeneousBatchMaxOutputs == null ||
           size <= route.heterogeneousBatchMaxOutputs) &&
         chainRouting?.kind !== "chain" &&
-        plans.every(requestIsEligibleForDurableGeneration);
+        plans.every((plan) =>
+          requestIsEligibleForDurableGeneration(
+            plan,
+            {
+              heterogeneous_batch: route.heterogeneousBatch === true,
+              durable_batch_outcomes: route.durableBatchOutcomes === true,
+            },
+            route.durableMedia,
+            route.modelFamily,
+          ),
+        );
       if (durableAdmission) {
         const clientBatchId = durableClientBatchId();
         const record: DurableGenerationRecoveryRecord = {

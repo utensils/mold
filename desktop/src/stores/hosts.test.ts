@@ -433,6 +433,35 @@ describe("hosts store", () => {
     expect(hosts.resolveRoute(null)?.hostId).toBe("hal9000-7680");
   });
 
+  it("freezes the exact durable-media capability into the selected host route", () => {
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: "host-key",
+      status: "ready",
+      error: null,
+      instanceId: "hal-instance",
+    });
+    hosts.telemetry[hal.id] = { queueDepth: 0, queueCapacity: 8, version: "0.25.0" };
+    hosts.capabilities[hal.id] = {
+      gallery: { can_delete: true },
+      durable_media: {
+        protocol_version: 1,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        h3_references: false,
+        private_h3: false,
+      },
+    };
+
+    expect(hosts.resolveRoute(hal.id)?.durableMedia).toEqual(
+      hosts.capabilities[hal.id]?.durable_media,
+    );
+  });
+
   it("allows Auto across differing profiles on the same Mold major version", () => {
     const hosts = useHostsStore();
     hosts.extras.push({

@@ -337,6 +337,7 @@ function pullResumeRequest(request: GenerateRequest): GenerateRequest {
 /** The work a missing-model pull would resume, frozen before the dialog opens. */
 interface MissingModelSubmission {
   model: string;
+  modelFamily: string;
   request: GenerateRequest;
   batch: number;
   chainRouting: ChainRoutingDecision | null;
@@ -348,6 +349,17 @@ interface MissingModelSubmission {
    * generate is not, because resuming would use different conditioning.
    */
   resumeAfterPull?: boolean;
+}
+
+function freezeModelFamily(route: HostRoute | null, modelFamily: string): HostRoute | null {
+  const family = modelFamily.trim();
+  return route
+    ? {
+        ...route,
+        target: { ...route.target },
+        ...(family ? { modelFamily: family } : {}),
+      }
+    : null;
 }
 let missingModelNotificationId = 0;
 
@@ -396,7 +408,10 @@ function offerMissingModelPull(
     (left, right) => Number(right.hostId === preferredId) - Number(left.hostId === preferredId),
   );
   if (ordered.length === 1) {
-    missingModel.value = { ...submission, route: ordered[0]!.route };
+    missingModel.value = {
+      ...submission,
+      route: freezeModelFamily(ordered[0]!.route, submission.modelFamily),
+    };
     return true;
   }
   const candidateHosts = ordered.flatMap((failure) => {
@@ -429,7 +444,7 @@ function presentMissingModelPull(
 ): boolean {
   if (targets.length === 0) return false;
   if (targets.length === 1) {
-    const route = routeFor(targets[0]!.host.id);
+    const route = freezeModelFamily(routeFor(targets[0]!.host.id), submission.modelFamily);
     if (!route) return false;
     missingModel.value = { ...submission, route };
     return true;
@@ -465,6 +480,7 @@ async function offerPullForSelectedModel(model: string) {
   const caps = generationCapabilitiesForFamily(form.family, form.model);
   const submission: MissingModelSubmission = {
     model,
+    modelFamily: form.family,
     request: pullResumeRequest(buildRequest(cloneGenerateForm(form))),
     // Same rule Generate uses: Batch N submits N ordinary siblings.
     batch: caps.forcesBatchSizeOne ? 1 : form.batchSize,
@@ -489,7 +505,10 @@ function chooseMissingModelHost(host: HostView) {
     toasts.push(`${host.label} is no longer reachable. Nothing was queued.`, "error");
     return;
   }
-  missingModel.value = { ...pending.submission, route };
+  missingModel.value = {
+    ...pending.submission,
+    route: freezeModelFamily(route, pending.submission.modelFamily),
+  };
 }
 
 /** Start the pull on the routed host and arm the auto-resume. */
@@ -3394,6 +3413,7 @@ async function generate() {
         // the user submitted.
         const offered = offerMissingModelPull(feasibility, {
           model: preliminaryRequest.model,
+          modelFamily: draft.family,
           request: pullResumeRequest(preliminaryRequest),
           batch,
           chainRouting: preliminaryRouting.kind === "chain" ? preliminaryRouting : null,
@@ -3506,6 +3526,7 @@ async function generate() {
           finalized.kind !== "route" &&
           offerMissingModelPull(finalized, {
             model: request.model,
+            modelFamily: draft.family,
             request,
             batch,
             chainRouting: chainRouting.kind === "chain" ? chainRouting : null,
@@ -3525,6 +3546,7 @@ async function generate() {
       route = finalizedRoute;
       placementPreview = finalized.kind === "route" ? (finalized.preview ?? null) : null;
     }
+    route = freezeModelFamily(route, draft.family)!;
     const accepted = await licenseAcceptance.request({
       hostLabel: route.label,
       target: route.target,

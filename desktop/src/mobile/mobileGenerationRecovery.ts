@@ -1,9 +1,10 @@
 import type { GenerateRequest, OutputFormat } from "../lib/api/types";
 import type {
   DurableGenerationQueueCapabilities,
+  DurableMediaCapabilities,
   GenerationBatchStatusResponse,
 } from "@studio/api/generationAdmission";
-import { supportsDurableGenerationLifecycle } from "@studio/api/generationAdmission";
+import { supportsDurableRequest } from "@studio/api/generationAdmission";
 import {
   buildGenerationBatchStatusRequest,
   createGenerationBatchTracker,
@@ -15,7 +16,6 @@ import {
   type GenerationLifecycleJob,
 } from "@studio/lib/generationLifecycle";
 import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Authoring";
-import { requestCarriesGenerationMedia } from "@studio/lib/generationMedia";
 
 export const MOBILE_DURABLE_GENERATIONS_KEY = "mold.mobile.durable-generations.v1";
 
@@ -195,26 +195,23 @@ export function saveMobileDurableGenerationRecoveries(
   storage.setItem(MOBILE_DURABLE_GENERATIONS_KEY, JSON.stringify(records));
 }
 
-export function generationRequestCarriesMedia(request: GenerateRequest): boolean {
-  return requestCarriesGenerationMedia(request);
-}
-
-/** Durable admission is intentionally narrower than server capability: media
- * requests stay on the authenticated legacy stream until their bytes have a
- * durable, encrypted staging authority. Automatic chains keep their existing
+/** Decide against the exact frozen host capability. Unsupported media stays
+ * on the authenticated legacy stream; automatic chains keep their existing
  * durable sequence protocol. */
 export function useMobileDurableGenerationLifecycle(input: {
   queue: DurableGenerationQueueCapabilities | null | undefined;
+  durableMedia?: DurableMediaCapabilities | null | undefined;
   requests: readonly GenerateRequest[];
   chain: boolean;
   modelFamily?: string | null;
 }): boolean {
   return (
     !input.chain &&
-    supportsDurableGenerationLifecycle(input.queue) &&
     input.requests.length > 0 &&
     !input.requests.some((request) => isMinimaxH3Identity(input.modelFamily, request.model)) &&
-    !input.requests.some(generationRequestCarriesMedia)
+    input.requests.every((request) =>
+      supportsDurableRequest(input.queue, input.durableMedia, request),
+    )
   );
 }
 

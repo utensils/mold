@@ -38,6 +38,7 @@ import type {
   ServerStatus,
 } from "../lib/api/types";
 import type { ReferenceUploadCapabilities } from "@studio/api/referenceUploads";
+import type { DurableMediaCapabilities } from "@studio/api/generationAdmission";
 import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
 import { useDownloadsStore } from "./downloads";
@@ -194,6 +195,10 @@ export interface HostRoute {
   heterogeneousBatchMaxOutputs?: number | null;
   /** Exact host exposes idempotent admission plus durable terminal outcomes. */
   durableBatchOutcomes?: boolean;
+  /** Exact host encrypts and durably replays supported request media. */
+  durableMedia?: DurableMediaCapabilities | null;
+  /** Authoritative family of the model frozen for this submission. */
+  modelFamily?: string | null;
 }
 
 export interface HostPlacementFailure {
@@ -246,6 +251,7 @@ function hostRoute(host: HostView, capabilities?: ServerCapabilities): HostRoute
     target: { baseUrl: host.baseUrl, apiKey: host.apiKey },
     instanceId: host.instanceId,
     referenceUploads: capabilities?.reference_uploads ?? null,
+    ...(capabilities?.durable_media ? { durableMedia: capabilities.durable_media } : {}),
     heterogeneousBatch: capabilities?.queue?.heterogeneous_batch === true,
     heterogeneousBatchMaxOutputs: capabilities?.queue?.heterogeneous_batch_max_outputs ?? null,
     ...(capabilities?.queue?.durable_batch_outcomes === true ? { durableBatchOutcomes: true } : {}),
@@ -710,6 +716,9 @@ export const useHostsStore = defineStore("hosts", {
         target: { baseUrl: chosen.baseUrl, apiKey: chosen.apiKey },
         instanceId: chosen.instanceId,
         referenceUploads: this.capabilities[chosen.id]?.reference_uploads ?? null,
+        ...(this.capabilities[chosen.id]?.durable_media
+          ? { durableMedia: this.capabilities[chosen.id]!.durable_media! }
+          : {}),
         heterogeneousBatch: this.capabilities[chosen.id]?.queue?.heterogeneous_batch === true,
         heterogeneousBatchMaxOutputs:
           this.capabilities[chosen.id]?.queue?.heterogeneous_batch_max_outputs ?? null,

@@ -1,4 +1,6 @@
 import { ApiError, apiJsonTo, type ApiTarget } from "./client";
+import { requestCarriesGenerationMedia } from "../lib/generationMedia";
+import { isMinimaxH3Identity } from "../lib/minimaxH3Identity";
 
 export type GenerationLifecyclePhase =
   | "accepted"
@@ -63,6 +65,35 @@ export interface DurableGenerationQueueCapabilities {
   durable_batch_outcomes?: boolean;
 }
 
+/** Exact additive wire shape of `mold_core::DurableMediaCapabilities`. */
+export interface DurableMediaCapabilities {
+  protocol_version: number;
+  encrypted_at_rest: boolean;
+  generate_request_media: boolean;
+  identity: boolean;
+  h3_references: boolean;
+  private_h3: boolean;
+}
+
+/** Network responses are untrusted even when their TypeScript projection is
+ * typed. A partial/malformed v1 record must never enable durable media. */
+export function isDurableMediaCapabilitiesV1(
+  value: unknown,
+): value is DurableMediaCapabilities & { protocol_version: 1 } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    record.protocol_version === 1 &&
+    typeof record.encrypted_at_rest === "boolean" &&
+    typeof record.generate_request_media === "boolean" &&
+    typeof record.identity === "boolean" &&
+    typeof record.h3_references === "boolean" &&
+    typeof record.private_h3 === "boolean"
+  );
+}
+
 /**
  * Mixed-version capability fence for the complete streamless lifecycle.
  * `heterogeneous_batch` alone only promises the older admission endpoint;
@@ -74,6 +105,59 @@ export function supportsDurableGenerationLifecycle(
   return (
     queue?.heterogeneous_batch === true && queue.durable_batch_outcomes === true
   );
+}
+
+function requestFieldIsPresent(
+  request: Record<string, unknown>,
+  field: string,
+): boolean {
+  return request[field] !== undefined && request[field] !== null;
+}
+
+/**
+ * Per-request mixed-version fence for the streamless lifecycle. Media-free
+ * requests keep using ordinary durable admission on older hosts. A request
+ * whose replay depends on media requires the exact encrypted v1 contract;
+ * absence or an unknown version never guesses.
+ *
+ * MiniMax H3/reference authority, HDR directories and media combined with a
+ * LoRA remain outside v1 even if a future host advertises broader H3 bits.
+ */
+export function supportsDurableRequest(
+  queue: DurableGenerationQueueCapabilities | null | undefined,
+  durableMedia: unknown,
+  request: object,
+): boolean {
+  if (!supportsDurableGenerationLifecycle(queue)) return false;
+
+  const record = request as Record<string, unknown>;
+  const model = typeof record.model === "string" ? record.model : null;
+  if (isMinimaxH3Identity(null, model)) return false;
+  if (requestFieldIsPresent(record, "references")) return false;
+
+  const carriesMedia = requestCarriesGenerationMedia(request);
+  if (!carriesMedia) return true;
+
+  if (
+    !isDurableMediaCapabilitiesV1(durableMedia) ||
+    durableMedia.encrypted_at_rest !== true ||
+    durableMedia.generate_request_media !== true
+  ) {
+    return false;
+  }
+
+  if (
+    requestFieldIsPresent(record, "hdr_exr_dir") ||
+    requestFieldIsPresent(record, "lora") ||
+    requestFieldIsPresent(record, "loras")
+  ) {
+    return false;
+  }
+
+  const carriesIdentity =
+    requestFieldIsPresent(record, "id_image") ||
+    requestFieldIsPresent(record, "id_images");
+  return !carriesIdentity || durableMedia.identity === true;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

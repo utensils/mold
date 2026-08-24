@@ -1668,6 +1668,75 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
   });
 
+  it("posts supported source media to the durable batch lifecycle without persisting or streaming it", async () => {
+    const imageModel: ModelEntry = {
+      ...model,
+      name: "flux-dev:fp8",
+      family: "flux",
+      source_image: "optional",
+    };
+    let admittedBody: Record<string, unknown> | null = null;
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([imageModel]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+          durable_media: {
+            protocol_version: 1,
+            encrypted_at_rest: true,
+            generate_request_media: true,
+            identity: true,
+            h3_references: false,
+            private_h3: false,
+          },
+        });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        admittedBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        const clientBatchId = admittedBody.client_batch_id as string;
+        return Promise.resolve({
+          id: "media-batch",
+          client_batch_id: clientBatchId,
+          instance_id: "studio-id",
+          durable: true,
+          children: [
+            {
+              index: 1,
+              job_id: "media-job",
+              state: "queued",
+              created_at_ms: 10,
+              updated_at_ms: 11,
+            },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.sourceImage = btoa("PRIVATE-DURABLE-SOURCE");
+    liveForm.sourceImageName = "source.png";
+    await submitPrompt("durable source print");
+    await flushPromises();
+
+    expect(admittedBody).not.toBeNull();
+    expect((admittedBody!.requests as Array<Record<string, unknown>>)[0]).toMatchObject({
+      source_image: btoa("PRIVATE-DURABLE-SOURCE"),
+    });
+    expect(openStreams.filter((stream) => stream.path === "/api/generate/stream")).toHaveLength(0);
+    expect(localStorage.getItem("mold.mobile.durable-generations.v1") ?? "").not.toContain(
+      btoa("PRIVATE-DURABLE-SOURCE"),
+    );
+  });
+
   it("recovers an ambiguous durable POST by client UUID without retrying or streaming", async () => {
     let clientBatchId = "";
     apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {

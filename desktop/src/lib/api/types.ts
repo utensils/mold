@@ -23,6 +23,7 @@ import type {
   GalleryTrashedEvent,
   GalleryUpdatedEvent,
 } from "@studio/lib/api/galleryOrganization";
+import type { DurableMediaCapabilities } from "@studio/api/generationAdmission";
 
 // Library organization wire shapes are shared across surfaces; re-export the
 // pieces desktop consumers reach for so `lib/api/types` stays the single
@@ -126,6 +127,8 @@ export interface ExpandCapabilities {
 
 export interface ServerCapabilities {
   generation_profile_v1?: boolean;
+  /** Restart-safe encrypted request-media queueing. Absent is unsupported. */
+  durable_media?: DurableMediaCapabilities | null;
   gallery: {
     can_delete: boolean;
     /** Trash support (soft delete + retention). Absent on older servers,

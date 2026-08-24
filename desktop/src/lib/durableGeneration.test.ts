@@ -21,13 +21,51 @@ const request = (overrides: Partial<GenerateRequest> = {}): GenerateRequest => (
 });
 
 describe("desktop durable generation recovery", () => {
-  it("accepts ordinary singleton/batch children but retains media and H3 on legacy transport", () => {
-    expect(requestIsEligibleForDurableGeneration(request())).toBe(true);
-    expect(requestIsEligibleForDurableGeneration(request({ source_image: "bytes" }))).toBe(false);
-    expect(requestIsEligibleForDurableGeneration(request({ id_image: "face" }))).toBe(false);
+  const queue = { heterogeneous_batch: true, durable_batch_outcomes: true };
+  const durableMedia = {
+    protocol_version: 1,
+    encrypted_at_rest: true,
+    generate_request_media: true,
+    identity: true,
+    h3_references: false,
+    private_h3: false,
+  };
+
+  it("accepts media only through the exact encrypted host capability", () => {
+    expect(requestIsEligibleForDurableGeneration(request(), queue, undefined)).toBe(true);
+    expect(
+      requestIsEligibleForDurableGeneration(
+        request({ source_image: "bytes" }),
+        queue,
+        durableMedia,
+      ),
+    ).toBe(true);
+    expect(
+      requestIsEligibleForDurableGeneration(request({ id_image: "face" }), queue, {
+        ...durableMedia,
+        identity: false,
+      }),
+    ).toBe(false);
+    expect(
+      requestIsEligibleForDurableGeneration(
+        request({ source_image: "bytes", loras: [] }),
+        queue,
+        durableMedia,
+      ),
+    ).toBe(false);
     expect(
       requestIsEligibleForDurableGeneration(
         request({ model: "minimax-h3-ref2va", references: [] }),
+        queue,
+        durableMedia,
+      ),
+    ).toBe(false);
+    expect(
+      requestIsEligibleForDurableGeneration(
+        request({ model: "hf:opaque-h3-checkpoint", source_image: "bytes" }),
+        queue,
+        durableMedia,
+        "minimax-h3",
       ),
     ).toBe(false);
   });

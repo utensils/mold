@@ -64,6 +64,18 @@ const route: HostRoute = {
   eventsAvailable: true,
 };
 
+const durableMediaRoute: HostRoute = {
+  ...route,
+  durableMedia: {
+    protocol_version: 1,
+    encrypted_at_rest: true,
+    generate_request_media: true,
+    identity: true,
+    h3_references: false,
+    private_h3: false,
+  },
+};
+
 function batch(
   clientBatchId: string,
   states: Array<
@@ -147,6 +159,43 @@ beforeEach(() => {
 });
 
 describe("web durable generation lifecycle", () => {
+  it("admits supported media without opening a held generation stream or persisting its bytes", () => {
+    admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
+    const stream = useGenerateStream();
+
+    const submitted = request("encrypted media print");
+    submitted.source_image = "PRIVATE-DURABLE-SOURCE";
+    stream.submit(submitted, { kind: "single" }, durableMediaRoute);
+
+    expect(admitGenerationBatch).toHaveBeenCalledTimes(1);
+    expect(admitGenerationBatch.mock.calls[0]![1].requests[0]).toMatchObject({
+      source_image: "PRIVATE-DURABLE-SOURCE",
+    });
+    expect(generateStream).not.toHaveBeenCalled();
+    expect(localStorage.getItem("mold.generate.jobs")).not.toContain(
+      "PRIVATE-DURABLE-SOURCE",
+    );
+  });
+
+  it("keeps an opaque H3 family on the legacy stream", () => {
+    const stream = useGenerateStream();
+    const submitted = request("opaque H3");
+    submitted.model = "hf:opaque-h3-checkpoint";
+    submitted.source_image = "PRIVATE-H3-SOURCE";
+
+    stream.submit(
+      submitted,
+      { kind: "single" },
+      {
+        ...durableMediaRoute,
+        modelFamily: "minimax-h3",
+      },
+    );
+
+    expect(admitGenerationBatch).not.toHaveBeenCalled();
+    expect(generateStream).toHaveBeenCalledTimes(1);
+  });
+
   it("has no browser submission-count cap and releases every POST immediately", () => {
     admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
     const stream = useGenerateStream();

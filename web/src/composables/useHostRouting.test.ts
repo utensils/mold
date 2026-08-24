@@ -1891,6 +1891,32 @@ describe("useHostRouting", () => {
     expect(route?.target.baseUrl).not.toContain("sk-studio");
   });
 
+  it("freezes the exact durable-media capability into the selected host route", async () => {
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    const durableMedia = {
+      protocol_version: 1,
+      encrypted_at_rest: true,
+      generate_request_media: true,
+      identity: true,
+      h3_references: false,
+      private_h3: false,
+    };
+    statuses.set(ORIGIN_HOST_ID, status());
+    models.set(ORIGIN_HOST_ID, []);
+    statuses.set(studio.id, status({ instance_id: "studio-instance" }));
+    models.set(studio.id, [model("flux-dev:q4")]);
+    capabilities.set(studio.id, {
+      gallery: { can_delete: true },
+      durable_media: durableMedia,
+    });
+    setGenerateTargetId(studio.id);
+
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    expect(routing.resolve("flux-dev:q4")?.durableMedia).toEqual(durableMedia);
+  });
+
   it("allows Auto across differing model profiles on the same Mold major version", async () => {
     const studio = addHost({ url: "http://studio:7680", name: "Studio" });
     statuses.set(ORIGIN_HOST_ID, status({ version: "0.23.1", queue_depth: 1 }));

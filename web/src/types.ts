@@ -17,6 +17,7 @@ import type {
   GalleryOrganizationFields,
   GalleryTrashCapabilities,
 } from "@studio/lib/api/galleryOrganization";
+import type { DurableMediaCapabilities } from "@studio/api/generationAdmission";
 
 export type { SourceFitPolicy } from "@studio/lib/sourceFit";
 export type {
@@ -214,6 +215,8 @@ export interface GalleryCapabilities {
 // Mirror of `mold_core::ServerCapabilities`.
 export interface ServerCapabilities {
   generation_profile_v1?: boolean;
+  /** Restart-safe encrypted request-media queueing. Absent is unsupported. */
+  durable_media?: DurableMediaCapabilities | null;
   gallery?: GalleryCapabilities;
   /** Server-enforced model families that are not activated in this build. */
   model_access?: {

@@ -759,7 +759,10 @@ describe("GenerateView prepared expansion batches", () => {
     await flushPromises();
 
     expect(submit).toHaveBeenCalledTimes(1);
-    expect(submit.mock.calls[0]![2]).toEqual(localRoute);
+    expect(submit.mock.calls[0]![2]).toEqual({
+      ...localRoute,
+      modelFamily: "flux",
+    });
   });
 
   it("reuses a quick transformed prompt after a host-only selection change", async () => {

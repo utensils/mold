@@ -63,6 +63,15 @@ function batch(
 }
 
 describe("mobile durable generation recovery", () => {
+  const durableMedia = {
+    protocol_version: 1,
+    encrypted_at_rest: true,
+    generate_request_media: true,
+    identity: true,
+    h3_references: false,
+    private_h3: false,
+  };
+
   it("admits singleton and Batch N while repeated submissions add no client-side queue cap", () => {
     const queue = { heterogeneous_batch: true, durable_batch_outcomes: true };
     expect(
@@ -76,7 +85,7 @@ describe("mobile durable generation recovery", () => {
     expect(recovery("batch", batchRequests).presentations).toHaveLength(batchRequests.length);
   });
 
-  it("keeps identity, source, control, reference, H3 and other media on legacy streaming", () => {
+  it("routes supported media durably only with the exact v1 host capability", () => {
     const queue = { heterogeneous_batch: true, durable_batch_outcomes: true };
     for (const media of [
       { id_image: "face" },
@@ -86,28 +95,50 @@ describe("mobile durable generation recovery", () => {
       { control_image: "control" },
       { edit_images: ["edit"] },
       { keyframes: [{ frame: 0, image: "keyframe" }] },
-      { references: [{ image: { authority: "inline", data: "h3" } }] },
       { audio_file: "audio" },
       { audio_file_path: "/host/audio.wav" },
       { source_video: "video" },
       { source_video_path: "/host/source.mp4" },
       { extend_video_path: "/host/video.mp4" },
-      { hdr_exr_dir: "/host/exr" },
     ]) {
       expect(
         useMobileDurableGenerationLifecycle({
           queue,
+          durableMedia,
+          requests: [{ ...request(), ...media } as GenerateRequest],
+          chain: false,
+        }),
+      ).toBe(true);
+      expect(
+        useMobileDurableGenerationLifecycle({
+          queue,
+          durableMedia: undefined,
           requests: [{ ...request(), ...media } as GenerateRequest],
           chain: false,
         }),
       ).toBe(false);
     }
+    for (const excluded of [
+      { references: [{ image: { authority: "inline", data: "h3" } }] },
+      { source_image: "source", lora: { path: "adapter", scale: 1 } },
+      { source_image: "source", loras: [] },
+      { hdr_exr_dir: "/host/exr" },
+    ])
+      expect(
+        useMobileDurableGenerationLifecycle({
+          queue,
+          durableMedia,
+          requests: [{ ...request(), ...excluded } as GenerateRequest],
+          chain: false,
+        }),
+      ).toBe(false);
     expect(useMobileDurableGenerationLifecycle({ queue, requests: [request()], chain: true })).toBe(
       false,
     );
     expect(
       useMobileDurableGenerationLifecycle({
         queue,
+        durableMedia,
         requests: [{ ...request(), model: "minimax-h3-fl2va:official-bf16" }],
         chain: false,
       }),
@@ -115,6 +146,7 @@ describe("mobile durable generation recovery", () => {
     expect(
       useMobileDurableGenerationLifecycle({
         queue,
+        durableMedia,
         requests: [{ ...request(), model: "hf:opaque-h3-checkpoint" }],
         chain: false,
         modelFamily: "minimax-h3",

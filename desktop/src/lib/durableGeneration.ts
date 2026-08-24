@@ -1,6 +1,11 @@
 import type { GenerateRequest, OutputFormat } from "./api/types";
 import type { GenerationBatchTracker } from "@studio/lib/generationLifecycle";
-import { requestCarriesGenerationMedia } from "@studio/lib/generationMedia";
+import {
+  supportsDurableRequest,
+  type DurableGenerationQueueCapabilities,
+  type DurableMediaCapabilities,
+} from "@studio/api/generationAdmission";
+import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Identity";
 
 export const DURABLE_GENERATION_STORAGE_KEY = "mold.desktop.durable-generations.v1";
 
@@ -31,14 +36,16 @@ export interface DurableGenerationRecoveryEnvelope {
   records: DurableGenerationRecoveryRecord[];
 }
 
-/**
- * The current durable journal deliberately excludes temporary/private media
- * authority. Keep those shapes on the legacy attached stream until a server
- * capability explicitly promises encrypted durable media staging.
- */
-export function requestIsEligibleForDurableGeneration(request: GenerateRequest): boolean {
-  if (request.model.toLowerCase().includes("minimax-h3")) return false;
-  return !requestCarriesGenerationMedia(request);
+/** Decide against the exact frozen host capability. Media stays on the legacy
+ * attached stream unless that server promises the encrypted v1 contract. */
+export function requestIsEligibleForDurableGeneration(
+  request: GenerateRequest,
+  queue: DurableGenerationQueueCapabilities | null | undefined,
+  durableMedia: DurableMediaCapabilities | null | undefined,
+  modelFamily?: string | null,
+): boolean {
+  if (isMinimaxH3Identity(modelFamily, request.model)) return false;
+  return supportsDurableRequest(queue, durableMedia, request);
 }
 
 export function durableChildSummary(

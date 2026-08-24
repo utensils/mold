@@ -777,6 +777,108 @@ describe("submitBatch connection cap", () => {
     expect(store.pending).toHaveLength(40);
   });
 
+  it("admits supported media through the encrypted durable capability without a stream slot", async () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, value),
+    });
+    const store = useGenerationStore();
+    useHostsStore().extras = [
+      {
+        id: "hal9000",
+        label: "hal9000",
+        url: "http://hal9000:7680",
+        apiKey: "fresh-key",
+        status: "ready",
+        error: null,
+        instanceId: "instance-1",
+      },
+    ];
+    store.attachSharedDurableEventHost("hal9000");
+    durableApi.admit.mockImplementation(async (_target, body) => {
+      const client = (body as { client_batch_id: string }).client_batch_id;
+      return {
+        id: "media-batch",
+        client_batch_id: client,
+        instance_id: "instance-1",
+        durable: true,
+        children: [
+          {
+            index: 1,
+            job_id: "media-job",
+            state: "queued",
+            created_at_ms: 1,
+            updated_at_ms: 1,
+          },
+        ],
+      };
+    });
+
+    store.submitBatch({ ...req, source_image: "PRIVATE-DURABLE-SOURCE" }, 1, {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      instanceId: "instance-1",
+      heterogeneousBatch: true,
+      durableBatchOutcomes: true,
+      durableMedia: {
+        protocol_version: 1,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        h3_references: false,
+        private_h3: false,
+      },
+      mirrorRemoteOutput: false,
+    });
+    await flushPromises();
+
+    expect(durableApi.admit).toHaveBeenCalledTimes(1);
+    expect(durableApi.admit.mock.calls[0]![1].requests[0]).toMatchObject({
+      source_image: "PRIVATE-DURABLE-SOURCE",
+    });
+    expect(mockSse).not.toHaveBeenCalled();
+    expect(storage.get(DURABLE_GENERATION_STORAGE_KEY) ?? "").not.toContain(
+      "PRIVATE-DURABLE-SOURCE",
+    );
+  });
+
+  it("keeps an opaque H3 family on the legacy stream", async () => {
+    const store = useGenerationStore();
+    store.submitBatch(
+      {
+        ...req,
+        model: "hf:opaque-h3-checkpoint",
+        source_image: "PRIVATE-H3-SOURCE",
+      },
+      1,
+      {
+        hostId: "hal9000",
+        label: "hal9000",
+        kind: "remote",
+        target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+        instanceId: "instance-1",
+        heterogeneousBatch: true,
+        durableBatchOutcomes: true,
+        durableMedia: {
+          protocol_version: 1,
+          encrypted_at_rest: true,
+          generate_request_media: true,
+          identity: true,
+          h3_references: false,
+          private_h3: false,
+        },
+        modelFamily: "minimax-h3",
+      },
+    );
+    await flushPromises();
+
+    expect(durableApi.admit).not.toHaveBeenCalled();
+    expect(mockSse).toHaveBeenCalledTimes(1);
+  });
+
   it("holds at most four streams across separate Generate submissions", async () => {
     const store = useGenerationStore();
     const first = store.submitBatch({ ...req, seed: 200 }, 1);

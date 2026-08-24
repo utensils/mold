@@ -747,6 +747,11 @@ function withReferenceUploads(route: HostRoute | null): HostRoute | null {
     target: { ...route.target },
     referenceUploads:
       capabilitiesByHost.value[route.hostId]?.reference_uploads ?? null,
+    ...(capabilitiesByHost.value[route.hostId]?.durable_media
+      ? {
+          durableMedia: capabilitiesByHost.value[route.hostId]!.durable_media!,
+        }
+      : {}),
     ...(capabilitiesByHost.value[route.hostId]?.queue
       ? { durableGeneration: capabilitiesByHost.value[route.hostId]!.queue }
       : {}),
@@ -966,6 +971,12 @@ async function resolveFeasibleWithPreview(
           instanceId: chosen.instanceId ?? null,
           referenceUploads:
             capabilitiesByHost.value[chosen.id]?.reference_uploads ?? null,
+          ...(capabilitiesByHost.value[chosen.id]?.durable_media
+            ? {
+                durableMedia:
+                  capabilitiesByHost.value[chosen.id]!.durable_media!,
+              }
+            : {}),
           ...(capabilitiesByHost.value[chosen.id]?.queue
             ? { durableGeneration: capabilitiesByHost.value[chosen.id]!.queue }
             : {}),
@@ -1312,6 +1323,12 @@ async function revalidateFeasibleWithPreview(
       instanceId: capturedInstanceId,
       referenceUploads:
         capabilitiesByHost.value[route.hostId]?.reference_uploads ?? null,
+      ...(capabilitiesByHost.value[route.hostId]?.durable_media
+        ? {
+            durableMedia:
+              capabilitiesByHost.value[route.hostId]!.durable_media!,
+          }
+        : {}),
       ...(capabilitiesByHost.value[route.hostId]?.queue
         ? { durableGeneration: capabilitiesByHost.value[route.hostId]!.queue }
         : {}),

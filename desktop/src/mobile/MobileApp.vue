@@ -2622,8 +2622,12 @@ function routeForMobileHost(host: MobileHost): HostRoute {
     target: { ...mobileHostTarget(host) },
     instanceId: host.instanceId ?? null,
     referenceUploads: serverCapabilities[host.id]?.reference_uploads ?? null,
+    ...(serverCapabilities[host.id]?.durable_media
+      ? { durableMedia: serverCapabilities[host.id]!.durable_media! }
+      : {}),
     heterogeneousBatch: queue?.heterogeneous_batch === true,
     heterogeneousBatchMaxOutputs: queue?.heterogeneous_batch_max_outputs ?? null,
+    durableBatchOutcomes: queue?.durable_batch_outcomes === true,
   };
 }
 
@@ -5925,7 +5929,11 @@ async function generate(): Promise<void> {
   const durableLifecycle =
     Boolean(route.instanceId?.trim()) &&
     useMobileDurableGenerationLifecycle({
-      queue: serverCapabilities[route.hostId]?.queue,
+      queue: {
+        heterogeneous_batch: route.heterogeneousBatch === true,
+        durable_batch_outcomes: route.durableBatchOutcomes === true,
+      },
+      durableMedia: route.durableMedia,
       requests: durablePlans,
       chain: chainRouting.kind === "chain",
       modelFamily: form.family,

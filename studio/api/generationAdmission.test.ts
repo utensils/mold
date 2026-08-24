@@ -7,6 +7,7 @@ import {
   parseGenerationBatchStatus,
   parseGenerationBatchStatusResponse,
   reconcileGenerationBatches,
+  supportsDurableRequest,
   supportsDurableGenerationLifecycle,
 } from "./generationAdmission";
 
@@ -51,6 +52,94 @@ describe("durable generation admission API", () => {
         durable_batch_outcomes: true,
       }),
     ).toBe(true);
+  });
+
+  it("admits request media only behind the exact encrypted v1 capability", () => {
+    const queue = {
+      heterogeneous_batch: true,
+      durable_batch_outcomes: true,
+    };
+    const media = {
+      protocol_version: 1,
+      encrypted_at_rest: true,
+      generate_request_media: true,
+      identity: true,
+      h3_references: false,
+      private_h3: false,
+    };
+
+    expect(
+      supportsDurableRequest(queue, undefined, { model: "flux-dev" }),
+    ).toBe(true);
+    expect(
+      supportsDurableRequest(queue, media, {
+        model: "flux-dev",
+        source_image: "private bytes",
+      }),
+    ).toBe(true);
+    for (const incompatible of [
+      undefined,
+      { ...media, protocol_version: 2 },
+      { ...media, encrypted_at_rest: false },
+      { ...media, generate_request_media: false },
+      { ...media, identity: undefined },
+      { ...media, h3_references: undefined },
+      { ...media, private_h3: undefined },
+      { ...media, identity: "yes" },
+    ]) {
+      expect(
+        supportsDurableRequest(queue, incompatible, {
+          model: "flux-dev",
+          source_image: "private bytes",
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it("requires identity support and always excludes H3, references, LoRA combinations, and HDR", () => {
+    const queue = {
+      heterogeneous_batch: true,
+      durable_batch_outcomes: true,
+    };
+    const media = {
+      protocol_version: 1,
+      encrypted_at_rest: true,
+      generate_request_media: true,
+      identity: true,
+      h3_references: false,
+      private_h3: false,
+    };
+
+    expect(
+      supportsDurableRequest(queue, media, {
+        model: "flux-dev",
+        id_image: "private face",
+      }),
+    ).toBe(true);
+    expect(
+      supportsDurableRequest(
+        queue,
+        { ...media, identity: false },
+        {
+          model: "flux-dev",
+          id_images: ["private face"],
+        },
+      ),
+    ).toBe(false);
+
+    for (const request of [
+      { model: "minimax-h3-ref2va", source_image: "private bytes" },
+      { model: "opaque", references: [] },
+      {
+        model: "flux-dev",
+        source_image: "private bytes",
+        lora: { path: "one" },
+      },
+      { model: "flux-dev", source_image: "private bytes", loras: [] },
+      { model: "flux-dev", hdr_exr_dir: "/private/hdr" },
+    ]) {
+      expect(supportsDurableRequest(queue, media, request)).toBe(false);
+    }
   });
 
   it("admits singleton batches without adding an invented client limit", async () => {
