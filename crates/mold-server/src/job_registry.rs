@@ -1014,6 +1014,23 @@ impl JobRegistry {
             .collect()
     }
 
+    /// Exact queued rows temporarily excluded while a durable PATCH owns
+    /// their runtime-projection token.
+    ///
+    /// The coordinator omits these ids from planning without removing their
+    /// pending generation or changing its durable lifecycle. Clearing the
+    /// exact token marks the registry mutated, making the retained work
+    /// eligible on the next immediate replan.
+    pub(crate) fn queue_patch_blocked_ids(&self) -> BTreeSet<String> {
+        self.inner
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .filter(|entry| entry.queue_patch_token.is_some())
+            .map(|entry| entry.id.clone())
+            .collect()
+    }
+
     /// Read only the lifecycle needed by scheduler cancellation/grant checks.
     ///
     /// This retains the full snapshot API for wire callers without making a

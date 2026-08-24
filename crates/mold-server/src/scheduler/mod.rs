@@ -3651,6 +3651,7 @@ impl Coordinator {
         // originally occupied by generations; owner work keeps its position
         // in the shared monotonic sequence.
         let queue_order = self.state.job_registry.queued_ids_in_order();
+        let queue_patch_blocked = self.state.job_registry.queue_patch_blocked_ids();
         let ranks = reordered_generation_ranks(
             self.pending
                 .iter()
@@ -3661,6 +3662,7 @@ impl Coordinator {
         let mut snapshots: Vec<WorkSnapshot> = self
             .pending
             .iter()
+            .filter(|(id, _)| !queue_patch_blocked.contains(*id))
             .map(|(id, pending)| {
                 let ready = pending.preparation == PreparationState::Ready
                     && pending
@@ -10001,6 +10003,175 @@ mod tests {
         ));
         assert_eq!(coordinator.leases.len(), 2);
         assert!(coordinator.pending.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sqlite_blocked_queue_patch_omits_only_its_target_until_exact_release() {
+        use tower::ServiceExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (worker_a, worker_a_rx) = test_worker(0);
+        let (worker_b, worker_b_rx) = test_worker(1);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker_a.clone(), worker_b.clone()].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(8);
+        let queue = QueueHandle::new(ingress_tx);
+        let mut state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 8);
+        state.metadata_db = db.clone();
+        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            db.clone(),
+            Some(root.path()),
+            "blocked-patch-coordinator",
+        ));
+        let owner = state
+            .queue_journal
+            .owner_uuid()
+            .expect("real metadata DB must enable the durable journal")
+            .to_string();
+        mold_db::generation_queue::insert(
+            db.as_ref().as_ref().unwrap(),
+            &mold_db::generation_queue::GenerationQueueRow {
+                id: "patch-target".to_string(),
+                owner_uuid: owner,
+                state: mold_db::generation_queue::QueueRowState::Queued,
+                model: "flux-dev:q4".to_string(),
+                request_json: r#"{"prompt":"patch target","model":"flux-dev:q4"}"#.to_string(),
+                media_set_id: None,
+                output_dir: root.path().join("gallery"),
+                target_gpu: Some(0),
+                target_device_id: None,
+                completion_payload: "full".to_string(),
+                seed_pinned: false,
+                dispatch_attempts: 0,
+                replay_seen: 0,
+                held_reason: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                started_at_ms: None,
+            },
+        )
+        .unwrap();
+
+        // The target starts behind another lane-zero job. PATCH will move it
+        // to the queued frontier while SQLite is deliberately stalled.
+        let mut results = Vec::new();
+        for (id, target_gpu) in [
+            ("lane-zero-contender", 0),
+            ("unrelated-linux-lane", 1),
+            ("patch-target", 0),
+        ] {
+            let (job, result) = fake_generation(id);
+            results.push(result);
+            state.job_registry.register(id, "flux-dev:q4");
+            state
+                .job_registry
+                .set_target_gpu(id, Some(target_gpu))
+                .unwrap();
+            queue.submit(job, 8).await.unwrap();
+        }
+
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state.clone(),
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        for _ in 0..3 {
+            coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        }
+        coordinator
+            .pending
+            .get_mut("unrelated-linux-lane")
+            .unwrap()
+            .preparation = PreparationState::Ready;
+        coordinator
+            .pending
+            .get_mut("patch-target")
+            .unwrap()
+            .preparation = PreparationState::Ready;
+        for (worker, ordinal) in [(&worker_a, 0), (&worker_b, 1)] {
+            coordinator.handle_worker_event(
+                WorkerEvent::Ready {
+                    device_id: worker_device_id(worker),
+                    ordinal,
+                    owner_epoch: 1,
+                    worker_generation: 1,
+                },
+                &mut immediate,
+            );
+        }
+
+        // Hold the journal's real SQLite connection. The route can install
+        // its exact runtime token, but cannot apply the durable edit yet.
+        let locked_db = db.clone();
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let blocker = tokio::task::spawn_blocking(move || {
+            locked_db.as_ref().as_ref().unwrap().with_conn(|_| {
+                locked_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+        });
+        locked_rx.await.unwrap();
+        let patch = tokio::spawn(
+            crate::routes::create_router(state.clone()).oneshot(
+                axum::http::Request::patch("/api/queue/patch-target")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"target_gpu":0,"position":0}"#))
+                    .unwrap(),
+            ),
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !state
+                .job_registry
+                .queue_patch_blocked_ids()
+                .contains("patch-target")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("hydrated target must carry the exact PATCH exclusion token");
+        assert!(!patch.is_finished(), "PATCH must remain blocked on SQLite");
+
+        coordinator.dispatch_ready().await;
+        assert_eq!(
+            recv_grant(&worker_b_rx).id,
+            "unrelated-linux-lane",
+            "the unrelated lane must grant while the PATCH target is omitted"
+        );
+        assert!(matches!(
+            worker_a_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        assert!(coordinator.pending.contains_key("patch-target"));
+
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap().unwrap();
+        let response = patch.await.unwrap().unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            state.job_registry.queued_ids_in_order(),
+            ["patch-target", "lane-zero-contender"],
+            "the durable PATCH order must project before its token is cleared"
+        );
+
+        coordinator
+            .pending
+            .get_mut("lane-zero-contender")
+            .unwrap()
+            .preparation = PreparationState::Ready;
+        coordinator.dispatch_ready().await;
+        assert_eq!(
+            recv_grant(&worker_a_rx).id,
+            "patch-target",
+            "exact-token release must immediately restore target eligibility and order"
+        );
+        assert!(coordinator.pending.contains_key("lane-zero-contender"));
+        drop(results);
     }
 
     #[tokio::test]
