@@ -1865,45 +1865,58 @@ pub(crate) fn stable_device_id_for_ordinal(
 /// exact legacy ordinal, so matching `Gpu` component pins are upgraded to the
 /// stable identity and every other legacy ordinal becomes `Auto`.
 ///
-/// Existing `Device` component pins are already durable identities in their
-/// own right. They may intentionally describe a heterogeneous placement and
-/// must not be replaced by the top-level dispatch target (or erased when that
-/// target is absent on this boot).
+/// Existing `Device` component pins are durable identities in their own right.
+/// Preserve each independently when that exact device exists on this boot;
+/// otherwise return only that missing component to `Auto`. This keeps a valid
+/// heterogeneous placement intact without letting a removed device strand the
+/// replayed job.
 pub(crate) fn resolve_replay_affinity(
     request: &mut mold_core::GenerateRequest,
     recorded_ordinal: Option<usize>,
     target_device_id: Option<&str>,
-    resolve: impl FnOnce(&str) -> Option<usize>,
+    resolve: impl Fn(&str) -> Option<usize>,
 ) -> Option<usize> {
-    migrate_legacy_accelerator_pins(request, recorded_ordinal.zip(target_device_id));
+    rebind_replay_accelerator_pins(request, recorded_ordinal.zip(target_device_id), &resolve);
     target_device_id.and_then(resolve)
 }
 
-fn migrate_legacy_accelerator_pins(
+fn rebind_replay_accelerator_pins(
     request: &mut mold_core::GenerateRequest,
     authoritative_mapping: Option<(usize, &str)>,
+    resolve: &impl Fn(&str) -> Option<usize>,
 ) {
-    fn migrate(device: &mut mold_core::DeviceRef, mapping: Option<(usize, &str)>) {
-        let mold_core::DeviceRef::Gpu { ordinal } = device else {
-            return;
-        };
-        *device = match mapping {
-            Some((recorded_ordinal, stable_id)) if *ordinal == recorded_ordinal => {
-                mold_core::DeviceRef::device(stable_id.to_string())
+    fn rebind(
+        device: &mut mold_core::DeviceRef,
+        mapping: Option<(usize, &str)>,
+        resolve: &impl Fn(&str) -> Option<usize>,
+    ) {
+        match device {
+            mold_core::DeviceRef::Gpu { ordinal } => {
+                *device = match mapping {
+                    Some((recorded_ordinal, stable_id))
+                        if *ordinal == recorded_ordinal && resolve(stable_id).is_some() =>
+                    {
+                        mold_core::DeviceRef::device(stable_id.to_string())
+                    }
+                    _ => mold_core::DeviceRef::Auto,
+                };
             }
-            _ => mold_core::DeviceRef::Auto,
-        };
+            mold_core::DeviceRef::Device { id } if resolve(id).is_none() => {
+                *device = mold_core::DeviceRef::Auto;
+            }
+            _ => {}
+        }
     }
 
     let Some(placement) = request.placement.as_mut() else {
         return;
     };
-    migrate(&mut placement.text_encoders, authoritative_mapping);
+    rebind(&mut placement.text_encoders, authoritative_mapping, resolve);
     let Some(advanced) = placement.advanced.as_mut() else {
         return;
     };
-    migrate(&mut advanced.transformer, authoritative_mapping);
-    migrate(&mut advanced.vae, authoritative_mapping);
+    rebind(&mut advanced.transformer, authoritative_mapping, resolve);
+    rebind(&mut advanced.vae, authoritative_mapping, resolve);
     for device in [
         advanced.clip_l.as_mut(),
         advanced.clip_g.as_mut(),
@@ -1913,7 +1926,7 @@ fn migrate_legacy_accelerator_pins(
     .into_iter()
     .flatten()
     {
-        migrate(device, authoritative_mapping);
+        rebind(device, authoritative_mapping, resolve);
     }
 }
 
@@ -3055,10 +3068,18 @@ mod tests {
         let json = serde_json::to_string(&request).unwrap();
         let mut request: mold_core::GenerateRequest = serde_json::from_str(&json).unwrap();
 
-        let target =
-            super::resolve_replay_affinity(&mut request, Some(2), Some("cuda:stable"), |id| {
-                (id == "cuda:stable").then_some(7)
-            });
+        let target = super::resolve_replay_affinity(
+            &mut request,
+            Some(2),
+            Some("cuda:stable"),
+            |id| match id {
+                "cuda:stable" => Some(7),
+                "cuda:text" => Some(3),
+                "cuda:vae" => Some(4),
+                "cuda:clip" => Some(5),
+                _ => None,
+            },
+        );
 
         assert_eq!(target, Some(7));
         let placement = request.placement.unwrap();
@@ -3091,7 +3112,9 @@ mod tests {
             }),
         });
 
-        let target = super::resolve_replay_affinity(&mut request, Some(2), None, |_| None);
+        let target = super::resolve_replay_affinity(&mut request, Some(2), None, |id| {
+            matches!(id, "cuda:text" | "cuda:vae").then_some(1)
+        });
 
         assert_eq!(target, None);
         let placement = request.placement.unwrap();
@@ -3118,14 +3141,13 @@ mod tests {
         });
 
         let target =
-            super::resolve_replay_affinity(&mut request, Some(4), Some("cuda:dispatch"), |_| None);
+            super::resolve_replay_affinity(&mut request, Some(4), Some("cuda:dispatch"), |id| {
+                matches!(id, "cuda:vae" | "cuda:qwen").then_some(1)
+            });
 
         assert_eq!(target, None);
         let advanced = request.placement.unwrap().advanced.unwrap();
-        assert_eq!(
-            advanced.transformer,
-            mold_core::DeviceRef::device("cuda:dispatch")
-        );
+        assert_eq!(advanced.transformer, mold_core::DeviceRef::Auto);
         assert_eq!(advanced.vae, mold_core::DeviceRef::device("cuda:vae"));
         assert_eq!(
             advanced.qwen,

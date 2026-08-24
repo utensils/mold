@@ -7510,7 +7510,9 @@ mod tests {
             generation_hard_ordinal(&state, "replayed", &request),
             Some(7)
         );
-        crate::queue_journal::resolve_replay_affinity(&mut request, Some(7), None, |_| None);
+        crate::queue_journal::resolve_replay_affinity(&mut request, Some(7), None, |id| {
+            (id == format!("cuda:{:032x}", 8)).then_some(7)
+        });
         assert_eq!(
             generation_hard_ordinal(&state, "replayed", &request),
             Some(7)
