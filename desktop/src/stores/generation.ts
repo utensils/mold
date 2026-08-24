@@ -609,11 +609,11 @@ export const useGenerationStore = defineStore("generation", {
       }
       try {
         const frame = JSON.parse(data) as { type?: unknown; id?: unknown };
+        const owner = records.find((record) =>
+          Object.values(record.tracker.jobs).some((job) => job.authority.jobId === frame.id),
+        );
         if (frame.type === "job_state_committed") {
           durablePostCommitInstances.set(hostId, records[0]!.tracker.expectedInstanceId);
-          const owner = records.find((record) =>
-            Object.values(record.tracker.jobs).some((job) => job.authority.jobId === frame.id),
-          );
           void this.reconcileDurableHost(
             hostId,
             owner ? new Set([owner.tracker.clientBatchId]) : undefined,
@@ -622,17 +622,17 @@ export const useGenerationStore = defineStore("generation", {
           durablePostCommitInstances.set(hostId, records[0]!.tracker.expectedInstanceId);
           void this.reconcileDurableHost(hostId);
         } else if (
-          (frame.type === "job_queued" ||
-            frame.type === "job_started" ||
-            frame.type === "job_ended" ||
-            frame.type === "gallery_added") &&
-          ((frame.type === "gallery_added" &&
-            durablePostCommitInstances.get(hostId) !== records[0]!.tracker.expectedInstanceId) ||
-            records.some((record) =>
-              Object.values(record.tracker.jobs).some((job) => job.authority.jobId === frame.id),
-            ))
+          frame.type === "gallery_added" &&
+          durablePostCommitInstances.get(hostId) !== records[0]!.tracker.expectedInstanceId
         ) {
           void this.reconcileDurableHost(hostId);
+        } else if (
+          owner &&
+          (frame.type === "job_queued" ||
+            frame.type === "job_started" ||
+            frame.type === "job_ended")
+        ) {
+          void this.reconcileDurableHost(hostId, new Set([owner.tracker.clientBatchId]));
         }
       } catch {
         void this.reconcileDurableHost(hostId);

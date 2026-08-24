@@ -536,6 +536,96 @@ describe("submitBatch connection cap", () => {
     expect(mockSse).not.toHaveBeenCalled();
   });
 
+  it("reconciles mapped lifecycle hints only against their owning durable batch", async () => {
+    const store = useGenerationStore();
+    useHostsStore().extras = [
+      {
+        id: "hal9000",
+        label: "hal9000",
+        url: "http://hal9000:7680",
+        apiKey: "fresh-key",
+        status: "ready",
+        error: null,
+        instanceId: "instance-1",
+      },
+    ];
+    store.attachSharedDurableEventHost("hal9000");
+    const admitted = new Map<string, { batchId: string; jobId: string }>();
+    let ordinal = 0;
+    durableApi.admit.mockImplementation(async (_target, body) => {
+      const clientBatchId = (body as { client_batch_id: string }).client_batch_id;
+      ordinal += 1;
+      const identity = { batchId: `batch-scope-${ordinal}`, jobId: `job-scope-${ordinal}` };
+      admitted.set(clientBatchId, identity);
+      return {
+        id: identity.batchId,
+        client_batch_id: clientBatchId,
+        instance_id: "instance-1",
+        durable: true,
+        children: [
+          {
+            index: 1,
+            job_id: identity.jobId,
+            state: "queued",
+            created_at_ms: 1,
+            updated_at_ms: 1,
+          },
+        ],
+      };
+    });
+    durableApi.reconcile.mockImplementation(async (_target, body) => {
+      const requested = new Set((body as { batch_ids?: string[] }).batch_ids ?? []);
+      return {
+        instance_id: "instance-1",
+        batches: [...admitted.entries()]
+          .filter(([, identity]) => requested.has(identity.batchId))
+          .map(([clientBatchId, identity]) => ({
+            id: identity.batchId,
+            client_batch_id: clientBatchId,
+            instance_id: "instance-1",
+            durable: true,
+            children: [
+              {
+                index: 1,
+                job_id: identity.jobId,
+                state: "running",
+                created_at_ms: 1,
+                updated_at_ms: 2,
+              },
+            ],
+          })),
+        missing: { client_batch_ids: [], batch_ids: [] },
+      };
+    });
+    const route = {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote" as const,
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      instanceId: "instance-1",
+      heterogeneousBatch: true,
+      durableBatchOutcomes: true,
+      mirrorRemoteOutput: false,
+    };
+    store.submitBatch(req, 1, route);
+    store.submitBatch(req, 1, route);
+    await flushPromises();
+    expect(admitted.size).toBe(2);
+    durableApi.reconcile.mockClear();
+
+    store.onDurableEvent(
+      "hal9000",
+      "event",
+      JSON.stringify({ type: "job_ended", id: "job-scope-1" }),
+    );
+    await flushPromises();
+
+    expect(durableApi.reconcile).toHaveBeenCalledTimes(1);
+    expect(durableApi.reconcile.mock.calls[0]![1]).toMatchObject({
+      batch_ids: ["batch-scope-1"],
+    });
+  });
+
   it("guarantees a follow-up reconcile when an invalidation arrives in flight", async () => {
     const store = useGenerationStore();
     useHostsStore().extras = [
