@@ -56,6 +56,7 @@ import { useGenerateFormStore } from "../stores/generateForm";
 import { useToastStore } from "../stores/toasts";
 import type { GalleryImage } from "../lib/api/types";
 import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage";
+import { clearSessionScrollForTests } from "@studio/lib/libraryOrganization";
 
 installMemoryLocalStorage();
 
@@ -157,9 +158,25 @@ async function mountView(
 }
 
 beforeEach(() => {
+  clearSessionScrollForTests();
   vi.clearAllMocks();
   localStorage.clear();
   apiFetchTo.mockResolvedValue(new Response());
+});
+
+describe("LibraryView session scroll", () => {
+  it("restores its own scroller after leaving and returning", async () => {
+    const first = await mountView();
+    const firstScroller = first.wrapper.get("div[style='contain: strict;']").element as HTMLElement;
+    firstScroller.scrollTop = 420;
+    first.wrapper.unmount();
+
+    const second = await mountView();
+    const secondScroller = second.wrapper.get("div[style='contain: strict;']")
+      .element as HTMLElement;
+    await vi.waitFor(() => expect(secondScroller.scrollTop).toBe(420));
+    second.wrapper.unmount();
+  });
 });
 
 describe("LibraryView notification deep links", () => {

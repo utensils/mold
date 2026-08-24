@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useVirtualizer } from "@tanstack/vue-virtual";
 import Icon from "@ui/components/Icon.vue";
@@ -38,6 +38,8 @@ import {
 } from "@studio/lib/sequenceReuse";
 import {
   displayTitle,
+  rememberSessionScroll,
+  sessionScrollPosition,
   validatePrintTitle,
   type MergedCollection,
 } from "@studio/lib/libraryOrganization";
@@ -85,6 +87,7 @@ const MENU_TAG_LIMIT = 12;
 /** Pointer sweep selection auto-scrolls near the top/bottom of the grid. */
 const DRAG_SCROLL_EDGE = 72;
 const DRAG_SCROLL_MAX = 18;
+const DESKTOP_LIBRARY_SCROLL_KEY = "desktop:library";
 
 const router = useRouter();
 const route = useRoute();
@@ -1921,6 +1924,20 @@ onMounted(() => {
       containerWidth.value = observed[0]?.contentRect.width ?? containerWidth.value;
     });
     resizeObserver.observe(scrollEl.value);
+  }
+  void nextTick(() => {
+    if (!scrollEl.value) return;
+    const position = sessionScrollPosition(DESKTOP_LIBRARY_SCROLL_KEY);
+    scrollEl.value.scrollTop = position.top;
+    scrollEl.value.scrollLeft = position.left;
+  });
+});
+onBeforeUnmount(() => {
+  if (scrollEl.value) {
+    rememberSessionScroll(DESKTOP_LIBRARY_SCROLL_KEY, {
+      top: scrollEl.value.scrollTop,
+      left: scrollEl.value.scrollLeft,
+    });
   }
 });
 onUnmounted(() => {

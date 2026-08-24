@@ -14,6 +14,7 @@ import {
   storeCachedGalleryMedia,
   storeCachedHostPresentation,
 } from "./galleryCache";
+import { clearSessionScrollForTests, sessionScrollPosition } from "@studio/lib/libraryOrganization";
 
 const {
   invoke,
@@ -280,6 +281,7 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  clearSessionScrollForTests();
   FakeIntersectionObserver.instances = [];
   (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver =
     FakeIntersectionObserver;
@@ -7050,6 +7052,73 @@ describe("MobileApp primary navigation", () => {
 
     expect(content.scrollTop).toBe(0);
   });
+
+  it("restores the Library scroll position when returning during the session", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await flushPromises();
+
+    const content = wrapper.get(".mobile-content").element as HTMLElement;
+    content.scrollTop = 420;
+    await wrapper.get("[data-test='mobile-tab-catalog']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+
+    await vi.waitFor(() => expect(content.scrollTop).toBe(420));
+  });
+
+  it("restores a deep Library position against the virtual grid extent", async () => {
+    const manyPrints = Array.from({ length: 81 }, (_, index) => ({
+      ...print,
+      filename: `deep-scroll-${index}.png`,
+      timestamp: print.timestamp - index,
+    }));
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve(manyPrints);
+      if (path === "/api/activity") {
+        return Promise.resolve({
+          instance_id: "mobile-host",
+          observed_at_unix_ms: 1,
+          items: [],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const content = wrapper.get(".mobile-content").element as HTMLElement;
+    let scrollTop = 0;
+    Object.defineProperty(content, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        const grid = wrapper!.find("[data-test='mobile-gallery-grid']");
+        const logicalExtent = grid.exists()
+          ? Number(grid.attributes("data-gallery-total")) * 10
+          : 0;
+        scrollTop = Math.min(value, logicalExtent);
+      },
+    });
+
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+
+    await vi.waitFor(() =>
+      expect(
+        wrapper!.get("[data-test='mobile-gallery-grid']").attributes("data-gallery-total"),
+      ).toBe("81"),
+    );
+    await flushPromises();
+    content.scrollTop = 700;
+    await wrapper.get("[data-test='mobile-tab-catalog']").trigger("click");
+    await flushPromises();
+    expect(scrollTop).toBe(0);
+    expect(sessionScrollPosition("mobile:library").top).toBe(700);
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(scrollTop).toBe(700));
+  });
 });
 
 describe("MobileApp gallery", () => {
@@ -10213,7 +10282,7 @@ describe("MobileApp Library organization", () => {
             name: "Portraits",
             slug: "portraits",
             description: null,
-            cover_filename: "fav.png",
+            cover_filename: "cover.png",
             count: 1,
             created_at: 1,
             updated_at: 1,
@@ -10323,12 +10392,36 @@ describe("MobileApp Library organization", () => {
     installLibraryApi();
     await openLibrary();
 
+    const gridThumbnail = wrapper!.get("[data-test='gallery-item'] img").attributes("src");
+
     await wrapper?.get("[data-test='mobile-library-scope-collections']").trigger("click");
     await flushPromises();
 
     const card = wrapper!.get("[data-test='mobile-collection-portraits']");
     expect(card.text()).toContain("Portraits");
     expect(card.text()).toContain("1");
+    await vi.waitFor(() => expect(card.find(".mobile-collection-cover img").exists()).toBe(true));
+    expect(card.get(".mobile-collection-cover img").attributes("src")).not.toBe(gridThumbnail);
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith(gridThumbnail);
+
+    vi.useFakeTimers();
+    await card.get(".mobile-collection-cover img").trigger("error");
+    expect(card.find(".mobile-collection-cover img").exists()).toBe(false);
+    expect(card.findComponent({ name: "MobileMediaPlaceholder" }).exists()).toBe(true);
+    const coverFetchCount = () =>
+      apiFetchTo.mock.calls.filter(([, path]) => String(path).includes("cover.png")).length;
+    const callsBeforeHidingShelf = coverFetchCount();
+    await wrapper?.get("[data-test='mobile-tab-catalog']").trigger("click");
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+    expect(coverFetchCount()).toBe(callsBeforeHidingShelf);
+    await wrapper?.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await flushPromises();
+    const restoredCard = wrapper!.get("[data-test='mobile-collection-portraits']");
+    await vi.waitFor(() =>
+      expect(restoredCard.find(".mobile-collection-cover img").exists()).toBe(true),
+    );
+    vi.useRealTimers();
 
     await card.get("[data-test='mobile-collection-open']").trigger("click");
     await flushPromises();

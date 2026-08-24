@@ -14,6 +14,7 @@ import {
   useGenerateForm,
 } from "../composables/useGenerateForm";
 import type { GalleryImage } from "../types";
+import { clearSessionScrollForTests } from "@studio/lib/libraryOrganization";
 
 const { listGalleryMock, deleteMock, fetchModelsMock } = vi.hoisted(() => ({
   listGalleryMock: vi.fn(),
@@ -215,6 +216,7 @@ beforeEach(() => setActivePinia(createPinia()));
 
 describe("LibraryPage", () => {
   beforeEach(() => {
+    clearSessionScrollForTests();
     localStorage.clear();
     resetNotifications();
     formTesting.resetForTest();
@@ -249,6 +251,27 @@ describe("LibraryPage", () => {
     pushMock.mockReset();
     replaceMock.mockReset();
     vi.mocked(requestConfirm).mockReset().mockResolvedValue(true);
+  });
+
+  it("restores the window scroll position after leaving and returning", async () => {
+    const scrollTo = vi
+      .spyOn(window, "scrollTo")
+      .mockImplementation(() => undefined);
+    const first = await mounted();
+    Object.defineProperty(window, "scrollY", {
+      configurable: true,
+      value: 420,
+    });
+    Object.defineProperty(window, "scrollX", { configurable: true, value: 0 });
+    first.unmount();
+    scrollTo.mockClear();
+
+    const second = await mounted();
+    await vi.waitFor(() =>
+      expect(scrollTo).toHaveBeenCalledWith({ top: 420, left: 0 }),
+    );
+    second.unmount();
+    scrollTo.mockRestore();
   });
 
   afterEach(() => {
