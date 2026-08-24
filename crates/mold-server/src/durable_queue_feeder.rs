@@ -302,6 +302,7 @@ fn projection_failure_holds(error: &crate::queue_media_store::QueueMediaError) -
         error,
         crate::queue_media_store::QueueMediaError::Authentication
             | crate::queue_media_store::QueueMediaError::Corrupt(_)
+            | crate::queue_media_store::QueueMediaError::InsecurePath(_)
             | crate::queue_media_store::QueueMediaError::NotFound
             | crate::queue_media_store::QueueMediaError::InvalidIdentity(_)
             | crate::queue_media_store::QueueMediaError::ProjectionUnavailable(_)
@@ -722,6 +723,17 @@ mod tests {
     }
 
     fn state(capacity: usize) -> (AppState, tokio::sync::mpsc::Receiver<GenerationJob>) {
+        let (state, rx, _) = state_with_home(capacity);
+        (state, rx)
+    }
+
+    fn state_with_home(
+        capacity: usize,
+    ) -> (
+        AppState,
+        tokio::sync::mpsc::Receiver<GenerationJob>,
+        std::path::PathBuf,
+    ) {
         let root = tempfile::tempdir().unwrap().keep();
         let gallery = root.join("gallery");
         std::fs::create_dir_all(&gallery).unwrap();
@@ -736,7 +748,7 @@ mod tests {
             "feeder-test",
         ));
         state.config.try_write().unwrap().output_dir = Some(gallery.to_string_lossy().into());
-        (state, rx)
+        (state, rx, root)
     }
 
     fn admit(state: &AppState, count: usize) -> Vec<String> {
@@ -962,6 +974,146 @@ mod tests {
         state.queue.decrement();
         shutdown.cancel();
         handle.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn insecure_oldest_media_projection_is_held_once_and_later_work_proceeds() {
+        use std::os::unix::fs::symlink;
+
+        use crate::queue_journal::{MediaBatchJournalAdmission, MediaJournalAdmission};
+        use crate::queue_media_lifecycle::QueueMediaLifecycle;
+        use crate::queue_media_startup::reconcile_claimed_owner;
+        use crate::queue_media_store::{
+            QueueMediaOperationFingerprint, QueueMediaProjection, QueueMediaStore, SealMedia,
+        };
+
+        let (state, mut rx, home) = state_with_home(1);
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        let store = QueueMediaStore::open(&home).unwrap().store;
+        let media_set = store
+            .seal_v2_with_operation_fingerprint(
+                &owner,
+                "job-0",
+                &QueueMediaOperationFingerprint::sha256_v1(b"feeder-insecure-projection"),
+                &QueueMediaProjection::default(),
+                vec![SealMedia::bytes("source", "source.png", vec![1, 2, 3])],
+            )
+            .unwrap();
+        let requests = [request("job 0"), request("job 1")];
+        let request_json = requests
+            .iter()
+            .map(|request| serde_json::to_string(request).unwrap())
+            .collect::<Vec<_>>();
+        let output = state.config.try_read().unwrap().effective_output_dir();
+        state
+            .queue_journal
+            .record_batch_with_media(MediaBatchJournalAdmission {
+                id: "batch",
+                client_batch_id: "client",
+                operation_receipt: "receipt",
+                children: &[
+                    MediaJournalAdmission {
+                        id: "job-0",
+                        model: &requests[0].model,
+                        request_json: &request_json[0],
+                        media_set: Some(&media_set),
+                        output_dir: &output,
+                        target_gpu: None,
+                        target_device_id: None,
+                        completion_payload: SseCompletionPayload::MetadataOnly,
+                        seed_pinned: false,
+                    },
+                    MediaJournalAdmission {
+                        id: "job-1",
+                        model: &requests[1].model,
+                        request_json: &request_json[1],
+                        media_set: None,
+                        output_dir: &output,
+                        target_gpu: None,
+                        target_device_id: None,
+                        completion_payload: SseCompletionPayload::MetadataOnly,
+                        seed_pinned: false,
+                    },
+                ],
+                observer_job_id: None,
+            })
+            .unwrap();
+
+        let lifecycle = Arc::new(QueueMediaLifecycle::new(
+            state.metadata_db.clone(),
+            home.clone(),
+            owner,
+        ));
+        state
+            .queue_journal
+            .install_queue_media_lifecycle(lifecycle.clone())
+            .unwrap();
+        assert!(
+            reconcile_claimed_owner(&state.queue_journal, lifecycle.as_ref())
+                .unwrap()
+                .durable_media_ready
+        );
+
+        let active_root = home.join("queue-media").join("v1").join("active");
+        let bundle = std::fs::read_dir(active_root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let bundle = std::fs::read_dir(bundle)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let bundle = std::fs::read_dir(bundle)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let symlink_target = home.join("projection-target.qms");
+        std::fs::rename(&bundle, &symlink_target).unwrap();
+        symlink(&symlink_target, &bundle).unwrap();
+        let target_before = std::fs::read(&symlink_target).unwrap();
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let current_output = state.config.try_read().unwrap().effective_output_dir();
+        let mut arbiter = FeederArbiter::default();
+        let report = feed_available(&state, Some(&current_output), &shutdown, &mut arbiter).await;
+        assert_eq!(report.held, 1);
+        assert_eq!(report.submitted, 1);
+        assert_eq!(report.stop, FeederStop::AtCapacity);
+
+        let rows = state.queue_journal.list_all();
+        let held = rows.iter().find(|row| row.id == "job-0").unwrap();
+        assert_eq!(held.state, mold_db::generation_queue::QueueRowState::Held);
+        assert!(held
+            .held_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("projection is invalid")));
+        let mut later = rx.try_recv().expect("later ordinary work must proceed");
+        assert_eq!(later.id, "job-1");
+        assert_eq!(std::fs::read(&symlink_target).unwrap(), target_before);
+        assert!(std::fs::symlink_metadata(&bundle)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        later.journal.take().unwrap().complete_before_dispatch();
+        state.job_registry.remove(&later.id);
+        state.queue.decrement();
+        let drained = feed_available(&state, Some(&current_output), &shutdown, &mut arbiter).await;
+        assert_eq!(drained, FeederReport::default());
+        let rows = state.queue_journal.list_all();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "job-0");
+        assert_eq!(
+            rows[0].state,
+            mold_db::generation_queue::QueueRowState::Held
+        );
     }
 
     #[tokio::test]
