@@ -57,6 +57,8 @@ import {
 } from "@studio/lib/sourceResolution";
 import type { CanvasIntent } from "@studio/lib/outputShape";
 import { groupLogicalGalleryPrints } from "@studio/lib/galleryPrintIdentity";
+import { virtualGridWindow } from "@studio/lib/virtualGrid";
+import { galleryThumbnailScheduler, type ThumbnailHandle } from "@studio/lib/thumbnailScheduler";
 import {
   collectionSlug,
   collectionSlugResolver,
@@ -870,12 +872,9 @@ const progress = ref("Ready");
 const progressIsError = ref(false);
 const generationAnnouncement = ref("");
 const gallery = ref<GalleryPrint[]>([]);
+const galleryByThumbnailKey = new Map<string, GalleryPrint>();
 const galleryLoading = ref(false);
-const galleryLoadingMore = ref(false);
 const galleryError = ref("");
-const galleryRemaining = ref(0);
-const gallerySentinel = ref<HTMLElement | null>(null);
-const gallerySentinelVisible = ref(false);
 const gallerySelectMode = ref(false);
 let nativeGalleryContextKey: string | null = null;
 const gallerySelection = ref<Set<string>>(new Set());
@@ -885,6 +884,13 @@ const galleryColumns = ref(loadMobileGalleryColumns());
 const galleryZoom = createPinchZoom(galleryColumns.value);
 const galleryZoomAnnouncement = ref("");
 const galleryPinchSurface = ref<HTMLElement | null>(null);
+const galleryGridSurface = ref<HTMLElement | null>(null);
+const galleryGridWidth = ref(0);
+const galleryViewportStart = ref(0);
+const galleryViewportSize = ref(0);
+let galleryGridTop = 0;
+let galleryWindowFrame: number | null = null;
+let galleryGridResizeObserver: ResizeObserver | null = null;
 const galleryDeleting = ref(false);
 const selectedPrint = ref<GalleryPrint | null>(null);
 // ── Library organization (V3 "Shelf") ───────────────────────────────────────
@@ -960,10 +966,9 @@ let galleryRefreshRequested = false;
 let galleryRefreshDeferred = false;
 let galleryRefreshTask: Promise<void> | null = null;
 let galleryOperationTail: Promise<void> = Promise.resolve();
-let galleryLoadMoreQueued = false;
-let gallerySentinelObserver: IntersectionObserver | null = null;
-let galleryContinuationFrame: number | null = null;
 const activeGalleryThumbnailControllers = new Set<AbortController>();
+const galleryThumbnailHandles = new Map<string, ThumbnailHandle<string>>();
+let visibleGalleryThumbnailKeys = new Set<string>();
 const galleryThumbnailRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let galleryDragPointerId: number | null = null;
 let galleryDragActive = false;
@@ -5598,8 +5603,16 @@ function retryGeneratedPreview(): void {
   renewGeneratedResult(true);
 }
 
-async function thumbnailUrl(target: ApiTarget, hostId: string, filename: string): Promise<string> {
+async function thumbnailUrl(
+  target: ApiTarget,
+  hostId: string,
+  filename: string,
+  signal?: AbortSignal,
+): Promise<string> {
   const controller = new AbortController();
+  const cancel = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener("abort", cancel, { once: true });
   activeGalleryThumbnailControllers.add(controller);
   let timeout: ReturnType<typeof setTimeout> | null = null;
   const deadline = new Promise<never>((_resolve, reject) => {
@@ -5640,6 +5653,7 @@ async function thumbnailUrl(target: ApiTarget, hostId: string, filename: string)
     return await Promise.race([load(), deadline]);
   } finally {
     if (timeout !== null) clearTimeout(timeout);
+    signal?.removeEventListener("abort", cancel);
     activeGalleryThumbnailControllers.delete(controller);
   }
 }
@@ -5651,6 +5665,8 @@ function galleryThumbnailRetryKey(print: Pick<GalleryPrint, "cacheKey" | "filena
 function cancelGalleryThumbnailRetries(): void {
   for (const timer of galleryThumbnailRetryTimers.values()) clearTimeout(timer);
   galleryThumbnailRetryTimers.clear();
+  for (const handle of galleryThumbnailHandles.values()) handle.cancel();
+  galleryThumbnailHandles.clear();
 }
 
 function galleryThumbnailRetryDelay(filename: string, attempt: number): number {
@@ -5670,9 +5686,9 @@ function scheduleGalleryThumbnailRetry(print: GalleryPrint, attempt = 0): void {
     () => {
       galleryThumbnailRetryTimers.delete(key);
       if (unmounted) return;
-      const current = gallery.value.find(
-        (candidate) => galleryThumbnailRetryKey(candidate) === key && candidate.thumbnailPending,
-      );
+      if (!visibleGalleryThumbnailKeys.has(key)) return;
+      const current = galleryByThumbnailKey.get(key);
+      if (current && !current.thumbnailPending) return;
       if (!current) return;
       loadGalleryThumbnail(current, attempt + 1);
     },
@@ -5683,11 +5699,18 @@ function scheduleGalleryThumbnailRetry(print: GalleryPrint, attempt = 0): void {
 
 function loadGalleryThumbnail(print: GalleryPrint, failedAttempts = 0): void {
   const key = galleryThumbnailRetryKey(print);
-  void thumbnailUrl(print.target, print.cacheKey, print.filename)
+  if (galleryThumbnailHandles.has(key) || !print.thumbnailPending) return;
+  const mediaVersion = `${print.timestamp}:${print.size_bytes ?? "unknown"}`;
+  const handle = galleryThumbnailScheduler.schedule({
+    key: `${print.cacheKey}|${print.filename}|${mediaVersion}`,
+    hostKey: print.cacheKey,
+    priority: "visible",
+    run: (signal) => thumbnailUrl(print.target, print.cacheKey, print.filename, signal),
+  });
+  galleryThumbnailHandles.set(key, handle);
+  void handle.promise
     .then((url) => {
-      const latest = gallery.value.find(
-        (candidate) => galleryThumbnailRetryKey(candidate) === key && candidate.thumbnailPending,
-      );
+      const latest = galleryByThumbnailKey.get(key);
       if (!latest || unmounted) {
         revokeObjectUrl(url);
         return;
@@ -5695,7 +5718,10 @@ function loadGalleryThumbnail(print: GalleryPrint, failedAttempts = 0): void {
       latest.thumbnailUrl = url;
       latest.thumbnailPending = false;
     })
-    .catch(() => scheduleGalleryThumbnailRetry(print, failedAttempts));
+    .catch(() => scheduleGalleryThumbnailRetry(print, failedAttempts))
+    .finally(() => {
+      if (galleryThumbnailHandles.get(key) === handle) galleryThumbnailHandles.delete(key);
+    });
 }
 
 function mobileGalleryCacheKey(host: MobileHost): string {
@@ -5752,6 +5778,7 @@ async function performGalleryRefresh(): Promise<void> {
   galleryError.value = "";
   const prior = gallery.value;
   gallery.value = [];
+  galleryByThumbnailKey.clear();
   for (const item of prior) revokeObjectUrl(item.thumbnailUrl);
   const allHosts = connectedHosts.value;
   const cachedResults = await Promise.all(
@@ -5867,6 +5894,7 @@ async function performGalleryRefresh(): Promise<void> {
   galleryCopies = refreshedCopies;
   for (const item of gallery.value) revokeObjectUrl(item.thumbnailUrl);
   gallery.value = [];
+  galleryByThumbnailKey.clear();
   rebuildGalleryOrganization();
   // The Trash listing is refetched on its own schedule; a live refresh only
   // marks it stale so the next Trash visit re-reads the host.
@@ -5883,47 +5911,26 @@ async function performGalleryRefresh(): Promise<void> {
   if (libraryScope.value === "trash") void refreshTrash();
 }
 
-function loadMoreGallery(): Promise<void> {
-  if (
-    galleryLoadMoreQueued ||
-    galleryLoading.value ||
-    galleryLoadingMore.value ||
-    galleryRemaining.value === 0
-  ) {
-    return Promise.resolve();
-  }
-  galleryLoadMoreQueued = true;
-  return enqueueGalleryOperation(async () => {
-    // The serialized operation is now running; `galleryLoadingMore` guards
-    // observer callbacks until the page settles.
-    galleryLoadMoreQueued = false;
-    await loadMoreGalleryPage();
-  });
-}
-
 async function loadMoreGalleryPage(): Promise<void> {
-  galleryLoadingMore.value = true;
-  try {
-    const page = pendingGallery.splice(0, 40);
-    // Place every row immediately, then hydrate each thumbnail independently.
-    // One slow WebView request cannot withhold the other 39 rows or the page's
-    // layout; browser connection pooling still bounds sockets per host.
-    const placed = page.map((print): GalleryPrint => ({
-      ...print,
-      thumbnailUrl: GALLERY_THUMBNAIL_PLACEHOLDER,
-      thumbnailPending: true,
-    }));
-    gallery.value.push(...placed);
-    for (const print of placed) loadGalleryThumbnail(print);
-    markMobileLibrarySeen(galleryCopies);
-  } finally {
-    // Loading state must settle even if a future cache/rendering change throws.
-    if (!unmounted) {
-      galleryRemaining.value = pendingGallery.length;
-      galleryLoadingMore.value = false;
-      scheduleGalleryContinuation();
-    }
+  const page = pendingGallery.splice(0);
+  // Keep the complete logical index in memory so navigation, filtering, and
+  // selection stay O(1), but the template windows its DOM rows and hydrates
+  // thumbnails only for the visible/near window below.
+  const placed = page.map((print): GalleryPrint => ({
+    ...print,
+    thumbnailUrl: GALLERY_THUMBNAIL_PLACEHOLDER,
+    thumbnailPending: true,
+  }));
+  const start = gallery.value.length;
+  gallery.value.push(...placed);
+  // Store Vue proxies, not the raw objects passed to push: thumbnail
+  // completions arrive from async closures and raw mutation bypasses proxy
+  // traps, leaving the DOM stuck on its placeholder.
+  for (let index = start; index < gallery.value.length; index++) {
+    const print = gallery.value[index]!;
+    galleryByThumbnailKey.set(galleryThumbnailRetryKey(print), print);
   }
+  markMobileLibrarySeen(galleryCopies);
 }
 
 async function reusePrint(print: GalleryPrint): Promise<void> {
@@ -6469,6 +6476,90 @@ function openPrint(print: GalleryPrint): void {
 const galleryPrintKey = (print: Pick<GalleryPrint, "hostId" | "filename">) =>
   `${print.hostId}|${print.filename}`;
 
+const mobileGalleryWindow = computed(() =>
+  virtualGridWindow({
+    itemCount: gallery.value.length,
+    containerWidth: galleryGridWidth.value,
+    minimumItemWidth: Math.max(1, galleryGridWidth.value / galleryColumns.value),
+    minimumColumns: galleryColumns.value,
+    maximumColumns: galleryColumns.value,
+    gap: 6,
+    viewportStart: galleryViewportStart.value,
+    viewportSize: galleryViewportSize.value,
+    overscanRows: 3,
+  }),
+);
+
+const visibleGallery = computed(() => {
+  if (galleryGridWidth.value <= 0) return gallery.value.slice(0, 40);
+  return gallery.value.slice(
+    mobileGalleryWindow.value.startIndex,
+    mobileGalleryWindow.value.endIndex,
+  );
+});
+
+function measureMobileGalleryWindow(): void {
+  galleryWindowFrame = null;
+  const content = mobileContent.value;
+  const surface = galleryGridSurface.value;
+  if (!content || !surface) return;
+  const contentRect = content.getBoundingClientRect();
+  const surfaceRect = surface.getBoundingClientRect();
+  galleryGridWidth.value = surfaceRect.width;
+  galleryGridTop = surfaceRect.top - contentRect.top + content.scrollTop;
+  galleryViewportStart.value = Math.max(0, content.scrollTop - galleryGridTop);
+  galleryViewportSize.value = content.clientHeight;
+}
+
+function scheduleMobileGalleryWindow(): void {
+  if (galleryWindowFrame !== null) return;
+  galleryWindowFrame = requestAnimationFrame(measureMobileGalleryWindow);
+}
+
+watch(galleryGridSurface, (surface) => {
+  galleryGridResizeObserver?.disconnect();
+  galleryGridResizeObserver = null;
+  if (!surface) return;
+  if (typeof ResizeObserver !== "undefined") {
+    galleryGridResizeObserver = new ResizeObserver(scheduleMobileGalleryWindow);
+    galleryGridResizeObserver.observe(surface);
+  }
+  void nextTick(measureMobileGalleryWindow);
+});
+
+watch(
+  () => [gallery.value.length, galleryColumns.value] as const,
+  () => void nextTick(measureMobileGalleryWindow),
+);
+
+watch(
+  () => visibleGallery.value.map(galleryThumbnailRetryKey).join("\u0000"),
+  () => {
+    const retained = new Set(visibleGallery.value.map(galleryThumbnailRetryKey));
+    if (selectedPrint.value) retained.add(galleryThumbnailRetryKey(selectedPrint.value));
+    visibleGalleryThumbnailKeys = retained;
+    for (const [key, handle] of galleryThumbnailHandles) {
+      if (retained.has(key)) continue;
+      handle.cancel();
+      galleryThumbnailHandles.delete(key);
+    }
+    for (const [key, timer] of galleryThumbnailRetryTimers) {
+      if (retained.has(key)) continue;
+      clearTimeout(timer);
+      galleryThumbnailRetryTimers.delete(key);
+    }
+    for (const print of gallery.value) {
+      const key = galleryThumbnailRetryKey(print);
+      if (retained.has(key) || print.thumbnailPending) continue;
+      revokeObjectUrl(print.thumbnailUrl);
+      print.thumbnailUrl = GALLERY_THUMBNAIL_PLACEHOLDER;
+      print.thumbnailPending = true;
+    }
+    for (const print of visibleGallery.value) loadGalleryThumbnail(print);
+  },
+  { immediate: true },
+);
+
 function allGalleryPrints(): Array<GalleryPrint | PendingGalleryPrint> {
   return [...gallery.value, ...pendingGallery];
 }
@@ -6788,6 +6879,7 @@ async function resetGalleryPaging(): Promise<void> {
   cancelGalleryThumbnailRetries();
   for (const item of gallery.value) revokeObjectUrl(item.thumbnailUrl);
   gallery.value = [];
+  galleryByThumbnailKey.clear();
   pendingGallery = visibleRepresentatives();
   await loadMoreGalleryPage();
 }
@@ -7085,6 +7177,10 @@ async function applyOrganizationPatch(
   trashCopies = apply(trashCopies);
   pendingGallery = apply(pendingGallery);
   gallery.value = apply(gallery.value);
+  galleryByThumbnailKey.clear();
+  for (const print of gallery.value) {
+    galleryByThumbnailKey.set(galleryThumbnailRetryKey(print), print);
+  }
   if (selectedPrint.value) {
     const next = patches.get(galleryPrintKey(selectedPrint.value));
     if (next) selectedPrint.value = { ...selectedPrint.value, ...next };
@@ -8007,6 +8103,7 @@ async function deleteSelectedGalleryPrints(): Promise<void> {
     trashCount.value += groupLogicalGalleryPrints(trashedCopies).length;
   }
   gallery.value = [];
+  galleryByThumbnailKey.clear();
   pendingGallery = visibleRepresentatives();
   await loadMoreGalleryPage();
 
@@ -8203,40 +8300,6 @@ watch(tab, (next) => {
   if (next !== "hosts") hostDetailId.value = "";
 });
 
-watch(gallerySentinel, (sentinel) => {
-  gallerySentinelObserver?.disconnect();
-  gallerySentinelObserver = null;
-  gallerySentinelVisible.value = false;
-  if (!sentinel) return;
-  gallerySentinelObserver = new IntersectionObserver(
-    (entries) => {
-      for (const entry of entries) gallerySentinelVisible.value = entry.isIntersecting;
-      if (gallerySentinelVisible.value) {
-        void loadMoreGallery();
-      }
-    },
-    { root: mobileContent.value, rootMargin: "600px 0px" },
-  );
-  gallerySentinelObserver.observe(sentinel);
-});
-
-function scheduleGalleryContinuation(): void {
-  if (!gallerySentinelVisible.value || galleryRemaining.value === 0) return;
-  if (galleryContinuationFrame !== null) return;
-  galleryContinuationFrame = requestAnimationFrame(() => {
-    galleryContinuationFrame = null;
-    if (gallerySentinelVisible.value && galleryRemaining.value > 0) void loadMoreGallery();
-  });
-}
-
-// A sentinel can remain in view without producing another observer event.
-// Re-check once the browser has laid out the completed placeholder page; there
-// is deliberately no arbitrary page cap that can strand older prints.
-watch(galleryLoadingMore, (loading) => {
-  if (loading) return;
-  scheduleGalleryContinuation();
-});
-
 // One failed model load must not become a manual-Retry dead end: the 10s
 // probe already self-heals `host.online`, so a false→true transition on the
 // selected host re-runs the (epoch-guarded) model load automatically.
@@ -8381,6 +8444,7 @@ onMounted(async () => {
   window.addEventListener("pointerup", finishGallerySelectionDrag);
   window.addEventListener("pointercancel", finishGallerySelectionDrag);
   window.addEventListener("mold:native-gallery-select", selectNativeGalleryContextPrint);
+  mobileContent.value?.addEventListener("scroll", scheduleMobileGalleryWindow, { passive: true });
   // The pinch tracks globally so a finger that slides off the grid mid-gesture
   // still reports, and so a lift outside the grid always ends it.
   window.addEventListener("pointermove", moveGalleryPinch, { passive: false });
@@ -8466,6 +8530,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointerup", finishGallerySelectionDrag);
   window.removeEventListener("pointercancel", finishGallerySelectionDrag);
   window.removeEventListener("mold:native-gallery-select", selectNativeGalleryContextPrint);
+  mobileContent.value?.removeEventListener("scroll", scheduleMobileGalleryWindow);
   nativeGalleryContextKey = null;
   finishGallerySelectionDrag();
   window.removeEventListener("pointermove", moveGalleryPinch);
@@ -8488,13 +8553,15 @@ onBeforeUnmount(() => {
   hostProbeTimer = null;
   if (liveActivityTimer) clearInterval(liveActivityTimer);
   liveActivityTimer = null;
-  gallerySentinelObserver?.disconnect();
-  gallerySentinelObserver = null;
   cancelGalleryThumbnailRetries();
+  for (const handle of galleryThumbnailHandles.values()) handle.cancel();
+  galleryThumbnailHandles.clear();
   for (const controller of activeGalleryThumbnailControllers) controller.abort();
   activeGalleryThumbnailControllers.clear();
-  if (galleryContinuationFrame !== null) cancelAnimationFrame(galleryContinuationFrame);
-  galleryContinuationFrame = null;
+  galleryGridResizeObserver?.disconnect();
+  galleryGridResizeObserver = null;
+  if (galleryWindowFrame !== null) cancelAnimationFrame(galleryWindowFrame);
+  galleryWindowFrame = null;
   stopSequenceTransport();
   for (const id of [...hostProbes.keys()]) cancelHostProbe(id);
   generation.resetJobs();
@@ -9760,104 +9827,111 @@ onBeforeUnmount(() => {
             </div>
             <div
               v-else-if="gallery.length"
-              class="gallery-grid"
-              :class="{ 'is-selecting': gallerySelectMode }"
-              :style="{ '--mobile-gallery-columns': galleryColumns }"
+              ref="galleryGridSurface"
+              class="gallery-grid-window"
+              :style="{
+                height: `${mobileGalleryWindow.totalSize}px`,
+                '--mobile-gallery-columns': galleryColumns,
+              }"
               :aria-label="`Prints, ${galleryColumns} across. Pinch to resize.`"
               :data-gallery-columns="galleryColumns"
+              :data-gallery-total="gallery.length"
+              :data-gallery-mounted="visibleGallery.length"
               role="group"
               data-test="mobile-gallery-grid"
             >
-              <button
-                v-for="print in gallery"
-                :key="`${print.hostId}:${print.filename}`"
-                class="gallery-item"
-                :class="{ 'gallery-item-selected': gallerySelection.has(galleryPrintKey(print)) }"
-                type="button"
-                :aria-label="
-                  gallerySelectMode
-                    ? tileLabel(
-                        print,
-                        gallerySelection.has(galleryPrintKey(print)) ? 'Deselect' : 'Select',
-                      )
-                    : tileLabel(print, 'Open')
-                "
-                :aria-pressed="
-                  gallerySelectMode ? gallerySelection.has(galleryPrintKey(print)) : undefined
-                "
-                :data-gallery-print-key="galleryPrintKey(print)"
-                data-test="gallery-item"
-                @pointerdown="beginGallerySelectionDrag($event, print)"
-                @click="handleGalleryTileClick($event, print)"
+              <div
+                class="gallery-grid gallery-grid-virtual"
+                :class="{ 'is-selecting': gallerySelectMode }"
+                :style="{
+                  '--mobile-gallery-columns': galleryColumns,
+                  transform: `translateY(${mobileGalleryWindow.offset}px)`,
+                }"
               >
-                <img
-                  :src="print.thumbnailUrl"
-                  :alt="print.metadata.prompt || print.filename"
-                  :class="{ 'is-thumbnail-pending': print.thumbnailPending }"
-                  loading="lazy"
-                  @contextmenu="rememberNativeGalleryContext(print)"
-                />
-                <span
-                  v-if="print.thumbnailPending"
-                  class="gallery-thumbnail-pending"
-                  data-test="gallery-thumbnail-pending"
-                  aria-hidden="true"
-                  >↻</span
+                <button
+                  v-for="print in visibleGallery"
+                  :key="`${print.hostId}:${print.filename}`"
+                  class="gallery-item"
+                  :class="{ 'gallery-item-selected': gallerySelection.has(galleryPrintKey(print)) }"
+                  type="button"
+                  :aria-label="
+                    gallerySelectMode
+                      ? tileLabel(
+                          print,
+                          gallerySelection.has(galleryPrintKey(print)) ? 'Deselect' : 'Select',
+                        )
+                      : tileLabel(print, 'Open')
+                  "
+                  :aria-pressed="
+                    gallerySelectMode ? gallerySelection.has(galleryPrintKey(print)) : undefined
+                  "
+                  :data-gallery-print-key="galleryPrintKey(print)"
+                  data-test="gallery-item"
+                  @pointerdown="beginGallerySelectionDrag($event, print)"
+                  @click="handleGalleryTileClick($event, print)"
                 >
-                <span
-                  v-if="isVideoItem(print) || isAudioItem(print)"
-                  class="gallery-video-badge"
-                  aria-hidden="true"
-                  >{{ isAudioItem(print) ? "♪" : "▶" }}</span
-                >
-                <span
-                  v-if="!gallerySelectMode && libraryScope !== 'trash' && isFreshMobilePrint(print)"
-                  class="gallery-new-badge"
-                  data-test="new-badge"
-                >
-                  New
-                </span>
-                <span
-                  v-if="isUpscaledImage(print)"
-                  class="gallery-upscaled-badge"
-                  data-test="upscaled-badge"
-                >
-                  Upscaled
-                </span>
-                <span
-                  v-if="!gallerySelectMode && organizationOf(print)?.favorite"
-                  class="gallery-favorite-badge"
-                  data-test="favorite-badge"
-                  aria-label="Favorite"
-                  >♥</span
-                >
-                <span
-                  v-if="libraryScope === 'trash' && purgeChipFor(print)"
-                  class="gallery-purge-chip"
-                  data-test="purge-chip"
-                  >{{ purgeChipFor(print) }}</span
-                >
-                <span
-                  v-if="gallerySelectMode"
-                  class="gallery-selection-indicator"
-                  data-test="mobile-gallery-selection-indicator"
-                  aria-hidden="true"
-                >
-                  {{ gallerySelection.has(galleryPrintKey(print)) ? "✓" : "" }}
-                </span>
-              </button>
+                  <img
+                    :src="print.thumbnailUrl"
+                    :alt="print.metadata.prompt || print.filename"
+                    :class="{ 'is-thumbnail-pending': print.thumbnailPending }"
+                    loading="lazy"
+                    @contextmenu="rememberNativeGalleryContext(print)"
+                  />
+                  <span
+                    v-if="print.thumbnailPending"
+                    class="gallery-thumbnail-pending"
+                    data-test="gallery-thumbnail-pending"
+                    aria-hidden="true"
+                    >↻</span
+                  >
+                  <span
+                    v-if="isVideoItem(print) || isAudioItem(print)"
+                    class="gallery-video-badge"
+                    aria-hidden="true"
+                    >{{ isAudioItem(print) ? "♪" : "▶" }}</span
+                  >
+                  <span
+                    v-if="
+                      !gallerySelectMode && libraryScope !== 'trash' && isFreshMobilePrint(print)
+                    "
+                    class="gallery-new-badge"
+                    data-test="new-badge"
+                  >
+                    New
+                  </span>
+                  <span
+                    v-if="isUpscaledImage(print)"
+                    class="gallery-upscaled-badge"
+                    data-test="upscaled-badge"
+                  >
+                    Upscaled
+                  </span>
+                  <span
+                    v-if="!gallerySelectMode && organizationOf(print)?.favorite"
+                    class="gallery-favorite-badge"
+                    data-test="favorite-badge"
+                    aria-label="Favorite"
+                    >♥</span
+                  >
+                  <span
+                    v-if="libraryScope === 'trash' && purgeChipFor(print)"
+                    class="gallery-purge-chip"
+                    data-test="purge-chip"
+                    >{{ purgeChipFor(print) }}</span
+                  >
+                  <span
+                    v-if="gallerySelectMode"
+                    class="gallery-selection-indicator"
+                    data-test="mobile-gallery-selection-indicator"
+                    aria-hidden="true"
+                  >
+                    {{ gallerySelection.has(galleryPrintKey(print)) ? "✓" : "" }}
+                  </span>
+                </button>
+              </div>
             </div>
             <div v-else class="empty-state" data-test="mobile-library-empty">
               {{ libraryEmptyCopy }}
-            </div>
-            <div
-              v-if="!galleryLoading && galleryRemaining"
-              ref="gallerySentinel"
-              class="gallery-scroll-sentinel"
-              data-test="mobile-gallery-sentinel"
-              aria-live="polite"
-            >
-              {{ galleryLoadingMore ? "Loading older prints…" : "" }}
             </div>
           </div>
         </template>

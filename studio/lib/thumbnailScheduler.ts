@@ -74,6 +74,11 @@ export class ThumbnailScheduler {
 
   schedule<T>(request: ThumbnailRequest<T>): ThumbnailHandle<T> {
     let entry = this.entries.get(request.key) as ScheduledEntry<T> | undefined;
+    if (entry && (entry.controller.signal.aborted || entry.consumers <= 0)) {
+      if (this.entries.get(request.key) === entry)
+        this.entries.delete(request.key);
+      entry = undefined;
+    }
     if (!entry) {
       let resolve!: (value: T) => void;
       let reject!: (error: unknown) => void;
@@ -187,7 +192,8 @@ export class ThumbnailScheduler {
       .run(entry.controller.signal)
       .then(entry.resolve, entry.reject)
       .finally(() => {
-        this.entries.delete(entry.key);
+        if (this.entries.get(entry.key) === entry)
+          this.entries.delete(entry.key);
         this.running -= 1;
         if (startedAsBackground) this.runningBackground -= 1;
         const hostRunning = (this.runningByHost.get(entry.hostKey) ?? 1) - 1;

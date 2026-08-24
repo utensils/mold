@@ -126,4 +126,28 @@ describe("ThumbnailScheduler", () => {
     expect(order[0]).toBe("promoted");
     older.cancel();
   });
+
+  it("starts a fresh generation when a cancelled key is requested again", async () => {
+    const scheduler = new ThumbnailScheduler({ concurrency: 2 });
+    const stale = deferred<string>();
+    const first = scheduler.schedule({
+      key: "same",
+      hostKey: "host",
+      priority: "visible",
+      run: () => stale.promise,
+    });
+    void first.promise.catch(() => {});
+    await turn();
+    first.cancel();
+    const second = scheduler.schedule({
+      key: "same",
+      hostKey: "host",
+      priority: "visible",
+      run: async () => "fresh",
+    });
+    await expect(second.promise).resolves.toBe("fresh");
+    stale.resolve("stale");
+    await turn();
+    expect(scheduler.stats.keys).toBe(0);
+  });
 });

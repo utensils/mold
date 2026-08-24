@@ -2,12 +2,13 @@ import type { GalleryImage, ModelEntry, ServerCapabilities } from "../lib/api/ty
 import type { MobileGalleryImage } from "./libraryOrganization";
 
 const DB_NAME = "mold-mobile-gallery-cache";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const GALLERIES_STORE = "galleries";
 const MEDIA_STORE = "media";
 const PRESENTATIONS_STORE = "host-presentations";
 const MAX_PRINTS_PER_HOST = 500;
 const MAX_THUMBNAIL_RECORDS = 320;
+const MAX_THUMBNAIL_BYTES = 64 * 1024 * 1024;
 const mediaMutationVersions = new Map<string, number>();
 const hostMutationVersions = new Map<string, number>();
 
@@ -43,15 +44,27 @@ interface CachedMediaRecord {
   cachedAt: number;
   bytes: ArrayBuffer;
   mimeType: string;
+  size: number;
 }
 
 function mediaKey(hostId: string, filename: string, kind: MediaKind): string {
   return `${hostId}\u0000${kind}\u0000${filename}`;
 }
 
+let databaseFactory: IDBFactory | null = null;
+let databasePromise: Promise<IDBDatabase | null> | null = null;
+let openDatabase: IDBDatabase | null = null;
+
 function openDb(): Promise<IDBDatabase | null> {
   if (typeof indexedDB === "undefined") return Promise.resolve(null);
-  return new Promise((resolve) => {
+  if (databaseFactory !== indexedDB) {
+    openDatabase?.close();
+    openDatabase = null;
+    databasePromise = null;
+    databaseFactory = indexedDB;
+  }
+  if (databasePromise) return databasePromise;
+  databasePromise = new Promise((resolve) => {
     let settled = false;
     const finish = (db: IDBDatabase | null) => {
       if (settled) {
@@ -85,10 +98,25 @@ function openDb(): Promise<IDBDatabase | null> {
         db.createObjectStore(PRESENTATIONS_STORE, { keyPath: "hostId" });
       }
     };
-    request.onsuccess = () => finish(request.result);
-    request.onerror = () => finish(null);
-    request.onblocked = () => finish(null);
+    request.onsuccess = () => {
+      openDatabase = request.result;
+      openDatabase.onversionchange = () => {
+        openDatabase?.close();
+        openDatabase = null;
+        databasePromise = null;
+      };
+      finish(request.result);
+    };
+    request.onerror = () => {
+      databasePromise = null;
+      finish(null);
+    };
+    request.onblocked = () => {
+      databasePromise = null;
+      finish(null);
+    };
   });
+  return databasePromise;
 }
 
 async function requestFromStore<T>(
@@ -103,7 +131,6 @@ async function requestFromStore<T>(
     const finish = (value: T | null) => {
       if (settled) return;
       settled = true;
-      db.close();
       resolve(value);
     };
     try {
@@ -207,6 +234,7 @@ export async function storeCachedGalleryMedia(
           cachedAt: Date.now(),
           bytes,
           mimeType: blob.type,
+          size: bytes.byteLength,
         })
       : store.get(key),
   );
@@ -220,16 +248,24 @@ export async function pruneCachedGalleryMedia(): Promise<void> {
     const finish = () => {
       if (settled) return;
       settled = true;
-      db.close();
       resolve();
     };
     try {
       const transaction = db.transaction(MEDIA_STORE, "readwrite");
       const store = transaction.objectStore(MEDIA_STORE);
-      const request = store.index("cachedAt").getAllKeys();
+      const request = store.index("cachedAt").openCursor(null, "prev");
+      let retainedRecords = 0;
+      let retainedBytes = 0;
       request.onsuccess = () => {
-        const excess = request.result.length - MAX_THUMBNAIL_RECORDS;
-        for (const key of request.result.slice(0, Math.max(0, excess))) store.delete(key);
+        const cursor = request.result;
+        if (!cursor) return;
+        const record = cursor.value as CachedMediaRecord;
+        retainedRecords += 1;
+        retainedBytes += record.size ?? record.bytes?.byteLength ?? 0;
+        if (retainedRecords > MAX_THUMBNAIL_RECORDS || retainedBytes > MAX_THUMBNAIL_BYTES) {
+          cursor.delete();
+        }
+        cursor.continue();
       };
       request.onerror = finish;
       transaction.oncomplete = finish;
@@ -273,16 +309,9 @@ export async function removeCachedGalleryPrints(
       for (const { hostId, filename } of removed) {
         store.delete(mediaKey(hostId, filename, "thumbnail"));
       }
-      transaction.oncomplete = () => {
-        db.close();
-        resolve();
-      };
-      transaction.onerror = transaction.onabort = () => {
-        db.close();
-        resolve();
-      };
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = transaction.onabort = () => resolve();
     } catch {
-      db.close();
       resolve();
     }
   });
@@ -325,7 +354,6 @@ export async function clearCachedGalleryHosts(hostIds: readonly string[]): Promi
     const finish = () => {
       if (settled) return;
       settled = true;
-      db.close();
       resolve();
     };
     try {

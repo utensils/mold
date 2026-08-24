@@ -16,8 +16,17 @@ const props = withDefaults(
     target?: ApiTarget | null;
     /** Blob-cache bucket, usually the origin host id. */
     cacheKey?: string | null;
+    mediaVersion?: string | null;
   }>(),
-  { video: false, audio: false, alt: "", controls: false, target: null, cacheKey: null },
+  {
+    video: false,
+    audio: false,
+    alt: "",
+    controls: false,
+    target: null,
+    cacheKey: null,
+    mediaVersion: null,
+  },
 );
 
 const src = ref<string | null>(null);
@@ -41,6 +50,7 @@ async function load() {
       const options = {
         ...(props.target ? { target: props.target } : {}),
         ...(props.cacheKey ? { cacheKey: props.cacheKey } : {}),
+        ...(props.mediaVersion ? { mediaVersion: props.mediaVersion } : {}),
       };
       // Thumbnails and full-size stills/audio go native-first in the desktop
       // app (#1132's rationale: a media element pointed straight at a host
@@ -52,7 +62,7 @@ async function load() {
       const url = thumbnail
         ? await (() => {
             const handle = galleryThumbnailScheduler.schedule({
-              key: `${props.cacheKey ?? "primary"}|${props.path}|${props.target?.baseUrl ?? "primary"}|${props.target?.apiKey ?? ""}`,
+              key: `${props.cacheKey ?? "primary"}|${props.path}|${props.mediaVersion ?? "legacy"}|${props.target?.baseUrl ?? "primary"}|${props.target?.apiKey ?? ""}`,
               hostKey: props.cacheKey ?? props.target?.baseUrl ?? "primary",
               priority: "visible",
               run: (signal) => authedMediaUrl(props.path, { ...options, signal }),
@@ -83,7 +93,13 @@ async function load() {
 // a double-click on every remote tile — the lightbox never opened for
 // remote-only prints. The multi-source form compares each value on its own.
 watch(
-  [() => props.path, () => props.cacheKey, () => props.target?.baseUrl, () => props.target?.apiKey],
+  [
+    () => props.path,
+    () => props.cacheKey,
+    () => props.mediaVersion,
+    () => props.target?.baseUrl,
+    () => props.target?.apiKey,
+  ],
   load,
 );
 onMounted(load);

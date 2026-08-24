@@ -21,12 +21,21 @@ import { ORIGIN_HOST_ID, type HostEntry } from "./hostRegistry";
 
 /** Blob object-URL cache, keyed by `${hostId}|${path}`. Ticket URLs are not
  *  cached — they are cheap to mint and expire, and the lightbox renews on open. */
-const cache = new Map<string, Promise<string>>();
+interface CachedThumbnail {
+  url: Promise<string>;
+  bytes: number | null;
+  settled: boolean;
+}
+
+const THUMBNAIL_CACHE_ENTRIES = 512;
+const THUMBNAIL_CACHE_BYTES = 64 * 1024 * 1024;
+const cache = new Map<string, CachedThumbnail>();
 
 const keyOf = (hostId: string, path: string) => `${hostId}|${path}`;
 
-export function thumbnailPath(filename: string): string {
-  return `/api/gallery/thumbnail/${encodeURIComponent(filename)}`;
+export function thumbnailPath(filename: string, mediaVersion?: string): string {
+  const path = `/api/gallery/thumbnail/${encodeURIComponent(filename)}`;
+  return mediaVersion ? `${path}?v=${encodeURIComponent(mediaVersion)}` : path;
 }
 
 export function mediaPath(filename: string): string {
@@ -61,13 +70,17 @@ export function needsAuthedMedia(host: HostEntry): boolean {
 async function fetchAuthedObjectUrl(
   host: HostEntry,
   path: string,
-): Promise<string> {
+  signal?: AbortSignal,
+): Promise<{ url: string; bytes: number }> {
   const res = await fetch(`${hostMediaBase(host)}${path}`, {
     headers: authHeaders(host),
+    signal,
   });
   if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`);
   const blob = await res.blob();
-  return URL.createObjectURL(blob);
+  if (signal?.aborted)
+    throw new DOMException("Thumbnail cancelled", "AbortError");
+  return { url: URL.createObjectURL(blob), bytes: blob.size };
 }
 
 /** Fetch raw bytes for a gallery path with the host's key — used by
@@ -92,19 +105,57 @@ export async function fetchGalleryBlob(
 export function resolveThumbnailSrc(
   host: HostEntry,
   filename: string,
+  options: { signal?: AbortSignal; mediaVersion?: string } = {},
 ): Promise<string> {
-  const path = thumbnailPath(filename);
+  const path = thumbnailPath(filename, options.mediaVersion);
   if (!needsAuthedMedia(host)) {
-    return Promise.resolve(directThumbnailUrl(host, filename));
+    return Promise.resolve(`${hostMediaBase(host)}${path}`);
   }
   const key = keyOf(host.id, path);
-  let url = cache.get(key);
-  if (!url) {
-    url = fetchAuthedObjectUrl(host, path);
-    cache.set(key, url);
-    url.catch(() => cache.delete(key));
+  let cached = cache.get(key);
+  if (!cached) {
+    const entry: CachedThumbnail = {
+      url: Promise.resolve(""),
+      bytes: null,
+      settled: false,
+    };
+    entry.url = fetchAuthedObjectUrl(host, path, options.signal).then(
+      ({ url, bytes }) => {
+        entry.bytes = bytes;
+        entry.settled = true;
+        if (cache.get(key) !== entry) URL.revokeObjectURL(url);
+        else trimThumbnailCache();
+        return url;
+      },
+    );
+    cached = entry;
+    cache.set(key, entry);
+    trimThumbnailCache();
+    entry.url.catch(() => {
+      entry.settled = true;
+      if (cache.get(key) === entry) cache.delete(key);
+    });
+  } else {
+    cache.delete(key);
+    cache.set(key, cached);
   }
-  return url;
+  return cached.url;
+}
+
+function trimThumbnailCache(): void {
+  let retainedBytes = 0;
+  for (const entry of cache.values()) retainedBytes += entry.bytes ?? 0;
+  while (
+    cache.size > THUMBNAIL_CACHE_ENTRIES ||
+    retainedBytes > THUMBNAIL_CACHE_BYTES
+  ) {
+    const oldest = [...cache].find(([, entry]) => entry.settled);
+    if (!oldest) break;
+    const [key, entry] = oldest;
+    cache.delete(key);
+    retainedBytes -= entry.bytes ?? 0;
+    void entry.url.then(revokeIfObjectUrl).catch(() => {});
+  }
 }
 
 interface GalleryMediaTicket {
@@ -160,7 +211,7 @@ export function evictHostMedia(hostId: string): void {
   for (const [key, cached] of [...cache]) {
     if (!key.startsWith(prefix)) continue;
     cache.delete(key);
-    void cached.then((u) => revokeIfObjectUrl(u)).catch(() => {});
+    void cached.url.then((u) => revokeIfObjectUrl(u)).catch(() => {});
   }
 }
 
@@ -170,5 +221,8 @@ function revokeIfObjectUrl(url: string): void {
 
 /** Test hook — clear the object-URL cache without touching the DOM. */
 export function __resetGalleryMediaForTests(): void {
+  for (const cached of cache.values()) {
+    void cached.url.then(revokeIfObjectUrl).catch(() => {});
+  }
   cache.clear();
 }

@@ -57,6 +57,8 @@ export interface AuthedMediaOptions {
   target?: ApiTarget;
   /** Cache bucket, usually the origin host id; defaults to "primary". */
   cacheKey?: string;
+  /** Opaque content identity; timestamp:size until hosts advertise media_version. */
+  mediaVersion?: string;
   /** Cancels queued/native transfer and skips decode/blob work when stale. */
   signal?: AbortSignal;
 }
@@ -76,8 +78,8 @@ export interface StreamableMediaOptions extends AuthedMediaOptions {
   video?: boolean;
 }
 
-const keyOf = (path: string, target: ApiTarget, cacheKey?: string) =>
-  `${cacheKey ?? "primary"}|${path}|${JSON.stringify([target.baseUrl, target.apiKey])}`;
+const keyOf = (path: string, target: ApiTarget, cacheKey?: string, mediaVersion?: string) =>
+  `${cacheKey ?? "primary"}|${path}|${mediaVersion ?? "legacy"}|${JSON.stringify([target.baseUrl, target.apiKey])}`;
 
 export function authedMediaUrl(path: string, opts: AuthedMediaOptions = {}): Promise<string> {
   if (path.startsWith("mold-local:")) return Promise.resolve(path);
@@ -86,7 +88,7 @@ export function authedMediaUrl(path: string, opts: AuthedMediaOptions = {}): Pro
   // Target identity is part of the cache authority. A reconnect may retain
   // the host bucket and path while changing URL or credentials; an in-flight
   // object URL from the old route must never satisfy the new one.
-  const key = keyOf(path, effectiveTarget, opts.cacheKey);
+  const key = keyOf(path, effectiveTarget, opts.cacheKey, opts.mediaVersion);
   let cached = cache.get(key);
   if (!cached) {
     const thumbnailPrefix = "/api/gallery/thumbnail/";

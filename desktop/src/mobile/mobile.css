@@ -2584,6 +2584,18 @@ button:disabled {
   gap: 6px;
 }
 
+.gallery-grid-window {
+  position: relative;
+  width: 100%;
+}
+
+.gallery-grid-virtual {
+  position: absolute;
+  inset: 0 0 auto;
+  width: 100%;
+  will-change: transform;
+}
+
 .gallery-grid.is-selecting .gallery-item {
   /* WebKit keeps vertical pans native until the pointer handler sees
      horizontal/diagonal drag-selection intent. */
