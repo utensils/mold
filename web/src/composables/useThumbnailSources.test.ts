@@ -26,14 +26,26 @@ async function settle(): Promise<void> {
   await Promise.resolve();
 }
 
-function entry(mediaVersion: string, filename = "same.png"): GalleryImage {
+function entry(
+  mediaVersion: string,
+  filename = "same.png",
+): GalleryImage & { hostId: string } {
   return {
     filename,
+    metadata: {
+      prompt: "test",
+      model: "test",
+      seed: 1,
+      steps: 1,
+      guidance: 1,
+      width: 1,
+      height: 1,
+      version: "test",
+    },
     timestamp: 1,
-    media_type: "image",
     media_version: mediaVersion,
     hostId: "remote",
-  } as GalleryImage;
+  };
 }
 
 describe("useThumbnailSources", () => {
