@@ -265,7 +265,7 @@ describe("resolveOutputShape", () => {
     ).toEqual({ width: 1344, height: 768 });
   });
 
-  it("offers every reviewed compact H3 canvas, and only those", () => {
+  it("offers the compact H3 recommendations and admits the whole rule", () => {
     const compact = modelFor("minimax-h3-fl2va:comfy-pruned-int8");
     const input: OutputShapeInput = {
       model: compact,
@@ -275,24 +275,40 @@ describe("resolveOutputShape", () => {
     };
     const result = resolveOutputShape(input);
 
-    // 1344x768 reduces to 7:4 and lands inside the 16:9 family chip; 768x768
-    // is the square chip. Both are qualified campaigns, and nothing else is.
+    // The compact stack is a RANGE with a recommended ladder now, so the
+    // chips span landscape, square, and portrait rather than the two
+    // canvases a campaign happened to run.
     expect(result.selectedFamilyId).toBe("16:9");
-    expect(result.families.map((family) => family.id)).toEqual(["1:1", "16:9"]);
+    expect(result.families.map((family) => family.id)).toEqual([
+      "1:1",
+      "16:9",
+      "9:16",
+    ]);
     expect(sizeForFamily("16:9", { ...input, intent: "manual" })).toEqual({
       width: 1344,
       height: 768,
     });
     expect(sizeForFamily("1:1", { ...input, intent: "manual" })).toEqual({
+      width: 960,
+      height: 960,
+    });
+    expect(sizeForFamily("9:16", { ...input, intent: "manual" })).toEqual({
       width: 768,
-      height: 768,
+      height: 1344,
     });
 
-    // The 16:9 pill is the model default; the square one is not.
+    // The 16:9 ladder carries every recommended landscape canvas, and only
+    // the model default is marked.
     expect(result.sizes.map((size) => [size.width, size.height])).toEqual([
+      [1024, 576],
+      [1280, 704],
       [1344, 768],
     ]);
-    expect(result.sizes[0]!.mark).toBe("Default");
+    expect(result.sizes.map((size) => size.mark)).toEqual([
+      null,
+      null,
+      "Default",
+    ]);
     const square = resolveOutputShape({
       ...input,
       width: 768,
@@ -302,19 +318,33 @@ describe("resolveOutputShape", () => {
     expect(square.selectedFamilyId).toBe("1:1");
     expect(square.sizes.map((size) => [size.width, size.height])).toEqual([
       [768, 768],
+      [960, 960],
     ]);
-    expect(square.sizes[0]!.mark).toBe(null);
 
-    // A canonical upstream resolver output nobody qualified stays refused.
+    // A canonical upstream resolver output nobody ran a campaign on is now
+    // admitted by the rule, and so is an ordinary aligned canvas; only a
+    // shape outside the rule is refused.
     const recipe = compact.generation_profile!.recipes[0]!;
-    expect(resolutionProfileError(1024, 768, recipe.resolution)).toBeTruthy();
     for (const [width, height] of [
       [1344, 768],
       [768, 768],
+      [1024, 768],
+      [1024, 576],
+      [512, 1984],
     ]) {
       expect(
         resolutionProfileError(width!, height!, recipe.resolution),
       ).toBeNull();
+    }
+    // Off the 32 stride, over the area ceiling, and under the axis floor.
+    for (const [width, height] of [
+      [1000, 600],
+      [1056, 992],
+      [224, 896],
+    ]) {
+      expect(
+        resolutionProfileError(width!, height!, recipe.resolution),
+      ).toBeTruthy();
     }
   });
 

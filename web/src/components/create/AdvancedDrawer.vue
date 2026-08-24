@@ -82,7 +82,7 @@ import {
 import {
   isMinimaxH3Identity,
   MINIMAX_H3_MAX_FRAMES,
-  MINIMAX_H3_REVIEWED_COMPACT_FRAMES,
+  MINIMAX_H3_MIN_FRAMES,
 } from "@studio/lib/minimaxH3Authoring";
 import {
   effectiveGenerationRecipe,
@@ -1045,7 +1045,7 @@ function setSequenceCameraMode(mode: string) {
             <p class="adv__hint">
               Frames must follow {{ frameGridLabel
               }}<template v-if="h3Family"
-                >, from {{ MINIMAX_H3_REVIEWED_COMPACT_FRAMES }} through
+                >, from {{ MINIMAX_H3_MIN_FRAMES }} through
                 {{ MINIMAX_H3_MAX_FRAMES }}</template
               >.
             </p>

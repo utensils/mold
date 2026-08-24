@@ -32,14 +32,15 @@ export {
 } from "./minimaxH3Identity";
 
 export const MINIMAX_H3_FIXED_FPS = 24;
-// Mirrors `mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES` — the exact clip
-// length the reviewed compact runtime renders, which every Studio surface
-// authors because runtime-unavailable official/NVFP4 tags are filtered from
-// Create. Deliberately NOT `MIN_FRAMES`, whose 107 is the family floor derived
-// from the model card's 4-second minimum: the two were one constant until they
-// were separated, and a compact request clamped to 107 is one the runtime
-// refuses.
+// Mirrors `mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES` — the compact
+// stack's DEFAULT clip length, and only that. It was the exact length the
+// runtime rendered, because the runtime envelope validated `frames` by
+// equality; the envelope is minted per request now and a compact tag takes
+// the family grid, so this seeds a form rather than gating one.
 export const MINIMAX_H3_REVIEWED_COMPACT_FRAMES = 124;
+// Mirrors `mold_core::minimax_h3::MIN_FRAMES` — the family floor, derived
+// from the model card's 4-second minimum at the fixed 24 fps.
+export const MINIMAX_H3_MIN_FRAMES = 107;
 // Mirrors `mold_core::minimax_h3::MAX_FRAMES`. 345, not 362: the next grid
 // value is 15.083 s at the family's fixed 24 fps, which the diffusers path
 // rejects. This is the fallback for a server that does not advertise its own
@@ -47,6 +48,12 @@ export const MINIMAX_H3_REVIEWED_COMPACT_FRAMES = 124;
 export const MINIMAX_H3_MAX_FRAMES = 345;
 export const MINIMAX_H3_FRAME_STEP = 17;
 export const MINIMAX_H3_FRAME_OFFSET = 5;
+// Mirrors `mold_core::minimax_h3::COMPACT_MIN_STEPS` /
+// `COMPACT_MAX_STEPS` — the base compact tag's step range. A reviewed Turbo
+// tier keeps its distilled adapter's exact count instead
+// (`MINIMAX_H3_REVIEWED_FL2VA_STEPS`).
+export const MINIMAX_H3_COMPACT_MIN_STEPS = 2;
+export const MINIMAX_H3_COMPACT_MAX_STEPS = 50;
 export const MINIMAX_H3_MAX_REFERENCES = 12;
 export const MINIMAX_H3_MAX_REFERENCE_IMAGES = 9;
 export const MINIMAX_H3_MAX_REFERENCE_VIDEOS = 3;
@@ -352,7 +359,7 @@ export function minimaxH3AuthoringCapabilities(
     task,
     runtimeAvailable: model.runtime_available !== false && !restricted,
     fixedFps: MINIMAX_H3_FIXED_FPS,
-    minFrames: MINIMAX_H3_REVIEWED_COMPACT_FRAMES,
+    minFrames: MINIMAX_H3_MIN_FRAMES,
     maxFrames: MINIMAX_H3_MAX_FRAMES,
     frameStep: MINIMAX_H3_FRAME_STEP,
     frameOffset: MINIMAX_H3_FRAME_OFFSET,
@@ -629,10 +636,14 @@ export function serializeMinimaxH3Authoring<T extends H3Request>(
   if (!isMinimaxH3Identity(family, model)) return { ...request };
   const task = minimaxH3TaskForModel(model);
 
+  // Snap onto the family grid and clamp to the family bounds. The floor is
+  // `MIN_FRAMES`, not the default clip length: a compact tag renders the whole
+  // `17n+5` range now, so clamping up to 124 would silently lengthen a clip
+  // the user asked to be shorter.
   const frames = Math.min(
     MINIMAX_H3_MAX_FRAMES,
     Math.max(
-      MINIMAX_H3_REVIEWED_COMPACT_FRAMES,
+      MINIMAX_H3_MIN_FRAMES,
       MINIMAX_H3_FRAME_OFFSET +
         Math.round(
           (Number(request.frames ?? MINIMAX_H3_REVIEWED_COMPACT_FRAMES) -
