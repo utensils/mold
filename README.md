@@ -108,7 +108,10 @@ redistribution — with no separate acceptance step; review the linked terms for
 your use. The reviewed FL2VA Turbo distillations are ordinary model tags
 (`minimax-h3-fl2va:comfy-pruned-int8-turbo-8step` and
 `…-turbo-4step-768p`) that pull the same compact stack plus one pinned LoRA
-adapter and render at their tier's fixed step count. The compact NVFP4
+adapter and render at their tier's fixed step count. The compact tags render
+any 32-aligned canvas up to `1344x768`'s pixel count, 107-345 frames at 24 fps,
+and 2-50 sampler steps; the memory estimate — not a pinned list of shapes —
+decides what a given card can hold. The compact NVFP4
 transformer tags (`minimax-h3-fl2va:comfy-pruned-nvfp4` and
 `minimax-h3-ref2va:comfy-pruned-nvfp4`) download and verify but have no
 runtime yet. Which H3 models a given build can actually *run* is advertised

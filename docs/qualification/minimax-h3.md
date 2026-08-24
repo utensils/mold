@@ -360,11 +360,13 @@ FL2VA partition. Ordinary builds omit the field, while Ref2VA remains absent.
 The ordinary model list carries two acquisition rows with their upstream source
 and download accounting. The authenticated presentation boundary may replace
 the FL2VA acquisition row with one exact executable row, but only when all five
-referenced component groups are installed. Its generation profile fixes the
-canvas to a qualified bucket — 1344x768 or 768x768, see
-[Qualified canvases](#qualified-canvases) — with 1344x768 the default, and
-fixes 124 frames at 24 fps, 21 terminal-inclusive grid points, batch one, MP4
-delivery, and a required first-frame source. Web, desktop, and iPhone remove the family-wide denial only
+referenced component groups are installed. Its generation profile bounds the
+canvas by the compact canvas RULE — see
+[Qualified canvases](#qualified-canvases) — with 1344x768 the default, offers
+the family frame grid (107-345 on `17n+5`) at 24 fps with 124 the default and
+2-50 terminal-inclusive grid points with 21 the default, and fixes batch one,
+MP4 delivery, and a required first-frame source. A reviewed Turbo tag keeps
+its distilled adapter's exact step count. Web, desktop, and iPhone remove the family-wide denial only
 when that exact model name and request envelope agree with the complete
 additive component graph. A missing component, widened axis, absent first
 frame, supplied last frame, unavailable MP4 encoder, or legacy/partial
@@ -383,12 +385,16 @@ executing ELF device/inode/size/SHA-256, domain-separated launch argument and
 sorted-environment hashes, and live CUDA driver plus compiled toolkit
 versions. Raw arguments and environment values are not serialized. Version 5
 invalidates the earlier one-forward smoke envelope and requires the exact
-compact-quality route selected by the released workflow: a qualified canvas
-(1344×768 or 768×768 — the row ceilings below are the larger canvas's and
-cover the smaller one with slack), 124 frames at 24 fps, batch one, exactly 21 terminal-inclusive grid points (20 transformer
-evaluations), one first-frame FL2VA endpoint, and explicit ceilings for Qwen
-text/vision, condition visual, target video/audio, and total packed rows copied
-from the fresh structured observation. Admission checks that envelope after
+compact-quality route selected by the released workflow: a canvas the compact
+rule admits, a clip length on the family grid at 24 fps, batch one,
+a step count inside the base tier's range or a Turbo tier's exact count,
+one first-frame FL2VA endpoint, and explicit ceilings for Qwen
+text/vision, condition visual, target video/audio, and total packed rows. The
+conditioning ceilings are copied from the fresh structured observation and stay
+the measured canvas's — the area ceiling makes them ceilings for every admitted
+canvas — while the generated-side rows are derived for the request's own shape
+through `mold_core::minimax_h3`'s packed-row functions, the same authority
+admission charges against. Admission checks that envelope after
 source preprocessing, the prepared attempt checks it again, and final dispatch
 repeats the check before any model execution. The candidate
 producer requires its own embedded source SHA and
@@ -592,19 +598,40 @@ before a real run can be admitted.
 
 ## Qualified canvases
 
-`mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES` is the single authority for
-which canvases the reviewed compact FL2VA runtime admits. Everything derives
-from it: the generation profile's buckets and their ceilings, the private
-bridge's advertised `recommended_dimensions`, source fitting, and
-`private_server.rs`'s own `validate_shape`. A campaign that qualifies another
-canvas appends one row there and nothing else moves.
+**What is measured and what is admitted are now different things.**
 
-Model-valid is not Mold-qualified. The checkpoint accepts any 32-aligned canvas
+`mold_core::minimax_h3::is_admitted_compact_canvas` is the single authority for
+which canvases the compact FL2VA runtime admits: both axes a multiple of 32,
+each at least 256 px, at most `COMPACT_MAX_PIXELS` = 1,032,192 pixels in total,
+and aspect inside the family's 1:4..4:1 bounds. The clip length is the family
+grid (107 to 345 frames on `17n+5` at 24 fps) and the base tag's step count is
+a 2..=50 range. Everything derives from those: the generation profile's range
+and ceilings, the private bridge's advertised bounds, source fitting, and
+`private_server.rs`'s own `validate_shape`.
+
+`REVIEWED_COMPACT_CANVASES` survives as the RECOMMENDED preset list, and the
+two canvases below are its evidence-backed entries.
+
+**The shapes in the table are the only ones MEASURED.** Both hardware
+campaigns ran at 1344x768 or 768x768 and 124 frames; the memory bounds in
+`public_runtime_bounds_for_shape` are the 1344x768 x 124 observations. Every
+other admitted shape is priced by SCALING those observations — the denoise
+workspaces linearly in packed rows, the audio decode linearly in the clip
+length, the video decode and condition encode linearly in the canvas area —
+and is therefore **admitted by a derived estimate rather than by measurement**.
+The scaling is exact at the measured shape (a byte-exact regression test pins
+it), and it is an interpolation rather than an extrapolation for every canvas,
+because the area ceiling IS the measured canvas's area. It is an
+extrapolation for a clip longer than 124 frames, which is why the derived
+device floor grows steeply there (about 24.3 GB at 345 frames against 9.7 GB at
+the default) and refuses a small card with numbers.
+
+Model-valid is not Mold-measured. The checkpoint accepts any 32-aligned canvas
 between 1:4 and 4:1 (ComfyUI's `nodes_minimax_h3.py:99-100` declares
 `min=32, max=MAX_RESOLUTION, step=32`, and 1344x768 is a *default* there), and
 `recommended_dimensions` faithfully ports the upstream resolver over that whole
-range. What is listed below is the strictly smaller set for which a real
-hardware campaign exists.
+range. Mold's own area ceiling is narrower than the checkpoint's, because that
+is where the measurement stops.
 
 Every row below ran on hal9000 — RTX 4090 24 GB, 62 GB host RAM, CUDA SM89 —
 at 124 frames / 24 fps.
@@ -699,25 +726,43 @@ a fresh process:
 Both tiers therefore render this canvas correctly and well inside a 24 GB
 card, and the Turbo tier's advantage is time alone.
 
-### Slack, deliberately
+### What is derived, and how
 
-Two things are NOT re-derived per canvas, and both are conservative in the
-same direction:
+Since the canvas and the clip length became rules, the envelope and the memory
+bounds are minted for the request rather than transcribed. Three groups:
 
-1. **Row ceilings.** `REVIEWED_MAX_TARGET_VIDEO_ROWS` and the packed total
-   stay the 1344x768 figures. Every row field on the envelope is a maximum
-   (`row_cap_mismatches` compares with `<=`), so 768x768 — which packs 21,312
-   target video rows against the ceiling's 37,296 — is admitted with slack.
-2. **Memory bounds.** `public_runtime_bounds` keeps #827's 1344x768
-   measurements, so `precheck_private_h3_admission_capacity`'s device and host
-   floors are the larger canvas's. A 768x768 render is therefore charged for
-   more memory than it uses; the campaign above measured 7,568 MiB against a
-   1344x768 grant sized for ~14.4 GB.
+1. **Conditioning row ceilings** — `REVIEWED_MAX_QWEN_OUTPUT_TEXT_ROWS`,
+   `REVIEWED_MAX_QWEN_VISION_ROWS`, `REVIEWED_MAX_CONDITION_VISUAL_ROWS` — stay
+   the measured canvas's figures and are genuinely ceilings for every admitted
+   canvas. One packed row is a 32x32 pixel cell, so a canvas packs
+   `pixels / 1024` rows per latent frame, and the compact rule's area ceiling
+   IS the measured canvas's area: no admitted canvas can exceed 1,008 rows.
+   `mold_core`'s
+   `no_admitted_canvas_packs_more_rows_per_latent_than_the_default` pins that
+   exhaustively. `row_cap_mismatches` compares with `<=`, so a smaller canvas is
+   admitted with slack.
+2. **Generated-side rows** — target video, target audio, and the packed total —
+   are DERIVED for the request's own shape through
+   `mold_core::minimax_h3`'s packed-row functions, which is the same authority
+   `h3_admission` charges against. Before this, the envelope transcribed them,
+   which was invisible only while both axes were pinned.
+3. **Memory bounds** are `public_runtime_bounds_for_shape(canvas, frames)`:
+   #827/#1245's observations scaled by the quantity each term is a function of
+   — the denoise workspaces by packed rows, the audio decode by clip length,
+   the video decode and condition encode by canvas area. Steps scale nothing;
+   a step is time, and each evaluation reuses the same workspaces. The scaling
+   passes through the same margin-and-grid policy the measurement does, so at
+   the measured shape every value is byte-identical to the pre-scaling record
+   (`the_public_bounds_scale_with_the_request_and_reproduce_the_measurement`).
 
-The effect is that a host which can run 1344x768 can run 768x768, and a host
-that is refused for 1344x768 is also refused for 768x768 even though it might
-have fit. That is the safe direction, and tightening it would require its own
-per-canvas measurement campaign for every bound.
+The 768x768 campaign above measured 7,568 MiB, and the scaled grant for that
+canvas is now proportionally smaller rather than the larger canvas's — so a
+host that is refused 1344x768 may still run 768x768. In the other direction a
+345-frame clip asks for a ~24.3 GB device floor against 9.7 GB at the default,
+and is refused on a 24 GB card with those numbers rather than by a rule.
+
+Only the two rows in the table are MEASURED. Every other shape is admitted on
+a derived estimate.
 
 ## Current evidence status
 

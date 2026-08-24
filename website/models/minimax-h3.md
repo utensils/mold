@@ -185,12 +185,14 @@ The initial compact CUDA implementation supports this request profile:
 
 - an SM89 CUDA GPU with sufficient VRAM and the H3 attention/runtime operators
   enabled (an Apple Silicon Metal GPU is admitted but unqualified — see above)
-- one of the two qualified canvases — `1344x768` (default) or `768x768` —
-  batch size 1
-- exactly 124 frames at 24 fps
-- exactly 21 terminal-inclusive sampler grid points (20 model evaluations) for
-  the base model; a reviewed Turbo tag instead requires exactly its tier's own
-  count (9 for `-turbo-8step`, 5 for `-turbo-4step-768p`)
+- any canvas the compact rule admits — both axes a multiple of 32, each at
+  least 256 px, at most 1,032,192 pixels in total (the area of `1344x768`),
+  aspect between 1:4 and 4:1 — batch size 1
+- 107 to 345 frames on the `17n+5` grid at 24 fps (124 is the default)
+- 2 to 50 terminal-inclusive sampler grid points for the base model (21 is the
+  default); a reviewed Turbo tag instead requires exactly its tier's own count
+  (9 for `-turbo-8step`, 5 for `-turbo-4step-768p`), because that count is the
+  distilled adapter's own schedule length
 - one required first-frame image and no last-frame endpoint
 - MP4 output with synchronized generated audio
 - a prompt of roughly 1,000 tokens or fewer: the reviewed conditioner sequence
@@ -198,40 +200,51 @@ The initial compact CUDA implementation supports this request profile:
   take 1,014, and a longer prompt is refused immediately with its exact budget
   named rather than after artifact verification
 
-### Qualified canvases
+### Canvas and duration
 
-The checkpoint itself accepts any 32-aligned canvas between 1:4 and 4:1;
-`1344x768` is upstream's _default_, not its limit. Mold advertises the strictly
-smaller set for which it has real-hardware evidence:
+The checkpoint accepts any 32-aligned canvas between 1:4 and 4:1, and clip
+lengths from 107 to 345 frames. Mold admits that whole space and lets the
+memory estimate decide what actually fits, rather than pinning the shapes a
+hardware campaign happened to run.
 
-Measured on an RTX 4090 24 GB at 124 frames / 24 fps, wall clock from request
-to MP4 bytes on a cold process:
+The canvas rule is:
+
+- both axes a multiple of 32 (one packed row is a 32x32 pixel cell)
+- each axis at least 256 px
+- at most **1,032,192 pixels** in total — the area of `1344x768`, which is what
+  every memory measurement below was captured at, so a larger canvas would have
+  to be priced by extrapolation
+- aspect between 1:4 and 4:1
+
+`1344x768` and `768x768` remain the recommended defaults because they have real
+hardware evidence. Measured on an RTX 4090 24 GB at 124 frames / 24 fps, wall
+clock from request to MP4 bytes on a cold process:
 
 | Canvas     | Aspect | Base tier (21 steps) | `-turbo-8step` (9 steps) |
 | ---------- | ------ | -------------------- | ------------------------ |
 | `1344x768` | 7:4    | 1216 s, 10.8 GB VRAM | 759.5 s, 13.5-14.6 GB    |
 | `768x768`  | 1:1    | 937 s, 7.4 GB VRAM   | 664 s, 9.2 GB VRAM       |
 
-`768x768` renders 43% fewer pixels and is faster on both tiers, but it is
-admitted against the larger canvas's memory floors — so a host that is refused
-`1344x768` is refused `768x768` too, even though it might have fit. Both
-canvases share the reviewed 124-frame duration, step counts, and prompt budget.
+Every other shape is priced by scaling those measurements: the denoise
+workspaces with the packed sequence, the audio decode with the clip length, and
+the video decode with the canvas area. A long clip therefore costs real VRAM —
+345 frames at `1344x768` asks for a device floor of about 24.3 GB against 9.7 GB
+at the default — and a host that cannot supply it is refused with those numbers
+rather than by a rule.
+
 Note that a Turbo tag costs slightly _more_ VRAM than the base tier on the same
 canvas: it is the same compact stack plus a resident adapter, and the step
 count it moves buys time, not memory.
 
-When a first-frame image is attached without explicit `--width`/`--height`,
-the CLI and Discord builders submit the qualified canvas nearest the source's
-aspect ratio — a landscape source gets `1344x768`, a square or portrait one
-gets `768x768` — and the engine fits the frame internally. The free-form
-aspect-derived short-edge canvas applies only to the hidden official BF16
-reference.
+When a first-frame image is attached without explicit `--width`/`--height`, the
+CLI and Discord builders render the source's own aspect at the largest size the
+area ceiling allows — a 16:9 source gets `1312x736`, a square one `992x992` —
+and the engine fits the frame internally. The free-form aspect-derived
+short-edge canvas applies only to the hidden official BF16 reference.
 
-Every reviewed compact and Turbo tag advertises exactly this envelope, so
-Create on web, desktop, and iPhone offers those two canvases (as the 16:9 and
-1:1 shape chips) with the tier's step count and 124 frames already fixed, and
-an off-envelope request — `1024x768`, say, which the checkpoint would happily
-render — is refused at submission instead of after the model loads.
+Create on web, desktop, and iPhone offers the recommended canvases as shape
+chips and a live frame slider, and a request outside the rule is still refused
+at submission instead of after the model loads.
 
 Mold rejects rather than silently resizing, rerouting, changing steps, dropping
 the source image, or falling back to another backend. A downloaded checkpoint
