@@ -2671,22 +2671,62 @@ button:disabled {
   opacity: 0;
 }
 
-.gallery-thumbnail-pending {
+.mobile-media-placeholder {
   position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background:
+    radial-gradient(
+      circle at 28% 22%,
+      color-mix(in srgb, var(--safelight) 9%, transparent),
+      transparent 44%
+    ),
+    linear-gradient(145deg, var(--bench), color-mix(in srgb, var(--bench) 86%, var(--bath)));
+  box-shadow: inset 0 0 0 1px var(--edge);
   color: var(--ink-3);
-  font-family: var(--font-utility);
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: max-content;
-  height: max-content;
-  padding: 6px 10px;
-  border: 1px solid color-mix(in srgb, var(--ink-3) 22%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--color-print-surface) 78%, transparent);
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+}
+
+.mobile-media-placeholder::after {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    108deg,
+    transparent 28%,
+    color-mix(in srgb, var(--rebate) 8%, transparent) 48%,
+    transparent 68%
+  );
+  content: "";
+  opacity: 0;
+  transform: translateX(-70%);
+}
+
+.mobile-media-placeholder.is-loading::after {
+  opacity: 1;
+  animation: mobile-media-shimmer 1.8s ease-in-out infinite;
+}
+
+.mobile-media-placeholder svg {
+  position: relative;
+  z-index: 1;
+  width: clamp(28px, 28%, 52px);
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.35;
+}
+
+@keyframes mobile-media-shimmer {
+  to {
+    transform: translateX(70%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mobile-media-placeholder.is-loading::after {
+    animation: none;
+  }
 }
 
 .gallery-video-badge {
@@ -4627,6 +4667,7 @@ button:disabled {
 }
 
 .mobile-collection-cover {
+  position: relative;
   display: grid;
   width: 48px;
   height: 48px;

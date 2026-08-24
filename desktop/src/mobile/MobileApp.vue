@@ -64,6 +64,8 @@ import {
   collectionSlugResolver,
   displayTitle,
   planOrganizationFanout,
+  rememberSessionScroll,
+  sessionScrollPosition,
   tagKey,
   trashRetentionSummary,
   visibleTagCounts,
@@ -386,6 +388,7 @@ import MobileGenerateParameters from "./MobileGenerateParameters.vue";
 import MobileHostDetail from "./MobileHostDetail.vue";
 import MobileIdentityWell from "./MobileIdentityWell.vue";
 import MobileLibrarySheet from "./MobileLibrarySheet.vue";
+import MobileMediaPlaceholder from "./MobileMediaPlaceholder.vue";
 import MobileLoraControls from "./MobileLoraControls.vue";
 import MobilePromptTools from "./MobilePromptTools.vue";
 import MobileRemixReview, { type MobileRemixReviewVariant } from "./MobileRemixReview.vue";
@@ -571,6 +574,7 @@ const GALLERY_HOST_TIMEOUT_MS = 9_000;
 const GALLERY_THUMBNAIL_TIMEOUT_MS = 5_000;
 const GALLERY_THUMBNAIL_PLACEHOLDER = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
 const GALLERY_THUMBNAIL_RETRY_MAX_MS = 30_000;
+const MOBILE_LIBRARY_SCROLL_KEY = "mobile:library";
 const REUSE_PRESENTATION_TIMEOUT_MS = 9_000;
 const OUTPUT_OPTIONS = [
   { value: "single" as const, label: "One shot" },
@@ -925,7 +929,15 @@ const emptyingTrash = ref(false);
 const galleryRestoring = ref(false);
 const collectionMenuSlug = ref<string | null>(null);
 const collectionDeleteConfirmSlug = ref<string | null>(null);
-const collectionCovers = reactive<Record<string, string>>({});
+interface CollectionCoverState {
+  hostId: string;
+  filename: string;
+  url: string;
+  status: "loading" | "ready" | "error";
+}
+const collectionCovers = reactive<Record<string, CollectionCoverState>>({});
+const collectionCoverRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const collectionCoverRetryAttempts = new Map<string, number>();
 const librarySheet = ref<LibrarySheet | null>(null);
 const librarySheetInput = ref("");
 const librarySheetError = ref("");
@@ -966,6 +978,8 @@ let galleryRefreshRequested = false;
 let galleryRefreshDeferred = false;
 let galleryRefreshTask: Promise<void> | null = null;
 let galleryOperationTail: Promise<void> = Promise.resolve();
+let pendingLibraryScrollRestore: { top: number; left: number } | null = null;
+let libraryScrollRestoreTimer: ReturnType<typeof setTimeout> | null = null;
 const activeGalleryThumbnailControllers = new Set<AbortController>();
 const galleryThumbnailHandles = new Map<string, ThumbnailHandle<string>>();
 let visibleGalleryThumbnailKeys = new Set<string>();
@@ -5931,6 +5945,7 @@ async function loadMoreGalleryPage(): Promise<void> {
     galleryByThumbnailKey.set(galleryThumbnailRetryKey(print), print);
   }
   markMobileLibrarySeen(galleryCopies);
+  if (pendingLibraryScrollRestore) restoreMobileLibraryScroll();
 }
 
 async function reusePrint(print: GalleryPrint): Promise<void> {
@@ -6747,6 +6762,21 @@ const activeCollection = computed(
     libraryCollectionCards.value.find((card) => card.slug === libraryFilters.collectionSlug) ??
     null,
 );
+const collectionShelfVisible = computed(
+  () => tab.value === "gallery" && libraryScope.value === "collections" && !activeCollection.value,
+);
+watch(
+  [
+    collectionShelfVisible,
+    libraryCollectionCards,
+    () => connectedHosts.value.map((host) => `${host.id}:${host.online}:${host.baseUrl}`).join("|"),
+  ],
+  ([visible, cards]) => {
+    if (visible) syncCollectionCovers(cards as MobileCollectionCard[]);
+    else pauseCollectionCoverRetries();
+  },
+  { immediate: true },
+);
 const libraryScopeCounts = computed<Record<MobileLibraryScope, number>>(() => ({
   prints: libraryPrintCount.value,
   collections: libraryCollectionCards.value.length,
@@ -6947,28 +6977,136 @@ function closeCollection(): void {
   void requeueGallery();
 }
 
-/** Cover thumbnail for a collection card: a loaded tile when the cover print
- * is on screen, otherwise fetched once through the cached media pipeline. */
-function collectionCoverUrl(card: MobileCollectionCard): string {
-  const loaded = gallery.value.find((print) =>
-    (organizationOf(print)?.collections ?? []).includes(card.slug),
-  );
-  if (loaded) return loaded.thumbnailUrl;
-  const cached = collectionCovers[card.slug];
-  if (cached) return cached;
-  const cover = card.cover;
-  if (!cover) return "";
-  const host = connectedHosts.value.find((candidate) => candidate.id === cover.hostId);
-  if (!host) return "";
-  collectionCovers[card.slug] = "";
-  void thumbnailUrl(mobileHostTarget(host), mobileGalleryCacheKey(host), cover.filename)
-    .then((url) => {
-      collectionCovers[card.slug] = url;
-    })
-    .catch(() => {
+/** Collection cards own their cover URL. Grid URLs are revoked whenever scope
+ * paging resets, so borrowing one here produces a broken image after the user
+ * switches from Prints to Collections. */
+function syncCollectionCovers(cards: readonly MobileCollectionCard[]): void {
+  if (!collectionShelfVisible.value) return;
+  const liveSlugs = new Set(cards.map((card) => card.slug));
+  for (const [slug, state] of Object.entries(collectionCovers)) {
+    if (!liveSlugs.has(slug)) {
+      revokeObjectUrl(state.url);
+      const timer = collectionCoverRetryTimers.get(slug);
+      if (timer) clearTimeout(timer);
+      collectionCoverRetryTimers.delete(slug);
+      collectionCoverRetryAttempts.delete(slug);
+      delete collectionCovers[slug];
+    }
+  }
+
+  for (const card of cards) {
+    const cover = card.cover;
+    const prior = collectionCovers[card.slug];
+    if (!cover) {
+      if (prior) revokeObjectUrl(prior.url);
+      const timer = collectionCoverRetryTimers.get(card.slug);
+      if (timer) clearTimeout(timer);
+      collectionCoverRetryTimers.delete(card.slug);
+      collectionCoverRetryAttempts.delete(card.slug);
       delete collectionCovers[card.slug];
-    });
-  return "";
+      continue;
+    }
+    if (prior?.hostId === cover.hostId && prior.filename === cover.filename) {
+      if (prior.status !== "error" || collectionCoverRetryTimers.has(card.slug)) continue;
+    } else if (prior) {
+      revokeObjectUrl(prior.url);
+      const timer = collectionCoverRetryTimers.get(card.slug);
+      if (timer) clearTimeout(timer);
+      collectionCoverRetryTimers.delete(card.slug);
+      collectionCoverRetryAttempts.delete(card.slug);
+    }
+
+    const state: CollectionCoverState = {
+      hostId: cover.hostId,
+      filename: cover.filename,
+      url: "",
+      status: "loading",
+    };
+    collectionCovers[card.slug] = state;
+    const host = connectedHosts.value.find((candidate) => candidate.id === cover.hostId);
+    if (!host) {
+      state.status = "error";
+      continue;
+    }
+    void thumbnailUrl(mobileHostTarget(host), mobileGalleryCacheKey(host), cover.filename)
+      .then((url) => {
+        const current = collectionCovers[card.slug];
+        if (
+          !current ||
+          current.hostId !== cover.hostId ||
+          current.filename !== cover.filename ||
+          unmounted
+        ) {
+          revokeObjectUrl(url);
+          return;
+        }
+        current.url = url;
+        current.status = "ready";
+        const timer = collectionCoverRetryTimers.get(card.slug);
+        if (timer) clearTimeout(timer);
+        collectionCoverRetryTimers.delete(card.slug);
+        collectionCoverRetryAttempts.delete(card.slug);
+      })
+      .catch(() => {
+        const current = collectionCovers[card.slug];
+        if (current?.hostId === cover.hostId && current.filename === cover.filename) {
+          current.status = "error";
+          scheduleCollectionCoverRetry(card);
+        }
+      });
+  }
+}
+
+function scheduleCollectionCoverRetry(card: MobileCollectionCard): void {
+  if (
+    unmounted ||
+    !collectionShelfVisible.value ||
+    collectionCoverRetryTimers.has(card.slug) ||
+    !card.cover
+  )
+    return;
+  const attempt = collectionCoverRetryAttempts.get(card.slug) ?? 0;
+  collectionCoverRetryAttempts.set(card.slug, attempt + 1);
+  const timer = setTimeout(
+    () => {
+      collectionCoverRetryTimers.delete(card.slug);
+      const current = collectionCovers[card.slug];
+      if (
+        !current ||
+        current.status !== "error" ||
+        current.hostId !== card.cover?.hostId ||
+        current.filename !== card.cover.filename
+      ) {
+        return;
+      }
+      delete collectionCovers[card.slug];
+      syncCollectionCovers(libraryCollectionCards.value);
+    },
+    galleryThumbnailRetryDelay(card.cover.filename, attempt),
+  );
+  collectionCoverRetryTimers.set(card.slug, timer);
+}
+
+function pauseCollectionCoverRetries(): void {
+  for (const timer of collectionCoverRetryTimers.values()) clearTimeout(timer);
+  collectionCoverRetryTimers.clear();
+}
+
+function handleCollectionCoverError(card: MobileCollectionCard): void {
+  const state = collectionCovers[card.slug];
+  if (!state) return;
+  revokeObjectUrl(state.url);
+  state.url = "";
+  state.status = "error";
+  scheduleCollectionCoverRetry(card);
+}
+
+function handleGalleryThumbnailError(print: GalleryPrint): void {
+  if (print.thumbnailPending) return;
+  revokeObjectUrl(print.thumbnailUrl);
+  print.thumbnailUrl = GALLERY_THUMBNAIL_PLACEHOLDER;
+  print.thumbnailPending = true;
+  scheduleGalleryThumbnailRetry(print);
 }
 
 // ── Library organization: mutations ─────────────────────────────────────────
@@ -8184,14 +8322,55 @@ function reuseSelectedPrint(): void {
 }
 
 function openSettings(): void {
+  if (tab.value === "gallery" && mobileContent.value) {
+    rememberSessionScroll(MOBILE_LIBRARY_SCROLL_KEY, {
+      top: mobileContent.value.scrollTop,
+      left: mobileContent.value.scrollLeft,
+    });
+  }
   settingsOpen.value = true;
   void nextTick(() => settingsBackButton.value?.focus());
 }
 
 function closeSettings(): void {
   settingsOpen.value = false;
-  void nextTick(() => settingsButton.value?.focus());
+  void nextTick(() => {
+    if (tab.value === "gallery" && mobileContent.value) {
+      const position = sessionScrollPosition(MOBILE_LIBRARY_SCROLL_KEY);
+      mobileContent.value.scrollTop = position.top;
+      mobileContent.value.scrollLeft = position.left;
+    }
+    settingsButton.value?.focus();
+  });
 }
+
+/** Restore after the logical gallery index has been placed. The virtual grid
+ * keeps the complete scroll extent available even though it mounts only the
+ * visible rows, so deep offsets restore in one frame. */
+function restoreMobileLibraryScroll(): void {
+  const target = pendingLibraryScrollRestore;
+  if (!target || tab.value !== "gallery" || unmounted || libraryScrollRestoreTimer !== null) return;
+  libraryScrollRestoreTimer = setTimeout(() => {
+    libraryScrollRestoreTimer = null;
+    if (pendingLibraryScrollRestore !== target || tab.value !== "gallery" || unmounted) return;
+    const scroller = mobileContent.value;
+    if (!scroller) return;
+    const gridExpected = libraryScope.value !== "collections" || activeCollection.value !== null;
+    if (
+      galleryLoading.value ||
+      (gridExpected && gallery.value.length > 0 && !galleryGridSurface.value)
+    ) {
+      return;
+    }
+    scroller.scrollTop = target.top;
+    scroller.scrollLeft = target.left;
+    pendingLibraryScrollRestore = null;
+  }, 0);
+}
+
+watch([galleryLoading, galleryGridSurface, libraryScope, activeCollection], () => {
+  restoreMobileLibraryScroll();
+});
 
 function manageHostsFromSettings(): void {
   settingsOpen.value = false;
@@ -8283,19 +8462,27 @@ watch(
   { flush: "sync" },
 );
 
-watch(tab, (next) => {
-  // The primary destinations share this one WebView scroller. Reset it after
-  // Vue swaps the destination so a long Library cannot open Models, Machines,
-  // or Create at the same inherited offset.
-  void nextTick(() => {
-    if (!mobileContent.value) return;
-    mobileContent.value.scrollTop = 0;
-    mobileContent.value.scrollLeft = 0;
-  });
+watch(tab, (next, previous) => {
+  if (previous === "gallery" && mobileContent.value) {
+    rememberSessionScroll(MOBILE_LIBRARY_SCROLL_KEY, {
+      top: mobileContent.value.scrollTop,
+      left: mobileContent.value.scrollLeft,
+    });
+  }
   if (next === "gallery") {
     librarySeenAtBaseline = loadLibrarySeenAt();
     libraryPreviouslyVisited = localStorage.getItem(LIBRARY_VISITED_KEY) === "true";
-    void refreshGallery();
+    pendingLibraryScrollRestore = sessionScrollPosition(MOBILE_LIBRARY_SCROLL_KEY);
+    void refreshGallery().then(restoreMobileLibraryScroll);
+  } else {
+    pendingLibraryScrollRestore = null;
+    // The primary destinations share this one WebView scroller. Non-Library
+    // destinations still start at the top rather than inheriting its offset.
+    void nextTick(() => {
+      if (!mobileContent.value) return;
+      mobileContent.value.scrollTop = 0;
+      mobileContent.value.scrollLeft = 0;
+    });
   }
   if (next !== "hosts") hostDetailId.value = "";
 });
@@ -8554,8 +8741,13 @@ onBeforeUnmount(() => {
   if (liveActivityTimer) clearInterval(liveActivityTimer);
   liveActivityTimer = null;
   cancelGalleryThumbnailRetries();
+  if (libraryScrollRestoreTimer !== null) clearTimeout(libraryScrollRestoreTimer);
+  libraryScrollRestoreTimer = null;
   for (const handle of galleryThumbnailHandles.values()) handle.cancel();
   galleryThumbnailHandles.clear();
+  for (const timer of collectionCoverRetryTimers.values()) clearTimeout(timer);
+  collectionCoverRetryTimers.clear();
+  collectionCoverRetryAttempts.clear();
   for (const controller of activeGalleryThumbnailControllers) controller.abort();
   activeGalleryThumbnailControllers.clear();
   galleryGridResizeObserver?.disconnect();
@@ -9654,7 +9846,16 @@ onBeforeUnmount(() => {
                 @contextmenu.prevent="openCollectionMenu(card.slug)"
               >
                 <span class="mobile-collection-cover" aria-hidden="true">
-                  <img v-if="collectionCoverUrl(card)" :src="collectionCoverUrl(card)" alt="" />
+                  <img
+                    v-if="collectionCovers[card.slug]?.status === 'ready'"
+                    :src="collectionCovers[card.slug]?.url"
+                    alt=""
+                    @error="handleCollectionCoverError(card)"
+                  />
+                  <MobileMediaPlaceholder
+                    v-else
+                    :loading="collectionCovers[card.slug]?.status === 'loading'"
+                  />
                 </span>
                 <span class="mobile-collection-copy">
                   <strong>{{ card.name }}</strong>
@@ -9875,15 +10076,14 @@ onBeforeUnmount(() => {
                     :alt="print.metadata.prompt || print.filename"
                     :class="{ 'is-thumbnail-pending': print.thumbnailPending }"
                     loading="lazy"
+                    @error="handleGalleryThumbnailError(print)"
                     @contextmenu="rememberNativeGalleryContext(print)"
                   />
-                  <span
+                  <MobileMediaPlaceholder
                     v-if="print.thumbnailPending"
-                    class="gallery-thumbnail-pending"
+                    loading
                     data-test="gallery-thumbnail-pending"
-                    aria-hidden="true"
-                    >Loading preview</span
-                  >
+                  />
                   <span
                     v-if="isVideoItem(print) || isAudioItem(print)"
                     class="gallery-video-badge"

@@ -612,3 +612,28 @@ export function visibleTagCounts(
   for (const [key, tag] of exactByKey) result.set(key, tag);
   return sortTags([...result.values()]);
 }
+
+/** In-memory workspace offsets. A fresh app/browser session starts at the top. */
+const sessionScrollPositions = new Map<string, { top: number; left: number }>();
+
+export function rememberSessionScroll(
+  key: string,
+  position: { top: number; left?: number },
+): void {
+  sessionScrollPositions.set(key, {
+    top: Math.max(0, position.top),
+    left: Math.max(0, position.left ?? 0),
+  });
+}
+
+export function sessionScrollPosition(key: string): {
+  top: number;
+  left: number;
+} {
+  return sessionScrollPositions.get(key) ?? { top: 0, left: 0 };
+}
+
+/** Test-only reset kept explicit so product code cannot accidentally persist it. */
+export function clearSessionScrollForTests(): void {
+  sessionScrollPositions.clear();
+}

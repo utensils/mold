@@ -61,6 +61,8 @@ import {
   tagKey,
   trashRetentionSummary,
   visibleTagCounts,
+  rememberSessionScroll,
+  sessionScrollPosition,
   type MergedCollection,
   type OrganizationMutation,
 } from "@studio/lib/libraryOrganization";
@@ -137,6 +139,8 @@ import {
   minimaxH3TaskForModel,
   setMinimaxH3GalleryImageFirstFrame,
 } from "@studio/lib/minimaxH3Authoring";
+
+const WEB_LIBRARY_SCROLL_KEY = "web:library";
 
 type FilterKind = "all" | "images" | "video" | "audio";
 type ViewMode = "feed" | "grid";
@@ -2101,6 +2105,10 @@ onMounted(() => {
   document.addEventListener("keydown", onDocumentKeydown);
 });
 onBeforeUnmount(() => {
+  rememberSessionScroll(WEB_LIBRARY_SCROLL_KEY, {
+    top: window.scrollY,
+    left: window.scrollX,
+  });
   window.removeEventListener("scroll", onScroll);
   document.removeEventListener("pointerdown", onDocumentPointerDown);
   document.removeEventListener("keydown", onDocumentKeydown);
@@ -2115,6 +2123,9 @@ onMounted(async () => {
   ]);
   if (disposed) return;
   models.value = listing;
+  await nextTick();
+  const position = sessionScrollPosition(WEB_LIBRARY_SCROLL_KEY);
+  window.scrollTo({ top: position.top, left: position.left });
   refreshTimer = setInterval(() => {
     if (!document.hidden) void refresh();
   }, 10_000);
