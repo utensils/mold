@@ -62,6 +62,7 @@ pub mod queue;
 pub mod queue_journal;
 pub mod queue_media;
 pub mod queue_media_runtime;
+mod queue_media_lifecycle;
 // This dependency-free policy seam lands default-dark. The concrete
 // schema/store adapter activates it atomically with queue-media admission.
 #[allow(dead_code)]
@@ -341,6 +342,33 @@ pub async fn run_server(
         Config::mold_dir().as_deref(),
         &instance_id,
     ));
+    if let Some(owner_uuid) = queue_journal.owner_uuid() {
+        let mold_home = Config::mold_dir().ok_or_else(|| {
+            anyhow::anyhow!(
+                "durable queue claimed an owner but MOLD_HOME became unavailable before media reconciliation"
+            )
+        })?;
+        let lifecycle = std::sync::Arc::new(queue_media_lifecycle::QueueMediaLifecycle::new(
+            metadata_db.clone(),
+            mold_home,
+            owner_uuid.to_string(),
+        ));
+        queue_journal
+            .install_queue_media_lifecycle(lifecycle.clone())
+            .map_err(anyhow::Error::msg)?;
+        let media_report =
+            queue_media_startup::reconcile_claimed_owner(&queue_journal, lifecycle.as_ref())?;
+        info!(
+            durable_media_ready = media_report.durable_media_ready,
+            restored = media_report.restored.len(),
+            deleted = media_report.deleted.len(),
+            cleared_gc_pending = media_report.cleared_gc_pending.len(),
+            held_jobs = media_report.held_jobs.len(),
+            issues = media_report.issues.len(),
+            unclaimed_owner_roots = media_report.unclaimed_owner_roots.len(),
+            "durable queue-media startup reconciliation complete"
+        );
+    }
     let generation_cancel = std::sync::Arc::new(generation_cancel::CancelRegistry::new());
     if queue_journal.is_enabled() {
         info!("durable generation queue enabled");

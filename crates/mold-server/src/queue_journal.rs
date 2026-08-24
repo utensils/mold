@@ -21,7 +21,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use mold_db::generation_batches::{
     self, GenerationBatchChildRow, GenerationBatchDetail, GenerationBatchRow,
@@ -446,6 +446,10 @@ pub struct QueueJournal {
     /// independent from `owner_uuid`: a broken media store must not disable
     /// ordinary media-free queue durability.
     durable_media_ready: AtomicBool,
+    /// One concrete DB/store authority shared by startup, terminal cleanup,
+    /// and the later admission/feeder integration. Default-empty keeps the
+    /// existing media-free journal behavior unchanged.
+    queue_media_lifecycle: OnceLock<Arc<crate::queue_media_lifecycle::QueueMediaLifecycle>>,
     #[cfg(test)]
     fail_completion_lookup: AtomicBool,
     #[cfg(test)]
@@ -495,6 +499,7 @@ impl QueueJournal {
             db,
             owner_uuid: claim.as_ref().map(|claim| claim.owner_uuid.clone()),
             durable_media_ready: AtomicBool::new(false),
+            queue_media_lifecycle: OnceLock::new(),
             _owner_claim: claim,
             #[cfg(test)]
             fail_completion_lookup: AtomicBool::new(false),
@@ -518,6 +523,7 @@ impl QueueJournal {
             db: Arc::new(None),
             owner_uuid: None,
             durable_media_ready: AtomicBool::new(false),
+            queue_media_lifecycle: OnceLock::new(),
             _owner_claim: None,
             #[cfg(test)]
             fail_completion_lookup: AtomicBool::new(false),
@@ -549,6 +555,24 @@ impl QueueJournal {
         self.durable_media_ready
             .load(Ordering::Acquire)
             .then_some(mold_core::DurableMediaCapabilities::v1())
+    }
+
+    pub(crate) fn install_queue_media_lifecycle(
+        &self,
+        lifecycle: Arc<crate::queue_media_lifecycle::QueueMediaLifecycle>,
+    ) -> Result<(), &'static str> {
+        self.queue_media_lifecycle
+            .set(lifecycle)
+            .map_err(|_| "queue-media lifecycle was already installed")
+    }
+
+    // Consumed by the admission/runtime slices only after their independent
+    // activation review; this lifecycle slice deliberately leaves them dark.
+    #[allow(dead_code)]
+    pub(crate) fn queue_media_lifecycle(
+        &self,
+    ) -> Option<Arc<crate::queue_media_lifecycle::QueueMediaLifecycle>> {
+        self.queue_media_lifecycle.get().cloned()
     }
 
     // Called by the default-dark startup coordinator once its independently
@@ -867,6 +891,21 @@ impl QueueJournal {
         generation_queue::claim_next(db, owner, &token, now_ms())
     }
 
+    /// Claim one exact queued row through the same owner/token fence as the
+    /// FIFO feeder. Admission can wake and hand off a newly committed id
+    /// without acquiring direct runtime authority or bypassing the journal.
+    #[allow(dead_code)] // activated by the separately reviewed admission feeder slice
+    pub(crate) fn claim_feeder_by_id(
+        self: &Arc<Self>,
+        id: &str,
+    ) -> anyhow::Result<Option<mold_db::generation_queue::QueueClaim>> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(None);
+        };
+        let token = uuid::Uuid::new_v4().to_string();
+        generation_queue::claim_by_id(db, owner, id, &token, now_ms())
+    }
+
     pub(crate) fn attach_claimed(self: &Arc<Self>, id: &str, claim_token: String) -> QueueTicket {
         QueueTicket {
             journal: Arc::clone(self),
@@ -935,6 +974,65 @@ impl QueueJournal {
         generation_batches::child_cancel_requested(db, owner, id)
     }
 
+    fn media_candidate(
+        &self,
+        id: &str,
+    ) -> Option<crate::queue_media_lifecycle::QueueMediaGcCandidate> {
+        let lifecycle = self.queue_media_lifecycle.get()?;
+        match lifecycle.candidate_for_job(id) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                tracing::warn!(
+                    job = %id,
+                    %error,
+                    "could not snapshot queue-media cleanup authority; the DB trigger will retain GC work"
+                );
+                None
+            }
+        }
+    }
+
+    fn active_media_candidates(&self) -> Vec<crate::queue_media_lifecycle::QueueMediaGcCandidate> {
+        let Some(lifecycle) = self.queue_media_lifecycle.get() else {
+            return Vec::new();
+        };
+        match lifecycle.active_candidates() {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "could not snapshot bulk queue-media cleanup authority; the DB trigger will retain GC work"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    fn cleanup_media_candidate(
+        &self,
+        candidate: Option<crate::queue_media_lifecycle::QueueMediaGcCandidate>,
+    ) {
+        let (Some(lifecycle), Some(candidate)) = (self.queue_media_lifecycle.get(), candidate)
+        else {
+            return;
+        };
+        if let Err(error) = lifecycle.cleanup_after_committed_delete(&candidate) {
+            tracing::warn!(
+                %error,
+                "queue-media cleanup remains GC-pending after terminal queue deletion"
+            );
+        }
+    }
+
+    fn cleanup_media_candidates(
+        &self,
+        candidates: Vec<crate::queue_media_lifecycle::QueueMediaGcCandidate>,
+    ) {
+        for candidate in candidates {
+            self.cleanup_media_candidate(Some(candidate));
+        }
+    }
+
     /// Drop one row regardless of the fence. The cancellation path: a job the
     /// user explicitly removed must not come back after a restart, even when
     /// the cancel lands during the drain.
@@ -942,12 +1040,17 @@ impl QueueJournal {
         let Some(db) = self.db() else {
             return;
         };
-        if let Err(error) = generation_queue::delete(db, id) {
-            tracing::warn!(
-                job = %id,
-                error = %format!("{error:#}"),
-                "could not remove a cancelled job from the durable queue"
-            );
+        let candidate = self.media_candidate(id);
+        match generation_queue::delete(db, id) {
+            Ok(true) => self.cleanup_media_candidate(candidate),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    job = %id,
+                    error = %format!("{error:#}"),
+                    "could not remove a cancelled job from the durable queue"
+                );
+            }
         }
     }
 
@@ -966,8 +1069,12 @@ impl QueueJournal {
             result_json: None,
             completed_at_ms: now_ms(),
         };
-        let cancelled = generation_batches::cancel_owned(db, owner, id, terminal)?
-            != generation_batches::OwnedCancellation::NotOwned;
+        let candidate = self.media_candidate(id);
+        let outcome = generation_batches::cancel_owned(db, owner, id, terminal)?;
+        if outcome == generation_batches::OwnedCancellation::Settled {
+            self.cleanup_media_candidate(candidate);
+        }
+        let cancelled = outcome != generation_batches::OwnedCancellation::NotOwned;
         self.wake_feeder();
         Ok(cancelled)
     }
@@ -977,11 +1084,15 @@ impl QueueJournal {
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
             return;
         };
-        if let Err(error) = generation_queue::delete_all_queued(db, owner) {
-            tracing::warn!(
-                error = %format!("{error:#}"),
-                "could not clear the durable queue after a bulk cancel"
-            );
+        let candidates = self.active_media_candidates();
+        match generation_queue::delete_all_queued(db, owner) {
+            Ok(_) => self.cleanup_media_candidates(candidates),
+            Err(error) => {
+                tracing::warn!(
+                    error = %format!("{error:#}"),
+                    "could not clear the durable queue after a bulk cancel"
+                );
+            }
         }
     }
 
@@ -997,8 +1108,10 @@ impl QueueJournal {
             result_json: None,
             completed_at_ms: now_ms(),
         };
+        let candidates = self.active_media_candidates();
         let additional =
             generation_batches::cancel_all_queued(db, owner, already_counted_live, terminal)?;
+        self.cleanup_media_candidates(candidates);
         self.wake_feeder();
         Ok(additional)
     }
@@ -1895,14 +2008,19 @@ impl QueueTicket {
         else {
             return Ok(generation_batches::OwnedHold::Fenced);
         };
-        generation_batches::hold_owned(
+        let candidate = self.journal.media_candidate(&self.id);
+        let outcome = generation_batches::hold_owned(
             db,
             owner,
             &self.id,
             self.claim_token.as_deref(),
             reason,
             now,
-        )
+        )?;
+        if outcome == generation_batches::OwnedHold::Cancelled {
+            self.journal.cleanup_media_candidate(candidate);
+        }
+        Ok(outcome)
     }
 
     fn finish_claimed(
@@ -1914,8 +2032,14 @@ impl QueueTicket {
         let Some(db) = self.journal.db() else {
             return false;
         };
+        let candidate = self.journal.media_candidate(&self.id);
         match generation_batches::finish_claimed(db, &self.id, token, expected, terminal) {
-            Ok(commit) => commit.queue_deleted,
+            Ok(commit) => {
+                if commit.queue_deleted {
+                    self.journal.cleanup_media_candidate(candidate);
+                }
+                commit.queue_deleted
+            }
             Err(error) => {
                 tracing::warn!(job = %self.id, %error, "could not atomically settle a claimed generation");
                 false
@@ -1996,6 +2120,7 @@ mod tests {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
             durable_media_ready: AtomicBool::new(false),
+            queue_media_lifecycle: OnceLock::new(),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
             fail_claim_release: AtomicBool::new(false),
@@ -2501,6 +2626,7 @@ mod tests {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
             durable_media_ready: AtomicBool::new(false),
+            queue_media_lifecycle: OnceLock::new(),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
             fail_claim_release: AtomicBool::new(false),
@@ -2527,6 +2653,7 @@ mod tests {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
             durable_media_ready: AtomicBool::new(false),
+            queue_media_lifecycle: OnceLock::new(),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
             fail_claim_release: AtomicBool::new(false),

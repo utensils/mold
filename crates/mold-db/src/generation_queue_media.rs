@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use anyhow::{bail, ensure, Result};
-use rusqlite::{params, Row};
+use rusqlite::{params, OptionalExtension, Row};
 
 use crate::MetadataDb;
 
@@ -203,6 +203,74 @@ pub fn list_active_queue_obligations(
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    })
+}
+
+/// Resolve the active opaque media obligation for one owner-fenced queue row.
+///
+/// Terminal paths use this lightweight projection before their delete
+/// transaction. The request JSON and every other potentially large queue
+/// column stay out of memory.
+pub fn active_queue_obligation_for_job(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    job_id: &str,
+) -> Result<Option<ActiveQueueMediaObligation>> {
+    db.with_conn(|conn| {
+        conn.query_row(
+            "SELECT queue.id,
+                    media.media_set_id, media.owner_uuid, media.state,
+                    media.created_at_ms, media.updated_at_ms
+               FROM generation_queue AS queue
+               JOIN generation_queue_media AS media
+                 ON media.media_set_id = queue.media_set_id
+              WHERE queue.id = ?1 AND queue.owner_uuid = ?2
+                AND media.owner_uuid = ?2 AND media.state = 'active'",
+            params![job_id, owner_uuid],
+            |row| {
+                let raw_state: String = row.get(3)?;
+                let state = QueueMediaObligationState::parse(&raw_state).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Text,
+                        format!("unknown generation_queue_media state '{raw_state}'").into(),
+                    )
+                })?;
+                Ok(ActiveQueueMediaObligation {
+                    job_id: row.get(0)?,
+                    obligation: QueueMediaObligation {
+                        media_set_id: row.get(1)?,
+                        owner_uuid: row.get(2)?,
+                        state,
+                        created_at_ms: row.get(4)?,
+                        updated_at_ms: row.get(5)?,
+                    },
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    })
+}
+
+/// Read one owner-scoped obligation without joining or hydrating its queue
+/// row. A terminal cleanup may proceed only after this returns `gc_pending`,
+/// which is the proof that the schema's DELETE trigger committed.
+pub fn obligation_by_id(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    media_set_id: &str,
+) -> Result<Option<QueueMediaObligation>> {
+    db.with_conn(|conn| {
+        conn.query_row(
+            "SELECT media_set_id, owner_uuid, state, created_at_ms, updated_at_ms
+               FROM generation_queue_media
+              WHERE owner_uuid = ?1 AND media_set_id = ?2",
+            params![owner_uuid, media_set_id],
+            row_to_obligation,
+        )
+        .optional()
+        .map_err(Into::into)
     })
 }
 
@@ -471,6 +539,11 @@ mod tests {
             1
         );
         assert_eq!(
+            generation_queue::hold_media_jobs(&db, "owner-a", &ids, "media invalid", 41).unwrap(),
+            1,
+            "an already-held media job still satisfies the startup quarantine"
+        );
+        assert_eq!(
             generation_queue::get(&db, "mine").unwrap().unwrap().state,
             QueueRowState::Held
         );
@@ -533,5 +606,47 @@ mod tests {
         assert!(!remove_gc_pending(&db, "owner-b", "set").unwrap());
         assert!(remove_gc_pending(&db, "owner-a", "set").unwrap());
         assert!(!remove_gc_pending(&db, "owner-a", "set").unwrap());
+    }
+
+    #[test]
+    fn targeted_lookup_is_owner_scoped_and_tracks_trigger_retirement() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        generation_queue::insert_with_media(
+            &db,
+            &queue_row("job", "owner-a", Some("set")),
+            &obligation("set", "owner-a"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            active_queue_obligation_for_job(&db, "owner-a", "job").unwrap(),
+            Some(ActiveQueueMediaObligation {
+                job_id: "job".to_string(),
+                obligation: obligation("set", "owner-a"),
+            })
+        );
+        assert!(active_queue_obligation_for_job(&db, "owner-b", "job")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            obligation_by_id(&db, "owner-a", "set")
+                .unwrap()
+                .unwrap()
+                .state,
+            QueueMediaObligationState::Active
+        );
+
+        assert!(generation_queue::delete(&db, "job").unwrap());
+        assert!(active_queue_obligation_for_job(&db, "owner-a", "job")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            obligation_by_id(&db, "owner-a", "set")
+                .unwrap()
+                .unwrap()
+                .state,
+            QueueMediaObligationState::GcPending
+        );
+        assert!(obligation_by_id(&db, "owner-b", "set").unwrap().is_none());
     }
 }

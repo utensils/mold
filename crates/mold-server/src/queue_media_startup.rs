@@ -95,13 +95,15 @@ pub(crate) struct AdapterError {
 }
 
 impl AdapterError {
-    fn new(kind: AdapterFailureKind, detail: impl Into<String>) -> Self {
+    pub(crate) fn new(kind: AdapterFailureKind, detail: impl Into<String>) -> Self {
         Self {
             kind,
             detail: detail.into(),
         }
     }
 }
+
+impl std::error::Error for AdapterError {}
 
 impl std::fmt::Display for AdapterError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -217,15 +219,6 @@ pub(crate) fn reconcile_claimed_owner(
         .filter_map(|obligation| obligation.job_id.clone())
         .collect();
 
-    match adapter.unclaimed_owner_roots(owner_uuid) {
-        Ok(roots) => {
-            report.unclaimed_owner_roots = roots;
-        }
-        Err(error) => report.issues.push(format!(
-            "could not enumerate non-claimed owner roots: {error}"
-        )),
-    }
-
     let initialization = if obligations.is_empty() {
         StoreInitializationPolicy::IfGloballyEmpty
     } else {
@@ -241,6 +234,15 @@ pub(crate) fn reconcile_claimed_owner(
             .issues
             .push(format!("owner media store unavailable: {error}"));
         return Ok(report);
+    }
+
+    match adapter.unclaimed_owner_roots(owner_uuid) {
+        Ok(roots) => {
+            report.unclaimed_owner_roots = roots;
+        }
+        Err(error) => report.issues.push(format!(
+            "could not enumerate non-claimed owner roots: {error}"
+        )),
     }
 
     let inspection = match adapter.inspect_owner(owner_uuid) {

@@ -793,8 +793,10 @@ pub fn hold(db: &MetadataDb, id: &str, reason: &str, now_ms: i64) -> Result<bool
 ///
 /// The owner and non-NULL media marker fences prevent a corrupt/missing set
 /// report from parking another installation's row or an ordinary media-free
-/// job. Held rows retain their marker and active cleanup obligation because
-/// the user may inspect or explicitly cancel them later.
+/// job. The returned count is the number of unique requested jobs proven held
+/// at commit, including rows a prior startup already held. Held rows retain
+/// their marker and active cleanup obligation because the user may inspect or
+/// explicitly cancel them later.
 pub fn hold_media_jobs(
     db: &MetadataDb,
     owner_uuid: &str,
@@ -816,9 +818,17 @@ pub fn hold_media_jobs(
                 AND state IN ('queued', 'running')",
         )?;
         let mut held = 0;
+        let mut verify = conn.prepare(
+            "SELECT 1 FROM generation_queue
+              WHERE id = ?1 AND owner_uuid = ?2
+                AND media_set_id IS NOT NULL AND state = 'held'",
+        )?;
         for job_id in job_ids {
             if seen.insert(job_id.as_str()) {
-                held += stmt.execute(params![job_id, owner_uuid, reason, now_ms])?;
+                stmt.execute(params![job_id, owner_uuid, reason, now_ms])?;
+                if verify.exists(params![job_id, owner_uuid])? {
+                    held += 1;
+                }
             }
         }
         Ok(held)
