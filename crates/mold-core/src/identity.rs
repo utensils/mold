@@ -785,7 +785,19 @@ pub fn true_cfg_engages(scale: f64) -> bool {
 /// as `id_weight: 0.0` — both are accepted, and both render exactly what a
 /// request that never named them renders.
 pub fn request_uses_true_cfg(req: &GenerateRequest) -> bool {
-    request_carries_identity_photo(req)
+    request_uses_true_cfg_with_identity_presence(req, request_carries_identity_photo(req))
+}
+
+/// Whether the request will run the true-CFG negative branch when the caller
+/// supplies the authoritative identity-photo presence fact.
+///
+/// Durable queue scheduling uses this before decrypting the photograph, while
+/// the ordinary hydrated path delegates through [`request_uses_true_cfg`].
+pub fn request_uses_true_cfg_with_identity_presence(
+    req: &GenerateRequest,
+    identity_photo_present: bool,
+) -> bool {
+    identity_photo_present
         && effective_id_weight(req) > 0.0
         && true_cfg_engages(effective_true_cfg(req))
 }
@@ -2333,6 +2345,22 @@ mod tests {
         }
         req.true_cfg = Some(1.5);
         assert!(request_uses_true_cfg(&req));
+    }
+
+    #[test]
+    fn explicit_identity_presence_seam_preserves_hydrated_true_cfg_behavior() {
+        let mut req = identity_request("flux-dev:q8");
+        for scale in [1.0, 1.5] {
+            req.true_cfg = Some(scale);
+            assert_eq!(
+                request_uses_true_cfg(&req),
+                request_uses_true_cfg_with_identity_presence(
+                    &req,
+                    request_carries_identity_photo(&req)
+                )
+            );
+            assert!(!request_uses_true_cfg_with_identity_presence(&req, false));
+        }
     }
 
     #[test]

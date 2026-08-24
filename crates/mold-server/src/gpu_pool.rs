@@ -2898,6 +2898,7 @@ mod tests {
                 ..Default::default()
             },
             crate::queue_media_store::QueueMediaProjection {
+                edit_image_count: 1,
                 edit_images: vec![
                     crate::queue_media_store::ProjectedImageDimensions::UnreadableHeader,
                 ],

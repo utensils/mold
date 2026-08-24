@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use mold_core::{GenerationReference, KeyframeCondition, LoraWeight};
+use zeroize::Zeroize;
 
 /// Top-level `GenerateRequest` fields whose values must never enter the
 /// durable request JSON. Keep this list in lockstep with `extract_request_media`.
@@ -295,6 +296,70 @@ impl std::fmt::Debug for OpaqueQueueMedia {
             .field("job_id", &self.job_id)
             .field("records", &self.records.len())
             .finish()
+    }
+}
+
+impl Drop for OpaqueQueueMedia {
+    fn drop(&mut self) {
+        scrub_opaque_records(&mut self.records);
+    }
+}
+
+fn scrub_payload(payload: &mut QueueMediaPayload) {
+    match payload {
+        QueueMediaPayload::Bytes(bytes) => bytes.zeroize(),
+        QueueMediaPayload::Text(text) => text.zeroize(),
+        QueueMediaPayload::Keyframe(keyframe) => {
+            keyframe.image.zeroize();
+            if let Some(name) = &mut keyframe.name {
+                name.zeroize();
+            }
+        }
+        QueueMediaPayload::Reference(reference) => scrub_reference(reference),
+        QueueMediaPayload::Lora(lora) => lora.path.zeroize(),
+        QueueMediaPayload::Presence => {}
+    }
+}
+
+fn scrub_reference(reference: &mut GenerationReference) {
+    let (media, provenance, mime_type) = match reference {
+        GenerationReference::Image {
+            media,
+            provenance,
+            mime_type,
+            ..
+        }
+        | GenerationReference::Video {
+            media,
+            provenance,
+            mime_type,
+            ..
+        }
+        | GenerationReference::Audio {
+            media,
+            provenance,
+            mime_type,
+            ..
+        } => (media, provenance, mime_type),
+    };
+    match media {
+        mold_core::GenerationReferenceAuthority::Inline { data } => data.zeroize(),
+        mold_core::GenerationReferenceAuthority::Upload { handle } => handle.zeroize(),
+        mold_core::GenerationReferenceAuthority::ServerPath { path } => path.zeroize(),
+        mold_core::GenerationReferenceAuthority::Descriptor => {}
+    }
+    if let Some(name) = &mut provenance.name {
+        name.zeroize();
+    }
+    if let Some(digest) = &mut provenance.sha256 {
+        digest.zeroize();
+    }
+    mime_type.zeroize();
+}
+
+fn scrub_opaque_records(records: &mut [OpaqueQueueMediaRecord]) {
+    for record in records {
+        scrub_payload(&mut record.payload);
     }
 }
 
@@ -754,15 +819,23 @@ pub fn project_request_media(
                 QueueMediaPosition::Item(_),
                 QueueMediaPayload::Bytes(bytes),
             ) => {
-                let dimensions = image::ImageReader::new(std::io::Cursor::new(bytes))
-                    .with_guessed_format()
-                    .ok()
-                    .and_then(|reader| reader.into_dimensions().ok())
-                    .map_or(
-                        ProjectedImageDimensions::UnreadableHeader,
-                        |(width, height)| ProjectedImageDimensions::Known { width, height },
-                    );
-                projection.edit_images.push(dimensions);
+                projection.edit_image_count = projection
+                    .edit_image_count
+                    .checked_add(1)
+                    .ok_or(QueueMediaError::CollectionTooLarge)?;
+                if projection.edit_images.len()
+                    < crate::queue_media_store::PROJECTED_EDIT_DIMENSION_SLOTS
+                {
+                    let dimensions = image::ImageReader::new(std::io::Cursor::new(bytes))
+                        .with_guessed_format()
+                        .ok()
+                        .and_then(|reader| reader.into_dimensions().ok())
+                        .map_or(
+                            ProjectedImageDimensions::UnreadableHeader,
+                            |(width, height)| ProjectedImageDimensions::Known { width, height },
+                        );
+                    projection.edit_images.push(dimensions);
+                }
             }
             (
                 QueueMediaRole::Keyframes,
@@ -814,12 +887,45 @@ pub fn project_request_media(
 /// second plaintext request. Path-shaped roles are safe-opened by the store;
 /// all other bytes remain memory-sink records when hydrated.
 pub fn into_seal_media(
-    media: OpaqueQueueMedia,
+    mut media: OpaqueQueueMedia,
 ) -> Result<Vec<crate::queue_media_store::SealMedia>, QueueMediaError> {
     use crate::queue_media_store::SealMedia;
 
+    // Complete every fallible check while `media` still owns all plaintext, so
+    // its Drop guard can scrub the full set on error. Serialized keyframes stay
+    // zeroizing until their bytes move into the successful result.
+    for record in &media.records {
+        match &record.payload {
+            QueueMediaPayload::Reference(_) => {
+                return Err(QueueMediaError::UnsupportedPreDispatchAuthority(
+                    QueueMediaRole::References,
+                ));
+            }
+            QueueMediaPayload::Lora(_) => {
+                return Err(QueueMediaError::UnsupportedPreDispatchAuthority(
+                    record.role,
+                ));
+            }
+            _ => {}
+        }
+    }
+    let mut serialized_keyframes = media
+        .records
+        .iter()
+        .map(|record| match &record.payload {
+            QueueMediaPayload::Keyframe(value) => serde_json::to_vec(value)
+                .map(zeroize::Zeroizing::new)
+                .map(Some)
+                .map_err(QueueMediaError::Serialize),
+            _ => Ok(None),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     let mut sealed = Vec::with_capacity(media.records.len());
-    for record in media.records {
+    for (record, serialized_keyframe) in std::mem::take(&mut media.records)
+        .into_iter()
+        .zip(&mut serialized_keyframes)
+    {
         let role = record.role.wire_label();
         let position = record.position.wire_label();
         let item = match record.payload {
@@ -829,20 +935,18 @@ pub fn into_seal_media(
                 SealMedia::path(role, position, PathBuf::from(value))
             }
             QueueMediaPayload::Text(value) => SealMedia::bytes(role, position, value.into_bytes()),
-            QueueMediaPayload::Keyframe(value) => SealMedia::bytes(
+            QueueMediaPayload::Keyframe(_) => SealMedia::bytes(
                 role,
                 position,
-                serde_json::to_vec(&value).map_err(QueueMediaError::Serialize)?,
+                std::mem::take(
+                    serialized_keyframe
+                        .as_mut()
+                        .expect("keyframe serialization was precomputed")
+                        .as_mut(),
+                ),
             ),
-            QueueMediaPayload::Reference(_) => {
-                return Err(QueueMediaError::UnsupportedPreDispatchAuthority(
-                    QueueMediaRole::References,
-                ))
-            }
-            QueueMediaPayload::Lora(_) => {
-                return Err(QueueMediaError::UnsupportedPreDispatchAuthority(
-                    record.role,
-                ))
+            QueueMediaPayload::Reference(_) | QueueMediaPayload::Lora(_) => {
+                unreachable!("unsupported payloads were rejected before moving plaintext")
             }
         };
         sealed.push(item);
@@ -856,12 +960,13 @@ pub(crate) fn decrypted_media_into_opaque(
 ) -> Result<OpaqueQueueMedia, QueueMediaError> {
     use crate::queue_media_store::DecryptedQueueMediaPayload;
 
-    let mut records = Vec::with_capacity(decrypted.media.len());
-    for item in std::mem::take(&mut decrypted.media) {
+    let mut records = OpaqueRecordsGuard(Vec::with_capacity(decrypted.media.len()));
+    while let Some(item) = decrypted.media.last() {
         let role = QueueMediaRole::from_wire_label(&item.role)
             .ok_or(QueueMediaError::InvalidStoredRecordLabel)?;
         let position = QueueMediaPosition::from_wire_label(&item.name)
             .ok_or(QueueMediaError::InvalidStoredRecordLabel)?;
+        let item = decrypted.media.pop().expect("last item exists");
         let payload = match item.payload {
             DecryptedQueueMediaPayload::PrivatePath(path) if role.is_path_shaped() => {
                 QueueMediaPayload::Text(
@@ -878,7 +983,7 @@ pub(crate) fn decrypted_media_into_opaque(
             {
                 QueueMediaPayload::Presence
             }
-            DecryptedQueueMediaPayload::Bytes(bytes) => match role {
+            DecryptedQueueMediaPayload::Bytes(mut bytes) => match role {
                 QueueMediaRole::SourceImage
                 | QueueMediaRole::IdentityImage
                 | QueueMediaRole::IdentityImages
@@ -890,25 +995,64 @@ pub(crate) fn decrypted_media_into_opaque(
                 | QueueMediaRole::ExtendVideo => QueueMediaPayload::Bytes(bytes),
                 QueueMediaRole::SourceImageName
                 | QueueMediaRole::IdentityImageName
-                | QueueMediaRole::IdentityImageNames => QueueMediaPayload::Text(
-                    String::from_utf8(bytes).map_err(|_| QueueMediaError::InvalidStoredText)?,
-                ),
-                QueueMediaRole::Keyframes => QueueMediaPayload::Keyframe(
-                    serde_json::from_slice(&bytes).map_err(QueueMediaError::Deserialize)?,
-                ),
-                _ => return Err(QueueMediaError::MalformedRecords(role)),
+                | QueueMediaRole::IdentityImageNames => match String::from_utf8(bytes) {
+                    Ok(text) => QueueMediaPayload::Text(text),
+                    Err(error) => {
+                        let mut bytes = error.into_bytes();
+                        bytes.zeroize();
+                        return Err(QueueMediaError::InvalidStoredText);
+                    }
+                },
+                QueueMediaRole::Keyframes => {
+                    let result = serde_json::from_slice(&bytes);
+                    bytes.zeroize();
+                    QueueMediaPayload::Keyframe(result.map_err(QueueMediaError::Deserialize)?)
+                }
+                _ => {
+                    bytes.zeroize();
+                    return Err(QueueMediaError::MalformedRecords(role));
+                }
             },
         };
-        records.push(OpaqueQueueMediaRecord {
+        records.0.push(OpaqueQueueMediaRecord {
             role,
             position,
             payload,
         });
     }
+    records.0.reverse();
     Ok(OpaqueQueueMedia {
         job_id: job_id.to_string(),
-        records,
+        records: records.into_records(),
     })
+}
+
+struct OpaqueRecordsGuard(Vec<OpaqueQueueMediaRecord>);
+
+impl OpaqueRecordsGuard {
+    fn into_records(mut self) -> Vec<OpaqueQueueMediaRecord> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for OpaqueRecordsGuard {
+    fn drop(&mut self) {
+        for record in &mut self.0 {
+            match &mut record.payload {
+                QueueMediaPayload::Bytes(bytes) => bytes.zeroize(),
+                QueueMediaPayload::Text(text) => text.zeroize(),
+                QueueMediaPayload::Keyframe(keyframe) => {
+                    keyframe.image.zeroize();
+                    if let Some(name) = &mut keyframe.name {
+                        name.zeroize();
+                    }
+                }
+                QueueMediaPayload::Presence
+                | QueueMediaPayload::Reference(_)
+                | QueueMediaPayload::Lora(_) => {}
+            }
+        }
+    }
 }
 
 fn ensure_json_is_authority_free(request_json: &str) -> Result<(), QueueMediaError> {
@@ -925,61 +1069,105 @@ fn ensure_json_is_authority_free(request_json: &str) -> Result<(), QueueMediaErr
     Ok(())
 }
 
-fn take_role(
-    grouped: &mut HashMap<QueueMediaRole, Vec<OpaqueQueueMediaRecord>>,
-    role: QueueMediaRole,
-) -> Vec<OpaqueQueueMediaRecord> {
-    grouped.remove(&role).unwrap_or_default()
+fn collection_role(role: QueueMediaRole) -> bool {
+    matches!(
+        role,
+        QueueMediaRole::IdentityImages
+            | QueueMediaRole::IdentityImageNames
+            | QueueMediaRole::EditImages
+            | QueueMediaRole::References
+            | QueueMediaRole::Keyframes
+            | QueueMediaRole::Loras
+    )
 }
 
-fn scalar_payload(
-    grouped: &mut HashMap<QueueMediaRole, Vec<OpaqueQueueMediaRecord>>,
-    role: QueueMediaRole,
-) -> Result<Option<QueueMediaPayload>, QueueMediaError> {
-    let mut records = take_role(grouped, role);
-    match records.len() {
-        0 => Ok(None),
-        1 if records[0].position == QueueMediaPosition::Scalar => {
-            Ok(Some(records.pop().expect("length checked").payload))
-        }
-        _ => Err(QueueMediaError::MalformedRecords(role)),
+fn record_payload_matches(record: &OpaqueQueueMediaRecord) -> bool {
+    use QueueMediaPayload::{Bytes, Keyframe, Lora, Presence, Reference, Text};
+
+    if collection_role(record.role) && record.position == QueueMediaPosition::Collection {
+        return matches!(record.payload, Presence);
     }
+    matches!(
+        (record.role, record.position, &record.payload),
+        (
+            QueueMediaRole::SourceImage
+                | QueueMediaRole::IdentityImage
+                | QueueMediaRole::MaskImage
+                | QueueMediaRole::ControlImage
+                | QueueMediaRole::AudioFile
+                | QueueMediaRole::SourceVideo
+                | QueueMediaRole::ExtendVideo,
+            QueueMediaPosition::Scalar,
+            Bytes(_),
+        ) | (
+            QueueMediaRole::SourceImageName
+                | QueueMediaRole::IdentityImageName
+                | QueueMediaRole::AudioFilePath
+                | QueueMediaRole::SourceVideoPath
+                | QueueMediaRole::ExtendVideoPath
+                | QueueMediaRole::HdrExrDir,
+            QueueMediaPosition::Scalar,
+            Text(_),
+        ) | (
+            QueueMediaRole::IdentityImages | QueueMediaRole::EditImages,
+            QueueMediaPosition::Item(_),
+            Bytes(_),
+        ) | (
+            QueueMediaRole::IdentityImageNames,
+            QueueMediaPosition::Item(_),
+            Text(_)
+        ) | (
+            QueueMediaRole::References,
+            QueueMediaPosition::Item(_),
+            Reference(_)
+        ) | (
+            QueueMediaRole::Keyframes,
+            QueueMediaPosition::Item(_),
+            Keyframe(_)
+        ) | (QueueMediaRole::Lora, QueueMediaPosition::Scalar, Lora(_))
+            | (QueueMediaRole::Loras, QueueMediaPosition::Item(_), Lora(_))
+    )
 }
 
-fn collection_payloads(
-    grouped: &mut HashMap<QueueMediaRole, Vec<OpaqueQueueMediaRecord>>,
-    role: QueueMediaRole,
-) -> Result<Option<Vec<QueueMediaPayload>>, QueueMediaError> {
-    let records = take_role(grouped, role);
-    if records.is_empty() {
-        return Ok(None);
-    }
-    let mut presence = false;
-    let mut items = BTreeMap::new();
+fn validate_record_topology(records: &[OpaqueQueueMediaRecord]) -> Result<(), QueueMediaError> {
+    let mut grouped: HashMap<QueueMediaRole, Vec<&OpaqueQueueMediaRecord>> = HashMap::new();
     for record in records {
-        match (record.position, record.payload) {
-            (QueueMediaPosition::Collection, QueueMediaPayload::Presence) if !presence => {
-                presence = true;
+        if !record_payload_matches(record) {
+            return Err(QueueMediaError::MalformedRecords(record.role));
+        }
+        grouped.entry(record.role).or_default().push(record);
+    }
+    for (role, records) in grouped {
+        if !collection_role(role) {
+            if records.len() != 1 {
+                return Err(QueueMediaError::MalformedRecords(role));
             }
-            (QueueMediaPosition::Item(index), payload) => {
-                if items.insert(index, payload).is_some() {
+            continue;
+        }
+        let mut presence = 0_usize;
+        let mut items = BTreeMap::new();
+        for record in records {
+            match record.position {
+                QueueMediaPosition::Collection => presence += 1,
+                QueueMediaPosition::Item(index) => {
+                    if items.insert(index, ()).is_some() {
+                        return Err(QueueMediaError::MalformedRecords(role));
+                    }
+                }
+                QueueMediaPosition::Scalar => {
                     return Err(QueueMediaError::MalformedRecords(role));
                 }
             }
-            _ => return Err(QueueMediaError::MalformedRecords(role)),
         }
-    }
-    if !presence {
-        return Err(QueueMediaError::MalformedRecords(role));
-    }
-    let mut values = Vec::with_capacity(items.len());
-    for (expected, (actual, payload)) in (0_u32..).zip(items) {
-        if expected != actual {
+        if presence != 1
+            || (0_u32..)
+                .zip(items.keys().copied())
+                .any(|(expected, actual)| expected != actual)
+        {
             return Err(QueueMediaError::MalformedRecords(role));
         }
-        values.push(payload);
     }
-    Ok(Some(values))
+    Ok(())
 }
 
 /// Reconstruct the exact request semantics from its JSON-safe settings and
@@ -1002,7 +1190,7 @@ pub fn rehydrate_request_media(
 pub fn rehydrate_request_media_into(
     expected_job_id: &str,
     request: &mut mold_core::GenerateRequest,
-    media: OpaqueQueueMedia,
+    mut media: OpaqueQueueMedia,
 ) -> Result<(), QueueMediaError> {
     if media.job_id != expected_job_id {
         return Err(QueueMediaError::JobScopeMismatch);
@@ -1033,32 +1221,40 @@ pub fn rehydrate_request_media_into(
             return Err(QueueMediaError::OverlayAuthorityConflict(field));
         }
     }
+    // Validate the complete topology and payload types before moving a single
+    // plaintext value into the caller's request. All fallible exits above and
+    // here leave `media` armed, whose Drop scrubs every byte payload.
+    validate_record_topology(&media.records)?;
+
     let mut grouped: HashMap<_, Vec<_>> = HashMap::new();
-    for record in media.records {
+    for record in std::mem::take(&mut media.records) {
         grouped.entry(record.role).or_default().push(record);
     }
 
     macro_rules! restore_scalar {
         ($role:expr, $field:ident, $variant:ident) => {
-            if let Some(payload) = scalar_payload(&mut grouped, $role)? {
-                request.$field = Some(match payload {
-                    QueueMediaPayload::$variant(value) => value,
-                    _ => return Err(QueueMediaError::MalformedRecords($role)),
-                });
+            if let Some(mut records) = grouped.remove(&$role) {
+                let payload = records.pop().expect("validated scalar record").payload;
+                let QueueMediaPayload::$variant(value) = payload else {
+                    unreachable!("record payload type was validated before overlay")
+                };
+                request.$field = Some(value);
             }
         };
     }
     macro_rules! restore_collection {
         ($role:expr, $field:ident, $variant:ident) => {
-            if let Some(payloads) = collection_payloads(&mut grouped, $role)? {
-                let mut values = Vec::with_capacity(payloads.len());
-                for payload in payloads {
-                    values.push(match payload {
-                        QueueMediaPayload::$variant(value) => value,
-                        _ => return Err(QueueMediaError::MalformedRecords($role)),
-                    });
+            if let Some(records) = grouped.remove(&$role) {
+                let mut items = BTreeMap::new();
+                for record in records {
+                    if let QueueMediaPosition::Item(index) = record.position {
+                        let QueueMediaPayload::$variant(value) = record.payload else {
+                            unreachable!("record payload type was validated before overlay")
+                        };
+                        items.insert(index, value);
+                    }
                 }
-                request.$field = Some(values);
+                request.$field = Some(items.into_values().collect());
             }
         };
     }
@@ -1084,9 +1280,7 @@ pub fn rehydrate_request_media_into(
     restore_scalar!(QueueMediaRole::Lora, lora, Lora);
     restore_collection!(QueueMediaRole::Loras, loras, Lora);
 
-    if let Some((&role, _)) = grouped.iter().next() {
-        return Err(QueueMediaError::MalformedRecords(role));
-    }
+    debug_assert!(grouped.is_empty(), "every validated role is restored");
     Ok(())
 }
 
@@ -1249,6 +1443,7 @@ mod tests {
         assert_eq!(projection.keyframe_count, 1);
         assert!(projection.identity_present);
         assert_eq!(projection.identity_photograph_count, 3);
+        assert_eq!(projection.edit_image_count, 2);
         assert_eq!(
             projection.edit_images,
             vec![
@@ -1261,6 +1456,37 @@ mod tests {
         );
         assert!(projection.mask_image && projection.control_image);
         assert!(projection.audio_inline && projection.audio_path);
+    }
+
+    #[test]
+    fn valid_qwen_edit_above_flux_slot_count_projects_total_without_extra_dimensions() {
+        let image = png(8, 8);
+        let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "five references",
+            "model": "qwen-image-edit:bf16",
+            "width": 512,
+            "height": 512,
+            "steps": 1,
+            "batch_size": 1,
+            "edit_images": (0..5)
+                .map(|_| base64::engine::general_purpose::STANDARD.encode(&image))
+                .collect::<Vec<_>>()
+        }))
+        .unwrap();
+        mold_core::validation::validate_generate_request(&request).unwrap();
+        let expected = serde_json::to_value(&request).unwrap();
+        let extracted = extract_request_fields("job-qwen-five".into(), request).unwrap();
+        let projection = project_request_media(extracted.media()).unwrap();
+
+        assert_eq!(projection.edit_image_count, 5);
+        assert_eq!(
+            projection.edit_images.len(),
+            crate::queue_media_store::PROJECTED_EDIT_DIMENSION_SLOTS
+        );
+        assert_eq!(
+            serde_json::to_value(extracted.rehydrate("job-qwen-five").unwrap()).unwrap(),
+            expected
+        );
     }
 
     #[test]
@@ -1287,6 +1513,134 @@ mod tests {
         assert_eq!(current.seed, Some(99));
         assert_eq!(current.source_image.as_deref(), Some(b"source".as_slice()));
         assert_eq!(current.id_image.as_deref(), Some(b"face".as_slice()));
+    }
+
+    #[test]
+    fn overlay_rejects_scope_authority_and_malformed_topology_before_mutation() {
+        fn request() -> mold_core::GenerateRequest {
+            serde_json::from_value(serde_json::json!({
+                "prompt": "atomic overlay",
+                "model": "mock",
+                "width": 64,
+                "height": 64,
+                "steps": 1,
+                "seed": 17
+            }))
+            .unwrap()
+        }
+        fn record(
+            role: QueueMediaRole,
+            position: QueueMediaPosition,
+            payload: QueueMediaPayload,
+        ) -> OpaqueQueueMediaRecord {
+            OpaqueQueueMediaRecord {
+                role,
+                position,
+                payload,
+            }
+        }
+
+        let malformed = vec![
+            vec![
+                record(
+                    QueueMediaRole::EditImages,
+                    QueueMediaPosition::Collection,
+                    QueueMediaPayload::Presence,
+                ),
+                record(
+                    QueueMediaRole::EditImages,
+                    QueueMediaPosition::Item(0),
+                    QueueMediaPayload::Bytes(b"first-secret".to_vec()),
+                ),
+                record(
+                    QueueMediaRole::EditImages,
+                    QueueMediaPosition::Item(0),
+                    QueueMediaPayload::Bytes(b"duplicate-secret".to_vec()),
+                ),
+            ],
+            vec![
+                record(
+                    QueueMediaRole::EditImages,
+                    QueueMediaPosition::Collection,
+                    QueueMediaPayload::Presence,
+                ),
+                record(
+                    QueueMediaRole::EditImages,
+                    QueueMediaPosition::Item(1),
+                    QueueMediaPayload::Bytes(b"gapped-secret".to_vec()),
+                ),
+            ],
+            vec![record(
+                QueueMediaRole::SourceImage,
+                QueueMediaPosition::Scalar,
+                QueueMediaPayload::Text("wrong-payload-secret".into()),
+            )],
+            vec![
+                record(
+                    QueueMediaRole::SourceImage,
+                    QueueMediaPosition::Scalar,
+                    QueueMediaPayload::Bytes(b"early-secret".to_vec()),
+                ),
+                record(
+                    QueueMediaRole::ControlImage,
+                    QueueMediaPosition::Item(0),
+                    QueueMediaPayload::Bytes(b"trailing-secret".to_vec()),
+                ),
+            ],
+        ];
+        for records in malformed {
+            let mut current = request();
+            let before = serde_json::to_value(&current).unwrap();
+            let result = rehydrate_request_media_into(
+                "job-atomic",
+                &mut current,
+                OpaqueQueueMedia {
+                    job_id: "job-atomic".into(),
+                    records,
+                },
+            );
+            assert!(matches!(result, Err(QueueMediaError::MalformedRecords(_))));
+            assert_eq!(serde_json::to_value(&current).unwrap(), before);
+        }
+
+        let mut wrong_job = request();
+        let before = serde_json::to_value(&wrong_job).unwrap();
+        assert!(matches!(
+            rehydrate_request_media_into(
+                "job-atomic",
+                &mut wrong_job,
+                OpaqueQueueMedia {
+                    job_id: "job-other".into(),
+                    records: vec![record(
+                        QueueMediaRole::SourceImage,
+                        QueueMediaPosition::Scalar,
+                        QueueMediaPayload::Bytes(b"scope-secret".to_vec()),
+                    )],
+                },
+            ),
+            Err(QueueMediaError::JobScopeMismatch)
+        ));
+        assert_eq!(serde_json::to_value(&wrong_job).unwrap(), before);
+
+        let mut conflict = request();
+        conflict.source_image = Some(b"existing-authority".to_vec());
+        let before = serde_json::to_value(&conflict).unwrap();
+        assert!(matches!(
+            rehydrate_request_media_into(
+                "job-atomic",
+                &mut conflict,
+                OpaqueQueueMedia {
+                    job_id: "job-atomic".into(),
+                    records: vec![record(
+                        QueueMediaRole::IdentityImage,
+                        QueueMediaPosition::Scalar,
+                        QueueMediaPayload::Bytes(b"conflict-secret".to_vec()),
+                    )],
+                },
+            ),
+            Err(QueueMediaError::OverlayAuthorityConflict("source_image"))
+        ));
+        assert_eq!(serde_json::to_value(&conflict).unwrap(), before);
     }
 
     #[test]

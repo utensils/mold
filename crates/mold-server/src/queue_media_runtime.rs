@@ -230,6 +230,13 @@ mod tests {
             Some(b"identity-bytes".as_slice())
         );
         let private_path = std::path::PathBuf::from(sanitized.source_video_path.as_ref().unwrap());
+        let runtime_root = private_path
+            .parent()
+            .and_then(std::path::Path::parent)
+            .unwrap()
+            .to_path_buf();
+        drop(deferred);
+        assert!(runtime_root.is_dir());
         assert_eq!(
             std::fs::read(&private_path).unwrap(),
             b"private-video-bytes"
@@ -245,6 +252,7 @@ mod tests {
 
         drop(lease);
         assert!(!private_path.exists());
+        assert!(!runtime_root.exists());
     }
 
     #[test]

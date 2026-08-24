@@ -6595,10 +6595,11 @@ fn denoise_forward_multiplier_permille_with_projection(
     request: &mold_core::GenerateRequest,
     projection: Option<&crate::queue_media_store::QueueMediaProjection>,
 ) -> u64 {
-    let uses_true_cfg = (mold_core::identity::request_carries_identity_photo(request)
-        || projection.is_some_and(|projection| projection.identity_present))
-        && mold_core::identity::effective_id_weight(request) > 0.0
-        && mold_core::identity::true_cfg_engages(mold_core::identity::effective_true_cfg(request));
+    let uses_true_cfg = mold_core::identity::request_uses_true_cfg_with_identity_presence(
+        request,
+        mold_core::identity::request_carries_identity_photo(request)
+            || projection.is_some_and(|projection| projection.identity_present),
+    );
     if !uses_true_cfg {
         return 1_000;
     }
@@ -6641,7 +6642,7 @@ fn generation_shape_bucket_with_projection(
                 || projection.source_video_path
         });
     let edit_count = request.edit_images.as_ref().map_or(0, Vec::len)
-        + projection.map_or(0, |projection| projection.edit_images.len());
+        + projection.map_or(0, |projection| projection.edit_image_count());
     let base = format!(
         "{}x{}:s{}:f{}:fps{}:a{}:src{}:edit{}:lora{}:b{}",
         request.width,
@@ -7076,6 +7077,7 @@ mod true_cfg_estimate_tests {
             source_image: true,
             identity_present: true,
             identity_photograph_count: 1,
+            edit_image_count: 2,
             edit_images: vec![
                 crate::queue_media_store::ProjectedImageDimensions::UnreadableHeader,
                 crate::queue_media_store::ProjectedImageDimensions::UnreadableHeader,
@@ -7108,6 +7110,28 @@ mod true_cfg_estimate_tests {
         assert_eq!(
             generation_shape_bucket_with_projection(&hydrated_path, None),
             generation_shape_bucket_with_projection(&sanitized_path, Some(&path_projection)),
+        );
+    }
+
+    #[test]
+    fn qwen_edit_count_above_flux_dimension_slots_keeps_hydrated_projection_parity() {
+        let mut hydrated = request();
+        hydrated.model = "qwen-image-edit".into();
+        hydrated.edit_images = Some((0_u8..5).map(|byte| vec![byte]).collect());
+        let mut sanitized = hydrated.clone();
+        sanitized.edit_images = None;
+        let projection = crate::queue_media_store::QueueMediaProjection {
+            edit_image_count: 5,
+            edit_images: vec![
+                crate::queue_media_store::ProjectedImageDimensions::UnreadableHeader;
+                crate::queue_media_store::PROJECTED_EDIT_DIMENSION_SLOTS
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            generation_shape_bucket_with_projection(&hydrated, None),
+            generation_shape_bucket_with_projection(&sanitized, Some(&projection)),
         );
     }
 

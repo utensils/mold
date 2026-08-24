@@ -44,7 +44,14 @@ const DATA_HEADER_BYTES: usize = 9;
 const MAX_CIPHERTEXT_FRAME: usize = CHUNK_BYTES + DATA_HEADER_BYTES + AEAD_TAG_BYTES;
 const BUNDLE_SUFFIX: &str = ".qms";
 const OPERATION_FINGERPRINT_VERSION_SHA256_V1: u16 = 1;
-const MAX_PROJECTED_EDIT_IMAGES: usize = mold_core::validation::FLUX2_DEV_MAX_REFERENCE_IMAGES;
+const RUNTIME_STAGING_PREFIX: &str = "runtime-";
+const RUNTIME_STAGING_CLAIM: &str = ".claim.lock";
+const RUNTIME_STAGING_SWEEP: &str = ".sweep.lock";
+pub(crate) const PROJECTED_EDIT_DIMENSION_SLOTS: usize =
+    mold_core::validation::FLUX2_DEV_MAX_REFERENCE_IMAGES;
+const PROJECTION_EDIT_SLOTS_END: usize = 20 + PROJECTED_EDIT_DIMENSION_SLOTS * 9;
+
+const _: () = assert!(PROJECTION_EDIT_SLOTS_END <= 56);
 
 type Cipher = XChaCha20Poly1305;
 type StreamNonce = aead_stream::Nonce<Cipher, StreamBE32<Cipher>>;
@@ -108,6 +115,26 @@ pub struct OpenedQueueMediaStore {
 pub struct QueueMediaStore {
     root: PathBuf,
     key: Arc<Zeroizing<[u8; KEY_BYTES]>>,
+    #[cfg(unix)]
+    runtime_staging: Arc<QueueMediaRuntimeStaging>,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct QueueMediaRuntimeStaging {
+    root: PathBuf,
+    _claim: File,
+}
+
+#[cfg(unix)]
+impl Drop for QueueMediaRuntimeStaging {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.root) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(%error, "failed to remove queue-media runtime plaintext staging");
+            }
+        }
+    }
 }
 
 impl fmt::Debug for QueueMediaStore {
@@ -279,6 +306,7 @@ pub struct QueueMediaProjection {
     pub keyframe_count: u32,
     pub identity_present: bool,
     pub identity_photograph_count: u32,
+    pub edit_image_count: u32,
     pub edit_images: Vec<ProjectedImageDimensions>,
     pub mask_image: bool,
     pub control_image: bool,
@@ -292,7 +320,7 @@ impl QueueMediaProjection {
     }
 
     pub fn edit_image_count(&self) -> usize {
-        self.edit_images.len()
+        self.edit_image_count as usize
     }
 
     pub fn has_visual_conditioning(&self) -> bool {
@@ -333,6 +361,8 @@ pub struct DecryptedMediaSet {
     pub manifest: MediaSetManifest,
     pub files: Vec<DecryptedMedia>,
     root: Option<PathBuf>,
+    #[cfg(unix)]
+    _runtime_staging: Arc<QueueMediaRuntimeStaging>,
 }
 
 #[derive(Debug)]
@@ -353,6 +383,128 @@ pub struct DecryptedQueueMediaSet {
     pub manifest: MediaSetManifest,
     pub media: Vec<DecryptedQueueMedia>,
     root: Option<PathBuf>,
+    #[cfg(unix)]
+    _runtime_staging: Arc<QueueMediaRuntimeStaging>,
+}
+
+struct PlaintextStagingGuard {
+    path: Option<PathBuf>,
+}
+
+impl PlaintextStagingGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn path(&self) -> &Path {
+        self.path.as_deref().expect("staging guard is armed")
+    }
+
+    fn rename_to(&mut self, destination: PathBuf) -> Result<(), QueueMediaError> {
+        fs::rename(self.path(), &destination)?;
+        self.path = Some(destination);
+        Ok(())
+    }
+
+    fn release(mut self) -> PathBuf {
+        self.path.take().expect("staging guard is armed")
+    }
+}
+
+impl Drop for PlaintextStagingGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn establish_runtime_staging(parent: &Path) -> Result<QueueMediaRuntimeStaging, QueueMediaError> {
+    ensure_private_dir(parent)?;
+    let sweep_path = parent.join(RUNTIME_STAGING_SWEEP);
+    let sweep = open_or_create_private_file(&sweep_path)?;
+    sweep.lock_exclusive().map_err(|error| {
+        QueueMediaError::SecurityUnavailable(format!(
+            "cannot lock the queue-media staging claim mutex: {error}"
+        ))
+    })?;
+
+    sweep_dead_runtime_staging_roots(parent)?;
+
+    let root = parent.join(format!("{RUNTIME_STAGING_PREFIX}{}", random_hex(16)?));
+    ensure_private_dir(&root)?;
+    let claim_path = root.join(RUNTIME_STAGING_CLAIM);
+    let claim = match create_private_file(&claim_path) {
+        Ok(claim) => claim,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&root);
+            return Err(error);
+        }
+    };
+    if let Err(error) = claim.try_lock_exclusive() {
+        let _ = fs::remove_dir_all(&root);
+        return Err(QueueMediaError::SecurityUnavailable(format!(
+            "cannot claim the queue-media runtime staging root: {error}"
+        )));
+    }
+    drop(sweep);
+    Ok(QueueMediaRuntimeStaging {
+        root,
+        _claim: claim,
+    })
+}
+
+#[cfg(unix)]
+fn sweep_runtime_staging_parent(parent: &Path) -> Result<(), QueueMediaError> {
+    ensure_private_dir(parent)?;
+    let sweep = open_or_create_private_file(&parent.join(RUNTIME_STAGING_SWEEP))?;
+    sweep.lock_exclusive().map_err(|error| {
+        QueueMediaError::SecurityUnavailable(format!(
+            "cannot lock the queue-media staging sweep mutex: {error}"
+        ))
+    })?;
+    sweep_dead_runtime_staging_roots(parent)
+}
+
+#[cfg(unix)]
+fn sweep_dead_runtime_staging_roots(parent: &Path) -> Result<(), QueueMediaError> {
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(set_id) = name.strip_prefix(RUNTIME_STAGING_PREFIX) else {
+            continue;
+        };
+        if !valid_set_id(set_id) {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        let root = entry.path();
+        let claim_path = root.join(RUNTIME_STAGING_CLAIM);
+        let claim = match mold_core::secure_file::open_regular_file_no_follow(&claim_path) {
+            Ok(claim) => claim,
+            Err(_) => continue,
+        };
+        match claim.try_lock_exclusive() {
+            Ok(()) => {
+                if let Err(error) = fs::remove_dir_all(&root) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        tracing::warn!(%error, "failed to sweep dead queue-media staging root");
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => {
+                tracing::warn!(%error, "could not inspect queue-media staging liveness");
+            }
+        }
+    }
+    Ok(())
 }
 
 impl DecryptedQueueMediaSet {
@@ -529,14 +681,6 @@ impl QueueMediaStore {
         let key_path = container.join(KEY_FILE);
         let key_existed = symlink_metadata_optional(&key_path)?.is_some();
 
-        let existing_payload = store_contains_payload(&version_root)?;
-        if !key_existed && existing_payload {
-            return Err(QueueMediaError::MissingKeyWithExistingStore);
-        }
-        if !key_existed && !allow_initialize {
-            return Err(QueueMediaError::MissingKey);
-        }
-
         ensure_private_dir(&container)?;
         for path in [
             version_root.clone(),
@@ -549,15 +693,30 @@ impl QueueMediaStore {
             ensure_private_dir(&path)?;
         }
 
+        #[cfg(unix)]
+        sweep_runtime_staging_parent(&version_root.join("ephemeral"))?;
+
+        let existing_payload = store_contains_payload(&version_root)?;
+        if !key_existed && existing_payload {
+            return Err(QueueMediaError::MissingKeyWithExistingStore);
+        }
+        if !key_existed && !allow_initialize {
+            return Err(QueueMediaError::MissingKey);
+        }
+
         let (key, key_disposition) = if key_existed {
             (load_master_key(&key_path)?, KeyDisposition::Loaded)
         } else {
             initialize_master_key(&key_path)?
         };
+        #[cfg(unix)]
+        let runtime_staging = Arc::new(establish_runtime_staging(&version_root.join("ephemeral"))?);
         Ok(OpenedQueueMediaStore {
             store: Self {
                 root: version_root,
                 key: Arc::new(key),
+                #[cfg(unix)]
+                runtime_staging,
             },
             key_disposition,
         })
@@ -862,21 +1021,17 @@ impl QueueMediaStore {
             .locate_bundle(media_set)?
             .ok_or(QueueMediaError::NotFound)?;
         let partial = self
+            .runtime_staging
             .root
-            .join("ephemeral")
             .join(format!("{}.partial", random_hex(16)?));
         ensure_private_dir(&partial)?;
-        let decoded = match self.decode_v2_from_path(media_set, &path, Some(&partial), true) {
-            Ok(decoded) => decoded,
-            Err(error) => {
-                let _ = fs::remove_dir_all(&partial);
-                return Err(error);
-            }
-        };
-        crate::dir_sync::sync_directory(&partial)?;
+        let mut staging = PlaintextStagingGuard::new(partial);
+        let decoded = self.decode_v2_from_path(media_set, &path, Some(staging.path()), true)?;
+        crate::dir_sync::sync_directory(staging.path())?;
+        let partial = staging.path().to_path_buf();
         let ready = partial.with_extension("ready");
-        fs::rename(&partial, &ready)?;
-        crate::dir_sync::sync_directory(&self.root.join("ephemeral"))?;
+        staging.rename_to(ready.clone())?;
+        crate::dir_sync::sync_directory(&self.runtime_staging.root)?;
         let mut memory = decoded.memory;
         let mut media = Vec::with_capacity(decoded.manifest.entries.len());
         for (index, entry) in decoded.manifest.entries.iter().enumerate() {
@@ -905,7 +1060,8 @@ impl QueueMediaStore {
         Ok(DecryptedQueueMediaSet {
             manifest: decoded.manifest,
             media,
-            root: Some(ready),
+            root: Some(staging.release()),
+            _runtime_staging: Arc::clone(&self.runtime_staging),
         })
     }
 
@@ -927,21 +1083,17 @@ impl QueueMediaStore {
         media_set: &MediaSetRef,
     ) -> Result<DecryptedMediaSet, QueueMediaError> {
         let partial = self
+            .runtime_staging
             .root
-            .join("ephemeral")
             .join(format!("{}.partial", random_hex(16)?));
         ensure_private_dir(&partial)?;
-        let decoded = match self.decode_bundle(media_set, Some(&partial)) {
-            Ok(decoded) => decoded,
-            Err(error) => {
-                let _ = fs::remove_dir_all(&partial);
-                return Err(error);
-            }
-        };
-        crate::dir_sync::sync_directory(&partial)?;
+        let mut staging = PlaintextStagingGuard::new(partial);
+        let decoded = self.decode_bundle(media_set, Some(staging.path()))?;
+        crate::dir_sync::sync_directory(staging.path())?;
+        let partial = staging.path().to_path_buf();
         let ready = partial.with_extension("ready");
-        fs::rename(&partial, &ready)?;
-        crate::dir_sync::sync_directory(&self.root.join("ephemeral"))?;
+        staging.rename_to(ready.clone())?;
+        crate::dir_sync::sync_directory(&self.runtime_staging.root)?;
         let files = decoded
             .manifest
             .entries
@@ -958,7 +1110,8 @@ impl QueueMediaStore {
         Ok(DecryptedMediaSet {
             manifest: decoded.manifest,
             files,
-            root: Some(ready),
+            root: Some(staging.release()),
+            _runtime_staging: Arc::clone(&self.runtime_staging),
         })
     }
 
@@ -2397,10 +2550,14 @@ fn operation_receipt_aad(owner_id: &str, operation_id: &str) -> Vec<u8> {
 fn encode_projection(
     projection: &QueueMediaProjection,
 ) -> Result<[u8; PROJECTION_PLAINTEXT_BYTES], QueueMediaError> {
-    if projection.edit_images.len() > MAX_PROJECTED_EDIT_IMAGES {
+    let expected_dimension_slots = projection
+        .edit_image_count()
+        .min(PROJECTED_EDIT_DIMENSION_SLOTS);
+    if projection.edit_images.len() != expected_dimension_slots {
         return Err(QueueMediaError::Corrupt(format!(
-            "projection has {} edit images; validated Flux.2 maximum is {MAX_PROJECTED_EDIT_IMAGES}",
-            projection.edit_images.len()
+            "projection edit-image count {} requires {expected_dimension_slots} dimension slots, found {}",
+            projection.edit_image_count,
+            projection.edit_images.len(),
         )));
     }
     if projection.identity_present != (projection.identity_photograph_count > 0) {
@@ -2444,7 +2601,7 @@ fn encode_projection(
     bytes[4..8].copy_from_slice(&flags.to_be_bytes());
     bytes[8..12].copy_from_slice(&projection.keyframe_count.to_be_bytes());
     bytes[12..16].copy_from_slice(&projection.identity_photograph_count.to_be_bytes());
-    bytes[16..20].copy_from_slice(&(projection.edit_images.len() as u32).to_be_bytes());
+    bytes[16..20].copy_from_slice(&projection.edit_image_count.to_be_bytes());
     for (index, dimensions) in projection.edit_images.iter().enumerate() {
         let offset = 20 + index * 9;
         match dimensions {
@@ -2463,7 +2620,9 @@ fn decode_projection(bytes: &[u8]) -> Result<QueueMediaProjection, QueueMediaErr
     if bytes.len() != PROJECTION_PLAINTEXT_BYTES
         || u16::from_be_bytes(bytes[..2].try_into().expect("sized")) != PROJECTION_VERSION
         || bytes[2..4] != [0, 0]
-        || bytes[56..].iter().any(|byte| *byte != 0)
+        || bytes[PROJECTION_EDIT_SLOTS_END..]
+            .iter()
+            .any(|byte| *byte != 0)
     {
         return Err(QueueMediaError::Corrupt("invalid projection record".into()));
     }
@@ -2473,17 +2632,13 @@ fn decode_projection(bytes: &[u8]) -> Result<QueueMediaProjection, QueueMediaErr
             "projection contains unknown flags".into(),
         ));
     }
-    let edit_count = u32::from_be_bytes(bytes[16..20].try_into().expect("sized")) as usize;
-    if edit_count > MAX_PROJECTED_EDIT_IMAGES {
-        return Err(QueueMediaError::Corrupt(
-            "projection edit-image count exceeds format bound".into(),
-        ));
-    }
-    let mut edit_images = Vec::with_capacity(edit_count);
-    for index in 0..MAX_PROJECTED_EDIT_IMAGES {
+    let edit_image_count = u32::from_be_bytes(bytes[16..20].try_into().expect("sized"));
+    let dimension_count = (edit_image_count as usize).min(PROJECTED_EDIT_DIMENSION_SLOTS);
+    let mut edit_images = Vec::with_capacity(dimension_count);
+    for index in 0..PROJECTED_EDIT_DIMENSION_SLOTS {
         let offset = 20 + index * 9;
         let slot = &bytes[offset..offset + 9];
-        if index >= edit_count {
+        if index >= dimension_count {
             if slot.iter().any(|byte| *byte != 0) {
                 return Err(QueueMediaError::Corrupt(
                     "unused projection dimension slot is nonzero".into(),
@@ -2522,6 +2677,7 @@ fn decode_projection(bytes: &[u8]) -> Result<QueueMediaProjection, QueueMediaErr
         keyframe_count: u32::from_be_bytes(bytes[8..12].try_into().expect("sized")),
         identity_present: bit(5),
         identity_photograph_count: u32::from_be_bytes(bytes[12..16].try_into().expect("sized")),
+        edit_image_count,
         edit_images,
         mask_image: bit(6),
         control_image: bit(7),
@@ -2740,8 +2896,13 @@ fn store_contains_payload(version_root: &Path) -> Result<bool, QueueMediaError> 
             return Ok(true);
         };
         match name {
-            "active" | "retired" | "staging" | "ephemeral" => {
+            "active" | "retired" | "staging" => {
                 if tree_contains_non_directory_entry(&entry.path())? {
+                    return Ok(true);
+                }
+            }
+            "ephemeral" => {
+                if runtime_staging_contains_payload(&entry.path())? {
                     return Ok(true);
                 }
             }
@@ -2751,6 +2912,28 @@ fn store_contains_payload(version_root: &Path) -> Result<bool, QueueMediaError> 
             "locks" if entry.file_type().is_ok_and(|kind| kind.is_dir()) => {}
             _ => return Ok(true),
         }
+    }
+    Ok(false)
+}
+
+fn runtime_staging_contains_payload(root: &Path) -> Result<bool, QueueMediaError> {
+    let Some(metadata) = symlink_metadata_optional(root)? else {
+        return Ok(false);
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(true);
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => return Ok(true),
+        };
+        if entry.file_name() == std::ffi::OsStr::new(RUNTIME_STAGING_SWEEP)
+            && entry.file_type().is_ok_and(|kind| kind.is_file())
+        {
+            continue;
+        }
+        return Ok(true);
     }
     Ok(false)
 }
@@ -3042,6 +3225,7 @@ mod tests {
             keyframe_count: 2,
             identity_present: true,
             identity_photograph_count: 3,
+            edit_image_count: 2,
             edit_images: vec![
                 ProjectedImageDimensions::Known {
                     width: 640,
@@ -3146,6 +3330,183 @@ mod tests {
                 QueueMediaProjectionFailure::LegacyV1
             ))
         ));
+    }
+
+    #[test]
+    fn projection_keeps_unbounded_edit_count_separate_from_flux_dimension_slots() {
+        let dimensions =
+            vec![ProjectedImageDimensions::UnreadableHeader; PROJECTED_EDIT_DIMENSION_SLOTS];
+        let projection = QueueMediaProjection {
+            edit_image_count: 5,
+            edit_images: dimensions.clone(),
+            ..Default::default()
+        };
+        let encoded = encode_projection(&projection).unwrap();
+        assert_eq!(decode_projection(&encoded).unwrap(), projection);
+
+        let noncanonical = QueueMediaProjection {
+            edit_image_count: 5,
+            edit_images: dimensions[..PROJECTED_EDIT_DIMENSION_SLOTS - 1].to_vec(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            encode_projection(&noncanonical),
+            Err(QueueMediaError::Corrupt(_))
+        ));
+
+        let mut unused_slot = encode_projection(&QueueMediaProjection {
+            edit_image_count: 1,
+            edit_images: vec![ProjectedImageDimensions::UnreadableHeader],
+            ..Default::default()
+        })
+        .unwrap();
+        unused_slot[20 + 9] = 1;
+        assert!(matches!(
+            decode_projection(&unused_slot),
+            Err(QueueMediaError::Corrupt(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    fn dead_runtime_root(parent: &Path, digit: char) -> PathBuf {
+        let root = parent.join(format!(
+            "{RUNTIME_STAGING_PREFIX}{}",
+            digit.to_string().repeat(32)
+        ));
+        ensure_private_dir(&root).unwrap();
+        create_private_file(&root.join(RUNTIME_STAGING_CLAIM)).unwrap();
+        fs::write(root.join("plaintext.media"), b"sigkill-shaped plaintext").unwrap();
+        root
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_staging_preserves_live_peers_and_cleans_on_final_clone_drop() {
+        let home = tempfile::tempdir().unwrap();
+        let first = open_store(home.path());
+        let first_root = first.runtime_staging.root.clone();
+        let first_clone = first.clone();
+        let second = open_store(home.path());
+        let second_root = second.runtime_staging.root.clone();
+
+        assert!(first_root.is_dir());
+        assert!(second_root.is_dir());
+        drop(first);
+        assert!(first_root.is_dir(), "a live clone retains the claim");
+        drop(second);
+        assert!(!second_root.exists());
+        assert!(first_root.is_dir());
+        drop(first_clone);
+        assert!(!first_root.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mixed_decryption_retains_runtime_root_until_returned_set_drops() {
+        let home = tempfile::tempdir().unwrap();
+        let source = home.path().join("source-video.mp4");
+        fs::write(&source, b"lease-owned-video").unwrap();
+        let store = open_store(home.path());
+        let runtime_root = store.runtime_staging.root.clone();
+        let reference = store
+            .seal_v2_with_operation_fingerprint(
+                "owner",
+                "job-mixed-lifetime",
+                &QueueMediaOperationFingerprint::sha256_v1(b"mixed lifetime"),
+                &QueueMediaProjection {
+                    source_video_path: true,
+                    ..Default::default()
+                },
+                &[SealMedia::path("source_video_path", "scalar", &source)],
+            )
+            .unwrap();
+        let decrypted = store.decrypt_mixed(&reference).unwrap();
+        let staged = match &decrypted.media[0].payload {
+            DecryptedQueueMediaPayload::PrivatePath(path) => path.clone(),
+            _ => panic!("path-shaped media must use private staging"),
+        };
+
+        drop(store);
+        assert!(runtime_root.is_dir());
+        assert_eq!(fs::read(&staged).unwrap(), b"lease-owned-video");
+        drop(decrypted);
+        assert!(!staged.exists());
+        assert!(!runtime_root.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_decryption_retains_runtime_root_until_returned_set_drops() {
+        let home = tempfile::tempdir().unwrap();
+        let source = home.path().join("legacy-source.bin");
+        fs::write(&source, b"legacy-lease-owned-bytes").unwrap();
+        let store = open_store(home.path());
+        let runtime_root = store.runtime_staging.root.clone();
+        let reference = store
+            .seal(
+                "owner",
+                "job-legacy-lifetime",
+                &[SealMedia::path("source", "scalar", &source)],
+            )
+            .unwrap();
+        let decrypted = store.decrypt_to_private_staging(&reference).unwrap();
+        let staged = decrypted.files[0].path.clone();
+
+        drop(store);
+        assert!(runtime_root.is_dir());
+        assert_eq!(fs::read(&staged).unwrap(), b"legacy-lease-owned-bytes");
+        drop(decrypted);
+        assert!(!staged.exists());
+        assert!(!runtime_root.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_sweeps_only_proven_dead_runtime_roots() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().unwrap();
+        let initial = open_store(home.path());
+        let parent = initial.root.join("ephemeral");
+        drop(initial);
+
+        let dead = dead_runtime_root(&parent, 'a');
+        let untracked = parent.join(format!("{RUNTIME_STAGING_PREFIX}{}", "b".repeat(32)));
+        ensure_private_dir(&untracked).unwrap();
+        fs::write(untracked.join("plaintext.media"), b"untracked").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let symlink_root = parent.join(format!("{RUNTIME_STAGING_PREFIX}{}", "c".repeat(32)));
+        symlink(outside.path(), &symlink_root).unwrap();
+
+        let reopened = open_store(home.path());
+        assert!(!dead.exists(), "an unlocked tracked root is proven dead");
+        assert!(
+            untracked.is_dir(),
+            "an untracked root is never guessed dead"
+        );
+        assert!(symlink_root
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        drop(reopened);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_locks_and_dead_plaintext_do_not_block_safe_empty_store_rekey() {
+        let home = tempfile::tempdir().unwrap();
+        let initial = QueueMediaStore::open(home.path()).unwrap();
+        assert_eq!(initial.key_disposition, KeyDisposition::Initialized);
+        let parent = initial.store.root.join("ephemeral");
+        drop(initial);
+        assert!(parent.join(RUNTIME_STAGING_SWEEP).is_file());
+
+        let dead = dead_runtime_root(&parent, 'd');
+        fs::remove_file(home.path().join(STORE_DIR).join(KEY_FILE)).unwrap();
+        let reopened = QueueMediaStore::open(home.path()).unwrap();
+        assert_eq!(reopened.key_disposition, KeyDisposition::Initialized);
+        assert!(!dead.exists());
     }
 
     #[cfg(unix)]
@@ -3442,10 +3803,14 @@ mod tests {
             fs::write(&path, bytes).unwrap();
             assert!(store.load(&reference).is_err());
             assert!(store.decrypt_to_private_staging(&reference).is_err());
-            assert!(fs::read_dir(store.root.join("ephemeral"))
+            let runtime_entries = fs::read_dir(&store.runtime_staging.root)
                 .unwrap()
-                .next()
-                .is_none());
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                runtime_entries,
+                vec![std::ffi::OsString::from(RUNTIME_STAGING_CLAIM)]
+            );
         }
     }
 

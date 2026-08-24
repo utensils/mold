@@ -803,10 +803,11 @@ pub(crate) fn request_charges_true_cfg_overhead_with_projection(
     req: &GenerateRequest,
     projection: Option<&crate::queue_media_store::QueueMediaProjection>,
 ) -> bool {
-    (mold_core::identity::request_carries_identity_photo(req)
-        || projection.is_some_and(|projection| projection.identity_present))
-        && mold_core::identity::effective_id_weight(req) > 0.0
-        && mold_core::identity::true_cfg_engages(mold_core::identity::effective_true_cfg(req))
+    mold_core::identity::request_uses_true_cfg_with_identity_presence(
+        req,
+        mold_core::identity::request_carries_identity_photo(req)
+            || projection.is_some_and(|projection| projection.identity_present),
+    )
 }
 
 fn activation_memory_for_estimate(hint: Option<ActivationHint>, qwen_quantized: bool) -> u64 {
@@ -1940,6 +1941,7 @@ mod fail_closed_tests {
             source_image: true,
             identity_present: true,
             identity_photograph_count: 1,
+            edit_image_count: 1,
             edit_images: vec![ProjectedImageDimensions::Known {
                 width: 320,
                 height: 240,
