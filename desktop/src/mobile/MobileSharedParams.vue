@@ -147,7 +147,7 @@ const sourceDimensions = computed(() => {
     {{ fpsError }}
   </p>
   <div class="field-grid">
-    <label class="field">
+    <label class="field" :class="{ 'field--with-note': stepsNote }">
       <span>Steps</span>
       <input
         v-model.number="form.steps"
@@ -160,10 +160,13 @@ const sourceDimensions = computed(() => {
         :disabled="stepsControl?.mode === 'fixed'"
         :aria-invalid="stepsError ? 'true' : undefined"
       />
+      <small v-if="stepsNote" class="mobile-generate-hint" data-test="mobile-fixed-steps-hint">
+        {{ stepsNote }}
+      </small>
     </label>
-    <label class="field"
-      ><span>Guidance</span
-      ><input
+    <label class="field" :class="{ 'field--with-note': guidanceNote }">
+      <span>Guidance</span>
+      <input
         :value="guidanceCaps.fixedGuidance ?? form.guidance"
         class="control"
         type="number"
@@ -177,14 +180,16 @@ const sourceDimensions = computed(() => {
           guidanceCaps.guidanceAdjustable &&
           (form.guidance = Number(($event.target as HTMLInputElement).value))
         "
-    /></label>
+      />
+      <small
+        v-if="guidanceNote"
+        class="mobile-generate-hint"
+        data-test="mobile-fixed-guidance-hint"
+      >
+        {{ guidanceNote }}
+      </small>
+    </label>
   </div>
-  <p v-if="stepsNote" class="mobile-generate-hint" data-test="mobile-fixed-steps-hint">
-    {{ stepsNote }}
-  </p>
-  <p v-if="guidanceNote" class="mobile-generate-hint" data-test="mobile-fixed-guidance-hint">
-    {{ guidanceNote }}
-  </p>
   <p
     v-if="stepsError || guidanceError"
     class="mobile-generate-validation"

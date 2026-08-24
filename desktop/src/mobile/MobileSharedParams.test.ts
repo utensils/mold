@@ -1,4 +1,4 @@
-import { mount } from "@vue/test-utils";
+import { mount, type DOMWrapper, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { reactive } from "vue";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -223,6 +223,26 @@ describe("MobileSharedParams fixed-control notes", () => {
 
     expect(wrapper.get("[data-test='mobile-fixed-steps-hint']").text()).toBe(H3_TURBO_STEPS_NOTE);
     expect(wrapper.get("[data-test='mobile-fixed-guidance-hint']").text()).toBe(H3_GUIDANCE_NOTE);
+
+    // Each note lives INSIDE its own field, directly under that field's input,
+    // so it reads as an explanation of that control rather than as trailing
+    // prose after the whole two-column grid.
+    const stepsField = fieldFor(wrapper, "Steps");
+    const guidanceField = fieldFor(wrapper, "Guidance");
+    expect(stepsField.find("[data-test='mobile-fixed-steps-hint']").exists()).toBe(true);
+    expect(stepsField.find("[data-test='mobile-fixed-guidance-hint']").exists()).toBe(false);
+    expect(guidanceField.find("[data-test='mobile-fixed-guidance-hint']").exists()).toBe(true);
+    expect(guidanceField.find("[data-test='mobile-fixed-steps-hint']").exists()).toBe(false);
+    // The note follows the input it explains.
+    const stepsInput = stepsField.get("input").element;
+    const stepsHint = stepsField.get("[data-test='mobile-fixed-steps-hint']").element;
+    expect(
+      stepsInput.compareDocumentPosition(stepsHint) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // A noted field takes the whole row so the sentence stays readable at
+    // phone width; the pair keeps its two-column layout when neither is noted.
+    expect(stepsField.classes()).toContain("field--with-note");
+    expect(guidanceField.classes()).toContain("field--with-note");
     // The old hard-coded sentence is false here: H3 pins guidance at 0 and
     // offers no Dev checkpoint to switch to.
     expect(wrapper.text()).not.toContain("Distilled recipe fixes CFG");
@@ -243,6 +263,8 @@ describe("MobileSharedParams fixed-control notes", () => {
 
     expect(wrapper.find("[data-test='mobile-fixed-steps-hint']").exists()).toBe(false);
     expect(wrapper.find("[data-test='mobile-fixed-guidance-hint']").exists()).toBe(false);
+    expect(fieldFor(wrapper, "Steps").classes()).not.toContain("field--with-note");
+    expect(fieldFor(wrapper, "Guidance").classes()).not.toContain("field--with-note");
   });
 
   it("invents no copy when a fixed control carries no note (older host)", () => {
@@ -266,3 +288,13 @@ describe("MobileSharedParams fixed-control notes", () => {
     expect(wrapper.find("[data-test='mobile-fixed-guidance-hint']").exists()).toBe(false);
   });
 });
+
+/** The `.field` label wrapping one named control — the container a note has to
+ * live inside to read as that control's own explanation. */
+function fieldFor(wrapper: VueWrapper, label: string): DOMWrapper<HTMLElement> {
+  const field = wrapper
+    .findAll<HTMLElement>("label.field")
+    .find((candidate) => candidate.get("span").text() === label);
+  if (!field) throw new Error(`no field labelled ${label}`);
+  return field;
+}
