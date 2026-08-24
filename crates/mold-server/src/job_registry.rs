@@ -1061,6 +1061,19 @@ impl JobRegistry {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Returns true while any accepted generation is executing.
+    ///
+    /// The registry is the lifecycle authority across scheduler/worker
+    /// hand-offs, so consumers deciding whether the server is idle must use
+    /// this signal rather than relying only on transport-local counters.
+    pub(crate) fn has_running(&self) -> bool {
+        self.inner
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|entry| entry.state == JobLifecycle::Running)
+    }
 }
 
 #[cfg(test)]
@@ -1139,7 +1152,9 @@ mod tests {
     fn mark_running_flips_state_and_records_gpu_ordinal() {
         let reg = JobRegistry::new();
         reg.register("a", "flux-dev:fp16");
+        assert!(!reg.has_running());
         reg.mark_running("a", Some(1));
+        assert!(reg.has_running());
         let snap = reg.snapshot();
         assert_eq!(snap.entries[0].state, JobLifecycle::Running);
         assert_eq!(snap.entries[0].gpu, Some(1));

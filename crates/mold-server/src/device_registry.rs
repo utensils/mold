@@ -132,6 +132,9 @@ pub(crate) struct SchedulerDeviceProjection {
     pub sampled_free_vram_bytes: u64,
     pub sampled_mold_vram_bytes: Option<u64>,
     pub discovered_free_vram_bytes: u64,
+    /// A generation registry row currently owns this device. This remains
+    /// authoritative across coordinator/worker lifecycle hand-offs.
+    pub active_work: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -851,6 +854,7 @@ impl DeviceRegistry {
                             }),
                         sampled_mold_vram_bytes: info.memory.mold_used_bytes,
                         discovered_free_vram_bytes,
+                        active_work: info.active_work_id.is_some(),
                     }
                 });
                 (info, scheduler)
