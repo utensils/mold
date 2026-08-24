@@ -7472,7 +7472,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_restart_pin_scrub_removes_v2_hard_ordinal_and_preserves_cpu() {
+    fn restart_without_top_level_pin_preserves_v2_component_identity_and_cpu() {
         let (worker, _worker_rx) = test_worker(7);
         let pool = Arc::new(GpuPool {
             workers: vec![worker].into(),
@@ -7498,8 +7498,8 @@ mod tests {
             text_encoders: mold_core::DeviceRef::Cpu,
             advanced: Some(mold_core::AdvancedPlacement {
                 transformer: mold_core::DeviceRef::gpu(7),
-                // This is the current boot's worker identity at the stale
-                // ordinal, not the missing stable target recorded on the row.
+                // This is a component's independently stable identity. The
+                // absent top-level row pin must not erase it.
                 vae: mold_core::DeviceRef::device(format!("cuda:{:032x}", 8)),
                 clip_l: Some(mold_core::DeviceRef::Cpu),
                 ..mold_core::AdvancedPlacement::default()
@@ -7511,7 +7511,10 @@ mod tests {
             Some(7)
         );
         crate::queue_journal::resolve_replay_affinity(&mut request, Some(7), None, |_| None);
-        assert_eq!(generation_hard_ordinal(&state, "replayed", &request), None);
+        assert_eq!(
+            generation_hard_ordinal(&state, "replayed", &request),
+            Some(7)
+        );
         let placement = request.placement.unwrap();
         assert_eq!(placement.text_encoders, mold_core::DeviceRef::Cpu);
         assert_eq!(

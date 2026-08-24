@@ -3773,7 +3773,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_restart_without_stable_identity_never_dispatches_the_stale_ordinal() {
+    fn legacy_restart_without_top_level_identity_preserves_component_device_identity() {
         let (worker, _worker_rx) = test_worker(7, 1);
         let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
         let state = crate::state::AppState::empty(
@@ -3800,15 +3800,17 @@ mod tests {
             .job_registry
             .register_job("legacy-replay", "mock-model", replay_target, None, None);
 
-        assert_eq!(
-            legacy_generation_preferred_gpu(&state, "legacy-replay", request.placement.as_ref()),
-            Ok(None)
-        );
+        assert!(legacy_generation_preferred_gpu(
+            &state,
+            "legacy-replay",
+            request.placement.as_ref()
+        )
+        .is_err_and(|error| error.contains("cuda:removed")));
         let placement = request.placement.unwrap();
         assert_eq!(placement.text_encoders, mold_core::DeviceRef::Cpu);
         let advanced = placement.advanced.unwrap();
         assert_eq!(advanced.transformer, mold_core::DeviceRef::Auto);
-        assert_eq!(advanced.vae, mold_core::DeviceRef::Auto);
+        assert_eq!(advanced.vae, mold_core::DeviceRef::device("cuda:removed"));
     }
 
     #[tokio::test]
