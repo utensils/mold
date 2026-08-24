@@ -40,7 +40,7 @@ import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import SourceImageWell from "../generate/SourceImageWell.vue";
 import IdentityWell from "./IdentityWell.vue";
 import { advancedActiveCount } from "../../lib/advancedCount";
-import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
+import { controlNote, effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import {
   intentForCanvas,
   resolveOutputShape,
@@ -239,6 +239,11 @@ const showIdentity = computed(() => !isSequence.value && props.form.identitySupp
 const activeRecipe = computed(() =>
   effectiveGenerationRecipe(selectedModel.value, props.form.pipeline),
 );
+/* A fixed control explains itself with the profile's own sentence, or with
+ * nothing at all. The inspector never composes that copy: the old hard-coded
+ * distilled-CFG line was false for H3, whose guidance is pinned at 0. */
+const stepsNote = computed(() => controlNote(activeRecipe.value?.steps));
+const guidanceNote = computed(() => controlNote(activeRecipe.value?.guidance));
 // The sequence opening image is primary-form source media, so — exactly like
 // the one-shot source well — it never contributes to the Advanced badge.
 const advancedCount = computed(() =>
@@ -763,6 +768,13 @@ function resetSettings() {
           @update:model-value="form.steps = $event"
         />
         <p v-if="stepsError" class="ms-field__error" role="alert">{{ stepsError }}</p>
+        <p
+          v-else-if="stepsNote"
+          class="ms-field__hint ms-field__hint--after-slider"
+          data-test="fixed-steps-hint"
+        >
+          {{ stepsNote }}
+        </p>
       </div>
 
       <!-- Prompt strength (guidance) -->
@@ -778,12 +790,11 @@ function resetSettings() {
           @update:model-value="form.guidance = $event"
         />
         <p
-          v-if="!caps.guidanceAdjustable"
+          v-if="guidanceNote"
           class="ms-field__hint ms-field__hint--after-slider"
           data-test="fixed-guidance-hint"
         >
-          Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with Auto or a guided pipeline
-          to adjust it.
+          {{ guidanceNote }}
         </p>
       </div>
 

@@ -139,6 +139,12 @@ kept files with the tags that still use them.
 
 Selecting a Turbo model resolves the base INT8 transformer, the tier's pinned
 adapter, and the tier's reviewed step count with no extra configuration. The
+Create screen locks Steps at that count and prints the reason underneath it
+("Fixed by the 8-step Turbo tier: 9 terminal-inclusive sampler grid points
+(8 denoise intervals)."), so the `9` is not a surprise; Guidance is locked the
+same way, because H3 has no classifier-free branch and pins the scale at 0.
+Both sentences come from the server's generation profile, so every surface —
+web, desktop, and the iPhone app — shows the same words. The
 `MOLD_H3_TURBO_ADAPTER` / `MOLD_H3_TURBO_TIER` environment pair is a
 capture-scope UAT override honored only by `h3-private-uat` builds; ordinary
 builds refuse a set pair rather than letting two selection authorities

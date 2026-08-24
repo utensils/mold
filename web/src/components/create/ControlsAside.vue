@@ -19,6 +19,7 @@ import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import {
+  controlNote,
   effectiveGenerationRecipe,
   resolutionProfileFinding,
 } from "@studio/lib/generationProfile";
@@ -104,6 +105,11 @@ const capabilities = computed(() =>
 const activeRecipe = computed(() =>
   effectiveGenerationRecipe(props.model, props.modelValue.pipeline),
 );
+/** A fixed control explains itself with the server's own sentence, or with
+ * nothing at all — this surface never composes copy for a value the profile
+ * pinned (an older server sends no note, and H3 is not a distilled FLUX). */
+const stepsNote = computed(() => controlNote(activeRecipe.value?.steps));
+const guidanceNote = computed(() => controlNote(activeRecipe.value?.guidance));
 /** Every size constraint is advisory — the server is the authority, so a
  * custom size renders a warning here rather than blocking Generate. */
 const resolutionWarning = computed(() => {
@@ -349,6 +355,9 @@ function lockLastSeed() {
         :value-label="`${modelValue.steps} steps`"
         @update:model-value="patch({ steps: $event })"
       />
+      <p v-if="stepsNote" class="controls__hint" data-test="fixed-steps-hint">
+        {{ stepsNote }}
+      </p>
     </div>
 
     <div
@@ -409,12 +418,11 @@ function lockLastSeed() {
         @update:model-value="patch({ guidance: $event })"
       />
       <p
-        v-if="!capabilities.guidanceAdjustable"
+        v-if="guidanceNote"
         class="controls__hint"
         data-test="fixed-guidance-hint"
       >
-        Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with Auto or
-        a guided pipeline to adjust it.
+        {{ guidanceNote }}
       </p>
     </div>
 

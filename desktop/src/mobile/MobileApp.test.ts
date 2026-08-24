@@ -822,7 +822,11 @@ describe("MobileApp sequence generation", () => {
     ]);
     expect(wrapper.find("[data-test='mobile-sequence-composer']").exists()).toBe(true);
     expect(fieldControl("Video model").element).toHaveProperty("value", sequenceModel.name);
-    expect(wrapper.text()).toContain("Distilled recipe fixes CFG at 1.0");
+    // The fixed-CFG sentence is the host's own control note now. This fixture
+    // advertises no generation profile, so the phone renders nothing rather
+    // than composing copy for a value it did not choose — see
+    // MobileSharedParams.test.ts for the note-bearing cases.
+    expect(wrapper.text()).not.toContain("Distilled recipe fixes CFG");
     expect(apiJsonTo).toHaveBeenCalledWith(target, "/api/chain-jobs/foreign-sequence");
   });
 

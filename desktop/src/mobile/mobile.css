@@ -863,6 +863,22 @@ textarea.control {
   gap: 0 10px;
 }
 
+/* A fixed control's explanation belongs to its own field, so it lives inside
+ * that field's label and sits directly under its input. The sentence needs the
+ * full row to stay readable at phone width, so a noted field spans both
+ * columns; an unnoted pair keeps the side-by-side layout unchanged. */
+.field-grid > .field--with-note {
+  grid-column: 1 / -1;
+}
+
+.field > .mobile-generate-hint {
+  display: block;
+  margin: 0;
+  font-family: var(--font-body);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
 .mobile-resolution-picker {
   min-width: 0;
   margin: 4px 0 18px;

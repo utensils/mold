@@ -27,9 +27,17 @@ source_max_pixels?: number | null, max_axis_pixels?: number | null, min_aspect_r
  */
 off_bucket?: OffBucketPolicy | null, aspect_groups: Array<ProfileAspectGroup>, };
 
-export type IntegerControl = { default: number, min: number, max: number, step: number, recommended?: Array<number>, mode: ControlMode, };
+export type IntegerControl = { default: number, min: number, max: number, step: number, recommended?: Array<number>, mode: ControlMode,
+/**
+ * See [`IntegerControl`]'s note on fixed-control copy.
+ */
+note?: string | null, };
 
-export type FloatControl = { default: number, min: number, max: number, step: number, mode: ControlMode, };
+export type FloatControl = { default: number, min: number, max: number, step: number, mode: ControlMode,
+/**
+ * See [`IntegerControl`]'s note on fixed-control copy.
+ */
+note?: string | null, };
 
 export type ProfileFpsControl = { "mode": "fixed", value: number, } | { "mode": "adjustable", default: number, min: number, max: number, step: number, };
 

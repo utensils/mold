@@ -101,6 +101,23 @@ export function advertisedGenerationRecipe(
   );
 }
 
+/**
+ * The server's own sentence explaining why a control cannot be changed.
+ *
+ * The generation profile authors this beside the decision that fixes the
+ * control, so no surface composes copy for a value it did not choose. An
+ * adjustable control, an older server that never sends the field, and a fixed
+ * control the profile had nothing to say about all answer `null` — render
+ * nothing rather than inventing a sentence.
+ */
+export function controlNote(
+  control: { mode?: string | null; note?: string | null } | null | undefined,
+): string | null {
+  if (!control || control.mode !== "fixed") return null;
+  const note = control.note;
+  return typeof note === "string" && note.trim() ? note : null;
+}
+
 /** Name an explicit recipe selector the advertised v1 contract cannot resolve. */
 export function generationRecipeSelectionError(
   model: GenerationProfileModel | null | undefined,
