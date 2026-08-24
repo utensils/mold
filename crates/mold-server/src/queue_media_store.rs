@@ -49,6 +49,7 @@ const OPERATION_FINGERPRINT_VERSION_SHA256_V1: u16 = 1;
 const RUNTIME_STAGING_PREFIX: &str = "runtime-";
 const RUNTIME_STAGING_CLAIM: &str = ".claim.lock";
 const RUNTIME_STAGING_SWEEP: &str = ".sweep.lock";
+const JOB_CLEANUP_LOCK: &str = ".cleanup.lock";
 pub(crate) const PROJECTED_EDIT_DIMENSION_SLOTS: usize =
     mold_core::validation::FLUX2_DEV_MAX_REFERENCE_IMAGES;
 const PROJECTION_EDIT_SLOTS_END: usize = 20 + PROJECTED_EDIT_DIMENSION_SLOTS * 9;
@@ -204,6 +205,15 @@ pub struct QueueMediaStore {
 struct QueueMediaRuntimeStaging {
     root: PathBuf,
     _claim: File,
+}
+
+/// A job lock keeps a shared claim on the cleanup namespace for its complete
+/// lifetime. Terminal cleanup takes that claim exclusively before unlinking a
+/// lock path, so a waiter can never continue on an unlinked lock inode while a
+/// new caller creates a second lock for the same job.
+struct QueueMediaJobLock {
+    _cleanup_claim: File,
+    _job: File,
 }
 
 #[cfg(unix)]
@@ -1037,15 +1047,17 @@ impl QueueMediaStore {
         };
         #[cfg(unix)]
         let runtime_staging = Arc::new(establish_runtime_staging(&version_root.join("ephemeral"))?);
+        let store = Self {
+            root: version_root,
+            key: Arc::new(key),
+            #[cfg(unix)]
+            runtime_staging,
+            #[cfg(test)]
+            inspection_calls: Arc::new(AtomicUsize::new(0)),
+        };
+        store.cleanup_empty_job_artifacts_at_startup();
         Ok(OpenedQueueMediaStore {
-            store: Self {
-                root: version_root,
-                key: Arc::new(key),
-                #[cfg(unix)]
-                runtime_staging,
-                #[cfg(test)]
-                inspection_calls: Arc::new(AtomicUsize::new(0)),
-            },
+            store,
             key_disposition,
         })
     }
@@ -1057,7 +1069,9 @@ impl QueueMediaStore {
         }
         #[cfg(windows)]
         {
-            Ok(QueueMediaSecurityMode::WindowsDpapiCurrentUser)
+            Err(QueueMediaError::SecurityUnavailable(
+                "Windows durable media hydration is not implemented".into(),
+            ))
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -1065,6 +1079,13 @@ impl QueueMediaStore {
                 "no owner-only key protection is implemented for this platform".into(),
             ))
         }
+    }
+
+    /// Whether this platform can authenticate and hydrate every supported V2
+    /// sink. DPAPI key protection alone is insufficient: admission remains
+    /// dark until mixed memory/private-path hydration is implemented.
+    pub(crate) const fn supports_mixed_hydration() -> bool {
+        cfg!(unix)
     }
 
     /// Seals exactly one fresh, non-content-addressed bundle for a queue job.
@@ -1195,6 +1216,22 @@ impl QueueMediaStore {
     }
 
     fn seal_inner(
+        &self,
+        owner_id: &str,
+        job_id: &str,
+        operation_fingerprint: Option<&QueueMediaOperationFingerprint>,
+        projection: Option<&QueueMediaProjection>,
+        media: Vec<SealMedia>,
+    ) -> Result<MediaSetRef, QueueMediaError> {
+        let result =
+            self.seal_inner_locked(owner_id, job_id, operation_fingerprint, projection, media);
+        if result.is_err() {
+            self.cleanup_job_artifacts(owner_id, job_id);
+        }
+        result
+    }
+
+    fn seal_inner_locked(
         &self,
         owner_id: &str,
         job_id: &str,
@@ -1497,41 +1534,53 @@ impl QueueMediaStore {
     /// before unlink, so deletion never bypasses the lifecycle ordering.
     pub fn delete(&self, media_set: &MediaSetRef) -> Result<(), QueueMediaError> {
         validate_media_set_ref(media_set)?;
-        let _lock = self.lock_job(&media_set.owner_id, &media_set.job_id)?;
-        let active = self.bundle_path(StoredState::Active, media_set);
-        let retired = self.bundle_path(StoredState::Retired, media_set);
-        if let Some(metadata) = symlink_metadata_optional(&active)? {
+        let result = (|| {
+            let _lock = self.lock_job(&media_set.owner_id, &media_set.job_id)?;
+            let active = self.bundle_path(StoredState::Active, media_set);
+            let retired = self.bundle_path(StoredState::Retired, media_set);
+            if let Some(metadata) = symlink_metadata_optional(&active)? {
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    return Err(QueueMediaError::InsecurePath(active.display().to_string()));
+                }
+                ensure_private_dir(retired.parent().expect("bundle has parent"))?;
+                if symlink_metadata_optional(&retired)?.is_some() {
+                    return Err(QueueMediaError::Corrupt(
+                        "set exists in both active and retired states".into(),
+                    ));
+                }
+                fs::rename(&active, &retired)?;
+                crate::dir_sync::sync_directory(retired.parent().expect("bundle has parent"))?;
+                crate::dir_sync::sync_directory(active.parent().expect("bundle has parent"))?;
+            }
+            let metadata = symlink_metadata_optional(&retired)?.ok_or(QueueMediaError::NotFound)?;
             if !metadata.is_file() || metadata.file_type().is_symlink() {
-                return Err(QueueMediaError::InsecurePath(active.display().to_string()));
+                return Err(QueueMediaError::InsecurePath(retired.display().to_string()));
             }
-            ensure_private_dir(retired.parent().expect("bundle has parent"))?;
-            if symlink_metadata_optional(&retired)?.is_some() {
-                return Err(QueueMediaError::Corrupt(
-                    "set exists in both active and retired states".into(),
-                ));
-            }
-            fs::rename(&active, &retired)?;
+            fs::remove_file(&retired)?;
             crate::dir_sync::sync_directory(retired.parent().expect("bundle has parent"))?;
-            crate::dir_sync::sync_directory(active.parent().expect("bundle has parent"))?;
+            Ok(())
+        })();
+        if result.is_ok() || matches!(&result, Err(QueueMediaError::NotFound)) {
+            self.cleanup_job_artifacts(&media_set.owner_id, &media_set.job_id);
         }
-        let metadata = symlink_metadata_optional(&retired)?.ok_or(QueueMediaError::NotFound)?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(QueueMediaError::InsecurePath(retired.display().to_string()));
-        }
-        fs::remove_file(&retired)?;
-        crate::dir_sync::sync_directory(retired.parent().expect("bundle has parent"))?;
-        Ok(())
+        result
     }
 
     /// Deletes a fully authenticated interrupted publication from staging.
     pub fn delete_staging(&self, media_set: &MediaSetRef) -> Result<(), QueueMediaError> {
         validate_media_set_ref(media_set)?;
-        let _lock = self.lock_job(&media_set.owner_id, &media_set.job_id)?;
-        self.decode_bundle_at_state(media_set, StoredState::Staging)?;
-        let staging = self.bundle_path(StoredState::Staging, media_set);
-        fs::remove_file(&staging)?;
-        crate::dir_sync::sync_directory(staging.parent().expect("bundle has parent"))?;
-        Ok(())
+        let result = (|| {
+            let _lock = self.lock_job(&media_set.owner_id, &media_set.job_id)?;
+            self.decode_bundle_at_state(media_set, StoredState::Staging)?;
+            let staging = self.bundle_path(StoredState::Staging, media_set);
+            fs::remove_file(&staging)?;
+            crate::dir_sync::sync_directory(staging.parent().expect("bundle has parent"))?;
+            Ok(())
+        })();
+        if result.is_ok() || matches!(&result, Err(QueueMediaError::NotFound)) {
+            self.cleanup_job_artifacts(&media_set.owner_id, &media_set.job_id);
+        }
+        result
     }
 
     /// Enumerates and authenticates one owner's sets. Malformed entries are
@@ -1540,6 +1589,14 @@ impl QueueMediaStore {
         #[cfg(test)]
         self.inspection_calls.fetch_add(1, Ordering::Relaxed);
         let mut report = StoreInspection::default();
+        if !Self::supports_mixed_hydration() {
+            report.unrecognized.push(UnrecognizedStoreEntry {
+                path: self.root.clone(),
+                set_id_hint: None,
+                reason: "durable media hydration is unavailable on this platform".into(),
+            });
+            return report;
+        }
         if let Err(error) = validate_identity("owner", owner_id) {
             report.unrecognized.push(UnrecognizedStoreEntry {
                 path: self.root.clone(),
@@ -1686,6 +1743,21 @@ impl QueueMediaStore {
             }
         }
         roots.into_iter().collect()
+    }
+
+    fn cleanup_empty_job_artifacts_at_startup(&self) {
+        let mut candidates = std::collections::BTreeSet::new();
+        for state in [
+            StoredState::Active,
+            StoredState::Retired,
+            StoredState::Staging,
+        ] {
+            collect_uuid_job_directories(&self.root.join(state.directory()), &mut candidates);
+        }
+        collect_uuid_job_locks(&self.root.join("locks"), &mut candidates);
+        for (owner_id, job_id) in candidates {
+            self.cleanup_job_artifacts(&owner_id, &job_id);
+        }
     }
 
     fn seal_file(
@@ -2249,13 +2321,97 @@ impl QueueMediaStore {
         Ok(DecodedBundle { manifest, memory })
     }
 
-    fn lock_job(&self, owner_id: &str, job_id: &str) -> Result<File, QueueMediaError> {
-        let owner_dir = self.root.join("locks").join(encode_component(owner_id));
+    fn lock_job(&self, owner_id: &str, job_id: &str) -> Result<QueueMediaJobLock, QueueMediaError> {
+        let locks_root = self.root.join("locks");
+        let cleanup_claim = open_or_create_private_file(&locks_root.join(JOB_CLEANUP_LOCK))?;
+        FileExt::lock_shared(&cleanup_claim)?;
+        let owner_dir = locks_root.join(encode_component(owner_id));
         ensure_private_dir(&owner_dir)?;
         let lock_path = owner_dir.join(format!("{}.lock", encode_component(job_id)));
         let lock = open_or_create_private_file(&lock_path)?;
         lock.lock_exclusive()?;
-        Ok(lock)
+        Ok(QueueMediaJobLock {
+            _cleanup_claim: cleanup_claim,
+            _job: lock,
+        })
+    }
+
+    fn cleanup_job_artifacts(&self, owner_id: &str, job_id: &str) {
+        if let Err(error) = self.cleanup_job_artifacts_inner(owner_id, job_id) {
+            tracing::warn!(
+                %error,
+                owner_id,
+                job_id,
+                "left queue-media job artifacts untouched because cleanup was not provably safe"
+            );
+        }
+    }
+
+    fn cleanup_job_artifacts_inner(
+        &self,
+        owner_id: &str,
+        job_id: &str,
+    ) -> Result<(), QueueMediaError> {
+        validate_identity("owner", owner_id)?;
+        validate_identity("job", job_id)?;
+        ensure_private_dir(&self.root)?;
+        let locks_root = self.root.join("locks");
+        ensure_private_dir(&locks_root)?;
+        let cleanup_claim = open_or_create_private_file(&locks_root.join(JOB_CLEANUP_LOCK))?;
+        cleanup_claim.lock_exclusive()?;
+
+        for state in [
+            StoredState::Active,
+            StoredState::Retired,
+            StoredState::Staging,
+        ] {
+            let state_root = self.root.join(state.directory());
+            ensure_private_dir(&state_root)?;
+            let owner_dir = state_root.join(encode_component(owner_id));
+            if let Some(metadata) = symlink_metadata_optional(&owner_dir)? {
+                verify_private_directory_metadata(&owner_dir, &metadata)?;
+            }
+            let job_dir = owner_dir.join(encode_component(job_id));
+            if !remove_empty_private_directory(&job_dir)? {
+                return Ok(());
+            }
+        }
+
+        let lock_owner = locks_root.join(encode_component(owner_id));
+        match symlink_metadata_optional(&lock_owner)? {
+            None => {}
+            Some(metadata) => {
+                verify_private_directory_metadata(&lock_owner, &metadata)?;
+                let lock_path = lock_owner.join(format!("{}.lock", encode_component(job_id)));
+                if let Some(metadata) = symlink_metadata_optional(&lock_path)? {
+                    if !metadata.is_file() || metadata.file_type().is_symlink() {
+                        return Err(QueueMediaError::InsecurePath(
+                            lock_path.display().to_string(),
+                        ));
+                    }
+                    let lock = mold_core::secure_file::open_regular_file_no_follow(&lock_path)
+                        .map_err(|error| QueueMediaError::InsecurePath(error.to_string()))?;
+                    verify_private_lock_file(&lock_path, &lock)?;
+                    lock.lock_exclusive()?;
+                    fs::remove_file(&lock_path)?;
+                    crate::dir_sync::sync_directory(&lock_owner)?;
+                }
+            }
+        }
+
+        for state in [
+            StoredState::Active,
+            StoredState::Retired,
+            StoredState::Staging,
+        ] {
+            let owner_dir = self
+                .root
+                .join(state.directory())
+                .join(encode_component(owner_id));
+            remove_empty_private_directory(&owner_dir)?;
+        }
+        remove_empty_private_directory(&lock_owner)?;
+        Ok(())
     }
 
     fn move_bundle(
@@ -3290,6 +3446,135 @@ fn ensure_private_dir(path: &Path) -> Result<(), QueueMediaError> {
     }
 }
 
+/// Remove only a current-user private directory proven empty without
+/// following links. `true` means the path is absent after the call; `false`
+/// means it contains evidence and was deliberately retained.
+fn remove_empty_private_directory(path: &Path) -> Result<bool, QueueMediaError> {
+    let Some(metadata) = symlink_metadata_optional(path)? else {
+        return Ok(true);
+    };
+    verify_private_directory_metadata(path, &metadata)?;
+    if fs::read_dir(path)?.next().transpose()?.is_some() {
+        return Ok(false);
+    }
+    fs::remove_dir(path)?;
+    if let Some(parent) = path.parent() {
+        crate::dir_sync::sync_directory(parent)?;
+    }
+    Ok(true)
+}
+
+fn collect_uuid_job_directories(
+    state_root: &Path,
+    candidates: &mut std::collections::BTreeSet<(String, String)>,
+) {
+    let Ok(metadata) = fs::symlink_metadata(state_root) else {
+        return;
+    };
+    if verify_private_directory_metadata(state_root, &metadata).is_err() {
+        return;
+    }
+    let Ok(owners) = fs::read_dir(state_root) else {
+        return;
+    };
+    for owner in owners.flatten() {
+        let owner_path = owner.path();
+        let Some(owner_id) = decoded_canonical_uuid_component(&owner.file_name()) else {
+            continue;
+        };
+        let Ok(metadata) = fs::symlink_metadata(&owner_path) else {
+            continue;
+        };
+        if verify_private_directory_metadata(&owner_path, &metadata).is_err() {
+            continue;
+        }
+        let Ok(jobs) = fs::read_dir(&owner_path) else {
+            continue;
+        };
+        for job in jobs.flatten() {
+            let Some(job_id) = decoded_canonical_uuid_component(&job.file_name()) else {
+                continue;
+            };
+            candidates.insert((owner_id.clone(), job_id));
+        }
+    }
+}
+
+fn collect_uuid_job_locks(
+    locks_root: &Path,
+    candidates: &mut std::collections::BTreeSet<(String, String)>,
+) {
+    let Ok(metadata) = fs::symlink_metadata(locks_root) else {
+        return;
+    };
+    if verify_private_directory_metadata(locks_root, &metadata).is_err() {
+        return;
+    }
+    let Ok(owners) = fs::read_dir(locks_root) else {
+        return;
+    };
+    for owner in owners.flatten() {
+        let owner_path = owner.path();
+        let Some(owner_id) = decoded_canonical_uuid_component(&owner.file_name()) else {
+            continue;
+        };
+        let Ok(metadata) = fs::symlink_metadata(&owner_path) else {
+            continue;
+        };
+        if verify_private_directory_metadata(&owner_path, &metadata).is_err() {
+            continue;
+        }
+        let Ok(locks) = fs::read_dir(&owner_path) else {
+            continue;
+        };
+        for lock in locks.flatten() {
+            let Some(name) = lock.file_name().to_str().map(ToOwned::to_owned) else {
+                continue;
+            };
+            let Some(encoded_job) = name.strip_suffix(".lock") else {
+                continue;
+            };
+            let Some(job_id) = decode_component(encoded_job).filter(|value| {
+                uuid::Uuid::parse_str(value).is_ok_and(|uuid| uuid.to_string() == *value)
+            }) else {
+                continue;
+            };
+            candidates.insert((owner_id.clone(), job_id));
+        }
+    }
+}
+
+fn decoded_canonical_uuid_component(value: &std::ffi::OsStr) -> Option<String> {
+    value
+        .to_str()
+        .and_then(decode_component)
+        .filter(|value| uuid::Uuid::parse_str(value).is_ok_and(|uuid| uuid.to_string() == *value))
+}
+
+fn verify_private_lock_file(path: &Path, file: &File) -> Result<(), QueueMediaError> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() != 0 {
+        return Err(QueueMediaError::InsecurePath(format!(
+            "{} is not an empty private lock file",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.permissions().mode() & 0o077 != 0
+            || metadata.nlink() != 1
+        {
+            return Err(QueueMediaError::InsecurePath(format!(
+                "{} is not a singly-linked current-user 0600 lock file",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn create_directory_owner_only(path: &Path) -> Result<(), QueueMediaError> {
     use std::os::unix::fs::DirBuilderExt;
@@ -3614,6 +3899,16 @@ fn open_or_create_private_file(path: &Path) -> Result<File, QueueMediaError> {
     if !metadata.is_file() {
         return Err(QueueMediaError::InsecurePath(path.display().to_string()));
     }
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o077 != 0
+        || metadata.nlink() != 1
+    {
+        return Err(QueueMediaError::InsecurePath(format!(
+            "{} is not a singly-linked current-user 0600 private file",
+            path.display()
+        )));
+    }
     Ok(file)
 }
 
@@ -3729,6 +4024,184 @@ mod tests {
         } else {
             store.seal("owner", job_id, media)
         }
+    }
+
+    fn job_directory(
+        store: &QueueMediaStore,
+        state: StoredState,
+        owner: &str,
+        job: &str,
+    ) -> PathBuf {
+        store
+            .root
+            .join(state.directory())
+            .join(encode_component(owner))
+            .join(encode_component(job))
+    }
+
+    fn job_lock_path(store: &QueueMediaStore, owner: &str, job: &str) -> PathBuf {
+        store
+            .root
+            .join("locks")
+            .join(encode_component(owner))
+            .join(format!("{}.lock", encode_component(job)))
+    }
+
+    #[test]
+    fn terminal_delete_reclaims_empty_job_directories_and_lock_idempotently() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let job = uuid::Uuid::new_v4().to_string();
+        let reference = store
+            .seal(
+                &owner,
+                &job,
+                vec![SealMedia::bytes("source", "one", vec![1, 2, 3])],
+            )
+            .unwrap();
+        let lock = job_lock_path(&store, &owner, &job);
+        assert!(lock.is_file());
+
+        store.delete(&reference).unwrap();
+        for state in [
+            StoredState::Active,
+            StoredState::Retired,
+            StoredState::Staging,
+        ] {
+            assert!(!job_directory(&store, state, &owner, &job).exists());
+        }
+        assert!(!lock.exists());
+
+        store.cleanup_job_artifacts(&owner, &job);
+        store.cleanup_job_artifacts(&owner, &job);
+        assert!(!lock.exists());
+    }
+
+    #[test]
+    fn rejected_seal_reclaims_empty_job_directories_and_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let job = uuid::Uuid::new_v4().to_string();
+        let failure = inject_seal_test_failure(SealTestFailure::Write(SealFrameKind::Data));
+        assert!(store
+            .seal(
+                &owner,
+                &job,
+                vec![SealMedia::bytes("source", "one", vec![1, 2, 3])],
+            )
+            .is_err());
+        drop(failure);
+
+        for state in [
+            StoredState::Active,
+            StoredState::Retired,
+            StoredState::Staging,
+        ] {
+            assert!(!job_directory(&store, state, &owner, &job).exists());
+        }
+        assert!(!job_lock_path(&store, &owner, &job).exists());
+    }
+
+    #[test]
+    fn startup_reclaims_stale_empty_uuid_job_directories_and_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let job = uuid::Uuid::new_v4().to_string();
+        for state in [
+            StoredState::Active,
+            StoredState::Retired,
+            StoredState::Staging,
+        ] {
+            ensure_private_dir(&job_directory(&store, state, &owner, &job)).unwrap();
+        }
+        let lock = job_lock_path(&store, &owner, &job);
+        ensure_private_dir(lock.parent().unwrap()).unwrap();
+        create_private_file(&lock).unwrap();
+        drop(store);
+
+        let reopened = open_store(home.path());
+        for state in [
+            StoredState::Active,
+            StoredState::Retired,
+            StoredState::Staging,
+        ] {
+            assert!(!job_directory(&reopened, state, &owner, &job).exists());
+        }
+        assert!(!lock.exists());
+    }
+
+    #[test]
+    fn terminal_cleanup_retains_nonempty_suspicious_job_evidence() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let job = uuid::Uuid::new_v4().to_string();
+        let reference = store
+            .seal(
+                &owner,
+                &job,
+                vec![SealMedia::bytes("source", "one", vec![1, 2, 3])],
+            )
+            .unwrap();
+        let suspicious =
+            job_directory(&store, StoredState::Staging, &owner, &job).join("foreign.evidence");
+        fs::write(&suspicious, b"retain me").unwrap();
+
+        store.delete(&reference).unwrap();
+        assert_eq!(fs::read(&suspicious).unwrap(), b"retain me");
+        assert!(job_lock_path(&store, &owner, &job).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_never_follows_or_unlinks_a_suspicious_lock_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let job = uuid::Uuid::new_v4().to_string();
+        let target = home.path().join("foreign-lock-target");
+        fs::write(&target, b"foreign evidence").unwrap();
+        let lock = job_lock_path(&store, &owner, &job);
+        ensure_private_dir(lock.parent().unwrap()).unwrap();
+        symlink(&target, &lock).unwrap();
+
+        store.cleanup_job_artifacts(&owner, &job);
+        assert!(fs::symlink_metadata(&lock)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(target).unwrap(), b"foreign evidence");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_never_descends_through_a_symlinked_owner_root() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let job = uuid::Uuid::new_v4().to_string();
+        let outside_owner = home.path().join("outside-owner");
+        let outside_job = outside_owner.join(encode_component(&job));
+        ensure_private_dir(&outside_job).unwrap();
+        let owner_link = store
+            .root
+            .join(StoredState::Active.directory())
+            .join(encode_component(&owner));
+        symlink(&outside_owner, &owner_link).unwrap();
+
+        store.cleanup_job_artifacts(&owner, &job);
+        assert!(fs::symlink_metadata(&owner_link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(outside_job.is_dir());
     }
 
     #[test]
@@ -4379,10 +4852,13 @@ mod tests {
             QueueMediaSecurityMode::UnixOwnerOnly
         );
         #[cfg(windows)]
-        assert_eq!(
-            QueueMediaStore::security_mode().unwrap(),
-            QueueMediaSecurityMode::WindowsDpapiCurrentUser
-        );
+        {
+            assert!(matches!(
+                QueueMediaStore::security_mode(),
+                Err(QueueMediaError::SecurityUnavailable(_))
+            ));
+            assert!(!QueueMediaStore::supports_mixed_hydration());
+        }
 
         #[cfg(unix)]
         {
