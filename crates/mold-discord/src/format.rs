@@ -440,12 +440,25 @@ pub fn format_server_status_pages(
             })
             .unwrap_or(0);
         let planned = queue.plan.as_ref().map_or(0, |plan| plan.work_items.len());
-        fields.push((
-            "Queue".to_string(),
-            format!(
-                "{} active/queued · {planned} planned · {blocked} blocked",
+        let queue_scope = match (status.queue_depth, queue.page.as_ref()) {
+            (Some(depth), Some(_)) => format!(
+                "{depth} total backlog · {} hydrated page rows",
                 queue.entries.len()
             ),
+            (Some(depth), None) => format!(
+                "{depth} server-reported queue load · {} response rows",
+                queue.entries.len()
+            ),
+            (None, Some(_)) => format!("{} hydrated page rows", queue.entries.len()),
+            (None, None) => format!("{} response rows", queue.entries.len()),
+        };
+        let runtime = status
+            .queue_capacity
+            .map(|capacity| format!(" · runtime capacity {capacity}"))
+            .unwrap_or_default();
+        fields.push((
+            "Queue".to_string(),
+            format!("{queue_scope}{runtime} · {planned} planned · {blocked} blocked"),
             false,
         ));
         if let Some(plan) = queue.plan.as_ref() {
@@ -1631,6 +1644,64 @@ mod tests {
         assert!(!fields.contains("cpu:utility:0"));
         assert!(!fields.contains("typed-host-internal"));
         assert!(!fields.contains("future-internal-id"));
+    }
+
+    #[test]
+    fn queue_summary_separates_total_backlog_hydrated_page_and_runtime_capacity() {
+        let status = ServerStatus {
+            version: "test".into(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec![],
+            busy: true,
+            current_generation: None,
+            gpu_info: None,
+            uptime_secs: 1,
+            hostname: None,
+            memory_status: None,
+            gpus: None,
+            queue_depth: Some(120),
+            queue_capacity: Some(8),
+            queue_paused: Some(false),
+            instance_id: None,
+            models_disk: None,
+            host_memory: None,
+        };
+        let row = mold_core::QueueJobEntryWire {
+            id: "job".into(),
+            model: "flux-dev:q8".into(),
+            state: "queued".into(),
+            started_at_unix_ms: 0,
+            position: 0,
+            gpu: None,
+            target_gpu: None,
+            seed_pinned: None,
+            metadata: None,
+            durable: Some(true),
+            held_reason: None,
+        };
+        let queue = mold_core::QueueListingWire {
+            entries: vec![row; 6],
+            page: Some(mold_core::QueuePage {
+                limit: 6,
+                offset: 0,
+                returned: 6,
+                next_cursor: Some("opaque".into()),
+            }),
+            ..Default::default()
+        };
+
+        let summary = format_server_status_pages(&status, None, Some(&queue))
+            .into_iter()
+            .flat_map(|page| page.fields)
+            .find(|(name, _, _)| name == "Queue")
+            .unwrap()
+            .1;
+        assert!(summary.contains("120 total backlog"));
+        assert!(summary.contains("6 hydrated page rows"));
+        assert!(summary.contains("runtime capacity 8"));
+        assert!(!summary.contains("active/queued"));
+        assert!(!summary.contains("120/8"));
     }
 
     #[test]

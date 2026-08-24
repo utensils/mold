@@ -13,7 +13,7 @@
 //! directly.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 
 use mold_core::{DeviceInfo, DeviceState, MoldClient, ServerCapabilities, ServerStatus};
@@ -344,7 +344,13 @@ pub(crate) enum MachinesFocus {
 
 /// How often hosts are re-polled while due (driven by the 2 s resource
 /// tick in `lib.rs`, so effective cadence is the next tick ≥ this).
-const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(4);
+pub(crate) const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// A telemetry poll gets at most one full polling interval. This is derived
+/// from the scheduling contract: if a request cannot finish before the host
+/// would otherwise be due again, retaining its socket would make fixed-rate
+/// polling accumulate work instead of observing the host.
+const POLL_TIMEOUT: std::time::Duration = POLL_INTERVAL;
 
 /// State of the Machines workspace.
 #[derive(Default)]
@@ -370,17 +376,28 @@ pub(crate) struct MachinesState {
     pub queue: Option<(String, mold_core::QueueListingWire)>,
     /// Single-flight guard for explicit continuation reads.
     pub queue_loading_more: bool,
+    pub(crate) queue_continuation: Option<(String, String)>,
+    pub(crate) queue_extended: bool,
     /// Job selection inside the detail pane's queue lanes.
     pub queue_selected: usize,
-    /// Last host-poll instant (None = poll immediately).
-    pub last_poll: Option<std::time::Instant>,
+    /// Periodic polling owns at most one task/socket group per host. The next
+    /// due time is written only when that task finishes (including timeout),
+    /// so scheduling is completion-relative instead of fixed-rate.
+    pub(crate) polls_in_flight: HashSet<String>,
+    pub(crate) poll_next_due: HashMap<String, std::time::Instant>,
+    pub(crate) queue_refresh_pending: HashSet<String>,
 }
 
 /// What [`MachinesState::poll_plan`] decided to fetch this tick.
 #[derive(Debug, Default)]
 pub(crate) struct PollPlan {
-    pub status_hosts: Vec<HostEntry>,
-    pub queue_host: Option<HostEntry>,
+    pub hosts: Vec<HostPollRequest>,
+}
+
+#[derive(Debug)]
+pub(crate) struct HostPollRequest {
+    pub entry: HostEntry,
+    pub include_queue: bool,
 }
 
 impl MachinesState {
@@ -442,6 +459,8 @@ impl MachinesState {
     fn on_selection_changed(&mut self) {
         self.queue = None;
         self.queue_loading_more = false;
+        self.queue_continuation = None;
+        self.queue_extended = false;
         self.queue_selected = 0;
         self.device_selected = 0;
     }
@@ -623,14 +642,19 @@ impl MachinesState {
         }
     }
 
-    /// Whether the host-poll interval has elapsed.
-    pub fn poll_due(&self) -> bool {
-        self.last_poll.is_none_or(|t| t.elapsed() >= POLL_INTERVAL)
+    /// Force every idle host to be due immediately. An in-flight host remains
+    /// single-flight and will be re-scheduled when its current poll completes.
+    pub fn force_poll(&mut self) {
+        self.poll_next_due.clear();
+        self.queue_refresh_pending
+            .extend(self.polls_in_flight.iter().cloned());
     }
 
-    /// Force the next [`Self::poll_due`] to fire immediately.
-    pub fn force_poll(&mut self) {
-        self.last_poll = None;
+    pub fn request_queue_refresh(&mut self, host_id: &str) {
+        self.poll_next_due.remove(host_id);
+        if self.polls_in_flight.contains(host_id) {
+            self.queue_refresh_pending.insert(host_id.to_string());
+        }
     }
 
     /// Decide which hosts to fetch this tick: every registered host (and
@@ -638,29 +662,64 @@ impl MachinesState {
     /// generation-target host otherwise. Marks not-yet-seen hosts as
     /// Connecting so their rows render honestly while the fetch runs.
     pub fn poll_plan(&mut self, machines_active: bool, target: &GenTarget) -> PollPlan {
-        self.last_poll = Some(std::time::Instant::now());
         let mut plan = PollPlan::default();
-        if machines_active {
-            plan.status_hosts = self
-                .registry
+        let mut desired = if machines_active {
+            self.registry
                 .hosts
                 .iter()
                 .filter(|host| host.connected)
                 .cloned()
-                .collect();
-            plan.queue_host = self.selected_host().filter(|host| host.connected).cloned();
+                .collect::<Vec<_>>()
         } else if let GenTarget::Host(id) = target {
-            if let Some(entry) = self.registry.get(id).filter(|host| host.connected) {
-                plan.status_hosts.push(entry.clone());
-            }
-        }
-        for entry in &plan.status_hosts {
+            self.registry
+                .get(id)
+                .filter(|host| host.connected)
+                .cloned()
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let selected_id = machines_active
+            .then(|| self.selected_host().map(|host| host.id.clone()))
+            .flatten();
+        let now = std::time::Instant::now();
+        desired.retain(|entry| {
+            !self.polls_in_flight.contains(&entry.id)
+                && self
+                    .poll_next_due
+                    .get(&entry.id)
+                    .is_none_or(|due| *due <= now)
+        });
+        for entry in desired {
             self.statuses.entry(entry.id.clone()).or_insert(HostStatus {
                 health: HostHealth::Connecting,
                 status: None,
             });
+            self.polls_in_flight.insert(entry.id.clone());
+            plan.hosts.push(HostPollRequest {
+                include_queue: selected_id.as_deref() == Some(entry.id.as_str()),
+                entry,
+            });
         }
         plan
+    }
+
+    /// Release one host's polling lease and schedule from completion, not
+    /// from start. Returns true when a refresh requested while the poll was in
+    /// flight should be dispatched immediately.
+    pub fn finish_poll(&mut self, host_id: &str) -> bool {
+        self.polls_in_flight.remove(host_id);
+        if self.queue_refresh_pending.remove(host_id) {
+            self.poll_next_due.remove(host_id);
+            true
+        } else {
+            self.poll_next_due.insert(
+                host_id.to_string(),
+                std::time::Instant::now() + POLL_INTERVAL,
+            );
+            false
+        }
     }
 
     /// Apply a background status result. `None` marks the row Offline —
@@ -689,16 +748,46 @@ impl MachinesState {
         if selected_id != host_id {
             return;
         }
-        match queue {
-            Some(listing) => {
-                if self.queue_selected >= listing.entries.len() {
-                    self.queue_selected = listing.entries.len().saturating_sub(1);
+        match (self.queue.take(), queue) {
+            (Some((current_host, current)), Some(mut head)) if current_host == host_id => {
+                let selected_id = current
+                    .entries
+                    .get(self.queue_selected)
+                    .map(|entry| entry.id.clone());
+                let mut seen = head
+                    .entries
+                    .iter()
+                    .map(|entry| entry.id.clone())
+                    .collect::<HashSet<_>>();
+                let preserve_loaded_window = self.queue_extended || self.queue_loading_more;
+                head.entries.extend(
+                    current
+                        .entries
+                        .into_iter()
+                        .filter(|entry| preserve_loaded_window || entry.state == "running")
+                        .filter(|entry| seen.insert(entry.id.clone())),
+                );
+                if self.queue_extended {
+                    head.page = current.page;
                 }
-                self.queue = Some((host_id, listing));
+                self.queue_selected = selected_id
+                    .as_ref()
+                    .and_then(|id| head.entries.iter().position(|entry| &entry.id == id))
+                    .unwrap_or_else(|| {
+                        self.queue_selected
+                            .min(head.entries.len().saturating_sub(1))
+                    });
+                self.queue = Some((host_id, head));
             }
-            None => self.queue = None,
+            (_, Some(listing)) => {
+                self.queue_selected = self
+                    .queue_selected
+                    .min(listing.entries.len().saturating_sub(1));
+                self.queue = Some((host_id, listing));
+                self.queue_extended = false;
+            }
+            (current, None) => self.queue = current,
         }
-        self.queue_loading_more = false;
     }
 
     /// Capture the exact continuation authority and mark it in flight.
@@ -714,6 +803,7 @@ impl MachinesState {
         let page = listing.page.as_ref()?;
         let cursor = page.next_cursor.clone()?;
         self.queue_loading_more = true;
+        self.queue_continuation = Some((entry.id.clone(), cursor.clone()));
         Some((entry, page.limit, cursor))
     }
 
@@ -725,17 +815,20 @@ impl MachinesState {
         cursor: &str,
         queue: Option<mold_core::QueueListingWire>,
     ) {
+        if self
+            .queue_continuation
+            .as_ref()
+            .map(|(host, next)| (host.as_str(), next.as_str()))
+            != Some((host_id.as_str(), cursor))
+        {
+            return;
+        }
         self.queue_loading_more = false;
+        self.queue_continuation = None;
         let Some((current_host, current)) = self.queue.as_mut() else {
             return;
         };
-        if *current_host != host_id
-            || current
-                .page
-                .as_ref()
-                .and_then(|page| page.next_cursor.as_deref())
-                != Some(cursor)
-        {
+        if *current_host != host_id {
             return;
         }
         let Some(mut continuation) = queue else {
@@ -753,6 +846,7 @@ impl MachinesState {
                 .filter(|entry| seen.insert(entry.id.clone())),
         );
         current.page = continuation.page;
+        self.queue_extended = true;
         if continuation.plan.is_some() {
             current.plan = continuation.plan;
         }
@@ -774,6 +868,9 @@ impl MachinesState {
         }
         self.capabilities.remove(id);
         self.device_feedback.remove(id);
+        self.polls_in_flight.remove(id);
+        self.poll_next_due.remove(id);
+        self.queue_refresh_pending.remove(id);
         if self.selected >= self.row_count() {
             self.selected = self.row_count() - 1;
         }
@@ -964,16 +1061,45 @@ pub(crate) fn connect_advance(form: &mut ConnectForm, input: ConnectInput) -> Co
 
 // ── Background fetch tasks ──────────────────────────────────────────
 
-/// Fetch `/api/status` for one host and report back. `None` status marks
-/// the row Offline; it stays listed and self-heals on the next poll.
-pub(crate) async fn fetch_host_status(
+/// Fetch one host's complete periodic snapshot under a single polling lease.
+/// Every independent request is cancelled at the polling interval, and the
+/// completion event always releases the lease so a wedged host cannot grow a
+/// new task/socket group on every UI tick.
+pub(crate) async fn fetch_host_poll(
     entry: HostEntry,
+    include_queue: bool,
     tx: mpsc::UnboundedSender<BackgroundEvent>,
 ) {
+    fetch_host_poll_with_timeout(entry, include_queue, tx, POLL_TIMEOUT).await;
+}
+
+async fn fetch_host_poll_with_timeout(
+    entry: HostEntry,
+    include_queue: bool,
+    tx: mpsc::UnboundedSender<BackgroundEvent>,
+    timeout: std::time::Duration,
+) {
     let client = client_for_host(&entry);
-    let status = client.server_status().await.ok().map(Box::new);
-    let devices = client.devices().await.ok();
-    let capabilities = client.server_capabilities().await.ok().map(Box::new);
+    let status = tokio::time::timeout(timeout, client.server_status());
+    let devices = tokio::time::timeout(timeout, client.devices());
+    let capabilities = tokio::time::timeout(timeout, client.server_capabilities());
+    let queue = async {
+        if include_queue {
+            tokio::time::timeout(timeout, client.list_queue())
+                .await
+                .ok()
+                .and_then(|result| result.ok())
+        } else {
+            None
+        }
+    };
+    let (status, devices, capabilities, queue) = tokio::join!(status, devices, capabilities, queue);
+    let status = status.ok().and_then(|result| result.ok()).map(Box::new);
+    let devices = devices.ok().and_then(|result| result.ok());
+    let capabilities = capabilities
+        .ok()
+        .and_then(|result| result.ok())
+        .map(Box::new);
     let _ = tx.send(BackgroundEvent::HostStatusUpdate {
         host_id: entry.id.clone(),
         status,
@@ -983,9 +1109,16 @@ pub(crate) async fn fetch_host_status(
         devices,
     });
     let _ = tx.send(BackgroundEvent::HostCapabilitiesUpdate {
-        host_id: entry.id,
+        host_id: entry.id.clone(),
         capabilities,
     });
+    if include_queue {
+        let _ = tx.send(BackgroundEvent::HostQueueUpdate {
+            host_id: entry.id.clone(),
+            queue,
+        });
+    }
+    let _ = tx.send(BackgroundEvent::HostPollFinished { host_id: entry.id });
 }
 
 pub(crate) async fn set_host_device_enabled(
@@ -1072,7 +1205,10 @@ pub(crate) async fn fetch_host_queue_page(
     tx: mpsc::UnboundedSender<BackgroundEvent>,
 ) {
     let client = client_for_host(&entry);
-    let queue = client.list_queue_page(limit, Some(&cursor)).await.ok();
+    let queue = tokio::time::timeout(POLL_TIMEOUT, client.list_queue_page(limit, Some(&cursor)))
+        .await
+        .ok()
+        .and_then(|result| result.ok());
     let _ = tx.send(BackgroundEvent::HostQueuePageLoaded {
         host_id: entry.id,
         cursor,
@@ -1294,12 +1430,13 @@ mod tests {
                 .all()
                 .iter()
                 .all(|host| host.id != "hal9000-7680"));
-            assert!(st.poll_plan(true, &GenTarget::Auto).status_hosts.is_empty());
+            assert!(st.poll_plan(true, &GenTarget::Auto).hosts.is_empty());
+            st.finish_poll("hal9000-7680");
             assert!(!HostRegistry::load().get("hal9000-7680").unwrap().connected);
 
             assert_eq!(st.toggle_connection("hal9000-7680"), Some(true));
             assert_eq!(
-                st.poll_plan(true, &GenTarget::Auto).status_hosts[0].id,
+                st.poll_plan(true, &GenTarget::Auto).hosts[0].entry.id,
                 "hal9000-7680"
             );
         });
@@ -1736,14 +1873,24 @@ mod tests {
         let mut st = state_with_hosts(2);
         st.select_next(); // h0
         let plan = st.poll_plan(true, &GenTarget::Auto);
-        assert_eq!(plan.status_hosts.len(), 2);
-        assert_eq!(plan.queue_host.as_ref().map(|h| h.id.as_str()), Some("h0"));
+        assert_eq!(plan.hosts.len(), 2);
+        assert!(plan
+            .hosts
+            .iter()
+            .any(|request| request.entry.id == "h0" && request.include_queue));
+        assert!(plan
+            .hosts
+            .iter()
+            .any(|request| request.entry.id == "h1" && !request.include_queue));
         // Unknown hosts are marked Connecting while the fetch runs.
         assert_eq!(
             st.statuses.get("h0").unwrap().health,
             HostHealth::Connecting
         );
-        assert!(!st.poll_due(), "poll_plan stamps last_poll");
+        assert!(
+            st.poll_plan(true, &GenTarget::Auto).hosts.is_empty(),
+            "in-flight hosts remain single-flight"
+        );
     }
 
     #[test]
@@ -1751,16 +1898,188 @@ mod tests {
         let mut st = state_with_hosts(2);
         let plan = st.poll_plan(false, &GenTarget::Host("h1".into()));
         assert_eq!(
-            plan.status_hosts
+            plan.hosts
                 .iter()
-                .map(|h| h.id.as_str())
+                .map(|request| request.entry.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["h1"]
         );
-        assert!(plan.queue_host.is_none());
+        assert!(plan.hosts.iter().all(|request| !request.include_queue));
 
         let plan = st.poll_plan(false, &GenTarget::Auto);
-        assert!(plan.status_hosts.is_empty());
+        assert!(plan.hosts.is_empty());
+    }
+
+    #[test]
+    fn stalled_host_poll_is_single_flight_and_completion_relative() {
+        let mut st = state_with_hosts(1);
+        st.select_next();
+
+        let first = st.poll_plan(true, &GenTarget::Auto);
+        assert_eq!(first.hosts.len(), 1);
+        assert!(first.hosts[0].include_queue);
+        for _ in 0..32 {
+            assert!(
+                st.poll_plan(true, &GenTarget::Auto).hosts.is_empty(),
+                "a stalled host must never acquire another polling lease"
+            );
+        }
+
+        assert!(!st.finish_poll("h0"));
+        assert!(
+            st.poll_plan(true, &GenTarget::Auto).hosts.is_empty(),
+            "the next interval starts when the prior poll finishes"
+        );
+        st.force_poll();
+        assert_eq!(st.poll_plan(true, &GenTarget::Auto).hosts.len(), 1);
+    }
+
+    fn queue_job(id: &str, state: &str) -> mold_core::QueueJobEntryWire {
+        mold_core::QueueJobEntryWire {
+            id: id.into(),
+            model: "flux-dev:q8".into(),
+            state: state.into(),
+            started_at_unix_ms: 0,
+            position: 0,
+            gpu: None,
+            target_gpu: None,
+            seed_pinned: None,
+            metadata: None,
+            durable: Some(true),
+            held_reason: None,
+        }
+    }
+
+    fn queue_page(
+        entries: Vec<mold_core::QueueJobEntryWire>,
+        cursor: Option<&str>,
+    ) -> mold_core::QueueListingWire {
+        let returned = entries.len();
+        mold_core::QueueListingWire {
+            entries,
+            page: Some(mold_core::QueuePage {
+                limit: 2,
+                offset: 0,
+                returned,
+                next_cursor: cursor.map(str::to_string),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn continuation_and_running_rows_survive_head_refresh_without_duplicate_request() {
+        let mut st = state_with_hosts(1);
+        st.select_next();
+        st.apply_queue(
+            "h0".into(),
+            Some(queue_page(
+                vec![
+                    queue_job("running", "running"),
+                    queue_job("selected", "queued"),
+                ],
+                Some("cursor-1"),
+            )),
+        );
+        st.queue_selected = 1;
+        assert_eq!(st.begin_queue_continuation().unwrap().2, "cursor-1");
+        assert!(
+            st.begin_queue_continuation().is_none(),
+            "the same continuation cannot be requested twice"
+        );
+
+        st.apply_queue(
+            "h0".into(),
+            Some(queue_page(
+                vec![queue_job("new-head", "queued")],
+                Some("new-cursor"),
+            )),
+        );
+        let listing = &st.queue.as_ref().unwrap().1;
+        assert_eq!(
+            listing
+                .entries
+                .iter()
+                .map(|job| job.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new-head", "running", "selected"],
+            "head refresh keeps the running row and the previously loaded window"
+        );
+        assert_eq!(listing.entries[st.queue_selected].id, "selected");
+        assert!(st.queue_loading_more);
+
+        st.apply_queue_continuation(
+            "h0".into(),
+            "cursor-1",
+            Some(queue_page(
+                vec![queue_job("continued", "queued")],
+                Some("cursor-2"),
+            )),
+        );
+        assert_eq!(
+            st.queue
+                .as_ref()
+                .unwrap()
+                .1
+                .page
+                .as_ref()
+                .unwrap()
+                .next_cursor
+                .as_deref(),
+            Some("cursor-2")
+        );
+        assert!(!st.queue_loading_more);
+
+        st.apply_queue(
+            "h0".into(),
+            Some(queue_page(
+                vec![queue_job("new-head", "queued")],
+                Some("head-again"),
+            )),
+        );
+        let listing = &st.queue.as_ref().unwrap().1;
+        assert!(listing.entries.iter().any(|job| job.id == "continued"));
+        assert_eq!(listing.entries[st.queue_selected].id, "selected");
+        assert_eq!(
+            listing.page.as_ref().unwrap().next_cursor.as_deref(),
+            Some("cursor-2")
+        );
+        assert_eq!(st.begin_queue_continuation().unwrap().2, "cursor-2");
+    }
+
+    #[test]
+    fn routine_head_refresh_keeps_only_missing_in_flight_rows_before_load_more() {
+        let mut st = state_with_hosts(1);
+        st.select_next();
+        st.apply_queue(
+            "h0".into(),
+            Some(queue_page(
+                vec![
+                    queue_job("running", "running"),
+                    queue_job("old-queued", "queued"),
+                ],
+                Some("cursor-1"),
+            )),
+        );
+        st.apply_queue(
+            "h0".into(),
+            Some(queue_page(
+                vec![queue_job("head", "queued")],
+                Some("cursor-2"),
+            )),
+        );
+
+        assert_eq!(
+            st.queue
+                .as_ref()
+                .unwrap()
+                .1
+                .entries
+                .iter()
+                .map(|job| job.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["head", "running"]
+        );
     }
 
     #[test]

@@ -1576,6 +1576,7 @@ mod tests {
                 h
             }),
             resource_info: crate::ui::info::ResourceInfo::default(),
+            server_status_poll_in_flight: false,
             history: crate::history::PromptHistory::load(),
             layout: crate::app::LayoutAreas::default(),
             server_process: None,

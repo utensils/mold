@@ -176,6 +176,12 @@ pub enum BackgroundEvent {
         cursor: String,
         queue: Option<mold_core::QueueListingWire>,
     },
+    /// Releases the per-host periodic polling lease after success or timeout.
+    HostPollFinished {
+        host_id: String,
+    },
+    /// Releases the connected-server resource polling lease.
+    ServerStatusPollFinished,
     /// Result of the connect-a-machine test fetch.
     MachineConnectTested {
         url: String,
@@ -1975,6 +1981,7 @@ pub struct App {
     pub bg_rx: mpsc::UnboundedReceiver<BackgroundEvent>,
     pub tokio_handle: tokio::runtime::Handle,
     pub resource_info: crate::ui::info::ResourceInfo,
+    pub(crate) server_status_poll_in_flight: bool,
     pub history: crate::history::PromptHistory,
     /// Layout areas from the last render, used for mouse hit-testing.
     pub layout: LayoutAreas,
@@ -2345,6 +2352,7 @@ impl App {
             bg_rx,
             tokio_handle: tokio::runtime::Handle::current(),
             resource_info: crate::ui::info::ResourceInfo::default(),
+            server_status_poll_in_flight: false,
             history,
             layout: LayoutAreas::default(),
             server_process,
@@ -2429,27 +2437,39 @@ impl App {
     }
 
     /// Spawn a background fetch of `/api/status` from the connected server.
-    pub fn spawn_server_status_fetch(&self) {
+    pub fn spawn_server_status_fetch(&mut self) {
+        if self.server_status_poll_in_flight {
+            return;
+        }
         let Some(ref url) = self.server_url else {
             return;
         };
+        self.server_status_poll_in_flight = true;
         let tx = self.bg_tx.clone();
         let url = url.clone();
         self.tokio_handle.spawn(async move {
             let client = mold_core::MoldClient::new(&url);
-            match client.server_status().await {
-                Ok(status) => {
+            let status = tokio::time::timeout(crate::hosts::POLL_INTERVAL, client.server_status());
+            let devices = tokio::time::timeout(crate::hosts::POLL_INTERVAL, client.devices());
+            let capabilities =
+                tokio::time::timeout(crate::hosts::POLL_INTERVAL, client.server_capabilities());
+            let (status, devices, capabilities) = tokio::join!(status, devices, capabilities);
+            match status.ok().and_then(|result| result.ok()) {
+                Some(status) => {
                     let _ = tx.send(BackgroundEvent::ServerStatusUpdate(Some(Box::new(status))));
                     let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
                         host_id: crate::hosts::LOCAL_HOST_ID.to_string(),
-                        devices: client.devices().await.ok(),
+                        devices: devices.ok().and_then(|result| result.ok()),
                     });
                     let _ = tx.send(BackgroundEvent::HostCapabilitiesUpdate {
                         host_id: crate::hosts::LOCAL_HOST_ID.to_string(),
-                        capabilities: client.server_capabilities().await.ok().map(Box::new),
+                        capabilities: capabilities
+                            .ok()
+                            .and_then(|result| result.ok())
+                            .map(Box::new),
                     });
                 }
-                Err(_) => {
+                None => {
                     // Server became unreachable — clear stale status so the UI
                     // stops showing the last-known hostname/memory.
                     let _ = tx.send(BackgroundEvent::ServerStatusUpdate(None));
@@ -2463,6 +2483,7 @@ impl App {
                     });
                 }
             }
+            let _ = tx.send(BackgroundEvent::ServerStatusPollFinished);
         });
     }
 
@@ -2470,30 +2491,16 @@ impl App {
     /// The plan (which hosts, whether a queue fetch rides along) lives in
     /// `hosts::MachinesState::poll_plan`.
     pub fn tick_host_polling(&mut self) {
-        if !self.machines.poll_due() {
-            return;
-        }
         let plan = self
             .machines
             .poll_plan(self.active_view == View::Machines, &self.target);
-        for entry in plan.status_hosts {
-            self.spawn_host_status_fetch(entry);
+        for request in plan.hosts {
+            self.tokio_handle.spawn(crate::hosts::fetch_host_poll(
+                request.entry,
+                request.include_queue,
+                self.bg_tx.clone(),
+            ));
         }
-        if let Some(entry) = plan.queue_host {
-            self.spawn_host_queue_fetch(entry);
-        }
-    }
-
-    /// Spawn a `/api/status` fetch for one registered host.
-    pub fn spawn_host_status_fetch(&self, entry: crate::hosts::HostEntry) {
-        self.tokio_handle
-            .spawn(crate::hosts::fetch_host_status(entry, self.bg_tx.clone()));
-    }
-
-    /// Spawn a queue-listing fetch for one registered host.
-    pub fn spawn_host_queue_fetch(&self, entry: crate::hosts::HostEntry) {
-        self.tokio_handle
-            .spawn(crate::hosts::fetch_host_queue(entry, self.bg_tx.clone()));
     }
 
     /// Spawn the connect-flow test fetch against `url`.
@@ -4469,7 +4476,7 @@ impl App {
                 View::Machines => match self.machines.focus {
                     crate::hosts::MachinesFocus::HostList => {
                         if self.machines.select_prev() {
-                            self.spawn_selected_host_queue_fetch();
+                            self.refresh_selected_host_queue();
                         }
                     }
                     crate::hosts::MachinesFocus::Detail => self.machines.queue_select_prev(),
@@ -4513,7 +4520,7 @@ impl App {
                 View::Machines => match self.machines.focus {
                     crate::hosts::MachinesFocus::HostList => {
                         if self.machines.select_next() {
-                            self.spawn_selected_host_queue_fetch();
+                            self.refresh_selected_host_queue();
                         }
                     }
                     crate::hosts::MachinesFocus::Detail => self.machines.queue_select_next(),
@@ -6017,9 +6024,10 @@ impl App {
 
     /// Kick a queue fetch for the newly selected Machines row (no-op for
     /// the local row — its lane is composed from in-process state).
-    fn spawn_selected_host_queue_fetch(&self) {
-        if let Some(entry) = self.machines.selected_host().cloned() {
-            self.spawn_host_queue_fetch(entry);
+    fn refresh_selected_host_queue(&mut self) {
+        if let Some(host_id) = self.machines.selected_host().map(|entry| entry.id.clone()) {
+            self.machines.request_queue_refresh(&host_id);
+            self.tick_host_polling();
         }
     }
 
@@ -8725,6 +8733,14 @@ impl App {
                     self.machines
                         .apply_queue_continuation(host_id, &cursor, queue);
                 }
+                BackgroundEvent::HostPollFinished { host_id } => {
+                    if self.machines.finish_poll(&host_id) {
+                        self.tick_host_polling();
+                    }
+                }
+                BackgroundEvent::ServerStatusPollFinished => {
+                    self.server_status_poll_in_flight = false;
+                }
                 BackgroundEvent::MachineConnectTested {
                     url,
                     api_key,
@@ -8761,7 +8777,8 @@ impl App {
                                         if let Some(entry) =
                                             self.machines.registry.get(&id).cloned()
                                         {
-                                            self.spawn_host_queue_fetch(entry);
+                                            self.machines.request_queue_refresh(&entry.id);
+                                            self.tick_host_polling();
                                         }
                                     }
                                     Err(crate::hosts::AddHostError::AlreadyKnown { name }) => {
@@ -10310,6 +10327,7 @@ mod tests {
             bg_rx,
             tokio_handle: tokio::runtime::Handle::current(),
             resource_info: crate::ui::info::ResourceInfo::default(),
+            server_status_poll_in_flight: false,
             // Start test apps with an empty in-memory history — avoids
             // reaching into whatever MOLD_DB_PATH currently points at,
             // which was the source of flakes in parallel runs.
@@ -10743,7 +10761,7 @@ mod tests {
         // idle line deliberately omits it, matching the mockup).
         app.generate.last_generation_time_ms = Some(1000);
         let (_, line) = crate::ui::chrome::activity_line(&app);
-        assert!(line.contains("queue 2"), "{line}");
+        assert!(line.contains("queue load 2 reported"), "{line}");
         app.generate.last_generation_time_ms = None;
 
         // No status + connecting flag → connecting chip.

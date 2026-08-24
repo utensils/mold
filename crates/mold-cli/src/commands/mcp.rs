@@ -105,6 +105,36 @@ fn append_queue_plan_status_lines(lines: &mut Vec<String>, queue: &mold_core::Qu
     }
 }
 
+fn append_queue_summary_status_lines(
+    lines: &mut Vec<String>,
+    status: &mold_core::ServerStatus,
+    queue: Option<&mold_core::QueueListingWire>,
+) {
+    match (
+        status.queue_depth,
+        queue.and_then(|listing| listing.page.as_ref()),
+    ) {
+        (Some(depth), Some(_)) => {
+            lines.push(format!("queue backlog: {depth} total nonterminal jobs"));
+        }
+        (Some(depth), None) => {
+            lines.push(format!("queue load (server-reported): {depth} jobs"));
+        }
+        (None, _) => {}
+    }
+    if let Some(queue) = queue {
+        let label = if queue.page.is_some() {
+            "hydrated queue page"
+        } else {
+            "queue response"
+        };
+        lines.push(format!("{label}: {} rows", queue.entries.len()));
+    }
+    if let Some(capacity) = status.queue_capacity {
+        lines.push(format!("runtime window capacity: {capacity} jobs"));
+    }
+}
+
 impl McpServer {
     fn new(host: Option<String>) -> Self {
         let client = match host {
@@ -573,9 +603,7 @@ impl McpServer {
                 ));
             }
         }
-        if let Some(depth) = status.queue_depth {
-            lines.push(format!("queue depth: {depth}"));
-        }
+        append_queue_summary_status_lines(&mut lines, &status, queue.as_ref());
         if let Some(queue) = &queue {
             append_queue_plan_status_lines(&mut lines, queue);
         }
@@ -2010,6 +2038,10 @@ mod tests {
             .await
             .unwrap();
         let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("queue load (server-reported): 4 jobs"));
+        assert!(text.contains("queue response: 0 rows"));
+        assert!(text.contains("runtime window capacity: 8 jobs"));
+        assert!(!text.contains("4/8"));
         assert!(text.contains("work legacy: phase=queued lane=host-utility/0"));
         assert!(text.contains("work typed-host: phase=queued lane=host-utility/1"));
         assert!(text.contains("work gpu: phase=queued lane=cuda:stable-a/2"));
@@ -2029,6 +2061,54 @@ mod tests {
         assert_eq!(work[2]["planned_device_id"], "cuda:stable-a");
         assert_eq!(work[3]["planned_lane_kind"], "remote_utility");
         assert_eq!(work[3]["planned_device_id"], "future-public-id");
+    }
+
+    #[test]
+    fn paged_queue_summary_distinguishes_backlog_page_and_runtime_window() {
+        let status: mold_core::ServerStatus = serde_json::from_value(json!({
+            "version": "test",
+            "models_loaded": [],
+            "busy": true,
+            "current_generation": null,
+            "gpu_info": null,
+            "uptime_secs": 1,
+            "queue_depth": 144,
+            "queue_capacity": 12
+        }))
+        .unwrap();
+        let row = mold_core::QueueJobEntryWire {
+            id: "job".into(),
+            model: "flux-dev:q8".into(),
+            state: "queued".into(),
+            started_at_unix_ms: 0,
+            position: 0,
+            gpu: None,
+            target_gpu: None,
+            seed_pinned: None,
+            metadata: None,
+            durable: Some(true),
+            held_reason: None,
+        };
+        let queue = mold_core::QueueListingWire {
+            entries: vec![row; 5],
+            page: Some(mold_core::QueuePage {
+                limit: 5,
+                offset: 0,
+                returned: 5,
+                next_cursor: Some("opaque".into()),
+            }),
+            ..Default::default()
+        };
+        let mut lines = Vec::new();
+        append_queue_summary_status_lines(&mut lines, &status, Some(&queue));
+        assert_eq!(
+            lines,
+            vec![
+                "queue backlog: 144 total nonterminal jobs",
+                "hydrated queue page: 5 rows",
+                "runtime window capacity: 12 jobs",
+            ]
+        );
     }
 
     #[test]
