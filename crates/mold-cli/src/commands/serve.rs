@@ -71,7 +71,11 @@ pub async fn run(
             println!("{} GPUs: {}", theme::icon_ok(), list.join(", "));
         }
     }
-    println!("{} Queue size: {}", theme::icon_ok(), queue_size);
+    println!(
+        "{} Runtime queue window: {} (durable backlog uncapped)",
+        theme::icon_ok(),
+        queue_size
+    );
 
     // Optionally spawn the Discord bot alongside the server.
     #[cfg(feature = "discord")]

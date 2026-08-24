@@ -3167,7 +3167,9 @@ pub struct ServerStatus {
     /// Current request queue depth (multi-GPU only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_depth: Option<usize>,
-    /// Maximum queue capacity (multi-GPU only).
+    /// Maximum hydrated runtime queue window (multi-GPU only).
+    ///
+    /// The durable generation backlog is not capped by this value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_capacity: Option<usize>,
     /// Whether new-job dispatch is currently paused (`POST /api/queue/pause`).

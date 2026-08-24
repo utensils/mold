@@ -1245,7 +1245,7 @@ environment before starting mold serve.")]
         #[arg(long, env = "MOLD_GPUS")]
         gpus: Option<String>,
 
-        /// Max queued requests before 503 (default: 200)
+        /// Jobs hydrated into the runtime window; the durable backlog is uncapped
         #[arg(long, env = "MOLD_QUEUE_SIZE", default_value_t = 200)]
         queue_size: usize,
 

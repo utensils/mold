@@ -352,7 +352,8 @@ pub struct AppState {
     /// Read-only authoritative device inventory and preference projection.
     /// Dispatch remains on `gpu_pool` until scheduler V2 lands.
     pub device_registry: Arc<crate::device_registry::DeviceRegistry>,
-    /// Maximum queue capacity (for status reporting and 503 responses).
+    /// Maximum hydrated runtime queue window. Durable rows may exceed it;
+    /// legacy attached requests can still receive a 503 when it is full.
     pub queue_capacity: usize,
 
     // ── Legacy single-GPU fields (retained during migration) ────────────────
