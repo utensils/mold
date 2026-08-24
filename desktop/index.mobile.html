@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme-family="mold">
+<html lang="en" data-theme-family="safelight" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta
@@ -9,6 +9,28 @@
     <meta name="theme-color" content="#12101d" />
     <meta name="mold-mobile-entry" content="mold-mobile-entry-v1" />
     <title>Mold</title>
+    <script>
+      // Apply the saved mobile theme before first paint. Mirrors
+      // src/mobile/settings.ts, including its Safelight Dark default.
+      (function () {
+        var family = "safelight";
+        var theme = "dark";
+        try {
+          var raw = localStorage.getItem("mold.mobile.settings.v1");
+          if (raw) {
+            var parsed = JSON.parse(raw);
+            if (parsed.themeFamily === "safelight" || parsed.themeFamily === "mold")
+              family = parsed.themeFamily;
+            if (parsed.theme === "system" || parsed.theme === "dark" || parsed.theme === "light")
+              theme = parsed.theme;
+          }
+        } catch (e) {}
+        var root = document.documentElement;
+        root.dataset.themeFamily = family;
+        if (theme === "system") delete root.dataset.theme;
+        else root.dataset.theme = theme;
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

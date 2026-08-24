@@ -23,21 +23,21 @@ afterEach(() => {
 });
 
 describe("mobile settings persistence", () => {
-  it("defaults new and corrupt installs to Safelight, system appearance, and Photos auto-save", () => {
+  it("defaults new and corrupt installs to Safelight Dark and Photos auto-save", () => {
     expect(DEFAULT_MOBILE_SETTINGS).toEqual({
-      theme: "system",
+      theme: "dark",
       themeFamily: "safelight",
       autoSavePhotos: true,
       autoTagTitle: true,
     });
     expect(loadMobileSettings(memoryStorage())).toEqual({
-      theme: "system",
+      theme: "dark",
       themeFamily: "safelight",
       autoSavePhotos: true,
       autoTagTitle: true,
     });
     expect(loadMobileSettings(memoryStorage("not json"))).toEqual({
-      theme: "system",
+      theme: "dark",
       themeFamily: "safelight",
       autoSavePhotos: true,
       autoTagTitle: true,
@@ -66,7 +66,7 @@ describe("mobile settings persistence", () => {
         ),
       ),
     ).toEqual({
-      theme: "system",
+      theme: "dark",
       themeFamily: "safelight",
       autoSavePhotos: false,
       autoTagTitle: true,

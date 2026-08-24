@@ -20,8 +20,8 @@ pub enum ConnectionMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Theme {
-    #[default]
     System,
+    #[default]
     Dark,
     Light,
 }
@@ -280,7 +280,7 @@ impl Default for AppSettings {
             last_route: None,
             engine_env: Default::default(),
             theme: Theme::default(),
-            theme_family: ThemeFamily::Mold,
+            theme_family: ThemeFamily::Safelight,
             notifications: true,
             dock_badge: true,
             restore_last_route: false,
@@ -523,7 +523,7 @@ mod tests {
         let loaded = load(&path);
         assert!(loaded.notifications);
         assert!(loaded.dock_badge);
-        assert_eq!(loaded.theme, Theme::System);
+        assert_eq!(loaded.theme, Theme::Dark);
         assert_eq!(loaded.theme_family, ThemeFamily::Safelight);
         assert!(loaded.engine_env.is_empty());
         assert!(!loaded.runpod_include_hf_token);
@@ -537,8 +537,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load(&path_in(&dir)), AppSettings::default());
         assert_eq!(AppSettings::default().mode, ConnectionMode::Local);
-        assert_eq!(AppSettings::default().theme, Theme::System);
-        assert_eq!(AppSettings::default().theme_family, ThemeFamily::Mold);
+        assert_eq!(AppSettings::default().theme, Theme::Dark);
+        assert_eq!(AppSettings::default().theme_family, ThemeFamily::Safelight);
         assert_eq!(AppSettings::default().update_channel, UpdateChannel::Stable);
     }
 

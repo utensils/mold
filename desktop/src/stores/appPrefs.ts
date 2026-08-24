@@ -15,8 +15,8 @@ export const useAppPrefsStore = defineStore("appPrefs", {
     settings: null as AppSettings | null,
   }),
   getters: {
-    theme: (s): Theme => s.settings?.theme ?? "system",
-    themeFamily: (s): ThemeFamily => s.settings?.themeFamily ?? "mold",
+    theme: (s): Theme => s.settings?.theme ?? "dark",
+    themeFamily: (s): ThemeFamily => s.settings?.themeFamily ?? "safelight",
     notifications: (s) => s.settings?.notifications ?? true,
     dockBadge: (s) => s.settings?.dockBadge ?? true,
     restoreLastRoute: (s) => s.settings?.restoreLastRoute ?? false,

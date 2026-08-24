@@ -90,7 +90,7 @@ document zoom disabled, and overscroll bounce suppressed. The Library viewer
 keeps a narrowly scoped horizontal swipe gesture. Settings persists the Mold
 Studio families (Mold or Safelight) with System/Dark/Light, host management,
 version, the TestFlight update channel, and an external-browser link to the
-public Mold privacy policy. Fresh installs start with Safelight + System; valid
+public Mold privacy policy. Fresh installs start with Safelight + Dark; valid
 persisted theme choices remain authoritative.
 
 `.github/workflows/ios.yml` gates mobile-relevant pull requests and `main`
