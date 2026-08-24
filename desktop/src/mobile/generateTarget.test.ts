@@ -49,6 +49,19 @@ describe("mobile automatic-routing visibility", () => {
       1,
     );
   });
+
+  it("keeps verified stale machines eligible but excludes unknown and mismatched authorities", () => {
+    const stale = host({ id: "stale", stale: true });
+    const unknown = host({ id: "unknown", online: false, healthError: "unreachable" });
+    const mismatch = host({
+      id: "mismatch",
+      online: false,
+      instanceId: "expected",
+      instanceMismatch: { expected: "expected", reported: "replacement" },
+    });
+
+    expect(mobileRoutingHosts([stale, unknown, mismatch])).toEqual([stale]);
+  });
 });
 
 describe("mobile generate-target persistence", () => {
@@ -107,6 +120,23 @@ describe("labels", () => {
     expect(mobileGenerateTargetLabel("capable", fleet)).toBe("Most capable");
     expect(mobileGenerateTargetLabel("studio", fleet)).toBe("Studio");
     expect(mobileGenerateTargetLabel("ghost", fleet)).toBe("ghost");
+  });
+
+  it("labels stale, never-verified, and mismatched pinned routes honestly", () => {
+    const degraded = [
+      host({ id: "stale", name: "Studio", stale: true }),
+      host({ id: "unknown", name: "New host", online: false, healthError: "timeout" }),
+      host({
+        id: "mismatch",
+        name: "Render",
+        online: false,
+        instanceMismatch: { expected: "old", reported: "new" },
+      }),
+    ];
+
+    expect(mobileGenerateTargetLabel("stale", degraded)).toBe("Studio · reconnecting");
+    expect(mobileGenerateTargetLabel("unknown", degraded)).toBe("New host · unreachable");
+    expect(mobileGenerateTargetLabel("mismatch", degraded)).toBe("Render · identity changed");
   });
 
   it("tags a model only when it is not on every reachable machine", () => {

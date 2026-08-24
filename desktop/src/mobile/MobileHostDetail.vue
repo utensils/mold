@@ -35,7 +35,7 @@ import { unloadModel } from "../lib/api/models";
 import { modelDisplayName, modelDisplayNameForId, modelSizeLabels } from "../lib/models";
 import { applyDownloadEvent, emptyDownloadsState, type DownloadsState } from "../stores/downloads";
 import type { QueueEntry } from "../stores/jobs";
-import { mobileHostTarget, type MobileHost } from "./hosts";
+import { mobileHostHealthLabel, mobileHostTarget, type MobileHost } from "./hosts";
 import { emptyTrash as emptyHostTrash, listTrash } from "@studio/api/galleryOrganization";
 import { RETENTION_OPTIONS, retentionLabel } from "@studio/lib/libraryOrganization";
 import {
@@ -587,6 +587,12 @@ async function loadHost(): Promise<void> {
       apiJsonTo<ModelEntry[]>(target.value, "/api/models"),
     ]);
     if (epoch !== loadEpoch) return;
+    const expectedInstanceId = props.host.instanceId?.trim();
+    const reportedInstanceId = nextStatus.instance_id?.trim();
+    if (expectedInstanceId && reportedInstanceId && expectedInstanceId !== reportedInstanceId) {
+      emit("status", { id: props.host.id, status: nextStatus });
+      throw new Error("This address now reports a different Mold server identity.");
+    }
     status.value = nextStatus;
     installed.value = models.filter((model) => model.downloaded);
     emit("status", { id: props.host.id, status: nextStatus });
@@ -753,17 +759,17 @@ onBeforeUnmount(() => {
       >
         <span aria-hidden="true">‹</span> Hosts
       </button>
-      <span class="host-chip">{{
-        host.connected === false
-          ? "disconnected"
-          : host.online
-            ? `v${host.version ?? ""}`
-            : "offline"
+      <span class="host-chip" data-test="host-detail-health">{{
+        mobileHostHealthLabel(host)
       }}</span>
     </div>
 
     <div class="mobile-detail-title">
-      <span class="status-dot" :class="host.online ? 'is-ready' : 'is-error'" aria-hidden="true" />
+      <span
+        class="status-dot"
+        :class="host.stale ? 'is-reconnecting' : host.online ? 'is-ready' : 'is-error'"
+        aria-hidden="true"
+      />
       <div>
         <h1 class="section-title">{{ host.name }}</h1>
         <p class="host-url">{{ host.baseUrl }}</p>
@@ -814,6 +820,13 @@ onBeforeUnmount(() => {
 
     <p v-if="host.connected === false" class="status-line">
       Disconnected. This host stays out of generation, Library, Models, and background checks.
+    </p>
+    <p v-else-if="host.instanceMismatch" class="status-line error-text" role="alert">
+      This address now reports a different Mold server identity. Remove and re-add the machine to
+      trust that replacement.
+    </p>
+    <p v-else-if="host.stale" class="status-line" role="status">
+      Reconnecting… Showing the last verified host state.
     </p>
     <p v-else-if="loading" class="status-line">Reading host…</p>
     <div v-if="error" class="row-actions">

@@ -329,9 +329,13 @@ import {
 import { markJobSettled, newJob } from "../lib/generationJob";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import {
+  mobileHostHealthLabel,
   mobileHostMatchesRoute,
   mobileHostTarget,
   normalizeRemoteAddress,
+  recordMobileHostAuthorityRejection,
+  recordMobileHostProbeFailure,
+  recordMobileHostStatus,
   remoteHostId,
   type MobileHost,
 } from "./hosts";
@@ -1159,10 +1163,13 @@ const routingHint = computed(() =>
 const headerTargetLabel = computed(() =>
   automaticRouting.value
     ? mobileGenerateTargetLabel(generateTarget.value, connectedHosts.value)
-    : (selectedHost.value?.name ?? "Remote only"),
+    : selectedHost.value
+      ? mobileGenerateTargetLabel(selectedHost.value.id, connectedHosts.value)
+      : "Remote only",
 );
 const developOnNote = computed(() => {
-  if (!automaticRouting.value) return `Develop on ${selectedHost.value?.name ?? "this machine"}`;
+  if (!automaticRouting.value)
+    return `Develop on ${selectedHost.value ? mobileGenerateTargetLabel(selectedHost.value.id, connectedHosts.value) : "this machine"}`;
   return generateTarget.value === CAPABLE_TARGET_ID
     ? "Develop on the most capable machine"
     : "Develop on the least busy machine";
@@ -3065,6 +3072,10 @@ function loadHosts(): MobileHost[] {
       connected: host.connected !== false,
       apiKey: "",
       online: false,
+      stale: false,
+      healthError: undefined,
+      authorityRejected: false,
+      instanceMismatch: undefined,
     }));
   } catch {
     return [];
@@ -3074,7 +3085,18 @@ function loadHosts(): MobileHost[] {
 function persistHosts(): void {
   localStorage.setItem(
     STORAGE_KEY,
-    JSON.stringify(hosts.value.map(({ apiKey: _apiKey, ...host }) => host)),
+    JSON.stringify(
+      hosts.value.map(
+        ({
+          apiKey: _apiKey,
+          stale: _stale,
+          healthError: _healthError,
+          authorityRejected: _authorityRejected,
+          instanceMismatch: _instanceMismatch,
+          ...host
+        }) => host,
+      ),
+    ),
   );
 }
 
@@ -3118,6 +3140,10 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
       instanceId,
       connected: true,
       online: true,
+      stale: false,
+      healthError: undefined,
+      authorityRejected: false,
+      instanceMismatch: undefined,
     };
     if (existing) Object.assign(existing, saved);
     else hosts.value.push(saved);
@@ -3253,22 +3279,52 @@ function renameHost(payload: { id: string; name: string }): void {
   persistHosts();
 }
 
-function updateHostStatus(payload: { id: string; status: ServerStatus | null }): void {
+/** Retire every routing cache whose authority belongs to the remembered
+ * instance. A replacement at the same URL must start from unknown instead of
+ * inheriting plausible model/capability data from another server. */
+function retireMobileHostAuthority(id: string): void {
+  delete hostTelemetry[id];
+  delete expandCapabilities[id];
+  delete serverCapabilities[id];
+  const nextModels = { ...modelsByHost.value };
+  delete nextModels[id];
+  modelsByHost.value = nextModels;
+  const nextIdentities = { ...modelSnapshotIdentities.value };
+  delete nextIdentities[id];
+  modelSnapshotIdentities.value = nextIdentities;
+  if (modelsHostId.value === id) {
+    models.value = [];
+    modelsHostId.value = "";
+  }
+}
+
+function updateHostStatus(payload: {
+  id: string;
+  status: ServerStatus | null;
+  error?: unknown;
+}): boolean {
   const host = hosts.value.find((candidate) => candidate.id === payload.id);
-  if (!host) return;
-  host.online = payload.status !== null;
+  if (!host) return false;
   if (payload.status) {
     const priorCacheKey = host.instanceId?.trim() || host.id;
-    const nextInstanceId = payload.status.instance_id ?? host.instanceId;
-    const nextCacheKey = nextInstanceId?.trim() || host.id;
+    if (recordMobileHostStatus(host, payload.status) === "instance_mismatch") {
+      retireMobileHostAuthority(host.id);
+      void clearCachedGalleryHosts([priorCacheKey]);
+      return false;
+    }
+    const nextCacheKey = host.instanceId?.trim() || host.id;
     if (priorCacheKey !== nextCacheKey) void clearCachedGalleryHosts([priorCacheKey]);
-    host.version = payload.status.version;
-    host.hostname = payload.status.hostname ?? undefined;
-    host.instanceId = nextInstanceId;
     captureHostTelemetry(host.id, payload.status);
   } else {
-    delete hostTelemetry[host.id];
+    const error = payload.error ?? new Error("Status probe failed");
+    if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+      recordMobileHostAuthorityRejection(host, error);
+      retireMobileHostAuthority(host.id);
+    } else {
+      recordMobileHostProbeFailure(host, error);
+    }
   }
+  return true;
 }
 
 function cancelHostProbe(id: string): void {
@@ -3283,7 +3339,7 @@ async function probeHost(host: MobileHost): Promise<void> {
   cancelHostProbe(host.id);
   const controller = new AbortController();
   const epoch = ++hostProbeEpoch;
-  const wasKnownOffline = knownHostReachability.has(host.id) && !host.online;
+  const wasUnavailable = !host.online || host.stale || Boolean(host.instanceMismatch);
   const timeout = setTimeout(() => controller.abort(), HOST_PROBE_TIMEOUT_MS);
   const probe = { epoch, controller, timeout };
   hostProbes.set(host.id, probe);
@@ -3293,12 +3349,12 @@ async function probeHost(host: MobileHost): Promise<void> {
     });
     if (hostProbes.get(host.id)?.epoch !== epoch) return;
     knownHostReachability.add(host.id);
-    updateHostStatus({ id: host.id, status });
-    if (wasKnownOffline && tab.value === "gallery") void refreshGallery();
-  } catch {
+    const verified = updateHostStatus({ id: host.id, status });
+    if (verified && wasUnavailable && tab.value === "gallery") void refreshGallery();
+  } catch (error) {
     if (hostProbes.get(host.id)?.epoch !== epoch) return;
     knownHostReachability.add(host.id);
-    updateHostStatus({ id: host.id, status: null });
+    updateHostStatus({ id: host.id, status: null, error });
   } finally {
     if (hostProbes.get(host.id)?.epoch === epoch) hostProbes.delete(host.id);
     clearTimeout(timeout);
@@ -3404,7 +3460,11 @@ function disconnectHost(id: string): void {
   if (!host) return;
   host.connected = false;
   host.online = false;
-  delete hostTelemetry[id];
+  host.stale = false;
+  host.healthError = undefined;
+  host.authorityRejected = false;
+  host.instanceMismatch = undefined;
+  retireMobileHostAuthority(id);
   pruneHostOrganization(id);
   if (selectedHostId.value === id) {
     selectedHostId.value = connectedHosts.value[0]?.id ?? "";
@@ -3420,6 +3480,11 @@ function reconnectHost(id: string): void {
   const host = hosts.value.find((candidate) => candidate.id === id);
   if (!host) return;
   host.connected = true;
+  host.online = false;
+  host.stale = false;
+  host.healthError = undefined;
+  host.authorityRejected = false;
+  host.instanceMismatch = undefined;
   knownHostReachability.delete(id);
   persistHosts();
   void probeHost(host);
@@ -3428,6 +3493,7 @@ function reconnectHost(id: string): void {
 function removeHost(id: string): void {
   cancelHostProbe(id);
   knownHostReachability.delete(id);
+  retireMobileHostAuthority(id);
   pruneHostOrganization(id);
   const removedSelectedHost = selectedHostId.value === id;
   const removedCatalogHost = catalogHostId.value === id;
@@ -3490,8 +3556,12 @@ async function refreshModels(): Promise<boolean> {
   const target = { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
   loadingModels.value = true;
   modelLoadError.value = "";
-  models.value = [];
-  modelsHostId.value = "";
+  // Keep a same-host last-good presentation mounted while its refresh is in
+  // flight. A different browsed host starts unknown and cannot inherit it.
+  if (modelsHostId.value !== hostId) {
+    models.value = [];
+    modelsHostId.value = "";
+  }
   try {
     const [status, entries, capabilities] = await Promise.all([
       apiJsonTo<ServerStatus>(target, "/api/status"),
@@ -3500,14 +3570,13 @@ async function refreshModels(): Promise<boolean> {
     ]);
     if (unmounted || epoch !== modelLoadEpoch || selectedHostId.value !== hostId) return false;
     knownHostReachability.add(hostId);
-    host.online = true;
-    host.version = status.version;
-    host.hostname = status.hostname ?? undefined;
     const priorCacheKey = mobileGalleryCacheKey(host);
-    host.instanceId = status.instance_id ?? host.instanceId;
+    if (!updateHostStatus({ id: hostId, status })) {
+      modelLoadError.value = `${host.name} now reports a different server identity. Remove and re-add this machine before generating.`;
+      return false;
+    }
     const nextCacheKey = mobileGalleryCacheKey(host);
     if (priorCacheKey !== nextCacheKey) await clearCachedGalleryHosts([priorCacheKey]);
-    captureHostTelemetry(hostId, status);
     expandCapabilities[hostId] = capabilities?.expand;
     serverCapabilities[hostId] = capabilities;
     // Keep auxiliary entries for the Upscale and ControlNet pickers, while
@@ -3542,7 +3611,11 @@ async function refreshModels(): Promise<boolean> {
   } catch (error) {
     if (unmounted || epoch !== modelLoadEpoch || selectedHostId.value !== hostId) return false;
     knownHostReachability.add(hostId);
-    host.online = false;
+    updateHostStatus({ id: hostId, status: null, error });
+    if (!host.online) {
+      models.value = [];
+      modelsHostId.value = "";
+    }
     // The banner above the model select owns this failure; the generation
     // status line keeps showing generation state, not background loads.
     const detail = describeTransportError(error, host.name);
@@ -3574,6 +3647,7 @@ async function refreshRoutingModels(): Promise<void> {
         const currentHost = hosts.value.find((candidate) => candidate.id === host.id);
         if (
           !currentHost ||
+          currentHost.instanceMismatch ||
           mobileGalleryCacheKey(currentHost) !== cacheKey ||
           currentHost.baseUrl !== target.baseUrl ||
           (currentHost.apiKey || null) !== target.apiKey
@@ -6702,7 +6776,11 @@ async function performGalleryRefresh(): Promise<void> {
         clearTimeout(timeout);
       }
       const currentHost = hosts.value.find((candidate) => candidate.id === host.id);
-      if (!currentHost || mobileGalleryCacheKey(currentHost) !== cacheKey) {
+      if (
+        !currentHost ||
+        currentHost.instanceMismatch ||
+        mobileGalleryCacheKey(currentHost) !== cacheKey
+      ) {
         throw new Error("Gallery host identity changed while refreshing");
       }
       if (capabilities !== undefined) serverCapabilities[host.id] = capabilities;
@@ -7018,7 +7096,11 @@ async function readReusePresentation(
       throw new Error("This machine now reports a different server identity.");
     }
     const currentHost = hosts.value.find((candidate) => candidate.id === print.hostId);
-    if (!currentHost || mobileGalleryCacheKey(currentHost) !== print.cacheKey) {
+    if (
+      !currentHost ||
+      currentHost.instanceMismatch ||
+      mobileGalleryCacheKey(currentHost) !== print.cacheKey
+    ) {
       throw new Error("This machine changed while its saved settings were refreshing.");
     }
     const presentation: CachedHostPresentation = {
@@ -9580,7 +9662,7 @@ onBeforeUnmount(() => {
               <option v-if="autoRoutingAvailable" :value="AUTO_TARGET_ID">Auto</option>
               <option v-if="autoRoutingAvailable" :value="CAPABLE_TARGET_ID">Most capable</option>
               <option v-for="host in connectedHosts" :key="host.id" :value="host.id">
-                {{ host.name }}{{ host.online ? "" : " · offline" }}
+                {{ mobileGenerateTargetLabel(host.id, connectedHosts) }}
               </option>
             </select>
           </label>
@@ -11215,14 +11297,18 @@ onBeforeUnmount(() => {
                 <span class="host-row-state">
                   <span
                     class="status-dot"
-                    :class="host.connected !== false ? (host.online ? 'is-ready' : 'is-error') : ''"
+                    :class="
+                      host.connected !== false
+                        ? host.stale
+                          ? 'is-reconnecting'
+                          : host.online
+                            ? 'is-ready'
+                            : 'is-error'
+                        : ''
+                    "
                   />
-                  <span class="host-chip">{{
-                    host.connected === false
-                      ? "disconnected"
-                      : host.online
-                        ? `v${host.version ?? ""}`
-                        : "offline"
+                  <span class="host-chip" data-test="mobile-host-health">{{
+                    mobileHostHealthLabel(host)
                   }}</span>
                   <span aria-hidden="true">›</span>
                 </span>

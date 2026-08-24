@@ -4055,6 +4055,10 @@ button:disabled {
   background: var(--safelight);
 }
 
+.status-dot.is-reconnecting {
+  background: var(--warning);
+}
+
 .status-dot.is-error {
   background: var(--stop);
 }

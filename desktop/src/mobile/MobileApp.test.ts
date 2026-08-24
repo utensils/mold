@@ -7081,7 +7081,7 @@ describe("MobileApp gallery", () => {
 
     expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
     await wrapper.get("[data-test='mobile-tab-generate']").trigger("click");
-    expect(wrapper.get("#mobile-prompt").element).toHaveProperty("value", "");
+    expect(wrapper.text()).not.toContain(print.metadata.prompt);
   });
 
   it("closes during Use as source and ignores its late media response", async () => {
@@ -7122,7 +7122,7 @@ describe("MobileApp gallery", () => {
     expect(liveForm.sourceImage).toBeNull();
   });
 
-  it("labels retained in-memory models as saved after the host goes offline", async () => {
+  it("keeps retained verified models authoritative while the host reconnects", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
@@ -7149,8 +7149,10 @@ describe("MobileApp gallery", () => {
     );
 
     expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
-      "Saved model information was used and is refreshing in the background.",
+      "Prompt settings restored",
     );
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    expect(wrapper.get("[data-test='mobile-host-health']").text()).toBe("reconnecting…");
   });
 
   it("times out a reuse even when the transport ignores AbortSignal", async () => {
@@ -9075,6 +9077,136 @@ describe("MobileApp machines telemetry", () => {
     expect(telemetry.get(".host-telemetry-mem").text()).toBe("9.8 / 24.0 GB");
     expect(telemetry.get(".host-telemetry-queue").text()).toBe("queue 2");
     expect(telemetry.get(".meter").attributes("aria-valuenow")).toBe("41");
+  });
+
+  it("keeps last-good telemetry and capabilities through repeated probe failures, then recovers", async () => {
+    vi.useFakeTimers();
+    let failing = false;
+    let currentStatus: ServerStatus = {
+      ...status,
+      gpu_info: {
+        name: "RTX 4090",
+        vram_total_mb: 24_000,
+        vram_used_mb: 9_840,
+        backend: "cuda",
+      },
+      queue_depth: 2,
+      queue_capacity: 8,
+    };
+    apiJsonTo.mockReset().mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") {
+        return failing
+          ? Promise.reject(new Error("status timeout"))
+          : Promise.resolve(currentStatus);
+      }
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({ gallery: { can_delete: true, organize: true } });
+      }
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-file-under']").exists()).toBe(true);
+    await openMachines();
+
+    failing = true;
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flushPromises();
+    let health = wrapper.get("[data-test='mobile-host-health']");
+    expect(health.text()).toBe("reconnecting…");
+    expect(wrapper.get("[data-test='mobile-host-telemetry'] .host-telemetry-mem").text()).toBe(
+      "9.8 / 24.0 GB",
+    );
+    expect(wrapper.get(".status-dot").classes()).toContain("is-reconnecting");
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-host-health']").text()).toBe("reconnecting…");
+    expect(wrapper.find("[data-test='mobile-host-telemetry']").exists()).toBe(true);
+
+    currentStatus = {
+      ...currentStatus,
+      version: "0.19.0",
+      queue_depth: 4,
+      gpu_info: { ...currentStatus.gpu_info!, vram_used_mb: 12_000 },
+    };
+    failing = false;
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flushPromises();
+    health = wrapper.get("[data-test='mobile-host-health']");
+    expect(health.text()).toBe("v0.19.0");
+    expect(wrapper.get("[data-test='mobile-host-telemetry'] .host-telemetry-queue").text()).toBe(
+      "queue 4",
+    );
+
+    await wrapper.get("[data-test='mobile-tab-generate']").trigger("click");
+    expect(wrapper.find("[data-test='mobile-file-under']").exists()).toBe(true);
+  });
+
+  it("fences a replacement instance and retires its old telemetry and capabilities", async () => {
+    vi.useFakeTimers();
+    let replacement = false;
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          hostname: "studio",
+          version: "0.18.0",
+          instanceId: "studio-id",
+          online: false,
+        },
+      ]),
+    );
+    apiJsonTo.mockReset().mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") {
+        return Promise.resolve({
+          ...status,
+          instance_id: replacement ? "replacement-id" : "studio-id",
+          gpu_info: {
+            name: "RTX 4090",
+            vram_total_mb: 24_000,
+            vram_used_mb: 9_840,
+            backend: "cuda",
+          },
+          queue_depth: 2,
+        } satisfies ServerStatus);
+      }
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({ gallery: { can_delete: true, organize: true } });
+      }
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-file-under']").exists()).toBe(true);
+
+    replacement = true;
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flushPromises();
+    await openMachines();
+
+    expect(wrapper.get("[data-test='mobile-host-health']").text()).toBe("identity changed");
+    expect(wrapper.find("[data-test='mobile-host-telemetry']").exists()).toBe(false);
+    expect(wrapper.get(".status-dot").classes()).toContain("is-error");
+
+    await wrapper.get("[data-test='mobile-tab-generate']").trigger("click");
+    expect(wrapper.find("[data-test='mobile-file-under']").exists()).toBe(false);
+    expect(wrapper.get(".mobile-header .host-chip").text()).toBe("Studio · identity changed");
   });
 
   it("aggregates every GPU on a host card", async () => {

@@ -20,7 +20,7 @@ import {
   isAutomaticTarget,
   normalizeTargetId,
 } from "@studio/lib/hostRouting";
-import type { MobileHost } from "./hosts";
+import { mobileHostHealthLabel, type MobileHost } from "./hosts";
 
 export const MOBILE_GENERATE_TARGET_KEY = "mold.mobile.generate-target.v1";
 
@@ -35,7 +35,7 @@ function defaultStorage(): TargetStorage | null {
 
 /** The connected machines an automatic policy may dispatch to. */
 export function mobileRoutingHosts(hosts: readonly MobileHost[]): MobileHost[] {
-  return hosts.filter((host) => host.connected !== false && host.online);
+  return hosts.filter((host) => host.connected !== false && host.online && !host.instanceMismatch);
 }
 
 /** Auto and Most capable appear only with two or more reachable machines. */
@@ -88,7 +88,12 @@ export function resolveMobileGenerateTarget(
 export function mobileGenerateTargetLabel(value: string, hosts: readonly MobileHost[]): string {
   if (value === AUTO_TARGET_ID) return "Auto";
   if (value === CAPABLE_TARGET_ID) return "Most capable";
-  return hosts.find((host) => host.id === value)?.name ?? value;
+  const host = hosts.find((candidate) => candidate.id === value);
+  if (!host) return value;
+  const health = mobileHostHealthLabel(host);
+  return host.online && !host.stale
+    ? host.name
+    : `${host.name} \u00b7 ${health.replace("\u2026", "")}`;
 }
 
 /** One line each, shown wherever the phone explains where work lands. */
