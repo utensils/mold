@@ -5558,6 +5558,154 @@ fn annotate_restart_required(state: &AppState, snapshot: &mut DeviceState) {
     }
 }
 
+struct DeviceMutationOutcome {
+    previous_desired: bool,
+    device: mold_core::DeviceInfo,
+    asynchronous: bool,
+}
+
+/// Complete one ordered device mutation independently of the request future.
+/// Persistence can block, so it runs before the scheduler fence and on the
+/// blocking pool. Once persistence succeeds, publication and the owner state
+/// transition are synchronous under the fence; any owner join and projection
+/// work happen after releasing it. Spawning this operation from the route also
+/// prevents request cancellation from leaving SQLite ahead of live authority.
+async fn apply_device_mutation(
+    state: AppState,
+    device_id: String,
+    enabled: bool,
+    mutate_runtime: bool,
+) -> Result<DeviceMutationOutcome, ApiError> {
+    let mut preference = state
+        .device_registry
+        .prepare_desired_enabled_mutation(&device_id, enabled)
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!("failed to persist device preference: {error:#}"))
+        })?;
+    let previous_desired = preference.previous();
+    let preference_changed = preference.changed();
+    let mut asynchronous = false;
+    let mut reap_owner_epoch = None;
+
+    if mutate_runtime {
+        let started_epoch;
+        {
+            let _mutation_guard = state.scheduler_mutation_fence.lock().await;
+            preference.publish();
+            started_epoch = if enabled {
+                if state.gpu_pool.workers.cancel_drain(&device_id) {
+                    None
+                } else if state
+                    .gpu_pool
+                    .worker_snapshot()
+                    .iter()
+                    .any(|worker| crate::scheduler::worker_device_id(worker) == device_id)
+                {
+                    // The old owner already committed to exit. Its exact
+                    // Stopped reduction observes desired=true and creates the
+                    // replacement.
+                    asynchronous = true;
+                    None
+                } else {
+                    let owner_epoch =
+                        state.gpu_pool.workers.start(&device_id).map_err(|error| {
+                            ApiError::with_code(
+                                format!("device '{device_id}' remains unavailable: {error}"),
+                                "NO_SCHEDULABLE_DEVICE",
+                                StatusCode::SERVICE_UNAVAILABLE,
+                            )
+                        })?;
+                    asynchronous = true;
+                    Some(owner_epoch)
+                }
+            } else if let Some(worker) = state
+                .gpu_pool
+                .worker_snapshot()
+                .into_iter()
+                .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
+            {
+                let owner_epoch = worker.owner_epoch;
+                let busy = state
+                    .gpu_pool
+                    .workers
+                    .request_disable(&device_id)
+                    .map_err(ApiError::internal)?;
+                if busy {
+                    asynchronous = true;
+                } else {
+                    reap_owner_epoch = Some(owner_epoch);
+                }
+                None
+            } else {
+                None
+            };
+
+            if let Some(owner_epoch) = started_epoch {
+                match state
+                    .gpu_pool
+                    .workers
+                    .announce_start(&device_id, owner_epoch)
+                {
+                    crate::gpu_pool::StartAnnouncement::Ready => {
+                        state
+                            .events
+                            .publish(mold_core::ServerEvent::DeviceStateChanged {
+                                device_id: device_id.clone(),
+                                desired_enabled: true,
+                                admin_state: DeviceAdminState::Enabled,
+                            });
+                    }
+                    crate::gpu_pool::StartAnnouncement::Failed(error) => {
+                        tracing::error!(
+                            device_id,
+                            owner_epoch,
+                            %error,
+                            "GPU owner failed during asynchronous lifecycle start"
+                        );
+                    }
+                    crate::gpu_pool::StartAnnouncement::Pending => {}
+                }
+            }
+        }
+
+        if let Some(owner_epoch) = reap_owner_epoch {
+            let pool = state.gpu_pool.clone();
+            let id = device_id.clone();
+            tokio::task::spawn_blocking(move || pool.workers.wait_and_reap(&id, owner_epoch))
+                .await
+                .map_err(|error| {
+                    ApiError::internal(format!("failed to join GPU owner thread: {error}"))
+                })?;
+        }
+    } else {
+        let _mutation_guard = state.scheduler_mutation_fence.lock().await;
+        preference.publish();
+    }
+
+    let resources = state.resources.latest();
+    let mut snapshot =
+        state
+            .device_registry
+            .snapshot(&state.gpu_pool, resources.as_ref(), &state.job_registry);
+    if !mutate_runtime {
+        annotate_restart_required(&state, &mut snapshot);
+    }
+    let device = snapshot
+        .devices
+        .into_iter()
+        .find(|device| device.id == device_id)
+        .ok_or_else(|| ApiError::internal("device disappeared during lifecycle mutation"))?;
+    if !mutate_runtime {
+        asynchronous = device.restart_required && preference_changed;
+    }
+    Ok(DeviceMutationOutcome {
+        previous_desired,
+        device,
+        asynchronous,
+    })
+}
+
 #[utoipa::path(
     patch,
     path = "/api/devices/{id}",
@@ -5597,34 +5745,19 @@ async fn patch_device(
     // A non-authoritative runtime cannot touch live owners, but it must let an
     // operator recover a persistently-disabled GPU for the next restart.
     if !state.scheduled_work.v2_authoritative() && request.enabled {
-        let _mutation_guard = state.scheduler_mutation_fence.lock().await;
-        let already_enabled = state.device_registry.desired_enabled(&device_id);
-        if !already_enabled {
-            state
-                .device_registry
-                .set_desired_enabled(&device_id, true)
-                .map_err(|error| {
-                    ApiError::internal(format!("failed to persist device preference: {error:#}"))
-                })?;
-        }
-        let resources = state.resources.latest();
-        let mut snapshot = state.device_registry.snapshot(
-            &state.gpu_pool,
-            resources.as_ref(),
-            &state.job_registry,
-        );
-        annotate_restart_required(&state, &mut snapshot);
-        let device = snapshot
-            .devices
-            .into_iter()
-            .find(|device| device.id == device_id)
-            .ok_or_else(|| ApiError::internal("device disappeared during preference mutation"))?;
-        let status = if device.restart_required && !already_enabled {
+        let operation_state = state.clone();
+        let operation_device_id = device_id.clone();
+        let outcome = tokio::spawn(async move {
+            apply_device_mutation(operation_state, operation_device_id, true, false).await
+        })
+        .await
+        .map_err(|error| ApiError::internal(format!("device mutation task failed: {error}")))??;
+        let status = if outcome.asynchronous {
             StatusCode::ACCEPTED
         } else {
             StatusCode::OK
         };
-        return Ok((status, Json(device)).into_response());
+        return Ok((status, Json(outcome.device)).into_response());
     }
     if !state.scheduled_work.v2_authoritative() {
         return Err(ApiError::with_code(
@@ -5634,106 +5767,19 @@ async fn patch_device(
         ));
     }
 
-    let old_desired = state.device_registry.desired_enabled(&device_id);
-    let _mutation_guard = state.scheduler_mutation_fence.lock().await;
-    state
-        .device_registry
-        .set_desired_enabled(&device_id, request.enabled)
-        .map_err(|error| {
-            ApiError::internal(format!("failed to persist device preference: {error:#}"))
-        })?;
-
-    let mut asynchronous = false;
-    let mut started_epoch = None;
-    if request.enabled {
-        if !state.gpu_pool.workers.cancel_drain(&device_id) {
-            if state
-                .gpu_pool
-                .worker_snapshot()
-                .iter()
-                .any(|worker| crate::scheduler::worker_device_id(worker) == device_id)
-            {
-                // The old owner already committed to exit. Its exact Stopped
-                // reduction observes desired=true and creates the replacement.
-                asynchronous = true;
-            } else {
-                started_epoch =
-                    Some(state.gpu_pool.workers.start(&device_id).map_err(|error| {
-                        ApiError::with_code(
-                            format!("device '{device_id}' remains unavailable: {error}"),
-                            "NO_SCHEDULABLE_DEVICE",
-                            StatusCode::SERVICE_UNAVAILABLE,
-                        )
-                    })?);
-                asynchronous = true;
-            }
-        }
-    } else if let Some(worker) = state
-        .gpu_pool
-        .worker_snapshot()
-        .into_iter()
-        .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
-    {
-        let owner_epoch = worker.owner_epoch;
-        let busy = state
-            .gpu_pool
-            .workers
-            .request_disable(&device_id)
-            .map_err(ApiError::internal)?;
-        if busy {
-            asynchronous = true;
-        } else {
-            let pool = state.gpu_pool.clone();
-            let id = device_id.clone();
-            tokio::task::spawn_blocking(move || pool.workers.wait_and_reap(&id, owner_epoch))
-                .await
-                .map_err(|error| {
-                    ApiError::internal(format!("failed to join GPU owner thread: {error}"))
-                })?;
-        }
-    }
-
-    let resources = state.resources.latest();
-    let snapshot =
-        state
-            .device_registry
-            .snapshot(&state.gpu_pool, resources.as_ref(), &state.job_registry);
-    let device = snapshot
-        .devices
-        .into_iter()
-        .find(|device| device.id == device_id)
-        .ok_or_else(|| ApiError::internal("device disappeared during lifecycle mutation"))?;
-    if let Some(owner_epoch) = started_epoch {
-        match state
-            .gpu_pool
-            .workers
-            .announce_start(&device_id, owner_epoch)
-        {
-            crate::gpu_pool::StartAnnouncement::Ready => {
-                state
-                    .events
-                    .publish(mold_core::ServerEvent::DeviceStateChanged {
-                        device_id: device.id.clone(),
-                        desired_enabled: true,
-                        admin_state: DeviceAdminState::Enabled,
-                    });
-            }
-            crate::gpu_pool::StartAnnouncement::Failed(error) => {
-                tracing::error!(
-                    device_id,
-                    owner_epoch,
-                    %error,
-                    "GPU owner failed during asynchronous lifecycle start"
-                );
-            }
-            crate::gpu_pool::StartAnnouncement::Pending => {}
-        }
-    }
+    let operation_state = state.clone();
+    let operation_device_id = device_id.clone();
+    let enabled = request.enabled;
+    let outcome = tokio::spawn(async move {
+        apply_device_mutation(operation_state, operation_device_id, enabled, true).await
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("device mutation task failed: {error}")))??;
     tracing::info!(
         device_id,
-        old_desired_enabled = old_desired,
+        old_desired_enabled = outcome.previous_desired,
         desired_enabled = request.enabled,
-        result = ?device.admin_state,
+        result = ?outcome.device.admin_state,
         request_id = request_id.as_ref().map(|id| id.0.0.as_str()),
         authenticated_key = authenticated
             .as_ref()
@@ -5742,16 +5788,16 @@ async fn patch_device(
         "device lifecycle mutation"
     );
 
-    let status = if asynchronous
+    let status = if outcome.asynchronous
         || matches!(
-            device.admin_state,
+            outcome.device.admin_state,
             DeviceAdminState::Draining | DeviceAdminState::Starting
         ) {
         StatusCode::ACCEPTED
     } else {
         StatusCode::OK
     };
-    Ok((status, Json(device)).into_response())
+    Ok((status, Json(outcome.device)).into_response())
 }
 
 // ── /health ───────────────────────────────────────────────────────────────────

@@ -144,11 +144,70 @@ pub(crate) struct CanonicalDeviceSnapshot {
 pub struct DeviceRegistry {
     records: Vec<CanonicalDeviceRecord>,
     explicit_preferences: RwLock<BTreeMap<String, bool>>,
+    preference_mutation_gates: BTreeMap<String, Arc<tokio::sync::Mutex<()>>>,
     transient_unavailable: RwLock<BTreeSet<String>>,
     metadata_db: Arc<Option<mold_db::MetadataDb>>,
     projection_guard: Mutex<()>,
     last_device_state: RwLock<Option<DeviceState>>,
     mutation_sequence: AtomicU64,
+    #[cfg(test)]
+    preference_persistence_hook: Mutex<Option<Arc<PreferencePersistenceHook>>>,
+}
+
+#[cfg(test)]
+pub(crate) type PreferencePersistenceHook =
+    dyn Fn(&str, bool) -> anyhow::Result<()> + Send + Sync + 'static;
+
+/// A persisted desired-state transition awaiting publication into the live
+/// registry. The owned per-device guard orders same-device requests across
+/// both phases without coupling metadata latency to the scheduler fence.
+pub(crate) struct DesiredEnabledMutation {
+    registry: Arc<DeviceRegistry>,
+    _serialization: tokio::sync::OwnedMutexGuard<()>,
+    device_id: String,
+    previous: bool,
+    desired: bool,
+    changed: bool,
+    published: bool,
+}
+
+impl DesiredEnabledMutation {
+    pub(crate) fn previous(&self) -> bool {
+        self.previous
+    }
+
+    pub(crate) fn changed(&self) -> bool {
+        self.changed
+    }
+
+    /// Publish a successfully persisted preference. This is deliberately
+    /// synchronous and bounded so routes can perform it while holding the
+    /// scheduler mutation fence without touching metadata or awaiting I/O.
+    pub(crate) fn publish(&mut self) {
+        if !self.changed || self.published {
+            return;
+        }
+        let _projection = self
+            .registry
+            .projection_guard
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut preferences = self
+            .registry
+            .explicit_preferences
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        debug_assert_eq!(
+            preferences.get(&self.device_id).copied().unwrap_or(true),
+            self.previous,
+            "per-device mutation guard must exclude stale preference publication"
+        );
+        preferences.insert(self.device_id.clone(), self.desired);
+        self.registry
+            .mutation_sequence
+            .fetch_add(1, Ordering::SeqCst);
+        self.published = true;
+    }
 }
 
 impl DeviceRegistry {
@@ -224,14 +283,21 @@ impl DeviceRegistry {
                 }
             })
             .unwrap_or_default();
+        let preference_mutation_gates = records
+            .iter()
+            .map(|record| (record.id.clone(), Arc::new(tokio::sync::Mutex::new(()))))
+            .collect();
         Self {
             records,
             explicit_preferences: RwLock::new(explicit_preferences),
+            preference_mutation_gates,
             transient_unavailable: RwLock::new(BTreeSet::new()),
             metadata_db,
             projection_guard: Mutex::new(()),
             last_device_state: RwLock::new(None),
             mutation_sequence: AtomicU64::new(0),
+            #[cfg(test)]
+            preference_persistence_hook: Mutex::new(None),
         }
     }
 
@@ -310,12 +376,79 @@ impl DeviceRegistry {
         ))
     }
 
-    /// Lifecycle mutation routes call this after resolving a stable device ID.
-    /// In DB-disabled mode, changes remain process-local and log that they
-    /// will not persist.
-    /// Persist a device preference and return whether its effective value
-    /// changed. The write lock spans persistence so concurrent callers cannot
-    /// both publish the same logical transition.
+    /// Persist a desired-state transition without publishing it to the live
+    /// projection. Same-device mutations remain ordered by a fixed inventory
+    /// gate (the gate set cannot grow after discovery); the shared DB may still
+    /// serialize metadata writers, but none of that waiting reaches the
+    /// scheduler fence.
+    pub(crate) async fn prepare_desired_enabled_mutation(
+        self: &Arc<Self>,
+        device_id: &str,
+        enabled: bool,
+    ) -> anyhow::Result<DesiredEnabledMutation> {
+        let gate = self
+            .preference_mutation_gates
+            .get(device_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown device '{device_id}'"))?;
+        let serialization = gate.lock_owned().await;
+        let previous = self.desired_enabled(device_id);
+        let changed = previous != enabled;
+        if changed {
+            let metadata_db = self.metadata_db.clone();
+            let owned_device_id = device_id.to_string();
+            #[cfg(test)]
+            let persistence_hook = self
+                .preference_persistence_hook
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                #[cfg(test)]
+                if let Some(hook) = persistence_hook {
+                    hook(&owned_device_id, enabled)?;
+                }
+                if let Some(db) = metadata_db.as_ref().as_ref() {
+                    mold_db::DevicePreferences::new(db).set(&owned_device_id, enabled)?;
+                } else {
+                    tracing::warn!(
+                        device_id = owned_device_id,
+                        desired_enabled = enabled,
+                        "metadata DB disabled; device preference will not persist"
+                    );
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("device preference persistence task failed: {error}")
+            })??;
+        }
+        Ok(DesiredEnabledMutation {
+            registry: self.clone(),
+            _serialization: serialization,
+            device_id: device_id.to_string(),
+            previous,
+            desired: enabled,
+            changed,
+            published: false,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_preference_persistence_hook(
+        &self,
+        hook: Option<Arc<PreferencePersistenceHook>>,
+    ) {
+        *self
+            .preference_persistence_hook
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = hook;
+    }
+
+    /// Synchronous setup helper for tests that construct a registry state
+    /// before exercising an async runtime path.
+    #[cfg(test)]
     pub fn set_desired_enabled(&self, device_id: &str, enabled: bool) -> anyhow::Result<bool> {
         let _projection = self
             .projection_guard
@@ -330,12 +463,6 @@ impl DeviceRegistry {
         }
         if let Some(db) = self.metadata_db.as_ref().as_ref() {
             mold_db::DevicePreferences::new(db).set(device_id, enabled)?;
-        } else {
-            tracing::warn!(
-                device_id,
-                desired_enabled = enabled,
-                "metadata DB disabled; device preference will not persist"
-            );
         }
         preferences.insert(device_id.to_string(), enabled);
         self.mutation_sequence.fetch_add(1, Ordering::SeqCst);

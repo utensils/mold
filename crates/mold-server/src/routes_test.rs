@@ -878,7 +878,10 @@ mod tests {
         (worker, job_rx)
     }
 
-    fn install_worker_registry(state: &mut AppState) {
+    fn install_worker_registry_with_metadata(
+        state: &mut AppState,
+        metadata_db: Arc<Option<mold_db::MetadataDb>>,
+    ) {
         let devices = state
             .gpu_pool
             .worker_snapshot()
@@ -903,8 +906,12 @@ mod tests {
             .collect();
         state.device_registry = Arc::new(crate::device_registry::DeviceRegistry::new(
             Arc::new(crate::device_registry::StaticDeviceDiscovery::new(devices)),
-            Arc::new(None),
+            metadata_db,
         ));
+    }
+
+    fn install_worker_registry(state: &mut AppState) {
+        install_worker_registry_with_metadata(state, Arc::new(None));
     }
 
     fn install_authoritative_v2(state: &mut AppState) {
@@ -1785,6 +1792,189 @@ mod tests {
             crate::gpu_pool::DRAIN_RUNNING
         );
         assert!(registry.desired_enabled(id));
+    }
+
+    #[tokio::test]
+    async fn blocked_device_preference_db_does_not_hold_scheduler_fence_and_patches_stay_ordered() {
+        let worker = gpu_worker_stub(0);
+        worker.in_flight.store(1, Ordering::SeqCst);
+        let pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = pool;
+        install_worker_registry_with_metadata(&mut state, db.clone());
+        install_authoritative_v2(&mut state);
+        let registry = state.device_registry.clone();
+        let scheduler_fence = state.scheduler_mutation_fence.clone();
+        let app = app_with_state(state);
+        let id = "cuda:00000000000000000000000000000000";
+
+        let (db_locked_tx, db_locked_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_db_tx, release_db_rx) = std::sync::mpsc::sync_channel(1);
+        let locked_db = db.clone();
+        let db_holder = std::thread::spawn(move || {
+            locked_db
+                .as_ref()
+                .as_ref()
+                .unwrap()
+                .with_conn(|_| {
+                    db_locked_tx.send(()).unwrap();
+                    release_db_rx.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        db_locked_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("test must hold the real metadata connection mutex");
+
+        let (persist_started_tx, persist_started_rx) = std::sync::mpsc::sync_channel(1);
+        let notified = Arc::new(AtomicBool::new(false));
+        registry.set_preference_persistence_hook(Some(Arc::new({
+            let notified = notified.clone();
+            move |_, _| {
+                if !notified.swap(true, Ordering::SeqCst) {
+                    persist_started_tx.send(()).unwrap();
+                }
+                Ok(())
+            }
+        })));
+
+        let disabling = tokio::spawn(
+            app.clone().oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            ),
+        );
+        tokio::task::spawn_blocking(move || {
+            persist_started_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("PATCH must reach real metadata persistence");
+        })
+        .await
+        .unwrap();
+        let unrelated_scheduler_operation = scheduler_fence
+            .try_lock_owned()
+            .expect("blocked metadata must not hold the scheduler mutation fence");
+        drop(unrelated_scheduler_operation);
+
+        let enabling = tokio::spawn(
+            app.oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .unwrap(),
+            ),
+        );
+        release_db_tx.send(()).unwrap();
+        db_holder.join().unwrap();
+
+        let disabled = disabling.await.unwrap().unwrap();
+        assert_eq!(disabled.status(), StatusCode::ACCEPTED);
+        assert_eq!(json_body(disabled).await["desired_enabled"], false);
+        let enabled = enabling.await.unwrap().unwrap();
+        assert_eq!(enabled.status(), StatusCode::OK);
+        assert_eq!(json_body(enabled).await["desired_enabled"], true);
+        assert!(registry.desired_enabled(id));
+        assert_eq!(
+            mold_db::DevicePreferences::new(db.as_ref().as_ref().unwrap())
+                .get(id)
+                .unwrap(),
+            Some(true),
+            "same-device persistence and publication must retain request order"
+        );
+        assert_eq!(
+            worker.drain_state.load(Ordering::SeqCst),
+            crate::gpu_pool::DRAIN_RUNNING,
+            "the later enable must cancel the earlier pending drain"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_concurrent_device_patch_does_not_publish_or_block_its_ordered_successor() {
+        let worker = gpu_worker_stub(0);
+        worker.in_flight.store(1, Ordering::SeqCst);
+        let pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = pool;
+        install_worker_registry_with_metadata(&mut state, db.clone());
+        install_authoritative_v2(&mut state);
+        let registry = state.device_registry.clone();
+        let app = app_with_state(state);
+        let id = "cuda:00000000000000000000000000000000";
+
+        let (first_started_tx, first_started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_first_tx, release_first_rx) = std::sync::mpsc::sync_channel(1);
+        let release_first_rx = Arc::new(Mutex::new(release_first_rx));
+        let calls = Arc::new(AtomicUsize::new(0));
+        registry.set_preference_persistence_hook(Some(Arc::new({
+            let calls = calls.clone();
+            let release_first_rx = release_first_rx.clone();
+            move |_, _| {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    first_started_tx.send(()).unwrap();
+                    release_first_rx.lock().unwrap().recv().unwrap();
+                    anyhow::bail!("injected preference persistence failure");
+                }
+                Ok(())
+            }
+        })));
+
+        let failing = tokio::spawn(
+            app.clone().oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            ),
+        );
+        tokio::task::spawn_blocking(move || {
+            first_started_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("first PATCH must own same-device persistence ordering");
+        })
+        .await
+        .unwrap();
+        let succeeding = tokio::spawn(
+            app.oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            ),
+        );
+        release_first_tx.send(()).unwrap();
+
+        let failed = failing.await.unwrap().unwrap();
+        assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(json_body(failed).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("injected preference persistence failure"));
+        let succeeded = succeeding.await.unwrap().unwrap();
+        assert_eq!(succeeded.status(), StatusCode::ACCEPTED);
+        assert_eq!(json_body(succeeded).await["desired_enabled"], false);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(!registry.desired_enabled(id));
+        assert_eq!(
+            mold_db::DevicePreferences::new(db.as_ref().as_ref().unwrap())
+                .get(id)
+                .unwrap(),
+            Some(false),
+            "the failed write must not publish, and its ordered successor must persist"
+        );
+        assert_eq!(
+            worker.drain_state.load(Ordering::SeqCst),
+            crate::gpu_pool::DRAIN_REQUESTED,
+            "only the successfully persisted mutation may touch lifecycle state"
+        );
     }
 
     #[tokio::test]
