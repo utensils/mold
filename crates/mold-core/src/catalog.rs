@@ -155,17 +155,23 @@ pub fn declared_audio_capability(family: &str, model: &str) -> Option<bool> {
 /// compact envelope answers: a bucket domain that refuses off-bucket sizes,
 /// with fixed steps and a fixed frame count.
 ///
-/// The canvas is HEALED rather than overwritten: a remembered size that names
-/// one of the recipe's own buckets is kept, and anything else falls back to
-/// the recipe's default. While the reviewed envelope had exactly one bucket
-/// those two rules were the same rule, and this read "the only preset". They
-/// stopped being the same rule the moment a second canvas was qualified, and
-/// keeping the old form would have silently stopped pinning the frame count
-/// and step count too — a row advertising "default 345 frames, maximum 124",
-/// which is the exact contradiction this function exists to remove.
+/// The canvas is the RECIPE's own default, never the remembered one, even
+/// when the remembered one names a valid bucket. `recipe()` derives
+/// `recipe.defaults` from the identity and the profile HASH covers it, so a
+/// row whose canvas followed a user preference would disagree with the
+/// recipe every first-party client reads (`applyRecipeDefaults`), and making
+/// the recipe follow instead would mint a per-user profile hash — which
+/// `authenticated_h3_private_model_row` fences against, so the executable row
+/// would vanish.
+///
+/// This used to read "the only preset", which was the same rule while the
+/// reviewed envelope had exactly one bucket. It stopped being the same rule
+/// the moment a second canvas was qualified: left alone it would have
+/// returned `None` for a two-bucket recipe and silently stopped pinning the
+/// frame and step counts too — a row advertising "default 345 frames,
+/// maximum 124", which is the exact contradiction this function removes.
 fn pinned_recipe_defaults(
     profile: &crate::GenerationProfileSet,
-    remembered: (u32, u32),
 ) -> Option<(u32, u32, u32, Option<u32>)> {
     let recipe = profile.default_recipe()?;
     if recipe.steps.mode != crate::ControlMode::Fixed {
@@ -177,17 +183,19 @@ fn pinned_recipe_defaults(
     {
         return None;
     }
+    // At least one bucket, and the recipe's own default must be one of them:
+    // a fixed-authority recipe whose default is off its own bucket list is
+    // not evidence of anything and must not overwrite a user's size.
     let mut presets = resolution
         .aspect_groups
         .iter()
         .flat_map(|group| group.presets.iter())
         .peekable();
     presets.peek()?;
-    let canvas = if presets.any(|preset| (preset.width, preset.height) == remembered) {
-        remembered
-    } else {
-        (recipe.defaults.width, recipe.defaults.height)
-    };
+    let canvas = (recipe.defaults.width, recipe.defaults.height);
+    if !presets.any(|preset| (preset.width, preset.height) == canvas) {
+        return None;
+    }
     let temporal = recipe.temporal.as_ref();
     let frames = match temporal {
         Some(temporal) if temporal.frames.mode == crate::ControlMode::Fixed => {
@@ -251,8 +259,12 @@ pub fn build_model_catalog(
         // refuses. `recipe()` already forces these for the compact envelope;
         // this reads them back rather than restating the rule.
         let (default_width, default_height, default_steps, default_frames) =
-            pinned_recipe_defaults(&generation_profile, (default_width, default_height))
-                .unwrap_or((default_width, default_height, default_steps, default_frames));
+            pinned_recipe_defaults(&generation_profile).unwrap_or((
+                default_width,
+                default_height,
+                default_steps,
+                default_frames,
+            ));
 
         // `minimax_h3::model_runtime_availability` is the same authority
         // `model_activation` consults before generation, so a row can never
@@ -470,8 +482,12 @@ pub fn build_model_catalog(
         // narrowing its ceiling while leaving a remembered 345-frame default
         // in place rebuilds the exact contradiction this fix removes.
         let (default_width, default_height, default_steps, default_frames) =
-            pinned_recipe_defaults(&generation_profile, (default_width, default_height))
-                .unwrap_or((default_width, default_height, default_steps, default_frames));
+            pinned_recipe_defaults(&generation_profile).unwrap_or((
+                default_width,
+                default_height,
+                default_steps,
+                default_frames,
+            ));
 
         models.push(ModelInfoExtended {
             downloaded: true,
@@ -635,11 +651,15 @@ mod tests {
             row.defaults.default_steps,
             crate::minimax_h3::COMFY_DEFAULT_STEPS
         );
-        // 768x768 is now a reviewed bucket, so a remembered canvas naming it
-        // is honoured rather than healed — the pref is only overwritten when
-        // it names a size the runtime would refuse.
-        assert_eq!(row.defaults.default_width, 768);
-        assert_eq!(row.defaults.default_height, 768);
+        // 768x768 became a reviewed bucket, but the row's default is still
+        // the RECIPE's — the profile hash covers `recipe.defaults`, so a row
+        // whose canvas followed a user preference would disagree with the
+        // recipe every client actually reads.
+        assert_eq!(row.defaults.default_width, crate::minimax_h3::DEFAULT_WIDTH);
+        assert_eq!(
+            row.defaults.default_height,
+            crate::minimax_h3::DEFAULT_HEIGHT
+        );
 
         let mut off_envelope = crate::Config::default();
         off_envelope.models.insert(

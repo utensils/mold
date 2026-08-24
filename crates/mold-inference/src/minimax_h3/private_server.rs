@@ -762,6 +762,31 @@ fn precheck_private_h3_prepared_rows(
     Ok(())
 }
 
+/// Refuse a canvas the SELECTED private qualification record does not carry.
+///
+/// Only the compiled public policy reads `mold_core`'s reviewed canvas set.
+/// A private build authenticates against a record file (FL2VA) or the
+/// compiled capture-scope profile (Ref2VA), each of which validates its
+/// canvas by exact equality — so widening the public set must not widen what
+/// those admit. This is a fast, one-directional restatement of the exact
+/// check `validate_prepared_with_adapter` makes later; hoisting it can only
+/// turn a refusal that costs ~37 GB of SHA-256 into one that costs nothing.
+#[cfg(all(feature = "mp4", not(feature = "h3")))]
+fn precheck_private_h3_record_canvas(
+    envelope: &H3PrivateRuntimeEnvelopeRecord,
+    width: u32,
+    height: u32,
+) -> Result<()> {
+    if width != envelope.width || height != envelope.height {
+        bail!(
+            "private H3 runtime qualification renders exactly {}x{}; received {width}x{height}",
+            envelope.width,
+            envelope.height
+        )
+    }
+    Ok(())
+}
+
 /// Refuse an exact prepared target the admission sample cannot hold.
 ///
 /// Device VRAM and host headroom are two independent resources with two
@@ -1767,6 +1792,17 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         &admission_request.request.rows,
         admission_request.prompt_tokens,
     )?;
+    // A private build's authority is a RECORD, not the compiled policy, and
+    // that record pins one canvas by equality — the reviewed FL2VA record its
+    // campaign minted, or `capture_runtime_envelope`'s Ref2VA canvas. So the
+    // widened public bucket set does not apply here, and without this the
+    // request would be admitted at the door and then refused by
+    // `validate_prepared_with_adapter` AFTER the ~37 GB artifact hashing
+    // pass. Refusing on the record's own canvas is the same lower-bound rule
+    // the row precheck above follows: a refusal here always implies a refusal
+    // there.
+    #[cfg(not(feature = "h3"))]
+    precheck_private_h3_record_canvas(&precheck_envelope, request.width, request.height)?;
     let artifact_report = qualify_private_artifacts_with_control(
         paths.models_root,
         partition_model,
@@ -6486,6 +6522,39 @@ mod tests {
         );
     }
 
+    /// A private build's authority is a record pinning ONE canvas, so the
+    /// widened public bucket set must not reach it — and the refusal has to
+    /// land before the ~37 GB artifact pass, not after it.
+    ///
+    /// The bridge deliberately still advertises the public bucket set on this
+    /// build: it is one code path with one profile hash, `h3-private-uat`
+    /// never ships (`scripts/verify-h3-release-exclusion.sh`), and the cost
+    /// of the mismatch to a developer is now this immediate refusal rather
+    /// than a wasted artifact pass.
+    #[cfg(all(feature = "mp4", not(feature = "h3")))]
+    #[test]
+    fn a_private_record_admits_only_its_own_canvas_before_the_artifact_pass() {
+        let envelope = reviewed_envelope(contract::COMFY_DEFAULT_STEPS);
+        precheck_private_h3_record_canvas(&envelope, envelope.width, envelope.height).unwrap();
+
+        // Reviewed by the PUBLIC policy, and still refused here — the record
+        // is the authority on a private build.
+        for &(width, height) in contract::REVIEWED_COMPACT_CANVASES {
+            if (width, height) == (envelope.width, envelope.height) {
+                continue;
+            }
+            let error = precheck_private_h3_record_canvas(&envelope, width, height)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!("{width}x{height}"))
+                    && error.contains(&format!("{}x{}", envelope.width, envelope.height)),
+                "{error}"
+            );
+        }
+        assert!(precheck_private_h3_record_canvas(&envelope, 1024, 768).is_err());
+    }
+
     /// Ref2VA's capture scope is a separate campaign and widening FL2VA's
     /// canvas set must not touch it.
     #[cfg(feature = "h3-private-uat")]
@@ -7965,7 +8034,10 @@ mod tests {
                 references: &[],
                 device_id: DEVICE_0,
                 device_ordinal: 0,
-                compute_capability: (8, 9),
+                // `None` is Metal since #1323 made this an `Option`; the lib
+                // was updated there and this `h3-private-uat` test call was
+                // not, so the suite has not compiled since.
+                compute_capability: Some((8, 9)),
                 available_device_bytes: 1 << 60,
                 available_host_headroom_bytes: 1 << 60,
             },
