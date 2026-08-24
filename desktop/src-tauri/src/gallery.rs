@@ -64,11 +64,9 @@ struct ActiveThumbnailRequest {
 impl ActiveThumbnailRequest {
     fn register(id: String) -> Result<Self, String> {
         let cancellation = Arc::new(ThumbnailCancellation::default());
-        let mut requests = ACTIVE_THUMBNAIL_REQUESTS
-            .lock()
-            .map_err(|_| {
-                "The gallery thumbnail cancellation registry is unavailable.".to_string()
-            })?;
+        let mut requests = ACTIVE_THUMBNAIL_REQUESTS.lock().map_err(|_| {
+            "The gallery thumbnail cancellation registry is unavailable.".to_string()
+        })?;
         if requests.contains_key(&id) {
             return Err("Duplicate gallery thumbnail request id.".into());
         }
