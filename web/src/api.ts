@@ -31,6 +31,7 @@ import type {
   ChainValidationResponse,
 } from "@studio/lib/api/chainTypes";
 import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
+import { conditionalApiJsonTo } from "@studio/api/client";
 export type {
   ChainValidationResponse,
   ChainValidationStage,
@@ -43,11 +44,11 @@ const base = "";
 export async function listGallery(
   signal?: AbortSignal,
 ): Promise<GalleryImage[]> {
-  const res = await fetch(`${base}/api/gallery`, { signal });
-  if (!res.ok) {
-    throw new Error(`GET /api/gallery failed: ${res.status} ${res.statusText}`);
-  }
-  return (await res.json()) as GalleryImage[];
+  return conditionalApiJsonTo<GalleryImage[]>(
+    { baseUrl: base, apiKey: null },
+    "/api/gallery",
+    { signal },
+  );
 }
 
 export async function deleteGalleryImage(filename: string): Promise<void> {
@@ -140,13 +141,11 @@ export async function listGalleryFrom(
   target?: StreamTarget,
   signal?: AbortSignal,
 ): Promise<GalleryImage[]> {
-  const headers = targetHeaders(target);
-  const res = await fetch(`${targetBase(target)}/api/gallery`, {
-    ...(Object.keys(headers).length ? { headers } : {}),
-    signal,
-  });
-  if (!res.ok) throw new Error(`GET /api/gallery failed: ${res.status}`);
-  return (await res.json()) as GalleryImage[];
+  return conditionalApiJsonTo<GalleryImage[]>(
+    { baseUrl: targetBase(target), apiKey: target?.apiKey ?? null },
+    "/api/gallery",
+    { signal },
+  );
 }
 
 /** Cancel a queued generation on the exact host that owns it. */

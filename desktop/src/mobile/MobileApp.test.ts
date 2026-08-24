@@ -252,10 +252,6 @@ class FakeIntersectionObserver {
   }
 }
 
-function scrollToGallerySentinel(): void {
-  for (const observer of FakeIntersectionObserver.instances) observer.intersect();
-}
-
 function mountMobileApp(pinia: Pinia = createPinia()): VueWrapper {
   return mount(MobileApp, {
     attachTo: document.body,
@@ -4780,7 +4776,7 @@ describe("MobileApp generation queue", () => {
     expect(galleryCalls).toBe(2);
   });
 
-  it("auto-loads older prints and defers a completion refresh while the viewer is open", async () => {
+  it("indexes every print while windowing tiles and defers refresh while the viewer is open", async () => {
     const prints = Array.from({ length: 41 }, (_, index) => ({
       ...print,
       filename: `print-${index}.mp4`,
@@ -4802,13 +4798,13 @@ describe("MobileApp generation queue", () => {
     await submitPrompt("refresh after older page");
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
     await vi.waitFor(() =>
-      expect(wrapper?.find("[data-test='mobile-gallery-sentinel']").exists()).toBe(true),
+      expect(
+        wrapper?.get("[data-test='mobile-gallery-grid']").attributes("data-gallery-total"),
+      ).toBe("41"),
     );
     expect(wrapper.find("button.gallery-more").exists()).toBe(false);
-
-    scrollToGallerySentinel();
-    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(41));
     expect(wrapper.find("[data-test='mobile-gallery-sentinel']").exists()).toBe(false);
+    expect(wrapper.findAll("[data-test='gallery-item']").length).toBeLessThanOrEqual(40);
 
     await wrapper.get("[data-test='gallery-item']").trigger("click");
     await flushPromises();
@@ -4832,11 +4828,15 @@ describe("MobileApp generation queue", () => {
 
     await wrapper.get("[data-test='gallery-viewer-close']").trigger("click");
     await vi.waitFor(() => expect(galleryCalls).toBe(2));
-    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(40));
+    await vi.waitFor(() =>
+      expect(
+        wrapper?.get("[data-test='mobile-gallery-grid']").attributes("data-gallery-total"),
+      ).toBe("41"),
+    );
     expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-tab-gallery']").element);
   });
 
-  it("continues auto-loading when a failed page leaves the sentinel visible", async () => {
+  it("keeps thumbnail failures local to the bounded visible window", async () => {
     const prints = Array.from({ length: 81 }, (_, index) => ({
       ...print,
       filename: `print-${index}.mp4`,
@@ -4851,7 +4851,7 @@ describe("MobileApp generation queue", () => {
     let thumbnailCall = 0;
     apiFetchTo.mockImplementation(() => {
       thumbnailCall += 1;
-      if (thumbnailCall > 40 && thumbnailCall <= 80) {
+      if (thumbnailCall > 20 && thumbnailCall <= 30) {
         return Promise.reject(new Error("thumbnail unavailable"));
       }
       return Promise.resolve({
@@ -4862,16 +4862,40 @@ describe("MobileApp generation queue", () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(thumbnailCall).toBe(40));
+    expect(wrapper.get("[data-test='mobile-gallery-grid']").attributes("data-gallery-total")).toBe(
+      "81",
+    );
+    expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(40);
+    expect(wrapper.find("[data-test='mobile-gallery-sentinel']").exists()).toBe(false);
+  });
+
+  it("keeps a ten-thousand-print Library to a bounded mounted tile window", async () => {
+    const prints = Array.from({ length: 10_000 }, (_, index) => ({
+      ...print,
+      filename: `large-library-${index}.png`,
+      timestamp: print.timestamp - index,
+    }));
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve(prints);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
     await vi.waitFor(() =>
-      expect(wrapper?.find("[data-test='mobile-gallery-sentinel']").exists()).toBe(true),
+      expect(
+        wrapper?.get("[data-test='mobile-gallery-grid']").attributes("data-gallery-total"),
+      ).toBe("10000"),
     );
 
-    scrollToGallerySentinel();
-
-    await vi.waitFor(() => expect(thumbnailCall).toBe(81));
-    expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(81);
-    expect(wrapper.findAll("[data-test='gallery-thumbnail-pending']")).toHaveLength(40);
-    expect(wrapper.find("[data-test='mobile-gallery-sentinel']").exists()).toBe(false);
+    expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(40);
+    expect(
+      Number(wrapper.get("[data-test='mobile-gallery-grid']").attributes("data-gallery-mounted")),
+    ).toBeLessThanOrEqual(40);
   });
 
   it("does not let a stalled thumbnail block every older print", async () => {
@@ -4894,7 +4918,7 @@ describe("MobileApp generation queue", () => {
       apiFetchTo.mockImplementation((_target, path, init) => {
         thumbnailCall += 1;
         requestedPaths.push(path);
-        if (thumbnailCall === 41) {
+        if (thumbnailCall === 1) {
           stalledSignal = init?.signal;
           // Model a WebView transport that ignores AbortSignal as well as
           // never resolving. The page deadline must still advance the grid.
@@ -4911,18 +4935,19 @@ describe("MobileApp generation queue", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(40);
 
-      scrollToGallerySentinel();
       await vi.advanceTimersByTimeAsync(50);
 
-      expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(81);
-      expect(wrapper.findAll("[data-test='gallery-thumbnail-pending']")).toHaveLength(1);
+      expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(40);
+      await vi.waitFor(() =>
+        expect(wrapper?.findAll("[data-test='gallery-thumbnail-pending']")).toHaveLength(1),
+      );
       expect(wrapper.text()).not.toContain("Loading older prints…");
 
       await vi.advanceTimersByTimeAsync(5_020);
 
       expect(stalledSignal?.aborted).toBe(true);
-      expect(requestedPaths).toContain("/api/gallery/thumbnail/stalled-pagination-print-80.mp4");
-      expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(81);
+      expect(requestedPaths).toContain("/api/gallery/thumbnail/stalled-pagination-print-39.mp4");
+      expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(40);
       expect(wrapper.findAll("[data-test='gallery-thumbnail-pending']")).toHaveLength(1);
       expect(wrapper.find("[data-test='mobile-gallery-sentinel']").exists()).toBe(false);
       expect(wrapper.text()).not.toContain("Loading older prints…");
@@ -4949,7 +4974,7 @@ describe("MobileApp generation queue", () => {
       apiFetchTo.mockImplementation((_target, path) => {
         const attempt = (attempts.get(path) ?? 0) + 1;
         attempts.set(path, attempt);
-        if (path.endsWith("retry-pagination-print-40.mp4") && attempt === 1) {
+        if (path.endsWith("retry-pagination-print-39.mp4") && attempt === 1) {
           return Promise.reject(new Error("temporary thumbnail failure"));
         }
         return Promise.resolve({
@@ -4961,16 +4986,17 @@ describe("MobileApp generation queue", () => {
       await vi.advanceTimersByTimeAsync(0);
       await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
       await vi.advanceTimersByTimeAsync(0);
-      scrollToGallerySentinel();
       await vi.advanceTimersByTimeAsync(20);
 
-      expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(41);
-      expect(wrapper.findAll("[data-test='gallery-thumbnail-pending']")).toHaveLength(1);
+      expect(wrapper.findAll("[data-test='gallery-item']")).toHaveLength(40);
+      await vi.waitFor(() =>
+        expect(wrapper?.findAll("[data-test='gallery-thumbnail-pending']")).toHaveLength(1),
+      );
 
       await vi.advanceTimersByTimeAsync(4_000);
 
       expect(wrapper.find("[data-test='gallery-thumbnail-pending']").exists()).toBe(false);
-      expect(attempts.get("/api/gallery/thumbnail/retry-pagination-print-40.mp4")).toBe(2);
+      expect(attempts.get("/api/gallery/thumbnail/retry-pagination-print-39.mp4")).toBe(2);
     } finally {
       vi.useRealTimers();
     }
@@ -4991,7 +5017,7 @@ describe("MobileApp generation queue", () => {
     const lateThumbnail = deferred<Response>();
     let pendingSignal: AbortSignal | undefined;
     apiFetchTo.mockImplementation((_target, path, init) => {
-      if (path.endsWith("unmount-pagination-print-40.mp4")) {
+      if (path.endsWith("unmount-pagination-print-0.mp4")) {
         pendingSignal = init?.signal;
         return lateThumbnail.promise;
       }
@@ -5001,10 +5027,6 @@ describe("MobileApp generation queue", () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
-    await vi.waitFor(() =>
-      expect(wrapper?.find("[data-test='mobile-gallery-sentinel']").exists()).toBe(true),
-    );
-    scrollToGallerySentinel();
     await vi.waitFor(() => expect(pendingSignal).toBeDefined());
     const objectUrlsBeforeUnmount = vi.mocked(URL.createObjectURL).mock.calls.length;
     const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
@@ -5045,11 +5067,10 @@ describe("MobileApp generation queue", () => {
     await submitPrompt("refresh after an early viewer close");
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
     await vi.waitFor(() =>
-      expect(wrapper?.find("[data-test='mobile-gallery-sentinel']").exists()).toBe(true),
+      expect(
+        wrapper?.get("[data-test='mobile-gallery-grid']").attributes("data-gallery-total"),
+      ).toBe("41"),
     );
-
-    scrollToGallerySentinel();
-    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(41));
 
     await wrapper.get("[data-test='gallery-item']").trigger("click");
     await flushPromises();
@@ -6648,8 +6669,9 @@ describe("MobileApp gallery", () => {
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
 
-    await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
-    expect(wrapper.get("[data-test='gallery-item'] img").attributes("src")).toContain("blob:");
+    await vi.waitFor(() =>
+      expect(wrapper?.get("[data-test='gallery-item'] img").attributes("src")).toContain("blob:"),
+    );
     expect(wrapper.text()).toContain("Showing saved Library");
   });
 
@@ -6967,9 +6989,14 @@ describe("MobileApp gallery", () => {
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
     await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
+    await vi.waitFor(() => expect(apiFetchTo).toHaveBeenCalled());
 
+    await vi.waitFor(() =>
+      expect(wrapper?.get("[data-test='gallery-item'] img").attributes("src")).toBe(
+        "data:image/png;base64,AQID",
+      ),
+    );
     const image = wrapper.get("[data-test='gallery-item'] img");
-    expect(image.attributes("src")).toBe("data:image/png;base64,AQID");
     expect(URL.createObjectURL).not.toHaveBeenCalled();
 
     const contextMenu = new Event("contextmenu", { bubbles: true, cancelable: true });

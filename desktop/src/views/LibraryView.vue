@@ -1453,7 +1453,7 @@ const virtualizer = useVirtualizer(
     count: rows.value.length,
     getScrollElement: () => scrollEl.value,
     estimateSize: (i: number) => (rows.value[i]?.height ?? rowHeight.value) + GAP,
-    overscan: 5,
+    overscan: 2,
   })),
 );
 
@@ -2144,6 +2144,10 @@ onUnmounted(() => {
                 "
                 :target="targetFor(laid.entry)"
                 :cache-key="laid.entry.sourceKey"
+                :media-version="
+                  laid.item.media_version ??
+                  `${laid.item.timestamp}:${laid.item.size_bytes ?? 'unknown'}`
+                "
                 :video="
                   gallery.mediaSourceOf(laid.entry.sourceKey) === 'local' && isVideo(laid.item)
                 "

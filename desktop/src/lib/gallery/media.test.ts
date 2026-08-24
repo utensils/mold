@@ -21,7 +21,11 @@ vi.mock("../api/client", async (importOriginal) => ({
 }));
 vi.mock("../ipc", () => ({
   inTauri: vi.fn(),
-  ipc: { fetchGalleryThumbnail: vi.fn(), fetchGalleryMedia: vi.fn() },
+  ipc: {
+    fetchGalleryThumbnail: vi.fn(),
+    cancelGalleryThumbnail: vi.fn(() => Promise.resolve()),
+    fetchGalleryMedia: vi.fn(),
+  },
 }));
 
 const blobResponse = () =>
@@ -355,12 +359,39 @@ describe("galleryMediaPath", () => {
 });
 
 describe("authedMediaUrl host-keyed cache", () => {
+  it("bounds the thumbnail working set and revokes least-recently-used URLs", async () => {
+    const target = { baseUrl: "http://cache-host:7680", apiKey: null };
+    const urls: string[] = [];
+    for (let index = 0; index < 520; index++) {
+      urls.push(
+        await authedMediaUrl(`/api/gallery/thumbnail/lru-${index}.png`, {
+          target,
+          cacheKey: "thumbnail-lru",
+        }),
+      );
+    }
+
+    expect(revoked).toEqual(expect.arrayContaining(urls.slice(0, 8)));
+    expect(revoked).not.toContain(urls.at(-1));
+    const calls = vi.mocked(apiFetchTo).mock.calls.length;
+    await authedMediaUrl("/api/gallery/thumbnail/lru-519.png", {
+      target,
+      cacheKey: "thumbnail-lru",
+    });
+    expect(apiFetchTo).toHaveBeenCalledTimes(calls);
+    await authedMediaUrl("/api/gallery/thumbnail/lru-0.png", {
+      target,
+      cacheKey: "thumbnail-lru",
+    });
+    expect(apiFetchTo).toHaveBeenCalledTimes(calls + 1);
+    evictHostMedia("thumbnail-lru");
+  });
+
   it("loads desktop thumbnails through native HTTP so held generation streams cannot starve them", async () => {
     vi.mocked(inTauri).mockReturnValue(true);
-    vi.mocked(ipc.fetchGalleryThumbnail).mockResolvedValue({
-      base64: btoa("thumbnail bytes"),
-      contentType: "image/png",
-    });
+    vi.mocked(ipc.fetchGalleryThumbnail).mockResolvedValue(
+      new TextEncoder().encode("thumbnail bytes").buffer,
+    );
     const target = { baseUrl: "http://hal9000:7680", apiKey: "hk" };
 
     await expect(
@@ -370,7 +401,11 @@ describe("authedMediaUrl host-keyed cache", () => {
       }),
     ).resolves.toMatch(/^blob:mock-/);
 
-    expect(ipc.fetchGalleryThumbnail).toHaveBeenCalledWith(target, "new print.png");
+    expect(ipc.fetchGalleryThumbnail).toHaveBeenCalledWith(
+      target,
+      "new print.png",
+      expect.any(String),
+    );
     expect(apiFetchTo).not.toHaveBeenCalled();
   });
 
@@ -386,7 +421,11 @@ describe("authedMediaUrl host-keyed cache", () => {
       /^blob:mock-/,
     );
 
-    expect(ipc.fetchGalleryThumbnail).toHaveBeenCalledWith(target, "ios-source.png");
+    expect(ipc.fetchGalleryThumbnail).toHaveBeenCalledWith(
+      target,
+      "ios-source.png",
+      expect.any(String),
+    );
     expect(apiFetchTo).toHaveBeenCalledWith(target, path);
   });
 

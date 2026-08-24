@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { ipc } from "../lib/ipc";
-import { apiFetchTo, apiJsonTo } from "../lib/api/client";
+import { apiFetchTo, conditionalApiJsonTo as apiJsonTo } from "../lib/api/client";
 import { evictHostMedia, evictMedia } from "../lib/gallery/media";
 import { useConnectionStore } from "./connection";
 import { useGalleryStore, type GalleryBucket } from "./gallery";
@@ -42,7 +42,7 @@ vi.mock("@studio/api/galleryOrganization", () => ({
 }));
 
 vi.mock("../lib/api/client", () => ({
-  apiJsonTo: vi.fn(),
+  conditionalApiJsonTo: vi.fn(),
   apiFetchTo: vi.fn(),
 }));
 

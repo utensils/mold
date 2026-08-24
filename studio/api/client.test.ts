@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   IncompatibleHostError,
   apiFetchTo,
+  conditionalApiJsonTo,
   parseCurrentServerStatus,
 } from "./client";
 
@@ -31,5 +32,36 @@ describe("target-explicit Studio API", () => {
     expect(() => parseCurrentServerStatus({ hostname: "old" })).toThrow(
       IncompatibleHostError,
     );
+  });
+
+  it("reuses an unchanged gallery snapshot on 304", async () => {
+    const rows = [{ filename: "cat.png" }];
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(rows), {
+          headers: { "content-type": "application/json", etag: '"gallery-1"' },
+        }),
+      )
+      .mockImplementationOnce(async (_input, init?: RequestInit) => {
+        expect((init?.headers as Headers).get("if-none-match")).toBe(
+          '"gallery-1"',
+        );
+        return new Response(null, { status: 304 });
+      });
+    vi.stubGlobal("fetch", fetchMock);
+    const target = { baseUrl: "http://etag-test:7680", apiKey: "secret" };
+
+    const first = await conditionalApiJsonTo<typeof rows>(
+      target,
+      "/api/gallery",
+    );
+    const second = await conditionalApiJsonTo<typeof rows>(
+      target,
+      "/api/gallery",
+    );
+
+    expect(second).toBe(first);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

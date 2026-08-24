@@ -2,14 +2,12 @@
 //! key metadata (including which Machine it lives on), and action hints.
 //!
 //! Replaces the old bottom Selected + Prompt inspector row. The panel
-//! reuses the grid's fixed-protocol image pattern (`Image::new` over a
-//! cached `Protocol`) with a one-slot cache keyed on
-//! `(entry index, width, height)` — it renders the *thumbnail* file, never
-//! a full-image decode per selection change.
+//! reuses the grid's off-thread thumbnail decode. Rendering only touches a
+//! prepared stateful protocol and never opens files or generates thumbnails.
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Paragraph, Wrap};
-use ratatui_image::{Image, Resize};
+use ratatui_image::StatefulImage;
 
 use crate::app::App;
 use crate::ui::widgets::panel_block;
@@ -63,7 +61,6 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let pipeline = entry.metadata.pipeline.map(|pipeline| pipeline.to_string());
     let identity = crate::identity::metadata_summary(&entry.metadata);
     let machine = entry.machine_label();
-    let thumb_path = crate::thumbnails::thumbnail_path(&entry.path);
 
     // ── Thumbnail (fixed protocol, one-slot cache) ──────────────
     let mut y = inner.y;
@@ -74,7 +71,7 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             width: inner.width,
             height: THUMB_ROWS,
         };
-        render_thumb(frame, app, thumb_area, idx, &thumb_path);
+        render_thumb(frame, app, thumb_area, idx);
         y += THUMB_ROWS + 1;
     }
 
@@ -176,38 +173,28 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// Render the panel thumbnail via the one-slot fixed-protocol cache.
-/// Cache key is `(entry index, area width, area height)` — selection or
-/// geometry changes rebuild it; re-renders of the same selection reuse it.
-fn render_thumb(
-    frame: &mut Frame,
-    app: &mut App,
-    thumb_area: Rect,
-    idx: usize,
-    thumb_path: &std::path::Path,
-) {
-    let cache_valid = app
+/// Render the selected thumbnail only after its off-thread decode completes.
+fn render_thumb(frame: &mut Frame, app: &mut App, thumb_area: Rect, idx: usize) {
+    let ready = app
         .gallery
-        .details_thumb
+        .details_thumbnail_state
         .as_ref()
-        .is_some_and(|(i, w, h, _)| *i == idx && *w == thumb_area.width && *h == thumb_area.height);
-
-    if !cache_valid {
-        app.gallery.details_thumb = None;
-        if thumb_path.is_file() {
-            if let Ok(img) = image::open(thumb_path) {
-                if let Ok(protocol) = app.picker.new_protocol(img, thumb_area, Resize::Fit(None)) {
-                    app.gallery.details_thumb =
-                        Some((idx, thumb_area.width, thumb_area.height, protocol));
-                }
-            }
-        }
+        .is_some_and(|(selected, _, _)| *selected == idx);
+    if !ready {
+        crate::ui::gallery::queue_thumbnail(app, idx);
     }
 
-    if let Some((_, _, _, ref mut protocol)) = app.gallery.details_thumb {
-        let fitted = protocol.area();
-        let centered = crate::ui::gallery::center_rect(thumb_area, fitted.width, fitted.height);
-        frame.render_widget(Image::new(protocol), centered);
+    if let Some((selected, state, (width, height))) = app.gallery.details_thumbnail_state.as_mut() {
+        if *selected == idx {
+            let centered = crate::ui::gallery::centered_thumb_rect(
+                thumb_area,
+                *width,
+                *height,
+                app.picker.font_size(),
+                app.picker.protocol_type(),
+            );
+            frame.render_stateful_widget(StatefulImage::default(), centered, state);
+        }
     }
 }
 
@@ -471,46 +458,29 @@ mod tests {
 
     #[test]
     #[serial_test::serial(mold_env)]
-    fn details_thumb_cache_is_keyed_by_selection_and_geometry() {
+    fn details_panel_renders_a_predecoded_thumbnail_without_disk_io() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         let _guard = runtime.enter();
 
-        // Real thumbnail on disk so the cache populates.
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let entry_path = PathBuf::from(format!("details-thumb-cache-{unique}.png"));
-        let thumb_path = crate::thumbnails::thumbnail_path(&entry_path);
-        if let Some(parent) = thumb_path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
             64,
             64,
             image::Rgba([0, 255, 0, 255]),
-        ))
-        .save(&thumb_path)
-        .unwrap();
+        ));
 
         let mut app = test_app_with_entry(Vec::new());
-        app.gallery.entries[0].path = entry_path;
+        app.gallery.details_thumbnail_state =
+            Some((0, app.picker.new_resize_protocol(image), (64, 64)));
 
         let _ = render_to_string(&mut app);
-        let cached = app
+        let cached_index = app
             .gallery
-            .details_thumb
+            .details_thumbnail_state
             .as_ref()
-            .map(|(i, w, h, _)| (*i, *w, *h));
-        assert_eq!(
-            cached,
-            Some((0, DETAILS_PANEL_W - 2, THUMB_ROWS)),
-            "one-slot cache holds the selected entry at the panel geometry"
-        );
-
-        std::fs::remove_file(&thumb_path).ok();
+            .map(|(index, _, _)| *index);
+        assert_eq!(cached_index, Some(0));
     }
 }

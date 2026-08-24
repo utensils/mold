@@ -20,7 +20,16 @@ const originalFetch = globalThis.fetch;
 let fetchMock: ReturnType<typeof vi.fn>;
 
 function ok(data: unknown, status = 200) {
-  return { ok: status < 400, status, json: async () => data };
+  return {
+    ok: status < 400,
+    status,
+    statusText: "",
+    headers: new Headers(),
+    json: async () => data,
+    clone() {
+      return this;
+    },
+  };
 }
 
 const currentStatus = {
@@ -58,9 +67,9 @@ describe("hostClient auth + requests", () => {
     await hostStatus(remote);
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe("http://192.168.1.20:7680/api/status");
-    expect((init as RequestInit).headers).toMatchObject({
-      "x-api-key": "sekret",
-    });
+    expect(new Headers((init as RequestInit).headers).get("x-api-key")).toBe(
+      "sekret",
+    );
   });
 
   it("omits the auth header for a keyless host", async () => {
@@ -77,9 +86,9 @@ describe("hostClient auth + requests", () => {
     await hostDiscoveryPeers(remote);
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe("http://192.168.1.20:7680/api/discovery/peers");
-    expect((init as RequestInit).headers).toMatchObject({
-      "x-api-key": "sekret",
-    });
+    expect(new Headers((init as RequestInit).headers).get("x-api-key")).toBe(
+      "sekret",
+    );
   });
 
   it("PATCHes a lane change with target_gpu", async () => {
@@ -321,9 +330,9 @@ describe("hostClient library organization plumbing", () => {
     await hostGallery(remote, undefined, "trash");
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe("http://192.168.1.20:7680/api/gallery?view=trash");
-    expect((init as RequestInit).headers).toMatchObject({
-      "x-api-key": "sekret",
-    });
+    expect(new Headers((init as RequestInit).headers).get("x-api-key")).toBe(
+      "sekret",
+    );
   });
 
   it("keeps the bare gallery path for the default library view", async () => {

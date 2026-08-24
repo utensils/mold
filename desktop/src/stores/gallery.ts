@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
+import { apiFetchTo, conditionalApiJsonTo, type ApiTarget } from "../lib/api/client";
 import { isTransportFailure } from "../lib/api/errors";
 import {
   evictHostMedia,
@@ -841,7 +841,7 @@ export const useGalleryStore = defineStore("gallery", {
         } else {
           const target = this.targetOf(key);
           if (!target) throw new Error("Host is not connected.");
-          items = await apiJsonTo<GalleryImage[]>(target, "/api/gallery");
+          items = await conditionalApiJsonTo<GalleryImage[]>(target, "/api/gallery");
           authorityTarget = target;
         }
         // Prints that vanished out-of-band (deleted by another client) must

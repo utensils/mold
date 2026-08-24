@@ -78,6 +78,9 @@ export interface GalleryCapabilitiesWire {
   organize?: boolean;
   /** Replay-safe bulk organization endpoint. */
   bulk_mutations?: boolean;
+  media_version?: boolean;
+  conditional_get?: boolean;
+  row_events?: boolean;
 }
 
 /** `PATCH /api/gallery/image/:filename` body. Every field is optional; an

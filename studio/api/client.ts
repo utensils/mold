@@ -65,6 +65,49 @@ export async function apiJsonTo<T>(
   return (await apiFetchTo(target, path, init)).json() as Promise<T>;
 }
 
+interface ConditionalJsonEntry {
+  etag: string;
+  value: unknown;
+}
+
+const conditionalJsonCache = new Map<string, ConditionalJsonEntry>();
+
+/** Conditional JSON read for large stable snapshots such as `/api/gallery`.
+ * A 304 returns the exact prior object, avoiding JSON parse and reactive tree
+ * replacement. Hosts without validators continue through the normal 200 path. */
+export async function conditionalApiJsonTo<T>(
+  target: ApiTarget,
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const key = `${target.baseUrl}|${path}`;
+  const cached = conditionalJsonCache.get(key);
+  const headers = apiHeaders(target, init.headers);
+  if (cached) headers.set("If-None-Match", cached.etag);
+  const response = await fetch(`${target.baseUrl}${path}`, {
+    ...init,
+    headers,
+  });
+  if (response.status === 304 && cached) return cached.value as T;
+  if (!response.ok) {
+    let body: unknown = null;
+    try {
+      body = await response.clone().json();
+    } catch {
+      // Preserve non-JSON failures below.
+    }
+    const detail =
+      typeof body === "object" && body !== null && "error" in body
+        ? String((body as { error: unknown }).error)
+        : response.statusText;
+    throw new ApiError(detail, response.status, body);
+  }
+  const value = (await response.json()) as T;
+  const etag = response.headers.get("ETag");
+  if (etag) conditionalJsonCache.set(key, { etag, value });
+  return value;
+}
+
 export interface CurrentServerStatus {
   instance_id: string;
   hostname: string;

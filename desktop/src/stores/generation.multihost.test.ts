@@ -41,6 +41,7 @@ vi.mock("../lib/api/client", () => ({
   },
   apiFetchTo: (...a: unknown[]) => apiFetchTo(...a),
   apiJsonTo: (...a: unknown[]) => apiJsonTo(...a),
+  conditionalApiJsonTo: (...a: unknown[]) => apiJsonTo(...a),
   currentTarget: () => {
     if (!primary.target) throw new Error("No engine connected.");
     return primary.target;

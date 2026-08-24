@@ -171,6 +171,7 @@ export interface GalleryImage extends GalleryOrganizationFields {
   timestamp: number;
   format?: OutputFormat | null;
   size_bytes?: number | null;
+  media_version?: string | null;
   metadata_synthetic?: boolean;
 }
 
@@ -205,6 +206,9 @@ export interface GalleryCapabilities {
   organize?: boolean;
   /** Replay-safe titles/tags/favorites/collection and permanent-delete batches. */
   bulk_mutations?: boolean;
+  media_version?: boolean;
+  conditional_get?: boolean;
+  row_events?: boolean;
 }
 
 // Mirror of `mold_core::ServerCapabilities`.

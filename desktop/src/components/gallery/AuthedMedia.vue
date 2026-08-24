@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from "vue";
+import { galleryThumbnailScheduler, type ThumbnailHandle } from "@studio/lib/thumbnailScheduler";
 import { authedMediaUrl, fullSizeMediaUrl } from "../../lib/gallery/media";
 import type { ApiTarget } from "../../lib/api/client";
 
@@ -15,17 +16,29 @@ const props = withDefaults(
     target?: ApiTarget | null;
     /** Blob-cache bucket, usually the origin host id. */
     cacheKey?: string | null;
+    mediaVersion?: string | null;
   }>(),
-  { video: false, audio: false, alt: "", controls: false, target: null, cacheKey: null },
+  {
+    video: false,
+    audio: false,
+    alt: "",
+    controls: false,
+    target: null,
+    cacheKey: null,
+    mediaVersion: null,
+  },
 );
 
 const src = ref<string | null>(null);
 const failed = ref(false);
 let loadEpoch = 0;
+let thumbnailHandle: ThumbnailHandle<string> | null = null;
 
 const retryDelaysMs = [0, 250, 1_000] as const;
 
 async function load() {
+  thumbnailHandle?.cancel();
+  thumbnailHandle = null;
   const epoch = ++loadEpoch;
   src.value = null;
   failed.value = false;
@@ -37,6 +50,7 @@ async function load() {
       const options = {
         ...(props.target ? { target: props.target } : {}),
         ...(props.cacheKey ? { cacheKey: props.cacheKey } : {}),
+        ...(props.mediaVersion ? { mediaVersion: props.mediaVersion } : {}),
       };
       // Thumbnails and full-size stills/audio go native-first in the desktop
       // app (#1132's rationale: a media element pointed straight at a host
@@ -44,8 +58,18 @@ async function load() {
       // generation/download stream to that host). Video keeps the ticketed
       // or direct streaming URL so it can seek without buffering; outside
       // Tauri, or when the native route refuses, stills fall back to it too.
-      const url = props.path.startsWith("/api/gallery/thumbnail/")
-        ? await authedMediaUrl(props.path, options)
+      const thumbnail = props.path.startsWith("/api/gallery/thumbnail/");
+      const url = thumbnail
+        ? await (() => {
+            const handle = galleryThumbnailScheduler.schedule({
+              key: `${props.cacheKey ?? "primary"}|${props.path}|${props.mediaVersion ?? "legacy"}|${props.target?.baseUrl ?? "primary"}|${props.target?.apiKey ?? ""}`,
+              hostKey: props.cacheKey ?? props.target?.baseUrl ?? "primary",
+              priority: "visible",
+              run: (signal) => authedMediaUrl(props.path, { ...options, signal }),
+            });
+            thumbnailHandle = handle;
+            return handle.promise;
+          })()
         : await fullSizeMediaUrl(props.path, {
             ...options,
             allowLegacyBlob: !props.video && !props.audio,
@@ -69,12 +93,20 @@ async function load() {
 // a double-click on every remote tile — the lightbox never opened for
 // remote-only prints. The multi-source form compares each value on its own.
 watch(
-  [() => props.path, () => props.cacheKey, () => props.target?.baseUrl, () => props.target?.apiKey],
+  [
+    () => props.path,
+    () => props.cacheKey,
+    () => props.mediaVersion,
+    () => props.target?.baseUrl,
+    () => props.target?.apiKey,
+  ],
   load,
 );
 onMounted(load);
 onUnmounted(() => {
   loadEpoch += 1;
+  thumbnailHandle?.cancel();
+  thumbnailHandle = null;
 });
 </script>
 
@@ -93,5 +125,38 @@ onUnmounted(() => {
   <div v-else-if="failed" class="flex h-full w-full items-center justify-center bg-bench">
     <span class="edge-code">UNREADABLE</span>
   </div>
-  <div v-else class="grain-shimmer h-full w-full" />
+  <div v-else class="media-placeholder grain-shimmer h-full w-full" aria-hidden="true">
+    <span>Loading preview</span>
+  </div>
 </template>
+
+<style scoped>
+.media-placeholder {
+  display: grid;
+  place-items: center;
+  background-color: color-mix(in srgb, var(--bench) 82%, var(--safelight) 18%);
+  background-image:
+    radial-gradient(
+      circle at 28% 24%,
+      color-mix(in srgb, var(--halide) 16%, transparent),
+      transparent 34%
+    ),
+    radial-gradient(
+      circle at 72% 76%,
+      color-mix(in srgb, var(--safelight) 14%, transparent),
+      transparent 38%
+    );
+}
+
+.media-placeholder span {
+  border: 1px solid color-mix(in srgb, var(--rebate) 20%, transparent);
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: color-mix(in srgb, var(--bench) 78%, transparent);
+  color: var(--ink-3);
+  font-family: var(--f-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+</style>

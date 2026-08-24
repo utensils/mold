@@ -11,7 +11,14 @@
  * empty-space marquee drag paints a selection rectangle. The tile grid is
  * chunked so a 1000+ print library doesn't mount every node up front.
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
 import MediaTile from "@ui/components/MediaTile.vue";
 import Icon from "@ui/components/Icon.vue";
 import { printKey } from "../../lib/multiHostGallery";
@@ -21,6 +28,7 @@ import type { ModelInfoExtended } from "../../types";
 import { mediaKind } from "../../types";
 import { modelDisplayNameForId } from "@studio/lib/modelDisplay";
 import { purgeCountdownFromPurgeAt } from "@studio/lib/libraryOrganization";
+import { virtualGridWindow } from "@studio/lib/virtualGrid";
 
 const props = withDefaults(
   defineProps<{
@@ -75,51 +83,78 @@ function purgeKind(entry: GalleryImage): string {
     .kind;
 }
 
-// ── Chunked rendering ──────────────────────────────────────────────────────
-// Grid tiles pack densely so we render a large-ish chunk and grow it as the
-// sentinel scrolls into view.
-const PAGE_SIZE = 150;
-const visibleCount = ref(PAGE_SIZE);
-const sentinel = ref<HTMLElement | null>(null);
+// ── Bidirectional row virtualization ───────────────────────────────────────
+// The old sentinel pagination only appended: after one trip to the bottom all
+// 10K tiles remained mounted. This window preserves the full scrollbar while
+// mounting only visible rows plus two rows on either side.
+const gridRoot = ref<HTMLElement | null>(null);
+const containerWidth = ref(0);
+const containerDocumentTop = ref(0);
+const viewportStart = ref(0);
+const viewportSize = ref(0);
+let resizeObserver: ResizeObserver | null = null;
+let frame = 0;
 
-const visibleEntries = computed(() =>
-  props.entries.slice(0, visibleCount.value),
+const gridWindow = computed(() =>
+  virtualGridWindow({
+    itemCount: props.entries.length,
+    containerWidth: containerWidth.value,
+    minimumItemWidth:
+      containerWidth.value < 640
+        ? containerWidth.value / 2
+        : props.thumbnailSize,
+    minimumColumns: containerWidth.value < 640 ? 2 : 1,
+    gap: 12,
+    viewportStart: viewportStart.value,
+    viewportSize: viewportSize.value,
+    overscanRows: 2,
+  }),
 );
-const hasMore = computed(() => visibleCount.value < props.entries.length);
 
-function loadMore() {
-  visibleCount.value = Math.min(
-    visibleCount.value + PAGE_SIZE,
-    props.entries.length,
+const visibleEntries = computed(() => {
+  // DOM-less unit tests have no layout. Keep their small fixture observable;
+  // real rendered surfaces always measure a positive width on mount.
+  if (containerWidth.value <= 0) return props.entries.slice(0, 150);
+  return props.entries.slice(
+    gridWindow.value.startIndex,
+    gridWindow.value.endIndex,
   );
+});
+
+function measureWindow() {
+  frame = 0;
+  const root = gridRoot.value;
+  if (!root) return;
+  const rect = root.getBoundingClientRect();
+  containerWidth.value = rect.width;
+  containerDocumentTop.value = rect.top + window.scrollY;
+  viewportStart.value = Math.max(
+    0,
+    window.scrollY - containerDocumentTop.value,
+  );
+  viewportSize.value = window.innerHeight;
 }
 
-let observer: IntersectionObserver | null = null;
-
-function installObserver() {
-  observer?.disconnect();
-  if (!sentinel.value || typeof IntersectionObserver === "undefined") return;
-  observer = new IntersectionObserver(
-    (entries) => {
-      for (const entry of entries) {
-        if (entry.isIntersecting && hasMore.value) loadMore();
-      }
-    },
-    { rootMargin: "800px 0px" },
-  );
-  observer.observe(sentinel.value);
+function scheduleMeasure() {
+  if (frame) return;
+  frame = requestAnimationFrame(measureWindow);
 }
 
-onMounted(installObserver);
-onBeforeUnmount(() => observer?.disconnect());
+onMounted(() => {
+  measureWindow();
+  window.addEventListener("scroll", scheduleMeasure, { passive: true });
+  window.addEventListener("resize", scheduleMeasure, { passive: true });
+  if (gridRoot.value && typeof ResizeObserver !== "undefined") {
+    resizeObserver = new ResizeObserver(scheduleMeasure);
+    resizeObserver.observe(gridRoot.value);
+  }
+});
 
-// Narrowing the filtered set (search / filter) should snap the window back to
-// page one rather than keep hundreds of tiles mounted.
 watch(
-  () => props.entries,
-  () => {
-    visibleCount.value = Math.min(PAGE_SIZE, props.entries.length);
-    queueMicrotask(installObserver);
+  () => [props.entries, props.thumbnailSize] as const,
+  async () => {
+    await nextTick();
+    measureWindow();
   },
 );
 
@@ -193,7 +228,6 @@ function onContextMenu(entry: GalleryImage, event: MouseEvent) {
 }
 
 // ── Marquee / drag selection ───────────────────────────────────────────────
-const gridRoot = ref<HTMLElement | null>(null);
 const dragBox = ref<{ x: number; y: number; w: number; h: number } | null>(
   null,
 );
@@ -274,6 +308,10 @@ function collectHits(x: number, y: number, w: number, h: number): string[] {
 
 onBeforeUnmount(() => {
   window.removeEventListener("pointermove", onPointerMove);
+  window.removeEventListener("scroll", scheduleMeasure);
+  window.removeEventListener("resize", scheduleMeasure);
+  resizeObserver?.disconnect();
+  if (frame) cancelAnimationFrame(frame);
 });
 </script>
 
@@ -295,151 +333,142 @@ onBeforeUnmount(() => {
     </div>
 
     <template v-else>
-      <div class="gg__grid">
+      <div class="gg__window" :style="{ height: `${gridWindow.totalSize}px` }">
         <div
-          v-for="entry in visibleEntries"
-          :key="keyOf(entry)"
-          class="gg__cell"
-          :data-filename="entry.filename"
-          :data-print-key="keyOf(entry)"
-          :data-selected="selection.has(keyOf(entry)) ? 'true' : 'false'"
-          @contextmenu.prevent="onContextMenu(entry, $event)"
+          class="gg__grid gg__grid--virtual"
+          :style="{ transform: `translateY(${gridWindow.offset}px)` }"
         >
-          <MediaTile
-            :src="tileSrc(entry)"
-            :alt="entry.metadata.prompt || entry.filename"
-            :fresh="fresh.has(keyOf(entry))"
-            @open="onTileOpen(entry)"
+          <div
+            v-for="entry in visibleEntries"
+            :key="keyOf(entry)"
+            class="gg__cell"
+            :data-filename="entry.filename"
+            :data-print-key="keyOf(entry)"
+            :data-selected="selection.has(keyOf(entry)) ? 'true' : 'false'"
+            @contextmenu.prevent="onContextMenu(entry, $event)"
           >
-            <template v-if="isMotion(entry)" #overlay>
-              <span class="gg__vbadge">
-                <svg
-                  class="gg__vplay"
-                  viewBox="0 0 24 24"
-                  fill="currentColor"
-                  aria-hidden="true"
-                >
-                  <path d="M8 5v14l11-7z" />
-                </svg>
-                <span v-if="durationLabel(entry)">{{
-                  durationLabel(entry)
-                }}</span>
-              </span>
-            </template>
-            <template v-else-if="isAudio(entry)" #overlay>
-              <span class="gg__vbadge">
-                <svg
-                  class="gg__vplay"
-                  viewBox="0 0 24 24"
-                  fill="currentColor"
-                  aria-hidden="true"
-                >
-                  <path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z" />
-                </svg>
-                <span v-if="durationLabel(entry)">{{
-                  durationLabel(entry)
-                }}</span>
-              </span>
-            </template>
-          </MediaTile>
-
-          <span
-            v-if="entry.favorite"
-            class="gg__fav"
-            data-test="favorite-badge"
-            title="Favorite"
-            aria-label="Favorite"
-          >
-            <Icon name="heart" :size="13" :stroke-width="2" />
-          </span>
-
-          <span
-            v-if="trash"
-            class="gg__purge"
-            :data-kind="purgeKind(entry)"
-            data-test="purge-chip"
-          >
-            {{ purgeLabel(entry) }}
-          </span>
-
-          <span
-            v-if="hostLabel(entry)"
-            class="gg__host"
-            data-test="host-badge"
-            :title="`Generated on ${hostLabel(entry)}`"
-          >
-            {{ hostLabel(entry) }}
-          </span>
-          <span
-            v-if="trash && !selectMode"
-            class="gg__trash-actions"
-            data-test="trash-actions"
-          >
-            <button
-              type="button"
-              class="gg__ta"
-              data-test="tile-restore"
-              @click.stop="emit('restore', entry)"
+            <MediaTile
+              :src="tileSrc(entry)"
+              :alt="entry.metadata.prompt || entry.filename"
+              :fresh="fresh.has(keyOf(entry))"
+              @open="onTileOpen(entry)"
             >
-              Restore
-            </button>
-            <button
-              type="button"
-              class="gg__ta gg__ta--danger"
-              data-test="tile-delete-forever"
-              @click.stop="emit('delete-forever', entry)"
-            >
-              Delete forever
-            </button>
-          </span>
-          <span
-            v-else
-            class="gg__metadata"
-            data-test="print-metadata"
-            :title="stripLabel(entry)"
-          >
-            {{ stripLabel(entry) }}
-          </span>
+              <template v-if="isMotion(entry)" #overlay>
+                <span class="gg__vbadge">
+                  <svg
+                    class="gg__vplay"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                    aria-hidden="true"
+                  >
+                    <path d="M8 5v14l11-7z" />
+                  </svg>
+                  <span v-if="durationLabel(entry)">{{
+                    durationLabel(entry)
+                  }}</span>
+                </span>
+              </template>
+              <template v-else-if="isAudio(entry)" #overlay>
+                <span class="gg__vbadge">
+                  <svg
+                    class="gg__vplay"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                    aria-hidden="true"
+                  >
+                    <path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z" />
+                  </svg>
+                  <span v-if="durationLabel(entry)">{{
+                    durationLabel(entry)
+                  }}</span>
+                </span>
+              </template>
+            </MediaTile>
 
-          <!-- Selection hit layer (select mode only). Sits above the tile so a
-               click toggles instead of opening; keeps shift/meta range logic. -->
-          <button
-            v-if="selectMode"
-            type="button"
-            class="gg__hit"
-            :class="{ 'gg__hit--on': selection.has(keyOf(entry)) }"
-            :aria-pressed="selection.has(keyOf(entry))"
-            :aria-label="`${selection.has(keyOf(entry)) ? 'Deselect' : 'Select'} ${entry.filename}`"
-            @click="onSelectClick(entry, $event)"
-          >
-            <span class="gg__check" aria-hidden="true">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="3"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <path d="m5 12 5 5L20 7" />
-              </svg>
+            <span
+              v-if="entry.favorite"
+              class="gg__fav"
+              data-test="favorite-badge"
+              title="Favorite"
+              aria-label="Favorite"
+            >
+              <Icon name="heart" :size="13" :stroke-width="2" />
             </span>
-          </button>
-        </div>
-      </div>
 
-      <div
-        v-if="entries.length > 0"
-        ref="sentinel"
-        class="gg__sentinel"
-        aria-hidden="true"
-      >
-        <span v-if="hasMore">
-          Loading more… ({{ visibleCount }}/{{ entries.length }})
-        </span>
-        <span v-else class="gg__sentinel-end">
-          {{ entries.length }} prints
-        </span>
+            <span
+              v-if="trash"
+              class="gg__purge"
+              :data-kind="purgeKind(entry)"
+              data-test="purge-chip"
+            >
+              {{ purgeLabel(entry) }}
+            </span>
+
+            <span
+              v-if="hostLabel(entry)"
+              class="gg__host"
+              data-test="host-badge"
+              :title="`Generated on ${hostLabel(entry)}`"
+            >
+              {{ hostLabel(entry) }}
+            </span>
+            <span
+              v-if="trash && !selectMode"
+              class="gg__trash-actions"
+              data-test="trash-actions"
+            >
+              <button
+                type="button"
+                class="gg__ta"
+                data-test="tile-restore"
+                @click.stop="emit('restore', entry)"
+              >
+                Restore
+              </button>
+              <button
+                type="button"
+                class="gg__ta gg__ta--danger"
+                data-test="tile-delete-forever"
+                @click.stop="emit('delete-forever', entry)"
+              >
+                Delete forever
+              </button>
+            </span>
+            <span
+              v-else
+              class="gg__metadata"
+              data-test="print-metadata"
+              :title="stripLabel(entry)"
+            >
+              {{ stripLabel(entry) }}
+            </span>
+
+            <!-- Selection hit layer (select mode only). Sits above the tile so a
+               click toggles instead of opening; keeps shift/meta range logic. -->
+            <button
+              v-if="selectMode"
+              type="button"
+              class="gg__hit"
+              :class="{ 'gg__hit--on': selection.has(keyOf(entry)) }"
+              :aria-pressed="selection.has(keyOf(entry))"
+              :aria-label="`${selection.has(keyOf(entry)) ? 'Deselect' : 'Select'} ${entry.filename}`"
+              @click="onSelectClick(entry, $event)"
+            >
+              <span class="gg__check" aria-hidden="true">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="3"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="m5 12 5 5L20 7" />
+                </svg>
+              </span>
+            </button>
+          </div>
+        </div>
       </div>
     </template>
 
@@ -471,6 +500,15 @@ onBeforeUnmount(() => {
   width: 100%;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+.gg__window {
+  position: relative;
+  width: 100%;
+}
+.gg__grid--virtual {
+  position: absolute;
+  inset: 0 0 auto;
+  will-change: transform;
 }
 @media (min-width: 640px) {
   .gg__grid {
@@ -708,20 +746,6 @@ onBeforeUnmount(() => {
   border-color: var(--safelight);
   background: var(--safelight);
   color: var(--on-accent);
-}
-
-.gg__sentinel {
-  margin-top: 22px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 32px;
-  font-family: var(--f-mono);
-  font-size: 11px;
-  color: var(--ink-3);
-}
-.gg__sentinel-end {
-  opacity: 0.7;
 }
 
 .gg__marquee {

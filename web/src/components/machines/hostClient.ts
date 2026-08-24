@@ -32,7 +32,11 @@ import {
   looksLikeCatalogId,
   type CatalogDownloadResponse,
 } from "../../api";
-import { parseCurrentServerStatus, type ApiTarget } from "@studio/api/client";
+import {
+  conditionalApiJsonTo,
+  parseCurrentServerStatus,
+  type ApiTarget,
+} from "@studio/api/client";
 import type { GalleryView } from "@studio/lib/api/galleryOrganization";
 import type { ConfigValue } from "../../lib/settingsConfig";
 import {
@@ -146,10 +150,12 @@ export function hostGallery(
   signal?: AbortSignal,
   view: GalleryView = "library",
 ) {
-  return getJson<import("../../types").GalleryImage[]>(
-    host,
-    view === "library" ? "/api/gallery" : `/api/gallery?view=${view}`,
-    signal,
+  const path =
+    view === "library" ? "/api/gallery" : `/api/gallery?view=${view}`;
+  return conditionalApiJsonTo<import("../../types").GalleryImage[]>(
+    hostApiTarget(host),
+    path,
+    { signal },
   );
 }
 

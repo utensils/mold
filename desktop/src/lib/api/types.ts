@@ -124,6 +124,9 @@ export interface ServerCapabilities {
     organize?: boolean;
     /** Replay-safe bulk organization endpoint. */
     bulk_mutations?: boolean;
+    media_version?: boolean;
+    conditional_get?: boolean;
+    row_events?: boolean;
   };
   /** Server-enforced model families that are not activated in this build. */
   model_access?: {
@@ -804,6 +807,7 @@ export interface GalleryImage extends GalleryOrganizationFields {
   timestamp: number;
   format?: OutputFormat | null;
   size_bytes?: number | null;
+  media_version?: string | null;
   metadata_synthetic?: boolean;
 }
 

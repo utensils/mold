@@ -104,14 +104,44 @@ watch(
 .ms-tile__ghost {
   position: absolute;
   inset: 0;
-  background: linear-gradient(
-    100deg,
-    transparent 20%,
-    color-mix(in srgb, var(--rebate) 6%, transparent) 50%,
-    transparent 80%
-  );
+  background-color: color-mix(in srgb, var(--print) 82%, var(--safelight) 18%);
+  background-image:
+    radial-gradient(
+      circle at 28% 24%,
+      color-mix(in srgb, var(--halide) 16%, transparent),
+      transparent 34%
+    ),
+    radial-gradient(
+      circle at 72% 76%,
+      color-mix(in srgb, var(--safelight) 14%, transparent),
+      transparent 38%
+    ),
+    linear-gradient(
+      100deg,
+      transparent 20%,
+      color-mix(in srgb, var(--rebate) 9%, transparent) 50%,
+      transparent 80%
+    );
   background-size: 220% 100%;
   animation: ms-tile-shimmer 1.4s ease-in-out infinite;
+}
+
+.ms-tile__ghost::after {
+  content: "Loading preview";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  border: 1px solid color-mix(in srgb, var(--rebate) 20%, transparent);
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: color-mix(in srgb, var(--print) 78%, transparent);
+  color: var(--ink-3);
+  font-family: var(--f-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 
 @media (prefers-reduced-motion: reduce) {

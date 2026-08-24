@@ -150,6 +150,11 @@ impl GenerationRecord {
             timestamp,
             format: Some(self.format),
             size_bytes: self.file_size_bytes.map(|n| n as u64),
+            media_version: Some(format!(
+                "{}:{}",
+                self.file_mtime_ms.unwrap_or(self.created_at_ms),
+                self.file_size_bytes.unwrap_or_default()
+            )),
             metadata_synthetic: self.metadata_synthetic,
             // Row title (user-editable) wins over the creation-time metadata
             // title; tags/collections/purge_at are applied by the server's
