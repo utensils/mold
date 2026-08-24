@@ -35,6 +35,13 @@ enum FeederControl {
     Stop,
 }
 
+#[derive(Debug, Default)]
+struct FeederArbiter {
+    /// Process/restart begins with ordinary FIFO. The bit flips only after a
+    /// successful DB claim, never after a vanished attached hint.
+    prefer_attached: bool,
+}
+
 /// Clear ownership tokens left by the prior runtime before any new HTTP
 /// admission can mint one. This is a serving precondition: callers must await
 /// it and propagate failure before constructing the router.
@@ -83,6 +90,7 @@ async fn run_with_retry_delay(
         let config = state.config.read().await;
         (!state.is_output_disabled(&config)).then(|| config.effective_output_dir())
     };
+    let mut arbiter = FeederArbiter::default();
     loop {
         // Construct both futures before the scan. Notify retains one permit,
         // so a commit or capacity release in the scan-to-wait gap is consumed
@@ -92,7 +100,13 @@ async fn run_with_retry_delay(
         tokio::pin!(durable_wake);
         tokio::pin!(capacity_wake);
 
-        let report = feed_available(&state, current_output_dir.as_deref(), &shutdown).await;
+        let report = feed_available(
+            &state,
+            current_output_dir.as_deref(),
+            &shutdown,
+            &mut arbiter,
+        )
+        .await;
         if report.submitted > 0 || report.held > 0 {
             tracing::debug!(
                 submitted = report.submitted,
@@ -234,10 +248,71 @@ async fn retain_for_shutdown(ticket: crate::queue_journal::QueueTicket) {
     }
 }
 
+struct SelectedClaim {
+    claim: mold_db::generation_queue::QueueClaim,
+    claimed_as_attached: bool,
+}
+
+fn claim_next(
+    journal: &std::sync::Arc<crate::queue_journal::QueueJournal>,
+    ingress: Option<&crate::queue_media_ingress::QueueMediaIngress>,
+    prefer_attached: bool,
+) -> anyhow::Result<Option<SelectedClaim>> {
+    let claim_attached = || -> anyhow::Result<Option<SelectedClaim>> {
+        let Some(ingress) = ingress else {
+            return Ok(None);
+        };
+        while let Some(job_id) = ingress.next_committed_id() {
+            match journal.claim_feeder_by_id(&job_id)? {
+                Some(claim) => {
+                    return Ok(Some(SelectedClaim {
+                        claim,
+                        claimed_as_attached: true,
+                    }));
+                }
+                None => ingress.discard_hint(&job_id),
+            }
+        }
+        Ok(None)
+    };
+    let claim_fifo = || {
+        journal.claim_next_feeder().map(|claim| {
+            claim.map(|claim| SelectedClaim {
+                claim,
+                claimed_as_attached: false,
+            })
+        })
+    };
+
+    if prefer_attached {
+        if let Some(claim) = claim_attached()? {
+            return Ok(Some(claim));
+        }
+        claim_fifo()
+    } else {
+        if let Some(claim) = claim_fifo()? {
+            return Ok(Some(claim));
+        }
+        claim_attached()
+    }
+}
+
+fn projection_failure_holds(error: &crate::queue_media_store::QueueMediaError) -> bool {
+    matches!(
+        error,
+        crate::queue_media_store::QueueMediaError::Authentication
+            | crate::queue_media_store::QueueMediaError::Corrupt(_)
+            | crate::queue_media_store::QueueMediaError::NotFound
+            | crate::queue_media_store::QueueMediaError::InvalidIdentity(_)
+            | crate::queue_media_store::QueueMediaError::ProjectionUnavailable(_)
+    )
+}
+
 async fn feed_available(
     state: &AppState,
     current_output_dir: Option<&std::path::Path>,
     shutdown: &tokio_util::sync::CancellationToken,
+    arbiter: &mut FeederArbiter,
 ) -> FeederReport {
     let mut report = FeederReport::default();
     loop {
@@ -257,7 +332,15 @@ async fn feed_available(
             }
         };
         let journal = state.queue_journal.clone();
-        let claim = match tokio::task::spawn_blocking(move || journal.claim_next_feeder()).await {
+        let ingress = journal
+            .queue_media_admission()
+            .map(|admission| admission.ingress().clone());
+        let prefer_attached = arbiter.prefer_attached;
+        let claim = match tokio::task::spawn_blocking(move || {
+            claim_next(&journal, ingress.as_deref(), prefer_attached)
+        })
+        .await
+        {
             Ok(Ok(Some(claim))) => claim,
             Ok(Ok(None)) => {
                 drop(reservation);
@@ -277,11 +360,16 @@ async fn feed_available(
                 return report;
             }
         };
+        arbiter.prefer_attached = !claim.claimed_as_attached;
 
-        let mut row = claim.row;
+        let mut row = claim.claim.row;
+        let observer = state
+            .queue_journal
+            .queue_media_admission()
+            .and_then(|admission| admission.ingress().take_claimed(&row.id));
         let ticket = state
             .queue_journal
-            .attach_claimed(&row.id, claim.claim_token);
+            .attach_claimed(&row.id, claim.claim.claim_token);
         let journal = state.queue_journal.clone();
         let completion_id = row.id.clone();
         let db_completion =
@@ -440,6 +528,40 @@ async fn feed_available(
                 continue;
             }
         };
+        let deferred_media = if let Some(set_id) = row.media_set_id.as_ref() {
+            let Some(lifecycle) = state.queue_journal.queue_media_lifecycle() else {
+                drop(reservation);
+                retain_for_retry(ticket, shutdown).await;
+                tracing::error!(job = %row.id, "durable media lifecycle is unavailable; retaining claim");
+                report.stop = FeederStop::RecoverableFailure;
+                return report;
+            };
+            let media_set = crate::queue_media_store::MediaSetRef {
+                owner_id: row.owner_uuid.clone(),
+                job_id: row.id.clone(),
+                set_id: set_id.clone(),
+            };
+            match lifecycle.deferred_media(media_set) {
+                Ok(deferred) => Some(deferred),
+                Err(error) if projection_failure_holds(&error) => {
+                    let reason = format!("durable media projection is invalid: {error}");
+                    let _ = tokio::task::spawn_blocking(move || ticket.hold(&reason)).await;
+                    drop(reservation);
+                    tracing::error!(job = %row.id, %error, "held durable generation with invalid media projection");
+                    report.held += 1;
+                    continue;
+                }
+                Err(error) => {
+                    drop(reservation);
+                    retain_for_retry(ticket, shutdown).await;
+                    tracing::warn!(job = %row.id, %error, "durable media projection infrastructure failed; retaining for retry");
+                    report.stop = FeederStop::RecoverableFailure;
+                    return report;
+                }
+            }
+        } else {
+            None
+        };
         let target_gpu = crate::queue_journal::resolve_replay_affinity(
             &mut request,
             row.target_gpu,
@@ -515,17 +637,46 @@ async fn feed_available(
             result_tx,
             outcome_rx,
         } = crate::job_supervisor::supervise_job(row.id.clone(), cancel);
-        drop(outcome_rx);
+        let progress_tx = match observer {
+            Some(observer) => match observer.mode() {
+                crate::queue_media_ingress::ObserverMode::Raw => {
+                    observer.deliver(crate::queue_media_ingress::AttachedObserver::Raw {
+                        outcome: outcome_rx,
+                    });
+                    None
+                }
+                crate::queue_media_ingress::ObserverMode::Sse(_) => {
+                    let (progress_tx, messages) = tokio::sync::mpsc::unbounded_channel();
+                    let cancellation_tx = progress_tx.clone();
+                    tokio::spawn(async move {
+                        if let Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) =
+                            outcome_rx.await
+                        {
+                            let _ = cancellation_tx.send(crate::state::SseMessage::Error(
+                                mold_core::SseErrorEvent::failed("cancelled".to_string()),
+                            ));
+                        }
+                    });
+                    observer
+                        .deliver(crate::queue_media_ingress::AttachedObserver::Sse { messages });
+                    Some(progress_tx)
+                }
+            },
+            None => {
+                drop(outcome_rx);
+                None
+            }
+        };
         let id = row.id.clone();
         let job = GenerationJob {
             id: id.clone(),
             request,
-            deferred_media: None,
+            deferred_media,
             resolved_references: None,
             completion_payload: crate::queue_journal::completion_payload_from_str(
                 &row.completion_payload,
             ),
-            progress_tx: None,
+            progress_tx,
             result_tx,
             output_dir: Some(row.output_dir),
             batch_child: None,
@@ -700,6 +851,62 @@ mod tests {
         shutdown.cancel();
         handle.await.unwrap();
         drop(jobs);
+    }
+
+    #[tokio::test]
+    async fn runtime_reservation_precedes_every_db_claim() {
+        let (state, _rx) = state(0);
+        admit(&state, 1);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+        tokio::task::yield_now().await;
+
+        let rows = state.queue_journal.list_all();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].state,
+            mold_db::generation_queue::QueueRowState::Queued
+        );
+        assert_eq!(rows[0].dispatch_attempts, 0);
+        shutdown.cancel();
+        handle.await.unwrap();
+    }
+
+    #[test]
+    fn successful_claims_alternate_fifo_and_exact_attached_authority() {
+        let (state, _rx) = state(3);
+        let ids = admit(&state, 3);
+        let ingress = crate::queue_media_ingress::QueueMediaIngress::new(3);
+        let attached = ingress
+            .reserve(&ids[1], crate::queue_media_ingress::ObserverMode::Raw)
+            .unwrap();
+        ingress.publish_committed(&ids[1]);
+
+        let first = claim_next(&state.queue_journal, Some(&ingress), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.claim.row.id, ids[0]);
+        assert!(!first.claimed_as_attached);
+
+        let second = claim_next(&state.queue_journal, Some(&ingress), true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.claim.row.id, ids[1]);
+        assert!(second.claimed_as_attached);
+
+        let third = claim_next(&state.queue_journal, Some(&ingress), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(third.claim.row.id, ids[2]);
+        assert!(!third.claimed_as_attached);
+
+        for selected in [first, second, third] {
+            state
+                .queue_journal
+                .attach_claimed(&selected.claim.row.id, selected.claim.claim_token)
+                .retain();
+        }
+        drop(attached);
     }
 
     #[tokio::test]

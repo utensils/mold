@@ -4108,14 +4108,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capabilities_keep_durable_media_dark_even_if_the_journal_seam_is_ready() {
+    async fn capabilities_keep_durable_media_dark_without_installed_services() {
         let state = AppState::for_tests();
         state.queue_journal.set_durable_media_ready(true);
-        assert_eq!(
-            state.queue_journal.durable_media_capabilities(),
-            Some(mold_core::DurableMediaCapabilities::v1()),
-            "the fixture must exercise a ready journal rather than the default-false case"
-        );
+        assert_eq!(state.queue_journal.durable_media_capabilities(), None);
 
         let resp = app_with_state(state)
             .oneshot(
@@ -4128,7 +4124,36 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(
             json_body(resp).await.get("durable_media").is_none(),
-            "this wire-only slice must not connect readiness to production advertisement"
+            "readiness without lifecycle/admission services must remain dark"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn capabilities_advertise_exact_v1_only_with_the_complete_runtime_matrix() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+
+        let response = app_with_state(state)
+            .oneshot(
+                Request::get("/api/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(response).await["durable_media"],
+            serde_json::json!({
+                "protocol_version": 1,
+                "encrypted_at_rest": true,
+                "generate_request_media": true,
+                "identity": true,
+                "h3_references": false,
+                "private_h3": false,
+            })
         );
     }
 
@@ -4388,10 +4413,35 @@ mod tests {
         state.output_disabled_override = false;
         state.metadata_db = db.clone();
         state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
-            db,
+            db.clone(),
             Some(root),
             "test-instance",
         ));
+        if let Some(owner) = state.queue_journal.owner_uuid() {
+            let lifecycle = Arc::new(crate::queue_media_lifecycle::QueueMediaLifecycle::new(
+                db,
+                root.to_path_buf(),
+                owner.to_string(),
+            ));
+            state
+                .queue_journal
+                .install_queue_media_lifecycle(lifecycle.clone())
+                .unwrap();
+            let report = crate::queue_media_startup::reconcile_claimed_owner(
+                &state.queue_journal,
+                lifecycle.as_ref(),
+            )
+            .unwrap();
+            assert!(report.durable_media_ready);
+            let admission = crate::queue_media_admission::DurableMediaAdmission::new(
+                lifecycle,
+                state.queue_capacity,
+            );
+            state
+                .queue_journal
+                .install_queue_media_admission(admission)
+                .unwrap();
+        }
         state
             .config
             .try_write()
@@ -4822,16 +4872,19 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn heterogeneous_batch_refuses_media_authority_instead_of_journaling_bytes() {
+    async fn heterogeneous_batch_seals_media_before_ack_without_sqlite_plaintext() {
         let root = tempfile::tempdir().unwrap();
-        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let (mut state, _rx) = durable_state(db, root.path());
+        let db_path = root.path().join("mold.db");
+        let db = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
         install_authoritative_v2(&mut state);
         let journal = state.queue_journal.clone();
         let app = app_with_state(state);
         let mut request: serde_json::Value =
             serde_json::from_str(&generate_body("volatile source", 512, 512)).unwrap();
-        request["source_image"] = serde_json::json!("aW1hZ2U=");
+        let source = base64::engine::general_purpose::STANDARD.encode(minimal_png());
+        request["source_image"] = serde_json::json!(source);
+        request["source_image_name"] = serde_json::json!("sqlite-media-name-sentinel.png");
 
         let response = app
             .oneshot(json_request(
@@ -4844,11 +4897,366 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
         let response = json_body(response).await;
-        assert_eq!(response["code"], "GENERATION_BATCH_NOT_DURABLE");
-        assert!(response["error"].as_str().unwrap().contains("source_image"));
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, response["children"][0]["job_id"]);
+        assert!(rows[0].media_set_id.is_some());
+        assert!(!rows[0].request_json.contains("sqlite-media-name-sentinel"));
+        assert!(!rows[0].request_json.contains(&source));
+
+        let mut sqlite = std::fs::read(&db_path).unwrap();
+        for suffix in ["-wal", "-shm"] {
+            if let Ok(bytes) = std::fs::read(format!("{}{}", db_path.display(), suffix)) {
+                sqlite.extend(bytes);
+            }
+        }
+        assert!(!sqlite
+            .windows(b"sqlite-media-name-sentinel".len())
+            .any(|window| window == b"sqlite-media-name-sentinel"));
+        assert!(!sqlite
+            .windows(source.len())
+            .any(|window| window == source.as_bytes()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn durable_media_receipt_survives_gc_and_rejects_changes_and_tampering() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+        let client_id = uuid::Uuid::new_v4().to_string();
+        let source = base64::engine::general_purpose::STANDARD.encode(minimal_png());
+        let mut request: serde_json::Value =
+            serde_json::from_str(&generate_body("receipt survives media GC", 512, 512)).unwrap();
+        request["source_image"] = serde_json::json!(source);
+        request["source_image_name"] = serde_json::json!("first-name.png");
+        let body = serde_json::json!({
+            "client_batch_id": client_id,
+            "requests": [request],
+        });
+
+        let admitted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+        let admitted = json_body(admitted).await;
+        let job_id = admitted["children"][0]["job_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(journal.cancel_id(&job_id).unwrap());
         assert!(journal.list_all().is_empty());
+
+        let retry = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        let retry = json_body(retry).await;
+        assert_eq!(retry["id"], admitted["id"]);
+        assert_eq!(retry["children"][0]["job_id"], job_id);
+
+        let mut changed = body.clone();
+        changed["requests"][0]["source_image_name"] = serde_json::json!("changed-name.png");
+        let conflict = app
+            .clone()
+            .oneshot(json_request("POST", "/api/generation-batches", changed))
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(conflict).await["code"],
+            "GENERATION_BATCH_IDEMPOTENCY_CONFLICT"
+        );
+
+        db.as_ref()
+            .as_ref()
+            .unwrap()
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE generation_batches SET request_sha256 = 'tampered'\
+                      WHERE client_batch_id = ?1",
+                    [client_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let undecidable = app
+            .oneshot(json_request("POST", "/api/generation-batches", body))
+            .await
+            .unwrap();
+        assert_eq!(undecidable.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json_body(undecidable).await["code"],
+            crate::queue_media_admission::DURABLE_MEDIA_IDENTITY_UNDECIDABLE
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn durable_media_mixed_siblings_commit_together_and_preflight_is_one_over_n_atomic() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+        let source = base64::engine::general_purpose::STANDARD.encode(minimal_png());
+        let mut media: serde_json::Value =
+            serde_json::from_str(&generate_body("mixed media", 64, 64)).unwrap();
+        media["source_image"] = serde_json::json!(source);
+        media["source_image_name"] = serde_json::json!("mixed-source.png");
+        let plain: serde_json::Value =
+            serde_json::from_str(&generate_body("mixed plain", 64, 64)).unwrap();
+
+        let accepted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [media.clone(), plain],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].media_set_id.is_some());
+        assert!(rows[1].media_set_id.is_none());
+        for row in rows {
+            assert!(journal.cancel_id(&row.id).unwrap());
+        }
+
+        let mut refused = media;
+        refused["lora"] = serde_json::json!({
+            "path": "must-not-be-resolved.safetensors",
+            "scale": 1.0
+        });
+        let rejected = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [
+                        serde_json::from_str::<serde_json::Value>(
+                            &generate_body("would otherwise admit", 64, 64)
+                        ).unwrap(),
+                        refused
+                    ],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(rejected).await["code"],
+            "DURABLE_MEDIA_LORA_UNSUPPORTED"
+        );
+        assert!(journal.list_all().is_empty());
+        let owner = journal.owner_uuid().unwrap();
+        assert!(mold_db::generation_queue_media::list_obligations(
+            db.as_ref().as_ref().unwrap(),
+            owner,
+            mold_db::generation_queue_media::QueueMediaObligationState::Active,
+        )
+        .unwrap()
+        .is_empty());
+    }
+
+    fn durable_direct_media_body(prompt: &str) -> String {
+        let mut request: serde_json::Value =
+            serde_json::from_str(&generate_body(prompt, 64, 64)).unwrap();
+        request["source_image"] =
+            serde_json::json!(base64::engine::general_purpose::STANDARD.encode(minimal_png()));
+        request["source_image_name"] = serde_json::json!("direct-source.png");
+        request.to_string()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn durable_direct_header_is_validated_before_any_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+
+        for path in ["/api/generate", "/api/generate/stream"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(path)
+                        .header("content-type", "application/json")
+                        .header("x-mold-operation-id", "not-a-uuid")
+                        .body(Body::from(durable_direct_media_body("invalid header")))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        assert!(journal.list_all().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headerless_direct_media_remains_attached_and_never_enters_sqlite() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, mut rx) = durable_state(db, root.path());
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+        let request = tokio::spawn(async move {
+            app.oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(durable_direct_media_body("legacy attached")))
+                    .unwrap(),
+            )
+            .await
+        });
+
+        let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("headerless media must enter the attached runtime queue")
+            .expect("runtime queue remains open");
+        assert!(job.journal.is_none());
+        assert!(job.deferred_media.is_none());
+        assert!(journal.list_all().is_empty());
+        drop(job);
+        request.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_direct_raw_observer_preserves_the_legacy_media_response() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
+        let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            app_with_state(state.clone()).oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .header("x-mold-operation-id", operation_id)
+                    .body(Body::from(durable_direct_media_body("durable raw")))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("durable raw observer must settle")
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("content-type").unwrap(), "image/png");
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap()
+                .as_ref(),
+            minimal_png()
+        );
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
+        worker.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_direct_sse_observer_preserves_queued_and_complete_events() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
+        let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            app_with_state(state).oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .header("x-mold-operation-id", uuid::Uuid::new_v4().to_string())
+                    .body(Body::from(durable_direct_media_body("durable SSE")))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("durable SSE observer must attach")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = tokio::time::timeout(
+            Duration::from_secs(5),
+            axum::body::to_bytes(response.into_body(), 1024 * 1024),
+        )
+        .await
+        .expect("durable SSE stream must terminate")
+        .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("\"type\":\"queued\""), "{body}");
+        assert!(body.contains("event: complete"), "{body}");
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
+        worker.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn full_observer_registry_degrades_to_committed_202_status() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let admission = state
+            .queue_journal
+            .queue_media_admission()
+            .expect("admission installed");
+        let registrations = (0..state.queue_capacity)
+            .map(|index| {
+                admission
+                    .ingress()
+                    .reserve(
+                        &format!("occupied-observer-{index}"),
+                        crate::queue_media_ingress::ObserverMode::Raw,
+                    )
+                    .expect("registry has its authoritative runtime capacity")
+            })
+            .collect::<Vec<_>>();
+        let journal = state.queue_journal.clone();
+        let response = app_with_state(state)
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .header("x-mold-operation-id", uuid::Uuid::new_v4().to_string())
+                    .body(Body::from(durable_direct_media_body("detached overflow")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(json_body(response).await["durable"], true);
+        assert_eq!(journal.list_all().len(), 1);
+        drop(registrations);
     }
 
     #[tokio::test(flavor = "current_thread")]

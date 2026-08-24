@@ -16,7 +16,10 @@ use crate::queue_media_startup::{
     StoreEntry, StoreEntryState, StoreInitializationPolicy, StoreInspection, UnclaimedOwnerRoot,
     UntouchedEntry,
 };
-use crate::queue_media_store::{MediaSetRef, QueueMediaError, QueueMediaStore};
+use crate::queue_media_store::{
+    MediaSetRef, QueueMediaError, QueueMediaOperationFingerprint, QueueMediaOperationReceipt,
+    QueueMediaProjection, QueueMediaStore, SealMedia,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct QueueMediaGcCandidate {
@@ -88,6 +91,90 @@ impl QueueMediaLifecycle {
                     "queue-media store was not opened by startup reconciliation",
                 )
             })
+    }
+
+    pub(crate) fn seal_operation_receipt(
+        &self,
+        operation_id: &str,
+        fingerprint: &QueueMediaOperationFingerprint,
+    ) -> Result<QueueMediaOperationReceipt, QueueMediaError> {
+        self.runtime_store()?
+            .seal_operation_receipt_v1(&self.owner_uuid, operation_id, fingerprint)
+    }
+
+    pub(crate) fn open_operation_receipt(
+        &self,
+        operation_id: &str,
+        receipt: &QueueMediaOperationReceipt,
+    ) -> Result<QueueMediaOperationFingerprint, QueueMediaError> {
+        self.runtime_store()?
+            .open_operation_receipt_v1(&self.owner_uuid, operation_id, receipt)
+    }
+
+    pub(crate) fn seal_v2(
+        &self,
+        job_id: &str,
+        fingerprint: &QueueMediaOperationFingerprint,
+        projection: &QueueMediaProjection,
+        media: Vec<SealMedia>,
+    ) -> Result<MediaSetRef, QueueMediaError> {
+        self.runtime_store()?.seal_v2_with_operation_fingerprint(
+            &self.owner_uuid,
+            job_id,
+            fingerprint,
+            projection,
+            media,
+        )
+    }
+
+    pub(crate) fn delete_unpublished(
+        &self,
+        media_set: &MediaSetRef,
+    ) -> Result<(), QueueMediaError> {
+        if media_set.owner_id != self.owner_uuid {
+            return Err(QueueMediaError::InvalidIdentity(
+                "queue-media lifecycle owner mismatch".to_string(),
+            ));
+        }
+        self.runtime_store()?.delete(media_set)
+    }
+
+    pub(crate) fn candidate_for_ref(
+        &self,
+        media_set: MediaSetRef,
+    ) -> Result<QueueMediaGcCandidate, AdapterError> {
+        self.ensure_owner(&media_set.owner_id)?;
+        Ok(QueueMediaGcCandidate { media_set })
+    }
+
+    pub(crate) fn deferred_media(
+        &self,
+        media_set: MediaSetRef,
+    ) -> Result<crate::queue_media_runtime::DeferredQueueMedia, QueueMediaError> {
+        if media_set.owner_id != self.owner_uuid {
+            return Err(QueueMediaError::InvalidIdentity(
+                "queue-media lifecycle owner mismatch".to_string(),
+            ));
+        }
+        let store = self.runtime_store()?;
+        let projection = store.open_projection(&media_set)?;
+        Ok(crate::queue_media_runtime::DeferredQueueMedia::new(
+            store, media_set, projection,
+        ))
+    }
+
+    fn runtime_store(&self) -> Result<Arc<QueueMediaStore>, QueueMediaError> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| QueueMediaError::Corrupt("queue-media store lock was poisoned".into()))?
+            .clone()
+            .ok_or_else(|| {
+                QueueMediaError::SecurityUnavailable(
+                    "queue-media store was not opened by startup reconciliation".into(),
+                )
+            })?;
+        Ok(Arc::new(store))
     }
 
     pub(crate) fn candidate_for_job(

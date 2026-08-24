@@ -1075,17 +1075,17 @@ pub(crate) async fn require_server_generation_request_activation(
     Ok(())
 }
 
-struct PreparedGenerationRoute {
-    output_dir: Option<std::path::PathBuf>,
-    warnings: RequestWarnings,
-    preferred_gpu: Option<usize>,
-    resolved_references: Option<crate::reference_uploads::ResolvedReferenceSet>,
+pub(crate) struct PreparedGenerationRoute {
+    pub(crate) output_dir: Option<std::path::PathBuf>,
+    pub(crate) warnings: RequestWarnings,
+    pub(crate) preferred_gpu: Option<usize>,
+    pub(crate) resolved_references: Option<crate::reference_uploads::ResolvedReferenceSet>,
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-    h3_private_ingress_grant: Option<crate::h3_private_bridge::H3PrivateIngressGrant>,
+    pub(crate) h3_private_ingress_grant: Option<crate::h3_private_bridge::H3PrivateIngressGrant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GenerationPreparationDelivery {
+pub(crate) enum GenerationPreparationDelivery {
     AttachedResponse,
     DurableBatch,
 }
@@ -1100,27 +1100,6 @@ impl GenerationPreparationDelivery {
 /// the durable queue. The first-party clients apply the same fence before
 /// selecting this endpoint, but the server must enforce its own persistence
 /// contract for direct and mixed-version callers too.
-fn durable_generation_media_field(request: &mold_core::GenerateRequest) -> Option<&'static str> {
-    [
-        (request.source_image.is_some(), "source_image"),
-        (request.id_image.is_some(), "id_image"),
-        (request.id_images.is_some(), "id_images"),
-        (request.edit_images.is_some(), "edit_images"),
-        (request.references.is_some(), "references"),
-        (request.mask_image.is_some(), "mask_image"),
-        (request.control_image.is_some(), "control_image"),
-        (request.audio_file.is_some(), "audio_file"),
-        (request.audio_file_path.is_some(), "audio_file_path"),
-        (request.source_video.is_some(), "source_video"),
-        (request.source_video_path.is_some(), "source_video_path"),
-        (request.extend_video.is_some(), "extend_video"),
-        (request.extend_video_path.is_some(), "extend_video_path"),
-        (request.keyframes.is_some(), "keyframes"),
-    ]
-    .into_iter()
-    .find_map(|(present, field)| present.then_some(field))
-}
-
 fn durable_generation_unsupported(message: impl Into<String>) -> ApiError {
     ApiError::with_code(
         message,
@@ -1143,7 +1122,7 @@ async fn prepare_generation(
     .await
 }
 
-async fn prepare_generation_for_delivery(
+pub(crate) async fn prepare_generation_for_delivery(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
     authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
@@ -1171,17 +1150,12 @@ async fn prepare_generation_for_delivery(
     // for every non-H3 configured alias and catalog ID.
     mold_core::minimax_h3::canonicalize_request_model(request);
 
-    if delivery.is_durable_batch() {
-        if let Some(field) = durable_generation_media_field(request) {
-            return Err(durable_generation_unsupported(format!(
-                "{field} carries temporary media authority and must use the attached generation lifecycle"
-            )));
-        }
-        if mold_core::minimax_h3::capability_contract_for_model(&request.model).is_some() {
-            return Err(durable_generation_unsupported(
-                "MiniMax H3 requests carry private replay authority and must use the attached generation lifecycle",
-            ));
-        }
+    if delivery.is_durable_batch()
+        && mold_core::minimax_h3::capability_contract_for_model(&request.model).is_some()
+    {
+        return Err(durable_generation_unsupported(
+            "MiniMax H3 requests carry private replay authority and must use the attached generation lifecycle",
+        ));
     }
 
     // `hdr_exr_dir` names an output directory on the machine doing inference.
@@ -2050,7 +2024,12 @@ async fn normalize_generation_placement(
 /// identical rows are collapsed so batch siblings and retries don't spam
 /// duplicates. Records what the user actually typed — callers capture the
 /// prompt before `prepare_generation` runs prompt expansion.
-fn record_prompt_history(state: &AppState, prompt: &str, negative: Option<&str>, model: &str) {
+pub(crate) fn record_prompt_history(
+    state: &AppState,
+    prompt: &str,
+    negative: Option<&str>,
+    model: &str,
+) {
     let Some(db) = state.metadata_db.as_ref().as_ref() else {
         return;
     };
@@ -2309,6 +2288,20 @@ fn require_expand_model_activation(settings: &mold_core::ExpandSettings) -> Resu
 
 // ── /api/generate ─────────────────────────────────────────────────────────────
 
+const OPERATION_ID_HEADER: &str = "x-mold-operation-id";
+
+fn requested_operation_id(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    let Some(value) = headers.get(OPERATION_ID_HEADER) else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| ApiError::validation("X-Mold-Operation-Id must be an ASCII UUID"))?;
+    let operation_id = uuid::Uuid::parse_str(value.trim())
+        .map_err(|_| ApiError::validation("X-Mold-Operation-Id must be a UUID"))?;
+    Ok(Some(operation_id.to_string()))
+}
+
 fn validate_live_server_batch_admission(
     request: &mold_core::GenerateRequest,
 ) -> Result<(), ApiError> {
@@ -2323,7 +2316,7 @@ fn validate_live_server_batch_admission(
 
 const MAX_HETEROGENEOUS_BATCH_OUTPUTS: usize = 64;
 
-fn generation_batch_status(
+pub(crate) fn generation_batch_status(
     instance_id: &str,
     detail: mold_db::generation_batches::DurableGenerationBatchDetail,
 ) -> mold_core::GenerationBatchStatus {
@@ -2411,6 +2404,33 @@ async fn admit_generation_batch(
         return Err(ApiError::validation(format!(
             "requests must contain 1..={MAX_HETEROGENEOUS_BATCH_OUTPUTS} children"
         )));
+    }
+    if body
+        .requests
+        .iter()
+        .any(crate::queue_media_admission::request_requires_durable_media_admission)
+    {
+        if state.queue_journal.durable_media_capabilities().is_none() {
+            return Err(ApiError::with_code(
+                "encrypted durable request media is unavailable",
+                "DURABLE_MEDIA_UNAVAILABLE",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ));
+        }
+        let admission = state
+            .queue_journal
+            .queue_media_admission()
+            .ok_or_else(|| ApiError::internal("durable media admission service is missing"))?;
+        let outcome = admission
+            .admit_batch(
+                &state,
+                authenticated.as_ref().map(|Extension(auth)| auth),
+                body,
+                None,
+                SseCompletionPayload::MetadataOnly,
+            )
+            .await?;
+        return Ok((outcome.status_code, Json(outcome.status)));
     }
     // Capture the request as received before canonicalization and default
     // materialization mutate it. History is a user-input recall surface, not
@@ -2679,6 +2699,11 @@ async fn reconcile_generation_batches(
     path = "/api/generate",
     tag = "generation",
     request_body = mold_core::GenerateRequest,
+    params((
+        "X-Mold-Operation-Id" = Option<String>,
+        Header,
+        description = "UUID idempotency key for encrypted durable request media"
+    )),
     responses(
         (status = 200, description = "Singleton requests return generated media bytes with the matching image/video Content-Type; server-owned batches return application/json BatchGenerateResponse"),
         (status = 404, description = "Model not downloaded"),
@@ -2692,10 +2717,72 @@ async fn reconcile_generation_batches(
 async fn generate(
     State(state): State<AppState>,
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
+    headers: HeaderMap,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Response, ApiError> {
     mold_core::minimax_h3::canonicalize_request_model(&mut req);
     validate_live_server_batch_admission(&req)?;
+    let operation_id = requested_operation_id(&headers)?;
+    if let Some(operation_id) =
+        operation_id.filter(|_| crate::queue_media_admission::request_has_durable_media(&req))
+    {
+        if req.batch_size != 1 {
+            return Err(ApiError::validation(
+                "X-Mold-Operation-Id durable media requests require batch_size=1",
+            ));
+        }
+        if state.queue_journal.durable_media_capabilities().is_none() {
+            return Err(ApiError::with_code(
+                "encrypted durable request media is unavailable",
+                "DURABLE_MEDIA_UNAVAILABLE",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ));
+        }
+        let admission = state
+            .queue_journal
+            .queue_media_admission()
+            .ok_or_else(|| ApiError::internal("durable media admission service is missing"))?;
+        let outcome = admission
+            .admit_batch(
+                &state,
+                authenticated.as_ref().map(|Extension(auth)| auth),
+                mold_core::GenerationBatchAdmissionRequest {
+                    client_batch_id: operation_id,
+                    requests: vec![req],
+                },
+                Some(crate::queue_media_ingress::ObserverMode::Raw),
+                SseCompletionPayload::Full,
+            )
+            .await?;
+        let status_code = outcome.status_code;
+        let status = outcome.status;
+        let warnings = outcome.warnings.unwrap_or_default();
+        let Some(observer) = outcome.observer else {
+            return Ok((status_code, Json(status)).into_response());
+        };
+        let attached = match observer.attached().await {
+            Ok(attached) => attached,
+            Err(_) => return Ok((StatusCode::ACCEPTED, Json(status)).into_response()),
+        };
+        let crate::queue_media_ingress::AttachedObserver::Raw { outcome } = attached else {
+            return Err(ApiError::internal(
+                "durable raw observer received an SSE delivery",
+            ));
+        };
+        let result = match outcome.await {
+            Ok(crate::job_supervisor::SupervisedOutcome::Finished(result)) => *result,
+            Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) => {
+                return Err(ApiError::cancelled(format!(
+                    "generation job {} was cancelled while queued",
+                    status.children[0].job_id
+                )));
+            }
+            Err(_) => {
+                return Ok((StatusCode::ACCEPTED, Json(status)).into_response());
+            }
+        };
+        return generation_result_response(result, warnings);
+    }
     // Capture before prepare_generation: prompt expansion mutates req.prompt,
     // and history should hold what the user typed.
     let typed = (
@@ -2797,18 +2884,23 @@ async fn generate(
     // worker still leaves something to replay.
     let target_device_id =
         crate::queue_journal::stable_device_id_for_ordinal(&state, preferred_gpu);
-    let journal = state
-        .queue_journal
-        .record(crate::queue_journal::JournalAdmission {
-            id: &job_id,
-            request: &req,
-            output_dir: output_dir.as_deref(),
-            target_gpu: preferred_gpu,
-            target_device_id: target_device_id.as_deref(),
-            completion_payload: SseCompletionPayload::Full,
-            batch_child: false,
-            carries_reference_authority: resolved_references.is_some() || req.references.is_some(),
-        });
+    let journal = (!crate::queue_media_admission::request_has_durable_media(&req))
+        .then(|| {
+            state
+                .queue_journal
+                .record(crate::queue_journal::JournalAdmission {
+                    id: &job_id,
+                    request: &req,
+                    output_dir: output_dir.as_deref(),
+                    target_gpu: preferred_gpu,
+                    target_device_id: target_device_id.as_deref(),
+                    completion_payload: SseCompletionPayload::Full,
+                    batch_child: false,
+                    carries_reference_authority: resolved_references.is_some()
+                        || req.references.is_some(),
+                })
+        })
+        .flatten();
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
@@ -2849,6 +2941,13 @@ async fn generate(
         }
     };
 
+    generation_result_response(result, warnings)
+}
+
+fn generation_result_response(
+    result: Result<crate::state::GenerationJobResult, String>,
+    warnings: RequestWarnings,
+) -> Result<Response, ApiError> {
     match result {
         Ok(job_result) => {
             let img = job_result.image;
@@ -3794,6 +3893,10 @@ pub(crate) fn requested_sse_completion_payload(
         "X-Mold-SSE-Payload" = Option<String>,
         Header,
         description = "Set to metadata-only to omit encoded media and return the saved gallery filename"
+    ), (
+        "X-Mold-Operation-Id" = Option<String>,
+        Header,
+        description = "UUID idempotency key for encrypted durable request media"
     )),
     responses(
         (status = 200, description = "SSE event stream with progress and result"),
@@ -3812,6 +3915,84 @@ async fn generate_stream(
     mold_core::minimax_h3::canonicalize_request_model(&mut req);
     let completion_payload = requested_sse_completion_payload(&headers)?;
     validate_live_server_batch_admission(&req)?;
+    let operation_id = requested_operation_id(&headers)?;
+    if let Some(operation_id) =
+        operation_id.filter(|_| crate::queue_media_admission::request_has_durable_media(&req))
+    {
+        if req.batch_size != 1 {
+            return Err(ApiError::validation(
+                "X-Mold-Operation-Id durable media requests require batch_size=1",
+            ));
+        }
+        if state.queue_journal.durable_media_capabilities().is_none() {
+            return Err(ApiError::with_code(
+                "encrypted durable request media is unavailable",
+                "DURABLE_MEDIA_UNAVAILABLE",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ));
+        }
+        let admission = state
+            .queue_journal
+            .queue_media_admission()
+            .ok_or_else(|| ApiError::internal("durable media admission service is missing"))?;
+        let outcome = admission
+            .admit_batch(
+                &state,
+                authenticated.as_ref().map(|Extension(auth)| auth),
+                mold_core::GenerationBatchAdmissionRequest {
+                    client_batch_id: operation_id,
+                    requests: vec![req],
+                },
+                Some(crate::queue_media_ingress::ObserverMode::Sse(
+                    completion_payload,
+                )),
+                completion_payload,
+            )
+            .await?;
+        let status = outcome.status;
+        let Some(observer) = outcome.observer else {
+            return Ok((outcome.status_code, Json(status)).into_response());
+        };
+        let attached = match observer.attached().await {
+            Ok(attached) => attached,
+            Err(_) => return Ok((StatusCode::ACCEPTED, Json(status)).into_response()),
+        };
+        let crate::queue_media_ingress::AttachedObserver::Sse { mut messages } = attached else {
+            return Err(ApiError::internal(
+                "durable SSE observer received a raw delivery",
+            ));
+        };
+        let warnings = outcome.warnings.unwrap_or_default();
+        let job_id = status.children[0].job_id.clone();
+        let position = state
+            .job_registry
+            .entry(&job_id)
+            .map_or(0, |entry| entry.position);
+        let stream = async_stream::stream! {
+            for warning in warnings.all() {
+                yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Progress(
+                    SseProgressEvent::Info { message: warning.to_string() }
+                )));
+            }
+            yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Progress(
+                SseProgressEvent::Queued { position, id: job_id }
+            )));
+            while let Some(message) = messages.recv().await {
+                let terminal = matches!(message, SseMessage::Error(_));
+                yield Ok::<_, Infallible>(sse_message_to_event(message));
+                if terminal {
+                    break;
+                }
+            }
+        };
+        return Ok(Sse::new(stream)
+            .keep_alive(
+                KeepAlive::new()
+                    .interval(std::time::Duration::from_secs(15))
+                    .text("ping"),
+            )
+            .into_response());
+    }
     // Capture before prepare_generation: prompt expansion mutates req.prompt,
     // and history should hold what the user typed.
     let typed = (
@@ -3952,18 +4133,23 @@ async fn generate_stream(
     } = crate::job_supervisor::supervise_job(job_id.clone(), cancel);
     let target_device_id =
         crate::queue_journal::stable_device_id_for_ordinal(&state, preferred_gpu);
-    let journal = state
-        .queue_journal
-        .record(crate::queue_journal::JournalAdmission {
-            id: &job_id,
-            request: &req,
-            output_dir: output_dir.as_deref(),
-            target_gpu: preferred_gpu,
-            target_device_id: target_device_id.as_deref(),
-            completion_payload,
-            batch_child: false,
-            carries_reference_authority: resolved_references.is_some() || req.references.is_some(),
-        });
+    let journal = (!crate::queue_media_admission::request_has_durable_media(&req))
+        .then(|| {
+            state
+                .queue_journal
+                .record(crate::queue_journal::JournalAdmission {
+                    id: &job_id,
+                    request: &req,
+                    output_dir: output_dir.as_deref(),
+                    target_gpu: preferred_gpu,
+                    target_device_id: target_device_id.as_deref(),
+                    completion_payload,
+                    batch_child: false,
+                    carries_reference_authority: resolved_references.is_some()
+                        || req.references.is_some(),
+                })
+        })
+        .flatten();
     let job = GenerationJob {
         id: job_id.clone(),
         request: req,
@@ -6467,10 +6653,9 @@ async fn server_capabilities(
                 .then_some(MAX_HETEROGENEOUS_BATCH_OUTPUTS as u32),
             durable_batch_outcomes: heterogeneous_batch,
         },
-        // Capability activation is intentionally fenced behind the complete
-        // durable-media admission lifecycle. This additive wire slice only
-        // establishes the default-dark response shape.
-        durable_media: None,
+        durable_media: heterogeneous_batch
+            .then(|| state.queue_journal.durable_media_capabilities())
+            .flatten(),
         reference_uploads: mold_core::ReferenceUploadCapabilities {
             available: true,
             // V2 rebinds the request scope to content-probed canonical

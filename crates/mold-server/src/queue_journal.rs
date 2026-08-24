@@ -24,7 +24,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use mold_db::generation_batches::{
-    self, GenerationBatchChildRow, GenerationBatchDetail, GenerationBatchRow,
+    self, GenerationBatchChildRow, GenerationBatchDetail, GenerationBatchMediaInsertOutcome,
+    GenerationBatchRow,
 };
 use mold_db::generation_queue::{
     self, GenerationQueueProjectionPage, GenerationQueueRow, QueueProjectionCursor, QueueRowState,
@@ -126,6 +127,30 @@ pub struct BatchJournalAdmission<'a> {
     pub client_batch_id: &'a str,
     pub request_sha256: &'a str,
     pub children: &'a [JournalAdmission<'a>],
+}
+
+/// Payload-free child row for the encrypted-media batch transaction.
+pub(crate) struct MediaJournalAdmission<'a> {
+    pub id: &'a str,
+    pub model: &'a str,
+    pub request_json: &'a str,
+    pub media_set: Option<&'a crate::queue_media_store::MediaSetRef>,
+    pub output_dir: &'a Path,
+    pub target_gpu: Option<usize>,
+    pub target_device_id: Option<&'a str>,
+    pub completion_payload: SseCompletionPayload,
+    pub seed_pinned: bool,
+}
+
+pub(crate) struct MediaBatchJournalAdmission<'a> {
+    pub id: &'a str,
+    pub client_batch_id: &'a str,
+    /// Randomized authenticated receipt, never a plaintext media fingerprint.
+    pub operation_receipt: &'a str,
+    pub children: &'a [MediaJournalAdmission<'a>],
+    /// Present only for a direct attached observer. Publication occurs after
+    /// the immediate transaction commits and before the feeder wake.
+    pub observer_job_id: Option<&'a str>,
 }
 
 /// Whether this request carries a face photograph.
@@ -450,6 +475,7 @@ pub struct QueueJournal {
     /// and the later admission/feeder integration. Default-empty keeps the
     /// existing media-free journal behavior unchanged.
     queue_media_lifecycle: OnceLock<Arc<crate::queue_media_lifecycle::QueueMediaLifecycle>>,
+    queue_media_admission: OnceLock<Arc<crate::queue_media_admission::DurableMediaAdmission>>,
     #[cfg(test)]
     fail_completion_lookup: AtomicBool,
     #[cfg(test)]
@@ -500,6 +526,7 @@ impl QueueJournal {
             owner_uuid: claim.as_ref().map(|claim| claim.owner_uuid.clone()),
             durable_media_ready: AtomicBool::new(false),
             queue_media_lifecycle: OnceLock::new(),
+            queue_media_admission: OnceLock::new(),
             _owner_claim: claim,
             #[cfg(test)]
             fail_completion_lookup: AtomicBool::new(false),
@@ -524,6 +551,7 @@ impl QueueJournal {
             owner_uuid: None,
             durable_media_ready: AtomicBool::new(false),
             queue_media_lifecycle: OnceLock::new(),
+            queue_media_admission: OnceLock::new(),
             _owner_claim: None,
             #[cfg(test)]
             fail_completion_lookup: AtomicBool::new(false),
@@ -552,9 +580,10 @@ impl QueueJournal {
     /// intentionally independent from [`Self::is_enabled`], so key/store
     /// failures do not turn off media-free durable generations.
     pub fn durable_media_capabilities(&self) -> Option<mold_core::DurableMediaCapabilities> {
-        self.durable_media_ready
-            .load(Ordering::Acquire)
-            .then_some(mold_core::DurableMediaCapabilities::v1())
+        (self.durable_media_ready.load(Ordering::Acquire)
+            && self.queue_media_lifecycle.get().is_some()
+            && self.queue_media_admission.get().is_some())
+        .then_some(mold_core::DurableMediaCapabilities::v1())
     }
 
     pub(crate) fn install_queue_media_lifecycle(
@@ -573,6 +602,21 @@ impl QueueJournal {
         &self,
     ) -> Option<Arc<crate::queue_media_lifecycle::QueueMediaLifecycle>> {
         self.queue_media_lifecycle.get().cloned()
+    }
+
+    pub(crate) fn install_queue_media_admission(
+        &self,
+        admission: Arc<crate::queue_media_admission::DurableMediaAdmission>,
+    ) -> Result<(), &'static str> {
+        self.queue_media_admission
+            .set(admission)
+            .map_err(|_| "durable-media admission was already installed")
+    }
+
+    pub(crate) fn queue_media_admission(
+        &self,
+    ) -> Option<Arc<crate::queue_media_admission::DurableMediaAdmission>> {
+        self.queue_media_admission.get().cloned()
     }
 
     // Called by the default-dark startup coordinator once its independently
@@ -793,6 +837,105 @@ impl QueueJournal {
             self.feeder_notify.notify_one();
         }
         Ok((detail, inserted))
+    }
+
+    /// Persist one media-bearing operation in the same immediate transaction
+    /// as all child rows and active media obligations. Existing media-free
+    /// `record_batch` remains byte-for-byte on its legacy equality path.
+    pub(crate) fn record_batch_with_media(
+        self: &Arc<Self>,
+        admission: MediaBatchJournalAdmission<'_>,
+    ) -> Result<GenerationBatchMediaInsertOutcome, String> {
+        let owner_uuid = self
+            .owner_uuid
+            .as_deref()
+            .ok_or_else(|| "durable generation queue is unavailable".to_string())?;
+        let db = self
+            .db()
+            .ok_or_else(|| "metadata DB is unavailable".to_string())?;
+        if admission.children.is_empty() {
+            return Err("batch must contain at least one child".to_string());
+        }
+        let now = now_ms();
+        let mut rows = Vec::with_capacity(admission.children.len());
+        let mut obligations = Vec::new();
+        for (offset, child) in admission.children.iter().enumerate() {
+            if child.request_json.len() > self.max_bytes {
+                return Err(format!(
+                    "batch child {} exceeds the durable queue payload ceiling",
+                    offset + 1
+                ));
+            }
+            let media_set_id = match child.media_set {
+                Some(media_set)
+                    if media_set.owner_id == owner_uuid && media_set.job_id == child.id =>
+                {
+                    obligations.push(mold_db::generation_queue_media::QueueMediaObligation {
+                        media_set_id: media_set.set_id.clone(),
+                        owner_uuid: owner_uuid.to_string(),
+                        state: mold_db::generation_queue_media::QueueMediaObligationState::Active,
+                        created_at_ms: now,
+                        updated_at_ms: now,
+                    });
+                    Some(media_set.set_id.clone())
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "batch child {} media authority does not match its owner and job",
+                        offset + 1
+                    ));
+                }
+                None => None,
+            };
+            rows.push((
+                GenerationBatchChildRow {
+                    batch_id: admission.id.to_string(),
+                    job_id: child.id.to_string(),
+                    batch_index: (offset + 1) as u32,
+                    state: "accepted".to_string(),
+                    error: None,
+                    updated_at_ms: now,
+                },
+                GenerationQueueRow {
+                    id: child.id.to_string(),
+                    owner_uuid: owner_uuid.to_string(),
+                    state: QueueRowState::Queued,
+                    model: child.model.to_string(),
+                    request_json: child.request_json.to_string(),
+                    media_set_id,
+                    output_dir: child.output_dir.to_path_buf(),
+                    target_gpu: child.target_gpu,
+                    target_device_id: child.target_device_id.map(ToOwned::to_owned),
+                    completion_payload: completion_payload_as_str(child.completion_payload)
+                        .to_string(),
+                    seed_pinned: child.seed_pinned,
+                    dispatch_attempts: 0,
+                    replay_seen: 0,
+                    held_reason: None,
+                    created_at_ms: now,
+                    updated_at_ms: now,
+                    started_at_ms: None,
+                },
+            ));
+        }
+        let batch = GenerationBatchRow {
+            id: admission.id.to_string(),
+            client_batch_id: admission.client_batch_id.to_string(),
+            owner_uuid: owner_uuid.to_string(),
+            request_sha256: admission.operation_receipt.to_string(),
+            created_at_ms: now,
+        };
+        let outcome = generation_batches::insert_or_get_with_media(db, &batch, &rows, &obligations)
+            .map_err(|error| format!("could not persist media generation batch: {error:#}"))?;
+        if matches!(outcome, GenerationBatchMediaInsertOutcome::Inserted(_)) {
+            if let (Some(job_id), Some(service)) =
+                (admission.observer_job_id, self.queue_media_admission.get())
+            {
+                service.publish_observer(job_id);
+            }
+            self.feeder_notify.notify_one();
+        }
+        Ok(outcome)
     }
 
     pub fn generation_batch(&self, id: &str) -> Option<GenerationBatchDetail> {
@@ -1073,6 +1216,9 @@ impl QueueJournal {
         let outcome = generation_batches::cancel_owned(db, owner, id, terminal)?;
         if outcome == generation_batches::OwnedCancellation::Settled {
             self.cleanup_media_candidate(candidate);
+            if let Some(service) = self.queue_media_admission.get() {
+                service.ingress().discard_hint(id);
+            }
         }
         let cancelled = outcome != generation_batches::OwnedCancellation::NotOwned;
         self.wake_feeder();
@@ -2121,6 +2267,7 @@ mod tests {
             owner_uuid: Some(owner),
             durable_media_ready: AtomicBool::new(false),
             queue_media_lifecycle: OnceLock::new(),
+            queue_media_admission: OnceLock::new(),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
             fail_claim_release: AtomicBool::new(false),
@@ -2627,6 +2774,7 @@ mod tests {
             owner_uuid: Some(owner),
             durable_media_ready: AtomicBool::new(false),
             queue_media_lifecycle: OnceLock::new(),
+            queue_media_admission: OnceLock::new(),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
             fail_claim_release: AtomicBool::new(false),
@@ -2654,6 +2802,7 @@ mod tests {
             owner_uuid: Some(owner),
             durable_media_ready: AtomicBool::new(false),
             queue_media_lifecycle: OnceLock::new(),
+            queue_media_admission: OnceLock::new(),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
             fail_claim_release: AtomicBool::new(false),

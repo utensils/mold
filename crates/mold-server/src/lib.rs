@@ -61,6 +61,8 @@ pub mod model_manager;
 pub mod queue;
 pub mod queue_journal;
 pub mod queue_media;
+mod queue_media_admission;
+mod queue_media_ingress;
 mod queue_media_lifecycle;
 pub mod queue_media_runtime;
 // This dependency-free policy seam lands default-dark. The concrete
@@ -695,6 +697,16 @@ pub async fn run_server(
     state.queue_journal = queue_journal.clone();
     state.generation_cancel = generation_cancel.clone();
     state.device_registry = device_registry;
+
+    // One admission/observer service is shared by both route shapes and the
+    // sole durable feeder. Install it before runtime recovery or the router.
+    if let Some(lifecycle) = queue_journal.queue_media_lifecycle() {
+        let admission =
+            queue_media_admission::DurableMediaAdmission::new(lifecycle, state.queue_capacity);
+        queue_journal
+            .install_queue_media_admission(admission)
+            .map_err(anyhow::Error::msg)?;
+    }
 
     // Startup token recovery is a serving precondition. Await it before any
     // generation producer or router exists, so an HTTP admission from this

@@ -661,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn capability_is_present_only_after_clean_reconciliation() {
+    fn clean_reconciliation_stays_dark_until_admission_is_installed() {
         let home = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
         let journal = journal(home.path(), db, "instance-a");
@@ -677,10 +677,7 @@ mod tests {
                 StoreInitializationPolicy::IfGloballyEmpty,
             )]
         );
-        assert_eq!(
-            journal.durable_media_capabilities(),
-            Some(mold_core::DurableMediaCapabilities::v1())
-        );
+        assert_eq!(journal.durable_media_capabilities(), None);
     }
 
     #[test]
