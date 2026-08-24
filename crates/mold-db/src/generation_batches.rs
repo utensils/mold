@@ -41,17 +41,14 @@ pub struct GenerationBatchDetail {
 ///
 /// An idempotency loser is not an error from the cleanup perspective: its
 /// distinct staged sets are durably recorded as gc-pending in the same
-/// transaction that observes the winner. A request-hash conflict is explicit
-/// for the caller but retains the same cleanup guarantee.
+/// transaction that observes the winner. `request_sha256` is an opaque,
+/// randomized encrypted receipt for this API: the DB returns the winner's
+/// stored receipt without comparing or classifying it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GenerationBatchMediaInsertOutcome {
     Inserted(GenerationBatchDetail),
     Existing {
         detail: GenerationBatchDetail,
-        gc_pending_media_set_ids: Vec<String>,
-        colliding_media_set_ids: Vec<String>,
-    },
-    Conflict {
         gc_pending_media_set_ids: Vec<String>,
         colliding_media_set_ids: Vec<String>,
     },
@@ -197,9 +194,11 @@ pub fn insert_or_get(
 /// immediate transaction.
 ///
 /// `obligations` contains exactly one entry for each child whose queue row has
-/// a non-NULL media marker. On an idempotent or conflicting retry the incoming
+/// a non-NULL media marker. When the client id already exists, the incoming
 /// obligations belong to the losing file-first contender, so they are instead
-/// committed as gc-pending and returned by id for immediate cleanup.
+/// committed as gc-pending and returned by id for immediate cleanup. The
+/// existing row's opaque receipt is returned verbatim; only the server may
+/// authenticate it and decide whether the operation matches.
 pub fn insert_or_get_with_media(
     db: &MetadataDb,
     batch: &GenerationBatchRow,
@@ -265,12 +264,6 @@ pub fn insert_or_get_with_media(
                 } else {
                     colliding_media_set_ids.push(obligation.media_set_id.clone());
                 }
-            }
-            if existing.batch.request_sha256 != batch.request_sha256 {
-                return Ok(GenerationBatchMediaInsertOutcome::Conflict {
-                    gc_pending_media_set_ids,
-                    colliding_media_set_ids,
-                });
             }
             return Ok(GenerationBatchMediaInsertOutcome::Existing {
                 detail: existing,
@@ -1103,25 +1096,30 @@ mod tests {
     }
 
     #[test]
-    fn media_batch_insert_is_atomic_and_idempotency_losers_become_gc_pending() {
+    fn media_batch_insert_never_classifies_opaque_receipts_and_losers_become_gc_pending() {
         let db = MetadataDb::open_in_memory().unwrap();
         let winner_rows = media_rows("winner", 2);
         let winner_media = media_for_rows(&winner_rows);
+        let winner_receipt = "opaque-winner-receipt";
         assert!(matches!(
-            insert_or_get_with_media(&db, &batch("hash"), &winner_rows, &winner_media).unwrap(),
+            insert_or_get_with_media(&db, &batch(winner_receipt), &winner_rows, &winner_media,)
+                .unwrap(),
             GenerationBatchMediaInsertOutcome::Inserted(_)
         ));
 
         let loser_rows = media_rows("loser", 2);
         let loser_media = media_for_rows(&loser_rows);
         let outcome =
-            insert_or_get_with_media(&db, &batch("hash"), &loser_rows, &loser_media).unwrap();
+            insert_or_get_with_media(&db, &batch(winner_receipt), &loser_rows, &loser_media)
+                .unwrap();
         assert!(matches!(
             outcome,
             GenerationBatchMediaInsertOutcome::Existing {
+                detail,
                 gc_pending_media_set_ids,
                 ..
-            } if gc_pending_media_set_ids == vec!["loser-set-0", "loser-set-1"]
+            } if detail.batch.request_sha256 == winner_receipt
+                && gc_pending_media_set_ids == vec!["loser-set-0", "loser-set-1"]
         ));
 
         let active = list_obligations(&db, "owner-1", QueueMediaObligationState::Active)
@@ -1142,26 +1140,37 @@ mod tests {
 
         let conflict_rows = media_rows("conflict", 1);
         let conflict_media = media_for_rows(&conflict_rows);
-        assert_eq!(
+        assert!(matches!(
             insert_or_get_with_media(
                 &db,
-                &batch("different-hash"),
+                &batch("different-opaque-receipt"),
                 &conflict_rows,
                 &conflict_media,
             )
             .unwrap(),
-            GenerationBatchMediaInsertOutcome::Conflict {
-                gc_pending_media_set_ids: vec!["conflict-set-0".to_string()],
-                colliding_media_set_ids: Vec::new(),
-            }
-        );
-        assert!(matches!(
-            insert_or_get_with_media(&db, &batch("hash"), &loser_rows, &loser_media).unwrap(),
             GenerationBatchMediaInsertOutcome::Existing {
+                detail,
+                gc_pending_media_set_ids,
+                colliding_media_set_ids,
+            } if detail.batch.request_sha256 == winner_receipt
+                && gc_pending_media_set_ids == vec!["conflict-set-0"]
+                && colliding_media_set_ids.is_empty()
+        ));
+        assert!(matches!(
+            insert_or_get_with_media(
+                &db,
+                &batch(winner_receipt),
+                &loser_rows,
+                &loser_media,
+            )
+            .unwrap(),
+            GenerationBatchMediaInsertOutcome::Existing {
+                detail,
                 gc_pending_media_set_ids,
                 colliding_media_set_ids,
                 ..
-            } if gc_pending_media_set_ids == vec!["loser-set-0", "loser-set-1"]
+            } if detail.batch.request_sha256 == winner_receipt
+                && gc_pending_media_set_ids == vec!["loser-set-0", "loser-set-1"]
                 && colliding_media_set_ids.is_empty()
         ));
         assert_eq!(
@@ -1169,6 +1178,79 @@ mod tests {
                 .unwrap()
                 .len(),
             3
+        );
+    }
+
+    #[test]
+    fn concurrent_media_contenders_return_the_stored_opaque_receipt_and_gc_the_loser() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mold.db");
+        MetadataDb::open(&path).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let handles = [
+            ("first", "opaque-receipt-first"),
+            ("second", "opaque-receipt-second"),
+        ]
+        .into_iter()
+        .map(|(prefix, receipt)| {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let db = MetadataDb::open(&path).unwrap();
+                let rows = media_rows(prefix, 1);
+                let media = media_for_rows(&rows);
+                barrier.wait();
+                insert_or_get_with_media(&db, &batch(receipt), &rows, &media).unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+        let outcomes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+
+        let inserted = outcomes
+            .iter()
+            .find_map(|outcome| match outcome {
+                GenerationBatchMediaInsertOutcome::Inserted(detail) => Some(detail),
+                _ => None,
+            })
+            .expect("one contender inserts");
+        let (existing, gc_pending, collisions) = outcomes
+            .iter()
+            .find_map(|outcome| match outcome {
+                GenerationBatchMediaInsertOutcome::Existing {
+                    detail,
+                    gc_pending_media_set_ids,
+                    colliding_media_set_ids,
+                } => Some((detail, gc_pending_media_set_ids, colliding_media_set_ids)),
+                _ => None,
+            })
+            .expect("one contender observes the winner");
+        assert_eq!(existing.batch.request_sha256, inserted.batch.request_sha256);
+        assert_eq!(gc_pending.len(), 1);
+        assert!(collisions.is_empty());
+
+        let reopened = MetadataDb::open(&path).unwrap();
+        assert_eq!(
+            list_obligations(&reopened, "owner-1", QueueMediaObligationState::Active,)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            list_obligations(&reopened, "owner-1", QueueMediaObligationState::GcPending,)
+                .unwrap()
+                .into_iter()
+                .map(|obligation| obligation.media_set_id)
+                .collect::<Vec<_>>(),
+            *gc_pending
+        );
+        assert_eq!(
+            crate::generation_queue::list_all(&reopened, "owner-1")
+                .unwrap()
+                .len(),
+            1
         );
     }
 
@@ -1201,7 +1283,8 @@ mod tests {
         let db = MetadataDb::open_in_memory().unwrap();
         let winner_rows = media_rows("winner", 1);
         let winner_media = media_for_rows(&winner_rows);
-        insert_or_get_with_media(&db, &batch("hash"), &winner_rows, &winner_media).unwrap();
+        let winner_receipt = "opaque-winner-receipt";
+        insert_or_get_with_media(&db, &batch(winner_receipt), &winner_rows, &winner_media).unwrap();
 
         let mut loser_rows = media_rows("loser", 2);
         loser_rows[0].1.media_set_id = Some("winner-set-0".to_string());
@@ -1210,12 +1293,20 @@ mod tests {
             media_obligation("loser-set-1"),
         ];
         assert!(matches!(
-            insert_or_get_with_media(&db, &batch("hash"), &loser_rows, &contender).unwrap(),
+            insert_or_get_with_media(
+                &db,
+                &batch("different-opaque-receipt"),
+                &loser_rows,
+                &contender,
+            )
+            .unwrap(),
             GenerationBatchMediaInsertOutcome::Existing {
+                detail,
                 gc_pending_media_set_ids,
                 colliding_media_set_ids,
                 ..
-            } if gc_pending_media_set_ids == vec!["loser-set-1"]
+            } if detail.batch.request_sha256 == winner_receipt
+                && gc_pending_media_set_ids == vec!["loser-set-1"]
                 && colliding_media_set_ids == vec!["winner-set-0"]
         ));
 
