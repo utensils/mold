@@ -1,0 +1,1 @@
+- **MiniMax H3 model selection is explicit and consistent.** Create now keeps installed Official BF16 and NVFP4 acquisition-only variants visible as disabled rows with the reporting machine's runtime reason instead of silently dropping them, and every registered H3 manifest uses the same human-readable model and family labels across Studio surfaces.

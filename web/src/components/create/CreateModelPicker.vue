@@ -15,6 +15,7 @@ import {
   modelDisplayName,
   modelDisplayNameForId,
 } from "@studio/lib/modelDisplay";
+import { familyLabel } from "@studio/lib/modelFamily";
 
 const props = defineProps<{
   models: ModelInfoExtended[];
@@ -104,7 +105,7 @@ function onChange(event: Event) {
       <optgroup
         v-for="group in groups"
         :key="group.family"
-        :label="group.family"
+        :label="familyLabel(group.family)"
       >
         <option v-for="m in group.list" :key="m.name" :value="m.name">
           {{ modelDisplayName(m) }}

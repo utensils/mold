@@ -781,7 +781,7 @@ describe("HostDetailView models", () => {
     const wrapper = await mountView(`/hosts/${REMOTE_ID}`, [h3Nvfp4]);
     const rows = wrapper.findAll("[data-test='model-row']");
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.text()).toContain("minimax-h3-fl2va:comfy-pruned-nvfp4");
+    expect(rows[0]!.text()).toContain("MiniMax H3 FL2VA · NVFP4");
   });
 
   it("repeats model kind and mature-content classification in the host inventory", async () => {

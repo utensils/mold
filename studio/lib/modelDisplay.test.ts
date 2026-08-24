@@ -48,6 +48,26 @@ describe("modelDisplayName", () => {
     );
   });
 
+  it("names every registered MiniMax H3 manifest consistently", () => {
+    expect(
+      modelDisplayName({ name: "minimax-h3-fl2va:comfy-pruned-int8" }),
+    ).toBe("MiniMax H3 FL2VA");
+    expect(
+      modelDisplayName({ name: "minimax-h3-ref2va:comfy-pruned-int8" }),
+    ).toBe("MiniMax H3 Ref2VA");
+    expect(modelDisplayName({ name: "minimax-h3-fl2va:official-bf16" })).toBe(
+      "MiniMax H3 FL2VA · Official BF16",
+    );
+    expect(
+      modelDisplayName({ name: "minimax-h3-ref2va:comfy-pruned-nvfp4" }),
+    ).toBe("MiniMax H3 Ref2VA · NVFP4");
+    expect(
+      modelDisplayName({
+        name: "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p",
+      }),
+    ).toBe("MiniMax H3 FL2VA Turbo 4-step 768p");
+  });
+
   it("resolves a wire model id through the model inventory", () => {
     expect(
       modelDisplayNameForId("cv:23423432", [

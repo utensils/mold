@@ -480,7 +480,7 @@ describe("MobileCatalogView", () => {
 
     const card = wrapper
       .findAll("[data-test='mobile-catalog-card']")
-      .find((candidate) => candidate.text().includes(installed.name))!;
+      .find((candidate) => candidate.text().includes("MiniMax H3 Ref2VA"))!;
     expect(card.text()).toContain("Installed");
     await card.get(".mobile-catalog-card-open").trigger("click");
     await flushPromises();
@@ -561,7 +561,7 @@ describe("MobileCatalogView", () => {
     await flushPromises();
     const card = wrapper
       .findAll("[data-test='mobile-catalog-card']")
-      .find((candidate) => candidate.text().includes("minimax-h3-fl2va"))!;
+      .find((candidate) => candidate.text().includes("MiniMax H3 FL2VA"))!;
     await card.get(".mobile-catalog-card-open").trigger("click");
     await flushPromises();
     let detail = document.querySelector<HTMLElement>("[data-test='mobile-catalog-detail']")!;

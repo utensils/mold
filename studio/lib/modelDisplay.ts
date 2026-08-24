@@ -9,6 +9,22 @@ export function isCatalogModelId(name: string): boolean {
   return name.startsWith("cv:") || name.startsWith("hf:");
 }
 
+/** Built-in H3 manifests predate the additive `display_name` wire field.
+ * Keep their stable request ids while giving every Studio surface the same
+ * task/layout label, including acquisition-only rows. */
+const MINIMAX_H3_DISPLAY_NAMES: Readonly<Record<string, string>> = {
+  "minimax-h3-fl2va:official-bf16": "MiniMax H3 FL2VA · Official BF16",
+  "minimax-h3-ref2va:official-bf16": "MiniMax H3 Ref2VA · Official BF16",
+  "minimax-h3-fl2va:comfy-pruned-int8": "MiniMax H3 FL2VA",
+  "minimax-h3-ref2va:comfy-pruned-int8": "MiniMax H3 Ref2VA",
+  "minimax-h3-fl2va:comfy-pruned-nvfp4": "MiniMax H3 FL2VA · NVFP4",
+  "minimax-h3-ref2va:comfy-pruned-nvfp4": "MiniMax H3 Ref2VA · NVFP4",
+  "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step":
+    "MiniMax H3 FL2VA Turbo 8-step",
+  "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p":
+    "MiniMax H3 FL2VA Turbo 4-step 768p",
+};
+
 /**
  * Catalog models use an opaque id as their runnable `name`. Keep that id in
  * form values and requests, but prefer the catalog-provided description in UI
@@ -17,6 +33,8 @@ export function isCatalogModelId(name: string): boolean {
 export function modelDisplayName(model: DisplayableModel): string {
   const displayName = model.display_name?.trim();
   if (displayName) return displayName;
+  const builtInDisplayName = MINIMAX_H3_DISPLAY_NAMES[model.name.toLowerCase()];
+  if (builtInDisplayName) return builtInDisplayName;
   if (isCatalogModelId(model.name)) {
     const description = model.description?.trim();
     if (description) return description;

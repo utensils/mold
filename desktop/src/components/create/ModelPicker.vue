@@ -4,6 +4,7 @@ import { useRouter } from "vue-router";
 import type { ModelEntry } from "../../lib/api/types";
 import { modelAvailabilityTag } from "../../lib/hosts";
 import { modelDisplayName, modelDisplayNameForId } from "../../lib/models";
+import { familyLabel } from "@studio/lib/modelFamily";
 import { modelSource } from "../../lib/modelSource";
 import { formatGB } from "../../lib/format";
 import { useHostModelsStore } from "../../stores/hostModels";
@@ -149,7 +150,7 @@ onBeforeUnmount(() => {
         </span>
       </button>
       <template v-for="[family, list] in families" :key="family">
-        <div class="ms-model__group">{{ family.toUpperCase() }}</div>
+        <div class="ms-model__group">{{ familyLabel(family) }}</div>
         <button
           v-for="m in list"
           :key="m.name"
@@ -227,10 +228,15 @@ onBeforeUnmount(() => {
   width: 100%;
   min-width: 16rem;
   overflow-y: auto;
+  overflow-x: hidden;
   border: 1px solid var(--edge);
   border-radius: 12px;
   background: var(--bench);
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.4);
+}
+.ms-model__option .edge-code {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .ms-model__group {
   font-family: var(--f-mono);
