@@ -943,6 +943,8 @@ const libraryPrintCount = ref(0);
 const organizationError = ref("");
 /** Accepted-request advisories stay visible until dismissed or superseded. */
 const requestAdvisories = ref<string[]>([]);
+const DURABLE_RECOVERY_STORAGE_WARNING =
+  "Recovery storage is unavailable. This generation is still being submitted, but closing the app before Mold confirms it may hide it from Create.";
 const organizationBusy = ref(false);
 const pendingGalleryMutationCount = ref(0);
 let flushingGalleryOutbox = false;
@@ -1932,13 +1934,21 @@ function durableCompleteEvent(
   };
 }
 
-function persistDurableGenerationRecoveries(): void {
-  saveMobileDurableGenerationRecoveries(
+function persistDurableGenerationRecoveries(): boolean {
+  const saved = saveMobileDurableGenerationRecoveries(
     localStorage,
     durableGenerationRecoveries.value.filter(
       (recovery) => !mobileDurableTerminalEffectsClaimed(recovery),
     ),
   );
+  if (saved) {
+    requestAdvisories.value = requestAdvisories.value.filter(
+      (warning) => warning !== DURABLE_RECOVERY_STORAGE_WARNING,
+    );
+  } else if (!requestAdvisories.value.includes(DURABLE_RECOVERY_STORAGE_WARNING)) {
+    requestAdvisories.value = [...requestAdvisories.value, DURABLE_RECOVERY_STORAGE_WARNING];
+  }
+  return saved;
 }
 
 function syncDurableGenerationJobs(): void {
@@ -2991,8 +3001,10 @@ async function submitMobileDurableGeneration(input: {
     durableGenerationRequests.set(durableGenerationKey(clientBatchId, offset + 1), request);
   }
   durableGenerationRecoveries.value = [...durableGenerationRecoveries.value, recovery];
-  // Crash/close safety boundary: the idempotency and instance identity are on
-  // disk before the first byte of POST is sent. No key, URL, body or media is.
+  // Prefer putting idempotency and instance identity on disk before the first
+  // byte of POST is sent. If Web Storage refuses, the same authority remains
+  // live in memory and this durable path still owns admission/reconciliation;
+  // no key, URL, body or media is persisted and no legacy submit is attempted.
   persistDurableGenerationRecoveries();
   syncDurableGenerationJobs();
   // Attach the per-host invalidation stream at the same crash-safe boundary.

@@ -42,6 +42,7 @@ import { sseStream } from "../lib/api/sse";
 import { apiFetchTo, apiJsonTo } from "../lib/api/client";
 import { runWithConcurrency, useGenerationStore } from "./generation";
 import { useHostsStore } from "./hosts";
+import { useToastStore } from "./toasts";
 import type { GenerateRequest } from "../lib/api/types";
 import { DURABLE_GENERATION_STORAGE_KEY } from "../lib/durableGeneration";
 import {
@@ -258,6 +259,67 @@ describe("submitBatch connection cap", () => {
     );
     expect(mockSse).not.toHaveBeenCalled();
   });
+
+  it.each(["QuotaExceededError", "SecurityError"])(
+    "admits once through the durable endpoint when recovery storage raises %s",
+    async (name) => {
+      const storage = new Map<string, string>();
+      vi.stubGlobal("localStorage", {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          if (key === DURABLE_GENERATION_STORAGE_KEY) {
+            throw Object.assign(new Error("storage unavailable"), { name });
+          }
+          storage.set(key, value);
+        },
+      });
+      const store = useGenerationStore();
+      durableApi.admit.mockImplementation(async (_target, body) => {
+        const clientBatchId = (body as { client_batch_id: string }).client_batch_id;
+        return {
+          id: "storage-failure-batch",
+          client_batch_id: clientBatchId,
+          instance_id: "instance-1",
+          durable: true,
+          children: [
+            {
+              index: 1,
+              job_id: "storage-failure-job",
+              state: "queued",
+              created_at_ms: 1,
+              updated_at_ms: 1,
+            },
+          ],
+        } as never;
+      });
+
+      const submitted = store.submitBatch(req, 1, {
+        hostId: "hal9000",
+        label: "hal9000",
+        kind: "remote",
+        target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+        instanceId: "instance-1",
+        heterogeneousBatch: true,
+        durableBatchOutcomes: true,
+        mirrorRemoteOutput: false,
+      });
+      await flushPromises();
+
+      expect(durableApi.admit).toHaveBeenCalledTimes(1);
+      expect(mockSse).not.toHaveBeenCalled();
+      expect(submitted.jobs[0]).toMatchObject({
+        id: "storage-failure-job",
+        status: "queued",
+        error: null,
+      });
+      expect(
+        useToastStore().items.some(
+          (toast) =>
+            toast.kind === "warning" && toast.message.includes("Recovery storage is unavailable"),
+        ),
+      ).toBe(true);
+    },
+  );
 
   it("admits singleton and Batch N durably without held generation streams", async () => {
     const store = useGenerationStore();

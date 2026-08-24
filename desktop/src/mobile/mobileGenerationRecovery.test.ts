@@ -182,6 +182,23 @@ describe("mobile durable generation recovery", () => {
     });
   });
 
+  it.each(["QuotaExceededError", "SecurityError"])(
+    "keeps a %s write failure out of the admission control flow",
+    (name) => {
+      const error = Object.assign(new Error("storage unavailable"), { name });
+      expect(
+        saveMobileDurableGenerationRecoveries(
+          {
+            setItem: () => {
+              throw error;
+            },
+          },
+          [recovery()],
+        ),
+      ).toBe(false);
+    },
+  );
+
   it("reconciles every tracked batch in one host request on wake", () => {
     const records = [recovery("a"), recovery("b"), recovery("c")];
     expect(buildMobileDurableHostStatusRequest(records, "host-1")).toEqual({

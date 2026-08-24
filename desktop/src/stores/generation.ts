@@ -76,6 +76,7 @@ import {
   type DurableGenerationRecoveryRecord,
 } from "../lib/durableGeneration";
 import { TargetStreamSlots } from "@studio/lib/targetStreamSlots";
+import { useToastStore } from "./toasts";
 
 export {
   applyChainProgress,
@@ -327,9 +328,22 @@ const durableReconcileAgain = new Set<string>();
 const durableCancelAttempts = new Map<string, Promise<boolean>>();
 const sharedDurableEventHosts = new Set<string>();
 let durableRecoveryLoaded = false;
+let durableRecoveryStorageUnavailable = false;
 
-function persistDurableRecords(): void {
-  saveDurableGenerationRecovery(durableRecords.values());
+const DURABLE_RECOVERY_STORAGE_WARNING =
+  "Recovery storage is unavailable. This generation is still being submitted, but reloading before Mold confirms it may hide it from Create.";
+
+function persistDurableRecords(): boolean {
+  const saved = saveDurableGenerationRecovery(durableRecords.values());
+  if (saved) {
+    durableRecoveryStorageUnavailable = false;
+    return true;
+  }
+  if (!durableRecoveryStorageUnavailable) {
+    useToastStore().push(DURABLE_RECOVERY_STORAGE_WARNING, "warning");
+  }
+  durableRecoveryStorageUnavailable = true;
+  return false;
 }
 
 function durableClientBatchId(): string {
@@ -1138,19 +1152,12 @@ export const useGenerationStore = defineStore("generation", {
         );
         const settlement = createDurableSettlement();
         durableSettlements.set(clientBatchId, settlement);
-        // Crash authority exists before the first byte of the POST leaves.
-        try {
-          persistDurableRecords();
-        } catch (error) {
-          durableRecords.delete(clientBatchId);
-          durableJobIds.delete(clientBatchId);
-          durableSettlements.delete(clientBatchId);
-          for (const job of jobs) {
-            settleJob(job, "error");
-            job.error = "Could not save durable recovery authority before submission.";
-          }
-          throw error;
-        }
+        // Prefer putting crash authority on disk before the first byte of the
+        // POST leaves. If Web Storage rejects the write, retain the same UUID
+        // and instance fence in memory and continue through this durable path;
+        // a client-side quota/privacy failure cannot veto valid host work or
+        // redirect it into the legacy endpoint.
+        persistDurableRecords();
         void this.admitDurableRecord(record, plans);
         const settled = settlement.promise.then((settledJobs) => {
           this.pendingConsumerBatchIds = this.pendingConsumerBatchIds.filter(
@@ -1557,6 +1564,7 @@ export const useGenerationStore = defineStore("generation", {
       durableJobIds.clear();
       durableSettlements.clear();
       durableRecords.clear();
+      durableRecoveryStorageUnavailable = false;
       sharedDurableEventHosts.clear();
       durableRecoveryLoaded = false;
       targets.clear();

@@ -102,6 +102,20 @@ describe("desktop durable generation recovery", () => {
     ).toBe("client-1");
   });
 
+  it.each(["QuotaExceededError", "SecurityError"])(
+    "degrades recovery without throwing when storage raises %s",
+    (name) => {
+      const error = Object.assign(new Error("storage unavailable"), { name });
+      expect(
+        saveDurableGenerationRecovery([], {
+          setItem: () => {
+            throw error;
+          },
+        }),
+      ).toBe(false);
+    },
+  );
+
   it("parses the authority and explicit event-gap contract fail-closed", () => {
     expect(parseEventAuthority('{"instance_id":"instance-1"}')).toEqual({
       instanceId: "instance-1",

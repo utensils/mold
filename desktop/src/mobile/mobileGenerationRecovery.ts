@@ -207,8 +207,16 @@ export function loadMobileDurableGenerationRecoveries(
 export function saveMobileDurableGenerationRecoveries(
   storage: Pick<Storage, "setItem">,
   records: readonly MobileDurableGenerationRecovery[],
-): void {
-  storage.setItem(MOBILE_DURABLE_GENERATIONS_KEY, JSON.stringify(records));
+): boolean {
+  try {
+    storage.setItem(MOBILE_DURABLE_GENERATIONS_KEY, JSON.stringify(records));
+    return true;
+  } catch {
+    // A WebView may reject localStorage in privacy mode or at quota. Keep the
+    // live, byte-free authority record in memory so this session can still
+    // reconcile by UUID; storage availability cannot veto server admission.
+    return false;
+  }
 }
 
 /** Decide against the exact frozen host capability. Unsupported media stays

@@ -7,6 +7,7 @@ import type { GalleryImage, ModelEntry, ServerStatus } from "../lib/api/types";
 import { applyModelDefaults, newGenerateForm, type GenerateForm } from "../lib/generateForm";
 import { saveGenerationTemplate } from "../lib/generationTemplates";
 import { MOBILE_GENERATION_TEMPLATES_STORAGE_KEY } from "./mobileTemplateStorage";
+import { MOBILE_DURABLE_GENERATIONS_KEY } from "./mobileGenerationRecovery";
 import {
   loadCachedGallery,
   storeCachedGallery,
@@ -388,6 +389,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   wrapper?.unmount();
   wrapper = null;
   document.body.innerHTML = "";
@@ -1667,6 +1669,78 @@ describe("MobileApp generation queue", () => {
     }
     await flushPromises();
   });
+
+  it.each(["QuotaExceededError", "SecurityError"])(
+    "admits once through the durable endpoint and warns when recovery storage raises %s",
+    async (name) => {
+      apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+        if (path === "/api/status") return Promise.resolve(status);
+        if (path === "/api/models") return Promise.resolve([model]);
+        if (path === "/api/gallery") return Promise.resolve([print]);
+        if (path === "/api/capabilities") {
+          return Promise.resolve({
+            events: { available: true },
+            queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+          });
+        }
+        if (path === "/api/activity") {
+          return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+        }
+        if (path === "/api/generation-batches" && init?.method === "POST") {
+          const clientBatchId = JSON.parse(String(init.body)).client_batch_id as string;
+          return Promise.resolve({
+            id: "storage-failure-batch",
+            client_batch_id: clientBatchId,
+            instance_id: "studio-id",
+            durable: true,
+            children: [
+              {
+                index: 1,
+                job_id: "storage-failure-job",
+                state: "queued",
+                created_at_ms: 1,
+                updated_at_ms: 1,
+              },
+            ],
+          });
+        }
+        return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      });
+
+      wrapper = mountMobileApp();
+      await flushPromises();
+      const storage = localStorage;
+      vi.stubGlobal("localStorage", {
+        get length() {
+          return storage.length;
+        },
+        clear: () => storage.clear(),
+        getItem: (key: string) => storage.getItem(key),
+        key: (index: number) => storage.key(index),
+        removeItem: (key: string) => storage.removeItem(key),
+        setItem: (key: string, value: string) => {
+          if (key === MOBILE_DURABLE_GENERATIONS_KEY) {
+            throw Object.assign(new Error("storage unavailable"), { name });
+          }
+          storage.setItem(key, value);
+        },
+      });
+
+      await submitPrompt("storage must not veto this print");
+
+      const durablePosts = apiJsonTo.mock.calls.filter(
+        ([, path, init]) => path === "/api/generation-batches" && init?.method === "POST",
+      );
+      expect(durablePosts).toHaveLength(1);
+      expect(openStreams.filter((stream) => stream.path === "/api/generate/stream")).toHaveLength(
+        0,
+      );
+      expect(wrapper.get("[data-test='mobile-generation-job']").text()).toContain("QUEUED");
+      expect(wrapper.get("[data-test='mobile-request-advisories']").text()).toContain(
+        "Recovery storage is unavailable",
+      );
+    },
+  );
 
   it("posts supported source media to the durable batch lifecycle without persisting or streaming it", async () => {
     const imageModel: ModelEntry = {

@@ -110,13 +110,22 @@ export function saveDurableGenerationRecovery(
   storage: Pick<Storage, "setItem"> | null = typeof localStorage === "undefined"
     ? null
     : localStorage,
-): void {
-  if (!storage) return;
+): boolean {
+  if (!storage) return false;
   const envelope: DurableGenerationRecoveryEnvelope = {
     version: 1,
     records: [...records],
   };
-  storage.setItem(DURABLE_GENERATION_STORAGE_KEY, JSON.stringify(envelope));
+  try {
+    storage.setItem(DURABLE_GENERATION_STORAGE_KEY, JSON.stringify(envelope));
+    return true;
+  } catch {
+    // Web Storage can synchronously reject writes in privacy mode or when its
+    // quota is exhausted. Recovery then degrades to this process's in-memory
+    // UUID/instance tracker; it must never become permission to skip durable
+    // server admission or fall back to a second, legacy submission.
+    return false;
+  }
 }
 
 export function parseEventAuthority(data: string): { instanceId: string } | null {
