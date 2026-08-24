@@ -2628,7 +2628,18 @@ button:disabled {
   border: 0;
   padding: 0;
   overflow: hidden;
-  background: var(--color-print-surface);
+  background-color: color-mix(in srgb, var(--color-print-surface) 82%, var(--safelight) 18%);
+  background-image:
+    radial-gradient(
+      circle at 28% 24%,
+      color-mix(in srgb, var(--halide) 16%, transparent),
+      transparent 34%
+    ),
+    radial-gradient(
+      circle at 72% 76%,
+      color-mix(in srgb, var(--safelight) 14%, transparent),
+      transparent 38%
+    );
   border-radius: 9px;
   touch-action: manipulation;
   -webkit-touch-callout: default;
@@ -2653,12 +2664,20 @@ button:disabled {
 
 .gallery-thumbnail-pending {
   position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
   color: var(--ink-3);
   font-family: var(--font-utility);
-  font-size: 20px;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: max-content;
+  height: max-content;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--ink-3) 22%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-print-surface) 78%, transparent);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .gallery-video-badge {

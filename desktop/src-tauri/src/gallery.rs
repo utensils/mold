@@ -228,6 +228,7 @@ fn scan(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
                 timestamp,
                 format: Some(file.format),
                 size_bytes: Some(size_bytes),
+                media_version: Some(format!("{timestamp}:{size_bytes}")),
                 metadata_synthetic: synthetic,
                 title: None,
                 tags: Vec::new(),

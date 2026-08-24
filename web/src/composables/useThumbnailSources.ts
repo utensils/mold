@@ -32,7 +32,9 @@ export function useThumbnailSources() {
     const resolved = remoteSrc.get(key);
     if (resolved !== undefined) return resolved;
     if (!requested.has(key)) {
-      const mediaVersion = `${entry.timestamp}:${entry.size_bytes ?? "unknown"}`;
+      const mediaVersion =
+        entry.media_version ??
+        `${entry.timestamp}:${entry.size_bytes ?? "unknown"}`;
       const handle = galleryThumbnailScheduler.schedule({
         key: `${host.id}|${entry.filename}|${mediaVersion}`,
         hostKey: host.id,

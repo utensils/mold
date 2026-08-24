@@ -86,6 +86,11 @@ pub enum BackgroundEvent {
     PullComplete(String),
     /// Background thumbnail generation finished.
     ThumbnailsReady,
+    /// One visible grid thumbnail finished decoding off the render path.
+    GalleryThumbnailReady {
+        path: std::path::PathBuf,
+        image: Option<image::DynamicImage>,
+    },
     /// Gallery image bytes fetched from server for preview.
     GalleryPreviewReady(Vec<u8>),
     /// Remote server health check + model list succeeded.
@@ -1328,6 +1333,12 @@ pub struct GalleryState {
     pub view_mode: GalleryViewMode,
     /// Thumbnail StatefulProtocol instances, lazily populated during render.
     pub thumbnail_states: Vec<Option<StatefulProtocol>>,
+    /// Source paths currently queued for off-thread thumbnail decode.
+    pub thumbnail_loading: std::collections::HashSet<std::path::PathBuf>,
+    /// Most-recently decoded grid entries. Keeps image protocols bounded.
+    pub thumbnail_lru: std::collections::VecDeque<usize>,
+    /// Selected print's predecoded thumbnail protocol for the details panel.
+    pub details_thumbnail_state: Option<(usize, StatefulProtocol, (u32, u32))>,
     /// Actual thumbnail pixel dimensions (width, height), populated when loaded.
     pub thumb_dimensions: Vec<Option<(u32, u32)>>,
     /// Cached fixed-protocol renders for centered grid thumbnails.
@@ -1372,6 +1383,9 @@ impl Default for GalleryState {
             scanning: false,
             view_mode: GalleryViewMode::Grid,
             thumbnail_states: Vec::new(),
+            thumbnail_loading: std::collections::HashSet::new(),
+            thumbnail_lru: std::collections::VecDeque::new(),
+            details_thumbnail_state: None,
             thumb_dimensions: Vec::new(),
             thumb_fixed_cache: Vec::new(),
             grid_cols: 3,
@@ -5634,6 +5648,9 @@ impl App {
         self.gallery.thumbnail_states = vec![None; entries.len()];
         self.gallery.thumb_dimensions = vec![None; entries.len()];
         self.gallery.thumb_fixed_cache = vec![None; entries.len()];
+        self.gallery.thumbnail_loading.clear();
+        self.gallery.thumbnail_lru.clear();
+        self.gallery.details_thumbnail_state = None;
         self.gallery.details_thumb = None;
         self.gallery.entries = entries;
         self.gallery.scanning = false;
@@ -8275,86 +8292,6 @@ impl App {
                     self.gallery.offline_hosts = scan.offline_hosts;
                     self.gallery.local_trash_available = scan.local_trash_available;
                     self.apply_gallery_scan(scan.entries);
-
-                    // Spawn background thumbnail generation. Remote
-                    // thumbnails are fetched from the entry's primary
-                    // origin with that host's saved API key.
-                    let entries_info: Vec<(std::path::PathBuf, Option<(String, String)>)> = self
-                        .gallery
-                        .entries
-                        .iter()
-                        .map(|e| {
-                            let origin = e.primary_origin();
-                            let remote = origin.url.map(|url| (url, origin.host_id));
-                            (e.path.clone(), remote)
-                        })
-                        .collect();
-                    let tx = self.bg_tx.clone();
-                    self.tokio_handle.spawn(async move {
-                        // Spawn all thumbnail fetches concurrently
-                        let mut handles = Vec::new();
-                        for (path, remote) in entries_info {
-                            if crate::thumbnails::thumbnail_exists(&path) {
-                                continue;
-                            }
-                            let handle = tokio::spawn(async move {
-                                let filename = path
-                                    .file_name()
-                                    .map(|f| f.to_string_lossy().to_string())
-                                    .unwrap_or_default();
-                                if let Some((url, host_id)) = remote {
-                                    // Fetch pre-generated thumbnail from server (fast, ~10KB)
-                                    let api_key = crate::hosts::api_key_for(&host_id);
-                                    let client = crate::hosts::client_for(&url, api_key.as_deref());
-                                    let fetched = if let Ok(data) =
-                                        client.get_gallery_thumbnail(&filename).await
-                                    {
-                                        let key = path.clone();
-                                        tokio::task::spawn_blocking(move || {
-                                            crate::thumbnails::save_thumbnail_bytes(&data, &key)
-                                                .ok();
-                                        })
-                                        .await
-                                        .ok();
-                                        true
-                                    } else {
-                                        false
-                                    };
-
-                                    // Fallback: generate from locally cached image if server fetch failed
-                                    if !fetched {
-                                        let cache_path = crate::gallery_scan::cached_image_path(
-                                            &host_id, &filename,
-                                        );
-                                        if cache_path.is_file() {
-                                            let key = path;
-                                            tokio::task::spawn_blocking(move || {
-                                                crate::thumbnails::generate_thumbnail_from_cached(
-                                                    &cache_path,
-                                                    &key,
-                                                )
-                                                .ok();
-                                            })
-                                            .await
-                                            .ok();
-                                        }
-                                    }
-                                } else {
-                                    // Local file — generate thumbnail directly
-                                    tokio::task::spawn_blocking(move || {
-                                        crate::thumbnails::generate_thumbnail(&path).ok();
-                                    })
-                                    .await
-                                    .ok();
-                                }
-                            });
-                            handles.push(handle);
-                        }
-                        for h in handles {
-                            let _ = h.await;
-                        }
-                        let _ = tx.send(BackgroundEvent::ThumbnailsReady);
-                    });
                 }
                 BackgroundEvent::GalleryPreviewReady(data) => {
                     let mut installed_animation = false;
@@ -8385,7 +8322,56 @@ impl App {
                     self.gallery.thumbnail_states = vec![None; len];
                     self.gallery.thumb_dimensions = vec![None; len];
                     self.gallery.thumb_fixed_cache = vec![None; len];
+                    self.gallery.thumbnail_loading.clear();
+                    self.gallery.thumbnail_lru.clear();
+                    self.gallery.details_thumbnail_state = None;
                     self.gallery.details_thumb = None;
+                }
+                BackgroundEvent::GalleryThumbnailReady { path, image } => {
+                    self.gallery.thumbnail_loading.remove(&path);
+                    let Some(image) = image else {
+                        continue;
+                    };
+                    let Some(index) = self
+                        .gallery
+                        .entries
+                        .iter()
+                        .position(|entry| entry.path == path)
+                    else {
+                        continue;
+                    };
+                    if index >= self.gallery.thumbnail_states.len() {
+                        continue;
+                    }
+                    self.gallery.thumb_dimensions[index] = Some((image.width(), image.height()));
+                    if index == self.gallery.selected {
+                        self.gallery.details_thumbnail_state = Some((
+                            index,
+                            self.picker.new_resize_protocol(image.clone()),
+                            (image.width(), image.height()),
+                        ));
+                    }
+                    self.gallery.thumbnail_states[index] =
+                        Some(self.picker.new_resize_protocol(image));
+                    self.gallery.thumbnail_lru.retain(|cached| *cached != index);
+                    self.gallery.thumbnail_lru.push_back(index);
+                    while self.gallery.thumbnail_lru.len() > 64 {
+                        let Some(victim) = self.gallery.thumbnail_lru.pop_front() else {
+                            break;
+                        };
+                        if victim == self.gallery.selected {
+                            self.gallery.thumbnail_lru.push_back(victim);
+                            continue;
+                        }
+                        if victim < self.gallery.thumbnail_states.len() {
+                            self.gallery.thumbnail_states[victim] = None;
+                            self.gallery.thumb_dimensions[victim] = None;
+                            self.gallery.thumb_fixed_cache[victim] = None;
+                        }
+                    }
+                    if index < self.gallery.thumb_fixed_cache.len() {
+                        self.gallery.thumb_fixed_cache[index] = None;
+                    }
                 }
                 BackgroundEvent::ServerConnected { url, models } => {
                     self.connecting = false;

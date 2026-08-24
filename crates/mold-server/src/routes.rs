@@ -5893,6 +5893,9 @@ async fn server_capabilities(
         }),
         organize: db_available,
         bulk_mutations: db_available,
+        media_version: true,
+        conditional_get: true,
+        row_events: true,
     };
     Json(mold_core::ServerCapabilities {
         generation_profile_v1: true,
@@ -7597,8 +7600,9 @@ impl GalleryView {
 /// (trash).
 async fn list_gallery(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<GalleryListQuery>,
-) -> Result<Json<Vec<mold_core::GalleryImage>>, ApiError> {
+) -> Result<Response, ApiError> {
     // Query-time DB recovery is serialized by the DB recovery lock. The
     // shared gallery side excludes an atomic batch publication without
     // needlessly serializing ordinary listings and media reads.
@@ -7606,14 +7610,14 @@ async fn list_gallery(
     let view = GalleryView::parse(query.view.as_deref())?;
     let config = state.config.read().await;
     if state.is_output_disabled(&config) {
-        return Ok(Json(Vec::new()));
+        return gallery_list_response(&headers, Vec::new());
     }
     let output_dir = config.effective_output_dir();
     let retention_days = config.gallery.effective_trash_retention_days();
     drop(config);
 
     if !output_dir.is_dir() {
-        return Ok(Json(Vec::new()));
+        return gallery_list_response(&headers, Vec::new());
     }
 
     if state.metadata_db.is_some() {
@@ -7666,13 +7670,13 @@ async fn list_gallery(
         .map_err(|e| ApiError::internal(format!("gallery DB query failed: {e}")))?
         .map_err(|e| ApiError::internal(format!("gallery DB query failed: {e:#}")))?;
         if let Some(images) = listed {
-            return Ok(Json(images));
+            return gallery_list_response(&headers, images);
         }
     }
 
     if view == GalleryView::Trash {
         // No trash index without the metadata DB.
-        return Ok(Json(Vec::new()));
+        return gallery_list_response(&headers, Vec::new());
     }
 
     let gallery_archive = state.gallery_publication_gate.clone();
@@ -7684,7 +7688,35 @@ async fn list_gallery(
     .map_err(|e| ApiError::internal(format!("gallery scan failed: {e}")))?
     .map_err(|e| ApiError::internal(format!("gallery archive validation failed: {e:#}")))?;
 
-    Ok(Json(images))
+    gallery_list_response(&headers, images)
+}
+
+fn gallery_list_response(
+    request_headers: &HeaderMap,
+    images: Vec<mold_core::GalleryImage>,
+) -> Result<Response, ApiError> {
+    let body = serde_json::to_vec(&images)
+        .map_err(|error| ApiError::internal(format!("gallery serialization failed: {error}")))?;
+    let etag = format!("\"{:x}\"", Sha256::digest(&body));
+    let unchanged = request_headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|candidate| candidate.trim() == etag));
+
+    let mut builder = Response::builder()
+        .header(header::ETAG, &etag)
+        .header(header::CACHE_CONTROL, "private, no-cache");
+    if unchanged {
+        builder = builder.status(StatusCode::NOT_MODIFIED);
+        return builder
+            .body(Body::empty())
+            .map_err(|error| ApiError::internal(format!("gallery response failed: {error}")));
+    }
+    builder
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .map_err(|error| ApiError::internal(format!("gallery response failed: {error}")))
 }
 
 /// Serve a gallery file by filename.
@@ -7873,8 +7905,9 @@ fn content_type_for_filename(name: &str) -> &'static str {
 /// at ~/.mold/cache/thumbnails/ on the server side.
 async fn get_gallery_thumbnail(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::extract::Path(filename): axum::extract::Path<String>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<Response, ApiError> {
     let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
     if state.is_output_disabled(&config) {
@@ -7899,31 +7932,52 @@ async fn get_gallery_thumbnail(
         )));
     }
 
+    let source_metadata = tokio::fs::metadata(&source_path)
+        .await
+        .map_err(|error| ApiError::internal(format!("failed to stat gallery media: {error}")))?;
+    let media_version = file_media_version(&source_metadata);
+    let etag = format!("\"thumb-{media_version}\"");
+
     // Thumbnail cache path: always `.png` regardless of the source extension,
     // so mp4 / gif / apng / webp / jpg all coexist cleanly in the same cache
     // dir and `image.save()` doesn't pick the wrong format from the path.
     let thumb_dir = server_thumbnail_dir();
-    let thumb_path = thumb_dir.join(format!("{clean_name}.png"));
     let lower = clean_name.to_ascii_lowercase();
     let is_video = lower.ends_with(".mp4");
     // Audio outputs ship a waveform PNG written into the thumbnail cache at
     // save time — there is nothing in a WAV for a raster decoder to read, so
     // a missing cache entry goes straight to the placeholder.
     let is_audio = lower.ends_with(".wav");
+    let thumb_path = if is_audio {
+        thumb_dir.join(format!("{clean_name}.png"))
+    } else {
+        versioned_thumbnail_path(&thumb_dir, &clean_name, &media_version)
+    };
     if is_audio && !thumb_path.is_file() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("image/svg+xml"),
+        return thumbnail_response(
+            &headers,
+            "image/svg+xml",
+            "public, max-age=300",
+            &etag,
+            AUDIO_PLACEHOLDER_SVG.as_bytes().to_vec(),
         );
-        headers.insert(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("public, max-age=300"),
-        );
-        return Ok((headers, AUDIO_PLACEHOLDER_SVG.as_bytes().to_vec()));
     }
 
     if !thumb_path.is_file() {
+        let singleflight = thumbnail_singleflight(&thumb_path);
+        let _singleflight_guard = singleflight.lock().await;
+        if thumb_path.is_file() {
+            let data = tokio::fs::read(&thumb_path)
+                .await
+                .map_err(|e| ApiError::internal(format!("failed to read thumbnail: {e}")))?;
+            return thumbnail_response(
+                &headers,
+                "image/png",
+                "public, max-age=31536000, immutable",
+                &etag,
+                data,
+            );
+        }
         // Generate thumbnail on-demand. Videos go through openh264 for a real
         // first-frame extract; everything else decodes via the `image` crate.
         // If either path fails, we fall back to serving the source bytes
@@ -7952,30 +8006,24 @@ async fn get_gallery_thumbnail(
             // either, so serving the source doesn't help — fall back to the
             // SVG play-icon placeholder instead.
             if is_video {
-                let mut headers = HeaderMap::new();
-                headers.insert(
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static("image/svg+xml"),
+                return thumbnail_response(
+                    &headers,
+                    "image/svg+xml",
+                    "public, max-age=300",
+                    &etag,
+                    VIDEO_PLACEHOLDER_SVG.as_bytes().to_vec(),
                 );
-                headers.insert(
-                    header::CACHE_CONTROL,
-                    HeaderValue::from_static("public, max-age=300"),
-                );
-                return Ok((headers, VIDEO_PLACEHOLDER_SVG.as_bytes().to_vec()));
             }
             let raw = tokio::fs::read(&source_path)
                 .await
                 .map_err(|e| ApiError::internal(format!("failed to read source: {e}")))?;
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static(content_type_for_filename(&clean_name)),
+            return thumbnail_response(
+                &headers,
+                content_type_for_filename(&clean_name),
+                "public, max-age=300",
+                &etag,
+                raw,
             );
-            headers.insert(
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=300"),
-            );
-            return Ok((headers, raw));
         }
     }
 
@@ -7983,14 +8031,78 @@ async fn get_gallery_thumbnail(
         .await
         .map_err(|e| ApiError::internal(format!("failed to read thumbnail: {e}")))?;
 
-    let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=3600"),
-    );
+    thumbnail_response(
+        &headers,
+        "image/png",
+        "public, max-age=31536000, immutable",
+        &etag,
+        data,
+    )
+}
 
-    Ok((headers, data))
+fn file_media_version(metadata: &std::fs::Metadata) -> String {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    format!("{modified}-{}", metadata.len())
+}
+
+fn versioned_thumbnail_path(
+    thumb_dir: &std::path::Path,
+    filename: &str,
+    media_version: &str,
+) -> std::path::PathBuf {
+    let key = Sha256::digest(format!("{filename}:{media_version}").as_bytes());
+    thumb_dir.join(format!("{key:x}.png"))
+}
+
+fn thumbnail_singleflight(path: &std::path::Path) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    static FLIGHTS: std::sync::LazyLock<
+        std::sync::Mutex<
+            std::collections::HashMap<std::path::PathBuf, std::sync::Weak<tokio::sync::Mutex<()>>>,
+        >,
+    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut flights = FLIGHTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    flights.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = flights.get(path).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    flights.insert(path.to_path_buf(), std::sync::Arc::downgrade(&lock));
+    lock
+}
+
+fn thumbnail_response(
+    request_headers: &HeaderMap,
+    content_type: &'static str,
+    cache_control: &'static str,
+    etag: &str,
+    bytes: Vec<u8>,
+) -> Result<Response, ApiError> {
+    let unchanged = request_headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|candidate| candidate.trim() == etag));
+    let mut builder = Response::builder()
+        .header(header::ETAG, etag)
+        .header(header::CACHE_CONTROL, cache_control);
+    if unchanged {
+        builder = builder.status(StatusCode::NOT_MODIFIED);
+        return builder
+            .body(Body::empty())
+            .map_err(|error| ApiError::internal(format!("thumbnail response failed: {error}")));
+    }
+    builder
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, bytes.len())
+        .body(Body::from(bytes))
+        .map_err(|error| ApiError::internal(format!("thumbnail response failed: {error}")))
 }
 
 const AUDIO_PLACEHOLDER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><defs><linearGradient id="a" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e293b"/><stop offset="1" stop-color="#0f172a"/></linearGradient></defs><rect width="256" height="256" fill="url(#a)"/><g fill="rgba(226,232,240,0.85)"><rect x="52" y="112" width="8" height="32" rx="4"/><rect x="72" y="92" width="8" height="72" rx="4"/><rect x="92" y="68" width="8" height="120" rx="4"/><rect x="112" y="100" width="8" height="56" rx="4"/><rect x="132" y="76" width="8" height="104" rx="4"/><rect x="152" y="104" width="8" height="48" rx="4"/><rect x="172" y="86" width="8" height="84" rx="4"/><rect x="192" y="116" width="8" height="24" rx="4"/></g></svg>"##;
@@ -8175,7 +8287,17 @@ fn warm_gallery_thumbnails(
                         .file_name()
                         .map(|f| f.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    let thumb_path = thumb_dir.join(format!("{filename}.png"));
+                    let thumb_path = entry
+                        .metadata()
+                        .ok()
+                        .map(|metadata| {
+                            versioned_thumbnail_path(
+                                thumb_dir,
+                                &filename,
+                                &file_media_version(&metadata),
+                            )
+                        })
+                        .unwrap_or_else(|| thumb_dir.join(format!("{filename}.png")));
                     if !thumb_path.is_file() {
                         let result = if is_video {
                             generate_video_thumbnail(path, &thumb_path)
@@ -8226,8 +8348,8 @@ pub fn spawn_thumbnail_warmup(
 
 fn thumbnail_warmup_enabled() -> bool {
     std::env::var("MOLD_THUMBNAIL_WARMUP")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false)
+        .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
+        .unwrap_or(true)
 }
 
 /// Scan a directory for gallery outputs (images + videos).
@@ -8286,6 +8408,7 @@ fn scan_gallery_dir_with_archive(
                 timestamp,
                 format: Some(file.format),
                 size_bytes: Some(size_bytes),
+                media_version: Some(format!("{timestamp}:{size_bytes}")),
                 metadata_synthetic: synthetic,
                 title: None,
                 tags: Vec::new(),
@@ -9984,12 +10107,45 @@ mod tests {
     }
 
     #[test]
-    fn thumbnail_warmup_is_disabled_by_default() {
+    fn thumbnail_warmup_is_enabled_by_default() {
         let _guard = env_lock().lock().unwrap();
         unsafe {
             std::env::remove_var("MOLD_THUMBNAIL_WARMUP");
         }
-        assert!(!thumbnail_warmup_enabled());
+        assert!(thumbnail_warmup_enabled());
+    }
+
+    #[tokio::test]
+    async fn gallery_list_etag_returns_unchanged_without_a_body() {
+        let first = gallery_list_response(&HeaderMap::new(), Vec::new()).unwrap();
+        let etag = first.headers().get(header::ETAG).unwrap().clone();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_NONE_MATCH, etag);
+        let second = gallery_list_response(&headers, Vec::new()).unwrap();
+        assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
+        let bytes = axum::body::to_bytes(second.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn thumbnail_cache_identity_changes_with_media_version() {
+        let dir = std::path::Path::new("/tmp/thumbs");
+        let first = versioned_thumbnail_path(dir, "cat.png", "1-100");
+        let second = versioned_thumbnail_path(dir, "cat.png", "2-100");
+        assert_ne!(first, second);
+        assert_eq!(first, versioned_thumbnail_path(dir, "cat.png", "1-100"));
+    }
+
+    #[test]
+    fn concurrent_thumbnail_misses_share_one_flight() {
+        let path = std::path::Path::new("/tmp/thumbs/singleflight.png");
+        let first = thumbnail_singleflight(path);
+        let second = thumbnail_singleflight(path);
+        assert!(Arc::ptr_eq(&first, &second));
     }
 
     #[test]

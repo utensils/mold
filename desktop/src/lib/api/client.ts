@@ -1,7 +1,13 @@
 import { useConnectionStore } from "../../stores/connection";
 import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "@studio/api/client";
 
-export { ApiError, apiFetchTo, apiHeaders, apiJsonTo } from "@studio/api/client";
+export {
+  ApiError,
+  apiFetchTo,
+  apiHeaders,
+  apiJsonTo,
+  conditionalApiJsonTo,
+} from "@studio/api/client";
 export type { ApiTarget } from "@studio/api/client";
 
 /** Resolve the current engine target or throw a directed error. */

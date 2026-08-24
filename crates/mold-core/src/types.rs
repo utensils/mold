@@ -7568,6 +7568,11 @@ pub struct GalleryImage {
     /// On-disk size in bytes, for UI display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
+    /// Stable identity for the current media bytes. Clients use this in
+    /// thumbnail cache keys so replacing a file in place cannot show stale
+    /// pixels. Older servers omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_version: Option<String>,
     /// True when `metadata` was synthesized (no mold:parameters chunk found).
     #[serde(default, skip_serializing_if = "is_false")]
     pub metadata_synthetic: bool,
@@ -7867,6 +7872,17 @@ pub struct GalleryCapabilities {
     /// available. Absent means clients use the legacy routes.
     #[serde(default, skip_serializing_if = "is_false")]
     pub bulk_mutations: bool,
+    /// Gallery rows include `media_version`, and thumbnail responses expose
+    /// validators derived from the same file identity.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub media_version: bool,
+    /// Gallery list and thumbnail endpoints support `If-None-Match`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub conditional_get: bool,
+    /// Gallery SSE add/update events carry complete rows, allowing clients to
+    /// update in place instead of polling the complete library.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub row_events: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -9242,6 +9258,7 @@ mod server_event_tests {
                 timestamp: 1_700_000_000,
                 format: Some(OutputFormat::Png),
                 size_bytes: Some(123),
+                media_version: Some("1700000000000:123".into()),
                 metadata_synthetic: false,
                 title: None,
                 tags: Vec::new(),
@@ -9276,6 +9293,7 @@ mod server_event_tests {
             timestamp: 1_700_000_000,
             format: Some(OutputFormat::Png),
             size_bytes: Some(123),
+            media_version: Some("1700000000000:123".into()),
             metadata_synthetic: false,
             title: Some("Smurf village".into()),
             tags: vec!["blue".into(), "cartoon".into()],
@@ -9561,6 +9579,9 @@ mod server_event_tests {
             }),
             organize: true,
             bulk_mutations: true,
+            media_version: true,
+            conditional_get: true,
+            row_events: true,
         };
         let wire = serde_json::to_value(&full).unwrap();
         assert_eq!(
@@ -9569,7 +9590,10 @@ mod server_event_tests {
                 "can_delete": true,
                 "trash": {"enabled": true, "retention_days": 30},
                 "organize": true,
-                "bulk_mutations": true
+                "bulk_mutations": true,
+                "media_version": true,
+                "conditional_get": true,
+                "row_events": true
             })
         );
         let back: GalleryCapabilities = serde_json::from_value(wire).unwrap();

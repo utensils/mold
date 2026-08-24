@@ -2462,6 +2462,7 @@ mod tests {
             timestamp,
             format: Some(OutputFormat::Png),
             size_bytes: Some(123),
+            media_version: Some(format!("{timestamp}:123")),
             metadata_synthetic: false,
             title: None,
             tags: Vec::new(),

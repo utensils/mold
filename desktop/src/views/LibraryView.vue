@@ -2144,7 +2144,10 @@ onUnmounted(() => {
                 "
                 :target="targetFor(laid.entry)"
                 :cache-key="laid.entry.sourceKey"
-                :media-version="`${laid.item.timestamp}:${laid.item.size_bytes ?? 'unknown'}`"
+                :media-version="
+                  laid.item.media_version ??
+                  `${laid.item.timestamp}:${laid.item.size_bytes ?? 'unknown'}`
+                "
                 :video="
                   gallery.mediaSourceOf(laid.entry.sourceKey) === 'local' && isVideo(laid.item)
                 "

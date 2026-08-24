@@ -125,5 +125,38 @@ onUnmounted(() => {
   <div v-else-if="failed" class="flex h-full w-full items-center justify-center bg-bench">
     <span class="edge-code">UNREADABLE</span>
   </div>
-  <div v-else class="grain-shimmer h-full w-full" />
+  <div v-else class="media-placeholder grain-shimmer h-full w-full" aria-hidden="true">
+    <span>Loading preview</span>
+  </div>
 </template>
+
+<style scoped>
+.media-placeholder {
+  display: grid;
+  place-items: center;
+  background-color: color-mix(in srgb, var(--bench) 82%, var(--safelight) 18%);
+  background-image:
+    radial-gradient(
+      circle at 28% 24%,
+      color-mix(in srgb, var(--halide) 16%, transparent),
+      transparent 34%
+    ),
+    radial-gradient(
+      circle at 72% 76%,
+      color-mix(in srgb, var(--safelight) 14%, transparent),
+      transparent 38%
+    );
+}
+
+.media-placeholder span {
+  border: 1px solid color-mix(in srgb, var(--rebate) 20%, transparent);
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: color-mix(in srgb, var(--bench) 78%, transparent);
+  color: var(--ink-3);
+  font-family: var(--f-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+</style>

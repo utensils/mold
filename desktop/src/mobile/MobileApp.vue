@@ -5700,7 +5700,7 @@ function scheduleGalleryThumbnailRetry(print: GalleryPrint, attempt = 0): void {
 function loadGalleryThumbnail(print: GalleryPrint, failedAttempts = 0): void {
   const key = galleryThumbnailRetryKey(print);
   if (galleryThumbnailHandles.has(key) || !print.thumbnailPending) return;
-  const mediaVersion = `${print.timestamp}:${print.size_bytes ?? "unknown"}`;
+  const mediaVersion = print.media_version ?? `${print.timestamp}:${print.size_bytes ?? "unknown"}`;
   const handle = galleryThumbnailScheduler.schedule({
     key: `${print.cacheKey}|${print.filename}|${mediaVersion}`,
     hostKey: print.cacheKey,
@@ -9882,7 +9882,7 @@ onBeforeUnmount(() => {
                     class="gallery-thumbnail-pending"
                     data-test="gallery-thumbnail-pending"
                     aria-hidden="true"
-                    >↻</span
+                    >Loading preview</span
                   >
                   <span
                     v-if="isVideoItem(print) || isAudioItem(print)"

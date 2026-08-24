@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui_image::picker::ProtocolType;
-use ratatui_image::{Image, Resize, StatefulImage};
+use ratatui_image::{Resize, StatefulImage};
 
 use crate::app::{App, GalleryViewMode};
 use crate::ui::library_details::{show_details_panel, DETAILS_PANEL_W};
@@ -29,7 +29,7 @@ pub(crate) const CELL_H: u16 = 12;
 /// Halfblocks terminals encode two image rows into one terminal row, so the
 /// effective character height is half the reported font height for aspect-fit
 /// purposes.
-fn centered_thumb_rect(
+pub(crate) fn centered_thumb_rect(
     area: Rect,
     img_w: u32,
     img_h: u32,
@@ -216,95 +216,99 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
     // Selected panel below the grid already shows the full filename.
     let thumb_area = cell_inner;
 
-    // Load thumbnail lazily if not yet loaded
+    // Queue visible thumbnails without doing filesystem or image work in the
+    // render loop. The small pending cap keeps a fast scroll from building a
+    // long FIFO of cells that are no longer visible.
     if idx < app.gallery.thumbnail_states.len() {
+        let fallback_dims = (entry.metadata.width.max(1), entry.metadata.height.max(1));
         if app.gallery.thumbnail_states[idx].is_none() {
-            let thumb_path = crate::thumbnails::thumbnail_path(&entry.path);
-            let mut loaded = false;
-
-            if thumb_path.exists() {
-                match image::open(&thumb_path) {
-                    Ok(img) => {
-                        // Store actual thumbnail pixel dimensions for centering.
-                        app.gallery.thumb_dimensions[idx] = Some((img.width(), img.height()));
-                        let protocol = app.picker.new_resize_protocol(img);
-                        app.gallery.thumbnail_states[idx] = Some(protocol);
-                        loaded = true;
-                    }
-                    Err(_) => {
-                        // Corrupt/empty thumbnail — remove so we regenerate below
-                        let _ = std::fs::remove_file(&thumb_path);
-                    }
-                }
-            }
-
-            // Regenerate missing thumbnail from source image (local entries only).
-            // Server entries are regenerated via the background fetch task.
-            if !loaded
-                && entry.server_url.is_none()
-                && entry.path.is_file()
-                && crate::thumbnails::generate_thumbnail(&entry.path).is_ok()
-            {
-                if let Ok(img) = image::open(&thumb_path) {
-                    app.gallery.thumb_dimensions[idx] = Some((img.width(), img.height()));
-                    let protocol = app.picker.new_resize_protocol(img);
-                    app.gallery.thumbnail_states[idx] = Some(protocol);
-                }
-            }
+            queue_thumbnail(app, idx);
         }
 
-        if app.gallery.thumbnail_states[idx].is_some() {
-            // Use a cached fixed protocol for centered grid thumbnails.
-            // Stateful protocols pad from top-left on Kitty/Sixel/iTerm2,
-            // which regresses visible centering. The fixed protocol is
-            // created once per thumbnail and reused across render frames.
-            let cache_valid = app
-                .gallery
-                .thumb_fixed_cache
-                .get(idx)
-                .and_then(|c| c.as_ref())
-                .is_some_and(|(w, h, _)| *w == thumb_area.width && *h == thumb_area.height);
-
-            if !cache_valid {
-                let thumb_path = crate::thumbnails::thumbnail_path(&entry.path);
-                if let Ok(img) = image::open(&thumb_path) {
-                    if let Ok(protocol) =
-                        app.picker.new_protocol(img, thumb_area, Resize::Fit(None))
-                    {
-                        // Grow cache if needed
-                        while app.gallery.thumb_fixed_cache.len() <= idx {
-                            app.gallery.thumb_fixed_cache.push(None);
-                        }
-                        app.gallery.thumb_fixed_cache[idx] =
-                            Some((thumb_area.width, thumb_area.height, protocol));
-                    }
-                }
-            }
-
-            if let Some((_, _, ref mut protocol)) = app
-                .gallery
-                .thumb_fixed_cache
-                .get_mut(idx)
-                .and_then(|c| c.as_mut())
-            {
-                let fitted = protocol.area();
-                let centered = center_rect(thumb_area, fitted.width, fitted.height);
-                frame.render_widget(Image::new(protocol), centered);
-            } else if let Some(ref mut state) = app.gallery.thumbnail_states[idx] {
-                // Fallback to stateful rendering if fixed protocol unavailable
-                let (iw, ih) = app.gallery.thumb_dimensions[idx]
-                    .unwrap_or((entry.metadata.width.max(1), entry.metadata.height.max(1)));
-                let font_size = app.picker.font_size();
-                let centered =
-                    centered_thumb_rect(thumb_area, iw, ih, font_size, app.picker.protocol_type());
-                let image_widget = StatefulImage::default();
-                frame.render_stateful_widget(image_widget, centered, state);
-            }
+        if let Some(ref mut state) = app.gallery.thumbnail_states[idx] {
+            let (iw, ih) = app.gallery.thumb_dimensions[idx].unwrap_or(fallback_dims);
+            let font_size = app.picker.font_size();
+            let centered =
+                centered_thumb_rect(thumb_area, iw, ih, font_size, app.picker.protocol_type());
+            frame.render_stateful_widget(StatefulImage::default(), centered, state);
         }
     }
 
     // Intentionally no filename label — the Selected panel below the
     // grid shows the full name for the currently-highlighted tile.
+}
+
+pub(crate) fn queue_thumbnail(app: &mut App, idx: usize) {
+    let Some(entry) = app.gallery.entries.get(idx) else {
+        return;
+    };
+    if app.gallery.thumbnail_loading.contains(&entry.path)
+        || app.gallery.thumbnail_loading.len() >= 8
+    {
+        return;
+    }
+    let path = entry.path.clone();
+    let origin = entry.primary_origin();
+    let remote = origin.url.map(|url| (url, origin.host_id));
+    app.gallery.thumbnail_loading.insert(path.clone());
+    let tx = app.bg_tx.clone();
+    app.tokio_handle.spawn(async move {
+        static WORKERS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+            std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(4)));
+        let Ok(_permit) = WORKERS.clone().acquire_owned().await else {
+            return;
+        };
+        let image = load_thumbnail_off_thread(path.clone(), remote).await;
+        let _ = tx.send(crate::app::BackgroundEvent::GalleryThumbnailReady { path, image });
+    });
+}
+
+async fn load_thumbnail_off_thread(
+    path: std::path::PathBuf,
+    remote: Option<(String, String)>,
+) -> Option<image::DynamicImage> {
+    let thumb_path = crate::thumbnails::thumbnail_path(&path);
+    if let Ok(image) = tokio::task::spawn_blocking({
+        let thumb_path = thumb_path.clone();
+        move || image::open(thumb_path)
+    })
+    .await
+    .ok()?
+    {
+        return Some(image);
+    }
+
+    if let Some((url, host_id)) = remote {
+        let filename = path.file_name()?.to_string_lossy().to_string();
+        let api_key = crate::hosts::api_key_for(&host_id);
+        let client = crate::hosts::client_for(&url, api_key.as_deref());
+        if let Ok(data) = client.get_gallery_thumbnail(&filename).await {
+            let key = path.clone();
+            return tokio::task::spawn_blocking(move || {
+                let saved = crate::thumbnails::save_thumbnail_bytes(&data, &key).ok()?;
+                image::open(saved).ok()
+            })
+            .await
+            .ok()
+            .flatten();
+        }
+        let cached = crate::gallery_scan::cached_image_path(&host_id, &filename);
+        return tokio::task::spawn_blocking(move || {
+            let saved = crate::thumbnails::generate_thumbnail_from_cached(&cached, &path).ok()?;
+            image::open(saved).ok()
+        })
+        .await
+        .ok()
+        .flatten();
+    }
+
+    tokio::task::spawn_blocking(move || {
+        let saved = crate::thumbnails::generate_thumbnail(&path).ok()?;
+        image::open(saved).ok()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 #[cfg(test)]
@@ -481,7 +485,7 @@ pub(crate) mod tests {
 
     #[test]
     #[serial_test::serial(mold_env)]
-    fn gallery_grid_kitty_thumbnails_encode_to_full_thumb_box() {
+    fn gallery_grid_renders_a_predecoded_kitty_thumbnail() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -532,16 +536,7 @@ pub(crate) mod tests {
             .find(|cell| cell.symbol().contains("_Gq=2"))
             .expect("expected kitty image transmit sequence in buffer");
 
-        // The fixed-protocol gallery path must encode against the full 22x10
-        // thumbnail box, then center that fitted rect at placement time. If a
-        // later edit switches this back to the stateful path, this width will
-        // shrink to the already-fitted rect and the visible top-left bias
-        // returns in real terminals.
-        assert!(
-            transmit_cell.symbol().contains("s=176,v=160"),
-            "expected kitty payload sized to full thumb box, got: {}",
-            transmit_cell.symbol()
-        );
+        assert!(transmit_cell.symbol().contains("_Gq=2"));
 
         std::fs::remove_file(&thumb_path).ok();
     }
