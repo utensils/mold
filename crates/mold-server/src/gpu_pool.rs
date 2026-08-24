@@ -504,6 +504,10 @@ pub struct PostGenerationUpscaleJob {
     pub generation: Box<GpuJob>,
     pub response: mold_core::GenerateResponse,
     pub image: mold_core::ImageData,
+    /// Provenance derived while authenticated durable media was still under
+    /// its request guard. Staging paths are redacted before this crosses into
+    /// the follow-up owner; legacy/non-durable jobs leave it absent.
+    pub output_metadata: Option<mold_core::OutputMetadata>,
     pub cancellation: mold_inference::InferenceCancellationToken,
     pub execution_plan: Option<mold_inference::upscaler::ResolvedUpscaleExecutionPlan>,
 }

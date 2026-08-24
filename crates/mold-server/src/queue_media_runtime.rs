@@ -6,7 +6,10 @@
 //! authenticated media onto the already-mutated runtime request.
 
 use std::fmt;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
+
+use zeroize::Zeroize;
 
 use crate::queue_media_store::{
     DecryptedQueueMediaSet, MediaSetRef, QueueMediaProjection, QueueMediaStore,
@@ -88,6 +91,239 @@ impl fmt::Debug for HydratedQueueMediaLease {
             .debug_struct("HydratedQueueMediaLease")
             .finish_non_exhaustive()
     }
+}
+
+/// Attempt-scoped access to a request whose durable media has been hydrated.
+///
+/// The guard borrows the authoritative request, owns its private staging
+/// lease, and scrubs every overlaid media field before the staging tree is
+/// released. Workers must route all post-hydration request access through this
+/// value; any owned request clone must use [`Self::zeroizing_clone`].
+pub struct HydratedQueueMediaRequest<'a> {
+    request: &'a mut mold_core::GenerateRequest,
+    lease: HydratedQueueMediaLease,
+}
+
+/// Uniform read-only request access for worker code after the hydration point.
+/// Only the hydrated arm owns a scrub/staging guard; the plain arm preserves
+/// legacy non-durable behavior exactly.
+pub enum AttemptQueueMediaRequest<'a> {
+    Plain(&'a mold_core::GenerateRequest),
+    Hydrated(HydratedQueueMediaRequest<'a>),
+}
+
+impl<'a> AttemptQueueMediaRequest<'a> {
+    pub fn plain(request: &'a mold_core::GenerateRequest) -> Self {
+        Self::Plain(request)
+    }
+
+    pub fn hydrated(
+        request: &'a mut mold_core::GenerateRequest,
+        lease: HydratedQueueMediaLease,
+    ) -> Self {
+        Self::Hydrated(HydratedQueueMediaRequest::new(request, lease))
+    }
+
+    pub fn is_hydrated(&self) -> bool {
+        matches!(self, Self::Hydrated(_))
+    }
+
+    pub fn zeroizing_clone(&self) -> ZeroizingGenerateRequest {
+        match self {
+            Self::Plain(request) => ZeroizingGenerateRequest {
+                request: (*request).clone(),
+                #[cfg(test)]
+                scrub_probe: None,
+            },
+            Self::Hydrated(request) => request.zeroizing_clone(),
+        }
+    }
+
+    pub fn output_metadata(
+        &self,
+        seed: u64,
+        scheduler: Option<mold_core::Scheduler>,
+        version: impl Into<String>,
+    ) -> mold_core::OutputMetadata {
+        match self {
+            Self::Plain(request) => {
+                mold_core::OutputMetadata::from_generate_request(request, seed, scheduler, version)
+            }
+            Self::Hydrated(request) => request.output_metadata(seed, scheduler, version),
+        }
+    }
+
+    /// Remove process-private staging roots from any diagnostic that crosses
+    /// into logs, SSE, or a client-visible result. Non-durable requests retain
+    /// their existing diagnostics byte-for-byte.
+    pub fn redact_staging_paths(&self, message: impl Into<String>) -> String {
+        let mut message = message.into();
+        let Self::Hydrated(request) = self else {
+            return message;
+        };
+        for path in [
+            request.audio_file_path.as_deref(),
+            request.source_video_path.as_deref(),
+            request.extend_video_path.as_deref(),
+            request.hdr_exr_dir.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = std::path::Path::new(path);
+            let runtime_root = path.ancestors().find(|ancestor| {
+                ancestor
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("runtime-"))
+            });
+            let sensitive = runtime_root.unwrap_or(path).to_string_lossy();
+            if !sensitive.is_empty() {
+                message = message.replace(sensitive.as_ref(), "<private-staging>");
+            }
+        }
+        message
+    }
+}
+
+impl Deref for AttemptQueueMediaRequest<'_> {
+    type Target = mold_core::GenerateRequest;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Plain(request) => request,
+            Self::Hydrated(request) => request,
+        }
+    }
+}
+
+impl<'a> HydratedQueueMediaRequest<'a> {
+    pub fn new(
+        request: &'a mut mold_core::GenerateRequest,
+        lease: HydratedQueueMediaLease,
+    ) -> Self {
+        Self { request, lease }
+    }
+
+    pub fn zeroizing_clone(&self) -> ZeroizingGenerateRequest {
+        ZeroizingGenerateRequest {
+            request: self.request.clone(),
+            #[cfg(test)]
+            scrub_probe: None,
+        }
+    }
+
+    /// Derive normal output provenance while ensuring process-private staging
+    /// paths never enter gallery metadata or completion events.
+    pub fn output_metadata(
+        &self,
+        seed: u64,
+        scheduler: Option<mold_core::Scheduler>,
+        version: impl Into<String>,
+    ) -> mold_core::OutputMetadata {
+        let mut request = self.zeroizing_clone();
+        let mut metadata =
+            mold_core::OutputMetadata::from_generate_request(&request, seed, scheduler, version);
+        scrub_metadata_path(&mut metadata.audio_file_path);
+        scrub_metadata_path(&mut metadata.source_video_path);
+        scrub_metadata_path(&mut metadata.extend_video_path);
+        scrub_metadata_path(&mut metadata.hdr_exr_dir);
+        // Drop the clone before returning so its media buffers do not survive
+        // alongside the intentionally payload-free metadata.
+        crate::queue_media::scrub_request_media(&mut request);
+        metadata
+    }
+}
+
+impl Deref for HydratedQueueMediaRequest<'_> {
+    type Target = mold_core::GenerateRequest;
+
+    fn deref(&self) -> &Self::Target {
+        self.request
+    }
+}
+
+impl Drop for HydratedQueueMediaRequest<'_> {
+    fn drop(&mut self) {
+        crate::queue_media::scrub_request_media(self.request);
+        // `lease` is deliberately released by field drop only after this Drop
+        // body has wiped the staged path strings from the request.
+        let _ = &self.lease;
+    }
+}
+
+/// An owned request copy whose durable media is wiped on every downstream
+/// success, error, cancellation, panic unwind, or worker join failure.
+pub struct ZeroizingGenerateRequest {
+    request: mold_core::GenerateRequest,
+    #[cfg(test)]
+    scrub_probe: Option<Arc<std::sync::atomic::AtomicBool>>,
+}
+
+#[cfg(test)]
+impl ZeroizingGenerateRequest {
+    fn with_scrub_probe(mut self, scrubbed: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.scrub_probe = Some(scrubbed);
+        self
+    }
+}
+
+impl Deref for ZeroizingGenerateRequest {
+    type Target = mold_core::GenerateRequest;
+
+    fn deref(&self) -> &Self::Target {
+        &self.request
+    }
+}
+
+impl DerefMut for ZeroizingGenerateRequest {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.request
+    }
+}
+
+impl Drop for ZeroizingGenerateRequest {
+    fn drop(&mut self) {
+        crate::queue_media::scrub_request_media(&mut self.request);
+        #[cfg(test)]
+        if let Some(scrubbed) = &self.scrub_probe {
+            scrubbed.store(
+                request_media_is_cleared(&self.request),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+fn request_media_is_cleared(request: &mold_core::GenerateRequest) -> bool {
+    request.source_image.is_none()
+        && request.source_image_name.is_none()
+        && request.id_image.is_none()
+        && request.id_image_name.is_none()
+        && request.id_images.is_none()
+        && request.id_image_names.is_none()
+        && request.edit_images.is_none()
+        && request.references.is_none()
+        && request.mask_image.is_none()
+        && request.control_image.is_none()
+        && request.audio_file.is_none()
+        && request.audio_file_path.is_none()
+        && request.source_video.is_none()
+        && request.source_video_path.is_none()
+        && request.extend_video.is_none()
+        && request.extend_video_path.is_none()
+        && request.keyframes.is_none()
+        && request.hdr_exr_dir.is_none()
+        && request.lora.is_none()
+        && request.loras.is_none()
+}
+
+fn scrub_metadata_path(path: &mut Option<String>) {
+    if let Some(path) = path {
+        path.zeroize();
+    }
+    *path = None;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,6 +489,98 @@ mod tests {
         drop(lease);
         assert!(!private_path.exists());
         assert!(!runtime_root.exists());
+    }
+
+    #[test]
+    fn hydrated_request_guard_scrubs_normal_clone_and_panic_paths_and_redacts_metadata() {
+        let home = tempfile::tempdir().unwrap();
+        let source_path = home.path().join("input.mp4");
+        std::fs::write(&source_path, b"private-video-bytes").unwrap();
+        let store = Arc::new(QueueMediaStore::open(home.path()).unwrap().store);
+        let extracted = extract_request_media(
+            "job-guard",
+            request(&source_path),
+            &ProcessPrivateAuthorities::none(),
+        )
+        .unwrap();
+        let projection = project_request_media(extracted.media()).unwrap();
+        let (request_json, opaque_media) = extracted.into_parts();
+        let media = into_seal_media(opaque_media).unwrap();
+        let reference = store
+            .seal_v2_with_operation_fingerprint(
+                "owner-guard",
+                "job-guard",
+                &QueueMediaOperationFingerprint::sha256_v1(b"guard operation"),
+                &projection,
+                media,
+            )
+            .unwrap();
+        let deferred = DeferredQueueMedia::new(store, reference, projection);
+        let mut sanitized: mold_core::GenerateRequest =
+            serde_json::from_str(&request_json).unwrap();
+
+        let lease = deferred.hydrate_into("job-guard", &mut sanitized).unwrap();
+        let private_path = std::path::PathBuf::from(sanitized.source_video_path.as_ref().unwrap());
+        let runtime_root = private_path
+            .ancestors()
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("runtime-"))
+            })
+            .unwrap()
+            .to_path_buf();
+        let guard = AttemptQueueMediaRequest::hydrated(&mut sanitized, lease);
+        let metadata = guard.output_metadata(11, None, "test");
+        assert!(metadata.source_image_sha256.is_some());
+        assert!(metadata.id_image_sha256.is_some());
+        assert!(metadata.source_video_path.is_none());
+        assert!(metadata.audio_file_path.is_none());
+        assert!(metadata.extend_video_path.is_none());
+        assert!(metadata.hdr_exr_dir.is_none());
+        let diagnostic = guard.redact_staging_paths(format!(
+            "decoder rejected {} beneath {}",
+            private_path.display(),
+            runtime_root.display()
+        ));
+        assert!(!diagnostic.contains(runtime_root.to_string_lossy().as_ref()));
+        assert!(diagnostic.contains("<private-staging>"));
+
+        let clone_scrubbed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let clone = guard
+            .zeroizing_clone()
+            .with_scrub_probe(Arc::clone(&clone_scrubbed));
+        drop(clone);
+        assert!(clone_scrubbed.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(private_path.is_file());
+        drop(guard);
+        assert!(request_media_is_cleared(&sanitized));
+        assert!(!private_path.exists());
+        assert!(runtime_root.is_dir());
+
+        let lease = deferred.hydrate_into("job-guard", &mut sanitized).unwrap();
+        let panic_path = std::path::PathBuf::from(sanitized.source_video_path.as_ref().unwrap());
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let guard = AttemptQueueMediaRequest::hydrated(&mut sanitized, lease);
+            assert!(guard.source_image.is_some());
+            panic!("injected worker panic after hydration");
+        }));
+        assert!(panicked.is_err());
+        assert!(request_media_is_cleared(&sanitized));
+        assert!(!panic_path.exists());
+        drop(deferred);
+        assert!(!runtime_root.exists());
+    }
+
+    #[test]
+    fn plain_attempt_metadata_preserves_non_durable_paths() {
+        let request = request(std::path::Path::new("/user/media/source.mp4"));
+        let attempt = AttemptQueueMediaRequest::plain(&request);
+        let metadata = attempt.output_metadata(11, None, "test");
+        assert_eq!(
+            metadata.source_video_path.as_deref(),
+            Some("/user/media/source.mp4")
+        );
     }
 
     #[test]

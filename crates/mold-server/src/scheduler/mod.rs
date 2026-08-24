@@ -12344,6 +12344,7 @@ mod tests {
                     height: 64,
                     index: 0,
                 },
+                output_metadata: None,
                 cancellation: mold_inference::InferenceCancellationToken::default(),
                 execution_plan: None,
             })),
@@ -12523,6 +12524,7 @@ mod tests {
                 gpu: Some(0),
             },
             image: original.clone(),
+            output_metadata: None,
             cancellation: mold_inference::InferenceCancellationToken::default(),
             execution_plan: Some(plan),
         }));
@@ -12682,6 +12684,7 @@ mod tests {
                 gpu: Some(0),
             },
             image: original.clone(),
+            output_metadata: None,
             cancellation: mold_inference::InferenceCancellationToken::default(),
             execution_plan: None,
         }));

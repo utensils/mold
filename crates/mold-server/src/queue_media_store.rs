@@ -284,6 +284,13 @@ pub enum SealMediaSource {
     Bytes(SealMediaBytes),
 }
 
+/// A path-shaped seal source that has already passed the supported-platform
+/// no-follow regular-file check. Keeping the `File` opaque prevents callers
+/// from constructing an unchecked path source while allowing admission to
+/// finish every fallible open before it releases its plaintext scrub owner.
+#[cfg(unix)]
+pub(crate) struct PreopenedSealMediaPath(File);
+
 #[derive(Debug)]
 pub struct SealMedia {
     pub role: String,
@@ -301,22 +308,38 @@ impl Drop for SealMedia {
 
 impl SealMedia {
     #[cfg(unix)]
+    pub(crate) fn preopen_path(
+        path: &std::path::Path,
+    ) -> Result<PreopenedSealMediaPath, QueueMediaError> {
+        mold_core::secure_file::open_regular_file_no_follow(path)
+            .map(PreopenedSealMediaPath)
+            .map_err(|error| QueueMediaError::InsecurePath(error.to_string()))
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn from_preopened_path(
+        role: impl Into<String>,
+        name: impl Into<String>,
+        source: PreopenedSealMediaPath,
+    ) -> Self {
+        Self {
+            role: role.into(),
+            name: name.into(),
+            source: SealMediaSource::OpenFile(source.0),
+            sink: QueueMediaSink::PrivateStaging,
+        }
+    }
+
+    #[cfg(unix)]
     pub fn path(
         role: impl Into<String>,
         name: impl Into<String>,
         path: impl Into<PathBuf>,
     ) -> Result<Self, QueueMediaError> {
         let mut path = path.into();
-        let file = mold_core::secure_file::open_regular_file_no_follow(&path)
-            .map_err(|error| QueueMediaError::InsecurePath(error.to_string()));
+        let source = Self::preopen_path(&path);
         scrub_path_buf(&mut path);
-        let file = file?;
-        Ok(Self {
-            role: role.into(),
-            name: name.into(),
-            source: SealMediaSource::OpenFile(file),
-            sink: QueueMediaSink::PrivateStaging,
-        })
+        Ok(Self::from_preopened_path(role, name, source?))
     }
 
     pub fn bytes(role: impl Into<String>, name: impl Into<String>, bytes: Vec<u8>) -> Self {

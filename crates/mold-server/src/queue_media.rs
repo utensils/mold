@@ -15,7 +15,12 @@
 //! be reconstructed from media records, so extraction rejects them explicitly.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+
+#[cfg(test)]
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use mold_core::{GenerationReference, KeyframeCondition, LoraWeight};
 use zeroize::Zeroize;
@@ -279,6 +284,8 @@ impl std::fmt::Debug for OpaqueQueueMediaRecord {
 pub struct OpaqueQueueMedia {
     pub(crate) job_id: String,
     pub(crate) records: Vec<OpaqueQueueMediaRecord>,
+    #[cfg(test)]
+    scrub_probe: Option<(usize, Arc<AtomicBool>)>,
 }
 
 impl OpaqueQueueMedia {
@@ -288,6 +295,12 @@ impl OpaqueQueueMedia {
 
     pub fn records(&self) -> &[OpaqueQueueMediaRecord] {
         &self.records
+    }
+
+    #[cfg(test)]
+    fn with_scrub_probe(mut self, scrubbed: Arc<AtomicBool>) -> Self {
+        self.scrub_probe = Some((self.records.len(), scrubbed));
+        self
     }
 }
 
@@ -304,6 +317,82 @@ impl std::fmt::Debug for OpaqueQueueMedia {
 impl Drop for OpaqueQueueMedia {
     fn drop(&mut self) {
         scrub_opaque_records(&mut self.records);
+        #[cfg(test)]
+        if let Some((expected_records, scrubbed)) = &self.scrub_probe {
+            scrubbed.store(
+                self.records.len() == *expected_records
+                    && self
+                        .records
+                        .iter()
+                        .all(|record| payload_is_scrubbed(&record.payload)),
+                Ordering::SeqCst,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+fn payload_is_scrubbed(payload: &QueueMediaPayload) -> bool {
+    fn bytes_are_scrubbed(bytes: &[u8]) -> bool {
+        bytes.iter().all(|byte| *byte == 0)
+    }
+
+    match payload {
+        QueueMediaPayload::Presence => true,
+        QueueMediaPayload::Bytes(bytes) => bytes_are_scrubbed(bytes),
+        QueueMediaPayload::Text(text) => bytes_are_scrubbed(text.as_bytes()),
+        QueueMediaPayload::Keyframe(keyframe) => {
+            bytes_are_scrubbed(&keyframe.image)
+                && keyframe
+                    .name
+                    .as_ref()
+                    .is_none_or(|name| bytes_are_scrubbed(name.as_bytes()))
+        }
+        QueueMediaPayload::Reference(reference) => {
+            let (media, provenance, mime_type) = match reference {
+                GenerationReference::Image {
+                    media,
+                    provenance,
+                    mime_type,
+                    ..
+                }
+                | GenerationReference::Video {
+                    media,
+                    provenance,
+                    mime_type,
+                    ..
+                }
+                | GenerationReference::Audio {
+                    media,
+                    provenance,
+                    mime_type,
+                    ..
+                } => (media, provenance, mime_type),
+            };
+            let media_scrubbed = match media {
+                mold_core::GenerationReferenceAuthority::Inline { data } => {
+                    bytes_are_scrubbed(data)
+                }
+                mold_core::GenerationReferenceAuthority::Upload { handle } => {
+                    bytes_are_scrubbed(handle.as_bytes())
+                }
+                mold_core::GenerationReferenceAuthority::ServerPath { path } => {
+                    bytes_are_scrubbed(path.as_bytes())
+                }
+                mold_core::GenerationReferenceAuthority::Descriptor => true,
+            };
+            media_scrubbed
+                && provenance
+                    .name
+                    .as_ref()
+                    .is_none_or(|name| bytes_are_scrubbed(name.as_bytes()))
+                && provenance
+                    .sha256
+                    .as_ref()
+                    .is_none_or(|digest| bytes_are_scrubbed(digest.as_bytes()))
+                && bytes_are_scrubbed(mime_type.as_bytes())
+        }
+        QueueMediaPayload::Lora(lora) => bytes_are_scrubbed(lora.path.as_bytes()),
     }
 }
 
@@ -363,6 +452,93 @@ fn scrub_opaque_records(records: &mut [OpaqueQueueMediaRecord]) {
     for record in records {
         scrub_payload(&mut record.payload);
     }
+}
+
+/// Wipe every request field that the durable queue-media overlay can restore.
+///
+/// This is intentionally the same exhaustive authority set as
+/// `extract_request_fields`. Attempt-scoped runtime guards call it before
+/// releasing private staging, and zeroizing request clones call it on every
+/// success/error exit from downstream worker ownership.
+pub(crate) fn scrub_request_media(request: &mut mold_core::GenerateRequest) {
+    fn scrub_bytes(value: &mut Option<Vec<u8>>) {
+        if let Some(bytes) = value {
+            bytes.zeroize();
+        }
+        *value = None;
+    }
+
+    fn scrub_text(value: &mut Option<String>) {
+        if let Some(text) = value {
+            text.zeroize();
+        }
+        *value = None;
+    }
+
+    fn scrub_byte_collection(value: &mut Option<Vec<Vec<u8>>>) {
+        if let Some(items) = value {
+            for item in items.iter_mut() {
+                item.zeroize();
+            }
+            items.clear();
+        }
+        *value = None;
+    }
+
+    fn scrub_text_collection(value: &mut Option<Vec<String>>) {
+        if let Some(items) = value {
+            for item in items.iter_mut() {
+                item.zeroize();
+            }
+            items.clear();
+        }
+        *value = None;
+    }
+
+    scrub_bytes(&mut request.source_image);
+    scrub_text(&mut request.source_image_name);
+    scrub_bytes(&mut request.id_image);
+    scrub_text(&mut request.id_image_name);
+    scrub_byte_collection(&mut request.id_images);
+    scrub_text_collection(&mut request.id_image_names);
+    scrub_byte_collection(&mut request.edit_images);
+    if let Some(references) = &mut request.references {
+        for reference in references.iter_mut() {
+            scrub_reference(reference);
+        }
+        references.clear();
+    }
+    request.references = None;
+    scrub_bytes(&mut request.mask_image);
+    scrub_bytes(&mut request.control_image);
+    scrub_bytes(&mut request.audio_file);
+    scrub_text(&mut request.audio_file_path);
+    scrub_bytes(&mut request.source_video);
+    scrub_text(&mut request.source_video_path);
+    scrub_bytes(&mut request.extend_video);
+    scrub_text(&mut request.extend_video_path);
+    if let Some(keyframes) = &mut request.keyframes {
+        for keyframe in keyframes.iter_mut() {
+            keyframe.image.zeroize();
+            if let Some(name) = &mut keyframe.name {
+                name.zeroize();
+            }
+        }
+        keyframes.clear();
+    }
+    request.keyframes = None;
+    scrub_text(&mut request.hdr_exr_dir);
+    if let Some(lora) = &mut request.lora {
+        lora.path.zeroize();
+    }
+    request.lora = None;
+    if let Some(loras) = &mut request.loras {
+        for lora in loras.iter_mut() {
+            lora.path.zeroize();
+        }
+        loras.clear();
+    }
+    request.loras = None;
 }
 
 pub struct ExtractedQueueRequest {
@@ -749,7 +925,12 @@ fn extract_request_fields(
     ensure_json_is_authority_free(&request_json)?;
     Ok(ExtractedQueueRequest {
         request_json,
-        media: OpaqueQueueMedia { job_id, records },
+        media: OpaqueQueueMedia {
+            job_id,
+            records,
+            #[cfg(test)]
+            scrub_probe: None,
+        },
     })
 }
 
@@ -896,6 +1077,7 @@ pub fn into_seal_media(
     // Complete every fallible check while `media` still owns all plaintext, so
     // its Drop guard can scrub the full set on error. Serialized keyframes stay
     // zeroizing until their bytes move into the successful result.
+    validate_record_topology(&media.records)?;
     for record in &media.records {
         match &record.payload {
             QueueMediaPayload::Reference(_) => {
@@ -923,10 +1105,41 @@ pub fn into_seal_media(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    #[cfg(unix)]
+    let opened_paths = media
+        .records
+        .iter()
+        .map(|record| match &record.payload {
+            QueueMediaPayload::Text(value) if record.role.is_path_shaped() => {
+                SealMedia::preopen_path(std::path::Path::new(value))
+                    .map(Some)
+                    .map_err(QueueMediaError::SealSource)
+            }
+            _ => Ok(None),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    #[cfg(not(unix))]
+    let opened_paths = {
+        if media.records.iter().any(|record| {
+            record.role.is_path_shaped() && matches!(record.payload, QueueMediaPayload::Text(_))
+        }) {
+            return Err(QueueMediaError::SealSource(
+                crate::queue_media_store::QueueMediaError::SecurityUnavailable(
+                    "path-shaped queue media requires Unix safe-open and path scrubbing".into(),
+                ),
+            ));
+        }
+        std::iter::repeat_with(|| None::<()>)
+            .take(media.records.len())
+            .collect::<Vec<_>>()
+    };
+
     let mut sealed = Vec::with_capacity(media.records.len());
-    for (record, serialized_keyframe) in std::mem::take(&mut media.records)
+    for ((record, serialized_keyframe), opened_path) in std::mem::take(&mut media.records)
         .into_iter()
         .zip(&mut serialized_keyframes)
+        .zip(opened_paths)
     {
         let role = record.role.wire_label();
         let position = record.position.wire_label();
@@ -936,19 +1149,19 @@ pub fn into_seal_media(
             QueueMediaPayload::Text(value) if record.role.is_path_shaped() => {
                 #[cfg(unix)]
                 {
-                    SealMedia::path(role, position, PathBuf::from(value))
-                        .map_err(QueueMediaError::SealSource)?
+                    let mut value = value;
+                    value.zeroize();
+                    SealMedia::from_preopened_path(
+                        role,
+                        position,
+                        opened_path.expect("path source was pre-opened before plaintext moved"),
+                    )
                 }
                 #[cfg(not(unix))]
                 {
                     let mut value = value;
                     value.zeroize();
-                    return Err(QueueMediaError::SealSource(
-                        crate::queue_media_store::QueueMediaError::SecurityUnavailable(
-                            "path-shaped queue media requires Unix safe-open and path scrubbing"
-                                .into(),
-                        ),
-                    ));
+                    unreachable!("non-Unix path authority was rejected before plaintext moved")
                 }
             }
             QueueMediaPayload::Text(value) => SealMedia::bytes(role, position, value.into_bytes()),
@@ -1041,6 +1254,8 @@ pub(crate) fn decrypted_media_into_opaque(
     Ok(OpaqueQueueMedia {
         job_id: job_id.to_string(),
         records: records.into_records(),
+        #[cfg(test)]
+        scrub_probe: None,
     })
 }
 
@@ -1305,6 +1520,8 @@ pub fn rehydrate_request_media_into(
 mod tests {
     use super::*;
     use base64::Engine as _;
+    #[cfg(unix)]
+    use std::io::Read as _;
 
     fn png(width: u32, height: u32) -> Vec<u8> {
         let mut cursor = std::io::Cursor::new(Vec::new());
@@ -1506,6 +1723,146 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn seal_conversion_scrubs_every_record_when_a_preopened_path_fails() {
+        use std::os::unix::fs::symlink;
+
+        fn record(
+            role: QueueMediaRole,
+            position: QueueMediaPosition,
+            payload: QueueMediaPayload,
+        ) -> OpaqueQueueMediaRecord {
+            OpaqueQueueMediaRecord {
+                role,
+                position,
+                payload,
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target.mp4");
+        let link = temp.path().join("rejected-link.mp4");
+        std::fs::write(&target, b"path-secret").unwrap();
+        symlink(&target, &link).unwrap();
+        let keyframe: KeyframeCondition = serde_json::from_value(serde_json::json!({
+            "frame": 0,
+            "image": "a2V5ZnJhbWUtc2VjcmV0",
+            "name": "keyframe-name-secret.png"
+        }))
+        .unwrap();
+        let scrubbed = Arc::new(AtomicBool::new(false));
+        let media = OpaqueQueueMedia {
+            job_id: "job-preopen-failure".into(),
+            records: vec![
+                record(
+                    QueueMediaRole::SourceVideoPath,
+                    QueueMediaPosition::Scalar,
+                    QueueMediaPayload::Text(link.to_string_lossy().into_owned()),
+                ),
+                record(
+                    QueueMediaRole::IdentityImage,
+                    QueueMediaPosition::Scalar,
+                    QueueMediaPayload::Bytes(b"later-identity-secret".to_vec()),
+                ),
+                record(
+                    QueueMediaRole::EditImages,
+                    QueueMediaPosition::Collection,
+                    QueueMediaPayload::Presence,
+                ),
+                record(
+                    QueueMediaRole::EditImages,
+                    QueueMediaPosition::Item(0),
+                    QueueMediaPayload::Bytes(b"later-edit-secret".to_vec()),
+                ),
+                record(
+                    QueueMediaRole::Keyframes,
+                    QueueMediaPosition::Collection,
+                    QueueMediaPayload::Presence,
+                ),
+                record(
+                    QueueMediaRole::Keyframes,
+                    QueueMediaPosition::Item(0),
+                    QueueMediaPayload::Keyframe(keyframe),
+                ),
+            ],
+            scrub_probe: None,
+        }
+        .with_scrub_probe(Arc::clone(&scrubbed));
+
+        assert!(matches!(
+            into_seal_media(media),
+            Err(QueueMediaError::SealSource(
+                crate::queue_media_store::QueueMediaError::InsecurePath(_)
+            ))
+        ));
+        assert!(
+            scrubbed.load(Ordering::SeqCst),
+            "the failing path and every later inline/name/keyframe record must remain under the opaque scrub owner"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn seal_conversion_keeps_preopened_paths_aligned_with_mixed_roles() {
+        fn record(
+            role: QueueMediaRole,
+            position: QueueMediaPosition,
+            payload: QueueMediaPayload,
+        ) -> OpaqueQueueMediaRecord {
+            OpaqueQueueMediaRecord {
+                role,
+                position,
+                payload,
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let audio = temp.path().join("audio.wav");
+        let video = temp.path().join("video.mp4");
+        std::fs::write(&audio, b"audio-path-bytes").unwrap();
+        std::fs::write(&video, b"video-path-bytes").unwrap();
+        let media = OpaqueQueueMedia {
+            job_id: "job-preopen-order".into(),
+            records: vec![
+                record(
+                    QueueMediaRole::AudioFilePath,
+                    QueueMediaPosition::Scalar,
+                    QueueMediaPayload::Text(audio.to_string_lossy().into_owned()),
+                ),
+                record(
+                    QueueMediaRole::SourceImage,
+                    QueueMediaPosition::Scalar,
+                    QueueMediaPayload::Bytes(b"inline-between-paths".to_vec()),
+                ),
+                record(
+                    QueueMediaRole::SourceVideoPath,
+                    QueueMediaPosition::Scalar,
+                    QueueMediaPayload::Text(video.to_string_lossy().into_owned()),
+                ),
+            ],
+            scrub_probe: None,
+        };
+
+        let mut sealed = into_seal_media(media).unwrap();
+        let mut opened = BTreeMap::new();
+        for item in &mut sealed {
+            if let crate::queue_media_store::SealMediaSource::OpenFile(file) = &mut item.source {
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes).unwrap();
+                opened.insert(item.role.clone(), bytes);
+            }
+        }
+        assert_eq!(
+            opened.get("audio_file_path").map(Vec::as_slice),
+            Some(b"audio-path-bytes".as_slice())
+        );
+        assert_eq!(
+            opened.get("source_video_path").map(Vec::as_slice),
+            Some(b"video-path-bytes".as_slice())
+        );
+    }
+
     #[test]
     fn overlay_restores_media_without_reverting_scheduler_mutations() {
         let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
@@ -1614,6 +1971,7 @@ mod tests {
                 OpaqueQueueMedia {
                     job_id: "job-atomic".into(),
                     records,
+                    scrub_probe: None,
                 },
             );
             assert!(matches!(result, Err(QueueMediaError::MalformedRecords(_))));
@@ -1633,6 +1991,7 @@ mod tests {
                         QueueMediaPosition::Scalar,
                         QueueMediaPayload::Bytes(b"scope-secret".to_vec()),
                     )],
+                    scrub_probe: None,
                 },
             ),
             Err(QueueMediaError::JobScopeMismatch)
@@ -1653,6 +2012,7 @@ mod tests {
                         QueueMediaPosition::Scalar,
                         QueueMediaPayload::Bytes(b"conflict-secret".to_vec()),
                     )],
+                    scrub_probe: None,
                 },
             ),
             Err(QueueMediaError::OverlayAuthorityConflict("source_image"))
@@ -1865,6 +2225,7 @@ mod tests {
         let media = OpaqueQueueMedia {
             job_id: "job-contaminated".to_string(),
             records: Vec::new(),
+            scrub_probe: None,
         };
 
         assert!(matches!(

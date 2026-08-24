@@ -1854,7 +1854,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     // The single-worker loop is the execution-slot lease. Keep the durable
     // bundle opaque through all queueing and cancellation-before-start paths,
     // then hydrate off Tokio immediately before reference/model preparation.
-    let _hydrated_media_lease = if let Some(deferred) = job.deferred_media.take() {
+    let hydrated_media_lease = if let Some(deferred) = job.deferred_media.take() {
         let expected_job_id = job.id.clone();
         let mut request = job.request.clone();
         match tokio::task::spawn_blocking(move || {
@@ -1882,9 +1882,16 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     } else {
         None
     };
+    let request = match hydrated_media_lease {
+        Some(lease) => {
+            crate::queue_media_runtime::AttemptQueueMediaRequest::hydrated(&mut job.request, lease)
+        }
+        None => crate::queue_media_runtime::AttemptQueueMediaRequest::plain(&job.request),
+    };
 
     if attempt_cancellation.is_cancelled() {
         let user_requested = state.job_registry.cancel_requested(&job.id);
+        drop(request);
         finish_single_worker_cancelled(job, user_requested);
         return;
     }
@@ -1903,10 +1910,10 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     // off Tokio's async worker and return the staging owner alongside the
     // opened handles so it remains alive for the whole generation attempt.
     let reference_binding_result =
-        if job.request.references.is_none() && job.resolved_references.is_none() {
+        if request.references.is_none() && job.resolved_references.is_none() {
             Ok(Vec::new())
         } else {
-            let request = job.request.clone();
+            let request = request.zeroizing_clone();
             let resolved = job.resolved_references.take();
             let cancellation = attempt_cancellation.clone();
             match tokio::task::spawn_blocking(move || {
@@ -1933,10 +1940,12 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         Err(error) => {
             if mold_inference::is_inference_cancelled(&error) {
                 let user_requested = state.job_registry.cancel_requested(&job.id);
+                drop(request);
                 finish_single_worker_cancelled(job, user_requested);
                 return;
             }
-            let err_msg = format!("generation reference binding error: {error:#}");
+            let err_msg = request
+                .redact_staging_paths(format!("generation reference binding error: {error:#}"));
             if let Some(ref tx) = job.progress_tx {
                 let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
             }
@@ -1953,18 +1962,18 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         }) as model_manager::EngineProgressCallback
     });
 
-    let activation_hint = model_manager::activation_hint_for_request(state, &job.request).await;
-    let request_has_lora = model_manager::request_has_effective_lora(&job.request);
+    let activation_hint = model_manager::activation_hint_for_request(state, &request).await;
+    let request_has_lora = model_manager::request_has_effective_lora(&request);
     if let Err(api_err) = model_manager::ensure_model_ready(
         state,
-        &job.request.model,
+        &request.model,
         progress_callback,
         activation_hint,
         request_has_lora,
     )
     .await
     {
-        let err_msg = api_err.error.clone();
+        let err_msg = request.redact_staging_paths(api_err.error.clone());
         if let Some(ref tx) = job.progress_tx {
             let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
         }
@@ -1974,6 +1983,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
 
     if attempt_cancellation.is_cancelled() {
         let user_requested = state.job_registry.cancel_requested(&job.id);
+        drop(request);
         finish_single_worker_cancelled(job, user_requested);
         return;
     }
@@ -1995,7 +2005,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     //    /api/cache, and any concurrent gallery/admin reads.
     let taken = {
         let mut cache = state.model_cache.lock().await;
-        cache.take(&job.request.model)
+        cache.take(&request.model)
     };
     let Some(mut cached_engine) = taken else {
         let err_msg = "no engine available after model readiness check".to_string();
@@ -2007,11 +2017,11 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     };
 
     let active_gen = state.active_generation.clone();
-    let gen_req = job.request.clone();
+    let gen_req = request.zeroizing_clone();
     let progress_tx = job.progress_tx.clone();
     let inference_cancellation = attempt_cancellation.clone();
 
-    set_active_generation(state, &job.request.model, &job.request.prompt);
+    set_active_generation(state, &request.model, &request.prompt);
 
     // Install progress capture before crossing into spawn_blocking. The live
     // registry snapshot is useful even when the submitting SSE receiver is
@@ -2047,7 +2057,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     let rss_after = crate::resources::ram_snapshot().used_by_mold;
     let rss_delta = rss_after as i64 - rss_before as i64;
     tracing::info!(
-        model = %job.request.model,
+        model = %request.model,
         rss_before_mb = rss_before / 1_000_000,
         rss_after_mb = rss_after / 1_000_000,
         rss_delta_mb = rss_delta / 1_000_000,
@@ -2083,7 +2093,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         Err(join_err) => {
             {
                 let mut cache = state.model_cache.lock().await;
-                cache.clear_in_flight(&job.request.model);
+                cache.clear_in_flight(&request.model);
             }
             clear_active_generation(state);
             Err(join_err)
@@ -2093,7 +2103,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     match result {
         Ok(Ok(Ok(mut response))) => {
             #[cfg(feature = "metrics")]
-            crate::metrics::record_generation(&job.request.model, inference_duration);
+            crate::metrics::record_generation(&request.model, inference_duration);
 
             if response.images.is_empty() && response.video.is_none() && response.audio.is_none() {
                 let err_msg =
@@ -2133,11 +2143,11 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             let mut original_img = None;
             if response.video.is_none()
                 && response.audio.is_none()
-                && requested_post_upscale_model(&job.request).is_some()
+                && requested_post_upscale_model(&request).is_some()
             {
                 let upscale_result = upscale_generated_image_on_single_worker(
                     state,
-                    &job.request,
+                    &request,
                     response.seed_used,
                     img.clone(),
                     job.progress_tx.as_ref(),
@@ -2148,6 +2158,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 img = output;
                 original_img = preserved_original;
                 if let Some(error) = upscale_error {
+                    let error = request.redact_staging_paths(error);
                     tracing::warn!(%error, "post-generation upscale failed; keeping original image");
                 }
             }
@@ -2160,10 +2171,12 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             match state.job_registry.claim_completion(&job.id) {
                 crate::job_registry::CompletionClaim::Claimed => {}
                 crate::job_registry::CompletionClaim::UserCancelled => {
+                    drop(request);
                     finish_single_worker_cancelled(job, true);
                     return;
                 }
                 crate::job_registry::CompletionClaim::AttemptCancelled => {
+                    drop(request);
                     finish_single_worker_cancelled(job, false);
                     return;
                 }
@@ -2174,8 +2187,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             // seed_used so the DB and embedded chunks agree. Awaited (still
             // off the async loop via spawn_blocking) so the complete event
             // below can carry the saved gallery filenames.
-            let mut metadata = OutputMetadata::from_generate_request(
-                &job.request,
+            let mut metadata = request.output_metadata(
                 response.seed_used,
                 None,
                 mold_core::build_info::version_string(),
@@ -2192,8 +2204,8 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             if let Some(ref dir) = job.output_dir {
                 let _gallery_writer = state.gallery_publication_gate.write().await;
                 let dir = dir.clone();
-                let model = job.request.model.clone();
-                let batch_size = job.request.batch_size;
+                let model = request.model.clone();
+                let batch_size = request.batch_size;
                 let generation_time_ms = response.generation_time_ms as i64;
                 let db = state.metadata_db.clone();
                 let events = state.events.clone();
@@ -2307,16 +2319,18 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         }
         Ok(Ok(Err(e))) => {
             #[cfg(feature = "metrics")]
-            crate::metrics::record_generation_error(&job.request.model);
+            crate::metrics::record_generation_error(&request.model);
 
             *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
             if mold_inference::is_inference_cancelled(&e) {
                 let user_requested = state.job_registry.cancel_requested(&job.id);
+                drop(request);
                 finish_single_worker_cancelled(job, user_requested);
                 return;
             }
-            tracing::error!("generation error: {e:#}");
-            let err_msg = format!("generation error: {}", clean_error_message(&e));
+            let err_msg = request
+                .redact_staging_paths(format!("generation error: {}", clean_error_message(&e)));
+            tracing::error!(%err_msg, "generation failed");
             if let Some(ref tx) = job.progress_tx {
                 let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
             }
@@ -2324,7 +2338,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         }
         Ok(Err(panic_payload)) => {
             #[cfg(feature = "metrics")]
-            crate::metrics::record_generation_error(&job.request.model);
+            crate::metrics::record_generation_error(&request.model);
 
             *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
             let msg = panic_payload
@@ -2332,8 +2346,8 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 .map(|s| s.as_str())
                 .or_else(|| panic_payload.downcast_ref::<&str>().copied())
                 .unwrap_or("unknown panic");
-            tracing::error!("inference panicked: {msg}");
-            let err_msg = format!("inference panicked: {msg}");
+            let err_msg = request.redact_staging_paths(format!("inference panicked: {msg}"));
+            tracing::error!(%err_msg, "inference panicked");
             if let Some(ref tx) = job.progress_tx {
                 let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
             }
@@ -2341,7 +2355,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         }
         Err(join_err) => {
             #[cfg(feature = "metrics")]
-            crate::metrics::record_generation_error(&job.request.model);
+            crate::metrics::record_generation_error(&request.model);
 
             *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
             tracing::error!("inference task join error: {join_err:?}");
@@ -3565,6 +3579,12 @@ mod tests {
         let binding = body
             .find("inference_bindings_for_request")
             .expect("reference preparation");
+        let guard = body
+            .find("AttemptQueueMediaRequest::hydrated")
+            .expect("attempt-scoped hydrated request guard");
+        let metadata = body
+            .find("request.output_metadata")
+            .expect("guard-aware output metadata");
         let cancel_checks = body
             .match_indices("attempt_cancellation.is_cancelled()")
             .map(|(index, _)| index)
@@ -3572,8 +3592,13 @@ mod tests {
 
         assert!(install < slot && slot < cancel_checks[0]);
         assert!(cancel_checks[0] < hydrate);
-        assert!(hydrate < cancel_checks[1]);
+        assert!(hydrate < guard && guard < cancel_checks[1]);
         assert!(cancel_checks[1] < binding);
+        assert!(binding < metadata);
+        assert!(body.matches("request.zeroizing_clone()").count() >= 2);
+        assert!(body[hydrate..].find("job.request.clone()").is_none());
+        assert!(body.contains("request.redact_staging_paths"));
+        assert!(body.contains("drop(request);\n                    finish_single_worker_cancelled"));
     }
     use super::*;
     use crate::gpu_pool::{GpuPool, GpuWorker};
@@ -4499,6 +4524,7 @@ mod tests {
                     generation: Box::new(generation),
                     response,
                     image: original.clone(),
+                    output_metadata: None,
                     cancellation: mold_inference::InferenceCancellationToken::default(),
                     execution_plan: None,
                 },
