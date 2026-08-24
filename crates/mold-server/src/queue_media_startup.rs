@@ -637,6 +637,7 @@ mod tests {
             created_at_ms: 1,
             updated_at_ms: 1,
             started_at_ms: None,
+            media_set_id: None,
         }
     }
 
