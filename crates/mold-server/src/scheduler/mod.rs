@@ -48,9 +48,8 @@ const MAX_DISPATCH_REPLANS_PER_TURN: u8 = 3;
 const MAX_CONCURRENT_PREPARATIONS: usize = 2;
 const DISPATCH_RETRY_BASE_MS: u64 = 25;
 const DISPATCH_RETRY_MAX_MS: u64 = 1_000;
-/// How long a queued generation that resolves NO execution plan may keep
-/// waiting once the scheduler holds nothing that could return the resource it
-/// is short of.
+/// How long a queued generation with an unclassified empty plan set may keep
+/// waiting once the scheduler holds nothing that could change that result.
 ///
 /// Zero-candidate work is reconsidered on every planning turn and dispatched
 /// the moment a plan resolves, which is the right answer while something is
@@ -58,10 +57,9 @@ const DISPATCH_RETRY_MAX_MS: u64 = 1_000;
 /// otherwise idle scheduler nothing will change on its own, and #1272 is what
 /// that looks like from a client — an H3 print reported `no_schedulable_device`
 /// three times, then nothing at all for the rest of a forty-minute wait, with
-/// no failure, no message, and a queue row that outlived the request. The grace
-/// is deliberately generous because an idle scheduler is not the same as an
-/// idle *machine*: another process can hold the GPU, and a short external spike
-/// must not settle work that would have run.
+/// no failure, no message, and a queue row that outlived the request. Typed
+/// transient failures are excluded: external resource pressure remains queued
+/// for however long it exists and wakes on a changed resource sample.
 const UNSCHEDULABLE_IDLE_GRACE_MS: u64 = 60_000;
 pub(crate) const CPU_UTILITY_DEVICE_ID: &str = "cpu:utility:0";
 
@@ -612,8 +610,8 @@ struct PendingGeneration {
     /// nothing that could free capacity. Cleared the moment a plan resolves or
     /// any work is leased, so it only accrues over a genuinely idle wait.
     unschedulable_since_ms: Option<u64>,
-    /// The last non-terminal planning failure, retained so the refusal names
-    /// the shortfall the plan named instead of a bare "never scheduled".
+    /// An unclassified planning reason, retained so a refusal can name it
+    /// instead of a bare "never scheduled".
     unschedulable_reason: Option<String>,
     /// Place in line this job's client was last told about, so a drained queue
     /// re-announces exactly once per actual move. `None` until first observed.
@@ -1408,6 +1406,7 @@ struct Coordinator {
     last_worker_claims: BTreeMap<String, usize>,
     last_device_preferences_sequence: u64,
     last_device_event_signature: Option<DeviceEventSignature>,
+    last_resource_capacity_signature: Vec<(String, u64)>,
     device_state_dirty: bool,
     plan_invalidations: BTreeMap<String, u8>,
     dispatch_retry_round: u8,
@@ -1488,7 +1487,7 @@ impl Coordinator {
             warm_wait_max_ms: u64::from(scheduler.warm_wait_max_ms),
             ..mold_scheduler::PlannerConfig::default()
         };
-        Self {
+        let mut coordinator = Self {
             state,
             planner: Planner::new(planner_config.clone()),
             admission_planner: Planner::new(mold_scheduler::PlannerConfig {
@@ -1516,6 +1515,7 @@ impl Coordinator {
             last_worker_claims: BTreeMap::new(),
             last_device_preferences_sequence: 0,
             last_device_event_signature: None,
+            last_resource_capacity_signature: Vec::new(),
             device_state_dirty: true,
             plan_invalidations: BTreeMap::new(),
             dispatch_retry_round: 0,
@@ -1529,7 +1529,9 @@ impl Coordinator {
             before_grant_hook: None,
             #[cfg(test)]
             before_queue_control_plan_hook: None,
-        }
+        };
+        coordinator.last_resource_capacity_signature = coordinator.resource_capacity_signature();
+        coordinator
     }
 
     /// Sample host memory and republish it, so `/api/status` and the queue
@@ -2688,6 +2690,26 @@ impl Coordinator {
         }
     }
 
+    fn resource_capacity_signature(&self) -> Vec<(String, u64)> {
+        self.device_snapshots()
+            .into_iter()
+            .map(|device| (device.id.to_string(), device.available_vram_bytes))
+            .collect()
+    }
+
+    /// Wake planning when sampled capacity changes, without turning the 1 Hz
+    /// telemetry stream into an unconditional scheduler retry loop.
+    fn reconcile_resource_capacity(&mut self, immediate: &mut bool) {
+        let signature = self.resource_capacity_signature();
+        if signature == self.last_resource_capacity_signature {
+            return;
+        }
+        self.last_resource_capacity_signature = signature;
+        if !self.pending.is_empty() || !self.pending_owner_work.is_empty() {
+            self.mutate(immediate);
+        }
+    }
+
     fn device_snapshots(&self) -> Vec<DeviceSnapshot> {
         let resources = self.state.resources.latest();
         let canonical = self.state.device_registry.canonical_snapshot(
@@ -2909,7 +2931,7 @@ impl Coordinator {
             // no filesystem model. Keep their transport/fencing focus without
             // weakening production admission.
             let estimate = crate::queue::estimate_model_vram(&pending.job.request.model);
-            return Ok(eligible_device_facts
+            let plans = eligible_device_facts
                 .iter()
                 .filter(|device| device.available_vram_bytes >= estimate)
                 .cloned()
@@ -3013,7 +3035,25 @@ impl Coordinator {
                         execution_fingerprint: pending.job.request.model.clone(),
                     }
                 })
-                .collect());
+                .collect::<Vec<_>>();
+            if plans.is_empty() {
+                let error = crate::execution_plan::insufficient_vram_error(
+                    &eligible_device_facts
+                        .iter()
+                        .map(|device| crate::execution_plan::DeviceInfeasibility {
+                            device_id: device.id.clone(),
+                            predicted_peak_bytes: estimate,
+                            available_bytes: device.available_vram_bytes,
+                            advice: None,
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                return Err(classify_generation_plan_failure(
+                    error,
+                    &self.total_vram_bytes_by_device_id(),
+                ));
+            }
+            return Ok(plans);
         }
         resolved.map_err(|error| {
             classify_generation_plan_failure(error, &self.total_vram_bytes_by_device_id())
@@ -3288,21 +3328,17 @@ impl Coordinator {
         true
     }
 
-    /// Settle a queued generation that can never be planned from here.
+    /// Settle an unclassified empty plan set that cannot change from here.
     ///
-    /// A ready job whose execution plan does not resolve contributes zero
+    /// A ready job whose resolver returns an empty plan set contributes zero
     /// candidates, and the planner has nothing left to say about it: with no
     /// candidate to compare against a device, `classify_no_candidate` reports
-    /// the untyped `NoSchedulableDevice`, and `generation_plan_catalog`
-    /// discards the actual reason at `debug`. That is correct as a *retry* —
-    /// the resource is usually held by work that is about to return it, and the
-    /// job is reconsidered every planning turn — but it is not an answer. On an
-    /// idle scheduler nobody is going to give the resource back, so #1272's
-    /// print sat `queued` past its client's forty-minute timeout with no
-    /// failure and no message while two later jobs ran.
+    /// the untyped `NoSchedulableDevice`. Typed transient failures do not enter
+    /// this settlement path; time cannot turn resource pressure into a terminal
+    /// verdict.
     ///
-    /// So: keep retrying while anything is leased or preparing, and settle the
-    /// job with the plan's own named shortfall once the wait has been idle for
+    /// Keep retrying while anything is leased or preparing, and settle only the
+    /// unclassified empty result once the wait has been idle for
     /// `UNSCHEDULABLE_IDLE_GRACE_MS`. This deliberately does NOT bound a job
     /// queued behind running work — that job is waiting for something real.
     fn settle_unschedulable_generations(&mut self) -> bool {
@@ -3338,7 +3374,11 @@ impl Coordinator {
                     // Terminal failures are rejected by their own pass, which
                     // already names the error.
                     Err(GenerationPlanFailure::Terminal(_)) => None,
-                    Err(error) => Some(error.to_string()),
+                    // Resource pressure and preparation refreshes are retry
+                    // states, not evidence that durable work became invalid.
+                    // Their duration cannot turn them into terminal failures.
+                    Err(GenerationPlanFailure::Transient(_))
+                    | Err(GenerationPlanFailure::StalePreparation(_)) => None,
                 };
                 (id.clone(), failure)
             })
@@ -5657,6 +5697,7 @@ pub async fn run_scheduler_coordinator(
         .publish_host_memory(coordinator.memory.wire_snapshot());
     coordinator.install_cpu_utility_lane(cpu_utility_tx.clone());
     let registry_notify = coordinator.state.job_registry.mutation_notifier();
+    let mut resource_rx = coordinator.state.resources.subscribe();
     let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut memory_ticker = tokio::time::interval(MEMORY_SAMPLE_INTERVAL);
@@ -5664,6 +5705,7 @@ pub async fn run_scheduler_coordinator(
     let mut fatal = false;
     let mut generation_ingress_open = true;
     let mut owner_ingress_open = true;
+    let mut resource_stream_open = true;
     loop {
         let mut immediate = false;
         tokio::select! {
@@ -5758,6 +5800,16 @@ pub async fn run_scheduler_coordinator(
             }
             _ = registry_notify.notified() => {
                 coordinator.reconcile_external_mutations(&mut immediate);
+            }
+            resource = resource_rx.recv(), if resource_stream_open => {
+                match resource {
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        coordinator.reconcile_resource_capacity(&mut immediate);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        resource_stream_open = false;
+                    }
+                }
             }
             _ = ticker.tick() => {
                 coordinator.reconcile_external_mutations(&mut immediate);
@@ -8445,20 +8497,28 @@ mod tests {
     /// so it is the single knob that turns a pending generation between
     /// "planned" and "zero candidates" without touching the planner.
     fn publish_free_vram(state: &AppState, free_bytes: u64) {
+        publish_free_vram_for_lanes(state, &[(mold_core::GpuBackend::Cuda, free_bytes)]);
+    }
+
+    fn publish_free_vram_for_lanes(state: &AppState, lanes: &[(mold_core::GpuBackend, u64)]) {
         const TOTAL: u64 = 24 << 30;
         state.resources.publish(mold_core::ResourceSnapshot {
             hostname: "test".into(),
             timestamp: 1,
-            gpus: vec![mold_core::GpuSnapshot {
-                ordinal: 0,
-                name: "gpu-0".into(),
-                backend: mold_core::GpuBackend::Cuda,
-                vram_total: TOTAL,
-                vram_used: TOTAL.saturating_sub(free_bytes),
-                vram_used_by_mold: Some(0),
-                vram_used_by_other: Some(TOTAL.saturating_sub(free_bytes)),
-                gpu_utilization: Some(0),
-            }],
+            gpus: lanes
+                .iter()
+                .enumerate()
+                .map(|(ordinal, (backend, free_bytes))| mold_core::GpuSnapshot {
+                    ordinal,
+                    name: format!("gpu-{ordinal}"),
+                    backend: *backend,
+                    vram_total: TOTAL,
+                    vram_used: TOTAL.saturating_sub(*free_bytes),
+                    vram_used_by_mold: Some(0),
+                    vram_used_by_other: Some(TOTAL.saturating_sub(*free_bytes)),
+                    gpu_utilization: Some(0),
+                })
+                .collect(),
             system_ram: mold_core::RamSnapshot {
                 total: 128 << 30,
                 used: 1 << 30,
@@ -8512,6 +8572,63 @@ mod tests {
         (coordinator, worker_rx, result_rx)
     }
 
+    async fn pressured_test_coordinator(
+        backend: mold_core::GpuBackend,
+        lane_count: usize,
+        free_vram_bytes: u64,
+    ) -> (
+        Coordinator,
+        Vec<std::sync::mpsc::Receiver<crate::gpu_pool::GpuWorkerCommand>>,
+        tokio::sync::oneshot::Receiver<Result<crate::state::GenerationJobResult, String>>,
+    ) {
+        let mut workers = Vec::new();
+        let mut worker_rxs = Vec::new();
+        for ordinal in 0..lane_count {
+            let (worker, worker_rx) = if backend == mold_core::GpuBackend::Metal {
+                metal_test_worker(ordinal)
+            } else {
+                test_worker(ordinal)
+            };
+            workers.push(worker);
+            worker_rxs.push(worker_rx);
+        }
+        let pool = Arc::new(GpuPool {
+            workers: workers.clone().into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 1);
+        state.job_registry.register("pressured", "flux-dev:q4");
+        let (mut job, result_rx) = fake_generation("pressured");
+        job.request.model = "flux-dev:q4".to_string();
+        queue.submit(job, 1).await.unwrap();
+        publish_free_vram_for_lanes(&state, &vec![(backend, free_vram_bytes); lane_count]);
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        coordinator
+            .pending
+            .get_mut("pressured")
+            .expect("queued")
+            .preparation = PreparationState::Ready;
+        for worker in workers {
+            coordinator.handle_worker_event(
+                WorkerEvent::Ready {
+                    device_id: worker_device_id(&worker),
+                    ordinal: worker.gpu.ordinal,
+                    owner_epoch: 1,
+                    worker_generation: 1,
+                },
+                &mut immediate,
+            );
+        }
+        (coordinator, worker_rxs, result_rx)
+    }
+
     /// The recovery half of #1272: a shortage that clears must not need a
     /// resubmission. The scheduler re-resolves plans on every planning turn, so
     /// the job dispatches on the first turn after capacity returns — nothing
@@ -8534,8 +8651,8 @@ mod tests {
         assert!(
             coordinator.pending["stranded"]
                 .unschedulable_since_ms
-                .is_some(),
-            "an idle unschedulable wait is observed from the first turn"
+                .is_none(),
+            "typed transient pressure must never start a terminal settlement timer"
         );
 
         publish_free_vram(&coordinator.state, 24 << 30);
@@ -8544,43 +8661,89 @@ mod tests {
         assert_eq!(recv_grant(&worker_rx).id, "stranded");
     }
 
-    /// The hang half of #1272. A queued generation that resolves no execution
-    /// plan on an idle scheduler is never going to: nothing is running that
-    /// could return the resource. It must be settled with the plan's own named
-    /// shortfall rather than left `queued` past the client's own timeout.
+    /// Physical capacity, rather than elapsed queue time, is the terminal
+    /// boundary. This covers Metal's one unified lane and the scheduler's
+    /// ordinary N-lane CUDA authority with 24 GiB physical VRAM but 22 GiB held
+    /// by another process on every lane.
     #[tokio::test]
-    async fn an_idle_scheduler_settles_a_permanently_unschedulable_generation() {
-        let (mut coordinator, worker_rx, mut result_rx) =
-            unschedulable_test_coordinator(2 << 30).await;
+    async fn external_vram_pressure_remains_queued_after_idle_grace_then_dispatches() {
+        for (label, backend, lane_count) in [
+            ("Metal single lane", mold_core::GpuBackend::Metal, 1),
+            ("CUDA N lane", mold_core::GpuBackend::Cuda, 2),
+        ] {
+            let (mut coordinator, worker_rxs, mut result_rx) =
+                pressured_test_coordinator(backend, lane_count, 2 << 30).await;
 
-        let _ = coordinator.dispatch_ready().await;
-        assert!(coordinator.pending.contains_key("stranded"));
-        assert!(
-            result_rx.try_recv().is_err(),
-            "the grace window must not settle the job on its first idle turn"
-        );
+            let failure = coordinator
+                .generation_plans(&coordinator.pending["pressured"])
+                .expect_err("22 GiB of external pressure must prevent a plan");
+            assert!(
+                matches!(failure, GenerationPlanFailure::Transient(_)),
+                "{label}: a peak that fits physical VRAM is transient"
+            );
 
-        // Collapse the grace window rather than sleeping through a minute of
-        // it. The observation itself already stands from the turn above.
-        coordinator.unschedulable_idle_grace_ms = 0;
+            // Collapse the existing grace instead of sleeping through it.
+            // Typed pressure must remain retryable even after that boundary.
+            coordinator.unschedulable_idle_grace_ms = 0;
+            for _ in 0..2 {
+                let _ = coordinator.dispatch_ready().await;
+            }
+            assert!(
+                coordinator.pending.contains_key("pressured"),
+                "{label}: elapsed pressure must not terminalize durable work"
+            );
+            assert!(
+                result_rx.try_recv().is_err(),
+                "{label}: the client must remain attached to queued work"
+            );
+            assert!(
+                worker_rxs.iter().all(|rx| rx.try_recv().is_err()),
+                "{label}: pressure must prevent transport"
+            );
 
-        let _ = coordinator.dispatch_ready().await;
+            let unchanged_version = coordinator.state_version;
+            let mut unchanged_immediate = false;
+            coordinator.reconcile_resource_capacity(&mut unchanged_immediate);
+            assert!(
+                !unchanged_immediate,
+                "{label}: an unchanged telemetry tick must not spin planning"
+            );
+            assert_eq!(coordinator.state_version, unchanged_version, "{label}");
 
-        assert!(
-            !coordinator.pending.contains_key("stranded"),
-            "an idle scheduler must not keep an unschedulable job queued forever"
-        );
-        assert!(
-            worker_rx.try_recv().is_err(),
-            "settling must never transport the job"
-        );
-        let Err(error) = result_rx.try_recv().expect("the client is told") else {
-            panic!("an unschedulable job settles as an error, never as a print");
-        };
-        assert!(
-            error.contains("flux-dev:q4"),
-            "the refusal names the model: {error}"
-        );
+            publish_free_vram_for_lanes(&coordinator.state, &vec![(backend, 24 << 30); lane_count]);
+            let mut immediate = false;
+            coordinator.reconcile_resource_capacity(&mut immediate);
+            assert!(immediate, "{label}: changed capacity must wake planning");
+            let _ = coordinator
+                .dispatch_ready_with(PlanningPass::Admission)
+                .await;
+
+            let grants = worker_rxs
+                .iter()
+                .filter_map(|rx| match rx.try_recv() {
+                    Ok(crate::gpu_pool::GpuWorkerCommand::Grant(grant)) => match grant.work {
+                        OwnerWork::Generation(job) => Some(*job),
+                        work => panic!("{label}: expected generation grant, got {:?}", work.kind()),
+                    },
+                    Ok(crate::gpu_pool::GpuWorkerCommand::Drain) => {
+                        panic!("{label}: unexpected drain command")
+                    }
+                    Ok(crate::gpu_pool::GpuWorkerCommand::Shutdown) => {
+                        panic!("{label}: unexpected shutdown command")
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        panic!("{label}: worker command channel disconnected")
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(grants.len(), 1, "{label}: one lane receives the job");
+            assert_eq!(grants[0].id, "pressured", "{label}");
+            assert!(
+                !coordinator.pending.contains_key("pressured"),
+                "{label}: cleared pressure restores dispatch eligibility"
+            );
+        }
     }
 
     /// Waiting behind real work is not the same failure. A job queued while
