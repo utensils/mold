@@ -1671,7 +1671,20 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     let runtime_qualification_source =
         private_runtime_qualification_source(admitted_task, paths.runtime_qualification_record)?;
     #[cfg(not(feature = "h3"))]
-    runtime_qualification_source.validate_route(device_id, device_ordinal, compute_capability)?;
+    {
+        // Both the reviewed record and the capture pin authorize one concrete
+        // CUDA compute capability; a Metal route carries none (#1323 made the
+        // capability `Option`, `None` == Metal), so it is refused here by name
+        // rather than compared against a capability it does not have.
+        let Some(compute_capability) = compute_capability else {
+            bail!("private H3 reviewed runtime qualification requires a CUDA route");
+        };
+        runtime_qualification_source.validate_route(
+            device_id,
+            device_ordinal,
+            compute_capability,
+        )?;
+    }
     // Cheap capacity floors BEFORE the artifact pass below hashes ~37 GB.
     // Refusing a hopeless device after several minutes of SHA-256 was the
     // worst failure this path had; both floors are provable lower bounds of
