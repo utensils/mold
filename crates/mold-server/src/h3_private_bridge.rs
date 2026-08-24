@@ -655,16 +655,8 @@ fn reviewed_h3_private_generation_profile_for(
         ) == Some(true),
     });
     let recipe = profile.recipes.first_mut()?;
-    // Every bound is the compact CANVAS RULE's own, so a client that reads a
-    // ceiling rather than the preset list is never handed a number smaller
-    // than a canvas admission accepts. `mold_core::minimax_h3` is the one
-    // authority for the rule.
-    let reviewed_canvases = mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES;
-    let pixels = mold_core::minimax_h3::reviewed_compact_max_pixels();
-    let (min_aspect, max_aspect) = mold_core::minimax_h3::reviewed_compact_aspect_bounds();
-    let min_axis = mold_core::minimax_h3::reviewed_compact_min_axis_pixels();
     // WHICH RUNTIME IS BEHIND THIS ROW decides what it may advertise, and the
-    // two differ.
+    // two differ on EVERY axis — spatial included.
     //
     // The public `h3` runtime MINTS its qualification envelope from the
     // request (`private_server::public_runtime_envelope_for_shape`), so it
@@ -678,23 +670,51 @@ fn reviewed_h3_private_generation_profile_for(
     // `validate_prepared_with_adapter` refuses it again afterwards. Advertising
     // a range there would offer sizes that runtime cannot accept, which is
     // exactly the advertise-one-thing-enforce-another split this profile
-    // exists to prevent. So it keeps the record's own fixed shape.
+    // exists to prevent. So it keeps the record's own fixed shape: ONE
+    // recommended canvas, and ceilings that are that canvas's own numbers.
     let private_record_runtime = private_h3_record_runtime();
+    // The record's canvas is the same `width`/`height` this profile defaults
+    // to, which is what `capture_runtime_envelope` and the reviewed FL2VA
+    // record both carry.
+    let record_canvas = [(width, height)];
+    let reviewed_canvases: &[(u32, u32)] = if private_record_runtime {
+        &record_canvas
+    } else {
+        mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES
+    };
+    let pixels = if private_record_runtime {
+        u64::from(width) * u64::from(height)
+    } else {
+        mold_core::minimax_h3::reviewed_compact_max_pixels()
+    };
+    let max_axis = if private_record_runtime {
+        width.max(height)
+    } else {
+        mold_core::minimax_h3::reviewed_compact_max_axis_pixels()
+    };
+    let (min_aspect, max_aspect) = if private_record_runtime {
+        let aspect = f64::from(width) / f64::from(height);
+        (aspect, aspect)
+    } else {
+        mold_core::minimax_h3::reviewed_compact_aspect_bounds()
+    };
     if private_record_runtime {
         recipe.resolution.domain = ResolutionDomain::Buckets;
         recipe.resolution.off_bucket = Some(mold_core::generation_profile::OffBucketPolicy::Reject);
+        recipe.resolution.min_width = width;
+        recipe.resolution.min_height = height;
     } else {
         // A RANGE, not a bucket set: the compact runtime admits any aligned
         // canvas inside its area ceiling and the memory estimate decides what
         // fits.
         recipe.resolution.domain = ResolutionDomain::Dynamic;
         recipe.resolution.off_bucket = None;
+        let min_axis = mold_core::minimax_h3::reviewed_compact_min_axis_pixels();
+        recipe.resolution.min_width = min_axis;
+        recipe.resolution.min_height = min_axis;
     }
-    recipe.resolution.min_width = min_axis;
-    recipe.resolution.min_height = min_axis;
     recipe.resolution.max_pixels = pixels;
-    recipe.resolution.max_axis_pixels =
-        Some(mold_core::minimax_h3::reviewed_compact_max_axis_pixels());
+    recipe.resolution.max_axis_pixels = Some(max_axis);
     recipe.resolution.min_aspect_ratio = Some(min_aspect);
     recipe.resolution.max_aspect_ratio = Some(max_aspect);
     // Keep the generated profile's canonical reduced-ratio identities (`7:4`
@@ -969,18 +989,35 @@ fn h3_model_row(
             } else {
                 mold_core::minimax_h3::FRAME_OFFSET
             }),
+            // `pixels` already follows the runtime (it comes from the
+            // profile builder), and the two spatial fields the row states on
+            // its own follow it the same way: a stored-record build admits
+            // exactly `request`'s canvas, so the ceiling it advertises is
+            // that canvas's own, not the compact rule's.
             max_pixels: Some(pixels),
-            max_axis_pixels: Some(mold_core::minimax_h3::reviewed_compact_max_axis_pixels()),
+            max_axis_pixels: Some(if private_h3_record_runtime() {
+                request.width.max(request.height)
+            } else {
+                mold_core::minimax_h3::reviewed_compact_max_axis_pixels()
+            }),
             default_negative_prompt: None,
             // The recommended canvases, default first — the same slice the
-            // range profile above advertises as presets. A row that named
-            // only the default let a client that reads
-            // `recommended_dimensions` rather than the profile offer one
-            // size while the profile offered several.
-            recommended_dimensions: mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES
-                .iter()
-                .map(|&(width, height)| mold_core::RecommendedDimensions { width, height })
-                .collect(),
+            // profile above advertises as presets. A row that named only the
+            // default let a client that reads `recommended_dimensions` rather
+            // than the profile offer one size while the profile offered
+            // several; a stored-record build is the case where one really is
+            // all there is.
+            recommended_dimensions: if private_h3_record_runtime() {
+                vec![mold_core::RecommendedDimensions {
+                    width: request.width,
+                    height: request.height,
+                }]
+            } else {
+                mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES
+                    .iter()
+                    .map(|&(width, height)| mold_core::RecommendedDimensions { width, height })
+                    .collect()
+            },
             dimension_alignment: Some(alignment),
         },
         downloaded: true,
@@ -1883,10 +1920,18 @@ mod presentation_tests {
             .flat_map(|group| group.presets.iter())
             .map(|preset| (preset.width, preset.height))
             .collect::<Vec<_>>();
-        // Order follows the aspect grouping, so compare as sets.
+        // Order follows the aspect grouping, so compare as sets. A
+        // stored-record build advertises the record's canvas alone.
         let mut sorted = advertised.clone();
         sorted.sort_unstable();
-        let mut expected = mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec();
+        let mut expected = if super::private_h3_record_runtime() {
+            vec![(
+                mold_core::minimax_h3::DEFAULT_WIDTH,
+                mold_core::minimax_h3::DEFAULT_HEIGHT,
+            )]
+        } else {
+            mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec()
+        };
         expected.sort_unstable();
         assert_eq!(sorted, expected);
         // The default canvas still leads.
@@ -1924,7 +1969,11 @@ mod presentation_tests {
                 .iter()
                 .map(|group| group.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["7:4", "20:11", "16:9", "1:1", "4:7", "11:20"]
+            if super::private_h3_record_runtime() {
+                vec!["7:4"]
+            } else {
+                vec!["7:4", "20:11", "16:9", "1:1", "4:7", "11:20"]
+            }
         );
 
         // Every ceiling is the canvas RULE's own, so a client that reads a
@@ -1991,13 +2040,39 @@ mod presentation_tests {
     /// test asserts the arm this build actually compiled.
     #[test]
     fn the_advertised_profile_matches_this_build_s_runtime_authority() {
-        let (profile, _, _) = super::reviewed_h3_private_generation_profile()
+        let (profile, _, pixels) = super::reviewed_h3_private_generation_profile()
             .expect("the reviewed H3 profile must resolve");
         let recipe = profile.default_recipe().expect("one reviewed recipe");
         let temporal = recipe.temporal.as_ref().expect("a temporal block");
+        let presets = recipe
+            .resolution
+            .aspect_groups
+            .iter()
+            .flat_map(|group| group.presets.iter())
+            .map(|preset| (preset.width, preset.height))
+            .collect::<Vec<_>>();
+        let record = (
+            mold_core::minimax_h3::DEFAULT_WIDTH,
+            mold_core::minimax_h3::DEFAULT_HEIGHT,
+        );
 
         if super::private_h3_record_runtime() {
-            // A stored record is the authority: every axis is its own value.
+            // A stored record is the authority: every axis is its own value,
+            // SPATIAL included. `precheck_private_h3_record_canvas` accepts
+            // only the record's exact canvas, so advertising the compact
+            // rule's ceilings would offer sizes it refuses.
+            assert_eq!(presets, vec![record]);
+            assert_eq!(pixels, u64::from(record.0) * u64::from(record.1));
+            assert_eq!(recipe.resolution.max_pixels, pixels);
+            assert_eq!(
+                recipe.resolution.max_axis_pixels,
+                Some(record.0.max(record.1))
+            );
+            assert_eq!(recipe.resolution.min_width, record.0);
+            assert_eq!(recipe.resolution.min_height, record.1);
+            let aspect = f64::from(record.0) / f64::from(record.1);
+            assert_eq!(recipe.resolution.min_aspect_ratio, Some(aspect));
+            assert_eq!(recipe.resolution.max_aspect_ratio, Some(aspect));
             assert_eq!(
                 recipe.resolution.domain,
                 mold_core::generation_profile::ResolutionDomain::Buckets
@@ -2026,6 +2101,28 @@ mod presentation_tests {
             assert_eq!(recipe.steps.min, mold_core::minimax_h3::COMFY_DEFAULT_STEPS);
         } else {
             // The per-request-minted runtime: the whole compact rule.
+            let mut sorted = presets.clone();
+            sorted.sort_unstable();
+            let mut expected = mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec();
+            expected.sort_unstable();
+            assert_eq!(sorted, expected);
+            assert_eq!(pixels, mold_core::minimax_h3::reviewed_compact_max_pixels());
+            assert_eq!(recipe.resolution.max_pixels, pixels);
+            assert_eq!(
+                recipe.resolution.max_axis_pixels,
+                Some(mold_core::minimax_h3::reviewed_compact_max_axis_pixels())
+            );
+            assert_eq!(
+                recipe.resolution.min_width,
+                mold_core::minimax_h3::MIN_COMPACT_AXIS_PIXELS
+            );
+            assert_eq!(
+                recipe.resolution.min_height,
+                mold_core::minimax_h3::MIN_COMPACT_AXIS_PIXELS
+            );
+            let (min_aspect, max_aspect) = mold_core::minimax_h3::reviewed_compact_aspect_bounds();
+            assert_eq!(recipe.resolution.min_aspect_ratio, Some(min_aspect));
+            assert_eq!(recipe.resolution.max_aspect_ratio, Some(max_aspect));
             assert_eq!(
                 recipe.resolution.domain,
                 mold_core::generation_profile::ResolutionDomain::Dynamic
@@ -2302,28 +2399,52 @@ mod tests {
         let mut expected = mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec();
         expected.sort_unstable();
         assert_eq!(advertised, expected);
-        assert_eq!(recipe.resolution.aspect_groups[0].presets.len(), 1);
+        // The default canvas leads either way, in its own 7:4 group; only a
+        // stored-record build has that group to itself.
         assert_eq!(recipe.resolution.aspect_groups[0].id, "7:4");
         assert_eq!(recipe.resolution.aspect_groups[0].label, "7:4");
         assert_eq!(recipe.resolution.aspect_groups[0].presets[0].width, 1344);
         assert_eq!(recipe.resolution.aspect_groups[0].presets[0].height, 768);
-        // The row's recommendations are the same set, default first.
-        assert_eq!(
-            row.defaults
-                .recommended_dimensions
-                .iter()
-                .map(|entry| (entry.width, entry.height))
-                .collect::<Vec<_>>(),
-            mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec()
-        );
-        assert_eq!(
-            row.defaults.max_pixels,
-            Some(mold_core::minimax_h3::reviewed_compact_max_pixels())
-        );
-        assert_eq!(
-            row.defaults.max_axis_pixels,
-            Some(mold_core::minimax_h3::reviewed_compact_max_axis_pixels())
-        );
+        if super::private_h3_record_runtime() {
+            assert_eq!(recipe.resolution.aspect_groups.len(), 1);
+            assert_eq!(recipe.resolution.aspect_groups[0].presets.len(), 1);
+        }
+        // The row's spatial metadata follows the same runtime authority as
+        // the profile: a stored-record build admits one canvas, so that is
+        // the only thing it may recommend or bound.
+        let advertised_dimensions = row
+            .defaults
+            .recommended_dimensions
+            .iter()
+            .map(|entry| (entry.width, entry.height))
+            .collect::<Vec<_>>();
+        if super::private_h3_record_runtime() {
+            let record = (
+                mold_core::minimax_h3::DEFAULT_WIDTH,
+                mold_core::minimax_h3::DEFAULT_HEIGHT,
+            );
+            assert_eq!(advertised_dimensions, vec![record]);
+            assert_eq!(
+                row.defaults.max_pixels,
+                Some(u64::from(record.0) * u64::from(record.1))
+            );
+            assert_eq!(row.defaults.max_axis_pixels, Some(record.0.max(record.1)));
+        } else {
+            // The same slice, in order, default first — the row does not
+            // group by aspect.
+            assert_eq!(
+                advertised_dimensions,
+                mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec()
+            );
+            assert_eq!(
+                row.defaults.max_pixels,
+                Some(mold_core::minimax_h3::reviewed_compact_max_pixels())
+            );
+            assert_eq!(
+                row.defaults.max_axis_pixels,
+                Some(mold_core::minimax_h3::reviewed_compact_max_axis_pixels())
+            );
+        }
         assert_eq!(
             recipe.resolution.aspect_groups[0].presets[0].tier,
             "reviewed"
