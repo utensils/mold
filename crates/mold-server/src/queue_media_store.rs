@@ -811,6 +811,16 @@ pub struct StoreInspection {
     pub unrecognized: Vec<UnrecognizedStoreEntry>,
 }
 
+/// One queue-media owner directory observed without traversing it.
+///
+/// Startup uses this only to report roots it does not own. A malformed or
+/// symlink root has no trusted owner hint and is never followed.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct StoreOwnerRoot {
+    pub owner_id_hint: Option<String>,
+    pub description: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct WireManifest {
     format_version: u16,
@@ -1517,6 +1527,75 @@ impl QueueMediaStore {
         }
         sort_inspection(&mut report);
         report
+    }
+
+    /// Enumerate direct owner roots without opening or traversing any owner
+    /// other than `claimed_owner_id`.
+    pub fn unclaimed_owner_roots(&self, claimed_owner_id: &str) -> Vec<StoreOwnerRoot> {
+        let mut roots = std::collections::BTreeSet::new();
+        for state in [
+            StoredState::Active,
+            StoredState::Retired,
+            StoredState::Staging,
+        ] {
+            let state_root = self.root.join(state.directory());
+            let entries = match fs::read_dir(&state_root) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    roots.insert(StoreOwnerRoot {
+                        owner_id_hint: None,
+                        description: format!(
+                            "could not enumerate {} owner roots: {error}",
+                            state.directory()
+                        ),
+                    });
+                    continue;
+                }
+            };
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        roots.insert(StoreOwnerRoot {
+                            owner_id_hint: None,
+                            description: format!(
+                                "could not read an {} owner root: {error}",
+                                state.directory()
+                            ),
+                        });
+                        continue;
+                    }
+                };
+                let owner = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(decode_component)
+                    .filter(|owner| validate_identity("owner", owner).is_ok());
+                let is_directory = entry.file_type().is_ok_and(|kind| kind.is_dir());
+                match owner {
+                    Some(owner) if owner == claimed_owner_id && is_directory => {}
+                    Some(owner) if is_directory => {
+                        roots.insert(StoreOwnerRoot {
+                            owner_id_hint: Some(owner),
+                            description: format!(
+                                "unclaimed {} queue-media owner root",
+                                state.directory()
+                            ),
+                        });
+                    }
+                    _ => {
+                        roots.insert(StoreOwnerRoot {
+                            owner_id_hint: None,
+                            description: format!(
+                                "unsafe or malformed {} queue-media owner root",
+                                state.directory()
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        roots.into_iter().collect()
     }
 
     fn seal_file(
@@ -4530,6 +4609,35 @@ mod tests {
         assert!(report.unrecognized.is_empty());
         store.delete_staging(&reference).unwrap();
         assert!(!staging.exists());
+    }
+
+    #[test]
+    fn unclaimed_owner_root_enumeration_never_descends_into_peer_roots() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        store
+            .seal(
+                "claimed-owner",
+                "claimed-job",
+                &[SealMedia::bytes("source", "one", vec![1])],
+            )
+            .unwrap();
+        store
+            .seal(
+                "peer-owner",
+                "peer-job",
+                &[SealMedia::bytes("source", "one", vec![2])],
+            )
+            .unwrap();
+
+        let roots = store.unclaimed_owner_roots("claimed-owner");
+        assert!(roots.iter().any(|root| {
+            root.owner_id_hint.as_deref() == Some("peer-owner")
+                && root.description.contains("active")
+        }));
+        assert!(roots
+            .iter()
+            .all(|root| root.owner_id_hint.as_deref() != Some("claimed-owner")));
     }
 
     #[test]
