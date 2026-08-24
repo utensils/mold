@@ -221,9 +221,9 @@ pub const DEFAULT_HEIGHT: u32 = 768;
 ///
 /// * `1344x768` — #827, 2026-08-19 (21 steps, 1216 s; `-turbo-8step`
 ///   759.5 s), the original qualification.
-/// * `768x768` — #1033, 2026-08-23 (21 steps, 937 s, 7,568 MiB peak VRAM,
-///   16.36 GB peak host RSS), 43% fewer pixels and strictly cheaper on
-///   every axis the runtime envelope bounds.
+/// * `768x768` — #1033, 2026-08-23 (21 steps, 937 s, 7.37 GiB VRAM high
+///   water; `-turbo-8step` 664 s, 9.15 GiB), 43% fewer pixels and strictly
+///   cheaper on every axis the runtime envelope bounds.
 ///
 /// The order is load-bearing in one place only: ties in
 /// [`nearest_reviewed_compact_canvas`] resolve to the first entry, which

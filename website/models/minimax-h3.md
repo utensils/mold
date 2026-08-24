@@ -204,15 +204,21 @@ The checkpoint itself accepts any 32-aligned canvas between 1:4 and 4:1;
 `1344x768` is upstream's _default_, not its limit. Mold advertises the strictly
 smaller set for which it has real-hardware evidence:
 
-| Canvas     | Aspect | Measured (RTX 4090 24 GB, 124 frames, 21 steps)    |
-| ---------- | ------ | -------------------------------------------------- |
-| `1344x768` | 7:4    | 1216 s, ~14.4 GB peak VRAM                         |
-| `768x768`  | 1:1    | 937 s, 7,568 MiB peak VRAM, 16.36 GB peak host RSS |
+Measured on an RTX 4090 24 GB at 124 frames / 24 fps, wall clock from request
+to MP4 bytes on a cold process:
 
-`768x768` renders 43% fewer pixels and is cheaper on every axis, but it is
+| Canvas     | Aspect | Base tier (21 steps) | `-turbo-8step` (9 steps) |
+| ---------- | ------ | -------------------- | ------------------------ |
+| `1344x768` | 7:4    | 1216 s, 10.8 GB VRAM | 759.5 s, 13.5-14.6 GB    |
+| `768x768`  | 1:1    | 937 s, 7.4 GB VRAM   | 664 s, 9.2 GB VRAM       |
+
+`768x768` renders 43% fewer pixels and is faster on both tiers, but it is
 admitted against the larger canvas's memory floors — so a host that is refused
 `1344x768` is refused `768x768` too, even though it might have fit. Both
 canvases share the reviewed 124-frame duration, step counts, and prompt budget.
+Note that a Turbo tag costs slightly _more_ VRAM than the base tier on the same
+canvas: it is the same compact stack plus a resident adapter, and the step
+count it moves buys time, not memory.
 
 When a first-frame image is attached without explicit `--width`/`--height`,
 the CLI and Discord builders submit the qualified canvas nearest the source's

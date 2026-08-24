@@ -606,11 +606,55 @@ between 1:4 and 4:1 (ComfyUI's `nodes_minimax_h3.py:99-100` declares
 range. What is listed below is the strictly smaller set for which a real
 hardware campaign exists.
 
-| Canvas    | Aspect | Pixels    | Campaign | Host                     | Steps | Wall clock | Peak VRAM  | Peak host RSS |
-| --------- | ------ | --------- | -------- | ------------------------ | ----- | ---------- | ---------- | ------------- |
-| 1344x768  | 7:4    | 1,032,192 | #827     | hal9000, RTX 4090, 24 GB | 21    | 1216 s     | ~14.4 GB   | —             |
-| 1344x768  | 7:4    | 1,032,192 | #827     | hal9000, RTX 4090, 24 GB | 9     | 759.5 s    | ~14.4 GB   | —             |
-| 768x768   | 1:1    | 589,824   | #1033    | hal9000, RTX 4090, 24 GB | 21    | 937 s      | 7,568 MiB  | 16.36 GB      |
+Every row below ran on hal9000 — RTX 4090 24 GB, 62 GB host RAM, CUDA SM89 —
+at 124 frames / 24 fps.
+
+| Canvas   | Aspect | Pixels    | Campaign | Steps | Wall clock | Runtime   | VRAM high water    | Peak host RSS |
+| -------- | ------ | --------- | -------- | ----- | ---------- | --------- | ------------------ | ------------- |
+| 1344x768 | 7:4    | 1,032,192 | #827     | 21    | 1216 s     | 1,217.4 s | 11,565,793,280 B   | —             |
+| 1344x768 | 7:4    | 1,032,192 | #827     | 9     | 759.5 s    | 731-834 s | 13.5-14.6 GB       | —             |
+| 768x768  | 1:1    | 589,824   | #1033    | 21    | 937 s      | 845.2 s   | 7,908,360,192 B    | 16.36 GB      |
+| 768x768  | 1:1    | 589,824   | #1033    | 9     | 664 s      | 507.7 s   | 9,820,962,816 B    | 16.34 GB      |
+
+Wall clock is POST to MP4 bytes on a cold process. Runtime and the VRAM high
+water are the scheduler's own learned-estimate rows in `mold.db`
+(`scheduler_estimates`, `device_class` `cuda:sm89:24gb`, `outcome` success,
+fallback `block_offload`, one sample each), keyed by shape bucket:
+`768x768:s21:f124:fps24:a0:src1:edit0:lora0:b1` and its `:s9:` sibling. The
+gap between wall clock and runtime is admission, the artifact SHA-256 pass,
+and publication, none of which are runtime phases.
+
+Per phase, as the estimates rows report them (`ewma_*` milliseconds):
+
+| Row                    | prompt_encode | denoise   | vae    | visual_decode | audio_decode | mux   |
+| ---------------------- | ------------- | --------- | ------ | ------------- | ------------ | ----- |
+| 1344x768, 21 steps     | 722,198       | 770,584   | 1,349  | 67,158        | 743          | 13    |
+| 1344x768, 9 steps      | ~715,000      | ~335,000  | —      | ~40,000       | —            | —     |
+| 768x768, 21 steps      | 445,565       | 588,682   | 801    | 22,705        | 741          | 11    |
+| 768x768, 9 steps       | 457,552       | 239,643   | 849    | 23,190        | 747          | 13    |
+
+**These columns are learned independently and do not sum to the runtime
+figure** — 768x768 at 21 steps reports 445.6 s of prompt encode beside 588.7 s
+of denoise against an 845.2 s runtime. Read each as that phase's own learned
+estimate, not as a partition of the wall clock. Three things the rows do say
+plainly:
+
+- **Denoise scales with pixels, prompt encode does not.** Halving the canvas
+  takes denoise from 770.6 s to 588.7 s at the same step count, and visual
+  decode from 67.2 s to 22.7 s, while prompt encode is a property of the
+  conditioner sequence and moves with the canvas only through the boundary
+  endpoint's vision pads (722.2 s -> 445.6 s). At 9 steps denoise is 239.6 s
+  and prompt encode is 457.6 s — the conditioner, not the sampler, is then the
+  dominant cost, which is why the Turbo tier's wall clock (664 s) is far from
+  9/21 of the base tier's.
+- **The Turbo tier costs more VRAM, not less.** 9.15 GiB against the base
+  tier's 7.37 GiB on the same canvas: the tier is the same compact stack plus
+  a resident adapter, and the step count it moves is a time axis, not a memory
+  one. The same ordering holds at 1344x768 (13.5-14.6 GB against 10.77 GiB).
+- **The 1 Hz `nvidia-smi` sampler under-reads the true high water**, as a
+  sampler must: 7,568 MiB observed against 7,908,360,192 B (7.37 GiB) for the
+  base 768x768 row, 9,392 MiB against 9.15 GiB for the Turbo one. The
+  scheduler's figure is the one to plan against.
 
 ### The 768x768 campaign (#1033, 2026-08-23)
 
@@ -625,16 +669,35 @@ Request: `minimax-h3-fl2va:comfy-pruned-int8`, 768x768, 124 frames, 24 fps,
 in a snowy pine forest at dawn") and the same 1344x768 source PNG as the
 recorded 1344x768 verification, fitted internally by the engine.
 
-Measured:
+Measured, base tier `minimax-h3-fl2va:comfy-pruned-int8` at 21 steps:
 
 - Wall clock, POST to MP4 bytes, cold process: **937 s** (against 1216 s at
   1344x768 and the same step count)
-- Peak VRAM, 1 Hz `nvidia-smi`: **7,568 MiB**
+- Runtime, from the estimates row: **845,188 ms**
+- VRAM high water, from the same row: **7,908,360,192 B** (7.37 GiB); the 1 Hz
+  `nvidia-smi` sampler saw 7,568 MiB
 - Peak host RSS, `VmHWM` of a fresh serve process: **16.36 GB**
 - Output: 768x768, 124 frames at 24/1, h264 + AAC stereo 32 kHz (162 audio
   frames), 2.1 MB MP4, SHA-256 prefix `2b95c627a1d2321b`
 - Visual: frame 0 pinned to the source; same subject and scene at frames 40,
   80, and 123; the subject turns and steps forward; no cut
+
+And the reviewed Turbo tier `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`
+at its own 9 terminal-inclusive grid points, same prompt, source, and seed on
+a fresh process:
+
+- Wall clock: **664 s**; runtime **507,700 ms**
+- VRAM high water: **9,820,962,816 B** (9.15 GiB); sampler peak 9,392 MiB —
+  *higher* than the base tier on the same canvas, because a Turbo tag is the
+  same compact stack plus a resident adapter
+- Peak host RSS: **16.34 GB**
+- Output: 768x768, 124 frames at 24/1, h264 + AAC stereo 32 kHz (162 audio
+  frames), 6.4 MB MP4, SHA-256 prefix `2bc04592ebdaa09e`
+- Visual: frame 0 pinned to the source; frames 80 and 123 keep the same fox and
+  forest with a forward stride; no cut
+
+Both tiers therefore render this canvas correctly and well inside a 24 GB
+card, and the Turbo tier's advantage is time alone.
 
 ### Slack, deliberately
 
