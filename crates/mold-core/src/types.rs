@@ -8559,6 +8559,11 @@ pub struct ServerCapabilities {
     /// of their responses working (can_pause = can_cancel_all = false).
     #[serde(default)]
     pub queue: QueueCapabilities,
+    /// Restart-safe encrypted request-media support for the durable queue.
+    /// Absence means unavailable; servers must keep this dark until the full
+    /// admission, reconciliation, hydration, and cleanup lifecycle is live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_media: Option<DurableMediaCapabilities>,
     /// Absent on older servers. Availability advertises the ingress protocol,
     /// not MiniMax H3 model/license activation; model_access remains the
     /// authority for whether a request may run.
@@ -10367,6 +10372,33 @@ mod queue_plan_wire_tests {
                 "h3_references": false,
                 "private_h3": false,
             })
+        );
+
+        let legacy_server: ServerCapabilities = serde_json::from_value(serde_json::json!({
+            "gallery": {"can_delete": true},
+            "catalog": {"available": false, "families": []}
+        }))
+        .unwrap();
+        assert_eq!(legacy_server.durable_media, None);
+        assert!(
+            !serde_json::to_value(&legacy_server)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("durable_media"),
+            "an unavailable capability must remain absent rather than serialize as null"
+        );
+
+        let advertised = ServerCapabilities {
+            durable_media: Some(DurableMediaCapabilities::v1()),
+            ..ServerCapabilities::default()
+        };
+        let advertised_wire = serde_json::to_value(&advertised).unwrap();
+        assert_eq!(advertised_wire["durable_media"], durable_media);
+        let round_tripped: ServerCapabilities = serde_json::from_value(advertised_wire).unwrap();
+        assert_eq!(
+            round_tripped.durable_media,
+            Some(DurableMediaCapabilities::v1())
         );
 
         let legacy_metadata: OutputMetadata = serde_json::from_value(serde_json::json!({

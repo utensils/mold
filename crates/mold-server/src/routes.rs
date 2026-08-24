@@ -6465,6 +6465,10 @@ async fn server_capabilities(
                 .then_some(MAX_HETEROGENEOUS_BATCH_OUTPUTS as u32),
             durable_batch_outcomes: heterogeneous_batch,
         },
+        // Capability activation is intentionally fenced behind the complete
+        // durable-media admission lifecycle. This additive wire slice only
+        // establishes the default-dark response shape.
+        durable_media: None,
         reference_uploads: mold_core::ReferenceUploadCapabilities {
             available: true,
             // V2 rebinds the request scope to content-probed canonical

@@ -4080,6 +4080,10 @@ mod tests {
         assert_eq!(body["queue"]["can_cancel_all"], true);
         assert_eq!(body["queue"]["can_reorder"], true);
         assert_eq!(body["queue"]["server_batch"], true);
+        assert!(
+            body.get("durable_media").is_none(),
+            "the server must keep durable request-media capability dark until activation is complete"
+        );
         assert_eq!(
             body["queue"]["server_batch_max_outputs"],
             crate::batch_runtime::MAX_LIVE_SERVER_BATCH_OUTPUTS
@@ -4100,6 +4104,31 @@ mod tests {
         assert_eq!(
             body["reference_uploads"]["max_file_bytes"],
             crate::reference_uploads::MAX_REFERENCE_UPLOAD_FILE_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn capabilities_keep_durable_media_dark_even_if_the_journal_seam_is_ready() {
+        let state = AppState::for_tests();
+        state.queue_journal.set_durable_media_ready(true);
+        assert_eq!(
+            state.queue_journal.durable_media_capabilities(),
+            Some(mold_core::DurableMediaCapabilities::v1()),
+            "the fixture must exercise a ready journal rather than the default-false case"
+        );
+
+        let resp = app_with_state(state)
+            .oneshot(
+                Request::get("/api/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            json_body(resp).await.get("durable_media").is_none(),
+            "this wire-only slice must not connect readiness to production advertisement"
         );
     }
 
