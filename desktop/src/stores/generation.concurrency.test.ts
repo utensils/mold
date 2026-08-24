@@ -507,8 +507,16 @@ describe("submitBatch connection cap", () => {
     await flushPromises();
     expect(submitted.jobs[0]!.status).toBe("loading");
 
-    phase = "complete";
     store.onDurableEvent("hal9000", "event", '{"type":"job_ended","id":"job-1"}');
+    await flushPromises();
+    expect(submitted.jobs[0]!.status).toBe("loading");
+
+    phase = "complete";
+    store.onDurableEvent(
+      "hal9000",
+      "event",
+      '{"type":"job_state_committed","id":"committed-before-client-map"}',
+    );
     await submitted.settled;
     expect(submitted.jobs[0]).toMatchObject({
       status: "complete",

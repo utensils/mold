@@ -33,6 +33,10 @@ describe("mobile durable generation host watch", () => {
     h.callbacks().onEvent("event", JSON.stringify({ type: "job_started", id: "a" }));
     await h.flush();
     expect(h.reasons).toEqual(["open"]);
+
+    h.callbacks().onEvent("event", JSON.stringify({ type: "job_state_committed", id: "a" }));
+    await h.flush();
+    expect(h.reasons).toEqual(["open", "event"]);
   });
 
   it("reconciles event gaps, malformed frames, close, and wake", async () => {

@@ -695,6 +695,9 @@ pub async fn run_server(
     }
     state.metadata_db = metadata_db;
     state.queue_journal = queue_journal.clone();
+    queue_journal
+        .install_event_broadcaster(state.events.clone())
+        .map_err(anyhow::Error::msg)?;
     state.generation_cancel = generation_cancel.clone();
     state.device_registry = device_registry;
 

@@ -544,6 +544,52 @@ describe("web durable generation lifecycle", () => {
     ).toBeGreaterThan(0);
   });
 
+  it("reconciles again from the post-commit hint when earlier terminal hints race", async () => {
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(batch(body.client_batch_id)),
+    );
+    const completed = vi.fn();
+    const stream = useGenerateStream(completed);
+    const id = stream.submit(request("post-commit"), { kind: "single" }, route);
+    await vi.waitFor(() =>
+      expect(
+        stream.jobs.value.find((job) => job.id === id)?.serverId,
+      ).toBeTruthy(),
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    const clientBatchId = job.durableBatch!.clientBatchId;
+    reconcileGenerationBatches
+      .mockResolvedValueOnce(
+        statusResponse([batch(clientBatchId, ["running"])]),
+      )
+      .mockResolvedValueOnce(
+        statusResponse([batch(clientBatchId, ["complete"])]),
+      );
+
+    __testing__.handleDurableEvent(
+      route.hostId,
+      "event",
+      JSON.stringify({ type: "job_ended", id: job.serverId }),
+    );
+    await vi.waitFor(() =>
+      expect(reconcileGenerationBatches).toHaveBeenCalledTimes(1),
+    );
+    expect(job.state).toBe("running");
+
+    __testing__.handleDurableEvent(
+      route.hostId,
+      "event",
+      JSON.stringify({
+        type: "job_state_committed",
+        id: "committed-before-client-map",
+      }),
+    );
+
+    await vi.waitFor(() => expect(job.state).toBe("done"));
+    await vi.waitFor(() => expect(completed).toHaveBeenCalledTimes(1));
+  });
+
   it("fences a replacement server instance instead of adopting its work", async () => {
     admitGenerationBatch.mockImplementation(
       (_target: unknown, body: { client_batch_id: string }) =>

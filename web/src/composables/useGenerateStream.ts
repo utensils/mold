@@ -1817,6 +1817,13 @@ function handleDurableEvent(
   if (eventName !== "event" || typeof data.type !== "string") {
     return;
   }
+  if (data.type === "job_state_committed") {
+    // Admission and execution are concurrent: a very fast child can commit
+    // before the POST response gives this client its server id. Reconcile the
+    // host, not only an already-mapped row. The bulk read is coalesced above.
+    void reconcileDurableHost(hostId);
+    return;
+  }
   let exactJob: Job | undefined;
   if (typeof data.id === "string") {
     exactJob = jobs.value.find(

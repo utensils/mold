@@ -610,8 +610,10 @@ export const useGenerationStore = defineStore("generation", {
           (frame.type === "job_queued" ||
             frame.type === "job_started" ||
             frame.type === "job_ended" ||
+            frame.type === "job_state_committed" ||
             frame.type === "gallery_added") &&
           (frame.type === "gallery_added" ||
+            frame.type === "job_state_committed" ||
             records.some((record) =>
               Object.values(record.tracker.jobs).some((job) => job.authority.jobId === frame.id),
             ))

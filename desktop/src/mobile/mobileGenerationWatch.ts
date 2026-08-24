@@ -26,6 +26,7 @@ const INVALIDATION_EVENT_TYPES = new Set([
   "job_queued",
   "job_started",
   "job_ended",
+  "job_state_committed",
   "gallery_added",
 ]);
 

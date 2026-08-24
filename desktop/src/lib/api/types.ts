@@ -898,6 +898,7 @@ export type ServerEvent =
   | { type: "job_queued"; id: string; model: string }
   | { type: "job_started"; id: string; model: string; gpu?: number | null }
   | { type: "job_ended"; id: string }
+  | { type: "job_state_committed"; id: string }
   | { type: "gallery_added"; filename: string; image?: GalleryImage | null }
   | { type: "gallery_removed"; filename: string }
   | GalleryUpdatedEvent<GalleryImage>

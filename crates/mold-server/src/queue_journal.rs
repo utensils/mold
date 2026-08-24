@@ -476,6 +476,9 @@ pub struct QueueJournal {
     /// existing media-free journal behavior unchanged.
     queue_media_lifecycle: OnceLock<Arc<crate::queue_media_lifecycle::QueueMediaLifecycle>>,
     queue_media_admission: OnceLock<Arc<crate::queue_media_admission::DurableMediaAdmission>>,
+    /// Post-commit lifecycle hints for durable clients. Installed after the
+    /// app state creates its one server-wide broadcaster.
+    events: OnceLock<Arc<crate::events::EventBroadcaster>>,
     #[cfg(test)]
     fail_completion_lookup: AtomicBool,
     #[cfg(test)]
@@ -538,6 +541,7 @@ impl QueueJournal {
             durable_media_ready: AtomicBool::new(false),
             queue_media_lifecycle: OnceLock::new(),
             queue_media_admission: OnceLock::new(),
+            events: OnceLock::new(),
             _owner_claim: claim,
             #[cfg(test)]
             fail_completion_lookup: AtomicBool::new(false),
@@ -564,6 +568,7 @@ impl QueueJournal {
             durable_media_ready: AtomicBool::new(false),
             queue_media_lifecycle: OnceLock::new(),
             queue_media_admission: OnceLock::new(),
+            events: OnceLock::new(),
             _owner_claim: None,
             #[cfg(test)]
             fail_completion_lookup: AtomicBool::new(false),
@@ -638,6 +643,21 @@ impl QueueJournal {
         self.queue_media_admission
             .set(admission)
             .map_err(|_| "durable-media admission was already installed")
+    }
+
+    pub(crate) fn install_event_broadcaster(
+        &self,
+        events: Arc<crate::events::EventBroadcaster>,
+    ) -> Result<(), &'static str> {
+        self.events
+            .set(events)
+            .map_err(|_| "queue journal event broadcaster was already installed")
+    }
+
+    fn publish_state_committed(&self, id: &str) {
+        if let Some(events) = self.events.get() {
+            events.publish(mold_core::ServerEvent::JobStateCommitted { id: id.to_string() });
+        }
     }
 
     pub(crate) fn queue_media_admission(
@@ -1031,8 +1051,16 @@ impl QueueJournal {
 
     fn set_batch_child_state(&self, id: &str, state: &str, error: Option<&str>) {
         let Some(db) = self.db() else { return };
-        if let Err(error) = generation_batches::set_child_state(db, id, state, error, now_ms()) {
-            tracing::warn!(job = %id, %error, "could not update generation batch child state");
+        match generation_batches::set_child_state(db, id, state, error, now_ms()) {
+            // `job_started` already invalidates clients after the running
+            // transition. Reserve the host-wide post-commit hint for states
+            // that otherwise race the earlier `job_ended`/gallery events.
+            Ok(true) if state != "running" => self.publish_state_committed(id),
+            Ok(true) => {}
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(job = %id, %error, "could not update generation batch child state");
+            }
         }
     }
 
@@ -1260,6 +1288,7 @@ impl QueueJournal {
             if let Some(service) = self.queue_media_admission.get() {
                 service.ingress().discard_hint(id);
             }
+            self.publish_state_committed(id);
         }
         let cancelled = outcome != generation_batches::OwnedCancellation::NotOwned;
         self.wake_feeder();
@@ -2312,6 +2341,12 @@ impl QueueTicket {
         if outcome == generation_batches::OwnedHold::Cancelled {
             self.journal.cleanup_media_candidate(candidate);
         }
+        if matches!(
+            outcome,
+            generation_batches::OwnedHold::Held | generation_batches::OwnedHold::Cancelled
+        ) {
+            self.journal.publish_state_committed(&self.id);
+        }
         Ok(outcome)
     }
 
@@ -2329,6 +2364,9 @@ impl QueueTicket {
             Ok(commit) => {
                 if commit.queue_deleted {
                     self.journal.cleanup_media_candidate(candidate);
+                }
+                if commit.batch_child_updated {
+                    self.journal.publish_state_committed(&self.id);
                 }
                 commit.queue_deleted
             }
@@ -2414,6 +2452,7 @@ mod tests {
             durable_media_ready: AtomicBool::new(false),
             queue_media_lifecycle: OnceLock::new(),
             queue_media_admission: OnceLock::new(),
+            events: OnceLock::new(),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
             fail_claim_release: AtomicBool::new(false),
@@ -2826,6 +2865,43 @@ mod tests {
     }
 
     #[test]
+    fn durable_state_event_is_published_after_terminal_commit() {
+        let journal = journal_with_db();
+        let events = crate::events::EventBroadcaster::new();
+        journal.install_event_broadcaster(events.clone()).unwrap();
+        let request = request();
+        journal
+            .record_batch(BatchJournalAdmission {
+                id: "event-batch",
+                client_batch_id: "event-client",
+                request_sha256: "event-sha",
+                children: &[admission("event-child", &request, Path::new("/gallery"))],
+            })
+            .unwrap();
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+        assert_eq!(ticket.claim_dispatch(), DispatchClaim::Granted);
+        let mut receiver = events.subscribe();
+
+        ticket.complete_with_result(Some(r#"{"filename":"event.png"}"#));
+
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            mold_core::ServerEvent::JobStateCommitted { id } if id == "event-child"
+        ));
+        let detail = journal
+            .durable_generation_batch("event-batch")
+            .unwrap()
+            .unwrap();
+        let child = &detail.children[0];
+        assert_eq!(child.state, "complete");
+        assert_eq!(
+            child.result_json.as_deref(),
+            Some(r#"{"filename":"event.png"}"#)
+        );
+    }
+
+    #[test]
     fn record_refuses_everything_that_must_not_be_journaled() {
         let journal = journal_with_db();
         let request = request();
@@ -2922,6 +2998,7 @@ mod tests {
             durable_media_ready: AtomicBool::new(false),
             queue_media_lifecycle: OnceLock::new(),
             queue_media_admission: OnceLock::new(),
+            events: OnceLock::new(),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
             fail_claim_release: AtomicBool::new(false),
@@ -2951,6 +3028,7 @@ mod tests {
             durable_media_ready: AtomicBool::new(false),
             queue_media_lifecycle: OnceLock::new(),
             queue_media_admission: OnceLock::new(),
+            events: OnceLock::new(),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
             fail_claim_release: AtomicBool::new(false),

@@ -9236,6 +9236,13 @@ pub enum ServerEvent {
     JobEnded {
         id: String,
     },
+    /// A durable generation batch child committed a new authoritative state.
+    /// Unlike `job_ended` and `gallery_added`, this is emitted only after the
+    /// SQLite transaction has completed, so reconnecting clients may safely
+    /// reconcile the child through `/api/generation-batches/status`.
+    JobStateCommitted {
+        id: String,
+    },
     /// A new output landed in the gallery. `image` carries the full gallery
     /// row when the metadata DB recorded it (clients can insert without a
     /// refetch); `None` when the DB is disabled — refetch `/api/gallery`.
@@ -9347,6 +9354,12 @@ mod server_event_tests {
         assert_eq!(
             serde_json::to_string(&ended).unwrap(),
             r#"{"type":"job_ended","id":"j1"}"#
+        );
+
+        let committed = ServerEvent::JobStateCommitted { id: "j1".into() };
+        assert_eq!(
+            serde_json::to_string(&committed).unwrap(),
+            r#"{"type":"job_state_committed","id":"j1"}"#
         );
     }
 
