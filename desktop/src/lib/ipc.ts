@@ -66,11 +66,6 @@ export interface SavedMedia {
   directory: string;
 }
 
-export interface NativeGalleryThumbnail {
-  base64: string;
-  contentType: string;
-}
-
 /** This device's gallery listing (live or trash) plus the authority that
  * produced it: the running local server's target, or `null` when the
  * lifecycle lock proved the server Off and the filesystem was read. */
@@ -325,9 +320,18 @@ export const ipc = {
   fetchGalleryThumbnail(
     target: ApiTarget,
     filename: string,
-  ): Promise<NativeGalleryThumbnail | null> {
+    requestId: string,
+  ): Promise<ArrayBuffer | ArrayLike<number> | null> {
     if (!inTauri()) return Promise.resolve(null);
-    return invoke<NativeGalleryThumbnail>("fetch_gallery_thumbnail", { target, filename });
+    return invoke<ArrayBuffer | ArrayLike<number>>("fetch_gallery_thumbnail", {
+      target,
+      filename,
+      requestId,
+    });
+  },
+  cancelGalleryThumbnail(requestId: string): Promise<void> {
+    if (!inTauri()) return Promise.resolve();
+    return invoke<void>("cancel_gallery_thumbnail", { requestId });
   },
   /** Fetch one full-size gallery file through native HTTP as raw bytes —
    * the Library lightbox and source picker for host-backed prints. Same

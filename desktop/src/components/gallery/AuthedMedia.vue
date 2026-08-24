@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from "vue";
+import { galleryThumbnailScheduler, type ThumbnailHandle } from "@studio/lib/thumbnailScheduler";
 import { authedMediaUrl, fullSizeMediaUrl } from "../../lib/gallery/media";
 import type { ApiTarget } from "../../lib/api/client";
 
@@ -22,10 +23,13 @@ const props = withDefaults(
 const src = ref<string | null>(null);
 const failed = ref(false);
 let loadEpoch = 0;
+let thumbnailHandle: ThumbnailHandle<string> | null = null;
 
 const retryDelaysMs = [0, 250, 1_000] as const;
 
 async function load() {
+  thumbnailHandle?.cancel();
+  thumbnailHandle = null;
   const epoch = ++loadEpoch;
   src.value = null;
   failed.value = false;
@@ -44,8 +48,18 @@ async function load() {
       // generation/download stream to that host). Video keeps the ticketed
       // or direct streaming URL so it can seek without buffering; outside
       // Tauri, or when the native route refuses, stills fall back to it too.
-      const url = props.path.startsWith("/api/gallery/thumbnail/")
-        ? await authedMediaUrl(props.path, options)
+      const thumbnail = props.path.startsWith("/api/gallery/thumbnail/");
+      const url = thumbnail
+        ? await (() => {
+            const handle = galleryThumbnailScheduler.schedule({
+              key: `${props.cacheKey ?? "primary"}|${props.path}|${props.target?.baseUrl ?? "primary"}|${props.target?.apiKey ?? ""}`,
+              hostKey: props.cacheKey ?? props.target?.baseUrl ?? "primary",
+              priority: "visible",
+              run: (signal) => authedMediaUrl(props.path, { ...options, signal }),
+            });
+            thumbnailHandle = handle;
+            return handle.promise;
+          })()
         : await fullSizeMediaUrl(props.path, {
             ...options,
             allowLegacyBlob: !props.video && !props.audio,
@@ -75,6 +89,8 @@ watch(
 onMounted(load);
 onUnmounted(() => {
   loadEpoch += 1;
+  thumbnailHandle?.cancel();
+  thumbnailHandle = null;
 });
 </script>
 

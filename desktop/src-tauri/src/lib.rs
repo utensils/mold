@@ -181,6 +181,7 @@ pub fn run() {
             gallery::local_gallery_restore,
             gallery::local_gallery_delete_forever,
             gallery::fetch_gallery_thumbnail,
+            gallery::cancel_gallery_thumbnail,
             gallery::fetch_gallery_media,
             gallery::import_source_image,
             gallery::save_output_bytes,

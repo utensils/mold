@@ -1,0 +1,129 @@
+import { describe, expect, it } from "vitest";
+import {
+  ThumbnailScheduler,
+  type ThumbnailPriority,
+} from "./thumbnailScheduler";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => (resolve = done));
+  return { promise, resolve };
+}
+
+async function turn(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+describe("ThumbnailScheduler", () => {
+  it("deduplicates physical media while retaining independent consumers", async () => {
+    const scheduler = new ThumbnailScheduler({ concurrency: 2 });
+    const work = deferred<string>();
+    let calls = 0;
+    const request = () =>
+      scheduler.schedule({
+        key: "host|a.png|v1",
+        hostKey: "host",
+        priority: "visible",
+        run: () => {
+          calls += 1;
+          return work.promise;
+        },
+      });
+    const first = request();
+    const second = request();
+    first.cancel();
+    await turn();
+    expect(calls).toBe(1);
+    work.resolve("url");
+    await expect(second.promise).resolves.toBe("url");
+  });
+
+  it("reserves capacity by limiting background work", async () => {
+    const scheduler = new ThumbnailScheduler({
+      concurrency: 3,
+      backgroundConcurrency: 1,
+    });
+    const blockers = [deferred<void>(), deferred<void>(), deferred<void>()];
+    const started: string[] = [];
+    const add = (key: string, priority: ThumbnailPriority, index: number) =>
+      scheduler.schedule({
+        key,
+        hostKey: key,
+        priority,
+        run: () => {
+          started.push(key);
+          return blockers[index]!.promise;
+        },
+      });
+    add("background-1", "background", 0);
+    add("background-2", "background", 1);
+    await turn();
+    expect(started).toEqual(["background-1"]);
+    add("visible", "visible", 2);
+    await turn();
+    expect(started).toEqual(["background-1", "visible"]);
+    blockers.forEach(({ resolve }) => resolve());
+  });
+
+  it("drops queued work and aborts running work after its final consumer cancels", async () => {
+    const scheduler = new ThumbnailScheduler({ concurrency: 1 });
+    const running = deferred<void>();
+    let runningSignal: AbortSignal | null = null;
+    const first = scheduler.schedule({
+      key: "first",
+      hostKey: "host",
+      priority: "visible",
+      run: (signal) => {
+        runningSignal = signal;
+        return running.promise;
+      },
+    });
+    const queued = scheduler.schedule({
+      key: "queued",
+      hostKey: "host",
+      priority: "near",
+      run: async () => undefined,
+    });
+    void first.promise.catch(() => {});
+    void queued.promise.catch(() => {});
+    await turn();
+    queued.cancel();
+    first.cancel();
+    expect((runningSignal as AbortSignal | null)?.aborted).toBe(true);
+    expect(scheduler.stats.queued).toBe(0);
+    running.resolve();
+  });
+
+  it("promotes queued work when it becomes visible", async () => {
+    const scheduler = new ThumbnailScheduler({ concurrency: 1 });
+    const blocker = deferred<void>();
+    const order: string[] = [];
+    const active = scheduler.schedule({
+      key: "active",
+      hostKey: "a",
+      priority: "visible",
+      run: () => blocker.promise,
+    });
+    const older = scheduler.schedule({
+      key: "older",
+      hostKey: "b",
+      priority: "near",
+      run: async () => void order.push("older"),
+    });
+    void older.promise.catch(() => {});
+    const promoted = scheduler.schedule({
+      key: "promoted",
+      hostKey: "c",
+      priority: "background",
+      run: async () => void order.push("promoted"),
+    });
+    promoted.setPriority("visible");
+    await turn();
+    blocker.resolve();
+    await active.promise;
+    await turn();
+    expect(order[0]).toBe("promoted");
+    older.cancel();
+  });
+});

@@ -57,6 +57,8 @@ export interface AuthedMediaOptions {
   target?: ApiTarget;
   /** Cache bucket, usually the origin host id; defaults to "primary". */
   cacheKey?: string;
+  /** Cancels queued/native transfer and skips decode/blob work when stale. */
+  signal?: AbortSignal;
 }
 
 interface GalleryMediaTicket {
@@ -100,11 +102,20 @@ export function authedMediaUrl(path: string, opts: AuthedMediaOptions = {}): Pro
         return null;
       }
       try {
-        const media = await ipc.fetchGalleryThumbnail(target, filename);
-        if (!media) return null;
-        const bytes = Uint8Array.from(atob(media.base64), (character) => character.charCodeAt(0));
-        return new Blob([bytes], { type: media.contentType });
+        if (opts.signal?.aborted) throw new DOMException("Thumbnail cancelled", "AbortError");
+        const requestId = crypto.randomUUID();
+        const cancelNative = () => void ipc.cancelGalleryThumbnail(requestId).catch(() => {});
+        opts.signal?.addEventListener("abort", cancelNative, { once: true });
+        try {
+          const media = await ipc.fetchGalleryThumbnail(target, filename, requestId);
+          if (!media) return null;
+          if (opts.signal?.aborted) throw new DOMException("Thumbnail cancelled", "AbortError");
+          return new Blob([nativeBytes(media)], { type: "image/png" });
+        } finally {
+          opts.signal?.removeEventListener("abort", cancelNative);
+        }
       } catch {
+        if (opts.signal?.aborted) throw new DOMException("Thumbnail cancelled", "AbortError");
         // Native commands differ between the desktop and iPhone shells. A
         // missing/refused desktop-only bridge must preserve the authenticated
         // web fallback instead of making every mobile thumbnail unreadable.
@@ -115,7 +126,16 @@ export function authedMediaUrl(path: string, opts: AuthedMediaOptions = {}): Pro
     entry.url = nativeThumbnail()
       .then(
         async (native) =>
-          native ?? (await (target ? apiFetchTo(target, path) : apiFetch(path))).blob(),
+          native ??
+          (
+            await (target
+              ? opts.signal
+                ? apiFetchTo(target, path, { signal: opts.signal })
+                : apiFetchTo(target, path)
+              : opts.signal
+                ? apiFetch(path, { signal: opts.signal })
+                : apiFetch(path))
+          ).blob(),
       )
       .then((blob) => {
         entry.bytes = blob.size;

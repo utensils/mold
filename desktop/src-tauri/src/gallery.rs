@@ -1,6 +1,10 @@
 use std::{
+    collections::HashMap,
     io::{Read, Seek, SeekFrom},
-    sync::OnceLock,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, LazyLock, Mutex, OnceLock,
+    },
     time::Duration,
 };
 
@@ -28,6 +32,59 @@ static GALLERY_THUMBNAIL_PERMITS: Semaphore =
     Semaphore::const_new(MAX_CONCURRENT_GALLERY_THUMBNAILS);
 static GALLERY_MEDIA_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static GALLERY_MEDIA_PERMITS: Semaphore = Semaphore::const_new(MAX_CONCURRENT_GALLERY_MEDIA);
+static ACTIVE_THUMBNAIL_REQUESTS: LazyLock<Mutex<HashMap<String, Arc<ThumbnailCancellation>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Default)]
+struct ThumbnailCancellation {
+    cancelled: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl ThumbnailCancellation {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    fn check(&self) -> Result<(), String> {
+        if self.cancelled.load(Ordering::Acquire) {
+            Err("Gallery thumbnail request cancelled.".into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct ActiveThumbnailRequest {
+    id: String,
+    cancellation: Arc<ThumbnailCancellation>,
+}
+
+impl ActiveThumbnailRequest {
+    fn register(id: String) -> Result<Self, String> {
+        let cancellation = Arc::new(ThumbnailCancellation::default());
+        ACTIVE_THUMBNAIL_REQUESTS
+            .lock()
+            .map_err(|_| "The gallery thumbnail cancellation registry is unavailable.".to_string())?
+            .insert(id.clone(), cancellation.clone());
+        Ok(Self { id, cancellation })
+    }
+}
+
+impl Drop for ActiveThumbnailRequest {
+    fn drop(&mut self) {
+        let Ok(mut requests) = ACTIVE_THUMBNAIL_REQUESTS.lock() else {
+            return;
+        };
+        if requests
+            .get(&self.id)
+            .is_some_and(|active| Arc::ptr_eq(active, &self.cancellation))
+        {
+            requests.remove(&self.id);
+        }
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct ImportedSourceImage {
@@ -957,13 +1014,6 @@ pub struct MediaSaveTarget {
     api_key: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeGalleryThumbnail {
-    base64: String,
-    content_type: String,
-}
-
 /// Fetch one bounded gallery file through the native HTTP client. WebKit's
 /// per-host connection pool is shared with every held-open generation SSE
 /// stream to that host, so media elements pointed straight at a busy remote
@@ -975,7 +1025,11 @@ async fn fetch_gallery_bytes(
     api_path: &str,
     max_bytes: usize,
     what: &str,
+    cancellation: Option<&ThumbnailCancellation>,
 ) -> Result<(Vec<u8>, String), String> {
+    if let Some(cancellation) = cancellation {
+        cancellation.check()?;
+    }
     let url = format!("{}{api_path}", target.base_url.trim_end_matches('/'));
     let mut request = client.get(url);
     if let Some(key) = target.api_key.as_deref().filter(|key| !key.is_empty()) {
@@ -1003,6 +1057,9 @@ async fn fetch_gallery_bytes(
     let mut bytes = Vec::with_capacity(response.content_length().unwrap_or(0) as usize);
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
+        }
         let chunk = chunk.map_err(|error| format!("The {what} transfer failed: {error}"))?;
         if bytes.len().saturating_add(chunk.len()) > max_bytes {
             return Err(format!("The gallery {what} is unexpectedly large."));
@@ -1016,16 +1073,29 @@ async fn fetch_gallery_bytes(
 pub async fn fetch_gallery_thumbnail(
     target: MediaSaveTarget,
     filename: String,
-) -> Result<NativeGalleryThumbnail, String> {
-    use base64::Engine;
-
+    request_id: String,
+) -> Result<tauri::ipc::Response, String> {
     if !valid_filename(&filename) {
         return Err("Invalid gallery filename.".into());
     }
-    let _permit = tokio::time::timeout(Duration::from_secs(5), GALLERY_THUMBNAIL_PERMITS.acquire())
-        .await
-        .map_err(|_| "The gallery thumbnail queue is busy; retrying may help.".to_string())?
-        .map_err(|_| "The gallery thumbnail service is unavailable.".to_string())?;
+    if request_id.is_empty() || request_id.len() > 128 {
+        return Err("Invalid gallery thumbnail request id.".into());
+    }
+    let active = ActiveThumbnailRequest::register(request_id)?;
+    active.cancellation.check()?;
+    let _permit = tokio::select! {
+        permit = tokio::time::timeout(
+            Duration::from_secs(5),
+            GALLERY_THUMBNAIL_PERMITS.acquire()
+        ) => permit
+            .map_err(|_| "The gallery thumbnail queue is busy; retrying may help.".to_string())?
+            .map_err(|_| "The gallery thumbnail service is unavailable.".to_string())?,
+        _ = active.cancellation.notify.notified() => {
+            active.cancellation.check()?;
+            return Err("Gallery thumbnail request cancelled.".into());
+        }
+    };
+    active.cancellation.check()?;
     let encoded =
         percent_encoding::utf8_percent_encode(&filename, percent_encoding::NON_ALPHANUMERIC);
     let client = GALLERY_THUMBNAIL_CLIENT.get_or_init(|| {
@@ -1038,18 +1108,34 @@ pub async fn fetch_gallery_thumbnail(
             .build()
             .expect("static gallery HTTP client settings must be valid")
     });
-    let (bytes, content_type) = fetch_gallery_bytes(
+    let thumbnail_path = format!("/api/gallery/thumbnail/{encoded}");
+    let fetch = fetch_gallery_bytes(
         client,
         &target,
-        &format!("/api/gallery/thumbnail/{encoded}"),
+        &thumbnail_path,
         MAX_GALLERY_THUMBNAIL_BYTES,
         "thumbnail",
-    )
-    .await?;
-    Ok(NativeGalleryThumbnail {
-        base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-        content_type,
-    })
+        Some(&active.cancellation),
+    );
+    tokio::pin!(fetch);
+    let (bytes, _content_type) = tokio::select! {
+        result = &mut fetch => result?,
+        _ = active.cancellation.notify.notified() => {
+            active.cancellation.check()?;
+            return Err("Gallery thumbnail request cancelled.".into());
+        }
+    };
+    active.cancellation.check()?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[tauri::command]
+pub fn cancel_gallery_thumbnail(request_id: String) {
+    if let Ok(requests) = ACTIVE_THUMBNAIL_REQUESTS.lock() {
+        if let Some(cancellation) = requests.get(&request_id) {
+            cancellation.cancel();
+        }
+    }
 }
 
 /// Full-size gallery media for a host-backed print, returned as raw bytes
@@ -1088,6 +1174,7 @@ pub async fn fetch_gallery_media(
         &format!("/api/gallery/image/{encoded}"),
         MAX_GALLERY_MEDIA_BYTES,
         "file",
+        None,
     )
     .await?;
     Ok(tauri::ipc::Response::new(bytes))

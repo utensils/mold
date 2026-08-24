@@ -21,7 +21,11 @@ vi.mock("../api/client", async (importOriginal) => ({
 }));
 vi.mock("../ipc", () => ({
   inTauri: vi.fn(),
-  ipc: { fetchGalleryThumbnail: vi.fn(), fetchGalleryMedia: vi.fn() },
+  ipc: {
+    fetchGalleryThumbnail: vi.fn(),
+    cancelGalleryThumbnail: vi.fn(() => Promise.resolve()),
+    fetchGalleryMedia: vi.fn(),
+  },
 }));
 
 const blobResponse = () =>
@@ -385,10 +389,9 @@ describe("authedMediaUrl host-keyed cache", () => {
 
   it("loads desktop thumbnails through native HTTP so held generation streams cannot starve them", async () => {
     vi.mocked(inTauri).mockReturnValue(true);
-    vi.mocked(ipc.fetchGalleryThumbnail).mockResolvedValue({
-      base64: btoa("thumbnail bytes"),
-      contentType: "image/png",
-    });
+    vi.mocked(ipc.fetchGalleryThumbnail).mockResolvedValue(
+      new TextEncoder().encode("thumbnail bytes").buffer,
+    );
     const target = { baseUrl: "http://hal9000:7680", apiKey: "hk" };
 
     await expect(
@@ -398,7 +401,11 @@ describe("authedMediaUrl host-keyed cache", () => {
       }),
     ).resolves.toMatch(/^blob:mock-/);
 
-    expect(ipc.fetchGalleryThumbnail).toHaveBeenCalledWith(target, "new print.png");
+    expect(ipc.fetchGalleryThumbnail).toHaveBeenCalledWith(
+      target,
+      "new print.png",
+      expect.any(String),
+    );
     expect(apiFetchTo).not.toHaveBeenCalled();
   });
 
@@ -414,7 +421,11 @@ describe("authedMediaUrl host-keyed cache", () => {
       /^blob:mock-/,
     );
 
-    expect(ipc.fetchGalleryThumbnail).toHaveBeenCalledWith(target, "ios-source.png");
+    expect(ipc.fetchGalleryThumbnail).toHaveBeenCalledWith(
+      target,
+      "ios-source.png",
+      expect.any(String),
+    );
     expect(apiFetchTo).toHaveBeenCalledWith(target, path);
   });
 
