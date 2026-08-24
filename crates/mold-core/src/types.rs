@@ -3164,7 +3164,11 @@ pub struct ServerStatus {
     /// Per-GPU worker status (multi-GPU only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpus: Option<Vec<GpuWorkerStatus>>,
-    /// Current request queue depth (multi-GPU only).
+    /// Total waiting generation load owned by this server (multi-GPU only).
+    ///
+    /// This includes the durable SQLite backlog plus live non-durable jobs,
+    /// with hydrated durable jobs counted once. It is not limited by
+    /// `queue_capacity`, which describes only the hydrated runtime window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_depth: Option<usize>,
     /// Maximum hydrated runtime queue window (multi-GPU only).

@@ -5,6 +5,8 @@
 //! for rows admitted through `/api/generation-batches`; legacy singleton rows
 //! are deliberately excluded by the batch-child ownership join.
 
+use std::sync::Arc;
+
 use crate::state::{AppState, GenerationJob, SubmitError};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -309,6 +311,35 @@ fn projection_failure_holds(error: &crate::queue_media_store::QueueMediaError) -
     )
 }
 
+/// Publish the bounded runtime cancellation token under the scheduler fence,
+/// then release that global fence before awaiting any durable lookup.
+///
+/// The job is not submitted to the runtime queue until the caller has checked
+/// the returned durable result, so this ordering closes cancellation races
+/// without letting a stalled SQLite connection freeze unrelated scheduling.
+async fn register_before_durable_cancel_check<F, T>(
+    state: &AppState,
+    row: &mold_db::generation_queue::GenerationQueueRow,
+    target_gpu: Option<usize>,
+    metadata: Box<mold_core::OutputMetadata>,
+    durable_check: F,
+) -> (Arc<tokio::sync::Notify>, T)
+where
+    F: std::future::Future<Output = T>,
+{
+    let cancel = {
+        let _mutation = state.scheduler_mutation_fence.lock().await;
+        state.job_registry.register_job(
+            &row.id,
+            &row.model,
+            target_gpu,
+            Some(row.seed_pinned),
+            Some(metadata),
+        )
+    };
+    (cancel, durable_check.await)
+}
+
 async fn feed_available(
     state: &AppState,
     current_output_dir: Option<&std::path::Path>,
@@ -589,34 +620,33 @@ async fn feed_available(
             request.scheduler,
             mold_core::build_info::version_string(),
         ));
-        // Cancellation and registry publication share the scheduler mutation
-        // fence with DELETE /api/queue. If cancellation won before the row was
-        // hydrated, its durable marker is settled by this exact claim. If
-        // registration won, the route observes the live token and cancels it.
-        let mutation = state.scheduler_mutation_fence.lock().await;
-        let cancel = state.job_registry.register_job(
-            &row.id,
-            &row.model,
-            target_gpu,
-            Some(row.seed_pinned),
-            Some(metadata),
-        );
+        // Registry publication shares the scheduler mutation fence with
+        // DELETE /api/queue, but SQLite is synchronous and can be stalled by
+        // another connection. Publish the cancellation token under the fence,
+        // release it, and only then perform the blocking durable check. The
+        // runtime queue does not receive this job until the check completes:
+        // cancellation before/during the check is observed in SQLite, while a
+        // later cancellation observes and trips the registered live token.
         let journal = state.queue_journal.clone();
         let cancel_id = row.id.clone();
-        let cancel_requested =
-            tokio::task::spawn_blocking(move || journal.feeder_cancel_requested(&cancel_id)).await;
+        let (cancel, cancel_requested) = register_before_durable_cancel_check(
+            state,
+            &row,
+            target_gpu,
+            metadata,
+            tokio::task::spawn_blocking(move || journal.feeder_cancel_requested(&cancel_id)),
+        )
+        .await;
         match cancel_requested {
             Ok(Ok(true)) => {
                 state.job_registry.remove(&row.id);
                 let _ = tokio::task::spawn_blocking(move || ticket.discard()).await;
-                drop(mutation);
                 drop(reservation);
                 continue;
             }
             Ok(Ok(false)) => {}
             Ok(Err(error)) => {
                 state.job_registry.remove(&row.id);
-                drop(mutation);
                 drop(reservation);
                 retain_for_retry(ticket, shutdown).await;
                 tracing::error!(job = %row.id, %error, "durable feeder cancellation check failed");
@@ -625,7 +655,6 @@ async fn feed_available(
             }
             Err(error) => {
                 state.job_registry.remove(&row.id);
-                drop(mutation);
                 drop(reservation);
                 retain_for_retry(ticket, shutdown).await;
                 tracing::error!(job = %row.id, %error, "durable feeder cancellation task failed");
@@ -633,7 +662,6 @@ async fn feed_available(
                 return report;
             }
         }
-        drop(mutation);
         let crate::job_supervisor::SupervisedJob {
             result_tx,
             outcome_rx,
@@ -1710,6 +1738,42 @@ mod tests {
         shutdown.cancel();
         handle.await.unwrap();
         drop(next);
+    }
+
+    #[tokio::test]
+    async fn blocking_durable_cancel_check_does_not_hold_scheduler_mutation_fence() {
+        let (state, _rx) = state(1);
+        admit(&state, 1);
+        let row = state.queue_journal.list_all().remove(0);
+        let metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
+            &request("fence"),
+            0,
+            None,
+            "test",
+        ));
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<bool>();
+        let mut handoff = Box::pin(register_before_durable_cancel_check(
+            &state,
+            &row,
+            None,
+            metadata,
+            async { release_rx.await.unwrap() },
+        ));
+
+        assert!(
+            futures::poll!(handoff.as_mut()).is_pending(),
+            "the synthetic durable lookup remains blocked"
+        );
+        assert!(state.job_registry.entry(&row.id).is_some());
+        let scheduler_guard = state
+            .scheduler_mutation_fence
+            .try_lock()
+            .expect("durable cancellation lookup must not own the scheduler mutation fence");
+        drop(scheduler_guard);
+        release_tx.send(false).unwrap();
+        let (_cancel, requested) = handoff.await;
+        assert!(!requested);
+        state.job_registry.remove(&row.id);
     }
 
     #[tokio::test]

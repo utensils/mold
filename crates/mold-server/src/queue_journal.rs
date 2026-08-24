@@ -1489,23 +1489,17 @@ impl QueueJournal {
         }
     }
 
-    /// Whether this id names a retained row that is cancellable but has no
-    /// registry entry.
+    /// Whether this id names any nonterminal durable row owned by this server.
     ///
-    /// Two kinds qualify: a held row, which exists only in the journal; and a
-    /// queued row on a boot with no dispatch owner, which replay deliberately
-    /// never registered. `DELETE /api/queue/:id` is the documented way to
-    /// clear either, and listing work an operator cannot then act on would be
-    /// half an answer. A `running` row is excluded — the endpoint refuses
-    /// running work, and the registry is the authority on that.
+    /// The cancellation route performs this blocking lookup before taking the
+    /// scheduler mutation fence. Including a feeder-claimed `running` row is
+    /// load-bearing: it may not have reached the registry yet, but cancellation
+    /// must still record intent for the token-bearing feeder handoff.
     pub fn owns_cancellable_row(&self, id: &str) -> anyhow::Result<bool> {
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
             return Ok(false);
         };
-        Ok(generation_queue::get(db, id)?.is_some_and(|row| {
-            row.owner_uuid == owner
-                && matches!(row.state, QueueRowState::Held | QueueRowState::Queued)
-        }))
+        Ok(generation_queue::get(db, id)?.is_some_and(|row| row.owner_uuid == owner))
     }
 
     /// Park a row by id, for a caller that has no ticket.
@@ -1560,6 +1554,83 @@ impl QueueJournal {
             return Ok(HashSet::new());
         };
         generation_queue::find_owned_ids(db, owner, ids)
+    }
+
+    /// Exact total waiting load without materializing the durable backlog.
+    ///
+    /// SQLite owns unclaimed durable rows; the bounded registry list supplies
+    /// live waiting jobs that have no durable row. The overlap probe is scoped
+    /// to that bounded list so hydrated durable jobs contribute exactly once.
+    pub fn total_waiting(&self, live_waiting_ids: &[String]) -> anyhow::Result<usize> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(live_waiting_ids.len());
+        };
+        let load = generation_queue::owned_queued_load(db, owner, live_waiting_ids)?;
+        let live_only = live_waiting_ids
+            .len()
+            .checked_sub(load.live_overlap)
+            .ok_or_else(|| anyhow::anyhow!("durable waiting overlap exceeds live waiting rows"))?;
+        load.queued_count
+            .checked_add(live_only)
+            .ok_or_else(|| anyhow::anyhow!("total waiting generation load exceeds usize"))
+    }
+
+    /// Atomically patch an owner-fenced durable queued row. This includes rows
+    /// deeper than the hydrated registry window and never reads request or
+    /// completion payload columns.
+    pub fn patch_owned_queued(
+        &self,
+        id: &str,
+        target_gpu: Option<Option<usize>>,
+        target_device_id: Option<Option<String>>,
+        position: Option<usize>,
+    ) -> anyhow::Result<generation_queue::OwnedQueuedPatchOutcome> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(generation_queue::OwnedQueuedPatchOutcome::NotOwned);
+        };
+        let target = target_gpu.map(|target_gpu| generation_queue::QueueTargetPatch {
+            target_gpu,
+            target_device_id: target_device_id.flatten(),
+        });
+        generation_queue::patch_owned_queued(
+            db,
+            owner,
+            id,
+            &generation_queue::OwnedQueuedPatch {
+                target,
+                position,
+                updated_at_ms: now_ms(),
+            },
+        )
+    }
+
+    /// Atomically patch the durable counterpart of a queued live-registry
+    /// handoff. The DB primitive requires an owner-matching non-NULL claim, so
+    /// this path cannot accidentally acquire an unhydrated deep-tail row.
+    pub fn patch_owned_claimed_queued(
+        &self,
+        id: &str,
+        target_gpu: Option<Option<usize>>,
+        target_device_id: Option<Option<String>>,
+        position: Option<usize>,
+    ) -> anyhow::Result<generation_queue::OwnedQueuedPatchOutcome> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(generation_queue::OwnedQueuedPatchOutcome::NotOwned);
+        };
+        let target = target_gpu.map(|target_gpu| generation_queue::QueueTargetPatch {
+            target_gpu,
+            target_device_id: target_device_id.flatten(),
+        });
+        generation_queue::patch_owned_claimed_queued(
+            db,
+            owner,
+            id,
+            &generation_queue::OwnedQueuedPatch {
+                target,
+                position,
+                updated_at_ms: now_ms(),
+            },
+        )
     }
 }
 

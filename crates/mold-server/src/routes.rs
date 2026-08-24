@@ -5352,7 +5352,7 @@ fn models_disk_usage(dir: &std::path::Path) -> Option<DiskUsage> {
         (status = 200, description = "Server status", body = ServerStatus),
     )
 )]
-async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
+async fn server_status(State(state): State<AppState>) -> Result<Json<ServerStatus>, ApiError> {
     // Disk stats are blocking syscalls (canonicalize + statvfs per mount, and
     // statvfs can hang outright on a wedged FUSE mount) — never run or await
     // them on the request path. Serve the cached snapshot; when it has gone
@@ -5364,6 +5364,21 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         let models_dir = state.config.read().await.resolved_models_dir();
         tokio::task::spawn_blocking(move || cache.store(models_disk_usage(&models_dir)));
     }
+
+    // `queue_capacity` is only the hydrated runtime window. Route selection
+    // needs the total waiting load, including SQLite-owned work that has not
+    // reached that window yet. Probe only the bounded live queued IDs for
+    // overlap so hydrated durable work contributes exactly once.
+    let live_waiting_ids = state
+        .job_registry
+        .snapshot()
+        .entries
+        .into_iter()
+        .filter(|entry| entry.state == crate::job_registry::JobLifecycle::Queued)
+        .map(|entry| entry.id)
+        .collect::<Vec<_>>();
+    let journal = state.queue_journal.clone();
+    let queue_depth = spawn_queue_read(move || journal.total_waiting(&live_waiting_ids)).await?;
 
     // One registry snapshot backs both the additive device API and legacy
     // status projections. It reads only the 1 Hz telemetry cache and worker
@@ -5423,7 +5438,7 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         (models, is_busy, gen)
     };
 
-    Json(ServerStatus {
+    Ok(Json(ServerStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
         git_sha: if mold_core::build_info::GIT_SHA == "unknown" {
             None
@@ -5447,13 +5462,13 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         } else {
             None
         },
-        queue_depth: Some(state.queue.pending()),
+        queue_depth: Some(queue_depth),
         queue_capacity: Some(state.queue_capacity),
         queue_paused: Some(state.queue_pause.is_paused()),
         instance_id: Some(state.instance_id.as_ref().clone()),
         models_disk,
         host_memory: state.scheduled_work.host_memory(),
-    })
+    }))
 }
 
 /// Stable read-only inventory of every runtime-visible device. Unsupported
@@ -5740,17 +5755,19 @@ async fn health() -> impl IntoResponse {
 
 // ── /api/queue ───────────────────────────────────────────────────────────────
 
-/// Snapshot of every job currently queued or running on the server. Clients
+/// Bounded snapshot of jobs currently queued or running on the server. Clients
 /// (notably the web SPA) poll this to reconcile their local card list — any
 /// "running" card whose server id isn't here is a zombie left over from a
-/// dropped SSE stream and should be dead-lettered.
+/// dropped SSE stream and should be dead-lettered. Durable continuation is
+/// explicit: the default and maximum page size are the hydrated runtime
+/// window, so an omitted query can never materialize an unbounded backlog.
 #[utoipa::path(
     get,
     path = "/api/queue",
     tag = "queue",
     params(
-        ("limit" = Option<usize>, Query, description = "Positive durable-row page size; omit for the legacy full snapshot"),
-        ("cursor" = Option<String>, Query, description = "Opaque exclusive cursor returned by the preceding page"),
+        ("limit" = Option<usize>, Query, description = "Positive durable-row page size, bounded by queue_capacity; omit to use queue_capacity"),
+        ("cursor" = Option<String>, Query, description = "Opaque exclusive cursor returned by the preceding page; limit may be omitted to use queue_capacity"),
     ),
     responses(
         (status = 200, description = "Queue snapshot", body = QueueListingResponse),
@@ -5763,17 +5780,18 @@ async fn list_queue(
 ) -> Result<Json<QueueListingResponse>, ApiError> {
     let mut listing = state.job_registry.snapshot();
     listing.plan = state.scheduled_work.latest_plan();
-    let Some(requested_page) = QueuePageRequest::parse(query)? else {
-        let journal = state.queue_journal.clone();
-        let journal_enabled = journal.is_enabled();
-        let rows = if journal_enabled {
-            spawn_queue_read(move || Ok(journal.list_all())).await?
-        } else {
-            Vec::new()
-        };
-        project_durable_queue_state(journal_enabled, &rows, &mut listing);
+    let requested_page = QueuePageRequest::parse(query, state.queue_capacity)?;
+    let explicit_page = requested_page.explicit;
+
+    if !state.queue_journal.is_enabled() {
+        // With no durable authority there is nothing to continue. Preserve
+        // the legacy `entries` projection for old clients; the registry is
+        // already bounded by the same runtime queue window.
+        for entry in &mut listing.entries {
+            entry.durable = Some(false);
+        }
         return Ok(Json(QueueListingResponse::legacy(listing)));
-    };
+    }
 
     let live_ids = listing
         .entries
@@ -5801,25 +5819,43 @@ async fn list_queue(
         })
     });
     let returned = durable_page.rows.len();
-    let live_count = listing.entries.len();
     let (entries, live_only_entries) = project_durable_queue_page(
         durable_page.rows,
         listing.entries,
         &durable_live_ids,
-        live_count,
         offset,
     )?;
 
+    let page = mold_core::QueuePage {
+        limit,
+        offset,
+        returned,
+        next_cursor,
+    };
+    if explicit_page {
+        return Ok(Json(QueueListingResponse {
+            entries,
+            live_only_entries: Some(live_only_entries),
+            plan: listing.plan,
+            page: Some(page),
+        }));
+    }
+
+    // Keep old clients useful on the bounded default path: they only know the
+    // `entries` array, so fold the bounded registry-only set into the first
+    // durable page. Reindex the merged projection to avoid counting a live
+    // durable overlay once in the registry and again in SQLite.
+    let mut entries = entries;
+    entries.extend(live_only_entries);
+    for (position, entry) in entries.iter_mut().enumerate() {
+        entry.position = position;
+    }
+    let page = page.next_cursor.is_some().then_some(page);
     Ok(Json(QueueListingResponse {
         entries,
-        live_only_entries: Some(live_only_entries),
+        live_only_entries: None,
         plan: listing.plan,
-        page: Some(mold_core::QueuePage {
-            limit,
-            offset,
-            returned,
-            next_cursor,
-        }),
+        page,
     }))
 }
 
@@ -5841,23 +5877,28 @@ struct QueuePageCursor {
 struct QueuePageRequest {
     limit: usize,
     cursor: Option<QueuePageCursor>,
+    explicit: bool,
 }
 
 impl QueuePageRequest {
-    fn parse(query: QueueListQuery) -> Result<Option<Self>, ApiError> {
-        match (query.limit, query.cursor) {
-            (None, None) => Ok(None),
-            (None, Some(_)) => Err(invalid_queue_page("cursor requires a positive limit")),
-            (Some(0), _) => Err(invalid_queue_page("limit must be positive")),
-            (Some(limit), cursor) => {
-                i64::try_from(limit)
-                    .map_err(|_| invalid_queue_page("limit is outside SQLite's supported range"))?;
-                Ok(Some(Self {
-                    limit,
-                    cursor: cursor.as_deref().map(decode_queue_cursor).transpose()?,
-                }))
-            }
+    fn parse(query: QueueListQuery, maximum: usize) -> Result<Self, ApiError> {
+        debug_assert!(maximum > 0, "queue capacity is a positive runtime contract");
+        if query.limit == Some(0) {
+            return Err(invalid_queue_page("limit must be positive"));
         }
+        let explicit = query.limit.is_some() || query.cursor.is_some();
+        let limit = query.limit.unwrap_or(maximum).min(maximum);
+        i64::try_from(limit)
+            .map_err(|_| invalid_queue_page("limit is outside SQLite's supported range"))?;
+        Ok(Self {
+            limit,
+            cursor: query
+                .cursor
+                .as_deref()
+                .map(decode_queue_cursor)
+                .transpose()?,
+            explicit,
+        })
     }
 }
 
@@ -5976,83 +6017,6 @@ async fn get_queue_job_preview(
         .ok_or_else(|| ApiError::queue_job_not_found(format!("queue job {id} is no longer live")))
 }
 
-/// Fold the durable journal into a `/api/queue` listing.
-///
-/// Live rows learn whether they are actually durable and how many times a
-/// worker has claimed them; held rows are appended, because they exist only in
-/// the journal and would otherwise be invisible — a job that is never going to
-/// run and that nothing reports is worse than one that failed.
-fn project_durable_queue_state(
-    journal_enabled: bool,
-    rows: &[mold_db::generation_queue::GenerationQueueRow],
-    listing: &mut crate::job_registry::QueueListing,
-) {
-    if !journal_enabled {
-        return;
-    }
-    if rows.is_empty() {
-        for entry in listing.entries.iter_mut() {
-            entry.durable = Some(false);
-        }
-        return;
-    }
-    let by_id: std::collections::HashMap<&str, &mold_db::generation_queue::GenerationQueueRow> =
-        rows.iter().map(|row| (row.id.as_str(), row)).collect();
-    for entry in listing.entries.iter_mut() {
-        match by_id.get(entry.id.as_str()) {
-            Some(row) => {
-                entry.durable = Some(true);
-                entry.replayed = Some(row.replay_seen > 0);
-                entry.dispatch_attempts = Some(row.dispatch_attempts);
-            }
-            None => entry.durable = Some(false),
-        }
-    }
-    let live: std::collections::HashSet<&str> = listing
-        .entries
-        .iter()
-        .map(|entry| entry.id.as_str())
-        .collect();
-    let mut position = listing.entries.len();
-    // Every retained row that is not already live. Held rows exist only here,
-    // and so do queued rows on a boot with no dispatch owner — replay returns
-    // before registering anything there, so without this a maintenance server
-    // reports an empty queue while owing work, exactly when an operator is
-    // most likely to be looking and least able to inspect or cancel it.
-    let unlisted: Vec<crate::job_registry::JobEntry> = rows
-        .iter()
-        .filter(|row| !live.contains(row.id.as_str()))
-        .map(|row| {
-            let state = match row.state {
-                mold_db::generation_queue::QueueRowState::Held => {
-                    crate::job_registry::JobLifecycle::Held
-                }
-                // A `running` row whose worker died reads as queued: that is
-                // what the next boot will do with it.
-                _ => crate::job_registry::JobLifecycle::Queued,
-            };
-            let entry = crate::job_registry::JobEntry {
-                id: row.id.clone(),
-                model: row.model.clone(),
-                state,
-                started_at_unix_ms: row.created_at_ms.max(0) as u64,
-                position,
-                gpu: None,
-                target_gpu: row.target_gpu,
-                seed_pinned: Some(row.seed_pinned),
-                metadata: None,
-                durable: Some(true),
-                replayed: Some(row.replay_seen > 0),
-                dispatch_attempts: Some(row.dispatch_attempts),
-                held_reason: row.held_reason.clone(),
-            };
-            position += 1;
-            entry
-        })
-        .collect();
-    listing.entries.extend(unlisted);
-}
-
 /// Turn a payload-free durable page into public queue rows, overlaying the
 /// registry only when that exact durable id is live. The complementary
 /// registry-only set is returned separately because those jobs have no
@@ -6062,7 +6026,6 @@ fn project_durable_queue_page(
     durable_rows: Vec<mold_db::generation_queue::GenerationQueueProjection>,
     live_entries: Vec<crate::job_registry::JobEntry>,
     durable_live_ids: &std::collections::HashSet<String>,
-    live_count: usize,
     offset: usize,
 ) -> Result<
     (
@@ -6084,43 +6047,51 @@ fn project_durable_queue_page(
 
     let mut entries = Vec::with_capacity(durable_rows.len());
     for (page_index, row) in durable_rows.into_iter().enumerate() {
+        let position = offset
+            .checked_add(page_index)
+            .ok_or_else(|| invalid_queue_page("queue cursor position is out of range"))?;
         if let Some(mut entry) = live_by_id.remove(&row.id) {
             entry.durable = Some(true);
             entry.replayed = Some(row.replay_seen > 0);
             entry.dispatch_attempts = Some(row.dispatch_attempts);
+            // The durable row is the traversal authority. Keeping the
+            // registry's old position here and then offsetting SQLite-only
+            // rows by the registry length counted this same job twice.
+            entry.position = position;
             entries.push(entry);
             continue;
         }
 
-        let state = match row.state {
-            mold_db::generation_queue::QueueRowState::Held => {
-                crate::job_registry::JobLifecycle::Held
-            }
-            // Preserve the legacy projection: a durable `running` row with no
-            // live registry owner is interrupted work awaiting the next boot.
-            _ => crate::job_registry::JobLifecycle::Queued,
-        };
-        let position = live_count
-            .checked_add(offset)
-            .and_then(|position| position.checked_add(page_index))
-            .ok_or_else(|| invalid_queue_page("queue cursor position is out of range"))?;
-        entries.push(crate::job_registry::JobEntry {
-            id: row.id,
-            model: row.model,
-            state,
-            started_at_unix_ms: row.created_at_ms.max(0) as u64,
-            position,
-            gpu: None,
-            target_gpu: row.target_gpu,
-            seed_pinned: Some(row.seed_pinned),
-            metadata: None,
-            durable: Some(true),
-            replayed: Some(row.replay_seen > 0),
-            dispatch_attempts: Some(row.dispatch_attempts),
-            held_reason: row.held_reason,
-        });
+        entries.push(job_entry_from_durable_projection(row, position));
     }
     Ok((entries, live_only_entries))
+}
+
+fn job_entry_from_durable_projection(
+    row: mold_db::generation_queue::GenerationQueueProjection,
+    position: usize,
+) -> crate::job_registry::JobEntry {
+    let state = match row.state {
+        mold_db::generation_queue::QueueRowState::Held => crate::job_registry::JobLifecycle::Held,
+        // A durable `running` row with no live registry owner is interrupted
+        // work awaiting the next boot and therefore projects as queued.
+        _ => crate::job_registry::JobLifecycle::Queued,
+    };
+    crate::job_registry::JobEntry {
+        id: row.id,
+        model: row.model,
+        state,
+        started_at_unix_ms: row.created_at_ms.max(0) as u64,
+        position,
+        gpu: None,
+        target_gpu: row.target_gpu,
+        seed_pinned: Some(row.seed_pinned),
+        metadata: None,
+        durable: Some(true),
+        replayed: Some(row.replay_seen > 0),
+        dispatch_attempts: Some(row.dispatch_attempts),
+        held_reason: row.held_reason,
+    }
 }
 
 /// Wrap any present JSON value (including `null`) in `Some`, so a field using
@@ -6215,73 +6186,108 @@ async fn patch_queue_job(
     // order can grant after this guard is acquired.
     let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
 
-    // Both edits are independent and additive — apply whichever the request
-    // supplied. `target_gpu` only when the field was present (absent leaves the
-    // lane untouched); `position` only when a reorder was requested.
-    if let Some(target_gpu) = resolved_target_gpu {
-        state
-            .job_registry
-            .set_target_gpu(&id, target_gpu)
-            .map_err(|e| match e {
-                crate::job_registry::TargetGpuUpdateError::NotFound => {
-                    ApiError::queue_job_not_found(format!("queue job {id} not found"))
-                }
-                crate::job_registry::TargetGpuUpdateError::AlreadyRunning => {
-                    ApiError::queue_job_running(format!(
-                        "queue job {id} is already running; lane changes only apply to queued jobs"
-                    ))
-                }
-            })?;
-    }
-
-    if let Some(position) = req.position {
-        state
-            .job_registry
-            .reorder_queued(&id, position)
-            .map_err(|e| match e {
-                crate::job_registry::QueueReorderError::NotFound => {
-                    ApiError::queue_job_not_found(format!("queue job {id} not found"))
-                }
-                crate::job_registry::QueueReorderError::AlreadyRunning => {
-                    ApiError::queue_job_running(format!(
-                        "queue job {id} is already running; only queued jobs can be reordered"
-                    ))
-                }
-            })?;
-    }
-
-    // Mirror the mutation into the durable row while still holding the
-    // scheduler fence, so a restart resumes the lane and order the user chose
-    // rather than the ones the job was admitted with.
-    let reordered = req
-        .position
-        .is_some()
-        .then(|| state.job_registry.queued_ids_in_order());
-    let pinned_device_id = req.hard_pinned_device_id.clone();
+    // SQLite owns jobs beyond the hydrated window. Mutate that authority
+    // first and fail the request on any persistence error; returning 200 after
+    // only changing the registry would acknowledge a lane/order that a restart
+    // silently loses. The DB primitive is one owner/state-fenced IMMEDIATE
+    // transaction for target plus position.
     let journal = state.queue_journal.clone();
     let mutation_id = id.clone();
-    if let Err(error) = tokio::task::spawn_blocking(move || {
-        journal.apply_queue_mutation(
-            &mutation_id,
-            resolved_target_gpu,
-            pinned_device_id.as_ref().map(|pin| pin.as_deref()),
-            reordered.as_deref(),
-        );
+    let requested_position = req.position;
+    let requested_device_id = req.hard_pinned_device_id;
+    let hydrated = state.job_registry.entry(&id).is_some();
+    let durable = spawn_queue_mutation(move || {
+        if hydrated {
+            let outcome = journal.patch_owned_claimed_queued(
+                &mutation_id,
+                resolved_target_gpu,
+                requested_device_id.clone(),
+                requested_position,
+            )?;
+            if matches!(
+                outcome,
+                mold_db::generation_queue::OwnedQueuedPatchOutcome::NotQueued
+            ) {
+                // Legacy startup replay hydrates an unclaimed row directly;
+                // the bounded feeder and direct admission publish claimed
+                // rows. Both alternatives remain owner/state/claim fenced.
+                journal.patch_owned_queued(
+                    &mutation_id,
+                    resolved_target_gpu,
+                    requested_device_id,
+                    requested_position,
+                )
+            } else {
+                Ok(outcome)
+            }
+        } else {
+            journal.patch_owned_queued(
+                &mutation_id,
+                resolved_target_gpu,
+                requested_device_id,
+                requested_position,
+            )
+        }
     })
-    .await
-    {
-        tracing::warn!(
-            job = %id,
-            %error,
-            "durable queue mutation worker stopped before acknowledgement"
-        );
+    .await?;
+
+    let durable_entry = match durable {
+        mold_db::generation_queue::OwnedQueuedPatchOutcome::Updated {
+            position,
+            projection,
+        } => Some(job_entry_from_durable_projection(projection, position)),
+        mold_db::generation_queue::OwnedQueuedPatchOutcome::NotOwned => None,
+        mold_db::generation_queue::OwnedQueuedPatchOutcome::NotQueued => {
+            return Err(ApiError::queue_job_running(format!(
+                "queue job {id} is no longer queued; only queued jobs can be reordered or re-laned"
+            )));
+        }
+    };
+
+    // Hydrated jobs have a second, bounded runtime projection. Apply the same
+    // edit only after the durable transaction commits. A durable-only tail row
+    // intentionally skips this block and returns its payload-free DB projection.
+    if state.job_registry.entry(&id).is_some() {
+        if let Some(target_gpu) = resolved_target_gpu {
+            state
+                .job_registry
+                .set_target_gpu(&id, target_gpu)
+                .map_err(|error| match error {
+                    crate::job_registry::TargetGpuUpdateError::NotFound => {
+                        ApiError::queue_job_not_found(format!("queue job {id} not found"))
+                    }
+                    crate::job_registry::TargetGpuUpdateError::AlreadyRunning => {
+                        ApiError::queue_job_running(format!(
+                            "queue job {id} is already running; lane changes only apply to queued jobs"
+                        ))
+                    }
+                })?;
+        }
+        if let Some(position) = requested_position {
+            state
+                .job_registry
+                .reorder_queued(&id, position)
+                .map_err(|error| match error {
+                    crate::job_registry::QueueReorderError::NotFound => {
+                        ApiError::queue_job_not_found(format!("queue job {id} not found"))
+                    }
+                    crate::job_registry::QueueReorderError::AlreadyRunning => {
+                        ApiError::queue_job_running(format!(
+                            "queue job {id} is already running; only queued jobs can be reordered"
+                        ))
+                    }
+                })?;
+        }
+        let entry = state
+            .job_registry
+            .entry(&id)
+            .ok_or_else(|| ApiError::queue_job_not_found(format!("queue job {id} not found")))?;
+        return Ok(Json(entry));
     }
 
-    let entry = state
-        .job_registry
-        .entry(&id)
-        .ok_or_else(|| ApiError::queue_job_not_found(format!("queue job {id} not found")))?;
-    Ok(Json(entry))
+    durable_entry
+        .map(Json)
+        .ok_or_else(|| ApiError::queue_job_not_found(format!("queue job {id} not found")))
 }
 
 /// Cancel a queued or running singleton generation, or an active server-owned
@@ -6302,6 +6308,14 @@ async fn cancel_queue_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    // SQLite can block behind another connection. Never hold the global
+    // scheduler mutation fence while probing the durable tail: the feeder
+    // publishes its registry token under that fence, so after this lookup the
+    // guarded registry check closes both possible races.
+    let journal = state.queue_journal.clone();
+    let probe_id = id.clone();
+    let durable_candidate =
+        spawn_queue_read(move || journal.owns_cancellable_row(&probe_id)).await?;
     let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
     match state.job_registry.cancel_queued(&id) {
         Ok(()) => {}
@@ -6316,11 +6330,7 @@ async fn cancel_queue_job(
         // falling straight through to 404 would show an operator work they
         // cannot act on.
         Err(crate::job_registry::QueuedJobCancelError::NotFound) => {
-            let journal = state.queue_journal.clone();
-            let probe_id = id.clone();
-            let owns_row =
-                spawn_queue_read(move || journal.owns_cancellable_row(&probe_id)).await?;
-            if !owns_row {
+            if !durable_candidate {
                 return Err(ApiError::queue_job_not_found(format!(
                     "queue job {id} not found"
                 )));

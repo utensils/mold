@@ -1507,6 +1507,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_queue_depth_reports_total_waiting_load_without_durable_overlay_duplicates() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
+        state.queue_capacity = 2;
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        for index in 0..5 {
+            seed_durable_projection_row(
+                &db,
+                &owner,
+                &format!("durable-{index}"),
+                mold_db::generation_queue::QueueRowState::Queued,
+                index,
+                0,
+            );
+        }
+        seed_durable_projection_row(
+            &db,
+            &owner,
+            "durable-running",
+            mold_db::generation_queue::QueueRowState::Running,
+            6,
+            0,
+        );
+        seed_durable_projection_row(
+            &db,
+            &owner,
+            "durable-held",
+            mold_db::generation_queue::QueueRowState::Held,
+            7,
+            0,
+        );
+        state.job_registry.register("durable-0", "model-durable-0");
+        state.job_registry.register("live-only", "model-live-only");
+        state
+            .job_registry
+            .register("durable-running", "model-durable-running");
+        state.job_registry.mark_running("durable-running", Some(0));
+
+        let status = json_body(
+            app_with_state(state)
+                .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status["queue_depth"], 6);
+        assert_eq!(status["queue_capacity"], 2);
+    }
+
+    #[tokio::test]
     async fn devices_returns_registry_workers_with_nullable_telemetry() {
         let worker = gpu_worker_stub(0);
         let mut state = AppState::with_engine(MockEngine::ready());
@@ -2785,12 +2836,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queue_pagination_rejects_zero_missing_and_malformed_inputs() {
+    async fn queue_pagination_rejects_zero_and_malformed_inputs() {
         let app = app_empty();
         for uri in [
             "/api/queue?limit=0",
-            "/api/queue?cursor=opaque-without-a-limit",
             "/api/queue?limit=1&cursor=not-a-valid-cursor",
+            "/api/queue?cursor=not-a-valid-cursor",
         ] {
             let response = app
                 .clone()
@@ -3334,6 +3385,150 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn patch_queue_reorders_and_relanes_a_durable_row_beyond_the_runtime_window() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
+        state.queue_capacity = 2;
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![gpu_worker_stub(0)].into(),
+        });
+        install_worker_registry(&mut state);
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        for index in 0..5 {
+            seed_durable_projection_row(
+                &db,
+                &owner,
+                &format!("deep-patch-{index}"),
+                mold_db::generation_queue::QueueRowState::Queued,
+                index,
+                0,
+            );
+        }
+        assert!(state.job_registry.snapshot().entries.is_empty());
+        let app = app_with_state(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::patch("/api/queue/deep-patch-4")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"target_gpu":0,"position":0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["id"], "deep-patch-4");
+        assert_eq!(body["position"], 0);
+        assert_eq!(body["target_gpu"], 0);
+        assert_eq!(body["durable"], true);
+
+        let page = state.queue_journal.projection_page(None, 2).unwrap();
+        assert_eq!(page.rows[0].id, "deep-patch-4");
+        assert_eq!(page.rows[0].target_gpu, Some(0));
+        assert_eq!(page.rows[1].id, "deep-patch-0");
+    }
+
+    #[tokio::test]
+    async fn patch_queue_uses_live_authority_for_a_claimed_feeder_handoff() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        seed_durable_projection_row(
+            &db,
+            &owner,
+            "live-running",
+            mold_db::generation_queue::QueueRowState::Queued,
+            0,
+            0,
+        );
+        let _claim = state
+            .queue_journal
+            .claim_feeder_by_id("live-running")
+            .unwrap()
+            .expect("feeder claims the handoff row");
+        state.job_registry.register("other-live", "model-other");
+        state
+            .job_registry
+            .register_with_target_gpu("live-running", "model-live-running", Some(2));
+
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::patch("/api/queue/live-running")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"target_gpu":null,"position":0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["id"], "live-running");
+        assert_eq!(body["position"], 0);
+        assert!(body.get("target_gpu").is_none());
+
+        let durable = mold_db::generation_queue::get(db.as_ref().as_ref().unwrap(), "live-running")
+            .unwrap()
+            .expect("claimed durable row remains present");
+        assert_eq!(durable.target_gpu, None);
+        assert_eq!(
+            state.job_registry.queued_ids_in_order(),
+            ["live-running", "other-live"]
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_queue_returns_failure_without_mutating_runtime_when_sqlite_mutation_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        seed_durable_projection_row(
+            &db,
+            &owner,
+            "durable-failure",
+            mold_db::generation_queue::QueueRowState::Queued,
+            0,
+            0,
+        );
+        state.job_registry.register_with_target_gpu(
+            "durable-failure",
+            "model-durable-failure",
+            Some(7),
+        );
+        db.as_ref()
+            .as_ref()
+            .unwrap()
+            .with_conn(|conn| {
+                conn.execute_batch("DROP TABLE generation_queue")?;
+                Ok(())
+            })
+            .unwrap();
+
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::patch("/api/queue/durable-failure")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"target_gpu":null}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            state
+                .job_registry
+                .entry("durable-failure")
+                .unwrap()
+                .target_gpu,
+            Some(7),
+            "SQLite-first failure must leave the runtime projection untouched"
+        );
+    }
+
+    #[tokio::test]
     async fn patch_queue_position_rejects_running_jobs() {
         let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
         state.job_registry.register("aaaa", "flux-dev:fp16");
@@ -3586,6 +3781,60 @@ mod tests {
             .unwrap();
         let body = json_body(resp).await;
         assert_eq!(body["entries"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn durable_cancellation_lookup_never_holds_the_scheduler_mutation_fence() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        seed_durable_projection_row(
+            &db,
+            &owner,
+            "deep-cancel",
+            mold_db::generation_queue::QueueRowState::Queued,
+            0,
+            0,
+        );
+
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let locked_db = db.clone();
+        let holder = std::thread::spawn(move || {
+            locked_db
+                .as_ref()
+                .as_ref()
+                .unwrap()
+                .with_conn(|_| {
+                    locked_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        locked_rx.recv().unwrap();
+
+        let app = app_with_state(state.clone());
+        let mut cancellation = Box::pin(
+            app.oneshot(
+                Request::delete("/api/queue/deep-cancel")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        );
+        assert!(
+            futures::poll!(cancellation.as_mut()).is_pending(),
+            "the cancellation lookup must wait behind the held SQLite connection"
+        );
+        let scheduler_guard = state
+            .scheduler_mutation_fence
+            .try_lock()
+            .expect("blocking SQLite lookup must not own the scheduler mutation fence");
+        drop(scheduler_guard);
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert_eq!(cancellation.await.unwrap().status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
@@ -4715,7 +4964,9 @@ mod tests {
         assert_eq!(first["entries"][0]["state"], "running");
         assert_eq!(first["entries"][0]["gpu"], 2);
         assert_eq!(first["entries"][0]["durable"], true);
+        assert_eq!(first["entries"][0]["position"], 0);
         assert_eq!(first["entries"][1]["id"], "queued");
+        assert_eq!(first["entries"][1]["position"], 1);
         assert_eq!(first["entries"][1]["seed_pinned"], true);
         assert_eq!(first["live_only_entries"].as_array().unwrap().len(), 1);
         assert_eq!(first["live_only_entries"][0]["id"], "h3-live-only");
@@ -4746,6 +4997,69 @@ mod tests {
         assert_eq!(second["entries"][1]["state"], "held");
         assert_eq!(second["entries"][1]["held_reason"], "held for review");
         assert_eq!(second["live_only_entries"][0]["id"], "h3-live-only");
+    }
+
+    #[tokio::test]
+    async fn queue_default_and_explicit_pages_are_bounded_by_the_runtime_window() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
+        state.queue_capacity = 2;
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        for index in 0..5 {
+            seed_durable_projection_row(
+                &db,
+                &owner,
+                &format!("deep-{index}"),
+                mold_db::generation_queue::QueueRowState::Queued,
+                index,
+                1024 * 1024,
+            );
+        }
+        let app = app_with_state(state);
+
+        let default = json_body(
+            app.clone()
+                .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(default["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(default["page"]["limit"], 2);
+        let cursor = default["page"]["next_cursor"]
+            .as_str()
+            .expect("bounded default exposes continuation")
+            .to_string();
+
+        let clamped = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get("/api/queue?limit=999999")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(clamped["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(clamped["page"]["limit"], 2);
+
+        let continued = json_body(
+            app.oneshot(
+                Request::get(format!("/api/queue?cursor={cursor}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(continued["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(continued["page"]["limit"], 2);
+        assert_eq!(continued["page"]["offset"], 2);
+        assert_eq!(continued["entries"][0]["id"], "deep-2");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6082,12 +6396,12 @@ mod tests {
                 .unwrap()
         });
         tokio::task::yield_now().await;
-        let live_status = app
+        let live_health = app
             .clone()
-            .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(live_status.status(), StatusCode::OK);
+        assert_eq!(live_health.status(), StatusCode::OK);
         assert!(
             !watchdog_released.load(Ordering::SeqCst),
             "bulk cancellation blocked the current-thread async executor"
