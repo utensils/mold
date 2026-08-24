@@ -1067,7 +1067,7 @@ onBeforeUnmount(() => {
           type="button"
           class="md-library__empty mt-2"
           data-test="queue-load-more"
-          :disabled="loadingMoreQueue || offline"
+          :disabled="loadingMoreQueue || !online"
           @click="loadMoreQueue"
         >
           {{ loadingMoreQueue ? "Loading…" : "Load more jobs" }}

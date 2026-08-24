@@ -657,6 +657,50 @@ describe("HostDetailPage — queue", () => {
     expect(w.find('[data-test="queue-load-more"]').exists()).toBe(true);
   });
 
+  it("uses reachability and in-flight state to gate durable continuation", async () => {
+    poll.status.value = makeStatus({ queue_capacity: 2 });
+    hostQueueCall.mockResolvedValue({
+      entries: [queued("a", 0), queued("b", 1)],
+      page: {
+        limit: 2,
+        offset: 0,
+        returned: 2,
+        next_cursor: "tail",
+      },
+    });
+
+    const w = await mountDetail();
+    const loadMore = w.get('[data-test="queue-load-more"]');
+    expect(loadMore.attributes("disabled")).toBeUndefined();
+
+    poll.stale.value = true;
+    await nextTick();
+    expect(w.find('[data-test="detail-reconnecting"]').exists()).toBe(true);
+    expect(loadMore.attributes("disabled")).toBeUndefined();
+
+    poll.stale.value = false;
+    poll.online.value = false;
+    await nextTick();
+    expect(loadMore.attributes("disabled")).toBeDefined();
+
+    poll.online.value = true;
+    await nextTick();
+    const continuation = deferred<{
+      entries: QueueEntry[];
+      page: { limit: number; cursor: string; returned: number };
+    }>();
+    hostQueueCall.mockReturnValueOnce(continuation.promise);
+    await loadMore.trigger("click");
+    expect(loadMore.attributes("disabled")).toBeDefined();
+    expect(loadMore.text()).toBe("Loading…");
+
+    continuation.resolve({
+      entries: [queued("c", 2)],
+      page: { limit: 2, cursor: "tail", returned: 1 },
+    });
+    await flushPromises();
+  });
+
   it("wires advertised pause and cancel-all controls to the viewed host", async () => {
     caps = {
       queue: { can_pause: true, can_cancel_all: true, can_reorder: false },
