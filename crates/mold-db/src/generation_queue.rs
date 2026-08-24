@@ -1151,6 +1151,112 @@ pub fn patch_owned_queued(
     job_id: &str,
     patch: &OwnedQueuedPatch,
 ) -> Result<OwnedQueuedPatchOutcome> {
+    patch_owned_queued_with_claim_fence(
+        db,
+        owner_uuid,
+        job_id,
+        patch,
+        QueuePatchClaimFence::Unclaimed,
+    )
+}
+
+/// Atomically patch one owner-fenced queued row already claimed by the live
+/// registry handoff.
+///
+/// This is the claimed counterpart to [`patch_owned_queued`]. It deliberately
+/// accepts only a non-NULL durable claim so an unclaimed deep-tail row cannot
+/// cross into the live mutation path. The owner, state, and claim-presence
+/// checks remain part of every target mutation in the transaction.
+pub fn patch_owned_claimed_queued(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    job_id: &str,
+    patch: &OwnedQueuedPatch,
+) -> Result<OwnedQueuedPatchOutcome> {
+    patch_owned_queued_with_claim_fence(
+        db,
+        owner_uuid,
+        job_id,
+        patch,
+        QueuePatchClaimFence::Claimed,
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum QueuePatchClaimFence {
+    Unclaimed,
+    Claimed,
+}
+
+impl QueuePatchClaimFence {
+    fn accepts(self, claim_token: Option<&str>) -> bool {
+        match self {
+            Self::Unclaimed => claim_token.is_none(),
+            Self::Claimed => claim_token.is_some(),
+        }
+    }
+
+    fn affinity_sql(self) -> &'static str {
+        match self {
+            Self::Unclaimed => {
+                "UPDATE generation_queue
+                    SET target_gpu = ?3, target_device_id = ?4, updated_at = ?5
+                  WHERE id = ?1 AND owner_uuid = ?2
+                    AND state = 'queued' AND claim_token IS NULL"
+            }
+            Self::Claimed => {
+                "UPDATE generation_queue
+                    SET target_gpu = ?3, target_device_id = ?4, updated_at = ?5
+                  WHERE id = ?1 AND owner_uuid = ?2
+                    AND state = 'queued' AND claim_token IS NOT NULL"
+            }
+        }
+    }
+
+    fn reorder_sql(self) -> &'static str {
+        match self {
+            Self::Unclaimed => {
+                "UPDATE generation_queue
+                    SET created_at = ?2, updated_at = ?3
+                  WHERE id = ?1 AND owner_uuid = ?4 AND state = 'queued'
+                    AND (id != ?5 OR claim_token IS NULL)"
+            }
+            Self::Claimed => {
+                "UPDATE generation_queue
+                    SET created_at = ?2, updated_at = ?3
+                  WHERE id = ?1 AND owner_uuid = ?4 AND state = 'queued'
+                    AND (id != ?5 OR claim_token IS NOT NULL)"
+            }
+        }
+    }
+
+    fn projection_sql(self) -> &'static str {
+        match self {
+            Self::Unclaimed => {
+                "SELECT id, state, model, target_gpu, seed_pinned,
+                        dispatch_attempts, replay_seen, held_reason, created_at
+                   FROM generation_queue
+                  WHERE id = ?1 AND owner_uuid = ?2
+                    AND state = 'queued' AND claim_token IS NULL"
+            }
+            Self::Claimed => {
+                "SELECT id, state, model, target_gpu, seed_pinned,
+                        dispatch_attempts, replay_seen, held_reason, created_at
+                   FROM generation_queue
+                  WHERE id = ?1 AND owner_uuid = ?2
+                    AND state = 'queued' AND claim_token IS NOT NULL"
+            }
+        }
+    }
+}
+
+fn patch_owned_queued_with_claim_fence(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    job_id: &str,
+    patch: &OwnedQueuedPatch,
+    claim_fence: QueuePatchClaimFence,
+) -> Result<OwnedQueuedPatchOutcome> {
     db.transact_immediate(|conn| {
         let owned = conn
             .query_row(
@@ -1171,16 +1277,13 @@ pub fn patch_owned_queued(
         let Some((state, created_at, rowid, claim_token)) = owned else {
             return Ok(OwnedQueuedPatchOutcome::NotOwned);
         };
-        if state != QueueRowState::Queued.as_str() || claim_token.is_some() {
+        if state != QueueRowState::Queued.as_str() || !claim_fence.accepts(claim_token.as_deref()) {
             return Ok(OwnedQueuedPatchOutcome::NotQueued);
         }
 
         if let Some(target) = &patch.target {
             let updated = conn.execute(
-                "UPDATE generation_queue
-                    SET target_gpu = ?3, target_device_id = ?4, updated_at = ?5
-                  WHERE id = ?1 AND owner_uuid = ?2
-                    AND state = 'queued' AND claim_token IS NULL",
+                claim_fence.affinity_sql(),
                 params![
                     job_id,
                     owner_uuid,
@@ -1217,12 +1320,7 @@ pub fn patch_owned_queued(
                     anyhow::anyhow!("queued generation count exceeds SQLite's range")
                 })?;
                 let anchor = oldest_created_at.min(i64::MAX - span);
-                let mut update = conn.prepare(
-                    "UPDATE generation_queue
-                        SET created_at = ?2, updated_at = ?3
-                      WHERE id = ?1 AND owner_uuid = ?4 AND state = 'queued'
-                        AND (id != ?5 OR claim_token IS NULL)",
-                )?;
+                let mut update = conn.prepare(claim_fence.reorder_sql())?;
                 let mut moved = 0usize;
                 for (index, id) in order.iter().enumerate() {
                     moved += update.execute(params![
@@ -1251,11 +1349,7 @@ pub fn patch_owned_queued(
         };
 
         let projection = conn.query_row(
-            "SELECT id, state, model, target_gpu, seed_pinned,
-                    dispatch_attempts, replay_seen, held_reason, created_at
-               FROM generation_queue
-              WHERE id = ?1 AND owner_uuid = ?2
-                AND state = 'queued' AND claim_token IS NULL",
+            claim_fence.projection_sql(),
             params![job_id, owner_uuid],
             |row| {
                 Ok(GenerationQueueProjection {
@@ -2657,6 +2751,189 @@ mod tests {
             })
             .unwrap();
         assert_eq!(claim_token.as_deref(), Some("feeder-claim"));
+    }
+
+    #[test]
+    fn owned_claimed_queued_patch_persists_live_affinity_and_position() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        for id in ["first", "live", "tail"] {
+            insert(&db, &row(id, "owner-a", 500)).unwrap();
+        }
+        claim_by_id(&db, "owner-a", "live", "registry-claim", 600)
+            .unwrap()
+            .unwrap();
+
+        let outcome = patch_owned_claimed_queued(
+            &db,
+            "owner-a",
+            "live",
+            &OwnedQueuedPatch {
+                target: Some(QueueTargetPatch {
+                    target_gpu: Some(4),
+                    target_device_id: Some("cuda:stable-live".into()),
+                }),
+                position: Some(0),
+                updated_at_ms: 700,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            OwnedQueuedPatchOutcome::Updated {
+                position: 0,
+                projection: GenerationQueueProjection {
+                    ref id,
+                    target_gpu: Some(4),
+                    ..
+                },
+            } if id == "live"
+        ));
+        let live = get(&db, "live").unwrap().unwrap();
+        assert_eq!(live.target_gpu, Some(4));
+        assert_eq!(live.target_device_id.as_deref(), Some("cuda:stable-live"));
+        assert_eq!(
+            list_replayable(&db, "owner-a")
+                .unwrap()
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            ["live", "first", "tail"]
+        );
+
+        recover_runtime_claims(&db, "owner-a", 800).unwrap();
+        let live = get(&db, "live").unwrap().unwrap();
+        assert_eq!(live.target_gpu, Some(4));
+        assert_eq!(live.target_device_id.as_deref(), Some("cuda:stable-live"));
+        assert_eq!(
+            list_replayable(&db, "owner-a")
+                .unwrap()
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            ["live", "first", "tail"]
+        );
+
+        assert_eq!(
+            patch_owned_claimed_queued(
+                &db,
+                "owner-a",
+                "first",
+                &OwnedQueuedPatch {
+                    target: None,
+                    position: Some(2),
+                    updated_at_ms: 900,
+                },
+            )
+            .unwrap(),
+            OwnedQueuedPatchOutcome::NotQueued
+        );
+    }
+
+    #[test]
+    fn owned_claimed_queued_patch_is_owner_and_state_fenced() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert(&db, &row("foreign", "owner-b", 500)).unwrap();
+        insert(&db, &row("running", "owner-a", 501)).unwrap();
+        insert(&db, &row("held", "owner-a", 502)).unwrap();
+        claim_by_id(&db, "owner-b", "foreign", "foreign-claim", 600)
+            .unwrap()
+            .unwrap();
+        claim_by_id(&db, "owner-a", "running", "running-claim", 601)
+            .unwrap()
+            .unwrap();
+        mark_dispatched_claimed(&db, "running", "running-claim", 602)
+            .unwrap()
+            .unwrap();
+        claim_by_id(&db, "owner-a", "held", "held-claim", 603)
+            .unwrap()
+            .unwrap();
+        hold_claimed(
+            &db,
+            "held",
+            "held-claim",
+            QueueRowState::Queued,
+            "review",
+            604,
+        )
+        .unwrap();
+        let patch = OwnedQueuedPatch {
+            target: Some(QueueTargetPatch {
+                target_gpu: Some(8),
+                target_device_id: Some("cuda:8".into()),
+            }),
+            position: Some(0),
+            updated_at_ms: 700,
+        };
+
+        assert_eq!(
+            patch_owned_claimed_queued(&db, "owner-a", "foreign", &patch).unwrap(),
+            OwnedQueuedPatchOutcome::NotOwned
+        );
+        assert_eq!(
+            patch_owned_claimed_queued(&db, "owner-a", "running", &patch).unwrap(),
+            OwnedQueuedPatchOutcome::NotQueued
+        );
+        assert_eq!(
+            patch_owned_claimed_queued(&db, "owner-a", "held", &patch).unwrap(),
+            OwnedQueuedPatchOutcome::NotQueued
+        );
+        for id in ["foreign", "running", "held"] {
+            let unchanged = get(&db, id).unwrap().unwrap();
+            assert_eq!(unchanged.target_gpu, None);
+            assert_eq!(unchanged.target_device_id, None);
+        }
+    }
+
+    #[test]
+    fn owned_claimed_queued_patch_rolls_back_partial_writes() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        for id in ["first", "live", "tail"] {
+            insert(&db, &row(id, "owner-a", 500)).unwrap();
+        }
+        claim_by_id(&db, "owner-a", "live", "registry-claim", 600)
+            .unwrap()
+            .unwrap();
+        let before = list_replayable(&db, "owner-a").unwrap();
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER reject_live_reorder
+                 BEFORE UPDATE OF created_at ON generation_queue
+                 WHEN OLD.id = 'first'
+                 BEGIN SELECT RAISE(ABORT, 'injected live reorder failure'); END;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let result = patch_owned_claimed_queued(
+            &db,
+            "owner-a",
+            "live",
+            &OwnedQueuedPatch {
+                target: Some(QueueTargetPatch {
+                    target_gpu: Some(9),
+                    target_device_id: Some("cuda:9".into()),
+                }),
+                position: Some(0),
+                updated_at_ms: 700,
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(list_replayable(&db, "owner-a").unwrap(), before);
+        let live = get(&db, "live").unwrap().unwrap();
+        assert_eq!(live.target_gpu, None);
+        assert_eq!(live.target_device_id, None);
+        let claim_token: Option<String> = db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT claim_token FROM generation_queue WHERE id = 'live'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(claim_token.as_deref(), Some("registry-claim"));
     }
 
     #[test]
