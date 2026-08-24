@@ -1628,16 +1628,16 @@ fn reference_prepared_shape_at(
             let (width, height) = reference_image_dimensions(*width, *height)?;
             // Visual VAE downsamples 16x, then the DiT packs 2x2 latent
             // patches: one row therefore represents a 32x32 pixel cell.
-            let visual_rows = u64::from(width / 32)
-                .checked_mul(u64::from(height / 32))
-                .ok_or_else(|| {
-                    reference_violation(
-                        Some(index),
-                        "MINIMAX_H3_REFERENCE_PREPARED_SHAPE",
-                        Some("width"),
-                        "reference image row count overflowed",
-                    )
-                })?;
+            // [`VIDEO_ROW_STRIDE`] names that, and `rows_per_video_latent` is
+            // the one function every consumer of it calls.
+            let visual_rows = rows_per_video_latent(width, height).ok_or_else(|| {
+                reference_violation(
+                    Some(index),
+                    "MINIMAX_H3_REFERENCE_PREPARED_SHAPE",
+                    Some("width"),
+                    "reference image row count overflowed",
+                )
+            })?;
             GenerationReferencePreparedShape {
                 version: REFERENCE_PREPROCESS_VERSION,
                 normalized_width: Some(width),

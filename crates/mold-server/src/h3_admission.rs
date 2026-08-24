@@ -640,42 +640,26 @@ impl H3PreparedRequestShape {
                 "H3 Qwen output rows must be 1..={H3_QWEN_MODEL_MAX_ROWS}, got {qwen_output_text_rows}"
             )));
         }
-        let width = u64::from(request.width);
-        let height = u64::from(request.height);
-        let target_frames = request
-            .frames
-            .unwrap_or(minimax_h3::REVIEWED_COMPACT_FRAMES);
-        let frames = u64::from(target_frames);
-        let video_latent_frames = frames
-            .checked_sub(u64::from(minimax_h3::FRAME_OFFSET))
-            .ok_or(H3AdmissionError::ArithmeticOverflow("video latent frames"))?
-            / u64::from(minimax_h3::FRAME_STEP)
-            * 5
-            + 2;
-        let rows_per_video_latent = width
-            .checked_div(32)
-            .and_then(|value| value.checked_mul(height / 32))
-            .ok_or(H3AdmissionError::ArithmeticOverflow(
-                "video rows per latent",
-            ))?;
-        let target_video_rows = video_latent_frames
-            .checked_mul(rows_per_video_latent)
-            .ok_or(H3AdmissionError::ArithmeticOverflow("target video rows"))?;
-        // round(frames / 24 * 40) using exact integer arithmetic. Valid H3
-        // frame counts never land on a half tie.
-        let audio_latents_per_channel = frames
-            .checked_mul(5)
-            .and_then(|value| value.checked_add(1))
-            .ok_or(H3AdmissionError::ArithmeticOverflow("target audio latents"))?
-            / 3;
-        let target_audio_rows = audio_latents_per_channel
-            .checked_mul(u64::from(minimax_h3::AUDIO_CHANNELS))
+        let target_frames = request.frames.unwrap_or(minimax_h3::DEFAULT_COMPACT_FRAMES);
+        // `mold_core::minimax_h3` is the ONE packed-row authority: the private
+        // runtime envelope that grants memory for this request derives its row
+        // ceilings from the same functions, so the charge and the grant cannot
+        // drift once a request may name its own canvas and clip length.
+        let video_latent_frames = minimax_h3::video_latent_frames(target_frames)
+            .ok_or(H3AdmissionError::ArithmeticOverflow("video latent frames"))?;
+        let rows_per_video_latent =
+            minimax_h3::rows_per_video_latent(request.width, request.height).ok_or(
+                H3AdmissionError::ArithmeticOverflow("video rows per latent"),
+            )?;
+        let target_video_rows =
+            minimax_h3::target_video_rows(request.width, request.height, target_frames)
+                .ok_or(H3AdmissionError::ArithmeticOverflow("target video rows"))?;
+        let audio_latents_per_channel = minimax_h3::audio_latents_per_channel(target_frames)
+            .ok_or(H3AdmissionError::ArithmeticOverflow("target audio latents"))?;
+        let target_audio_rows = minimax_h3::target_audio_rows(target_frames)
             .ok_or(H3AdmissionError::ArithmeticOverflow("target audio rows"))?;
-        let audio_samples_per_channel = frames
-            .checked_mul(4_000)
-            .and_then(|value| value.checked_add(1))
-            .ok_or(H3AdmissionError::ArithmeticOverflow("target audio samples"))?
-            / 3;
+        let audio_samples_per_channel = minimax_h3::audio_samples_per_channel(target_frames)
+            .ok_or(H3AdmissionError::ArithmeticOverflow("target audio samples"))?;
 
         let references = request.references.as_deref().unwrap_or_default();
         let reference_shapes =
@@ -739,8 +723,7 @@ impl H3PreparedRequestShape {
             Self {
                 width: request.width,
                 height: request.height,
-                frames: u32::try_from(frames)
-                    .map_err(|_| H3AdmissionError::ArithmeticOverflow("frames"))?,
+                frames: target_frames,
                 video_latent_frames,
                 audio_latents_per_channel,
                 audio_samples_per_channel,
@@ -784,34 +767,22 @@ impl H3PreparedRequestShape {
             )));
         }
 
-        let frames = u64::from(self.frames);
-        let expected_video_latent_frames = frames
-            .checked_sub(u64::from(minimax_h3::FRAME_OFFSET))
-            .ok_or(H3AdmissionError::ArithmeticOverflow("video latent frames"))?
-            / u64::from(minimax_h3::FRAME_STEP)
-            * 5
-            + 2;
-        let rows_per_video_latent = u64::from(self.width / 32)
-            .checked_mul(u64::from(self.height / 32))
+        // Same single authority as `from_request_with_reference_authority`.
+        let expected_video_latent_frames = minimax_h3::video_latent_frames(self.frames)
+            .ok_or(H3AdmissionError::ArithmeticOverflow("video latent frames"))?;
+        let rows_per_video_latent = minimax_h3::rows_per_video_latent(self.width, self.height)
             .ok_or(H3AdmissionError::ArithmeticOverflow(
                 "video rows per latent",
             ))?;
-        let expected_target_video_rows = expected_video_latent_frames
-            .checked_mul(rows_per_video_latent)
-            .ok_or(H3AdmissionError::ArithmeticOverflow("target video rows"))?;
-        let expected_audio_latents = frames
-            .checked_mul(5)
-            .and_then(|value| value.checked_add(1))
-            .ok_or(H3AdmissionError::ArithmeticOverflow("target audio latents"))?
-            / 3;
-        let expected_target_audio_rows = expected_audio_latents
-            .checked_mul(u64::from(minimax_h3::AUDIO_CHANNELS))
+        let expected_target_video_rows =
+            minimax_h3::target_video_rows(self.width, self.height, self.frames)
+                .ok_or(H3AdmissionError::ArithmeticOverflow("target video rows"))?;
+        let expected_audio_latents = minimax_h3::audio_latents_per_channel(self.frames)
+            .ok_or(H3AdmissionError::ArithmeticOverflow("target audio latents"))?;
+        let expected_target_audio_rows = minimax_h3::target_audio_rows(self.frames)
             .ok_or(H3AdmissionError::ArithmeticOverflow("target audio rows"))?;
-        let expected_audio_samples = frames
-            .checked_mul(4_000)
-            .and_then(|value| value.checked_add(1))
-            .ok_or(H3AdmissionError::ArithmeticOverflow("target audio samples"))?
-            / 3;
+        let expected_audio_samples = minimax_h3::audio_samples_per_channel(self.frames)
+            .ok_or(H3AdmissionError::ArithmeticOverflow("target audio samples"))?;
         if self.video_latent_frames != expected_video_latent_frames
             || self.audio_latents_per_channel != expected_audio_latents
             || self.audio_samples_per_channel != expected_audio_samples

@@ -642,17 +642,18 @@ fn reviewed_h3_private_generation_profile_for(
         ) == Some(true),
     });
     let recipe = profile.recipes.first_mut()?;
-    // Every ceiling is the widest of the reviewed canvases, and the aspect
-    // bounds span them, so a client that reads a ceiling rather than the
-    // bucket list is never handed a number smaller than a bucket it is being
-    // offered. `mold_core::minimax_h3` is the one authority for the set.
+    // Every bound is the compact CANVAS RULE's own, so a client that reads a
+    // ceiling rather than the preset list is never handed a number smaller
+    // than a canvas admission accepts. `mold_core::minimax_h3` is the one
+    // authority for the rule.
     let reviewed_canvases = mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES;
     let pixels = mold_core::minimax_h3::reviewed_compact_max_pixels();
     let (min_aspect, max_aspect) = mold_core::minimax_h3::reviewed_compact_aspect_bounds();
     let min_axis = mold_core::minimax_h3::reviewed_compact_min_axis_pixels();
-    recipe.resolution.domain = ResolutionDomain::Buckets;
-    // The reviewed diffusers runtime refuses off-bucket shapes outright.
-    recipe.resolution.off_bucket = Some(mold_core::generation_profile::OffBucketPolicy::Reject);
+    // A RANGE, not a bucket set: the compact runtime admits any aligned canvas
+    // inside its area ceiling and the memory estimate decides what fits.
+    recipe.resolution.domain = ResolutionDomain::Dynamic;
+    recipe.resolution.off_bucket = None;
     recipe.resolution.min_width = min_axis;
     recipe.resolution.min_height = min_axis;
     recipe.resolution.max_pixels = pixels;
@@ -684,21 +685,40 @@ fn reviewed_h3_private_generation_profile_for(
         return None;
     }
     recipe.resolution.aspect_groups = reviewed_groups;
+    // A Turbo tier's step count is its distilled adapter's own schedule
+    // length and stays fixed; the base tier takes the compact range.
+    let turbo = mold_core::minimax_h3::turbo_tier_for_model(model).is_some();
     recipe.steps.default = steps;
-    recipe.steps.min = steps;
-    recipe.steps.max = steps;
+    recipe.steps.min = if turbo {
+        steps
+    } else {
+        mold_core::minimax_h3::COMPACT_MIN_STEPS
+    };
+    recipe.steps.max = if turbo {
+        steps
+    } else {
+        mold_core::minimax_h3::COMPACT_MAX_STEPS
+    };
     recipe.steps.step = 1;
     recipe.steps.recommended = vec![steps];
-    recipe.steps.mode = ControlMode::Fixed;
+    recipe.steps.mode = if turbo {
+        ControlMode::Fixed
+    } else {
+        ControlMode::Adjustable
+    };
     let temporal = recipe.temporal.as_mut()?;
     temporal.frames.default = frames;
-    temporal.frames.min = frames;
-    temporal.frames.max = frames;
-    temporal.frames.step = 1;
-    temporal.frames.recommended = vec![frames];
-    temporal.frames.mode = ControlMode::Fixed;
+    temporal.frames.min = mold_core::minimax_h3::MIN_FRAMES;
+    temporal.frames.max = mold_core::minimax_h3::MAX_FRAMES;
+    temporal.frames.step = mold_core::minimax_h3::FRAME_STEP;
+    temporal.frames.recommended = vec![
+        mold_core::minimax_h3::MIN_FRAMES,
+        frames,
+        mold_core::minimax_h3::MAX_FRAMES,
+    ];
+    temporal.frames.mode = ControlMode::Adjustable;
     temporal.fps = FpsControl::Fixed { value: fps };
-    temporal.max_duration_seconds = Some(frames.div_ceil(fps));
+    temporal.max_duration_seconds = Some(mold_core::minimax_h3::MAX_FRAMES.div_ceil(fps));
     recipe.defaults.width = width;
     recipe.defaults.height = height;
     recipe.defaults.steps = steps;
@@ -868,20 +888,22 @@ fn h3_model_row(
             description: description.into(),
             default_frames: Some(request.frames),
             default_fps: Some(request.fps),
-            min_frames: Some(request.frames),
-            max_frames: Some(request.frames),
-            max_runtime_seconds: Some(request.frames.div_ceil(request.fps)),
-            max_frames_absolute: Some(request.frames),
-            frame_step: Some(1),
-            frame_offset: Some(0),
+            // The compact stack takes the FAMILY frame grid; `request.frames`
+            // is the default clip length, not a ceiling.
+            min_frames: Some(mold_core::minimax_h3::MIN_FRAMES),
+            max_frames: Some(mold_core::minimax_h3::MAX_FRAMES),
+            max_runtime_seconds: Some(mold_core::minimax_h3::MAX_DURATION_SECONDS),
+            max_frames_absolute: Some(mold_core::minimax_h3::MAX_FRAMES),
+            frame_step: Some(mold_core::minimax_h3::FRAME_STEP),
+            frame_offset: Some(mold_core::minimax_h3::FRAME_OFFSET),
             max_pixels: Some(pixels),
             max_axis_pixels: Some(mold_core::minimax_h3::reviewed_compact_max_axis_pixels()),
             default_negative_prompt: None,
-            // Every canvas a hardware campaign qualified, default first — the
-            // same slice the bucket profile above advertises. A row that
-            // named only the default let a client that reads
+            // The recommended canvases, default first — the same slice the
+            // range profile above advertises as presets. A row that named
+            // only the default let a client that reads
             // `recommended_dimensions` rather than the profile offer one
-            // size while the profile offered two.
+            // size while the profile offered several.
             recommended_dimensions: mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES
                 .iter()
                 .map(|&(width, height)| mold_core::RecommendedDimensions { width, height })
@@ -1771,9 +1793,10 @@ fn validate_private_h3_live_owner_route(
 
 #[cfg(test)]
 mod presentation_tests {
-    /// The advertised buckets are exactly the canvases `mold_core` records as
-    /// reviewed — one aspect group each, keeping the profile's canonical
-    /// reduced-ratio identity (`7:4` for 1344x768, `1:1` for 768x768).
+    /// The advertised presets are exactly the canvases `mold_core`
+    /// recommends, grouped by their canonical reduced-ratio identity (`7:4`
+    /// for 1344x768, `1:1` for the squares). They are RECOMMENDATIONS on a
+    /// continuous range, not a bucket set.
     #[test]
     fn reviewed_profile_keeps_the_canonical_exact_aspect_identity() {
         let (profile, _, pixels) = super::reviewed_h3_private_generation_profile()
@@ -1787,10 +1810,26 @@ mod presentation_tests {
             .flat_map(|group| group.presets.iter())
             .map(|preset| (preset.width, preset.height))
             .collect::<Vec<_>>();
+        // Order follows the aspect grouping, so compare as sets.
+        let mut sorted = advertised.clone();
+        sorted.sort_unstable();
+        let mut expected = mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec();
+        expected.sort_unstable();
+        assert_eq!(sorted, expected);
+        // The default canvas still leads.
         assert_eq!(
-            advertised,
-            mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec()
+            advertised.first().copied(),
+            Some((
+                mold_core::minimax_h3::DEFAULT_WIDTH,
+                mold_core::minimax_h3::DEFAULT_HEIGHT
+            ))
         );
+        // A range, not a bucket set.
+        assert_eq!(
+            recipe.resolution.domain,
+            mold_core::generation_profile::ResolutionDomain::Dynamic
+        );
+        assert_eq!(recipe.resolution.off_bucket, None);
         for group in &recipe.resolution.aspect_groups {
             assert_eq!(group.id, group.label);
             for preset in &group.presets {
@@ -1804,12 +1843,12 @@ mod presentation_tests {
                 .iter()
                 .map(|group| group.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["7:4", "1:1"]
+            vec!["7:4", "20:11", "16:9", "1:1", "4:7", "11:20"]
         );
 
-        // Every ceiling spans the whole set, so a client that reads a ceiling
-        // rather than the bucket list is never handed a number smaller than a
-        // bucket it is being offered.
+        // Every ceiling is the canvas RULE's own, so a client that reads a
+        // ceiling rather than the preset list is never handed a number
+        // smaller than a canvas admission accepts.
         assert_eq!(pixels, mold_core::minimax_h3::reviewed_compact_max_pixels());
         assert_eq!(recipe.resolution.max_pixels, pixels);
         assert_eq!(
@@ -1831,6 +1870,55 @@ mod presentation_tests {
             recipe.defaults.height,
             mold_core::minimax_h3::DEFAULT_HEIGHT
         );
+
+        // The frame and step axes are ranges for the base tier.
+        let temporal = recipe.temporal.as_ref().expect("a temporal block");
+        assert_eq!(temporal.frames.min, mold_core::minimax_h3::MIN_FRAMES);
+        assert_eq!(temporal.frames.max, mold_core::minimax_h3::MAX_FRAMES);
+        assert_eq!(temporal.frames.step, mold_core::minimax_h3::FRAME_STEP);
+        assert_eq!(
+            temporal.frames.default,
+            mold_core::minimax_h3::DEFAULT_COMPACT_FRAMES
+        );
+        assert_eq!(
+            temporal.frames.mode,
+            mold_core::generation_profile::ControlMode::Adjustable
+        );
+        assert_eq!(recipe.steps.min, mold_core::minimax_h3::COMPACT_MIN_STEPS);
+        assert_eq!(recipe.steps.max, mold_core::minimax_h3::COMPACT_MAX_STEPS);
+        assert_eq!(
+            recipe.steps.default,
+            mold_core::minimax_h3::COMFY_DEFAULT_STEPS
+        );
+        assert_eq!(
+            recipe.steps.mode,
+            mold_core::generation_profile::ControlMode::Adjustable
+        );
+    }
+
+    /// A Turbo tier's step count IS its distilled adapter's schedule length,
+    /// so it stays a fixed control while the base tier's became a range.
+    #[test]
+    fn a_turbo_tier_keeps_its_exact_step_count() {
+        for tier in mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS {
+            let (profile, _, _) =
+                super::reviewed_h3_private_generation_profile_for(tier.model, tier.steps)
+                    .expect("every reviewed Turbo tier resolves a profile");
+            let recipe = profile.default_recipe().expect("one reviewed recipe");
+            assert_eq!(recipe.steps.min, tier.steps, "{}", tier.model);
+            assert_eq!(recipe.steps.max, tier.steps, "{}", tier.model);
+            assert_eq!(recipe.steps.default, tier.steps, "{}", tier.model);
+            assert_eq!(
+                recipe.steps.mode,
+                mold_core::generation_profile::ControlMode::Fixed,
+                "{}",
+                tier.model
+            );
+            // The frame axis is still the family grid: only the step axis is
+            // the adapter's property.
+            let temporal = recipe.temporal.as_ref().expect("a temporal block");
+            assert_eq!(temporal.frames.max, mold_core::minimax_h3::MAX_FRAMES);
+        }
     }
 }
 

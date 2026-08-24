@@ -10347,20 +10347,20 @@ mod tests {
         assert!(request.original_prompt.is_none());
     }
 
-    /// Both doors a compact H3 request can reach agree on the reviewed
-    /// canvases, and neither needs a GPU to answer.
+    /// Both doors a compact H3 request can reach agree on the canvas RULE,
+    /// and neither needs a GPU to answer.
     ///
     /// Authenticated private H3 ingress deliberately skips
     /// `validate_request_against_generation_profile`, so its own door —
     /// `validate_h3_private_uat_request` — has to carry the canvas rule, and
     /// every ordinary client reaches the same answer through the profile's
-    /// `Buckets` + `OffBucketPolicy::Reject`. That door's canvas rule IS the
-    /// `validate_reviewed_canvas` called here: the `h3` feature gates the
-    /// wrapper, not the rule, and `mold-ai-core`'s
+    /// range. That door's canvas rule IS the `validate_reviewed_canvas`
+    /// called here: the `h3` feature gates the wrapper, not the rule, and
+    /// `mold-ai-core`'s
     /// `private_h3_ingress_admits_every_reviewed_canvas_and_refuses_the_rest`
-    /// pins the delegation verbatim. 1024x768 is the interesting
-    /// negative: it is a canonical upstream resolver output the checkpoint
-    /// itself would render, and no campaign has run it.
+    /// pins the delegation verbatim. 1024x768 is the interesting positive: a
+    /// canonical upstream resolver output no campaign has run, refused by the
+    /// old bucket set and admitted by the rule.
     #[test]
     fn both_admission_doors_admit_every_reviewed_h3_canvas_and_refuse_the_rest() {
         let request = |model: &str, width: u32, height: u32| {
@@ -10403,7 +10403,13 @@ mod tests {
             mold_core::minimax_h3::FL2VA_COMFY,
             mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
         ] {
-            for &(width, height) in mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES {
+            // Every recommended preset, plus canvases no campaign ran that
+            // the rule admits.
+            let admitted = mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES
+                .iter()
+                .copied()
+                .chain([(1024, 768), (768, 1344), (1024, 576), (512, 1984)]);
+            for (width, height) in admitted {
                 let mut reviewed = request(model, width, height);
                 reviewed.steps = profile(model).default_recipe().unwrap().steps.default;
                 mold_core::minimax_h3::validate_reviewed_canvas(&reviewed)
@@ -10412,13 +10418,10 @@ mod tests {
                     .unwrap_or_else(|error| panic!("{model} {width}x{height}: {error}"));
             }
 
-            // 1024x768 and 768x1344 sit inside the advertised ceilings, so
-            // the bucket policy itself is what refuses them — the case that
-            // would silently pass if the profile leaked back to `Dynamic`.
-            // 1536x672 is refused earlier, by the advertised axis ceiling.
-            for (width, height, bucket_refusal) in
-                [(1024, 768, true), (768, 1344, true), (1536, 672, false)]
-            {
+            // Off the 32 stride, over the compact area ceiling, under the
+            // compact axis floor, and outside the family aspect bounds. Each
+            // must be refused at BOTH doors.
+            for (width, height) in [(1000, 600), (1056, 992), (224, 896), (1600, 288)] {
                 let mut off = request(model, width, height);
                 off.steps = profile(model).default_recipe().unwrap().steps.default;
                 let private = mold_core::minimax_h3::validate_reviewed_canvas(&off).unwrap_err();
@@ -10427,15 +10430,42 @@ mod tests {
                     "{model} {width}x{height}: {}",
                     private.message
                 );
-                let ordinary =
+                assert!(
                     mold_core::validate_request_against_generation_profile(&profile(model), &off)
-                        .unwrap_err();
-                if bucket_refusal {
-                    assert!(
-                        ordinary.contains("not an available bucket"),
-                        "{model} {width}x{height}: {ordinary}"
-                    );
-                }
+                        .is_err(),
+                    "{model} {width}x{height} passed the ordinary door"
+                );
+            }
+
+            // The clip length is a grid now, and both doors follow it.
+            for frames in [
+                mold_core::minimax_h3::MIN_FRAMES,
+                mold_core::minimax_h3::DEFAULT_COMPACT_FRAMES,
+                mold_core::minimax_h3::MAX_FRAMES,
+            ] {
+                let mut clip = request(
+                    model,
+                    mold_core::minimax_h3::DEFAULT_WIDTH,
+                    mold_core::minimax_h3::DEFAULT_HEIGHT,
+                );
+                clip.steps = profile(model).default_recipe().unwrap().steps.default;
+                clip.frames = Some(frames);
+                mold_core::validate_request_against_generation_profile(&profile(model), &clip)
+                    .unwrap_or_else(|error| panic!("{model} {frames} frames: {error}"));
+            }
+            for frames in [90, 125, 362] {
+                let mut clip = request(
+                    model,
+                    mold_core::minimax_h3::DEFAULT_WIDTH,
+                    mold_core::minimax_h3::DEFAULT_HEIGHT,
+                );
+                clip.steps = profile(model).default_recipe().unwrap().steps.default;
+                clip.frames = Some(frames);
+                assert!(
+                    mold_core::validate_request_against_generation_profile(&profile(model), &clip)
+                        .is_err(),
+                    "{model} {frames} frames passed the ordinary door"
+                );
             }
         }
     }

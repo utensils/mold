@@ -1144,8 +1144,9 @@ pub(crate) fn normalize_generate_params_for_family(params: &mut GenerateParams, 
         return;
     }
 
-    // Model-aware: a compact tag renders exactly one clip length, so
-    // repairing a stale count must land on that, not on the family floor.
+    // Model-aware, and today every H3 layout takes the family grid: an
+    // off-grid stale count snaps to the nearest `17n+5` point rather than to
+    // one pinned clip length.
     params.frames =
         mold_core::minimax_h3::recommended_frames_for_model(family, &params.model, params.frames);
     params.fps = mold_core::minimax_h3::FIXED_FPS;
@@ -13133,9 +13134,11 @@ mod tests {
         assert_eq!(app.generate.params.format, OutputFormat::Mp4);
         assert_eq!(app.generate.params.guidance, 0.0);
         assert_eq!(app.generate.params.strength, 1.0);
+        // The params carried a stale 25, which snaps to the nearest grid
+        // point rather than to the default clip length.
         assert_eq!(
             app.generate.params.frames,
-            mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES
+            mold_core::minimax_h3::MIN_FRAMES
         );
         assert_eq!(app.generate.params.fps, mold_core::minimax_h3::FIXED_FPS);
         assert_eq!(app.generate.params.scheduler, None);
@@ -13153,21 +13156,25 @@ mod tests {
         assert_eq!(app.generate.params.format, OutputFormat::Mp4);
         assert_eq!(app.generate.params.enable_audio, Some(true));
 
-        app.generate.params.frames = mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES;
+        // The clip length is adjustable now: one step down from the default
+        // is the previous grid point.
+        app.generate.params.frames = mold_core::minimax_h3::DEFAULT_COMPACT_FRAMES;
         app.adjust_field(ParamField::Frames, -1);
         assert_eq!(
             app.generate.params.frames,
-            mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES
+            mold_core::minimax_h3::DEFAULT_COMPACT_FRAMES - mold_core::minimax_h3::FRAME_STEP
         );
         app.generate.params.fps = 12;
         app.adjust_field(ParamField::Fps, 1);
         assert_eq!(app.generate.params.fps, mold_core::minimax_h3::FIXED_FPS);
 
+        // An off-grid 25 snaps to the family floor, then steps one grid
+        // point up.
         app.generate.params.frames = 25;
         app.adjust_field(ParamField::Frames, 1);
         assert_eq!(
             app.generate.params.frames,
-            mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES + mold_core::minimax_h3::FRAME_STEP
+            mold_core::minimax_h3::MIN_FRAMES + mold_core::minimax_h3::FRAME_STEP
         );
     }
 
@@ -13190,10 +13197,8 @@ mod tests {
         session.apply_to_params(&mut params);
         normalize_generate_params_for_family(&mut params, "minimax_h3");
 
-        assert_eq!(
-            params.frames,
-            mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES
-        );
+        // 25 is off the grid; it repairs to the nearest valid clip length.
+        assert_eq!(params.frames, mold_core::minimax_h3::MIN_FRAMES);
         assert_eq!(params.fps, mold_core::minimax_h3::FIXED_FPS);
         assert_eq!(params.format, OutputFormat::Mp4);
         assert_eq!(params.enable_audio, Some(true));
@@ -13236,9 +13241,11 @@ mod tests {
             app.update_model("flux-dev:q4");
             app.update_model(mold_core::minimax_h3::FL2VA_COMFY);
 
+            // The remembered 25 is off the grid, so it repairs to the
+            // nearest valid clip length rather than to one pinned count.
             assert_eq!(
                 app.generate.params.frames,
-                mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES
+                mold_core::minimax_h3::MIN_FRAMES
             );
             assert_eq!(app.generate.params.fps, mold_core::minimax_h3::FIXED_FPS);
             assert_eq!(app.generate.params.format, OutputFormat::Mp4);
