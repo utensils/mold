@@ -4910,21 +4910,25 @@ mod tests {
 
     /// `build_model_catalog` launders a user's saved `model_pref` into
     /// `ModelConfig.default_steps`, so a value stored before the reviewed
-    /// envelope was pinned can outlive it. The compact tiers run exactly
-    /// their own step count, so an omitted `--steps` must resolve from the
-    /// tier identity and never from that stored preference — otherwise the
-    /// CLI builds a request its own profile then refuses. An explicit
-    /// `--steps` stays user input: the profile answers it with the clear
-    /// fixed-at message rather than a silent snap. The hidden official BF16
-    /// reference keeps the stored value, because its ladder is adjustable.
+    /// envelope was pinned can outlive it. An omitted `--steps` must resolve
+    /// from the tier identity and never from that stored preference —
+    /// otherwise the CLI silently changes its model default. An explicit
+    /// `--steps` stays user input: the base tiers admit it through their
+    /// adjustable range, while Turbo tiers answer it with the clear fixed-at
+    /// message rather than a silent snap. The hidden official BF16 reference
+    /// keeps the stored value, because its ladder is adjustable.
     #[test]
     fn h3_compact_steps_ignore_a_stale_model_pref_default() {
         let config = Config::default();
-        for (model, expected_steps) in [
-            (mold_core::minimax_h3::FL2VA_COMFY, 21),
-            (mold_core::minimax_h3::REF2VA_COMFY, 21),
-            (mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP, 9),
-            (mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P, 5),
+        for (model, expected_steps, adjustable_steps) in [
+            (mold_core::minimax_h3::FL2VA_COMFY, 21, true),
+            (mold_core::minimax_h3::REF2VA_COMFY, 21, true),
+            (mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP, 9, false),
+            (
+                mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
+                5,
+                false,
+            ),
         ] {
             let mut stale = config.resolved_model_config(model);
             stale.default_steps = Some(30);
@@ -4963,20 +4967,23 @@ mod tests {
                 )
                 .unwrap_or_else(|error| panic!("{model}: {error}"));
 
-                // ...and the stale value the old code submitted is exactly
-                // what that profile refuses, with the message a user can act
-                // on. This is what an explicit `--steps 30` still earns.
-                let mut stale_request = request.clone();
-                stale_request.steps = 30;
-                assert!(
+                // An explicit value is admitted for the base tier's derived
+                // range, but the distilled Turbo schedules remain fixed.
+                let mut explicit_request = request.clone();
+                explicit_request.steps = 30;
+                let validation =
                     mold_core::generation_profile::validate_request_against_generation_profile(
                         &profile,
-                        &stale_request,
-                    )
-                    .unwrap_err()
-                    .contains("steps is fixed at"),
-                    "{model}"
-                );
+                        &explicit_request,
+                    );
+                if adjustable_steps {
+                    validation.unwrap_or_else(|error| panic!("{model}: {error}"));
+                } else {
+                    assert!(
+                        validation.unwrap_err().contains("steps is fixed at"),
+                        "{model}"
+                    );
+                }
             }
         }
 
