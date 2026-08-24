@@ -360,10 +360,11 @@ FL2VA partition. Ordinary builds omit the field, while Ref2VA remains absent.
 The ordinary model list carries two acquisition rows with their upstream source
 and download accounting. The authenticated presentation boundary may replace
 the FL2VA acquisition row with one exact executable row, but only when all five
-referenced component groups are installed. Its generation profile fixes width
-1344, height 768, 124 frames at 24
-fps, 21 terminal-inclusive grid points, batch one, MP4 delivery, and a required
-first-frame source. Web, desktop, and iPhone remove the family-wide denial only
+referenced component groups are installed. Its generation profile fixes the
+canvas to a qualified bucket — 1344x768 or 768x768, see
+[Qualified canvases](#qualified-canvases) — with 1344x768 the default, and
+fixes 124 frames at 24 fps, 21 terminal-inclusive grid points, batch one, MP4
+delivery, and a required first-frame source. Web, desktop, and iPhone remove the family-wide denial only
 when that exact model name and request envelope agree with the complete
 additive component graph. A missing component, widened axis, absent first
 frame, supplied last frame, unavailable MP4 encoder, or legacy/partial
@@ -382,8 +383,9 @@ executing ELF device/inode/size/SHA-256, domain-separated launch argument and
 sorted-environment hashes, and live CUDA driver plus compiled toolkit
 versions. Raw arguments and environment values are not serialized. Version 5
 invalidates the earlier one-forward smoke envelope and requires the exact
-compact-quality route selected by the released workflow: 1344×768, 124 frames
-at 24 fps, batch one, exactly 21 terminal-inclusive grid points (20 transformer
+compact-quality route selected by the released workflow: a qualified canvas
+(1344×768 or 768×768 — the row ceilings below are the larger canvas's and
+cover the smaller one with slack), 124 frames at 24 fps, batch one, exactly 21 terminal-inclusive grid points (20 transformer
 evaluations), one first-frame FL2VA endpoint, and explicit ceilings for Qwen
 text/vision, condition visual, target video/audio, and total packed rows copied
 from the fresh structured observation. Admission checks that envelope after
@@ -587,6 +589,135 @@ admission-policy constants, not measured H3 production peaks.
 Exact artifact sizes, header facts, attention workspace, resident block count,
 prefetch, dequantization workspace, and every phase allocation must be frozen
 before a real run can be admitted.
+
+## Qualified canvases
+
+`mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES` is the single authority for
+which canvases the reviewed compact FL2VA runtime admits. Everything derives
+from it: the generation profile's buckets and their ceilings, the private
+bridge's advertised `recommended_dimensions`, source fitting, and
+`private_server.rs`'s own `validate_shape`. A campaign that qualifies another
+canvas appends one row there and nothing else moves.
+
+Model-valid is not Mold-qualified. The checkpoint accepts any 32-aligned canvas
+between 1:4 and 4:1 (ComfyUI's `nodes_minimax_h3.py:99-100` declares
+`min=32, max=MAX_RESOLUTION, step=32`, and 1344x768 is a *default* there), and
+`recommended_dimensions` faithfully ports the upstream resolver over that whole
+range. What is listed below is the strictly smaller set for which a real
+hardware campaign exists.
+
+Every row below ran on hal9000 — RTX 4090 24 GB, 62 GB host RAM, CUDA SM89 —
+at 124 frames / 24 fps.
+
+| Canvas   | Aspect | Pixels    | Campaign | Steps | Wall clock | Runtime   | VRAM high water    | Peak host RSS |
+| -------- | ------ | --------- | -------- | ----- | ---------- | --------- | ------------------ | ------------- |
+| 1344x768 | 7:4    | 1,032,192 | #827     | 21    | 1216 s     | 1,217.4 s | 11,565,793,280 B   | —             |
+| 1344x768 | 7:4    | 1,032,192 | #827     | 9     | 759.5 s    | 731-834 s | 13.5-14.6 GB       | —             |
+| 768x768  | 1:1    | 589,824   | #1033    | 21    | 937 s      | 845.2 s   | 7,908,360,192 B    | 16.36 GB      |
+| 768x768  | 1:1    | 589,824   | #1033    | 9     | 664 s      | 507.7 s   | 9,820,962,816 B    | 16.34 GB      |
+
+Wall clock is POST to MP4 bytes on a cold process. Runtime and the VRAM high
+water are the scheduler's own learned-estimate rows in `mold.db`
+(`scheduler_estimates`, `device_class` `cuda:sm89:24gb`, `outcome` success,
+fallback `block_offload`, one sample each), keyed by shape bucket:
+`768x768:s21:f124:fps24:a0:src1:edit0:lora0:b1` and its `:s9:` sibling. The
+gap between wall clock and runtime is admission, the artifact SHA-256 pass,
+and publication, none of which are runtime phases.
+
+Per phase, as the estimates rows report them (`ewma_*` milliseconds):
+
+| Row                    | prompt_encode | denoise   | vae    | visual_decode | audio_decode | mux   |
+| ---------------------- | ------------- | --------- | ------ | ------------- | ------------ | ----- |
+| 1344x768, 21 steps     | 722,198       | 770,584   | 1,349  | 67,158        | 743          | 13    |
+| 1344x768, 9 steps      | ~715,000      | ~335,000  | —      | ~40,000       | —            | —     |
+| 768x768, 21 steps      | 445,565       | 588,682   | 801    | 22,705        | 741          | 11    |
+| 768x768, 9 steps       | 457,552       | 239,643   | 849    | 23,190        | 747          | 13    |
+
+**These columns are learned independently and do not sum to the runtime
+figure** — 768x768 at 21 steps reports 445.6 s of prompt encode beside 588.7 s
+of denoise against an 845.2 s runtime. Read each as that phase's own learned
+estimate, not as a partition of the wall clock. Three things the rows do say
+plainly:
+
+- **Denoise scales with pixels, prompt encode does not.** Halving the canvas
+  takes denoise from 770.6 s to 588.7 s at the same step count, and visual
+  decode from 67.2 s to 22.7 s, while prompt encode is a property of the
+  conditioner sequence and moves with the canvas only through the boundary
+  endpoint's vision pads (722.2 s -> 445.6 s). At 9 steps denoise is 239.6 s
+  and prompt encode is 457.6 s — the conditioner, not the sampler, is then the
+  dominant cost, which is why the Turbo tier's wall clock (664 s) is far from
+  9/21 of the base tier's.
+- **The Turbo tier costs more VRAM, not less.** 9.15 GiB against the base
+  tier's 7.37 GiB on the same canvas: the tier is the same compact stack plus
+  a resident adapter, and the step count it moves is a time axis, not a memory
+  one. The same ordering holds at 1344x768 (13.5-14.6 GB against 10.77 GiB).
+- **The 1 Hz `nvidia-smi` sampler under-reads the true high water**, as a
+  sampler must: 7,568 MiB observed against 7,908,360,192 B (7.37 GiB) for the
+  base 768x768 row, 9,392 MiB against 9.15 GiB for the Turbo one. The
+  scheduler's figure is the one to plan against.
+
+### The 768x768 campaign (#1033, 2026-08-23)
+
+Host: hal9000 — RTX 4090 24 GB, 62 GB host RAM, CUDA SM89, mold 0.25.0 at
+`a647206` plus a two-hunk scratch patch that widened ONLY the width/height pins
+in `validate_shape` and `public_runtime_envelope_for_steps`
+(`crates/mold-inference/src/minimax_h3/private_server.rs`) to 768x768. That
+patch was never shipped; this PR replaces it with the canvas authority above.
+
+Request: `minimax-h3-fl2va:comfy-pruned-int8`, 768x768, 124 frames, 24 fps,
+21 steps, guidance 0.0, strength 1, seed 770021 — the same prompt ("a red fox
+in a snowy pine forest at dawn") and the same 1344x768 source PNG as the
+recorded 1344x768 verification, fitted internally by the engine.
+
+Measured, base tier `minimax-h3-fl2va:comfy-pruned-int8` at 21 steps:
+
+- Wall clock, POST to MP4 bytes, cold process: **937 s** (against 1216 s at
+  1344x768 and the same step count)
+- Runtime, from the estimates row: **845,188 ms**
+- VRAM high water, from the same row: **7,908,360,192 B** (7.37 GiB); the 1 Hz
+  `nvidia-smi` sampler saw 7,568 MiB
+- Peak host RSS, `VmHWM` of a fresh serve process: **16.36 GB**
+- Output: 768x768, 124 frames at 24/1, h264 + AAC stereo 32 kHz (162 audio
+  frames), 2.1 MB MP4, SHA-256 prefix `2b95c627a1d2321b`
+- Visual: frame 0 pinned to the source; same subject and scene at frames 40,
+  80, and 123; the subject turns and steps forward; no cut
+
+And the reviewed Turbo tier `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`
+at its own 9 terminal-inclusive grid points, same prompt, source, and seed on
+a fresh process:
+
+- Wall clock: **664 s**; runtime **507,700 ms**
+- VRAM high water: **9,820,962,816 B** (9.15 GiB); sampler peak 9,392 MiB —
+  *higher* than the base tier on the same canvas, because a Turbo tag is the
+  same compact stack plus a resident adapter
+- Peak host RSS: **16.34 GB**
+- Output: 768x768, 124 frames at 24/1, h264 + AAC stereo 32 kHz (162 audio
+  frames), 6.4 MB MP4, SHA-256 prefix `2bc04592ebdaa09e`
+- Visual: frame 0 pinned to the source; frames 80 and 123 keep the same fox and
+  forest with a forward stride; no cut
+
+Both tiers therefore render this canvas correctly and well inside a 24 GB
+card, and the Turbo tier's advantage is time alone.
+
+### Slack, deliberately
+
+Two things are NOT re-derived per canvas, and both are conservative in the
+same direction:
+
+1. **Row ceilings.** `REVIEWED_MAX_TARGET_VIDEO_ROWS` and the packed total
+   stay the 1344x768 figures. Every row field on the envelope is a maximum
+   (`row_cap_mismatches` compares with `<=`), so 768x768 — which packs 21,312
+   target video rows against the ceiling's 37,296 — is admitted with slack.
+2. **Memory bounds.** `public_runtime_bounds` keeps #827's 1344x768
+   measurements, so `precheck_private_h3_admission_capacity`'s device and host
+   floors are the larger canvas's. A 768x768 render is therefore charged for
+   more memory than it uses; the campaign above measured 7,568 MiB against a
+   1344x768 grant sized for ~14.4 GB.
+
+The effect is that a host which can run 1344x768 can run 768x768, and a host
+that is refused for 1344x768 is also refused for 768x768 even though it might
+have fit. That is the safe direction, and tightening it would require its own
+per-canvas measurement campaign for every bound.
 
 ## Current evidence status
 

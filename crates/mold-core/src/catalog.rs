@@ -152,8 +152,24 @@ pub fn declared_audio_capability(family: &str, model: &str) -> Option<bool> {
 /// `None` whenever the recipe leaves any of them adjustable — a preset on a
 /// dynamic canvas is a recommendation, and overriding a user's remembered
 /// size with it would be a regression, not a fix. Today only H3's reviewed
-/// compact envelope answers: a single-preset bucket domain that refuses
-/// off-bucket sizes, with fixed steps and a fixed frame count.
+/// compact envelope answers: a bucket domain that refuses off-bucket sizes,
+/// with fixed steps and a fixed frame count.
+///
+/// The canvas is the RECIPE's own default, never the remembered one, even
+/// when the remembered one names a valid bucket. `recipe()` derives
+/// `recipe.defaults` from the identity and the profile HASH covers it, so a
+/// row whose canvas followed a user preference would disagree with the
+/// recipe every first-party client reads (`applyRecipeDefaults`), and making
+/// the recipe follow instead would mint a per-user profile hash — which
+/// `authenticated_h3_private_model_row` fences against, so the executable row
+/// would vanish.
+///
+/// This used to read "the only preset", which was the same rule while the
+/// reviewed envelope had exactly one bucket. It stopped being the same rule
+/// the moment a second canvas was qualified: left alone it would have
+/// returned `None` for a two-bucket recipe and silently stopped pinning the
+/// frame and step counts too — a row advertising "default 345 frames,
+/// maximum 124", which is the exact contradiction this function removes.
 fn pinned_recipe_defaults(
     profile: &crate::GenerationProfileSet,
 ) -> Option<(u32, u32, u32, Option<u32>)> {
@@ -167,12 +183,17 @@ fn pinned_recipe_defaults(
     {
         return None;
     }
+    // At least one bucket, and the recipe's own default must be one of them:
+    // a fixed-authority recipe whose default is off its own bucket list is
+    // not evidence of anything and must not overwrite a user's size.
     let mut presets = resolution
         .aspect_groups
         .iter()
-        .flat_map(|group| group.presets.iter());
-    let only = presets.next()?;
-    if presets.next().is_some() {
+        .flat_map(|group| group.presets.iter())
+        .peekable();
+    presets.peek()?;
+    let canvas = (recipe.defaults.width, recipe.defaults.height);
+    if !presets.any(|preset| (preset.width, preset.height) == canvas) {
         return None;
     }
     let temporal = recipe.temporal.as_ref();
@@ -183,7 +204,7 @@ fn pinned_recipe_defaults(
         Some(_) => return None,
         None => None,
     };
-    Some((only.width, only.height, recipe.defaults.steps, frames))
+    Some((canvas.0, canvas.1, recipe.defaults.steps, frames))
 }
 
 pub fn build_model_catalog(
@@ -626,13 +647,47 @@ mod tests {
             .expect("the compact FL2VA row is always catalogued");
 
         assert_eq!(row.defaults.default_frames, Some(124));
+        assert_eq!(
+            row.defaults.default_steps,
+            crate::minimax_h3::COMFY_DEFAULT_STEPS
+        );
+        // 768x768 became a reviewed bucket, but the row's default is still
+        // the RECIPE's — the profile hash covers `recipe.defaults`, so a row
+        // whose canvas followed a user preference would disagree with the
+        // recipe every client actually reads.
         assert_eq!(row.defaults.default_width, crate::minimax_h3::DEFAULT_WIDTH);
         assert_eq!(
             row.defaults.default_height,
             crate::minimax_h3::DEFAULT_HEIGHT
         );
+
+        let mut off_envelope = crate::Config::default();
+        off_envelope.models.insert(
+            crate::minimax_h3::FL2VA_COMFY.to_string(),
+            crate::config::ModelConfig {
+                default_frames: Some(345),
+                default_width: Some(1024),
+                default_height: Some(1024),
+                default_steps: Some(30),
+                ..Default::default()
+            },
+        );
+        let healed = super::build_model_catalog(&off_envelope, None, false);
+        let healed_row = healed
+            .iter()
+            .find(|row| row.info.name == crate::minimax_h3::FL2VA_COMFY)
+            .expect("the compact FL2VA row is always catalogued");
+        assert_eq!(healed_row.defaults.default_frames, Some(124));
         assert_eq!(
-            row.defaults.default_steps,
+            healed_row.defaults.default_width,
+            crate::minimax_h3::DEFAULT_WIDTH
+        );
+        assert_eq!(
+            healed_row.defaults.default_height,
+            crate::minimax_h3::DEFAULT_HEIGHT
+        );
+        assert_eq!(
+            healed_row.defaults.default_steps,
             crate::minimax_h3::COMFY_DEFAULT_STEPS
         );
 

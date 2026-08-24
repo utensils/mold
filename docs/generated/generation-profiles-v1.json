@@ -15579,7 +15579,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "0416694a3bd93aac1a559ddf54914c3441d8cea1331049104fab6b89f9bb4085",
+        "profile_hash": "c074f5427ad68cd5d78a86565fb3eb3c0b43e76b59f58ef3703363605ca81679",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -15612,6 +15612,18 @@
                     {
                       "id": "1344x768",
                       "width": 1344,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "768x768",
+                      "width": 768,
                       "height": 768,
                       "tier": "recommended"
                     }
@@ -15740,7 +15752,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "5ecdbc17d708eed39f90a227a2e486714b299b131e3499b4e269cabbb02197f1",
+        "profile_hash": "89cfc88df504792573bf099d030895217186ab55e7df244f0f544e38795962b7",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -15773,6 +15785,18 @@
                     {
                       "id": "1344x768",
                       "width": 1344,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "768x768",
+                      "width": 768,
                       "height": 768,
                       "tier": "recommended"
                     }
@@ -15901,7 +15925,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-fl2va",
-        "profile_hash": "428df21c4169638e6012f6d6482c6dc8def20f1fbe98776b55c835c8dbd75748",
+        "profile_hash": "336038fdc36fdcf6119f00e4a0148a8ce1690f09129bd60ba9f4770b155a3322",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -15934,6 +15958,18 @@
                     {
                       "id": "1344x768",
                       "width": 1344,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "768x768",
+                      "width": 768,
                       "height": 768,
                       "tier": "recommended"
                     }
@@ -16286,7 +16322,7 @@
       "profile": {
         "schema_version": 1,
         "profile_id": "minimax-h3.minimax-h3-ref2va",
-        "profile_hash": "66e6cd39a81e0b416c58951089a187a03d3bfb1889bf2aabf5977c1ea3eb09c2",
+        "profile_hash": "0860f3c2a93a794167e5398acd2c3ad231ba797c55d5008eafc7e0f524c53db3",
         "default_recipe_id": "default",
         "recipes": [
           {
@@ -16319,6 +16355,18 @@
                     {
                       "id": "1344x768",
                       "width": 1344,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "768x768",
+                      "width": 768,
                       "height": 768,
                       "tier": "recommended"
                     }

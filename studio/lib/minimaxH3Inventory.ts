@@ -218,6 +218,18 @@ export const MINIMAX_H3_REVIEWED_FL2VA_STEPS: Readonly<Record<string, number>> =
     "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p": 5,
   };
 
+/** Client-side mirror of `mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES`
+ * — every canvas a hardware campaign qualified, DEFAULT FIRST.
+ *
+ * The server advertises exactly one reference request per model row, and it
+ * is always the default canvas; the rest of the set reaches clients through
+ * the row's generation-profile buckets. So this is a pin on the ADVERTISED
+ * request, not a statement that the runtime renders only one size. */
+const MINIMAX_H3_REVIEWED_CANVASES: readonly (readonly [number, number])[] = [
+  [1344, 768],
+  [768, 768],
+];
+
 function parseTurboVariant(
   value: unknown,
 ): MiniMaxH3TurboVariantCapability | null {
@@ -572,10 +584,18 @@ export function reviewedMiniMaxH3ModelAccess(
       : (task.turbo.find(
           (variant) => variant.model === model && variant.installed,
         )?.request ?? null);
+  // The advertised reference request is always the DEFAULT canvas — the
+  // reviewed set's first entry — never "whichever canvas this host felt
+  // like". Every other qualified canvas reaches the form through the row's
+  // generation-profile buckets, which the sha256 below already fences.
+  const [[defaultWidth, defaultHeight]] = MINIMAX_H3_REVIEWED_CANVASES as [
+    readonly [number, number],
+    ...(readonly [number, number])[],
+  ];
   if (
     !request ||
-    request.width !== 1344 ||
-    request.height !== 768 ||
+    request.width !== defaultWidth ||
+    request.height !== defaultHeight ||
     request.frames !== 124 ||
     request.fps !== 24 ||
     request.steps !== expectedSteps ||

@@ -4892,6 +4892,7 @@ mod tests {
                 "{model}"
             );
         }
+
         // The hidden official BF16 reference keeps its 50-step manifest
         // default through the same path.
         let official = config.resolved_model_config(mold_core::minimax_h3::FL2VA_OFFICIAL);
@@ -4994,9 +4995,12 @@ mod tests {
     }
 
     /// A source image without explicit dims must not bend a compact H3
-    /// request off the reviewed envelope: admission validates exact
-    /// 1344x768, and the engine fits the source internally. The hidden
-    /// official BF16 reference keeps its flexible aspect-derived canvas.
+    /// request off the reviewed envelope: admission validates membership in
+    /// the reviewed canvas set, and the engine fits the source into whichever
+    /// one the request names. Within the set the source's aspect chooses, so
+    /// a square source lands on the square canvas rather than being
+    /// letterboxed into the 7:4 default. The hidden official BF16 reference
+    /// keeps its flexible aspect-derived canvas.
     #[test]
     fn h3_source_image_keeps_the_compact_envelope() {
         let config = Config::default();
@@ -5025,13 +5029,38 @@ mod tests {
                     None
                 )
                 .unwrap(),
-                (
-                    mold_core::minimax_h3::DEFAULT_WIDTH,
-                    mold_core::minimax_h3::DEFAULT_HEIGHT
-                ),
+                // A square source now lands on the square reviewed canvas
+                // instead of being letterboxed into the 7:4 default.
+                (768, 768),
                 "{model}"
             );
         }
+
+        // A 16:9 source keeps the historical default canvas.
+        let mut landscape = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(1920, 1080))
+            .write_to(
+                &mut std::io::Cursor::new(&mut landscape),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        assert_eq!(
+            effective_dimensions(
+                &config,
+                &model_cfg,
+                mold_core::minimax_h3::FL2VA_COMFY,
+                Some("minimax-h3"),
+                None,
+                None,
+                Some(&landscape),
+                None
+            )
+            .unwrap(),
+            (
+                mold_core::minimax_h3::DEFAULT_WIDTH,
+                mold_core::minimax_h3::DEFAULT_HEIGHT
+            )
+        );
 
         assert_eq!(
             effective_dimensions(

@@ -845,14 +845,13 @@ const H3: &[(u32, u32)] = &[
     (768, 1024),
     (768, 1344),
 ];
-/// The reviewed compact stack renders exactly one canvas: `private_server.rs`
-/// admits `DEFAULT_WIDTH`x`DEFAULT_HEIGHT` and nothing else, and the engine
-/// fits any source into it. Advertising the official ladder here is what let
-/// users pick a size the engine refuses after the load was paid for.
-const H3_COMPACT: &[(u32, u32)] = &[(
-    crate::minimax_h3::DEFAULT_WIDTH,
-    crate::minimax_h3::DEFAULT_HEIGHT,
-)];
+/// The reviewed compact stack renders exactly the canvases its hardware
+/// campaigns qualified: `private_server.rs` admits membership in this same
+/// slice and nothing else, and the engine fits any source into whichever one
+/// the request names. Advertising the official ladder here is what let users
+/// pick a size the engine refuses after the load was paid for; restating the
+/// list here is what would let this drift from the runtime that enforces it.
+const H3_COMPACT: &[(u32, u32)] = crate::minimax_h3::REVIEWED_COMPACT_CANVASES;
 
 const Z_IMAGE_QUALIFICATION: ResolutionQualificationRecord =
     ResolutionQualificationRecord {
@@ -1076,21 +1075,20 @@ fn recipe(
             alignment,
             min_width: alignment.max(64),
             min_height: alignment.max(64),
-            // The compact stack admits exactly one canvas, so its ceilings
-            // are that canvas. The family constants are the *official* BF16
-            // ladder's headroom and sit above every compact preset, which
-            // lets a client that reads the ceiling rather than the buckets
-            // offer a size admission refuses.
+            // The compact stack admits only its reviewed canvases, so its
+            // ceilings are the largest of them. The family constants are the
+            // *official* BF16 ladder's headroom and sit above every compact
+            // preset, which lets a client that reads the ceiling rather than
+            // the buckets offer a size admission refuses.
             max_pixels: if h3_compact {
-                u64::from(crate::minimax_h3::DEFAULT_WIDTH)
-                    * u64::from(crate::minimax_h3::DEFAULT_HEIGHT)
+                crate::minimax_h3::reviewed_compact_max_pixels()
             } else {
                 validation::max_pixels_for_family_composed(Some(family), composition)
             },
             source_max_pixels: (family == "qwen-image-edit")
                 .then_some(validation::QWEN_IMAGE_EDIT_SOURCE_MAX_PIXELS),
             max_axis_pixels: if h3_compact {
-                Some(crate::minimax_h3::DEFAULT_WIDTH.max(crate::minimax_h3::DEFAULT_HEIGHT))
+                Some(crate::minimax_h3::reviewed_compact_max_axis_pixels())
             } else {
                 validation::max_axis_pixels_for_family_composed(Some(family), composition)
             },
@@ -2225,10 +2223,17 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(
                 presets,
-                vec![(
-                    crate::minimax_h3::DEFAULT_WIDTH,
-                    crate::minimax_h3::DEFAULT_HEIGHT
-                )],
+                crate::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec(),
+                "{model}: the buckets are exactly the canvases a campaign qualified"
+            );
+            assert_eq!(
+                recipe.resolution.max_pixels,
+                crate::minimax_h3::reviewed_compact_max_pixels(),
+                "{model}"
+            );
+            assert_eq!(
+                recipe.resolution.max_axis_pixels,
+                Some(crate::minimax_h3::reviewed_compact_max_axis_pixels()),
                 "{model}"
             );
 
@@ -2273,7 +2278,18 @@ mod tests {
             request.output_format = Some(OutputFormat::Mp4);
             validate_request_against_generation_profile(&profile, &request).unwrap();
 
-            let off_bucket = request_for(&profile, 768, 768);
+            // Every reviewed canvas is submittable, not only the default.
+            for &(width, height) in crate::minimax_h3::REVIEWED_COMPACT_CANVASES {
+                let mut reviewed = request_for(&profile, width, height);
+                reviewed.output_format = Some(OutputFormat::Mp4);
+                validate_request_against_generation_profile(&profile, &reviewed)
+                    .unwrap_or_else(|error| panic!("{model} {width}x{height}: {error}"));
+            }
+
+            // 1024x768 is a canonical resolver output the model itself would
+            // accept, and no campaign has run it, so the bucket policy must
+            // still refuse it.
+            let off_bucket = request_for(&profile, 1024, 768);
             assert!(
                 validate_request_against_generation_profile(&profile, &off_bucket)
                     .unwrap_err()

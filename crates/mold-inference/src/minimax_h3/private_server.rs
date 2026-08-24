@@ -346,8 +346,13 @@ impl H3PrivateRuntimeEnvelopeRecord {
                     && self.max_condition_visual_rows > 0
             }
         };
-        if self.width != contract::DEFAULT_WIDTH
-            || self.height != contract::DEFAULT_HEIGHT
+        // The canvas is a SET membership, not an equality: `mold_core`'s
+        // `REVIEWED_COMPACT_CANVASES` is the single authority for which
+        // canvases a hardware campaign qualified, and the generation
+        // profile's buckets, the private bridge's advertised
+        // recommendations, and this gate all read that same slice. Every
+        // other axis stays pinned by equality.
+        if !contract::is_reviewed_compact_canvas(self.width, self.height)
             || self.frames != contract::REVIEWED_COMPACT_FRAMES
             || self.fps != contract::FIXED_FPS
             || self.batch_size != 1
@@ -661,6 +666,14 @@ pub(crate) fn private_h3_admission_host_floor_bytes(
 /// This runs before the artifact SHA-256 pass. It is one-directional by
 /// construction: a refusal here implies the exact per-attempt check would also
 /// refuse, so hoisting it can only turn a slow refusal into a fast one.
+///
+/// The floors are CANVAS-INDEPENDENT and stay #827's 1344x768 measurements
+/// for every reviewed canvas. A 768x768 render is therefore charged for more
+/// memory than it uses (7,568 MiB observed against a grant sized for
+/// ~14.4 GB), so a host that is refused the default canvas is refused the
+/// square one too even though it might have fit. That is the safe direction
+/// and it stays deliberate: tightening it would need its own per-canvas
+/// measurement campaign for every bound in `public_runtime_bounds`.
 #[cfg(feature = "mp4")]
 fn precheck_private_h3_admission_capacity(
     bounds: &H3PrivateRuntimeBoundRecord,
@@ -744,6 +757,31 @@ fn precheck_private_h3_prepared_rows(
         bail!(
             "private H3 request exceeds the reviewed compact-quality envelope: {}",
             mismatches.join("; ")
+        )
+    }
+    Ok(())
+}
+
+/// Refuse a canvas the SELECTED private qualification record does not carry.
+///
+/// Only the compiled public policy reads `mold_core`'s reviewed canvas set.
+/// A private build authenticates against a record file (FL2VA) or the
+/// compiled capture-scope profile (Ref2VA), each of which validates its
+/// canvas by exact equality — so widening the public set must not widen what
+/// those admit. This is a fast, one-directional restatement of the exact
+/// check `validate_prepared_with_adapter` makes later; hoisting it can only
+/// turn a refusal that costs ~37 GB of SHA-256 into one that costs nothing.
+#[cfg(all(feature = "mp4", not(feature = "h3")))]
+fn precheck_private_h3_record_canvas(
+    envelope: &H3PrivateRuntimeEnvelopeRecord,
+    width: u32,
+    height: u32,
+) -> Result<()> {
+    if width != envelope.width || height != envelope.height {
+        bail!(
+            "private H3 runtime qualification renders exactly {}x{}; received {width}x{height}",
+            envelope.width,
+            envelope.height
         )
     }
     Ok(())
@@ -1754,6 +1792,17 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         &admission_request.request.rows,
         admission_request.prompt_tokens,
     )?;
+    // A private build's authority is a RECORD, not the compiled policy, and
+    // that record pins one canvas by equality — the reviewed FL2VA record its
+    // campaign minted, or `capture_runtime_envelope`'s Ref2VA canvas. So the
+    // widened public bucket set does not apply here, and without this the
+    // request would be admitted at the door and then refused by
+    // `validate_prepared_with_adapter` AFTER the ~37 GB artifact hashing
+    // pass. Refusing on the record's own canvas is the same lower-bound rule
+    // the row precheck above follows: a refusal here always implies a refusal
+    // there.
+    #[cfg(not(feature = "h3"))]
+    precheck_private_h3_record_canvas(&precheck_envelope, request.width, request.height)?;
     let artifact_report = qualify_private_artifacts_with_control(
         paths.models_root,
         partition_model,
@@ -1829,6 +1878,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     #[cfg(feature = "h3")]
     let runtime_qualification = public_runtime_qualification(
         &artifact_report,
+        (request.width, request.height),
         device_id,
         device_ordinal,
         compute_capability,
@@ -2933,6 +2983,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     #[cfg(feature = "h3")]
     let runtime_qualification = public_runtime_qualification(
         &artifact_report,
+        (request.width, request.height),
         &owner_fence.device_id,
         owner_fence.device_ordinal,
         owner_fence.compute_capability,
@@ -4989,10 +5040,20 @@ const REVIEWED_MAX_QWEN_VISION_ROWS: u64 = 4 * REVIEWED_FL2VA_VISION_PAD_ROWS;
 /// The boundary endpoint's conditioning latent rows.
 const REVIEWED_MAX_CONDITION_VISUAL_ROWS: u64 = REVIEWED_FL2VA_VISION_PAD_ROWS;
 
-/// 1344x768 x 124 frames of generated video latents.
+/// 1344x768 x 124 frames of generated video latents — the LARGEST reviewed
+/// canvas, which is what makes this a ceiling rather than a transcription.
+///
+/// Every row field on the envelope is a maximum (`row_cap_mismatches` compares
+/// with `<=`), so a smaller reviewed canvas is admitted with slack rather than
+/// needing its own number: 768x768 packs 21,312 target video rows against this
+/// 37,296. Deriving this per canvas would buy a tighter refusal for a request
+/// nothing can currently produce, and would have to move in lockstep with the
+/// memory bounds below — which are #827's 1344x768 measurements and are
+/// deliberately shared, so the smaller canvas is priced conservatively too.
 const REVIEWED_MAX_TARGET_VIDEO_ROWS: u64 = 37_296;
 
-/// The same duration of generated audio latents.
+/// The same duration of generated audio latents. Canvas-independent: audio
+/// rows follow the clip's duration, which every reviewed canvas shares.
 const REVIEWED_MAX_TARGET_AUDIO_ROWS: u64 = 414;
 
 /// The packed sequence is exactly the four axes the FL2VA prepared request
@@ -5004,22 +5065,41 @@ const REVIEWED_MAX_TOTAL_PACKED_ROWS: u64 = REVIEWED_MAX_QWEN_OUTPUT_TEXT_ROWS
     + REVIEWED_MAX_TARGET_VIDEO_ROWS
     + REVIEWED_MAX_TARGET_AUDIO_ROWS;
 
+/// The reviewed public envelope on the DEFAULT canvas at the default step
+/// count.
+///
+/// Only the row precheck asks for this: it reads row ceilings alone, and
+/// those are canvas-independent (see [`REVIEWED_MAX_TARGET_VIDEO_ROWS`]).
+/// Every authority that gates a request mints the envelope for that
+/// request's own canvas instead.
 #[cfg(feature = "h3")]
 fn public_runtime_envelope() -> H3PrivateRuntimeEnvelopeRecord {
-    public_runtime_envelope_for_steps(contract::COMFY_DEFAULT_STEPS)
+    public_runtime_envelope_for_canvas(
+        (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
+        contract::COMFY_DEFAULT_STEPS,
+    )
 }
 
-/// The reviewed public envelope at a given step count.
+/// The reviewed public envelope on one reviewed canvas at a given step count.
 ///
-/// A Turbo tier renders the same canvas — 1344x768, 124 frames, 24 fps, one
+/// A Turbo tier renders the same envelope — 124 frames, 24 fps, one
 /// first-frame endpoint, identical row ceilings — and moves only the step
 /// count, which is the whole point of the distillation. Callers may only pass
 /// a count an authenticated adapter declares.
+///
+/// The canvas comes from the REQUEST, and the fail-closed property is
+/// unmoved: `validate_shape` runs before every other check in
+/// `validate_prepared_with_adapter` and refuses an envelope whose canvas is
+/// not in `mold_core`'s reviewed set, so a request cannot mint an authority
+/// for a canvas nobody qualified.
 #[cfg(feature = "h3")]
-fn public_runtime_envelope_for_steps(max_steps: u32) -> H3PrivateRuntimeEnvelopeRecord {
+fn public_runtime_envelope_for_canvas(
+    canvas: (u32, u32),
+    max_steps: u32,
+) -> H3PrivateRuntimeEnvelopeRecord {
     H3PrivateRuntimeEnvelopeRecord {
-        width: contract::DEFAULT_WIDTH,
-        height: contract::DEFAULT_HEIGHT,
+        width: canvas.0,
+        height: canvas.1,
         frames: contract::REVIEWED_COMPACT_FRAMES,
         fps: contract::FIXED_FPS,
         batch_size: 1,
@@ -5412,6 +5492,10 @@ pub fn h3_capture_bound_report(
 #[allow(clippy::too_many_arguments)]
 fn public_runtime_qualification(
     artifact: &H3PrivateArtifactQualificationReport,
+    // The request's own canvas. `validate_public_runtime_profile_with_turbo`
+    // refuses it below unless `mold_core` records it as reviewed, so this
+    // parameter can only ever narrow the minted authority, never widen it.
+    canvas: (u32, u32),
     device_id: &str,
     device_ordinal: usize,
     compute_capability: Option<(u16, u16)>,
@@ -5478,7 +5562,8 @@ fn public_runtime_qualification(
             cuda_driver_version: 0,
             cuda_toolkit_version: 0,
         },
-        envelope: public_runtime_envelope_for_steps(
+        envelope: public_runtime_envelope_for_canvas(
+            canvas,
             turbo_steps.unwrap_or(contract::COMFY_DEFAULT_STEPS),
         ),
         bounds: public_runtime_bounds(),
@@ -6371,6 +6456,120 @@ mod tests {
         }
     }
 
+    /// The reviewed canvas is a SET, and `mold_core` owns it. Both qualified
+    /// canvases validate; a canonical resolver output no campaign has run
+    /// does not.
+    #[test]
+    fn the_runtime_envelope_admits_every_reviewed_canvas_and_nothing_else() {
+        for &(width, height) in contract::REVIEWED_COMPACT_CANVASES {
+            let mut envelope = reviewed_envelope(contract::COMFY_DEFAULT_STEPS);
+            envelope.width = width;
+            envelope.height = height;
+            envelope
+                .validate()
+                .unwrap_or_else(|error| panic!("{width}x{height}: {error}"));
+        }
+
+        // 1024x768 is a canonical resolver output, 768x1344 is the transpose
+        // of a reviewed canvas, and 1344x769 is off the alignment grid.
+        // None has a campaign, so none is admitted.
+        for (width, height) in [(1024, 768), (768, 1344), (1344, 769), (1920, 1080)] {
+            let mut envelope = reviewed_envelope(contract::COMFY_DEFAULT_STEPS);
+            envelope.width = width;
+            envelope.height = height;
+            assert!(
+                envelope.validate().is_err(),
+                "unqualified canvas {width}x{height} was admitted"
+            );
+        }
+    }
+
+    /// The compiled public envelope is minted for the request's own canvas,
+    /// and every other axis is unmoved by that canvas.
+    #[cfg(feature = "h3")]
+    #[test]
+    fn the_public_envelope_is_minted_for_the_requested_reviewed_canvas() {
+        let default = public_runtime_envelope();
+        assert_eq!(
+            (default.width, default.height),
+            (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT)
+        );
+        for &(width, height) in contract::REVIEWED_COMPACT_CANVASES {
+            let envelope =
+                public_runtime_envelope_for_canvas((width, height), contract::COMFY_DEFAULT_STEPS);
+            assert_eq!((envelope.width, envelope.height), (width, height));
+            envelope.validate().unwrap();
+            // Row ceilings are the largest reviewed canvas's, shared by every
+            // smaller one — a slack admission, never a per-canvas number.
+            assert_eq!(
+                envelope.max_target_video_rows,
+                REVIEWED_MAX_TARGET_VIDEO_ROWS
+            );
+            assert_eq!(
+                envelope.max_total_packed_rows,
+                REVIEWED_MAX_TOTAL_PACKED_ROWS
+            );
+            assert_eq!(envelope.frames, contract::REVIEWED_COMPACT_FRAMES);
+            assert_eq!(envelope.fps, contract::FIXED_FPS);
+            assert_eq!(envelope.batch_size, 1);
+            assert_eq!(envelope.endpoint_count, 1);
+        }
+        // A canvas nobody qualified cannot mint an authority for itself.
+        assert!(
+            public_runtime_envelope_for_canvas((1024, 768), contract::COMFY_DEFAULT_STEPS)
+                .validate()
+                .is_err()
+        );
+    }
+
+    /// A private build's authority is a record pinning ONE canvas, so the
+    /// widened public bucket set must not reach it — and the refusal has to
+    /// land before the ~37 GB artifact pass, not after it.
+    ///
+    /// The bridge deliberately still advertises the public bucket set on this
+    /// build: it is one code path with one profile hash, `h3-private-uat`
+    /// never ships (`scripts/verify-h3-release-exclusion.sh`), and the cost
+    /// of the mismatch to a developer is now this immediate refusal rather
+    /// than a wasted artifact pass.
+    #[cfg(all(feature = "mp4", not(feature = "h3")))]
+    #[test]
+    fn a_private_record_admits_only_its_own_canvas_before_the_artifact_pass() {
+        let envelope = reviewed_envelope(contract::COMFY_DEFAULT_STEPS);
+        precheck_private_h3_record_canvas(&envelope, envelope.width, envelope.height).unwrap();
+
+        // Reviewed by the PUBLIC policy, and still refused here — the record
+        // is the authority on a private build.
+        for &(width, height) in contract::REVIEWED_COMPACT_CANVASES {
+            if (width, height) == (envelope.width, envelope.height) {
+                continue;
+            }
+            let error = precheck_private_h3_record_canvas(&envelope, width, height)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!("{width}x{height}"))
+                    && error.contains(&format!("{}x{}", envelope.width, envelope.height)),
+                "{error}"
+            );
+        }
+        assert!(precheck_private_h3_record_canvas(&envelope, 1024, 768).is_err());
+    }
+
+    /// Ref2VA's capture scope is a separate campaign and widening FL2VA's
+    /// canvas set must not touch it.
+    #[cfg(feature = "h3-private-uat")]
+    #[test]
+    fn the_capture_scope_envelope_keeps_the_single_default_canvas() {
+        let capture = capture_runtime_envelope();
+        assert_eq!(
+            (capture.width, capture.height),
+            (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT)
+        );
+        assert_eq!(capture.max_qwen_output_text_rows, 1_058);
+        assert_eq!(capture.endpoint_count, 0);
+        assert_eq!(capture.endpoint_anchor, "none");
+    }
+
     /// The reviewed rows a maximum-length FL2VA request packs.
     #[cfg(feature = "mp4")]
     fn reviewed_rows(qwen_output_text_rows: u64) -> H3FactoryPreparedRowsInput {
@@ -6731,6 +6930,7 @@ mod tests {
         let mint = |turbo| {
             public_runtime_qualification(
                 &artifact,
+                (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
                 "gpu-0",
                 0,
                 Some((8, 9)),
@@ -7834,7 +8034,10 @@ mod tests {
                 references: &[],
                 device_id: DEVICE_0,
                 device_ordinal: 0,
-                compute_capability: (8, 9),
+                // `None` is Metal since #1323 made this an `Option`; the lib
+                // was updated there and this `h3-private-uat` test call was
+                // not, so the suite has not compiled since.
+                compute_capability: Some((8, 9)),
                 available_device_bytes: 1 << 60,
                 available_host_headroom_bytes: 1 << 60,
             },
@@ -8968,6 +9171,7 @@ mod tests {
         let artifact = artifact_report();
         let authority = public_runtime_qualification(
             &artifact,
+            (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
             DEVICE_0,
             0,
             Some((8, 9)),
@@ -9053,6 +9257,7 @@ mod tests {
         ] {
             assert!(public_runtime_qualification(
                 &crossed,
+                (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
                 DEVICE_0,
                 0,
                 Some(cc),
@@ -9065,6 +9270,7 @@ mod tests {
             crossed.task = "ref2va";
             assert!(public_runtime_qualification(
                 &crossed,
+                (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
                 DEVICE_0,
                 0,
                 Some((8, 9)),
@@ -9079,6 +9285,7 @@ mod tests {
         crossed_model.canonical_model = contract::REF2VA_COMFY.into();
         assert!(public_runtime_qualification(
             &crossed_model,
+            (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
             DEVICE_0,
             0,
             Some((8, 9)),

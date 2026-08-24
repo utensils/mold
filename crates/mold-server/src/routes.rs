@@ -10347,6 +10347,99 @@ mod tests {
         assert!(request.original_prompt.is_none());
     }
 
+    /// Both doors a compact H3 request can reach agree on the reviewed
+    /// canvases, and neither needs a GPU to answer.
+    ///
+    /// Authenticated private H3 ingress deliberately skips
+    /// `validate_request_against_generation_profile`, so its own door —
+    /// `validate_h3_private_uat_request` — has to carry the canvas rule, and
+    /// every ordinary client reaches the same answer through the profile's
+    /// `Buckets` + `OffBucketPolicy::Reject`. That door's canvas rule IS the
+    /// `validate_reviewed_canvas` called here: the `h3` feature gates the
+    /// wrapper, not the rule, and `mold-ai-core`'s
+    /// `private_h3_ingress_admits_every_reviewed_canvas_and_refuses_the_rest`
+    /// pins the delegation verbatim. 1024x768 is the interesting
+    /// negative: it is a canonical upstream resolver output the checkpoint
+    /// itself would render, and no campaign has run it.
+    #[test]
+    fn both_admission_doors_admit_every_reviewed_h3_canvas_and_refuse_the_rest() {
+        let request = |model: &str, width: u32, height: u32| {
+            serde_json::from_value::<mold_core::GenerateRequest>(serde_json::json!({
+                "prompt": "a red fox in a snowy pine forest at dawn",
+                "model": model,
+                "width": width,
+                "height": height,
+                "steps": mold_core::minimax_h3::COMFY_DEFAULT_STEPS,
+                "guidance": 0.0,
+                "strength": 1.0,
+                "seed": 770_021,
+                "batch_size": 1,
+                "frames": mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
+                "fps": mold_core::minimax_h3::FIXED_FPS,
+                "output_format": "mp4"
+            }))
+            .unwrap()
+        };
+        let profile = |model: &str| {
+            mold_core::resolve_generation_profile(mold_core::GenerationProfileInput {
+                model,
+                family: mold_core::minimax_h3::FAMILY,
+                sub_family: None,
+                default_width: mold_core::minimax_h3::DEFAULT_WIDTH,
+                default_height: mold_core::minimax_h3::DEFAULT_HEIGHT,
+                default_steps: mold_core::minimax_h3::COMFY_DEFAULT_STEPS,
+                default_guidance: 0.0,
+                default_frames: Some(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES),
+                default_fps: Some(mold_core::minimax_h3::FIXED_FPS),
+                default_negative_prompt: None,
+                source_image: Some(mold_core::SourceImageCapability::Required),
+                supports_sequence: false,
+                supports_extend: false,
+                supports_audio: true,
+            })
+        };
+
+        for model in [
+            mold_core::minimax_h3::FL2VA_COMFY,
+            mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
+        ] {
+            for &(width, height) in mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES {
+                let mut reviewed = request(model, width, height);
+                reviewed.steps = profile(model).default_recipe().unwrap().steps.default;
+                mold_core::minimax_h3::validate_reviewed_canvas(&reviewed)
+                    .unwrap_or_else(|error| panic!("{model} {width}x{height}: {}", error.message));
+                mold_core::validate_request_against_generation_profile(&profile(model), &reviewed)
+                    .unwrap_or_else(|error| panic!("{model} {width}x{height}: {error}"));
+            }
+
+            // 1024x768 and 768x1344 sit inside the advertised ceilings, so
+            // the bucket policy itself is what refuses them — the case that
+            // would silently pass if the profile leaked back to `Dynamic`.
+            // 1536x672 is refused earlier, by the advertised axis ceiling.
+            for (width, height, bucket_refusal) in
+                [(1024, 768, true), (768, 1344, true), (1536, 672, false)]
+            {
+                let mut off = request(model, width, height);
+                off.steps = profile(model).default_recipe().unwrap().steps.default;
+                let private = mold_core::minimax_h3::validate_reviewed_canvas(&off).unwrap_err();
+                assert_eq!(
+                    private.code, "MINIMAX_H3_DIMENSIONS",
+                    "{model} {width}x{height}: {}",
+                    private.message
+                );
+                let ordinary =
+                    mold_core::validate_request_against_generation_profile(&profile(model), &off)
+                        .unwrap_err();
+                if bucket_refusal {
+                    assert!(
+                        ordinary.contains("not an available bucket"),
+                        "{model} {width}x{height}: {ordinary}"
+                    );
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn generation_preflight_gates_nested_models_and_root_relative_artifacts() {
         let state = AppState::for_tests();

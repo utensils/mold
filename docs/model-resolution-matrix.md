@@ -1383,7 +1383,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 
 ### Profile `minimax-h3.minimax-h3-fl2va`
 
-Schema 1 · hash `0416694a3bd93aac1a559ddf54914c3441d8cea1331049104fab6b89f9bb4085` · default recipe `default`
+Schema 1 · hash `c074f5427ad68cd5d78a86565fb3eb3c0b43e76b59f58ef3703363605ca81679` · default recipe `default`
 
 Models: `minimax-h3-fl2va:comfy-pruned-int8`, `minimax-h3-fl2va:comfy-pruned-nvfp4`.
 
@@ -1397,12 +1397,13 @@ Models: `minimax-h3-fl2va:comfy-pruned-int8`, `minimax-h3-fl2va:comfy-pruned-nvf
 | Exact ratio | Qualified presets |
 |---|---|
 | `7:4` | `1344x768` (recommended) |
+| `1:1` | `768x768` (recommended) |
 
 Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cdaaa03fa4497e89ac64ff169219acf`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`
 
-Schema 1 · hash `5ecdbc17d708eed39f90a227a2e486714b299b131e3499b4e269cabbb02197f1` · default recipe `default`
+Schema 1 · hash `89cfc88df504792573bf099d030895217186ab55e7df244f0f544e38795962b7` · default recipe `default`
 
 Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`.
 
@@ -1416,12 +1417,13 @@ Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`.
 | Exact ratio | Qualified presets |
 |---|---|
 | `7:4` | `1344x768` (recommended) |
+| `1:1` | `768x768` (recommended) |
 
 Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cdaaa03fa4497e89ac64ff169219acf`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
 ### `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`
 
-Schema 1 · hash `428df21c4169638e6012f6d6482c6dc8def20f1fbe98776b55c835c8dbd75748` · default recipe `default`
+Schema 1 · hash `336038fdc36fdcf6119f00e4a0148a8ce1690f09129bd60ba9f4770b155a3322` · default recipe `default`
 
 Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`.
 
@@ -1435,6 +1437,7 @@ Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`.
 | Exact ratio | Qualified presets |
 |---|---|
 | `7:4` | `1344x768` (recommended) |
+| `1:1` | `768x768` (recommended) |
 
 Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cdaaa03fa4497e89ac64ff169219acf`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
@@ -1464,7 +1467,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### Profile `minimax-h3.minimax-h3-ref2va`
 
-Schema 1 · hash `66e6cd39a81e0b416c58951089a187a03d3bfb1889bf2aabf5977c1ea3eb09c2` · default recipe `default`
+Schema 1 · hash `0860f3c2a93a794167e5398acd2c3ad231ba797c55d5008eafc7e0f524c53db3` · default recipe `default`
 
 Models: `minimax-h3-ref2va:comfy-pruned-int8`, `minimax-h3-ref2va:comfy-pruned-nvfp4`.
 
@@ -1478,6 +1481,7 @@ Models: `minimax-h3-ref2va:comfy-pruned-int8`, `minimax-h3-ref2va:comfy-pruned-n
 | Exact ratio | Qualified presets |
 |---|---|
 | `7:4` | `1344x768` (recommended) |
+| `1:1` | `768x768` (recommended) |
 
 Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cdaaa03fa4497e89ac64ff169219acf`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 

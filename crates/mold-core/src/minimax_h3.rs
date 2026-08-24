@@ -204,6 +204,167 @@ pub fn turbo_tier_for_model(model: &str) -> Option<&'static TurboManifestTier> {
 
 pub const DEFAULT_WIDTH: u32 = 1344;
 pub const DEFAULT_HEIGHT: u32 = 768;
+/// Every canvas the reviewed compact runtime qualification admits, DEFAULT
+/// FIRST.
+///
+/// This is the single authority for "is this canvas reviewed". It exists
+/// because [`DEFAULT_WIDTH`]/[`DEFAULT_HEIGHT`] were being read two ways at
+/// once — as the canvas a request defaults to, and as an equality gate
+/// spelling "the one reviewed canvas". They are still the default; they are
+/// no longer the gate. A campaign that qualifies another canvas appends one
+/// row here and nothing else moves: the generation profile's buckets, the
+/// private runtime envelope's shape check, the private bridge's advertised
+/// recommendations, and source fitting all derive from this slice.
+///
+/// Each entry is a real hardware campaign on the 24 GB RTX 4090-class tier,
+/// at 124 frames / 24 fps, recorded in `docs/qualification/minimax-h3.md`:
+///
+/// * `1344x768` — #827, 2026-08-19 (21 steps, 1216 s; `-turbo-8step`
+///   759.5 s), the original qualification.
+/// * `768x768` — #1033, 2026-08-23 (21 steps, 937 s, 7.37 GiB VRAM high
+///   water; `-turbo-8step` 664 s, 9.15 GiB), 43% fewer pixels and strictly
+///   cheaper on every axis the runtime envelope bounds.
+///
+/// The order is load-bearing in one place only: ties in
+/// [`nearest_reviewed_compact_canvas`] resolve to the first entry, which
+/// keeps the historical default winning when a source is equidistant.
+pub const REVIEWED_COMPACT_CANVASES: &[(u32, u32)] = &[(DEFAULT_WIDTH, DEFAULT_HEIGHT), (768, 768)];
+
+/// Whether an exact canvas is one the reviewed compact runtime admits.
+///
+/// Everything that used to compare against `DEFAULT_WIDTH`/`DEFAULT_HEIGHT`
+/// as a gate asks this instead.
+pub const fn is_reviewed_compact_canvas(width: u32, height: u32) -> bool {
+    let mut index = 0;
+    while index < REVIEWED_COMPACT_CANVASES.len() {
+        let (canvas_width, canvas_height) = REVIEWED_COMPACT_CANVASES[index];
+        if canvas_width == width && canvas_height == height {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+/// The largest pixel count over the reviewed compact canvases.
+///
+/// A client that reads a ceiling rather than the bucket list must not be
+/// handed a number smaller than a bucket it is being offered.
+pub const fn reviewed_compact_max_pixels() -> u64 {
+    let mut max = 0;
+    let mut index = 0;
+    while index < REVIEWED_COMPACT_CANVASES.len() {
+        let (width, height) = REVIEWED_COMPACT_CANVASES[index];
+        let pixels = width as u64 * height as u64;
+        if pixels > max {
+            max = pixels;
+        }
+        index += 1;
+    }
+    max
+}
+
+/// The longest single axis over the reviewed compact canvases.
+pub const fn reviewed_compact_max_axis_pixels() -> u32 {
+    let mut max = 0;
+    let mut index = 0;
+    while index < REVIEWED_COMPACT_CANVASES.len() {
+        let (width, height) = REVIEWED_COMPACT_CANVASES[index];
+        if width > max {
+            max = width;
+        }
+        if height > max {
+            max = height;
+        }
+        index += 1;
+    }
+    max
+}
+
+/// The shortest single axis over the reviewed compact canvases — the floor a
+/// bucket profile may advertise as `min_width`/`min_height`.
+pub const fn reviewed_compact_min_axis_pixels() -> u32 {
+    let mut min = u32::MAX;
+    let mut index = 0;
+    while index < REVIEWED_COMPACT_CANVASES.len() {
+        let (width, height) = REVIEWED_COMPACT_CANVASES[index];
+        if width < min {
+            min = width;
+        }
+        if height < min {
+            min = height;
+        }
+        index += 1;
+    }
+    min
+}
+
+/// The narrowest and widest aspect ratios the reviewed compact canvases span.
+pub fn reviewed_compact_aspect_bounds() -> (f64, f64) {
+    let mut min = f64::MAX;
+    let mut max = f64::MIN;
+    for &(width, height) in REVIEWED_COMPACT_CANVASES {
+        let aspect = f64::from(width) / f64::from(height);
+        min = min.min(aspect);
+        max = max.max(aspect);
+    }
+    (min, max)
+}
+
+/// The reviewed compact canvas whose aspect ratio is closest to a source's.
+///
+/// Distance is measured in LOG aspect, so 2:1 and 1:2 are equidistant from
+/// 1:1 — comparing raw ratios would make every portrait source look nearly
+/// identical and every landscape one look far away. Ties resolve to the first
+/// entry, which is the historical default canvas.
+pub fn nearest_reviewed_compact_canvas(width: u32, height: u32) -> (u32, u32) {
+    if width == 0 || height == 0 {
+        return (DEFAULT_WIDTH, DEFAULT_HEIGHT);
+    }
+    let source = (f64::from(width) / f64::from(height)).ln();
+    let mut best = (DEFAULT_WIDTH, DEFAULT_HEIGHT);
+    let mut best_distance = f64::MAX;
+    for &(canvas_width, canvas_height) in REVIEWED_COMPACT_CANVASES {
+        let distance = ((f64::from(canvas_width) / f64::from(canvas_height)).ln() - source).abs();
+        if distance < best_distance {
+            best_distance = distance;
+            best = (canvas_width, canvas_height);
+        }
+    }
+    best
+}
+
+/// The canvases one concrete model identity may render, or `None` when the
+/// identity keeps the family's flexible resolver (the hidden official BF16
+/// references).
+pub fn qualified_canvases_for_model(family: &str, model: &str) -> Option<&'static [(u32, u32)]> {
+    uses_reviewed_compact_envelope(family, model).then_some(REVIEWED_COMPACT_CANVASES)
+}
+
+/// [`valid_frame_count_for_model`]'s spatial twin: a compact tag renders one
+/// of the reviewed canvases and nothing else; every other H3 identity takes
+/// the family's alignment/area/aspect envelope.
+pub fn valid_dimensions_for_model(family: &str, model: &str, width: u32, height: u32) -> bool {
+    match qualified_canvases_for_model(family, model) {
+        Some(canvases) => canvases.contains(&(width, height)),
+        None => true,
+    }
+}
+
+/// [`recommended_dimensions`], narrowed by the concrete model. Repairing a
+/// stale or off-envelope canvas for a compact tag must land on a canvas that
+/// runs, not on the family resolver's free-form answer.
+pub fn recommended_dimensions_for_model(
+    family: &str,
+    model: &str,
+    width: u32,
+    height: u32,
+) -> (u32, u32) {
+    match qualified_canvases_for_model(family, model) {
+        Some(_) => nearest_reviewed_compact_canvas(width, height),
+        None => recommended_dimensions(width, height),
+    }
+}
 pub const DEFAULT_STEPS: u32 = 50;
 pub const COMFY_DEFAULT_STEPS: u32 = 21;
 pub const FIXED_FPS: u32 = 24;
@@ -841,15 +1002,23 @@ pub fn recommended_frames(frames: u32) -> u32 {
 /// image without explicit dimensions. The official BF16 reference keeps its
 /// flexible short-edge/area canvas ([`recommended_dimensions`]); every
 /// compact layout — the base task partitions and the Turbo tiers — must
-/// submit the fixed reviewed envelope regardless of source aspect, because
-/// compact admission validates exact `DEFAULT_WIDTH`x`DEFAULT_HEIGHT`
-/// dimensions and the engine fits the source internally. A model the layout
-/// resolver does not recognize also takes the envelope: fail toward the
-/// stricter contract.
+/// submit one of the reviewed canvases, because compact admission validates
+/// membership in [`REVIEWED_COMPACT_CANVASES`] and the engine fits the source
+/// into whichever one the request names. A model the layout resolver does not
+/// recognize also takes the reviewed set: fail toward the stricter contract.
+///
+/// Which one it picks is [`nearest_reviewed_compact_canvas`]: while
+/// `1344x768` was the only reviewed canvas this was necessarily a constant,
+/// and answering the constant for a square source letterboxed it into 16:9
+/// with no way to ask for anything else. Now that `768x768` is qualified, a
+/// square or portrait source fits the square canvas and a landscape source
+/// keeps the default. The choice is by ASPECT alone — the reviewed set has no
+/// two canvases of one aspect, and a source's pixel count is not evidence
+/// about which reviewed canvas should render it.
 pub fn source_fit_dimensions(model: &str, width: u32, height: u32) -> (u32, u32) {
     match layout_for_model(model) {
         Some(Layout::OfficialBf16) => recommended_dimensions(width, height),
-        _ => (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+        _ => nearest_reviewed_compact_canvas(width, height),
     }
 }
 
@@ -1787,6 +1956,41 @@ pub fn validate_request_contract(req: &GenerateRequest, task: Task) -> Result<Mo
 /// This does not authorize H3 execution. It differs from
 /// [`validate_request_contract`] only by requiring descriptor authorities for
 /// Ref2VA, so a queued request never needs to carry server-local paths.
+/// The reviewed-canvas gate for one concrete compact identity, as a
+/// [`ContractError`] carrying its own repair.
+///
+/// Deliberately NOT part of [`validate_request_contract`]. That function is
+/// the FAMILY/model contract — the engine's own `prepare_request` runs it,
+/// and the synthetic pipeline tests that pin engine behaviour do so on tiny
+/// canvases where the reviewed set is meaningless. The reviewed canvases are
+/// a RUNTIME QUALIFICATION fact, so this is asked at the request door
+/// instead: `validation::validate_h3_private_uat_request` for authenticated
+/// private ingress (which skips generation-profile validation), and the
+/// generation profile's `Buckets` + `OffBucketPolicy::Reject` for every
+/// ordinary client. `private_server.rs` keeps the last word either way.
+pub fn validate_reviewed_canvas(req: &GenerateRequest) -> Result<(), ContractError> {
+    if valid_dimensions_for_model(FAMILY, &req.model, req.width, req.height) {
+        return Ok(());
+    }
+    let reviewed = qualified_canvases_for_model(FAMILY, &req.model)
+        .unwrap_or(REVIEWED_COMPACT_CANVASES)
+        .iter()
+        .map(|(width, height)| format!("{width}x{height}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut error = violation(
+        "MINIMAX_H3_DIMENSIONS",
+        format!(
+            "{} renders exactly {reviewed}; received {}x{}",
+            req.model, req.width, req.height
+        ),
+    );
+    error.recommended_dimensions = Some(recommended_dimensions_for_model(
+        FAMILY, &req.model, req.width, req.height,
+    ));
+    Err(error)
+}
+
 pub fn validate_resolved_request_contract(
     req: &GenerateRequest,
     task: Task,
@@ -3012,8 +3216,9 @@ mod tests {
     }
 
     /// A source image never bends a compact request off the reviewed
-    /// envelope: the aspect-derived canvas is official-BF16 behavior only,
-    /// and compact admission validates exact envelope dimensions.
+    /// envelope: the free-form aspect-derived canvas is official-BF16
+    /// behavior only, and compact admission validates membership in the
+    /// reviewed canvas set. Within that set the source's aspect chooses.
     #[test]
     fn source_fit_keeps_the_compact_envelope_and_the_official_aspect_canvas() {
         for model in [
@@ -3024,7 +3229,7 @@ mod tests {
         ] {
             assert_eq!(
                 source_fit_dimensions(model, 1024, 1024),
-                (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+                (768, 768),
                 "{model}"
             );
             assert_eq!(
@@ -3708,6 +3913,7 @@ mod tests {
             );
         }
 
+        // The family envelope, on an identity that keeps it.
         for (width, height) in [
             (DEFAULT_WIDTH, DEFAULT_HEIGHT),
             (DEFAULT_HEIGHT, DEFAULT_WIDTH),
@@ -3716,6 +3922,8 @@ mod tests {
             (1024, 256),
         ] {
             let mut req = request();
+            req.model = FL2VA_OFFICIAL.into();
+            req.steps = DEFAULT_STEPS;
             req.width = width;
             req.height = height;
             assert!(
@@ -3723,6 +3931,52 @@ mod tests {
                 "valid canvas {width}x{height}"
             );
         }
+    }
+
+    /// The reviewed-canvas gate is a DOOR check, never part of the family
+    /// contract: the engine's own `prepare_request` runs the contract on the
+    /// tiny synthetic canvases its pipeline tests use, and a compact identity
+    /// is a perfectly valid H3 model there.
+    #[test]
+    fn the_reviewed_canvas_gate_is_a_door_check_and_not_the_family_contract() {
+        for &(width, height) in REVIEWED_COMPACT_CANVASES {
+            let mut req = request();
+            req.width = width;
+            req.height = height;
+            validate_reviewed_canvas(&req)
+                .unwrap_or_else(|error| panic!("{width}x{height}: {}", error.message));
+            assert!(validate_request_contract(&req, Task::Fl2va).is_ok());
+        }
+
+        for (width, height) in [(1024, 768), (768, 1344), (1024, 1024)] {
+            let mut req = request();
+            req.width = width;
+            req.height = height;
+            let error = validate_reviewed_canvas(&req).unwrap_err();
+            assert_eq!(
+                error.code, "MINIMAX_H3_DIMENSIONS",
+                "off-envelope compact canvas {width}x{height}"
+            );
+            let repair = error.recommended_dimensions.unwrap();
+            assert!(
+                is_reviewed_compact_canvas(repair.0, repair.1),
+                "the repair must land on a canvas that runs: {width}x{height}"
+            );
+            // The family contract still admits it — the engine's synthetic
+            // pipeline tests depend on exactly that.
+            assert!(
+                validate_request_contract(&req, Task::Fl2va).is_ok(),
+                "{width}x{height} is inside the family envelope"
+            );
+        }
+
+        // A hidden official reference has no reviewed canvas set at all.
+        let mut official = request();
+        official.model = FL2VA_OFFICIAL.into();
+        official.steps = DEFAULT_STEPS;
+        official.width = 1024;
+        official.height = 768;
+        validate_reviewed_canvas(&official).unwrap();
     }
 
     /// The frame bounds are DERIVED from the published duration contract, not
@@ -3783,6 +4037,155 @@ mod tests {
         assert_ne!(
             REVIEWED_COMPACT_FRAMES.cmp(&MAX_FRAMES),
             std::cmp::Ordering::Greater
+        );
+    }
+
+    /// `REVIEWED_COMPACT_CANVASES` is the one authority for "which canvas did
+    /// a hardware campaign qualify". Every derived ceiling reads it, so a new
+    /// campaign appends one row and nothing else moves.
+    #[test]
+    fn the_reviewed_compact_canvases_are_the_one_canvas_authority() {
+        assert_eq!(
+            REVIEWED_COMPACT_CANVASES,
+            &[(1344, 768), (768, 768)],
+            "each entry needs a real campaign in docs/qualification/minimax-h3.md"
+        );
+        // The default is first, which is what makes an equidistant source
+        // keep the historical canvas.
+        assert_eq!(
+            REVIEWED_COMPACT_CANVASES.first().copied(),
+            Some((DEFAULT_WIDTH, DEFAULT_HEIGHT))
+        );
+        for &(width, height) in REVIEWED_COMPACT_CANVASES {
+            assert!(
+                is_reviewed_compact_canvas(width, height),
+                "{width}x{height}"
+            );
+            // Every reviewed canvas must be inside the family contract too.
+            assert!(width.is_multiple_of(DIMENSION_ALIGNMENT));
+            assert!(height.is_multiple_of(DIMENSION_ALIGNMENT));
+            assert!(u64::from(width) * u64::from(height) <= MAX_PIXELS);
+        }
+        // 1024x768 is a canonical resolver output the model would accept and
+        // no campaign has run, and the transpose of a reviewed canvas is not
+        // itself reviewed.
+        assert!(!is_reviewed_compact_canvas(1024, 768));
+        assert!(!is_reviewed_compact_canvas(768, 1344));
+
+        assert_eq!(reviewed_compact_max_pixels(), 1344 * 768);
+        assert_eq!(reviewed_compact_max_axis_pixels(), 1344);
+        assert_eq!(reviewed_compact_min_axis_pixels(), 768);
+        let (min_aspect, max_aspect) = reviewed_compact_aspect_bounds();
+        assert!((min_aspect - 1.0).abs() < 1e-9);
+        assert!((max_aspect - 1.75).abs() < 1e-9);
+    }
+
+    /// A compact tag renders one of the reviewed canvases and nothing else;
+    /// the hidden official BF16 references keep the family envelope.
+    #[test]
+    fn compact_dimensions_are_model_aware() {
+        for model in [
+            FL2VA_COMFY,
+            REF2VA_COMFY,
+            FL2VA_COMFY_TURBO_8STEP,
+            FL2VA_COMFY_TURBO_4STEP_768P,
+        ] {
+            for &(width, height) in REVIEWED_COMPACT_CANVASES {
+                assert!(
+                    valid_dimensions_for_model(FAMILY, model, width, height),
+                    "{model} {width}x{height}"
+                );
+            }
+            assert!(
+                !valid_dimensions_for_model(FAMILY, model, 1024, 768),
+                "{model}"
+            );
+            assert!(
+                !valid_dimensions_for_model(FAMILY, model, 768, 1344),
+                "{model}"
+            );
+            // Repair lands on a canvas that runs, never on the free-form
+            // family resolver's answer.
+            assert_eq!(
+                recommended_dimensions_for_model(FAMILY, model, 1024, 768),
+                (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+                "{model}"
+            );
+            assert_eq!(
+                recommended_dimensions_for_model(FAMILY, model, 768, 1344),
+                (768, 768),
+                "{model}"
+            );
+        }
+
+        for model in [FL2VA_OFFICIAL, REF2VA_OFFICIAL] {
+            assert!(
+                qualified_canvases_for_model(FAMILY, model).is_none(),
+                "{model}"
+            );
+            assert!(
+                valid_dimensions_for_model(FAMILY, model, 1024, 768),
+                "{model}"
+            );
+            assert_eq!(
+                recommended_dimensions_for_model(FAMILY, model, 1024, 1024),
+                recommended_dimensions(1024, 1024),
+                "{model}"
+            );
+        }
+    }
+
+    /// Source fitting picks the reviewed canvas nearest the source's aspect.
+    /// While 1344x768 was the only reviewed canvas this was a constant, and a
+    /// square source was letterboxed into 16:9 with no way to ask otherwise.
+    #[test]
+    fn compact_source_fit_picks_the_nearest_reviewed_canvas_by_aspect() {
+        for model in [FL2VA_COMFY, FL2VA_COMFY_TURBO_8STEP] {
+            assert_eq!(
+                source_fit_dimensions(model, 1920, 1080),
+                (1344, 768),
+                "{model}"
+            );
+            assert_eq!(
+                source_fit_dimensions(model, 1344, 768),
+                (1344, 768),
+                "{model}"
+            );
+            assert_eq!(
+                source_fit_dimensions(model, 1024, 1024),
+                (768, 768),
+                "{model}"
+            );
+            assert_eq!(
+                source_fit_dimensions(model, 768, 1024),
+                (768, 768),
+                "{model}"
+            );
+            // Log distance, so a tall portrait is nearer 1:1 than 7:4 is.
+            assert_eq!(
+                source_fit_dimensions(model, 512, 2048),
+                (768, 768),
+                "{model}"
+            );
+            // A degenerate source keeps the default.
+            assert_eq!(
+                source_fit_dimensions(model, 0, 0),
+                (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+                "{model}"
+            );
+            // Every answer is itself reviewed.
+            for source in [(1920, 1080), (1024, 1024), (768, 1024), (3, 1)] {
+                let (width, height) = source_fit_dimensions(model, source.0, source.1);
+                assert!(
+                    is_reviewed_compact_canvas(width, height),
+                    "{model} {source:?}"
+                );
+            }
+        }
+        // The hidden official reference keeps its flexible resolver.
+        assert_eq!(
+            source_fit_dimensions(FL2VA_OFFICIAL, 1024, 1024),
+            recommended_dimensions(1024, 1024)
         );
     }
 
@@ -4826,15 +5229,12 @@ mod tests {
                 REVIEWED_COMPACT_FRAMES
             ));
             assert!(!valid_frame_count_for_model(FAMILY, name, 121), "{name}");
-            // A source image never moves the canvas off the reviewed one.
+            // A source image never moves the canvas off the reviewed set.
             assert_eq!(
                 source_fit_dimensions(name, 1920, 1080),
                 (DEFAULT_WIDTH, DEFAULT_HEIGHT)
             );
-            assert_eq!(
-                source_fit_dimensions(name, 512, 900),
-                (DEFAULT_WIDTH, DEFAULT_HEIGHT)
-            );
+            assert_eq!(source_fit_dimensions(name, 512, 900), (768, 768));
 
             let defaults = &find_manifest(name).unwrap().defaults;
             assert_eq!(defaults.width, DEFAULT_WIDTH);
