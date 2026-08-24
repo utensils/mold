@@ -7,11 +7,13 @@ import {
   type ModelAccessCapabilityRecord,
 } from "./modelAccess";
 import { imageDimensionsFromBase64 } from "./imageDimensions";
+import { MINIMAX_H3_REVIEWED_FL2VA_STEPS } from "./minimaxH3Inventory";
 import { readFileBase64 } from "./fileBase64";
 import {
   canonicalMinimaxH3ModelName,
   isMinimaxH3Identity,
   minimaxH3TaskForModel,
+  MINIMAX_H3_FL2VA_COMFY as FL2VA_COMFY_BASE,
   type MinimaxH3Task,
 } from "./minimaxH3Identity";
 
@@ -105,6 +107,11 @@ export interface MinimaxH3AuthoringCapabilities {
   maxFrames: number;
   frameStep: number;
   frameOffset: number;
+  /** The step range this identity accepts. A reviewed Turbo tier reports its
+   * distilled adapter's exact count on both bounds, because that count is the
+   * schedule's length rather than a preference. */
+  minSteps: number;
+  maxSteps: number;
   synchronizedAudio: true;
   audioDisableSupported: false;
 }
@@ -355,6 +362,14 @@ export function minimaxH3AuthoringCapabilities(
     family: model.family,
     generation_profile_sha256: model.generation_profile?.profile_hash ?? null,
   });
+  // A reviewed Turbo tier's count is its distilled adapter's schedule length,
+  // so both bounds are that number; the base tag takes the compact range.
+  const canonical = canonicalMinimaxH3ModelName(model.name) ?? model.name;
+  const reviewedSteps = MINIMAX_H3_REVIEWED_FL2VA_STEPS[canonical];
+  const turboSteps =
+    reviewedSteps != null && canonical !== FL2VA_COMFY_BASE
+      ? reviewedSteps
+      : null;
   return {
     task,
     runtimeAvailable: model.runtime_available !== false && !restricted,
@@ -363,6 +378,8 @@ export function minimaxH3AuthoringCapabilities(
     maxFrames: MINIMAX_H3_MAX_FRAMES,
     frameStep: MINIMAX_H3_FRAME_STEP,
     frameOffset: MINIMAX_H3_FRAME_OFFSET,
+    minSteps: turboSteps ?? MINIMAX_H3_COMPACT_MIN_STEPS,
+    maxSteps: turboSteps ?? MINIMAX_H3_COMPACT_MAX_STEPS,
     synchronizedAudio: true,
     audioDisableSupported: false,
   };
