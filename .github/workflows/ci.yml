@@ -667,6 +667,19 @@ jobs:
         run: cargo clippy -p mold-ai-inference --features h3-attention-rc,dev-bins --bin h3_attention_qualification -- -D warnings
       - name: Clippy the synthetic MiniMax H3 packed-row benchmark
         run: cargo clippy -p mold-ai-inference --features h3-attention-rc,dev-bins --bin h3_attention_benchmark -- -D warnings
+      # #1350: nothing else compiles mold-server's `h3-private-uat` edge. The
+      # `rust` job's H3 steps only reach mold-inference's forwarding feature,
+      # which carries no device, so a shared field that changed shape under
+      # everyone (`H3PrivatePresentationRoute::compute_capability` becoming an
+      # `Option` to identify Metal) broke this build on main and stayed
+      # broken. It belongs HERE and not in the
+      # `rust` job because the feature deliberately pins `cuda` +
+      # `h3-attention-rc` (see crates/mold-server/Cargo.toml), so checking it
+      # needs nvcc — and this is ci.yml's only job with a CUDA toolkit, already
+      # building the very RC kernel the feature forwards. `--all-targets` is
+      # load-bearing: both red tests #1350 fixed live in `#[cfg(test)]` code.
+      - name: Check the private MiniMax H3 UAT server build
+        run: cargo check -p mold-ai-server --features h3-private-uat --all-targets
 
   metal-check:
     name: Metal forced-local typecheck

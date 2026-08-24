@@ -6521,6 +6521,19 @@ mod tests {
     /// HTTP 501 and the SAME sentence. A user who reads "Ref2VA execution is
     /// not available in any released build" on the model card must not then
     /// get a licensing refusal at submit.
+    ///
+    /// A build that compiles private MiniMax H3 ingress is the exception, and
+    /// the exception is structural rather than incidental: `prepare_generation`
+    /// runs `classify_h3_private_ingress` BEFORE model activation, and that
+    /// classifier claims every identity `capability_contract_for_model`
+    /// resolves — which is every H3 row. So the private boundary, not
+    /// `model_runtime_availability`, is what answers there, and the public 501
+    /// is unreachable by construction. #1350 deliberately leaves that ordering
+    /// alone (it is an authorization boundary in a licensed-model path) and
+    /// asserts what such a build does promise: the private boundary refuses
+    /// before anything is admitted, with a credential to satisfy first on a
+    /// build without public `h3`. The 401 is therefore not the assertion —
+    /// the authenticated refusal below is.
     #[tokio::test]
     async fn every_unrunnable_h3_row_is_refused_at_generation_with_its_own_reason() {
         let app = app_with(MockEngine::ready());
@@ -6544,30 +6557,53 @@ mod tests {
             let reason = model["runtime_unavailable_reason"]
                 .as_str()
                 .unwrap_or_else(|| panic!("{name} reports no reason"));
-            let resp = app
-                .clone()
-                .oneshot(
-                    Request::post("/api/generate")
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({
-                                "prompt": "a cat",
-                                "model": name,
-                                "width": mold_core::minimax_h3::DEFAULT_WIDTH,
-                                "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
-                                "steps": mold_core::minimax_h3::DEFAULT_STEPS,
-                                "guidance": 0.0,
-                                "batch_size": 1,
-                                "frames": mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
-                                "fps": mold_core::minimax_h3::FIXED_FPS,
-                                "output_format": "mp4"
-                            })
-                            .to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+            let body = serde_json::json!({
+                "prompt": "a cat",
+                "model": name,
+                "width": mold_core::minimax_h3::DEFAULT_WIDTH,
+                "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
+                "steps": mold_core::minimax_h3::DEFAULT_STEPS,
+                "guidance": 0.0,
+                "batch_size": 1,
+                "frames": mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
+                "fps": mold_core::minimax_h3::FIXED_FPS,
+                "output_format": "mp4"
+            })
+            .to_string();
+            let submit = || {
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap()
+            };
+
+            if cfg!(any(feature = "h3", feature = "h3-private-uat")) {
+                // The credential comes first on a build without public `h3`;
+                // a public H3 build derives the ingress identity from the
+                // server instance and goes straight to the partition.
+                let resp = app.clone().oneshot(submit()).await.unwrap();
+                assert!(
+                    resp.status() == StatusCode::UNAUTHORIZED
+                        || resp.status() == StatusCode::UNPROCESSABLE_ENTITY,
+                    "{name}: {}",
+                    resp.status()
+                );
+                // Authenticated, the private partition itself refuses: an
+                // unrunnable row is never the reviewed compact partition, so
+                // nothing reaches admission or the queue.
+                let mut authenticated = submit();
+                authenticated
+                    .extensions_mut()
+                    .insert(crate::auth::ApiKeyAuthenticated {
+                        identity: "unrunnable-h3-row-test".to_string(),
+                    });
+                let resp = app.clone().oneshot(authenticated).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{name}");
+                refused += 1;
+                continue;
+            }
+
+            let resp = app.clone().oneshot(submit()).await.unwrap();
             assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED, "{name}");
             let error = json_body(resp).await;
             assert_eq!(

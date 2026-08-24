@@ -276,6 +276,13 @@ fn reviewed_h3_private_runtime_available(_task: mold_core::minimax_h3::Task) -> 
 /// record, qualification record, and every model component. Omission is the
 /// safe response when API-key authentication or either external authority file
 /// is unavailable.
+///
+/// Scoped like every other item here: only a build that compiles the H3
+/// runtime — or the bare `cfg(test)` build that exercises its fail-closed
+/// arm — has a caller for it. `h3-private-bridge` alone is the structural
+/// scheduler/server seam and never advertises, so compiling this there is
+/// dead code the workspace lint gate rejects.
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 #[cfg_attr(all(test, not(feature = "h3-private-uat")), allow(dead_code))]
 pub(crate) fn advertised_h3_private_capability(
     api_key_auth_enabled: bool,
@@ -344,7 +351,9 @@ pub(crate) fn advertised_h3_private_capability(
                     Some(mold_inference::H3PrivatePresentationRoute {
                         device_id: &device.id,
                         device_ordinal: device.ordinal?,
-                        compute_capability: (major.parse().ok()?, minor.parse().ok()?),
+                        // This route set is filtered to CUDA devices above, so the
+                        // architecture is always known; `None` identifies Metal.
+                        compute_capability: Some((major.parse().ok()?, minor.parse().ok()?)),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1978,21 +1987,26 @@ mod presentation_tests {
 
         // Every ceiling is the canvas RULE's own, so a client that reads a
         // ceiling rather than the preset list is never handed a number
-        // smaller than a canvas admission accepts.
-        assert_eq!(pixels, mold_core::minimax_h3::reviewed_compact_max_pixels());
-        assert_eq!(recipe.resolution.max_pixels, pixels);
-        assert_eq!(
-            recipe.resolution.max_axis_pixels,
-            Some(mold_core::minimax_h3::reviewed_compact_max_axis_pixels())
-        );
-        assert_eq!(
-            recipe.resolution.min_width,
-            mold_core::minimax_h3::reviewed_compact_min_axis_pixels()
-        );
-        assert_eq!(recipe.resolution.min_height, recipe.resolution.min_width);
-        let (min_aspect, max_aspect) = mold_core::minimax_h3::reviewed_compact_aspect_bounds();
-        assert_eq!(recipe.resolution.min_aspect_ratio, Some(min_aspect));
-        assert_eq!(recipe.resolution.max_aspect_ratio, Some(max_aspect));
+        // smaller than a canvas admission accepts. A stored-record build has
+        // no rule to read — every axis is the record's own value — and that
+        // arm is pinned by
+        // `the_advertised_profile_matches_this_build_s_runtime_authority`.
+        if !super::private_h3_record_runtime() {
+            assert_eq!(pixels, mold_core::minimax_h3::reviewed_compact_max_pixels());
+            assert_eq!(recipe.resolution.max_pixels, pixels);
+            assert_eq!(
+                recipe.resolution.max_axis_pixels,
+                Some(mold_core::minimax_h3::reviewed_compact_max_axis_pixels())
+            );
+            assert_eq!(
+                recipe.resolution.min_width,
+                mold_core::minimax_h3::reviewed_compact_min_axis_pixels()
+            );
+            assert_eq!(recipe.resolution.min_height, recipe.resolution.min_width);
+            let (min_aspect, max_aspect) = mold_core::minimax_h3::reviewed_compact_aspect_bounds();
+            assert_eq!(recipe.resolution.min_aspect_ratio, Some(min_aspect));
+            assert_eq!(recipe.resolution.max_aspect_ratio, Some(max_aspect));
+        }
 
         // The default the row seeds a form with stays the historical canvas.
         assert_eq!(recipe.defaults.width, mold_core::minimax_h3::DEFAULT_WIDTH);
@@ -2196,6 +2210,11 @@ mod tests {
 
     #[test]
     fn redacted_preview_endpoints_are_substituted_only_when_present_and_empty() {
+        // The fixture has to satisfy the FL2VA request contract, or every
+        // assertion below would be measuring the same early return: guidance
+        // must be 0 and strength 1 (their serde defaults are 3.5 and 0.75,
+        // neither of which H3 accepts), and a frame-0 keyframe beside a
+        // `source_image` is a duplicate first-frame boundary.
         fn request(model: &str) -> mold_core::GenerateRequest {
             serde_json::from_value(serde_json::json!({
                 "prompt": "probe",
@@ -2203,32 +2222,51 @@ mod tests {
                 "width": mold_core::minimax_h3::DEFAULT_WIDTH,
                 "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
                 "steps": mold_core::minimax_h3::DEFAULT_STEPS,
+                "guidance": 0.0,
+                "strength": 1.0,
                 "batch_size": 1,
                 "output_format": "mp4"
             }))
             .expect("test request must deserialize")
         }
+        // The final frame of the default clip: FL2VA keyframes may target
+        // only frame 0 or this one.
+        let last_frame = mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES - 1;
+
+        // A redacted first frame is substituted; a boundary carrying real
+        // bytes is left exactly as it arrived.
         let mut fl2va = request(mold_core::minimax_h3::FL2VA_COMFY);
         fl2va.source_image = Some(Vec::new());
-        fl2va.keyframes = Some(vec![
+        fl2va.keyframes = Some(vec![mold_core::KeyframeCondition {
+            frame: last_frame,
+            image: vec![1, 2, 3],
+            name: None,
+        }]);
+        super::substitute_redacted_preview_endpoints(&mut fl2va);
+        let substituted = fl2va.source_image.clone().unwrap();
+        assert!(!substituted.is_empty());
+        // Real bytes are never replaced.
+        assert_eq!(fl2va.keyframes.as_deref().unwrap()[0].image, vec![1, 2, 3]);
+
+        // Redacted keyframes are substituted too, and one placeholder serves
+        // every endpoint of the same request.
+        let mut boundaries = request(mold_core::minimax_h3::FL2VA_COMFY);
+        boundaries.keyframes = Some(vec![
             mold_core::KeyframeCondition {
-                frame: 123,
+                frame: 0,
                 image: Vec::new(),
                 name: None,
             },
             mold_core::KeyframeCondition {
-                frame: 0,
-                image: vec![1, 2, 3],
+                frame: last_frame,
+                image: Vec::new(),
                 name: None,
             },
         ]);
-        super::substitute_redacted_preview_endpoints(&mut fl2va);
-        let substituted = fl2va.source_image.clone().unwrap();
-        assert!(!substituted.is_empty());
-        let keyframes = fl2va.keyframes.as_deref().unwrap();
+        super::substitute_redacted_preview_endpoints(&mut boundaries);
+        let keyframes = boundaries.keyframes.as_deref().unwrap();
         assert_eq!(keyframes[0].image, substituted);
-        // Real bytes are never replaced.
-        assert_eq!(keyframes[1].image, vec![1, 2, 3]);
+        assert_eq!(keyframes[1].image, substituted);
 
         // Non-FL2VA requests pass through untouched.
         let mut ref2va = request(mold_core::minimax_h3::REF2VA_COMFY);
@@ -2387,7 +2425,8 @@ mod tests {
             }
         );
         // Presets are grouped by aspect, so their order is the grouping's;
-        // compare as a set.
+        // compare as a set. A stored-record build advertises the record's
+        // canvas alone, because that is the only one it admits.
         let mut advertised = recipe
             .resolution
             .aspect_groups
@@ -2396,7 +2435,14 @@ mod tests {
             .map(|preset| (preset.width, preset.height))
             .collect::<Vec<_>>();
         advertised.sort_unstable();
-        let mut expected = mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec();
+        let mut expected = if super::private_h3_record_runtime() {
+            vec![(
+                mold_core::minimax_h3::DEFAULT_WIDTH,
+                mold_core::minimax_h3::DEFAULT_HEIGHT,
+            )]
+        } else {
+            mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec()
+        };
         expected.sort_unstable();
         assert_eq!(advertised, expected);
         // The default canvas leads either way, in its own 7:4 group; only a
