@@ -1914,6 +1914,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         &artifact_report,
         (request.width, request.height),
         request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
+        request.steps,
         device_id,
         device_ordinal,
         compute_capability,
@@ -3020,6 +3021,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         &artifact_report,
         (request.width, request.height),
         request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
+        request.steps,
         &owner_fence.device_id,
         owner_fence.device_ordinal,
         owner_fence.compute_capability,
@@ -5640,6 +5642,13 @@ fn public_runtime_qualification(
     // ever shape the minted authority within what the door already allowed.
     canvas: (u32, u32),
     frames: u32,
+    // The request's own step count. A Turbo adapter overrides it below with
+    // its distilled schedule length; the base tier carries the request's,
+    // because `validate_prepared_with_adapter` compares `grid_points` to
+    // `max_steps` by EQUALITY. Minting the default 21 here while the profile
+    // advertised a 2..=50 range is what let a 30-step base request clear API
+    // validation and then fail at runtime preparation.
+    steps: u32,
     device_id: &str,
     device_ordinal: usize,
     compute_capability: Option<(u16, u16)>,
@@ -5706,11 +5715,7 @@ fn public_runtime_qualification(
             cuda_driver_version: 0,
             cuda_toolkit_version: 0,
         },
-        envelope: public_runtime_envelope_for_shape(
-            canvas,
-            frames,
-            turbo_steps.unwrap_or(contract::COMFY_DEFAULT_STEPS),
-        ),
+        envelope: public_runtime_envelope_for_shape(canvas, frames, turbo_steps.unwrap_or(steps)),
         bounds: public_runtime_bounds_for_shape(canvas, frames),
         evidence_artifacts: Vec::new(),
         identity_sha256: String::new(),
@@ -7264,6 +7269,109 @@ mod tests {
             .unwrap();
     }
 
+    /// The base tier mints its envelope from the REQUEST's step count, and the
+    /// whole prepared-validation path agrees.
+    ///
+    /// `validate_prepared_with_adapter` compares `grid_points` to `max_steps`
+    /// by EQUALITY, so minting the default 21 while the generation profile
+    /// advertises a 2..=50 range let a 30-step base request clear API
+    /// validation and then fail at runtime preparation — the exact
+    /// advertise-one-thing-enforce-another split the range was meant to
+    /// remove. A Turbo adapter still overrides the request, because its count
+    /// is the distilled schedule's length.
+    #[cfg(all(feature = "h3", feature = "mp4"))]
+    #[test]
+    fn the_base_tier_mints_and_validates_the_requested_step_count() {
+        let artifact = artifact_report();
+        let mint = |steps: u32| {
+            public_runtime_qualification(
+                &artifact,
+                (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
+                contract::DEFAULT_COMPACT_FRAMES,
+                steps,
+                "gpu-0",
+                0,
+                Some((8, 9)),
+                &sha('a'),
+                "synthetic-qualified-kernel",
+                &sha('b'),
+                None,
+            )
+        };
+        // The rows a REAL request at this shape packs, so the row caps are
+        // exercised by the same authority the step axis is.
+        let realistic_rows = || {
+            let condition =
+                contract::rows_per_video_latent(contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT)
+                    .unwrap();
+            let video = contract::target_video_rows(
+                contract::DEFAULT_WIDTH,
+                contract::DEFAULT_HEIGHT,
+                contract::DEFAULT_COMPACT_FRAMES,
+            )
+            .unwrap();
+            let audio = contract::target_audio_rows(contract::DEFAULT_COMPACT_FRAMES).unwrap();
+            H3FactoryPreparedRowsInput {
+                qwen_output_text_rows: 128,
+                qwen_vision_rows: condition * 4,
+                condition_visual_rows: condition,
+                condition_audio_rows: 0,
+                target_video_rows: video,
+                target_audio_rows: audio,
+                total_packed_rows: 128 + condition + video + audio,
+            }
+        };
+
+        for steps in [
+            contract::COMPACT_MIN_STEPS,
+            contract::COMFY_DEFAULT_STEPS,
+            30,
+            contract::COMPACT_MAX_STEPS,
+        ] {
+            let authority = mint(steps).unwrap_or_else(|error| panic!("{steps} steps: {error}"));
+            assert_eq!(authority.record.envelope.max_steps, steps, "{steps}");
+
+            // The full prepared-validation path, on the envelope production
+            // actually minted for this request.
+            let mut request = prepared_request_for_compact_quality_envelope();
+            request.rows = realistic_rows();
+            request.grid_points = steps;
+            request.denoise_forward_count = steps - 1;
+            authority
+                .record
+                .envelope
+                .validate_prepared_with_adapter(&request, None)
+                .unwrap_or_else(|error| panic!("{steps} steps: {error}"));
+
+            // A request whose steps disagree with the minted envelope is still
+            // refused by name, so the equality check has not been weakened.
+            let mut mismatched = prepared_request_for_compact_quality_envelope();
+            mismatched.rows = realistic_rows();
+            mismatched.grid_points = steps + 1;
+            mismatched.denoise_forward_count = steps;
+            let error = authority
+                .record
+                .envelope
+                .validate_prepared_with_adapter(&mismatched, None)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("grid_points"), "{steps}: {error}");
+        }
+
+        // Outside the base range nothing mints at all.
+        for steps in [0, 1, contract::COMPACT_MAX_STEPS + 1, 4_096] {
+            let error = mint(steps).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!(
+                    "allows {}..={} steps",
+                    contract::COMPACT_MIN_STEPS,
+                    contract::COMPACT_MAX_STEPS
+                )),
+                "{steps}: {error}"
+            );
+        }
+    }
+
     /// The qualification boundary must not strip tier identity either.
     ///
     /// `public_runtime_qualification` mints an FL2VA-shaped record. Feeding it
@@ -7283,6 +7391,7 @@ mod tests {
                 &artifact,
                 (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
                 contract::DEFAULT_COMPACT_FRAMES,
+                contract::COMFY_DEFAULT_STEPS,
                 "gpu-0",
                 0,
                 Some((8, 9)),
@@ -9525,6 +9634,7 @@ mod tests {
             &artifact,
             (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
             contract::DEFAULT_COMPACT_FRAMES,
+            contract::COMFY_DEFAULT_STEPS,
             DEVICE_0,
             0,
             Some((8, 9)),
@@ -9612,6 +9722,7 @@ mod tests {
                 &crossed,
                 (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
                 contract::DEFAULT_COMPACT_FRAMES,
+                contract::COMFY_DEFAULT_STEPS,
                 DEVICE_0,
                 0,
                 Some(cc),
@@ -9626,6 +9737,7 @@ mod tests {
                 &crossed,
                 (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
                 contract::DEFAULT_COMPACT_FRAMES,
+                contract::COMFY_DEFAULT_STEPS,
                 DEVICE_0,
                 0,
                 Some((8, 9)),
@@ -9642,6 +9754,7 @@ mod tests {
             &crossed_model,
             (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
             contract::DEFAULT_COMPACT_FRAMES,
+            contract::COMFY_DEFAULT_STEPS,
             DEVICE_0,
             0,
             Some((8, 9)),
