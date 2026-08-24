@@ -1885,10 +1885,9 @@ mod tests {
         );
         let request = build_request(&canonical_params, "p", &canonical_negative).unwrap();
 
-        assert_eq!(
-            request.frames,
-            Some(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES)
-        );
+        // The stale count was off the grid, so H3 authority snapped it to
+        // the nearest valid clip length.
+        assert_eq!(request.frames, Some(mold_core::minimax_h3::MIN_FRAMES));
         assert_eq!(request.fps, Some(mold_core::minimax_h3::FIXED_FPS));
         assert_eq!(request.output_format, Some(mold_core::OutputFormat::Mp4));
         assert_eq!(request.enable_audio, Some(true));

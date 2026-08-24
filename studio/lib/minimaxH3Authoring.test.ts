@@ -345,6 +345,29 @@ describe("MiniMax H3 Studio authority", () => {
     ).toContain("Reattach first frame opening.png");
   });
 
+  it("reports the compact step range, and a Turbo tier's exact count", () => {
+    const base = minimaxH3AuthoringCapabilities({
+      name: "minimax-h3-fl2va:comfy-pruned-int8",
+      family: "minimax-h3",
+    })!;
+    expect(base.minSteps).toBe(2);
+    expect(base.maxSteps).toBe(50);
+    expect(base.minFrames).toBe(107);
+    expect(base.maxFrames).toBe(345);
+
+    // A distilled adapter's schedule length is not a preference.
+    const turbo = minimaxH3AuthoringCapabilities({
+      name: "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step",
+      family: "minimax-h3",
+    })!;
+    expect(turbo.minSteps).toBe(9);
+    expect(turbo.maxSteps).toBe(9);
+    // The frame grid is still the family's — only the step axis is the
+    // adapter's property.
+    expect(turbo.minFrames).toBe(107);
+    expect(turbo.maxFrames).toBe(345);
+  });
+
   it("keeps runtime and legal access as independent fail-closed authorities", () => {
     expect(
       minimaxH3AuthoringCapabilities({

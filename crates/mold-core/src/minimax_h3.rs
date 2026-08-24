@@ -204,150 +204,200 @@ pub fn turbo_tier_for_model(model: &str) -> Option<&'static TurboManifestTier> {
 
 pub const DEFAULT_WIDTH: u32 = 1344;
 pub const DEFAULT_HEIGHT: u32 = 768;
-/// Every canvas the reviewed compact runtime qualification admits, DEFAULT
-/// FIRST.
+/// The spatial stride one packed video row covers.
 ///
-/// This is the single authority for "is this canvas reviewed". It exists
-/// because [`DEFAULT_WIDTH`]/[`DEFAULT_HEIGHT`] were being read two ways at
-/// once — as the canvas a request defaults to, and as an equality gate
-/// spelling "the one reviewed canvas". They are still the default; they are
-/// no longer the gate. A campaign that qualifies another canvas appends one
-/// row here and nothing else moves: the generation profile's buckets, the
-/// private runtime envelope's shape check, the private bridge's advertised
-/// recommendations, and source fitting all derive from this slice.
+/// The visual VAE compresses 16x spatially (`spatial_downsample_factors`
+/// `[2, 2, 2, 2, 1, 1]`) and the DiT then packs `patch_size [1, 2, 2]` latent
+/// cells into one token, so one packed row is a 32x32 pixel cell. Admission,
+/// the runtime envelope, the reference prepared-shape resolver, and the
+/// canvas rule all derive from this one constant instead of restating `32`.
+pub const VIDEO_ROW_STRIDE: u32 = 32;
+const _: () = assert!(VIDEO_ROW_STRIDE == DIMENSION_ALIGNMENT);
+
+/// The pixel ceiling a compact canvas must stay inside.
 ///
-/// Each entry is a real hardware campaign on the 24 GB RTX 4090-class tier,
-/// at 124 frames / 24 fps, recorded in `docs/qualification/minimax-h3.md`:
+/// This is the qualifying campaign's own canvas area (1344x768). It is a real
+/// measurement boundary rather than a preset property: `public_runtime_bounds`
+/// was captured at exactly this shape, so a canvas above it would be priced by
+/// an extrapolation nothing measured. Keeping it as the AREA ceiling — rather
+/// than as an exact size — is what lets any 32-aligned canvas of the same or
+/// smaller area be scored by the same linear packed-row model.
+pub const COMPACT_MAX_PIXELS: u64 = DEFAULT_WIDTH as u64 * DEFAULT_HEIGHT as u64;
+
+/// The shortest axis an admitted compact canvas may have.
+///
+/// 256 px is 8 packed rows on [`VIDEO_ROW_STRIDE`], which keeps every stage
+/// that consumes the canvas well clear of a degenerate shape: the visual VAE
+/// downsamples 16x (16 latent cells on the short axis), its temporal decode
+/// chunks are full-canvas rather than spatially tiled so no tile size is
+/// involved, and the conditioner normalizes the boundary endpoint onto the
+/// same canvas. Nothing in the pipeline asks for more; the floor exists so a
+/// 32x32 request cannot reach the runtime at all.
+pub const MIN_COMPACT_AXIS_PIXELS: u32 = 256;
+
+/// Canvas PRESETS the compact stack recommends, DEFAULT FIRST.
+///
+/// This is a recommendation list, never a gate: [`is_admitted_compact_canvas`]
+/// is the rule, and every entry here must satisfy it (pinned by a test). Two
+/// entries are real hardware campaigns on the 24 GB RTX 4090-class tier at 124
+/// frames / 24 fps, recorded in `docs/qualification/minimax-h3.md`:
 ///
 /// * `1344x768` — #827, 2026-08-19 (21 steps, 1216 s; `-turbo-8step`
-///   759.5 s), the original qualification.
+///   759.5 s), the original qualification and the shape every memory bound in
+///   `private_server.rs` was measured at.
 /// * `768x768` — #1033, 2026-08-23 (21 steps, 937 s, 7.37 GiB VRAM high
-///   water; `-turbo-8step` 664 s, 9.15 GiB), 43% fewer pixels and strictly
-///   cheaper on every axis the runtime envelope bounds.
+///   water; `-turbo-8step` 664 s, 9.15 GiB).
 ///
-/// The order is load-bearing in one place only: ties in
-/// [`nearest_reviewed_compact_canvas`] resolve to the first entry, which
-/// keeps the historical default winning when a source is equidistant.
-pub const REVIEWED_COMPACT_CANVASES: &[(u32, u32)] = &[(DEFAULT_WIDTH, DEFAULT_HEIGHT), (768, 768)];
-
-/// Whether an exact canvas is one the reviewed compact runtime admits.
+/// The rest are ordinary aligned canvases inside the ceiling, offered so a
+/// client has a ladder to pick from; they are admitted by the rule like any
+/// other request and priced by the request-scaled envelope, not by a campaign.
 ///
-/// Everything that used to compare against `DEFAULT_WIDTH`/`DEFAULT_HEIGHT`
-/// as a gate asks this instead.
-pub const fn is_reviewed_compact_canvas(width: u32, height: u32) -> bool {
-    let mut index = 0;
-    while index < REVIEWED_COMPACT_CANVASES.len() {
-        let (canvas_width, canvas_height) = REVIEWED_COMPACT_CANVASES[index];
-        if canvas_width == width && canvas_height == height {
-            return true;
-        }
-        index += 1;
-    }
-    false
-}
+/// The order is load-bearing in one place only: the default must be first, so
+/// a client reading `recommended_dimensions` offers it first.
+pub const REVIEWED_COMPACT_CANVASES: &[(u32, u32)] = &[
+    (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+    (1280, 704),
+    (1024, 576),
+    (960, 960),
+    (768, 768),
+    (768, 1344),
+    (704, 1280),
+];
 
-/// The largest pixel count over the reviewed compact canvases.
+/// Whether the compact stack admits an exact canvas.
 ///
-/// A client that reads a ceiling rather than the bucket list must not be
-/// handed a number smaller than a bucket it is being offered.
-pub const fn reviewed_compact_max_pixels() -> u64 {
-    let mut max = 0;
-    let mut index = 0;
-    while index < REVIEWED_COMPACT_CANVASES.len() {
-        let (width, height) = REVIEWED_COMPACT_CANVASES[index];
-        let pixels = width as u64 * height as u64;
-        if pixels > max {
-            max = pixels;
-        }
-        index += 1;
-    }
-    max
-}
-
-/// The longest single axis over the reviewed compact canvases.
-pub const fn reviewed_compact_max_axis_pixels() -> u32 {
-    let mut max = 0;
-    let mut index = 0;
-    while index < REVIEWED_COMPACT_CANVASES.len() {
-        let (width, height) = REVIEWED_COMPACT_CANVASES[index];
-        if width > max {
-            max = width;
-        }
-        if height > max {
-            max = height;
-        }
-        index += 1;
-    }
-    max
-}
-
-/// The shortest single axis over the reviewed compact canvases — the floor a
-/// bucket profile may advertise as `min_width`/`min_height`.
-pub const fn reviewed_compact_min_axis_pixels() -> u32 {
-    let mut min = u32::MAX;
-    let mut index = 0;
-    while index < REVIEWED_COMPACT_CANVASES.len() {
-        let (width, height) = REVIEWED_COMPACT_CANVASES[index];
-        if width < min {
-            min = width;
-        }
-        if height < min {
-            min = height;
-        }
-        index += 1;
-    }
-    min
-}
-
-/// The narrowest and widest aspect ratios the reviewed compact canvases span.
-pub fn reviewed_compact_aspect_bounds() -> (f64, f64) {
-    let mut min = f64::MAX;
-    let mut max = f64::MIN;
-    for &(width, height) in REVIEWED_COMPACT_CANVASES {
-        let aspect = f64::from(width) / f64::from(height);
-        min = min.min(aspect);
-        max = max.max(aspect);
-    }
-    (min, max)
-}
-
-/// The reviewed compact canvas whose aspect ratio is closest to a source's.
+/// This replaced set membership in `REVIEWED_COMPACT_CANVASES`. The four
+/// clauses are each a property something downstream needs:
 ///
-/// Distance is measured in LOG aspect, so 2:1 and 1:2 are equidistant from
-/// 1:1 — comparing raw ratios would make every portrait source look nearly
-/// identical and every landscape one look far away. Ties resolve to the first
-/// entry, which is the historical default canvas.
-pub fn nearest_reviewed_compact_canvas(width: u32, height: u32) -> (u32, u32) {
+/// * both axes on [`VIDEO_ROW_STRIDE`], because the packed-row arithmetic is
+///   `(width / 32) * (height / 32)` and a remainder would silently truncate;
+/// * both axes at least [`MIN_COMPACT_AXIS_PIXELS`];
+/// * area within [`COMPACT_MAX_PIXELS`], the campaign's own canvas area, which
+///   is what keeps the linear workspace scaling an interpolation;
+/// * aspect inside the family's [`MIN_ASPECT_RATIO`]/[`MAX_ASPECT_RATIO`].
+///
+/// The area ceiling has a second consequence worth stating: `(w/32)*(h/32)` is
+/// `w*h/1024`, so no admitted canvas can pack more than
+/// `COMPACT_MAX_PIXELS / 1024` = 1,008 rows per latent frame — which is
+/// exactly the default canvas's own figure, so the conditioning row ceilings
+/// measured there remain ceilings for every admitted canvas.
+pub fn is_admitted_compact_canvas(width: u32, height: u32) -> bool {
     if width == 0 || height == 0 {
-        return (DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        return false;
     }
-    let source = (f64::from(width) / f64::from(height)).ln();
-    let mut best = (DEFAULT_WIDTH, DEFAULT_HEIGHT);
-    let mut best_distance = f64::MAX;
-    for &(canvas_width, canvas_height) in REVIEWED_COMPACT_CANVASES {
-        let distance = ((f64::from(canvas_width) / f64::from(canvas_height)).ln() - source).abs();
-        if distance < best_distance {
-            best_distance = distance;
-            best = (canvas_width, canvas_height);
+    if !width.is_multiple_of(VIDEO_ROW_STRIDE) || !height.is_multiple_of(VIDEO_ROW_STRIDE) {
+        return false;
+    }
+    if width < MIN_COMPACT_AXIS_PIXELS || height < MIN_COMPACT_AXIS_PIXELS {
+        return false;
+    }
+    if u64::from(width) * u64::from(height) > COMPACT_MAX_PIXELS {
+        return false;
+    }
+    let aspect = f64::from(width) / f64::from(height);
+    (MIN_ASPECT_RATIO..=MAX_ASPECT_RATIO).contains(&aspect)
+}
+
+/// The compact canvas rule's area ceiling, as a client-facing number.
+pub const fn reviewed_compact_max_pixels() -> u64 {
+    COMPACT_MAX_PIXELS
+}
+
+/// The longest single axis the compact canvas rule can admit.
+///
+/// Derived from the rule rather than from the preset list: the widest legal
+/// canvas is the one whose aspect sits exactly on [`MAX_ASPECT_RATIO`] and
+/// whose area sits exactly on [`COMPACT_MAX_PIXELS`] — 2016x512. Advertising
+/// the presets' own maximum instead would hand a client a ceiling smaller than
+/// a canvas admission accepts.
+pub fn reviewed_compact_max_axis_pixels() -> u32 {
+    let mut best = MIN_COMPACT_AXIS_PIXELS;
+    let mut axis = MIN_COMPACT_AXIS_PIXELS;
+    while u64::from(axis) * u64::from(MIN_COMPACT_AXIS_PIXELS) <= COMPACT_MAX_PIXELS {
+        if is_admitted_compact_canvas(axis, shortest_admitted_partner(axis)) {
+            best = axis;
         }
+        axis += VIDEO_ROW_STRIDE;
     }
     best
 }
 
-/// The canvases one concrete model identity may render, or `None` when the
-/// identity keeps the family's flexible resolver (the hidden official BF16
+/// The shortest 32-aligned partner an axis could legally take under the aspect
+/// bound alone (the area bound is checked by the caller).
+fn shortest_admitted_partner(axis: u32) -> u32 {
+    let by_aspect = (f64::from(axis) / MAX_ASPECT_RATIO).ceil() as u32;
+    let floor = by_aspect.max(MIN_COMPACT_AXIS_PIXELS);
+    floor.div_ceil(VIDEO_ROW_STRIDE) * VIDEO_ROW_STRIDE
+}
+
+/// The shortest single axis the compact canvas rule admits.
+pub const fn reviewed_compact_min_axis_pixels() -> u32 {
+    MIN_COMPACT_AXIS_PIXELS
+}
+
+/// The aspect bounds the compact canvas rule admits — the family's own.
+pub fn reviewed_compact_aspect_bounds() -> (f64, f64) {
+    (MIN_ASPECT_RATIO, MAX_ASPECT_RATIO)
+}
+
+/// The largest admitted compact canvas whose aspect matches a source's.
+///
+/// The compact rule admits any aligned canvas inside the area ceiling, so
+/// fitting a source no longer means picking the nearest of a couple of fixed
+/// sizes — it means rendering the source's own shape as large as the ceiling
+/// allows. A 16:9 source is no longer letterboxed into 7:4 and a square one is
+/// no longer letterboxed into 16:9.
+///
+/// The search walks the SHORT axis down from the ideal and derives the long
+/// axis from the aspect each time, rather than rounding both axes
+/// independently: independent rounding drifts the aspect (and turns a square
+/// source into a rectangle as soon as the first candidate overshoots the
+/// ceiling). The aspect is clamped into the family bounds first, so a 10:1
+/// source renders 4:1 rather than being refused.
+pub fn largest_admitted_compact_canvas(width: u32, height: u32) -> (u32, u32) {
+    if width == 0 || height == 0 {
+        return (DEFAULT_WIDTH, DEFAULT_HEIGHT);
+    }
+    let aspect = (f64::from(width) / f64::from(height)).clamp(MIN_ASPECT_RATIO, MAX_ASPECT_RATIO);
+    let width_is_long = aspect >= 1.0;
+    let ratio = if width_is_long { aspect } else { 1.0 / aspect };
+    let stride = f64::from(VIDEO_ROW_STRIDE);
+    let snap = |axis: f64| {
+        ((axis / stride).round_ties_even().max(1.0) as u32).saturating_mul(VIDEO_ROW_STRIDE)
+    };
+    let mut short = snap((COMPACT_MAX_PIXELS as f64 / ratio).sqrt());
+    while short >= MIN_COMPACT_AXIS_PIXELS {
+        let long = snap(f64::from(short) * ratio);
+        let candidate = if width_is_long {
+            (long, short)
+        } else {
+            (short, long)
+        };
+        if is_admitted_compact_canvas(candidate.0, candidate.1) {
+            return candidate;
+        }
+        short -= VIDEO_ROW_STRIDE;
+    }
+    (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+}
+
+/// The canvas PRESETS one concrete model identity recommends, or `None` when
+/// the identity keeps the family's flexible resolver (the hidden official BF16
 /// references).
+///
+/// These are recommendations. The gate is [`valid_dimensions_for_model`].
 pub fn qualified_canvases_for_model(family: &str, model: &str) -> Option<&'static [(u32, u32)]> {
     uses_reviewed_compact_envelope(family, model).then_some(REVIEWED_COMPACT_CANVASES)
 }
 
-/// [`valid_frame_count_for_model`]'s spatial twin: a compact tag renders one
-/// of the reviewed canvases and nothing else; every other H3 identity takes
+/// [`valid_frame_count_for_model`]'s spatial twin: a compact tag renders any
+/// canvas [`is_admitted_compact_canvas`] accepts; every other H3 identity takes
 /// the family's alignment/area/aspect envelope.
 pub fn valid_dimensions_for_model(family: &str, model: &str, width: u32, height: u32) -> bool {
-    match qualified_canvases_for_model(family, model) {
-        Some(canvases) => canvases.contains(&(width, height)),
-        None => true,
+    if uses_reviewed_compact_envelope(family, model) {
+        is_admitted_compact_canvas(width, height)
+    } else {
+        true
     }
 }
 
@@ -360,9 +410,10 @@ pub fn recommended_dimensions_for_model(
     width: u32,
     height: u32,
 ) -> (u32, u32) {
-    match qualified_canvases_for_model(family, model) {
-        Some(_) => nearest_reviewed_compact_canvas(width, height),
-        None => recommended_dimensions(width, height),
+    if uses_reviewed_compact_envelope(family, model) {
+        largest_admitted_compact_canvas(width, height)
+    } else {
+        recommended_dimensions(width, height)
     }
 }
 pub const DEFAULT_STEPS: u32 = 50;
@@ -388,15 +439,37 @@ pub const MIN_FRAMES: u32 = 107;
 /// 24 FPS rate. The next grid value, 362, is 15.083 seconds and is rejected by
 /// the pinned upstream Diffusers oracle.
 pub const MAX_FRAMES: u32 = 345;
-/// The exact frame count the reviewed compact runtime qualification admits.
+/// The compact stack's DEFAULT clip length — not a gate.
 ///
-/// `H3PrivateRuntimeEnvelopeRecord` validates this by equality, the compact
-/// generation profiles pin it as a fixed control, and every builder that
-/// submits the reviewed envelope uses it. It is an authority of its own: a
-/// campaign that qualifies a different clip length moves this and nothing
-/// else, and widening the family floor must never widen what the runtime
-/// admits.
+/// It was an equality gate: the runtime envelope validated `frames` against it
+/// and the generation profile pinned frames as a fixed control, so 124 was the
+/// only clip a compact tag could render. It is now the default alone, and a
+/// compact tag takes the family grid ([`valid_frame_count`], 107..=345 on
+/// `17n+5`) like every other H3 identity. Its shape is still special in one
+/// respect: `public_runtime_bounds` in `private_server.rs` was MEASURED at 124
+/// frames on the default canvas, and every other clip length is priced by
+/// scaling that measurement with the request's own packed-row count.
+///
+/// The name is retained because ~40 call sites read it as `unwrap_or` for an
+/// absent `frames`; [`DEFAULT_COMPACT_FRAMES`] is the honest alias.
 pub const REVIEWED_COMPACT_FRAMES: u32 = 124;
+/// [`REVIEWED_COMPACT_FRAMES`] under the name that describes what it is.
+pub const DEFAULT_COMPACT_FRAMES: u32 = REVIEWED_COMPACT_FRAMES;
+/// The fewest steps a compact request may ask for.
+///
+/// The sampler builds a sigma GRID whose terminal point is zero, so two points
+/// is one denoise evaluation and one point is not a schedule at all
+/// (`H3DualSchedule::new` refuses `grid_points < 2`). A floor of 1 would be
+/// refused by arithmetic rather than by contract.
+pub const COMPACT_MIN_STEPS: u32 = 2;
+/// The most steps a compact request may ask for.
+///
+/// The upstream schedule imposes no smaller bound — Comfy's
+/// `BasicScheduler("simple")` samples a 1,000-entry flow table, so it degrades
+/// only past 1,001 grid points — so this is the released model's own default
+/// step count ([`DEFAULT_STEPS`]) used as the ceiling: past it a render costs
+/// more time than any reviewed configuration and buys nothing anyone measured.
+pub const COMPACT_MAX_STEPS: u32 = DEFAULT_STEPS;
 pub const FRAME_STEP: u32 = 17;
 pub const FRAME_OFFSET: u32 = 5;
 pub const DIMENSION_ALIGNMENT: u32 = 32;
@@ -953,22 +1026,103 @@ pub const fn valid_frame_count(frames: u32) -> bool {
         && (frames - FRAME_OFFSET).is_multiple_of(FRAME_STEP)
 }
 
+// ---------------------------------------------------------------------------
+// Packed-row geometry.
+//
+// The prepared request's packed sequence is four row counts summed, and three
+// of them are pure functions of the canvas and the clip length. That
+// arithmetic was written out three times — the server's admission authority,
+// `mold-inference`'s target-budget validator, and the reference prepared-shape
+// resolver — and the runtime envelope transcribed its results as constants.
+// While the canvas and the frame count were both pinned that was invisible;
+// once a request may name either, a divergence between the envelope that
+// GRANTS memory and the admission that CHARGES it is a silent over- or
+// under-admit. These are the one authority all of them call.
+//
+// Every function returns `Option` rather than a crate error type so each
+// caller keeps its own overflow reporting.
+// ---------------------------------------------------------------------------
+
+/// Latent frames the video VAE produces for a clip of `frames` pixel frames.
+///
+/// `(frames - 5) / 17 * 5 + 2`, the released checkpoint's own temporal
+/// geometry. Only defined on the family grid; a frame count off it truncates,
+/// which is exactly why [`valid_frame_count`] runs first at every door.
+pub fn video_latent_frames(frames: u32) -> Option<u64> {
+    let frames = u64::from(frames);
+    Some(frames.checked_sub(u64::from(FRAME_OFFSET))? / u64::from(FRAME_STEP) * 5 + 2)
+}
+
+/// Packed rows one video latent frame occupies on a canvas.
+///
+/// `(width / stride) * (height / stride)` — see [`VIDEO_ROW_STRIDE`].
+pub fn rows_per_video_latent(width: u32, height: u32) -> Option<u64> {
+    let stride = u64::from(VIDEO_ROW_STRIDE);
+    u64::from(width)
+        .checked_div(stride)?
+        .checked_mul(u64::from(height) / stride)
+}
+
+/// Total generated-video rows a request packs.
+pub fn target_video_rows(width: u32, height: u32, frames: u32) -> Option<u64> {
+    video_latent_frames(frames)?.checked_mul(rows_per_video_latent(width, height)?)
+}
+
+/// Audio latents per channel for a clip of `frames` pixel frames.
+///
+/// `round(frames / 24 * 40)` in exact integer arithmetic: `(frames * 5 + 1) / 3`.
+/// Valid H3 frame counts never land on a half tie.
+pub fn audio_latents_per_channel(frames: u32) -> Option<u64> {
+    u64::from(frames)
+        .checked_mul(5)?
+        .checked_add(1)
+        .map(|v| v / 3)
+}
+
+/// Total generated-audio rows a request packs.
+pub fn target_audio_rows(frames: u32) -> Option<u64> {
+    audio_latents_per_channel(frames)?.checked_mul(u64::from(AUDIO_CHANNELS))
+}
+
+/// Audio samples per channel implied by the clip's DURATION.
+///
+/// `round(frames / 24 * 32000)`, exactly: `(frames * 4000 + 1) / 3`. This is
+/// the AAC mux staging size — how much audio the finished clip carries.
+pub fn audio_samples_per_channel(frames: u32) -> Option<u64> {
+    u64::from(frames)
+        .checked_mul(4_000)?
+        .checked_add(1)
+        .map(|value| value / 3)
+}
+
+/// Audio samples per channel the VOCODER emits.
+///
+/// `audio_latents_per_channel * 800`, which is deliberately NOT
+/// [`audio_samples_per_channel`]: the latent count is the rounded duration and
+/// the vocoder expands each latent by a fixed 800, so the two differ by up to
+/// 800 samples (267 at the default 124 frames). One is what the clip is worth,
+/// the other is what the decoder produces; unifying them would make the
+/// factory's prepared-request check reject every valid request.
+pub fn vocoder_audio_samples_per_channel(frames: u32) -> Option<u64> {
+    audio_latents_per_channel(frames)?.checked_mul(800)
+}
+
 /// The single frame count `model` may render, when its layout admits exactly
 /// one.
 ///
-/// `None` means the model takes the family range. The reviewed compact layouts
-/// answer [`REVIEWED_COMPACT_FRAMES`]: their runtime envelope validates the
-/// clip length by equality, so for them the floor and the ceiling are the same
-/// number and the family range is not the question to ask.
-pub fn fixed_frames_for_model(family: &str, model: &str) -> Option<u32> {
-    uses_reviewed_compact_envelope(family, model).then_some(REVIEWED_COMPACT_FRAMES)
+/// Nothing answers `Some` today: the compact layouts used to, because their
+/// runtime envelope validated the clip length by equality, and now they take
+/// the family grid like every other H3 identity. The helper survives because
+/// it is the shape a future single-length layout would need, and because
+/// removing it would push a `None` literal into each of its callers.
+pub fn fixed_frames_for_model(_family: &str, _model: &str) -> Option<u32> {
+    None
 }
 
 /// [`recommended_frames`], narrowed by the concrete model.
 ///
-/// Normalizing a stale or off-grid frame count for a compact tag must land on
-/// the clip length that runs, not on the family floor — otherwise repairing a
-/// restored request produces one the runtime refuses.
+/// Normalizing a stale or off-grid frame count for a compact tag snaps to the
+/// family grid, which is what the runtime now admits.
 pub fn recommended_frames_for_model(family: &str, model: &str, frames: u32) -> u32 {
     fixed_frames_for_model(family, model).unwrap_or_else(|| recommended_frames(frames))
 }
@@ -1001,24 +1155,19 @@ pub fn recommended_frames(frames: u32) -> u32 {
 /// The canvas an H3 request should submit when the caller attached a source
 /// image without explicit dimensions. The official BF16 reference keeps its
 /// flexible short-edge/area canvas ([`recommended_dimensions`]); every
-/// compact layout — the base task partitions and the Turbo tiers — must
-/// submit one of the reviewed canvases, because compact admission validates
-/// membership in [`REVIEWED_COMPACT_CANVASES`] and the engine fits the source
-/// into whichever one the request names. A model the layout resolver does not
-/// recognize also takes the reviewed set: fail toward the stricter contract.
+/// compact layout — the base task partitions and the Turbo tiers — takes
+/// [`largest_admitted_compact_canvas`], which renders the source's own aspect
+/// as large as the compact area ceiling allows. A model the layout resolver
+/// does not recognize also takes the compact rule: fail toward the stricter
+/// contract.
 ///
-/// Which one it picks is [`nearest_reviewed_compact_canvas`]: while
-/// `1344x768` was the only reviewed canvas this was necessarily a constant,
-/// and answering the constant for a square source letterboxed it into 16:9
-/// with no way to ask for anything else. Now that `768x768` is qualified, a
-/// square or portrait source fits the square canvas and a landscape source
-/// keeps the default. The choice is by ASPECT alone — the reviewed set has no
-/// two canvases of one aspect, and a source's pixel count is not evidence
-/// about which reviewed canvas should render it.
+/// This was a nearest-of-two-fixed-canvases choice, which letterboxed every
+/// source that was neither 7:4 nor square. With the canvas rule in place the
+/// source no longer has to be fitted into someone else's shape.
 pub fn source_fit_dimensions(model: &str, width: u32, height: u32) -> (u32, u32) {
     match layout_for_model(model) {
         Some(Layout::OfficialBf16) => recommended_dimensions(width, height),
-        _ => nearest_reviewed_compact_canvas(width, height),
+        _ => largest_admitted_compact_canvas(width, height),
     }
 }
 
@@ -1479,16 +1628,16 @@ fn reference_prepared_shape_at(
             let (width, height) = reference_image_dimensions(*width, *height)?;
             // Visual VAE downsamples 16x, then the DiT packs 2x2 latent
             // patches: one row therefore represents a 32x32 pixel cell.
-            let visual_rows = u64::from(width / 32)
-                .checked_mul(u64::from(height / 32))
-                .ok_or_else(|| {
-                    reference_violation(
-                        Some(index),
-                        "MINIMAX_H3_REFERENCE_PREPARED_SHAPE",
-                        Some("width"),
-                        "reference image row count overflowed",
-                    )
-                })?;
+            // [`VIDEO_ROW_STRIDE`] names that, and `rows_per_video_latent` is
+            // the one function every consumer of it calls.
+            let visual_rows = rows_per_video_latent(width, height).ok_or_else(|| {
+                reference_violation(
+                    Some(index),
+                    "MINIMAX_H3_REFERENCE_PREPARED_SHAPE",
+                    Some("width"),
+                    "reference image row count overflowed",
+                )
+            })?;
             GenerationReferencePreparedShape {
                 version: REFERENCE_PREPROCESS_VERSION,
                 normalized_width: Some(width),
@@ -1972,16 +2121,12 @@ pub fn validate_reviewed_canvas(req: &GenerateRequest) -> Result<(), ContractErr
     if valid_dimensions_for_model(FAMILY, &req.model, req.width, req.height) {
         return Ok(());
     }
-    let reviewed = qualified_canvases_for_model(FAMILY, &req.model)
-        .unwrap_or(REVIEWED_COMPACT_CANVASES)
-        .iter()
-        .map(|(width, height)| format!("{width}x{height}"))
-        .collect::<Vec<_>>()
-        .join(", ");
     let mut error = violation(
         "MINIMAX_H3_DIMENSIONS",
         format!(
-            "{} renders exactly {reviewed}; received {}x{}",
+            "{} renders canvases whose axes are multiples of {VIDEO_ROW_STRIDE}, at least \
+             {MIN_COMPACT_AXIS_PIXELS} px, at most {COMPACT_MAX_PIXELS} pixels in total, with \
+             aspect ratio in [{MIN_ASPECT_RATIO}, {MAX_ASPECT_RATIO}]; received {}x{}",
             req.model, req.width, req.height
         ),
     );
@@ -3215,10 +3360,10 @@ mod tests {
         }
     }
 
-    /// A source image never bends a compact request off the reviewed
-    /// envelope: the free-form aspect-derived canvas is official-BF16
-    /// behavior only, and compact admission validates membership in the
-    /// reviewed canvas set. Within that set the source's aspect chooses.
+    /// A source image never bends a compact request off the compact canvas
+    /// rule: the official short-edge/area resolver is BF16-reference behavior
+    /// only, and a compact fit renders the source's own aspect as large as the
+    /// compact area ceiling allows.
     #[test]
     fn source_fit_keeps_the_compact_envelope_and_the_official_aspect_canvas() {
         for model in [
@@ -3229,12 +3374,12 @@ mod tests {
         ] {
             assert_eq!(
                 source_fit_dimensions(model, 1024, 1024),
-                (768, 768),
+                (992, 992),
                 "{model}"
             );
             assert_eq!(
                 source_fit_dimensions(model, 1920, 1080),
-                (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+                (1312, 736),
                 "{model}"
             );
         }
@@ -3248,7 +3393,7 @@ mod tests {
         // compact contract.
         assert_eq!(
             source_fit_dimensions("custom-h3-finetune", 1920, 1080),
-            (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+            (1312, 736)
         );
     }
 
@@ -3948,7 +4093,9 @@ mod tests {
             assert!(validate_request_contract(&req, Task::Fl2va).is_ok());
         }
 
-        for (width, height) in [(1024, 768), (768, 1344), (1024, 1024)] {
+        // Family-legal but outside the compact rule: over the area
+        // ceiling (the first two) and under the compact axis floor.
+        for (width, height) in [(1056, 992), (576, 1856), (224, 896)] {
             let mut req = request();
             req.width = width;
             req.height = height;
@@ -3959,7 +4106,7 @@ mod tests {
             );
             let repair = error.recommended_dimensions.unwrap();
             assert!(
-                is_reviewed_compact_canvas(repair.0, repair.1),
+                is_admitted_compact_canvas(repair.0, repair.1),
                 "the repair must land on a canvas that runs: {width}x{height}"
             );
             // The family contract still admits it — the engine's synthetic
@@ -4040,44 +4187,157 @@ mod tests {
         );
     }
 
-    /// `REVIEWED_COMPACT_CANVASES` is the one authority for "which canvas did
-    /// a hardware campaign qualify". Every derived ceiling reads it, so a new
-    /// campaign appends one row and nothing else moves.
+    /// `is_admitted_compact_canvas` is the one canvas authority, and
+    /// `REVIEWED_COMPACT_CANVASES` is a recommendation list that must satisfy
+    /// it. The rule replaced set membership so a compact tag can render any
+    /// aligned canvas inside the campaign's own area ceiling; the memory
+    /// estimate, not a pinned list, decides what actually fits.
     #[test]
-    fn the_reviewed_compact_canvases_are_the_one_canvas_authority() {
-        assert_eq!(
-            REVIEWED_COMPACT_CANVASES,
-            &[(1344, 768), (768, 768)],
-            "each entry needs a real campaign in docs/qualification/minimax-h3.md"
-        );
-        // The default is first, which is what makes an equidistant source
-        // keep the historical canvas.
+    fn the_compact_canvas_rule_is_the_one_canvas_authority() {
+        // The default is first, which is what a client offering
+        // `recommended_dimensions` shows first.
         assert_eq!(
             REVIEWED_COMPACT_CANVASES.first().copied(),
             Some((DEFAULT_WIDTH, DEFAULT_HEIGHT))
         );
         for &(width, height) in REVIEWED_COMPACT_CANVASES {
             assert!(
-                is_reviewed_compact_canvas(width, height),
-                "{width}x{height}"
+                is_admitted_compact_canvas(width, height),
+                "recommended preset {width}x{height} must satisfy the rule"
             );
-            // Every reviewed canvas must be inside the family contract too.
+            // Every preset must be inside the family contract too.
             assert!(width.is_multiple_of(DIMENSION_ALIGNMENT));
             assert!(height.is_multiple_of(DIMENSION_ALIGNMENT));
             assert!(u64::from(width) * u64::from(height) <= MAX_PIXELS);
         }
-        // 1024x768 is a canonical resolver output the model would accept and
-        // no campaign has run, and the transpose of a reviewed canvas is not
-        // itself reviewed.
-        assert!(!is_reviewed_compact_canvas(1024, 768));
-        assert!(!is_reviewed_compact_canvas(768, 1344));
+        // Both campaign canvases are still offered.
+        assert!(REVIEWED_COMPACT_CANVASES.contains(&(1344, 768)));
+        assert!(REVIEWED_COMPACT_CANVASES.contains(&(768, 768)));
+
+        // Admitted: aligned, inside the ceiling, sane aspect. 1024x576 and
+        // the transpose of the default were both refused before the rule.
+        for (width, height) in [
+            (1024, 576),
+            (768, 1344),
+            (1024, 768),
+            (992, 992),
+            (256, 256),
+            (2016, 512),
+        ] {
+            assert!(
+                is_admitted_compact_canvas(width, height),
+                "{width}x{height} should be admitted"
+            );
+        }
+        // Over the area ceiling by one stride on one axis.
+        assert!(!is_admitted_compact_canvas(1344, 800));
+        // Off the 32 stride.
+        assert!(!is_admitted_compact_canvas(1000, 600));
+        assert!(!is_admitted_compact_canvas(1024, 570));
+        // Under the short-axis floor.
+        assert!(!is_admitted_compact_canvas(224, 224));
+        // Outside the family aspect bounds (5:1).
+        assert!(!is_admitted_compact_canvas(1600, 288));
+        // Zero is never a canvas.
+        assert!(!is_admitted_compact_canvas(0, 768));
+        assert!(!is_admitted_compact_canvas(768, 0));
 
         assert_eq!(reviewed_compact_max_pixels(), 1344 * 768);
-        assert_eq!(reviewed_compact_max_axis_pixels(), 1344);
-        assert_eq!(reviewed_compact_min_axis_pixels(), 768);
+        assert_eq!(COMPACT_MAX_PIXELS, 1_032_192);
+        // The rule's own widest canvas is 2016x512 — aspect exactly 4:1 and
+        // area exactly on the ceiling — not the widest preset.
+        assert_eq!(reviewed_compact_max_axis_pixels(), 2016);
+        assert_eq!(reviewed_compact_min_axis_pixels(), MIN_COMPACT_AXIS_PIXELS);
         let (min_aspect, max_aspect) = reviewed_compact_aspect_bounds();
-        assert!((min_aspect - 1.0).abs() < 1e-9);
-        assert!((max_aspect - 1.75).abs() < 1e-9);
+        assert!((min_aspect - MIN_ASPECT_RATIO).abs() < 1e-9);
+        assert!((max_aspect - MAX_ASPECT_RATIO).abs() < 1e-9);
+    }
+
+    /// The rows-per-latent ceiling is a CONSEQUENCE of the area ceiling, and
+    /// the conditioning row caps in `private_server.rs` depend on it: one
+    /// packed row is a 32x32 cell, so no admitted canvas can exceed
+    /// `COMPACT_MAX_PIXELS / 1024` rows, which is the default canvas's own
+    /// 1,008. If this ever fails, the reviewed vision/condition ceilings stop
+    /// being ceilings.
+    #[test]
+    fn no_admitted_canvas_packs_more_rows_per_latent_than_the_default() {
+        let ceiling = COMPACT_MAX_PIXELS / u64::from(VIDEO_ROW_STRIDE * VIDEO_ROW_STRIDE);
+        assert_eq!(ceiling, 1_008);
+        assert_eq!(
+            rows_per_video_latent(DEFAULT_WIDTH, DEFAULT_HEIGHT),
+            Some(ceiling)
+        );
+        let mut width = MIN_COMPACT_AXIS_PIXELS;
+        while width <= reviewed_compact_max_axis_pixels() {
+            let mut height = MIN_COMPACT_AXIS_PIXELS;
+            while height <= reviewed_compact_max_axis_pixels() {
+                if is_admitted_compact_canvas(width, height) {
+                    assert!(
+                        rows_per_video_latent(width, height).unwrap() <= ceiling,
+                        "{width}x{height}"
+                    );
+                }
+                height += VIDEO_ROW_STRIDE;
+            }
+            width += VIDEO_ROW_STRIDE;
+        }
+    }
+
+    /// The packed-row arithmetic is one authority. These are the numbers the
+    /// #827 campaign's envelope was transcribed from, so a change here is a
+    /// change to what admission charges.
+    #[test]
+    fn packed_row_geometry_reproduces_the_measured_envelope() {
+        assert_eq!(video_latent_frames(REVIEWED_COMPACT_FRAMES), Some(37));
+        assert_eq!(
+            rows_per_video_latent(DEFAULT_WIDTH, DEFAULT_HEIGHT),
+            Some(1_008)
+        );
+        assert_eq!(
+            target_video_rows(DEFAULT_WIDTH, DEFAULT_HEIGHT, REVIEWED_COMPACT_FRAMES),
+            Some(37_296)
+        );
+        assert_eq!(target_audio_rows(REVIEWED_COMPACT_FRAMES), Some(414));
+        assert_eq!(
+            audio_latents_per_channel(REVIEWED_COMPACT_FRAMES),
+            Some(207)
+        );
+        // The smaller campaign canvas.
+        assert_eq!(rows_per_video_latent(768, 768), Some(576));
+        assert_eq!(
+            target_video_rows(768, 768, REVIEWED_COMPACT_FRAMES),
+            Some(21_312)
+        );
+        // Grid endpoints.
+        assert_eq!(video_latent_frames(MIN_FRAMES), Some(32));
+        assert_eq!(video_latent_frames(MAX_FRAMES), Some(102));
+        // The two audio sample counts are deliberately different quantities.
+        assert_eq!(
+            audio_samples_per_channel(REVIEWED_COMPACT_FRAMES),
+            Some(165_333)
+        );
+        assert_eq!(
+            vocoder_audio_samples_per_channel(REVIEWED_COMPACT_FRAMES),
+            Some(165_600)
+        );
+    }
+
+    /// The compact steps axis is a RANGE for the base tier. The Turbo tiers
+    /// keep their exact distilled counts, which is a property of the adapter.
+    #[test]
+    fn the_compact_steps_range_is_derived_and_contains_every_reviewed_count() {
+        assert_eq!(COMPACT_MIN_STEPS, 2);
+        assert_eq!(COMPACT_MAX_STEPS, DEFAULT_STEPS);
+        assert_eq!(COMPACT_MAX_STEPS, 50);
+        assert!((COMPACT_MIN_STEPS..=COMPACT_MAX_STEPS).contains(&COMFY_DEFAULT_STEPS));
+        for tier in REVIEWED_TURBO_MANIFEST_TIERS {
+            assert!(
+                (COMPACT_MIN_STEPS..=COMPACT_MAX_STEPS).contains(&tier.steps),
+                "{} steps {}",
+                tier.model,
+                tier.steps
+            );
+        }
     }
 
     /// A compact tag renders one of the reviewed canvases and nothing else;
@@ -4096,24 +4356,31 @@ mod tests {
                     "{model} {width}x{height}"
                 );
             }
-            assert!(
-                !valid_dimensions_for_model(FAMILY, model, 1024, 768),
-                "{model}"
-            );
-            assert!(
-                !valid_dimensions_for_model(FAMILY, model, 768, 1344),
-                "{model}"
-            );
-            // Repair lands on a canvas that runs, never on the free-form
-            // family resolver's answer.
+            // The rule admits far more than the preset list: 4:3 and the
+            // default's own transpose were both refused by set membership.
+            for (width, height) in [(1024, 768), (768, 1344), (1024, 576)] {
+                assert!(
+                    valid_dimensions_for_model(FAMILY, model, width, height),
+                    "{model} {width}x{height}"
+                );
+            }
+            // Off the stride, over the area ceiling, and under the axis floor.
+            for (width, height) in [(1000, 600), (1056, 992), (224, 896)] {
+                assert!(
+                    !valid_dimensions_for_model(FAMILY, model, width, height),
+                    "{model} {width}x{height}"
+                );
+                // Repair lands on a canvas that runs, never on the free-form
+                // family resolver's answer.
+                let repair = recommended_dimensions_for_model(FAMILY, model, width, height);
+                assert!(
+                    is_admitted_compact_canvas(repair.0, repair.1),
+                    "{model} {width}x{height} -> {repair:?}"
+                );
+            }
             assert_eq!(
-                recommended_dimensions_for_model(FAMILY, model, 1024, 768),
-                (DEFAULT_WIDTH, DEFAULT_HEIGHT),
-                "{model}"
-            );
-            assert_eq!(
-                recommended_dimensions_for_model(FAMILY, model, 768, 1344),
-                (768, 768),
+                recommended_dimensions_for_model(FAMILY, model, 1000, 600),
+                (1280, 768),
                 "{model}"
             );
         }
@@ -4135,36 +4402,46 @@ mod tests {
         }
     }
 
-    /// Source fitting picks the reviewed canvas nearest the source's aspect.
-    /// While 1344x768 was the only reviewed canvas this was a constant, and a
-    /// square source was letterboxed into 16:9 with no way to ask otherwise.
+    /// Source fitting renders the SOURCE'S own aspect at the largest size the
+    /// compact area ceiling admits. It used to pick the nearest of two fixed
+    /// canvases, which letterboxed every source that was neither 7:4 nor
+    /// square.
     #[test]
-    fn compact_source_fit_picks_the_nearest_reviewed_canvas_by_aspect() {
+    fn compact_source_fit_renders_the_source_aspect_at_the_ceiling() {
         for model in [FL2VA_COMFY, FL2VA_COMFY_TURBO_8STEP] {
+            // 16:9 is no longer flattened into the 7:4 default.
             assert_eq!(
                 source_fit_dimensions(model, 1920, 1080),
-                (1344, 768),
+                (1312, 736),
                 "{model}"
             );
+            // A source already on a preset keeps it exactly.
             assert_eq!(
                 source_fit_dimensions(model, 1344, 768),
                 (1344, 768),
                 "{model}"
             );
+            // A square source stays square, and larger than 768x768.
             assert_eq!(
                 source_fit_dimensions(model, 1024, 1024),
-                (768, 768),
+                (992, 992),
                 "{model}"
             );
+            // 3:4 stays 3:4 rather than collapsing to 1:1.
             assert_eq!(
                 source_fit_dimensions(model, 768, 1024),
-                (768, 768),
+                (864, 1152),
                 "{model}"
             );
-            // Log distance, so a tall portrait is nearer 1:1 than 7:4 is.
+            // Past the family aspect bound the aspect is clamped to 1:4.
             assert_eq!(
                 source_fit_dimensions(model, 512, 2048),
-                (768, 768),
+                (480, 1920),
+                "{model}"
+            );
+            assert_eq!(
+                source_fit_dimensions(model, 100, 2048),
+                (480, 1920),
                 "{model}"
             );
             // A degenerate source keeps the default.
@@ -4173,12 +4450,28 @@ mod tests {
                 (DEFAULT_WIDTH, DEFAULT_HEIGHT),
                 "{model}"
             );
-            // Every answer is itself reviewed.
-            for source in [(1920, 1080), (1024, 1024), (768, 1024), (3, 1)] {
+            // Every answer is itself admitted, and never letterboxed by more
+            // than one stride of aspect drift.
+            for source in [
+                (1920, 1080),
+                (1024, 1024),
+                (768, 1024),
+                (3, 1),
+                (1, 3),
+                (2560, 1080),
+                (640, 480),
+            ] {
                 let (width, height) = source_fit_dimensions(model, source.0, source.1);
                 assert!(
-                    is_reviewed_compact_canvas(width, height),
-                    "{model} {source:?}"
+                    is_admitted_compact_canvas(width, height),
+                    "{model} {source:?} -> {width}x{height}"
+                );
+                let wanted = (f64::from(source.0) / f64::from(source.1))
+                    .clamp(MIN_ASPECT_RATIO, MAX_ASPECT_RATIO);
+                let got = f64::from(width) / f64::from(height);
+                assert!(
+                    (got / wanted).ln().abs() < 0.05,
+                    "{model} {source:?} -> {width}x{height} drifted from {wanted}"
                 );
             }
         }
@@ -5215,26 +5508,26 @@ mod tests {
         // engine could never render.
         for name in [FL2VA_COMFY_NVFP4, REF2VA_COMFY_NVFP4] {
             assert!(uses_reviewed_compact_envelope(FAMILY, name), "{name}");
-            assert_eq!(
-                fixed_frames_for_model(FAMILY, name),
-                Some(REVIEWED_COMPACT_FRAMES)
-            );
-            assert_eq!(
-                recommended_frames_for_model(FAMILY, name, 200),
-                REVIEWED_COMPACT_FRAMES
-            );
-            assert!(valid_frame_count_for_model(
-                FAMILY,
-                name,
-                REVIEWED_COMPACT_FRAMES
-            ));
+            // The compact tags take the FAMILY frame grid; nothing pins a
+            // single clip length any more.
+            assert_eq!(fixed_frames_for_model(FAMILY, name), None);
+            assert_eq!(recommended_frames_for_model(FAMILY, name, 200), 192);
+            for frames in [MIN_FRAMES, REVIEWED_COMPACT_FRAMES, MAX_FRAMES] {
+                assert!(
+                    valid_frame_count_for_model(FAMILY, name, frames),
+                    "{name} {frames}"
+                );
+            }
             assert!(!valid_frame_count_for_model(FAMILY, name, 121), "{name}");
-            // A source image never moves the canvas off the reviewed set.
-            assert_eq!(
-                source_fit_dimensions(name, 1920, 1080),
-                (DEFAULT_WIDTH, DEFAULT_HEIGHT)
-            );
-            assert_eq!(source_fit_dimensions(name, 512, 900), (768, 768));
+            assert!(!valid_frame_count_for_model(FAMILY, name, 362), "{name}");
+            // A source image never moves the canvas off the compact rule.
+            for source in [(1920, 1080), (512, 900)] {
+                let fitted = source_fit_dimensions(name, source.0, source.1);
+                assert!(
+                    is_admitted_compact_canvas(fitted.0, fitted.1),
+                    "{name} {source:?} -> {fitted:?}"
+                );
+            }
 
             let defaults = &find_manifest(name).unwrap().defaults;
             assert_eq!(defaults.width, DEFAULT_WIDTH);

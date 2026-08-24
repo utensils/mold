@@ -172,38 +172,31 @@ pub fn declared_audio_capability(family: &str, model: &str) -> Option<bool> {
 /// maximum 124", which is the exact contradiction this function removes.
 fn pinned_recipe_defaults(
     profile: &crate::GenerationProfileSet,
+    family: &str,
+    model: &str,
 ) -> Option<(u32, u32, u32, Option<u32>)> {
+    // Only the compact H3 recipe overrides its own `input.default_*`, and it
+    // does so precisely because those arrive laundered through user
+    // `model_prefs`. Reading the recipe back here is what keeps the row and
+    // the profile — which a client reads in one response, and whose hash
+    // covers `recipe.defaults` — from disagreeing.
+    if !crate::minimax_h3::uses_reviewed_compact_envelope(family, model) {
+        return None;
+    }
     let recipe = profile.default_recipe()?;
-    if recipe.steps.mode != crate::ControlMode::Fixed {
-        return None;
-    }
-    let resolution = &recipe.resolution;
-    if resolution.domain != crate::ResolutionDomain::Buckets
-        || resolution.off_bucket != Some(crate::generation_profile::OffBucketPolicy::Reject)
-    {
-        return None;
-    }
-    // At least one bucket, and the recipe's own default must be one of them:
-    // a fixed-authority recipe whose default is off its own bucket list is
-    // not evidence of anything and must not overwrite a user's size.
-    let mut presets = resolution
-        .aspect_groups
-        .iter()
-        .flat_map(|group| group.presets.iter())
-        .peekable();
-    presets.peek()?;
+    // Evidence, not trust: a recipe default that the compact rule or the
+    // family frame grid would refuse is not authority over anything.
     let canvas = (recipe.defaults.width, recipe.defaults.height);
-    if !presets.any(|preset| (preset.width, preset.height) == canvas) {
+    if !crate::minimax_h3::is_admitted_compact_canvas(canvas.0, canvas.1) {
         return None;
     }
-    let temporal = recipe.temporal.as_ref();
-    let frames = match temporal {
-        Some(temporal) if temporal.frames.mode == crate::ControlMode::Fixed => {
-            Some(temporal.frames.default)
-        }
-        Some(_) => return None,
-        None => None,
-    };
+    let frames = recipe
+        .temporal
+        .as_ref()
+        .map(|temporal| temporal.frames.default);
+    if frames.is_some_and(|frames| !crate::minimax_h3::valid_frame_count(frames)) {
+        return None;
+    }
     Some((canvas.0, canvas.1, recipe.defaults.steps, frames))
 }
 
@@ -259,12 +252,8 @@ pub fn build_model_catalog(
         // refuses. `recipe()` already forces these for the compact envelope;
         // this reads them back rather than restating the rule.
         let (default_width, default_height, default_steps, default_frames) =
-            pinned_recipe_defaults(&generation_profile).unwrap_or((
-                default_width,
-                default_height,
-                default_steps,
-                default_frames,
-            ));
+            pinned_recipe_defaults(&generation_profile, &manifest.family, &manifest.name)
+                .unwrap_or((default_width, default_height, default_steps, default_frames));
 
         // `minimax_h3::model_runtime_availability` is the same authority
         // `model_activation` consults before generation, so a row can never
@@ -482,7 +471,7 @@ pub fn build_model_catalog(
         // narrowing its ceiling while leaving a remembered 345-frame default
         // in place rebuilds the exact contradiction this fix removes.
         let (default_width, default_height, default_steps, default_frames) =
-            pinned_recipe_defaults(&generation_profile).unwrap_or((
+            pinned_recipe_defaults(&generation_profile, &family, name).unwrap_or((
                 default_width,
                 default_height,
                 default_steps,

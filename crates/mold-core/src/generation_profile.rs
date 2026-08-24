@@ -845,12 +845,11 @@ const H3: &[(u32, u32)] = &[
     (768, 1024),
     (768, 1344),
 ];
-/// The reviewed compact stack renders exactly the canvases its hardware
-/// campaigns qualified: `private_server.rs` admits membership in this same
-/// slice and nothing else, and the engine fits any source into whichever one
-/// the request names. Advertising the official ladder here is what let users
-/// pick a size the engine refuses after the load was paid for; restating the
-/// list here is what would let this drift from the runtime that enforces it.
+/// The compact stack's RECOMMENDED canvases. Its admission rule is
+/// `minimax_h3::is_admitted_compact_canvas` — any 32-aligned canvas inside the
+/// campaign's own area ceiling — so these are a ladder to pick from rather
+/// than the only sizes that run. Restating the list here is what would let it
+/// drift from the runtime that enforces the rule.
 const H3_COMPACT: &[(u32, u32)] = crate::minimax_h3::REVIEWED_COMPACT_CANVASES;
 
 const Z_IMAGE_QUALIFICATION: ResolutionQualificationRecord =
@@ -1000,9 +999,12 @@ fn recipe(
     // `input.default_*` — those are laundered through user `model_prefs` in
     // `build_model_catalog` and can carry a stale off-envelope value.
     let h3_compact = crate::minimax_h3::uses_reviewed_compact_envelope(family, input.model);
-    let h3_compact_steps = crate::minimax_h3::turbo_tier_for_model(input.model)
-        .map(|tier| tier.steps)
-        .unwrap_or(crate::minimax_h3::COMFY_DEFAULT_STEPS);
+    // A Turbo tier's step count is a property of the distilled adapter, not
+    // a qualification pin: its schedule has exactly that many grid points, so
+    // it stays a fixed control. The base compact tag takes a range.
+    let h3_compact_turbo_steps =
+        crate::minimax_h3::turbo_tier_for_model(input.model).map(|tier| tier.steps);
+    let h3_compact_steps = h3_compact_turbo_steps.unwrap_or(crate::minimax_h3::COMFY_DEFAULT_STEPS);
     let audio_only = pipeline == Some(Ltx2PipelineMode::T2a);
     let source_driven = family == "qwen-image-edit"
         || matches!(
@@ -1067,19 +1069,30 @@ fn recipe(
         ResolutionProfile {
             domain: if source_driven {
                 ResolutionDomain::SourceDriven
-            } else if family == "wan" || h3_compact {
+            } else if family == "wan" {
                 ResolutionDomain::Buckets
             } else {
+                // The compact H3 stack is a RANGE, not a bucket set: any
+                // 32-aligned canvas inside its area ceiling is admitted and
+                // the memory estimate decides what fits. Its presets survive
+                // as `aspect_groups` recommendations.
                 ResolutionDomain::Dynamic
             },
             alignment,
-            min_width: alignment.max(64),
-            min_height: alignment.max(64),
-            // The compact stack admits only its reviewed canvases, so its
-            // ceilings are the largest of them. The family constants are the
-            // *official* BF16 ladder's headroom and sit above every compact
-            // preset, which lets a client that reads the ceiling rather than
-            // the buckets offer a size admission refuses.
+            min_width: if h3_compact {
+                crate::minimax_h3::reviewed_compact_min_axis_pixels()
+            } else {
+                alignment.max(64)
+            },
+            min_height: if h3_compact {
+                crate::minimax_h3::reviewed_compact_min_axis_pixels()
+            } else {
+                alignment.max(64)
+            },
+            // The compact stack's ceilings come from its own canvas rule. The
+            // family constants are the *official* BF16 ladder's headroom and
+            // sit above the compact area ceiling, which lets a client that
+            // reads the ceiling offer a size admission refuses.
             max_pixels: if h3_compact {
                 crate::minimax_h3::reviewed_compact_max_pixels()
             } else {
@@ -1099,12 +1112,9 @@ fn recipe(
             // Wan's buckets are the trained sizes, not the only runnable
             // ones — a deliberate off-bucket request is admitted and the
             // advisory warning channel says results may vary. H3's compact
-            // bucket is the only size its admission accepts, so it refuses.
-            off_bucket: if h3_compact {
-                Some(OffBucketPolicy::Reject)
-            } else {
-                (family == "wan").then_some(OffBucketPolicy::Warn)
-            },
+            // presets are recommendations on a continuous range, so there is
+            // no off-bucket question to answer at all.
+            off_bucket: (family == "wan").then_some(OffBucketPolicy::Warn),
             aspect_groups: aspect_groups(family, &dimensions),
         }
     };
@@ -1121,13 +1131,22 @@ fn recipe(
     let effective_guidance = guidance_caps.fixed_scale.unwrap_or(input.default_guidance);
     let mut temporal = temporal_profile(input, family);
     if let Some(temporal) = temporal.as_mut().filter(|_| h3_compact) {
+        // The compact stack takes the FAMILY frame grid. It was pinned to one
+        // clip length because the runtime envelope validated `frames` by
+        // equality; the envelope is now minted per request and the memory
+        // estimate refuses what does not fit.
         temporal.frames = IntegerControl {
-            default: crate::minimax_h3::REVIEWED_COMPACT_FRAMES,
-            min: crate::minimax_h3::REVIEWED_COMPACT_FRAMES,
-            max: crate::minimax_h3::REVIEWED_COMPACT_FRAMES,
+            default: crate::minimax_h3::DEFAULT_COMPACT_FRAMES,
+            min: crate::minimax_h3::MIN_FRAMES,
+            max: crate::minimax_h3::MAX_FRAMES,
             step: crate::minimax_h3::FRAME_STEP,
-            recommended: vec![crate::minimax_h3::REVIEWED_COMPACT_FRAMES],
-            mode: ControlMode::Fixed,
+            recommended: vec![
+                crate::minimax_h3::MIN_FRAMES,
+                crate::minimax_h3::DEFAULT_COMPACT_FRAMES,
+                226,
+                crate::minimax_h3::MAX_FRAMES,
+            ],
+            mode: ControlMode::Adjustable,
         };
     }
     let flux2_dev = family == "flux2"
@@ -1233,17 +1252,19 @@ fn recipe(
         resolution,
         steps: IntegerControl {
             default: default_steps,
-            min: if h3_compact {
-                h3_compact_steps
-            } else if family == "minimax-h3" {
-                2
-            } else {
-                1
+            min: match (h3_compact_turbo_steps, family) {
+                (Some(steps), _) => steps,
+                (None, "minimax-h3") => crate::minimax_h3::COMPACT_MIN_STEPS,
+                _ => 1,
             },
-            max: if h3_compact { h3_compact_steps } else { 100 },
+            max: match (h3_compact_turbo_steps, h3_compact) {
+                (Some(steps), _) => steps,
+                (None, true) => crate::minimax_h3::COMPACT_MAX_STEPS,
+                (None, false) => 100,
+            },
             step: 1,
             recommended: vec![default_steps],
-            mode: if h3_compact {
+            mode: if h3_compact_turbo_steps.is_some() {
                 ControlMode::Fixed
             } else {
                 ControlMode::Adjustable
@@ -2195,6 +2216,7 @@ mod tests {
             (crate::minimax_h3::FL2VA_COMFY_TURBO_8STEP, 9),
             (crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P, 5),
         ] {
+            let turbo = crate::minimax_h3::turbo_tier_for_model(model).is_some();
             let mut h3_input = input(model, "minimax-h3");
             h3_input.default_width = 768;
             h3_input.default_height = 768;
@@ -2204,14 +2226,28 @@ mod tests {
             let profile = resolve_generation_profile(h3_input);
             let recipe = profile.default_recipe().unwrap();
 
+            // The compact stack is a RANGE, not a bucket set: any 32-aligned
+            // canvas inside its area ceiling is admitted and the memory
+            // estimate decides what fits.
             assert_eq!(
                 recipe.resolution.domain,
-                ResolutionDomain::Buckets,
+                ResolutionDomain::Dynamic,
+                "{model}"
+            );
+            assert_eq!(recipe.resolution.off_bucket, None, "{model}");
+            assert_eq!(
+                recipe.resolution.alignment,
+                crate::minimax_h3::VIDEO_ROW_STRIDE,
                 "{model}"
             );
             assert_eq!(
-                recipe.resolution.off_bucket,
-                Some(OffBucketPolicy::Reject),
+                recipe.resolution.min_width,
+                crate::minimax_h3::MIN_COMPACT_AXIS_PIXELS,
+                "{model}"
+            );
+            assert_eq!(
+                recipe.resolution.min_height,
+                crate::minimax_h3::MIN_COMPACT_AXIS_PIXELS,
                 "{model}"
             );
             let presets = recipe
@@ -2221,10 +2257,18 @@ mod tests {
                 .flat_map(|group| &group.presets)
                 .map(|preset| (preset.width, preset.height))
                 .collect::<Vec<_>>();
-            assert_eq!(
-                presets,
-                crate::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec(),
-                "{model}: the buckets are exactly the canvases a campaign qualified"
+            for preset in &presets {
+                assert!(
+                    crate::minimax_h3::is_admitted_compact_canvas(preset.0, preset.1),
+                    "{model}: recommended {preset:?} must satisfy the canvas rule"
+                );
+            }
+            assert!(
+                presets.contains(&(
+                    crate::minimax_h3::DEFAULT_WIDTH,
+                    crate::minimax_h3::DEFAULT_HEIGHT
+                )),
+                "{model}"
             );
             assert_eq!(
                 recipe.resolution.max_pixels,
@@ -2242,31 +2286,52 @@ mod tests {
             assert_eq!(recipe.defaults.steps, steps, "{model}");
             assert_eq!(
                 recipe.defaults.frames,
-                Some(crate::minimax_h3::REVIEWED_COMPACT_FRAMES),
+                Some(crate::minimax_h3::DEFAULT_COMPACT_FRAMES),
                 "{model}"
             );
 
-            assert_eq!(recipe.steps.mode, ControlMode::Fixed, "{model}");
-            assert_eq!(recipe.steps.min, steps, "{model}");
-            assert_eq!(recipe.steps.max, steps, "{model}");
+            // A Turbo tier's step count is the distilled adapter's own
+            // schedule length and stays fixed; the base tag takes a range.
+            if turbo {
+                assert_eq!(recipe.steps.mode, ControlMode::Fixed, "{model}");
+                assert_eq!(recipe.steps.min, steps, "{model}");
+                assert_eq!(recipe.steps.max, steps, "{model}");
+            } else {
+                assert_eq!(recipe.steps.mode, ControlMode::Adjustable, "{model}");
+                assert_eq!(
+                    recipe.steps.min,
+                    crate::minimax_h3::COMPACT_MIN_STEPS,
+                    "{model}"
+                );
+                assert_eq!(
+                    recipe.steps.max,
+                    crate::minimax_h3::COMPACT_MAX_STEPS,
+                    "{model}"
+                );
+            }
             assert_eq!(recipe.steps.default, steps, "{model}");
             assert_eq!(recipe.steps.recommended, vec![steps], "{model}");
 
             let temporal = recipe.temporal.as_ref().unwrap();
-            assert_eq!(temporal.frames.mode, ControlMode::Fixed, "{model}");
+            assert_eq!(temporal.frames.mode, ControlMode::Adjustable, "{model}");
             assert_eq!(
                 temporal.frames.min,
-                crate::minimax_h3::REVIEWED_COMPACT_FRAMES,
+                crate::minimax_h3::MIN_FRAMES,
                 "{model}"
             );
             assert_eq!(
                 temporal.frames.max,
-                crate::minimax_h3::REVIEWED_COMPACT_FRAMES,
+                crate::minimax_h3::MAX_FRAMES,
+                "{model}"
+            );
+            assert_eq!(
+                temporal.frames.step,
+                crate::minimax_h3::FRAME_STEP,
                 "{model}"
             );
             assert_eq!(
                 temporal.frames.default,
-                crate::minimax_h3::REVIEWED_COMPACT_FRAMES,
+                crate::minimax_h3::DEFAULT_COMPACT_FRAMES,
                 "{model}"
             );
 
@@ -2278,44 +2343,56 @@ mod tests {
             request.output_format = Some(OutputFormat::Mp4);
             validate_request_against_generation_profile(&profile, &request).unwrap();
 
-            // Every reviewed canvas is submittable, not only the default.
+            // Every recommended canvas is submittable, and so is a canvas no
+            // campaign ran that the rule admits.
             for &(width, height) in crate::minimax_h3::REVIEWED_COMPACT_CANVASES {
                 let mut reviewed = request_for(&profile, width, height);
                 reviewed.output_format = Some(OutputFormat::Mp4);
                 validate_request_against_generation_profile(&profile, &reviewed)
                     .unwrap_or_else(|error| panic!("{model} {width}x{height}: {error}"));
             }
-
-            // 1024x768 is a canonical resolver output the model itself would
-            // accept, and no campaign has run it, so the bucket policy must
-            // still refuse it.
-            let off_bucket = request_for(&profile, 1024, 768);
+            for (width, height) in [(1024, 768), (1024, 576), (512, 1984)] {
+                let mut off_preset = request_for(&profile, width, height);
+                off_preset.output_format = Some(OutputFormat::Mp4);
+                validate_request_against_generation_profile(&profile, &off_preset)
+                    .unwrap_or_else(|error| panic!("{model} {width}x{height}: {error}"));
+            }
+            // Over the area ceiling is still refused, by the ceiling.
+            let mut too_large = request_for(&profile, 1056, 992);
+            too_large.output_format = Some(OutputFormat::Mp4);
             assert!(
-                validate_request_against_generation_profile(&profile, &off_bucket)
-                    .unwrap_err()
-                    .contains("not an available bucket"),
+                validate_request_against_generation_profile(&profile, &too_large).is_err(),
+                "{model}"
+            );
+
+            // Another clip length on the family grid is submittable now.
+            let mut longer = request.clone();
+            longer.frames =
+                Some(crate::minimax_h3::DEFAULT_COMPACT_FRAMES + crate::minimax_h3::FRAME_STEP);
+            validate_request_against_generation_profile(&profile, &longer)
+                .unwrap_or_else(|error| panic!("{model}: {error}"));
+            let mut off_grid = request.clone();
+            off_grid.frames = Some(crate::minimax_h3::DEFAULT_COMPACT_FRAMES + 1);
+            assert!(
+                validate_request_against_generation_profile(&profile, &off_grid).is_err(),
                 "{model}"
             );
 
             let mut wrong_steps = request.clone();
             wrong_steps.steps = 30;
+            let outcome = validate_request_against_generation_profile(&profile, &wrong_steps);
+            if turbo {
+                assert!(
+                    outcome.unwrap_err().contains("steps is fixed at"),
+                    "{model}"
+                );
+            } else {
+                outcome.unwrap_or_else(|error| panic!("{model}: {error}"));
+            }
+            let mut too_many_steps = request.clone();
+            too_many_steps.steps = crate::minimax_h3::COMPACT_MAX_STEPS + 1;
             assert!(
-                validate_request_against_generation_profile(&profile, &wrong_steps)
-                    .unwrap_err()
-                    .contains("steps is fixed at"),
-                "{model}"
-            );
-
-            let mut wrong_frames = request.clone();
-            wrong_frames.frames =
-                Some(crate::minimax_h3::REVIEWED_COMPACT_FRAMES + crate::minimax_h3::FRAME_STEP);
-            assert!(
-                validate_request_against_generation_profile(&profile, &wrong_frames)
-                    .unwrap_err()
-                    .contains(&format!(
-                        "frames is fixed at {}",
-                        crate::minimax_h3::REVIEWED_COMPACT_FRAMES
-                    )),
+                validate_request_against_generation_profile(&profile, &too_many_steps).is_err(),
                 "{model}"
             );
         }

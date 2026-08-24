@@ -4995,12 +4995,11 @@ mod tests {
     }
 
     /// A source image without explicit dims must not bend a compact H3
-    /// request off the reviewed envelope: admission validates membership in
-    /// the reviewed canvas set, and the engine fits the source into whichever
-    /// one the request names. Within the set the source's aspect chooses, so
-    /// a square source lands on the square canvas rather than being
-    /// letterboxed into the 7:4 default. The hidden official BF16 reference
-    /// keeps its flexible aspect-derived canvas.
+    /// request off its canvas rule: admission validates alignment, the area
+    /// ceiling, the axis floor, and the aspect bounds. Inside that the
+    /// source's own aspect wins, so a square source stays square rather than
+    /// being letterboxed into the 7:4 default. The hidden official BF16
+    /// reference keeps its short-edge/area resolver.
     #[test]
     fn h3_source_image_keeps_the_compact_envelope() {
         let config = Config::default();
@@ -5029,14 +5028,14 @@ mod tests {
                     None
                 )
                 .unwrap(),
-                // A square source now lands on the square reviewed canvas
-                // instead of being letterboxed into the 7:4 default.
-                (768, 768),
+                // A square source stays square, at the largest square the
+                // compact area ceiling admits.
+                (992, 992),
                 "{model}"
             );
         }
 
-        // A 16:9 source keeps the historical default canvas.
+        // A 16:9 source renders 16:9 rather than the 7:4 default.
         let mut landscape = Vec::new();
         image::DynamicImage::ImageRgb8(image::RgbImage::new(1920, 1080))
             .write_to(
@@ -5056,10 +5055,7 @@ mod tests {
                 None
             )
             .unwrap(),
-            (
-                mold_core::minimax_h3::DEFAULT_WIDTH,
-                mold_core::minimax_h3::DEFAULT_HEIGHT
-            )
+            (1312, 736)
         );
 
         assert_eq!(

@@ -418,8 +418,8 @@ pub fn max_frames_for_family(family: &str) -> Option<u32> {
 /// a profile that fixes 124 — a size the user was told would work and the
 /// engine refuses after the load is paid for.
 pub fn max_frames_for_model_at_fps(family: &str, model: &str, fps: u32) -> Option<u32> {
-    if crate::minimax_h3::uses_reviewed_compact_envelope(family, model) {
-        return Some(crate::minimax_h3::REVIEWED_COMPACT_FRAMES);
+    if let Some(fixed) = crate::minimax_h3::fixed_frames_for_model(family, model) {
+        return Some(fixed);
     }
     max_frames_for_family_at_fps(family, fps)
 }
@@ -427,8 +427,8 @@ pub fn max_frames_for_model_at_fps(family: &str, model: &str, fps: u32) -> Optio
 /// [`max_frames_absolute_for_family`], narrowed by the concrete model. See
 /// [`max_frames_for_model_at_fps`] for why the H3 answer is per layout.
 pub fn max_frames_absolute_for_model(family: &str, model: &str) -> Option<u32> {
-    if crate::minimax_h3::uses_reviewed_compact_envelope(family, model) {
-        return Some(crate::minimax_h3::REVIEWED_COMPACT_FRAMES);
+    if let Some(fixed) = crate::minimax_h3::fixed_frames_for_model(family, model) {
+        return Some(fixed);
     }
     max_frames_absolute_for_family(family)
 }
@@ -441,13 +441,13 @@ pub fn min_frames_for_family(family: &str) -> Option<u32> {
 
 /// [`min_frames_for_family`], narrowed by the concrete model.
 ///
-/// The reviewed compact runtime renders exactly one clip length, so its floor
-/// and its ceiling are the same number. Answering the family floor here would
-/// pair a `min_frames` of 107 with a `max_frames` of 124 on a row whose
-/// profile fixes both at 124.
+/// A layout that renders exactly one clip length has the same floor and
+/// ceiling; every H3 layout takes the family grid today, so this answers the
+/// family floor. The narrowing survives because the row's floor and ceiling
+/// must always come from the same authority as its profile's frames control.
 pub fn min_frames_for_model(family: &str, model: &str) -> Option<u32> {
-    if crate::minimax_h3::uses_reviewed_compact_envelope(family, model) {
-        return Some(crate::minimax_h3::REVIEWED_COMPACT_FRAMES);
+    if let Some(fixed) = crate::minimax_h3::fixed_frames_for_model(family, model) {
+        return Some(fixed);
     }
     min_frames_for_family(family)
 }

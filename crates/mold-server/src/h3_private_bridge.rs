@@ -607,6 +607,19 @@ fn reviewed_h3_private_generation_profile() -> Option<(mold_core::GenerationProf
     )
 }
 
+/// Whether THIS BUILD's H3 runtime authenticates a stored qualification
+/// record rather than minting one per request.
+///
+/// A private-UAT build without the public `h3` feature reads a record file
+/// (FL2VA) or the compiled capture-scope profile (Ref2VA), each pinning one
+/// canvas, one clip length, and one step count by equality. Everything it
+/// advertises must be those exact values; the public runtime mints its
+/// envelope from the request and advertises the whole compact rule.
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
+const fn private_h3_record_runtime() -> bool {
+    cfg!(feature = "h3-private-uat") && !cfg!(feature = "h3")
+}
+
 /// The reviewed single-quality-point profile for one compact FL2VA identity.
 /// A Turbo tag renders the same canvas/duration envelope; the only axis its
 /// reviewed tier moves is the fixed step count.
@@ -642,22 +655,66 @@ fn reviewed_h3_private_generation_profile_for(
         ) == Some(true),
     });
     let recipe = profile.recipes.first_mut()?;
-    // Every ceiling is the widest of the reviewed canvases, and the aspect
-    // bounds span them, so a client that reads a ceiling rather than the
-    // bucket list is never handed a number smaller than a bucket it is being
-    // offered. `mold_core::minimax_h3` is the one authority for the set.
-    let reviewed_canvases = mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES;
-    let pixels = mold_core::minimax_h3::reviewed_compact_max_pixels();
-    let (min_aspect, max_aspect) = mold_core::minimax_h3::reviewed_compact_aspect_bounds();
-    let min_axis = mold_core::minimax_h3::reviewed_compact_min_axis_pixels();
-    recipe.resolution.domain = ResolutionDomain::Buckets;
-    // The reviewed diffusers runtime refuses off-bucket shapes outright.
-    recipe.resolution.off_bucket = Some(mold_core::generation_profile::OffBucketPolicy::Reject);
-    recipe.resolution.min_width = min_axis;
-    recipe.resolution.min_height = min_axis;
+    // WHICH RUNTIME IS BEHIND THIS ROW decides what it may advertise, and the
+    // two differ on EVERY axis — spatial included.
+    //
+    // The public `h3` runtime MINTS its qualification envelope from the
+    // request (`private_server::public_runtime_envelope_for_shape`), so it
+    // admits the whole compact canvas rule, the family frame grid, and the
+    // base tier's step range.
+    //
+    // A private-UAT build without `h3` authenticates a STORED qualification
+    // record instead, and that record pins one canvas, one clip length, and
+    // one step count by equality — `precheck_private_h3_record_canvas` refuses
+    // anything else before the artifact pass and
+    // `validate_prepared_with_adapter` refuses it again afterwards. Advertising
+    // a range there would offer sizes that runtime cannot accept, which is
+    // exactly the advertise-one-thing-enforce-another split this profile
+    // exists to prevent. So it keeps the record's own fixed shape: ONE
+    // recommended canvas, and ceilings that are that canvas's own numbers.
+    let private_record_runtime = private_h3_record_runtime();
+    // The record's canvas is the same `width`/`height` this profile defaults
+    // to, which is what `capture_runtime_envelope` and the reviewed FL2VA
+    // record both carry.
+    let record_canvas = [(width, height)];
+    let reviewed_canvases: &[(u32, u32)] = if private_record_runtime {
+        &record_canvas
+    } else {
+        mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES
+    };
+    let pixels = if private_record_runtime {
+        u64::from(width) * u64::from(height)
+    } else {
+        mold_core::minimax_h3::reviewed_compact_max_pixels()
+    };
+    let max_axis = if private_record_runtime {
+        width.max(height)
+    } else {
+        mold_core::minimax_h3::reviewed_compact_max_axis_pixels()
+    };
+    let (min_aspect, max_aspect) = if private_record_runtime {
+        let aspect = f64::from(width) / f64::from(height);
+        (aspect, aspect)
+    } else {
+        mold_core::minimax_h3::reviewed_compact_aspect_bounds()
+    };
+    if private_record_runtime {
+        recipe.resolution.domain = ResolutionDomain::Buckets;
+        recipe.resolution.off_bucket = Some(mold_core::generation_profile::OffBucketPolicy::Reject);
+        recipe.resolution.min_width = width;
+        recipe.resolution.min_height = height;
+    } else {
+        // A RANGE, not a bucket set: the compact runtime admits any aligned
+        // canvas inside its area ceiling and the memory estimate decides what
+        // fits.
+        recipe.resolution.domain = ResolutionDomain::Dynamic;
+        recipe.resolution.off_bucket = None;
+        let min_axis = mold_core::minimax_h3::reviewed_compact_min_axis_pixels();
+        recipe.resolution.min_width = min_axis;
+        recipe.resolution.min_height = min_axis;
+    }
     recipe.resolution.max_pixels = pixels;
-    recipe.resolution.max_axis_pixels =
-        Some(mold_core::minimax_h3::reviewed_compact_max_axis_pixels());
+    recipe.resolution.max_axis_pixels = Some(max_axis);
     recipe.resolution.min_aspect_ratio = Some(min_aspect);
     recipe.resolution.max_aspect_ratio = Some(max_aspect);
     // Keep the generated profile's canonical reduced-ratio identities (`7:4`
@@ -684,21 +741,51 @@ fn reviewed_h3_private_generation_profile_for(
         return None;
     }
     recipe.resolution.aspect_groups = reviewed_groups;
+    // A Turbo tier's step count is its distilled adapter's own schedule
+    // length and stays fixed; the base tier takes the compact range, unless a
+    // stored record is the authority (above), which pins one count.
+    let fixed_steps =
+        private_record_runtime || mold_core::minimax_h3::turbo_tier_for_model(model).is_some();
     recipe.steps.default = steps;
-    recipe.steps.min = steps;
-    recipe.steps.max = steps;
+    recipe.steps.min = if fixed_steps {
+        steps
+    } else {
+        mold_core::minimax_h3::COMPACT_MIN_STEPS
+    };
+    recipe.steps.max = if fixed_steps {
+        steps
+    } else {
+        mold_core::minimax_h3::COMPACT_MAX_STEPS
+    };
     recipe.steps.step = 1;
     recipe.steps.recommended = vec![steps];
-    recipe.steps.mode = ControlMode::Fixed;
+    recipe.steps.mode = if fixed_steps {
+        ControlMode::Fixed
+    } else {
+        ControlMode::Adjustable
+    };
     let temporal = recipe.temporal.as_mut()?;
     temporal.frames.default = frames;
-    temporal.frames.min = frames;
-    temporal.frames.max = frames;
-    temporal.frames.step = 1;
-    temporal.frames.recommended = vec![frames];
-    temporal.frames.mode = ControlMode::Fixed;
+    if private_record_runtime {
+        temporal.frames.min = frames;
+        temporal.frames.max = frames;
+        temporal.frames.step = 1;
+        temporal.frames.recommended = vec![frames];
+        temporal.frames.mode = ControlMode::Fixed;
+        temporal.max_duration_seconds = Some(frames.div_ceil(fps));
+    } else {
+        temporal.frames.min = mold_core::minimax_h3::MIN_FRAMES;
+        temporal.frames.max = mold_core::minimax_h3::MAX_FRAMES;
+        temporal.frames.step = mold_core::minimax_h3::FRAME_STEP;
+        temporal.frames.recommended = vec![
+            mold_core::minimax_h3::MIN_FRAMES,
+            frames,
+            mold_core::minimax_h3::MAX_FRAMES,
+        ];
+        temporal.frames.mode = ControlMode::Adjustable;
+        temporal.max_duration_seconds = Some(mold_core::minimax_h3::MAX_FRAMES.div_ceil(fps));
+    }
     temporal.fps = FpsControl::Fixed { value: fps };
-    temporal.max_duration_seconds = Some(frames.div_ceil(fps));
     recipe.defaults.width = width;
     recipe.defaults.height = height;
     recipe.defaults.steps = steps;
@@ -868,24 +955,69 @@ fn h3_model_row(
             description: description.into(),
             default_frames: Some(request.frames),
             default_fps: Some(request.fps),
-            min_frames: Some(request.frames),
-            max_frames: Some(request.frames),
-            max_runtime_seconds: Some(request.frames.div_ceil(request.fps)),
-            max_frames_absolute: Some(request.frames),
-            frame_step: Some(1),
-            frame_offset: Some(0),
+            // The compact stack takes the FAMILY frame grid; `request.frames`
+            // is the default clip length, not a ceiling. A private-UAT build
+            // without `h3` authenticates a stored record that pins one clip
+            // length, so its row must say so — same rule as the profile above.
+            min_frames: Some(if private_h3_record_runtime() {
+                request.frames
+            } else {
+                mold_core::minimax_h3::MIN_FRAMES
+            }),
+            max_frames: Some(if private_h3_record_runtime() {
+                request.frames
+            } else {
+                mold_core::minimax_h3::MAX_FRAMES
+            }),
+            max_runtime_seconds: Some(if private_h3_record_runtime() {
+                request.frames.div_ceil(request.fps)
+            } else {
+                mold_core::minimax_h3::MAX_DURATION_SECONDS
+            }),
+            max_frames_absolute: Some(if private_h3_record_runtime() {
+                request.frames
+            } else {
+                mold_core::minimax_h3::MAX_FRAMES
+            }),
+            frame_step: Some(if private_h3_record_runtime() {
+                1
+            } else {
+                mold_core::minimax_h3::FRAME_STEP
+            }),
+            frame_offset: Some(if private_h3_record_runtime() {
+                0
+            } else {
+                mold_core::minimax_h3::FRAME_OFFSET
+            }),
+            // `pixels` already follows the runtime (it comes from the
+            // profile builder), and the two spatial fields the row states on
+            // its own follow it the same way: a stored-record build admits
+            // exactly `request`'s canvas, so the ceiling it advertises is
+            // that canvas's own, not the compact rule's.
             max_pixels: Some(pixels),
-            max_axis_pixels: Some(mold_core::minimax_h3::reviewed_compact_max_axis_pixels()),
+            max_axis_pixels: Some(if private_h3_record_runtime() {
+                request.width.max(request.height)
+            } else {
+                mold_core::minimax_h3::reviewed_compact_max_axis_pixels()
+            }),
             default_negative_prompt: None,
-            // Every canvas a hardware campaign qualified, default first — the
-            // same slice the bucket profile above advertises. A row that
-            // named only the default let a client that reads
-            // `recommended_dimensions` rather than the profile offer one
-            // size while the profile offered two.
-            recommended_dimensions: mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES
-                .iter()
-                .map(|&(width, height)| mold_core::RecommendedDimensions { width, height })
-                .collect(),
+            // The recommended canvases, default first — the same slice the
+            // profile above advertises as presets. A row that named only the
+            // default let a client that reads `recommended_dimensions` rather
+            // than the profile offer one size while the profile offered
+            // several; a stored-record build is the case where one really is
+            // all there is.
+            recommended_dimensions: if private_h3_record_runtime() {
+                vec![mold_core::RecommendedDimensions {
+                    width: request.width,
+                    height: request.height,
+                }]
+            } else {
+                mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES
+                    .iter()
+                    .map(|&(width, height)| mold_core::RecommendedDimensions { width, height })
+                    .collect()
+            },
             dimension_alignment: Some(alignment),
         },
         downloaded: true,
@@ -1771,9 +1903,10 @@ fn validate_private_h3_live_owner_route(
 
 #[cfg(test)]
 mod presentation_tests {
-    /// The advertised buckets are exactly the canvases `mold_core` records as
-    /// reviewed — one aspect group each, keeping the profile's canonical
-    /// reduced-ratio identity (`7:4` for 1344x768, `1:1` for 768x768).
+    /// The advertised presets are exactly the canvases `mold_core`
+    /// recommends, grouped by their canonical reduced-ratio identity (`7:4`
+    /// for 1344x768, `1:1` for the squares). They are RECOMMENDATIONS on a
+    /// continuous range, not a bucket set.
     #[test]
     fn reviewed_profile_keeps_the_canonical_exact_aspect_identity() {
         let (profile, _, pixels) = super::reviewed_h3_private_generation_profile()
@@ -1787,10 +1920,42 @@ mod presentation_tests {
             .flat_map(|group| group.presets.iter())
             .map(|preset| (preset.width, preset.height))
             .collect::<Vec<_>>();
-        assert_eq!(
-            advertised,
+        // Order follows the aspect grouping, so compare as sets. A
+        // stored-record build advertises the record's canvas alone.
+        let mut sorted = advertised.clone();
+        sorted.sort_unstable();
+        let mut expected = if super::private_h3_record_runtime() {
+            vec![(
+                mold_core::minimax_h3::DEFAULT_WIDTH,
+                mold_core::minimax_h3::DEFAULT_HEIGHT,
+            )]
+        } else {
             mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec()
+        };
+        expected.sort_unstable();
+        assert_eq!(sorted, expected);
+        // The default canvas still leads.
+        assert_eq!(
+            advertised.first().copied(),
+            Some((
+                mold_core::minimax_h3::DEFAULT_WIDTH,
+                mold_core::minimax_h3::DEFAULT_HEIGHT
+            ))
         );
+        // A range, not a bucket set — unless a stored record is this
+        // build's authority, which pins one canvas by equality.
+        if super::private_h3_record_runtime() {
+            assert_eq!(
+                recipe.resolution.domain,
+                mold_core::generation_profile::ResolutionDomain::Buckets
+            );
+        } else {
+            assert_eq!(
+                recipe.resolution.domain,
+                mold_core::generation_profile::ResolutionDomain::Dynamic
+            );
+            assert_eq!(recipe.resolution.off_bucket, None);
+        }
         for group in &recipe.resolution.aspect_groups {
             assert_eq!(group.id, group.label);
             for preset in &group.presets {
@@ -1804,12 +1969,16 @@ mod presentation_tests {
                 .iter()
                 .map(|group| group.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["7:4", "1:1"]
+            if super::private_h3_record_runtime() {
+                vec!["7:4"]
+            } else {
+                vec!["7:4", "20:11", "16:9", "1:1", "4:7", "11:20"]
+            }
         );
 
-        // Every ceiling spans the whole set, so a client that reads a ceiling
-        // rather than the bucket list is never handed a number smaller than a
-        // bucket it is being offered.
+        // Every ceiling is the canvas RULE's own, so a client that reads a
+        // ceiling rather than the preset list is never handed a number
+        // smaller than a canvas admission accepts.
         assert_eq!(pixels, mold_core::minimax_h3::reviewed_compact_max_pixels());
         assert_eq!(recipe.resolution.max_pixels, pixels);
         assert_eq!(
@@ -1831,6 +2000,192 @@ mod presentation_tests {
             recipe.defaults.height,
             mold_core::minimax_h3::DEFAULT_HEIGHT
         );
+
+        // The frame and step axes are ranges for the base tier, on the
+        // per-request-minted runtime. The defaults hold either way.
+        let temporal = recipe.temporal.as_ref().expect("a temporal block");
+        assert_eq!(
+            temporal.frames.default,
+            mold_core::minimax_h3::DEFAULT_COMPACT_FRAMES
+        );
+        assert_eq!(
+            recipe.steps.default,
+            mold_core::minimax_h3::COMFY_DEFAULT_STEPS
+        );
+        if !super::private_h3_record_runtime() {
+            assert_eq!(temporal.frames.min, mold_core::minimax_h3::MIN_FRAMES);
+            assert_eq!(temporal.frames.max, mold_core::minimax_h3::MAX_FRAMES);
+            assert_eq!(temporal.frames.step, mold_core::minimax_h3::FRAME_STEP);
+            assert_eq!(
+                temporal.frames.mode,
+                mold_core::generation_profile::ControlMode::Adjustable
+            );
+            assert_eq!(recipe.steps.min, mold_core::minimax_h3::COMPACT_MIN_STEPS);
+            assert_eq!(recipe.steps.max, mold_core::minimax_h3::COMPACT_MAX_STEPS);
+            assert_eq!(
+                recipe.steps.mode,
+                mold_core::generation_profile::ControlMode::Adjustable
+            );
+        }
+    }
+
+    /// What the row advertises must match WHICH RUNTIME is behind it.
+    ///
+    /// The public `h3` runtime mints its qualification envelope per request,
+    /// so it may advertise the whole compact rule. A private-UAT build without
+    /// `h3` authenticates a STORED record that pins one canvas, one clip
+    /// length, and one step count by equality — `precheck_private_h3_record_
+    /// canvas` refuses anything else before the ~37 GB artifact pass — so it
+    /// must advertise exactly those. One predicate answers for both, and this
+    /// test asserts the arm this build actually compiled.
+    #[test]
+    fn the_advertised_profile_matches_this_build_s_runtime_authority() {
+        let (profile, _, pixels) = super::reviewed_h3_private_generation_profile()
+            .expect("the reviewed H3 profile must resolve");
+        let recipe = profile.default_recipe().expect("one reviewed recipe");
+        let temporal = recipe.temporal.as_ref().expect("a temporal block");
+        let presets = recipe
+            .resolution
+            .aspect_groups
+            .iter()
+            .flat_map(|group| group.presets.iter())
+            .map(|preset| (preset.width, preset.height))
+            .collect::<Vec<_>>();
+        let record = (
+            mold_core::minimax_h3::DEFAULT_WIDTH,
+            mold_core::minimax_h3::DEFAULT_HEIGHT,
+        );
+
+        if super::private_h3_record_runtime() {
+            // A stored record is the authority: every axis is its own value,
+            // SPATIAL included. `precheck_private_h3_record_canvas` accepts
+            // only the record's exact canvas, so advertising the compact
+            // rule's ceilings would offer sizes it refuses.
+            assert_eq!(presets, vec![record]);
+            assert_eq!(pixels, u64::from(record.0) * u64::from(record.1));
+            assert_eq!(recipe.resolution.max_pixels, pixels);
+            assert_eq!(
+                recipe.resolution.max_axis_pixels,
+                Some(record.0.max(record.1))
+            );
+            assert_eq!(recipe.resolution.min_width, record.0);
+            assert_eq!(recipe.resolution.min_height, record.1);
+            let aspect = f64::from(record.0) / f64::from(record.1);
+            assert_eq!(recipe.resolution.min_aspect_ratio, Some(aspect));
+            assert_eq!(recipe.resolution.max_aspect_ratio, Some(aspect));
+            assert_eq!(
+                recipe.resolution.domain,
+                mold_core::generation_profile::ResolutionDomain::Buckets
+            );
+            assert_eq!(
+                recipe.resolution.off_bucket,
+                Some(mold_core::generation_profile::OffBucketPolicy::Reject)
+            );
+            assert_eq!(
+                temporal.frames.mode,
+                mold_core::generation_profile::ControlMode::Fixed
+            );
+            assert_eq!(
+                temporal.frames.min,
+                mold_core::minimax_h3::DEFAULT_COMPACT_FRAMES
+            );
+            assert_eq!(
+                temporal.frames.max,
+                mold_core::minimax_h3::DEFAULT_COMPACT_FRAMES
+            );
+            assert_eq!(
+                recipe.steps.mode,
+                mold_core::generation_profile::ControlMode::Fixed
+            );
+            assert_eq!(recipe.steps.min, recipe.steps.max);
+            assert_eq!(recipe.steps.min, mold_core::minimax_h3::COMFY_DEFAULT_STEPS);
+        } else {
+            // The per-request-minted runtime: the whole compact rule.
+            let mut sorted = presets.clone();
+            sorted.sort_unstable();
+            let mut expected = mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec();
+            expected.sort_unstable();
+            assert_eq!(sorted, expected);
+            assert_eq!(pixels, mold_core::minimax_h3::reviewed_compact_max_pixels());
+            assert_eq!(recipe.resolution.max_pixels, pixels);
+            assert_eq!(
+                recipe.resolution.max_axis_pixels,
+                Some(mold_core::minimax_h3::reviewed_compact_max_axis_pixels())
+            );
+            assert_eq!(
+                recipe.resolution.min_width,
+                mold_core::minimax_h3::MIN_COMPACT_AXIS_PIXELS
+            );
+            assert_eq!(
+                recipe.resolution.min_height,
+                mold_core::minimax_h3::MIN_COMPACT_AXIS_PIXELS
+            );
+            let (min_aspect, max_aspect) = mold_core::minimax_h3::reviewed_compact_aspect_bounds();
+            assert_eq!(recipe.resolution.min_aspect_ratio, Some(min_aspect));
+            assert_eq!(recipe.resolution.max_aspect_ratio, Some(max_aspect));
+            assert_eq!(
+                recipe.resolution.domain,
+                mold_core::generation_profile::ResolutionDomain::Dynamic
+            );
+            assert_eq!(recipe.resolution.off_bucket, None);
+            assert_eq!(
+                temporal.frames.mode,
+                mold_core::generation_profile::ControlMode::Adjustable
+            );
+            assert_eq!(temporal.frames.min, mold_core::minimax_h3::MIN_FRAMES);
+            assert_eq!(temporal.frames.max, mold_core::minimax_h3::MAX_FRAMES);
+            assert_eq!(
+                recipe.steps.mode,
+                mold_core::generation_profile::ControlMode::Adjustable
+            );
+            assert_eq!(recipe.steps.min, mold_core::minimax_h3::COMPACT_MIN_STEPS);
+            assert_eq!(recipe.steps.max, mold_core::minimax_h3::COMPACT_MAX_STEPS);
+        }
+    }
+
+    /// The predicate itself: a private-UAT build without public `h3` is the
+    /// only configuration whose authority is a stored record.
+    #[test]
+    fn only_a_private_uat_build_without_h3_reads_a_stored_record() {
+        assert_eq!(
+            super::private_h3_record_runtime(),
+            cfg!(feature = "h3-private-uat") && !cfg!(feature = "h3")
+        );
+        if cfg!(feature = "h3") {
+            assert!(!super::private_h3_record_runtime());
+        }
+    }
+
+    /// A Turbo tier's step count IS its distilled adapter's schedule length,
+    /// so it stays a fixed control while the base tier's became a range.
+    #[test]
+    fn a_turbo_tier_keeps_its_exact_step_count() {
+        for tier in mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS {
+            let (profile, _, _) =
+                super::reviewed_h3_private_generation_profile_for(tier.model, tier.steps)
+                    .expect("every reviewed Turbo tier resolves a profile");
+            let recipe = profile.default_recipe().expect("one reviewed recipe");
+            assert_eq!(recipe.steps.min, tier.steps, "{}", tier.model);
+            assert_eq!(recipe.steps.max, tier.steps, "{}", tier.model);
+            assert_eq!(recipe.steps.default, tier.steps, "{}", tier.model);
+            assert_eq!(
+                recipe.steps.mode,
+                mold_core::generation_profile::ControlMode::Fixed,
+                "{}",
+                tier.model
+            );
+            // The frame axis is still the family grid: only the step axis is
+            // the adapter's property. A stored-record build pins it instead.
+            let temporal = recipe.temporal.as_ref().expect("a temporal block");
+            if super::private_h3_record_runtime() {
+                assert_eq!(
+                    temporal.frames.max,
+                    mold_core::minimax_h3::DEFAULT_COMPACT_FRAMES
+                );
+            } else {
+                assert_eq!(temporal.frames.max, mold_core::minimax_h3::MAX_FRAMES);
+            }
+        }
     }
 }
 
@@ -2025,57 +2380,107 @@ mod tests {
         let recipe = profile.default_recipe().unwrap();
         assert_eq!(
             recipe.resolution.domain,
-            mold_core::generation_profile::ResolutionDomain::Buckets
+            if super::private_h3_record_runtime() {
+                mold_core::generation_profile::ResolutionDomain::Buckets
+            } else {
+                mold_core::generation_profile::ResolutionDomain::Dynamic
+            }
         );
-        assert_eq!(
-            recipe
-                .resolution
-                .aspect_groups
-                .iter()
-                .flat_map(|group| group.presets.iter())
-                .map(|preset| (preset.width, preset.height))
-                .collect::<Vec<_>>(),
-            mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec()
-        );
-        assert_eq!(recipe.resolution.aspect_groups[0].presets.len(), 1);
+        // Presets are grouped by aspect, so their order is the grouping's;
+        // compare as a set.
+        let mut advertised = recipe
+            .resolution
+            .aspect_groups
+            .iter()
+            .flat_map(|group| group.presets.iter())
+            .map(|preset| (preset.width, preset.height))
+            .collect::<Vec<_>>();
+        advertised.sort_unstable();
+        let mut expected = mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec();
+        expected.sort_unstable();
+        assert_eq!(advertised, expected);
+        // The default canvas leads either way, in its own 7:4 group; only a
+        // stored-record build has that group to itself.
         assert_eq!(recipe.resolution.aspect_groups[0].id, "7:4");
         assert_eq!(recipe.resolution.aspect_groups[0].label, "7:4");
         assert_eq!(recipe.resolution.aspect_groups[0].presets[0].width, 1344);
         assert_eq!(recipe.resolution.aspect_groups[0].presets[0].height, 768);
-        // The row's recommendations are the same set, default first.
-        assert_eq!(
-            row.defaults
-                .recommended_dimensions
-                .iter()
-                .map(|entry| (entry.width, entry.height))
-                .collect::<Vec<_>>(),
-            mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec()
-        );
-        assert_eq!(
-            row.defaults.max_pixels,
-            Some(mold_core::minimax_h3::reviewed_compact_max_pixels())
-        );
-        assert_eq!(
-            row.defaults.max_axis_pixels,
-            Some(mold_core::minimax_h3::reviewed_compact_max_axis_pixels())
-        );
+        if super::private_h3_record_runtime() {
+            assert_eq!(recipe.resolution.aspect_groups.len(), 1);
+            assert_eq!(recipe.resolution.aspect_groups[0].presets.len(), 1);
+        }
+        // The row's spatial metadata follows the same runtime authority as
+        // the profile: a stored-record build admits one canvas, so that is
+        // the only thing it may recommend or bound.
+        let advertised_dimensions = row
+            .defaults
+            .recommended_dimensions
+            .iter()
+            .map(|entry| (entry.width, entry.height))
+            .collect::<Vec<_>>();
+        if super::private_h3_record_runtime() {
+            let record = (
+                mold_core::minimax_h3::DEFAULT_WIDTH,
+                mold_core::minimax_h3::DEFAULT_HEIGHT,
+            );
+            assert_eq!(advertised_dimensions, vec![record]);
+            assert_eq!(
+                row.defaults.max_pixels,
+                Some(u64::from(record.0) * u64::from(record.1))
+            );
+            assert_eq!(row.defaults.max_axis_pixels, Some(record.0.max(record.1)));
+        } else {
+            // The same slice, in order, default first — the row does not
+            // group by aspect.
+            assert_eq!(
+                advertised_dimensions,
+                mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec()
+            );
+            assert_eq!(
+                row.defaults.max_pixels,
+                Some(mold_core::minimax_h3::reviewed_compact_max_pixels())
+            );
+            assert_eq!(
+                row.defaults.max_axis_pixels,
+                Some(mold_core::minimax_h3::reviewed_compact_max_axis_pixels())
+            );
+        }
         assert_eq!(
             recipe.resolution.aspect_groups[0].presets[0].tier,
             "reviewed"
         );
-        assert_eq!(recipe.steps.min, 21);
-        assert_eq!(recipe.steps.max, 21);
-        assert_eq!(
-            recipe.steps.mode,
-            mold_core::generation_profile::ControlMode::Fixed
-        );
+        assert_eq!(recipe.steps.default, 21);
         let temporal = recipe.temporal.as_ref().unwrap();
-        assert_eq!(temporal.frames.min, 124);
-        assert_eq!(temporal.frames.max, 124);
-        assert_eq!(
-            temporal.frames.mode,
-            mold_core::generation_profile::ControlMode::Fixed
-        );
+        assert_eq!(temporal.frames.default, 124);
+        if super::private_h3_record_runtime() {
+            // A stored record pins every axis by equality.
+            assert_eq!(recipe.steps.min, 21);
+            assert_eq!(recipe.steps.max, 21);
+            assert_eq!(
+                recipe.steps.mode,
+                mold_core::generation_profile::ControlMode::Fixed
+            );
+            assert_eq!(temporal.frames.min, 124);
+            assert_eq!(temporal.frames.max, 124);
+            assert_eq!(
+                temporal.frames.mode,
+                mold_core::generation_profile::ControlMode::Fixed
+            );
+        } else {
+            // The per-request-minted runtime advertises the compact ranges.
+            assert_eq!(recipe.steps.min, mold_core::minimax_h3::COMPACT_MIN_STEPS);
+            assert_eq!(recipe.steps.max, mold_core::minimax_h3::COMPACT_MAX_STEPS);
+            assert_eq!(
+                recipe.steps.mode,
+                mold_core::generation_profile::ControlMode::Adjustable
+            );
+            assert_eq!(temporal.frames.min, mold_core::minimax_h3::MIN_FRAMES);
+            assert_eq!(temporal.frames.max, mold_core::minimax_h3::MAX_FRAMES);
+            assert_eq!(
+                temporal.frames.mode,
+                mold_core::generation_profile::ControlMode::Adjustable
+            );
+        }
     }
 
     fn place_turbo_adapter(

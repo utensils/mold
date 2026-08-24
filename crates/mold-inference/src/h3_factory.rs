@@ -1928,29 +1928,23 @@ fn validate_prepared_request(request: &H3FactoryPreparedRequestInput) -> Result<
             bail!("MiniMax H3 endpoint preprocessing contract changed after admission");
         }
     }
-    let frames = u64::from(request.frames);
-    let expected_video_latent_frames = frames
-        .checked_sub(u64::from(contract::FRAME_OFFSET))
-        .ok_or_else(|| anyhow!("MiniMax H3 video latent frames underflow"))?
-        / u64::from(contract::FRAME_STEP)
-        * 5
-        + 2;
-    let rows_per_video_latent = u64::from(request.width / 32)
-        .checked_mul(u64::from(request.height / 32))
+    // `mold_core::minimax_h3` is the one packed-row authority the server's
+    // admission and the private runtime envelope also read.
+    let expected_video_latent_frames = contract::video_latent_frames(request.frames)
+        .ok_or_else(|| anyhow!("MiniMax H3 video latent frames underflow"))?;
+    let rows_per_video_latent = contract::rows_per_video_latent(request.width, request.height)
         .ok_or_else(|| anyhow!("MiniMax H3 rows per video latent overflow"))?;
-    let expected_target_video_rows = expected_video_latent_frames
-        .checked_mul(rows_per_video_latent)
-        .ok_or_else(|| anyhow!("MiniMax H3 target video rows overflow"))?;
-    let expected_audio_latents = frames
-        .checked_mul(5)
-        .and_then(|value| value.checked_add(1))
-        .ok_or_else(|| anyhow!("MiniMax H3 audio latent rows overflow"))?
-        / 3;
-    let expected_audio_rows = expected_audio_latents
-        .checked_mul(u64::from(contract::AUDIO_CHANNELS))
+    let expected_target_video_rows =
+        contract::target_video_rows(request.width, request.height, request.frames)
+            .ok_or_else(|| anyhow!("MiniMax H3 target video rows overflow"))?;
+    let expected_audio_latents = contract::audio_latents_per_channel(request.frames)
+        .ok_or_else(|| anyhow!("MiniMax H3 audio latent rows overflow"))?;
+    let expected_audio_rows = contract::target_audio_rows(request.frames)
         .ok_or_else(|| anyhow!("MiniMax H3 target audio rows overflow"))?;
-    let expected_audio_samples = expected_audio_latents
-        .checked_mul(800)
+    // Deliberately the VOCODER count, which is `latents * 800` and NOT the
+    // duration-derived `audio_samples_per_channel` admission charges the AAC
+    // staging against; the two differ by up to 800 samples.
+    let expected_audio_samples = contract::vocoder_audio_samples_per_channel(request.frames)
         .ok_or_else(|| anyhow!("MiniMax H3 audio samples overflow"))?;
     if !(2..=H3_FACTORY_MAX_GRID_POINTS).contains(&request.grid_points) {
         bail!("MiniMax H3 target budget supports 2..={H3_FACTORY_MAX_GRID_POINTS} grid points");

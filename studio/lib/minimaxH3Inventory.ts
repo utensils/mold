@@ -206,11 +206,14 @@ function roleValue(value: unknown): value is MiniMaxH3ComponentRole {
   return COMPONENT_ROLES.includes(value as MiniMaxH3ComponentRole);
 }
 
-/** Client-side mirror of the reviewed compact FL2VA step authorities
+/** Client-side mirror of the compact FL2VA step DEFAULTS
  * (`mold_core::minimax_h3`): 21 for the base identity, 9/5 for the reviewed
- * Turbo tiers. A server-advertised envelope must agree exactly — the
- * advertised value is what the form submits, the table is the fail-closed
- * pin. */
+ * Turbo tiers.
+ *
+ * For a Turbo tier this is still exact — the count is the distilled adapter's
+ * own schedule length, so the advertised envelope must agree. For the base
+ * identity it is the default within
+ * `MINIMAX_H3_COMPACT_MIN_STEPS..=MINIMAX_H3_COMPACT_MAX_STEPS`, not a pin. */
 export const MINIMAX_H3_REVIEWED_FL2VA_STEPS: Readonly<Record<string, number>> =
   {
     "minimax-h3-fl2va:comfy-pruned-int8": 21,
@@ -218,13 +221,13 @@ export const MINIMAX_H3_REVIEWED_FL2VA_STEPS: Readonly<Record<string, number>> =
     "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p": 5,
   };
 
-/** Client-side mirror of `mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES`
- * — every canvas a hardware campaign qualified, DEFAULT FIRST.
+/** Canvases the ADVERTISED reference request may name.
  *
- * The server advertises exactly one reference request per model row, and it
- * is always the default canvas; the rest of the set reaches clients through
- * the row's generation-profile buckets. So this is a pin on the ADVERTISED
- * request, not a statement that the runtime renders only one size. */
+ * The server advertises exactly one reference request per model row, and it is
+ * always the default canvas; the compact runtime itself admits any 32-aligned
+ * canvas inside its area ceiling, which reaches clients through the row's
+ * generation profile. So this is a pin on the advertised request, not a
+ * statement about what the runtime renders. */
 const MINIMAX_H3_REVIEWED_CANVASES: readonly (readonly [number, number])[] = [
   [1344, 768],
   [768, 768],
