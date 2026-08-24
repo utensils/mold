@@ -642,39 +642,48 @@ fn reviewed_h3_private_generation_profile_for(
         ) == Some(true),
     });
     let recipe = profile.recipes.first_mut()?;
-    let pixels = u64::from(width).checked_mul(u64::from(height))?;
-    let aspect = f64::from(width) / f64::from(height);
+    // Every ceiling is the widest of the reviewed canvases, and the aspect
+    // bounds span them, so a client that reads a ceiling rather than the
+    // bucket list is never handed a number smaller than a bucket it is being
+    // offered. `mold_core::minimax_h3` is the one authority for the set.
+    let reviewed_canvases = mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES;
+    let pixels = mold_core::minimax_h3::reviewed_compact_max_pixels();
+    let (min_aspect, max_aspect) = mold_core::minimax_h3::reviewed_compact_aspect_bounds();
+    let min_axis = mold_core::minimax_h3::reviewed_compact_min_axis_pixels();
     recipe.resolution.domain = ResolutionDomain::Buckets;
     // The reviewed diffusers runtime refuses off-bucket shapes outright.
     recipe.resolution.off_bucket = Some(mold_core::generation_profile::OffBucketPolicy::Reject);
-    recipe.resolution.min_width = width;
-    recipe.resolution.min_height = height;
+    recipe.resolution.min_width = min_axis;
+    recipe.resolution.min_height = min_axis;
     recipe.resolution.max_pixels = pixels;
-    recipe.resolution.max_axis_pixels = Some(width.max(height));
-    recipe.resolution.min_aspect_ratio = Some(aspect);
-    recipe.resolution.max_aspect_ratio = Some(aspect);
-    // Keep the generated profile's canonical reduced-ratio identity (`7:4`).
-    // Create surfaces render this label inside a compact aspect chip; replacing
-    // it with prose here made one server-only presentation fork wrap outside
-    // the control even though every surface already shares the profile.
-    let mut reviewed_group = recipe
-        .resolution
-        .aspect_groups
-        .iter()
-        .find(|group| {
-            group
-                .presets
-                .iter()
-                .any(|preset| preset.width == width && preset.height == height)
-        })?
-        .clone();
-    reviewed_group
-        .presets
-        .retain(|preset| preset.width == width && preset.height == height);
-    for preset in &mut reviewed_group.presets {
-        preset.tier = "reviewed".into();
+    recipe.resolution.max_axis_pixels =
+        Some(mold_core::minimax_h3::reviewed_compact_max_axis_pixels());
+    recipe.resolution.min_aspect_ratio = Some(min_aspect);
+    recipe.resolution.max_aspect_ratio = Some(max_aspect);
+    // Keep the generated profile's canonical reduced-ratio identities (`7:4`
+    // for 1344x768, `1:1` for 768x768). Create surfaces render these labels
+    // inside a compact aspect chip; replacing them with prose here made one
+    // server-only presentation fork wrap outside the control even though
+    // every surface already shares the profile.
+    let mut reviewed_groups = recipe.resolution.aspect_groups.clone();
+    for group in &mut reviewed_groups {
+        group
+            .presets
+            .retain(|preset| reviewed_canvases.contains(&(preset.width, preset.height)));
+        for preset in &mut group.presets {
+            preset.tier = "reviewed".into();
+        }
     }
-    recipe.resolution.aspect_groups = vec![reviewed_group];
+    reviewed_groups.retain(|group| !group.presets.is_empty());
+    if reviewed_groups
+        .iter()
+        .map(|group| group.presets.len())
+        .sum::<usize>()
+        != reviewed_canvases.len()
+    {
+        return None;
+    }
+    recipe.resolution.aspect_groups = reviewed_groups;
     recipe.steps.default = steps;
     recipe.steps.min = steps;
     recipe.steps.max = steps;
@@ -866,12 +875,17 @@ fn h3_model_row(
             frame_step: Some(1),
             frame_offset: Some(0),
             max_pixels: Some(pixels),
-            max_axis_pixels: Some(request.width.max(request.height)),
+            max_axis_pixels: Some(mold_core::minimax_h3::reviewed_compact_max_axis_pixels()),
             default_negative_prompt: None,
-            recommended_dimensions: vec![mold_core::RecommendedDimensions {
-                width: request.width,
-                height: request.height,
-            }],
+            // Every canvas a hardware campaign qualified, default first — the
+            // same slice the bucket profile above advertises. A row that
+            // named only the default let a client that reads
+            // `recommended_dimensions` rather than the profile offer one
+            // size while the profile offered two.
+            recommended_dimensions: mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES
+                .iter()
+                .map(|&(width, height)| mold_core::RecommendedDimensions { width, height })
+                .collect(),
             dimension_alignment: Some(alignment),
         },
         downloaded: true,
@@ -1757,26 +1771,66 @@ fn validate_private_h3_live_owner_route(
 
 #[cfg(test)]
 mod presentation_tests {
+    /// The advertised buckets are exactly the canvases `mold_core` records as
+    /// reviewed — one aspect group each, keeping the profile's canonical
+    /// reduced-ratio identity (`7:4` for 1344x768, `1:1` for 768x768).
     #[test]
     fn reviewed_profile_keeps_the_canonical_exact_aspect_identity() {
-        let (profile, _, _) = super::reviewed_h3_private_generation_profile()
+        let (profile, _, pixels) = super::reviewed_h3_private_generation_profile()
             .expect("the reviewed H3 profile must resolve");
         let recipe = profile.default_recipe().expect("one reviewed recipe");
-        let group = recipe
+
+        let advertised = recipe
             .resolution
             .aspect_groups
-            .first()
-            .expect("one reviewed aspect group");
-
-        assert_eq!(recipe.resolution.aspect_groups.len(), 1);
-        assert_eq!(group.id, "7:4");
-        assert_eq!(group.label, "7:4");
-        assert_eq!(group.presets.len(), 1);
+            .iter()
+            .flat_map(|group| group.presets.iter())
+            .map(|preset| (preset.width, preset.height))
+            .collect::<Vec<_>>();
         assert_eq!(
-            (group.presets[0].width, group.presets[0].height),
-            (1344, 768)
+            advertised,
+            mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec()
         );
-        assert_eq!(group.presets[0].tier, "reviewed");
+        for group in &recipe.resolution.aspect_groups {
+            assert_eq!(group.id, group.label);
+            for preset in &group.presets {
+                assert_eq!(preset.tier, "reviewed");
+            }
+        }
+        assert_eq!(
+            recipe
+                .resolution
+                .aspect_groups
+                .iter()
+                .map(|group| group.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["7:4", "1:1"]
+        );
+
+        // Every ceiling spans the whole set, so a client that reads a ceiling
+        // rather than the bucket list is never handed a number smaller than a
+        // bucket it is being offered.
+        assert_eq!(pixels, mold_core::minimax_h3::reviewed_compact_max_pixels());
+        assert_eq!(recipe.resolution.max_pixels, pixels);
+        assert_eq!(
+            recipe.resolution.max_axis_pixels,
+            Some(mold_core::minimax_h3::reviewed_compact_max_axis_pixels())
+        );
+        assert_eq!(
+            recipe.resolution.min_width,
+            mold_core::minimax_h3::reviewed_compact_min_axis_pixels()
+        );
+        assert_eq!(recipe.resolution.min_height, recipe.resolution.min_width);
+        let (min_aspect, max_aspect) = mold_core::minimax_h3::reviewed_compact_aspect_bounds();
+        assert_eq!(recipe.resolution.min_aspect_ratio, Some(min_aspect));
+        assert_eq!(recipe.resolution.max_aspect_ratio, Some(max_aspect));
+
+        // The default the row seeds a form with stays the historical canvas.
+        assert_eq!(recipe.defaults.width, mold_core::minimax_h3::DEFAULT_WIDTH);
+        assert_eq!(
+            recipe.defaults.height,
+            mold_core::minimax_h3::DEFAULT_HEIGHT
+        );
     }
 }
 
@@ -1973,11 +2027,38 @@ mod tests {
             recipe.resolution.domain,
             mold_core::generation_profile::ResolutionDomain::Buckets
         );
+        assert_eq!(
+            recipe
+                .resolution
+                .aspect_groups
+                .iter()
+                .flat_map(|group| group.presets.iter())
+                .map(|preset| (preset.width, preset.height))
+                .collect::<Vec<_>>(),
+            mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec()
+        );
         assert_eq!(recipe.resolution.aspect_groups[0].presets.len(), 1);
         assert_eq!(recipe.resolution.aspect_groups[0].id, "7:4");
         assert_eq!(recipe.resolution.aspect_groups[0].label, "7:4");
         assert_eq!(recipe.resolution.aspect_groups[0].presets[0].width, 1344);
         assert_eq!(recipe.resolution.aspect_groups[0].presets[0].height, 768);
+        // The row's recommendations are the same set, default first.
+        assert_eq!(
+            row.defaults
+                .recommended_dimensions
+                .iter()
+                .map(|entry| (entry.width, entry.height))
+                .collect::<Vec<_>>(),
+            mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES.to_vec()
+        );
+        assert_eq!(
+            row.defaults.max_pixels,
+            Some(mold_core::minimax_h3::reviewed_compact_max_pixels())
+        );
+        assert_eq!(
+            row.defaults.max_axis_pixels,
+            Some(mold_core::minimax_h3::reviewed_compact_max_axis_pixels())
+        );
         assert_eq!(
             recipe.resolution.aspect_groups[0].presets[0].tier,
             "reviewed"

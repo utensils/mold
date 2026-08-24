@@ -792,9 +792,9 @@ mod tests {
 
     /// The authoring path promotes inferred dimensions to explicit values
     /// before `effective_dimensions` runs, so it must apply the same layout
-    /// policy: a compact tag submits the fixed reviewed envelope regardless
-    /// of source aspect, and only the official BF16 reference keeps the
-    /// aspect-derived canvas.
+    /// policy: a compact tag submits one of the REVIEWED canvases — the one
+    /// nearest the source's aspect — and only the official BF16 reference
+    /// keeps the free-form aspect-derived canvas.
     #[test]
     fn boundary_image_dimensions_keep_the_compact_envelope() {
         let dir = tempfile::tempdir().unwrap();
@@ -830,9 +830,11 @@ mod tests {
                 None,
             )
             .unwrap();
+            // A square source now lands on the square reviewed canvas
+            // instead of being letterboxed into the 7:4 default.
             assert_eq!(
                 prepared.width.zip(prepared.height),
-                Some((minimax_h3::DEFAULT_WIDTH, minimax_h3::DEFAULT_HEIGHT)),
+                Some((768, 768)),
                 "{model}"
             );
         }

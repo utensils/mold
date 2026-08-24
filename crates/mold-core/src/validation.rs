@@ -1901,6 +1901,14 @@ pub fn validate_h3_private_uat_request(req: &GenerateRequest) -> Result<(), Stri
             "private MiniMax H3 validation requires an exact reviewed task model".to_string(),
         );
     }
+    // Authenticated private H3 ingress deliberately skips generation-profile
+    // validation, so this door is the only place an off-envelope canvas can
+    // be refused before admission hashes ~37 GB of weights. Every ordinary
+    // client reaches the same refusal through the profile's `Buckets` +
+    // `OffBucketPolicy::Reject`, and `private_server.rs`'s runtime envelope
+    // keeps the last word on both routes.
+    crate::minimax_h3::validate_reviewed_canvas(req)
+        .map_err(|error| format!("{}: {}", error.code, error.message))?;
     validate_generate_request_after_activation(req, Some(crate::minimax_h3::FAMILY))
 }
 
@@ -3680,6 +3688,48 @@ mod tests {
         assert!(validate_h3_private_uat_request(&official)
             .unwrap_err()
             .contains("exact reviewed task model"));
+    }
+
+    /// The private ingress door carries the reviewed-canvas rule, because it
+    /// is the one admission path that skips generation-profile validation.
+    /// The rule itself is `minimax_h3::validate_reviewed_canvas`; this pins
+    /// the delegation so the two can never answer differently.
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    #[test]
+    fn private_h3_ingress_admits_every_reviewed_canvas_and_refuses_the_rest() {
+        for &(width, height) in crate::minimax_h3::REVIEWED_COMPACT_CANVASES {
+            let mut req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);
+            req.width = width;
+            req.height = height;
+            validate_h3_private_uat_request(&req)
+                .unwrap_or_else(|error| panic!("{width}x{height}: {error}"));
+        }
+
+        // 1024x768 is a canonical upstream resolver output no campaign has
+        // run; 768x1344 is the transpose of a reviewed canvas.
+        for (width, height) in [(1024, 768), (768, 1344)] {
+            let mut req = valid_h3_request(crate::minimax_h3::FL2VA_COMFY);
+            req.width = width;
+            req.height = height;
+            let error = validate_h3_private_uat_request(&req).unwrap_err();
+            assert!(
+                error.contains("MINIMAX_H3_DIMENSIONS"),
+                "{width}x{height}: {error}"
+            );
+            assert_eq!(
+                error,
+                format!(
+                    "{}: {}",
+                    crate::minimax_h3::validate_reviewed_canvas(&req)
+                        .unwrap_err()
+                        .code,
+                    crate::minimax_h3::validate_reviewed_canvas(&req)
+                        .unwrap_err()
+                        .message
+                ),
+                "the door must report the shared rule verbatim"
+            );
+        }
     }
 
     #[test]

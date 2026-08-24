@@ -152,10 +152,20 @@ pub fn declared_audio_capability(family: &str, model: &str) -> Option<bool> {
 /// `None` whenever the recipe leaves any of them adjustable — a preset on a
 /// dynamic canvas is a recommendation, and overriding a user's remembered
 /// size with it would be a regression, not a fix. Today only H3's reviewed
-/// compact envelope answers: a single-preset bucket domain that refuses
-/// off-bucket sizes, with fixed steps and a fixed frame count.
+/// compact envelope answers: a bucket domain that refuses off-bucket sizes,
+/// with fixed steps and a fixed frame count.
+///
+/// The canvas is HEALED rather than overwritten: a remembered size that names
+/// one of the recipe's own buckets is kept, and anything else falls back to
+/// the recipe's default. While the reviewed envelope had exactly one bucket
+/// those two rules were the same rule, and this read "the only preset". They
+/// stopped being the same rule the moment a second canvas was qualified, and
+/// keeping the old form would have silently stopped pinning the frame count
+/// and step count too — a row advertising "default 345 frames, maximum 124",
+/// which is the exact contradiction this function exists to remove.
 fn pinned_recipe_defaults(
     profile: &crate::GenerationProfileSet,
+    remembered: (u32, u32),
 ) -> Option<(u32, u32, u32, Option<u32>)> {
     let recipe = profile.default_recipe()?;
     if recipe.steps.mode != crate::ControlMode::Fixed {
@@ -170,11 +180,14 @@ fn pinned_recipe_defaults(
     let mut presets = resolution
         .aspect_groups
         .iter()
-        .flat_map(|group| group.presets.iter());
-    let only = presets.next()?;
-    if presets.next().is_some() {
-        return None;
-    }
+        .flat_map(|group| group.presets.iter())
+        .peekable();
+    presets.peek()?;
+    let canvas = if presets.any(|preset| (preset.width, preset.height) == remembered) {
+        remembered
+    } else {
+        (recipe.defaults.width, recipe.defaults.height)
+    };
     let temporal = recipe.temporal.as_ref();
     let frames = match temporal {
         Some(temporal) if temporal.frames.mode == crate::ControlMode::Fixed => {
@@ -183,7 +196,7 @@ fn pinned_recipe_defaults(
         Some(_) => return None,
         None => None,
     };
-    Some((only.width, only.height, recipe.defaults.steps, frames))
+    Some((canvas.0, canvas.1, recipe.defaults.steps, frames))
 }
 
 pub fn build_model_catalog(
@@ -238,12 +251,8 @@ pub fn build_model_catalog(
         // refuses. `recipe()` already forces these for the compact envelope;
         // this reads them back rather than restating the rule.
         let (default_width, default_height, default_steps, default_frames) =
-            pinned_recipe_defaults(&generation_profile).unwrap_or((
-                default_width,
-                default_height,
-                default_steps,
-                default_frames,
-            ));
+            pinned_recipe_defaults(&generation_profile, (default_width, default_height))
+                .unwrap_or((default_width, default_height, default_steps, default_frames));
 
         // `minimax_h3::model_runtime_availability` is the same authority
         // `model_activation` consults before generation, so a row can never
@@ -461,12 +470,8 @@ pub fn build_model_catalog(
         // narrowing its ceiling while leaving a remembered 345-frame default
         // in place rebuilds the exact contradiction this fix removes.
         let (default_width, default_height, default_steps, default_frames) =
-            pinned_recipe_defaults(&generation_profile).unwrap_or((
-                default_width,
-                default_height,
-                default_steps,
-                default_frames,
-            ));
+            pinned_recipe_defaults(&generation_profile, (default_width, default_height))
+                .unwrap_or((default_width, default_height, default_steps, default_frames));
 
         models.push(ModelInfoExtended {
             downloaded: true,
@@ -626,13 +631,43 @@ mod tests {
             .expect("the compact FL2VA row is always catalogued");
 
         assert_eq!(row.defaults.default_frames, Some(124));
-        assert_eq!(row.defaults.default_width, crate::minimax_h3::DEFAULT_WIDTH);
         assert_eq!(
-            row.defaults.default_height,
+            row.defaults.default_steps,
+            crate::minimax_h3::COMFY_DEFAULT_STEPS
+        );
+        // 768x768 is now a reviewed bucket, so a remembered canvas naming it
+        // is honoured rather than healed — the pref is only overwritten when
+        // it names a size the runtime would refuse.
+        assert_eq!(row.defaults.default_width, 768);
+        assert_eq!(row.defaults.default_height, 768);
+
+        let mut off_envelope = crate::Config::default();
+        off_envelope.models.insert(
+            crate::minimax_h3::FL2VA_COMFY.to_string(),
+            crate::config::ModelConfig {
+                default_frames: Some(345),
+                default_width: Some(1024),
+                default_height: Some(1024),
+                default_steps: Some(30),
+                ..Default::default()
+            },
+        );
+        let healed = super::build_model_catalog(&off_envelope, None, false);
+        let healed_row = healed
+            .iter()
+            .find(|row| row.info.name == crate::minimax_h3::FL2VA_COMFY)
+            .expect("the compact FL2VA row is always catalogued");
+        assert_eq!(healed_row.defaults.default_frames, Some(124));
+        assert_eq!(
+            healed_row.defaults.default_width,
+            crate::minimax_h3::DEFAULT_WIDTH
+        );
+        assert_eq!(
+            healed_row.defaults.default_height,
             crate::minimax_h3::DEFAULT_HEIGHT
         );
         assert_eq!(
-            row.defaults.default_steps,
+            healed_row.defaults.default_steps,
             crate::minimax_h3::COMFY_DEFAULT_STEPS
         );
 

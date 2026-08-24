@@ -360,10 +360,11 @@ FL2VA partition. Ordinary builds omit the field, while Ref2VA remains absent.
 The ordinary model list carries two acquisition rows with their upstream source
 and download accounting. The authenticated presentation boundary may replace
 the FL2VA acquisition row with one exact executable row, but only when all five
-referenced component groups are installed. Its generation profile fixes width
-1344, height 768, 124 frames at 24
-fps, 21 terminal-inclusive grid points, batch one, MP4 delivery, and a required
-first-frame source. Web, desktop, and iPhone remove the family-wide denial only
+referenced component groups are installed. Its generation profile fixes the
+canvas to a qualified bucket — 1344x768 or 768x768, see
+[Qualified canvases](#qualified-canvases) — with 1344x768 the default, and
+fixes 124 frames at 24 fps, 21 terminal-inclusive grid points, batch one, MP4
+delivery, and a required first-frame source. Web, desktop, and iPhone remove the family-wide denial only
 when that exact model name and request envelope agree with the complete
 additive component graph. A missing component, widened axis, absent first
 frame, supplied last frame, unavailable MP4 encoder, or legacy/partial
@@ -382,8 +383,9 @@ executing ELF device/inode/size/SHA-256, domain-separated launch argument and
 sorted-environment hashes, and live CUDA driver plus compiled toolkit
 versions. Raw arguments and environment values are not serialized. Version 5
 invalidates the earlier one-forward smoke envelope and requires the exact
-compact-quality route selected by the released workflow: 1344×768, 124 frames
-at 24 fps, batch one, exactly 21 terminal-inclusive grid points (20 transformer
+compact-quality route selected by the released workflow: a qualified canvas
+(1344×768 or 768×768 — the row ceilings below are the larger canvas's and
+cover the smaller one with slack), 124 frames at 24 fps, batch one, exactly 21 terminal-inclusive grid points (20 transformer
 evaluations), one first-frame FL2VA endpoint, and explicit ceilings for Qwen
 text/vision, condition visual, target video/audio, and total packed rows copied
 from the fresh structured observation. Admission checks that envelope after
@@ -587,6 +589,72 @@ admission-policy constants, not measured H3 production peaks.
 Exact artifact sizes, header facts, attention workspace, resident block count,
 prefetch, dequantization workspace, and every phase allocation must be frozen
 before a real run can be admitted.
+
+## Qualified canvases
+
+`mold_core::minimax_h3::REVIEWED_COMPACT_CANVASES` is the single authority for
+which canvases the reviewed compact FL2VA runtime admits. Everything derives
+from it: the generation profile's buckets and their ceilings, the private
+bridge's advertised `recommended_dimensions`, source fitting, and
+`private_server.rs`'s own `validate_shape`. A campaign that qualifies another
+canvas appends one row there and nothing else moves.
+
+Model-valid is not Mold-qualified. The checkpoint accepts any 32-aligned canvas
+between 1:4 and 4:1 (ComfyUI's `nodes_minimax_h3.py:99-100` declares
+`min=32, max=MAX_RESOLUTION, step=32`, and 1344x768 is a *default* there), and
+`recommended_dimensions` faithfully ports the upstream resolver over that whole
+range. What is listed below is the strictly smaller set for which a real
+hardware campaign exists.
+
+| Canvas    | Aspect | Pixels    | Campaign | Host                     | Steps | Wall clock | Peak VRAM  | Peak host RSS |
+| --------- | ------ | --------- | -------- | ------------------------ | ----- | ---------- | ---------- | ------------- |
+| 1344x768  | 7:4    | 1,032,192 | #827     | hal9000, RTX 4090, 24 GB | 21    | 1216 s     | ~14.4 GB   | —             |
+| 1344x768  | 7:4    | 1,032,192 | #827     | hal9000, RTX 4090, 24 GB | 9     | 759.5 s    | ~14.4 GB   | —             |
+| 768x768   | 1:1    | 589,824   | #1033    | hal9000, RTX 4090, 24 GB | 21    | 937 s      | 7,568 MiB  | 16.36 GB      |
+
+### The 768x768 campaign (#1033, 2026-08-23)
+
+Host: hal9000 — RTX 4090 24 GB, 62 GB host RAM, CUDA SM89, mold 0.25.0 at
+`a647206` plus a two-hunk scratch patch that widened ONLY the width/height pins
+in `validate_shape` and `public_runtime_envelope_for_steps`
+(`crates/mold-inference/src/minimax_h3/private_server.rs`) to 768x768. That
+patch was never shipped; this PR replaces it with the canvas authority above.
+
+Request: `minimax-h3-fl2va:comfy-pruned-int8`, 768x768, 124 frames, 24 fps,
+21 steps, guidance 0.0, strength 1, seed 770021 — the same prompt ("a red fox
+in a snowy pine forest at dawn") and the same 1344x768 source PNG as the
+recorded 1344x768 verification, fitted internally by the engine.
+
+Measured:
+
+- Wall clock, POST to MP4 bytes, cold process: **937 s** (against 1216 s at
+  1344x768 and the same step count)
+- Peak VRAM, 1 Hz `nvidia-smi`: **7,568 MiB**
+- Peak host RSS, `VmHWM` of a fresh serve process: **16.36 GB**
+- Output: 768x768, 124 frames at 24/1, h264 + AAC stereo 32 kHz (162 audio
+  frames), 2.1 MB MP4, SHA-256 prefix `2b95c627a1d2321b`
+- Visual: frame 0 pinned to the source; same subject and scene at frames 40,
+  80, and 123; the subject turns and steps forward; no cut
+
+### Slack, deliberately
+
+Two things are NOT re-derived per canvas, and both are conservative in the
+same direction:
+
+1. **Row ceilings.** `REVIEWED_MAX_TARGET_VIDEO_ROWS` and the packed total
+   stay the 1344x768 figures. Every row field on the envelope is a maximum
+   (`row_cap_mismatches` compares with `<=`), so 768x768 — which packs 21,312
+   target video rows against the ceiling's 37,296 — is admitted with slack.
+2. **Memory bounds.** `public_runtime_bounds` keeps #827's 1344x768
+   measurements, so `precheck_private_h3_admission_capacity`'s device and host
+   floors are the larger canvas's. A 768x768 render is therefore charged for
+   more memory than it uses; the campaign above measured 7,568 MiB against a
+   1344x768 grant sized for ~14.4 GB.
+
+The effect is that a host which can run 1344x768 can run 768x768, and a host
+that is refused for 1344x768 is also refused for 768x768 even though it might
+have fit. That is the safe direction, and tightening it would require its own
+per-canvas measurement campaign for every bound.
 
 ## Current evidence status
 

@@ -185,7 +185,8 @@ The initial compact CUDA implementation supports this request profile:
 
 - an SM89 CUDA GPU with sufficient VRAM and the H3 attention/runtime operators
   enabled (an Apple Silicon Metal GPU is admitted but unqualified — see above)
-- `1344x768`, batch size 1
+- one of the two qualified canvases — `1344x768` (default) or `768x768` —
+  batch size 1
 - exactly 124 frames at 24 fps
 - exactly 21 terminal-inclusive sampler grid points (20 model evaluations) for
   the base model; a reviewed Turbo tag instead requires exactly its tier's own
@@ -197,16 +198,34 @@ The initial compact CUDA implementation supports this request profile:
   take 1,014, and a longer prompt is refused immediately with its exact budget
   named rather than after artifact verification
 
+### Qualified canvases
+
+The checkpoint itself accepts any 32-aligned canvas between 1:4 and 4:1;
+`1344x768` is upstream's _default_, not its limit. Mold advertises the strictly
+smaller set for which it has real-hardware evidence:
+
+| Canvas     | Aspect | Measured (RTX 4090 24 GB, 124 frames, 21 steps)    |
+| ---------- | ------ | -------------------------------------------------- |
+| `1344x768` | 7:4    | 1216 s, ~14.4 GB peak VRAM                         |
+| `768x768`  | 1:1    | 937 s, 7,568 MiB peak VRAM, 16.36 GB peak host RSS |
+
+`768x768` renders 43% fewer pixels and is cheaper on every axis, but it is
+admitted against the larger canvas's memory floors — so a host that is refused
+`1344x768` is refused `768x768` too, even though it might have fit. Both
+canvases share the reviewed 124-frame duration, step counts, and prompt budget.
+
 When a first-frame image is attached without explicit `--width`/`--height`,
-the CLI and Discord builders submit the fixed `1344x768` envelope regardless
-of the source's aspect ratio — the engine fits the frame internally. The
+the CLI and Discord builders submit the qualified canvas nearest the source's
+aspect ratio — a landscape source gets `1344x768`, a square or portrait one
+gets `768x768` — and the engine fits the frame internally. The free-form
 aspect-derived short-edge canvas applies only to the hidden official BF16
 reference.
 
 Every reviewed compact and Turbo tag advertises exactly this envelope, so
-Create on web, desktop, and iPhone offers the single `1344x768` canvas with the
-tier's step count and 124 frames already fixed, and an off-envelope request is
-refused at submission instead of after the model loads.
+Create on web, desktop, and iPhone offers those two canvases (as the 16:9 and
+1:1 shape chips) with the tier's step count and 124 frames already fixed, and
+an off-envelope request — `1024x768`, say, which the checkpoint would happily
+render — is refused at submission instead of after the model loads.
 
 Mold rejects rather than silently resizing, rerouting, changing steps, dropping
 the source image, or falling back to another backend. A downloaded checkpoint

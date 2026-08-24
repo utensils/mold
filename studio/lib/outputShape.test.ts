@@ -265,6 +265,59 @@ describe("resolveOutputShape", () => {
     ).toEqual({ width: 1344, height: 768 });
   });
 
+  it("offers every reviewed compact H3 canvas, and only those", () => {
+    const compact = modelFor("minimax-h3-fl2va:comfy-pruned-int8");
+    const input: OutputShapeInput = {
+      model: compact,
+      width: 1344,
+      height: 768,
+      intent: "model-default",
+    };
+    const result = resolveOutputShape(input);
+
+    // 1344x768 reduces to 7:4 and lands inside the 16:9 family chip; 768x768
+    // is the square chip. Both are qualified campaigns, and nothing else is.
+    expect(result.selectedFamilyId).toBe("16:9");
+    expect(result.families.map((family) => family.id)).toEqual(["1:1", "16:9"]);
+    expect(sizeForFamily("16:9", { ...input, intent: "manual" })).toEqual({
+      width: 1344,
+      height: 768,
+    });
+    expect(sizeForFamily("1:1", { ...input, intent: "manual" })).toEqual({
+      width: 768,
+      height: 768,
+    });
+
+    // The 16:9 pill is the model default; the square one is not.
+    expect(result.sizes.map((size) => [size.width, size.height])).toEqual([
+      [1344, 768],
+    ]);
+    expect(result.sizes[0]!.mark).toBe("Default");
+    const square = resolveOutputShape({
+      ...input,
+      width: 768,
+      height: 768,
+      intent: "manual",
+    });
+    expect(square.selectedFamilyId).toBe("1:1");
+    expect(square.sizes.map((size) => [size.width, size.height])).toEqual([
+      [768, 768],
+    ]);
+    expect(square.sizes[0]!.mark).toBe(null);
+
+    // A canonical upstream resolver output nobody qualified stays refused.
+    const recipe = compact.generation_profile!.recipes[0]!;
+    expect(resolutionProfileError(1024, 768, recipe.resolution)).toBeTruthy();
+    for (const [width, height] of [
+      [1344, 768],
+      [768, 768],
+    ]) {
+      expect(
+        resolutionProfileError(width!, height!, recipe.resolution),
+      ).toBeNull();
+    }
+  });
+
   it("keeps following the source across a model switch, and manual across it too", () => {
     const source = { width: 1024, height: 1024 };
     const sdxl = modelFor("sdxl-base:fp16");
