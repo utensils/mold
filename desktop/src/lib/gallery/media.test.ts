@@ -355,6 +355,34 @@ describe("galleryMediaPath", () => {
 });
 
 describe("authedMediaUrl host-keyed cache", () => {
+  it("bounds the thumbnail working set and revokes least-recently-used URLs", async () => {
+    const target = { baseUrl: "http://cache-host:7680", apiKey: null };
+    const urls: string[] = [];
+    for (let index = 0; index < 520; index++) {
+      urls.push(
+        await authedMediaUrl(`/api/gallery/thumbnail/lru-${index}.png`, {
+          target,
+          cacheKey: "thumbnail-lru",
+        }),
+      );
+    }
+
+    expect(revoked).toEqual(expect.arrayContaining(urls.slice(0, 8)));
+    expect(revoked).not.toContain(urls.at(-1));
+    const calls = vi.mocked(apiFetchTo).mock.calls.length;
+    await authedMediaUrl("/api/gallery/thumbnail/lru-519.png", {
+      target,
+      cacheKey: "thumbnail-lru",
+    });
+    expect(apiFetchTo).toHaveBeenCalledTimes(calls);
+    await authedMediaUrl("/api/gallery/thumbnail/lru-0.png", {
+      target,
+      cacheKey: "thumbnail-lru",
+    });
+    expect(apiFetchTo).toHaveBeenCalledTimes(calls + 1);
+    evictHostMedia("thumbnail-lru");
+  });
+
   it("loads desktop thumbnails through native HTTP so held generation streams cannot starve them", async () => {
     vi.mocked(inTauri).mockReturnValue(true);
     vi.mocked(ipc.fetchGalleryThumbnail).mockResolvedValue({

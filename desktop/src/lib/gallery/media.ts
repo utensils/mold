@@ -11,7 +11,46 @@ import { inTauri, ipc } from "../ipc";
  * viewers should use `streamableMediaUrl` instead, which preserves Range
  * requests through a short-lived read-only ticket.
  */
-const cache = new Map<string, Promise<string>>();
+interface CachedObjectUrl {
+  url: Promise<string>;
+  /** Blob bytes retained by the object URL once the request settles. */
+  bytes: number | null;
+  settled: boolean;
+}
+
+// A viewport only needs a small working set. Keeping every thumbnail for the
+// entire session made a long Library scroll retain hundreds of MB in WebKit's
+// blob/graphics heaps. Both limits are intentional: entry count protects a
+// gallery of tiny thumbnails, while bytes protect unusually large posters.
+const THUMBNAIL_CACHE_ENTRIES = 512;
+const THUMBNAIL_CACHE_BYTES = 64 * 1024 * 1024;
+const cache = new Map<string, CachedObjectUrl>();
+
+function revokeCachedObjectUrl(entry: CachedObjectUrl): void {
+  void entry.url.then((url) => URL.revokeObjectURL(url)).catch(() => {});
+}
+
+function trimThumbnailCache(): void {
+  let retainedBytes = 0;
+  for (const entry of cache.values()) retainedBytes += entry.bytes ?? 0;
+  while (cache.size > THUMBNAIL_CACHE_ENTRIES || retainedBytes > THUMBNAIL_CACHE_BYTES) {
+    // Never evict an unresolved promise: its caller has not received a usable
+    // URL yet. Resolution re-enters this function, so a burst can exceed the
+    // bound only while requests are actively in flight.
+    const oldest = [...cache].find(([, entry]) => entry.settled);
+    if (!oldest) break;
+    const [key, entry] = oldest;
+    cache.delete(key);
+    retainedBytes -= entry.bytes ?? 0;
+    revokeCachedObjectUrl(entry);
+  }
+}
+
+function rememberThumbnail(key: string, entry: CachedObjectUrl): void {
+  cache.delete(key);
+  cache.set(key, entry);
+  trimThumbnailCache();
+}
 
 export interface AuthedMediaOptions {
   /** Explicit host to fetch from; defaults to the primary connection. */
@@ -46,8 +85,8 @@ export function authedMediaUrl(path: string, opts: AuthedMediaOptions = {}): Pro
   // the host bucket and path while changing URL or credentials; an in-flight
   // object URL from the old route must never satisfy the new one.
   const key = keyOf(path, effectiveTarget, opts.cacheKey);
-  let url = cache.get(key);
-  if (!url) {
+  let cached = cache.get(key);
+  if (!cached) {
     const thumbnailPrefix = "/api/gallery/thumbnail/";
     const encodedFilename = path.startsWith(thumbnailPrefix)
       ? path.slice(thumbnailPrefix.length)
@@ -72,16 +111,33 @@ export function authedMediaUrl(path: string, opts: AuthedMediaOptions = {}): Pro
         return null;
       }
     };
-    url = nativeThumbnail()
+    const entry: CachedObjectUrl = { url: Promise.resolve(""), bytes: null, settled: false };
+    entry.url = nativeThumbnail()
       .then(
         async (native) =>
           native ?? (await (target ? apiFetchTo(target, path) : apiFetch(path))).blob(),
       )
-      .then((b) => URL.createObjectURL(b));
-    cache.set(key, url);
-    url.catch(() => cache.delete(key));
+      .then((blob) => {
+        entry.bytes = blob.size;
+        entry.settled = true;
+        const objectUrl = URL.createObjectURL(blob);
+        // The host/path may have been invalidated while its request was in
+        // flight. Do not leak an object URL that is no longer authoritative.
+        if (cache.get(key) !== entry) URL.revokeObjectURL(objectUrl);
+        else trimThumbnailCache();
+        return objectUrl;
+      });
+    cached = entry;
+    rememberThumbnail(key, entry);
+    entry.url.catch(() => {
+      entry.settled = true;
+      if (cache.get(key) === entry) cache.delete(key);
+    });
+  } else {
+    // Map insertion order is recency order.
+    rememberThumbnail(key, cached);
   }
-  return url;
+  return cached.url;
 }
 
 /**
@@ -260,12 +316,15 @@ export async function fetchGalleryMediaBytes(path: string, target: ApiTarget): P
 }
 
 function evictPrefix(prefix: string): void {
-  for (const store of [cache, fullSizeCache]) {
-    for (const [key, cached] of [...store]) {
-      if (!key.startsWith(prefix)) continue;
-      store.delete(key);
-      void cached.then((u) => URL.revokeObjectURL(u)).catch(() => {});
-    }
+  for (const [key, cached] of [...cache]) {
+    if (!key.startsWith(prefix)) continue;
+    cache.delete(key);
+    revokeCachedObjectUrl(cached);
+  }
+  for (const [key, cached] of [...fullSizeCache]) {
+    if (!key.startsWith(prefix)) continue;
+    fullSizeCache.delete(key);
+    void cached.then((url) => URL.revokeObjectURL(url)).catch(() => {});
   }
 }
 
