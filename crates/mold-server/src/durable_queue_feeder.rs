@@ -757,7 +757,8 @@ async fn feed_available(
         };
         match reservation.submit(job).await {
             Ok(_) => report.submitted += 1,
-            Err((error, mut job)) => {
+            Err(returned) => {
+                let (error, mut job) = *returned;
                 if let Some(ticket) = job.journal.take() {
                     retain_for_shutdown(ticket).await;
                 }

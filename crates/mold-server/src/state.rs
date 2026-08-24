@@ -163,10 +163,10 @@ impl QueueHandle {
     pub async fn submit(&self, job: GenerationJob, capacity: usize) -> Result<usize, SubmitError> {
         let reservation = self.try_reserve(capacity)?;
         let position = reservation.position;
-        reservation
-            .submit(job)
-            .await
-            .map_err(|(error, _job)| error)?;
+        reservation.submit(job).await.map_err(|returned| {
+            let (error, _job) = *returned;
+            error
+        })?;
         #[cfg(feature = "metrics")]
         {
             crate::metrics::record_queue_submit();
@@ -283,13 +283,13 @@ impl QueueReservation {
     pub(crate) async fn submit(
         mut self,
         job: GenerationJob,
-    ) -> Result<usize, (SubmitError, GenerationJob)> {
+    ) -> Result<usize, Box<(SubmitError, GenerationJob)>> {
         match self.queue.job_tx.send(job).await {
             Ok(()) => {
                 self.committed = true;
                 Ok(self.position)
             }
-            Err(returned) => Err((SubmitError::Shutdown, returned.0)),
+            Err(returned) => Err(Box::new((SubmitError::Shutdown, returned.0))),
         }
     }
 }

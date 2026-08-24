@@ -2107,10 +2107,7 @@ impl QueueMediaStore {
         let mut manifest_started = false;
         let mut saw_final = false;
 
-        loop {
-            let Some((is_final, ciphertext)) = read_frame(&mut reader)? else {
-                break;
-            };
+        while let Some((is_final, ciphertext)) = read_frame(&mut reader)? {
             let aad = frame_aad(media_set, ordinal, is_final, ciphertext.len());
             let stream = decryptor.take().expect("stream exists until final frame");
             let plaintext = Zeroizing::new(
@@ -2242,10 +2239,7 @@ impl QueueMediaStore {
         let mut saw_final = false;
         let mut memory = BTreeMap::new();
 
-        loop {
-            let Some((is_final, ciphertext)) = read_frame(&mut reader)? else {
-                break;
-            };
+        while let Some((is_final, ciphertext)) = read_frame(&mut reader)? {
             let aad = frame_aad_for_version(
                 media_set,
                 V2_FORMAT_VERSION,
@@ -3366,7 +3360,7 @@ fn decode_component(value: &str) -> Option<String> {
         return None;
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);
-    for pair in value.as_bytes().chunks_exact(2) {
+    for pair in value.as_bytes().as_chunks::<2>().0 {
         let high = hex_value(pair[0])?;
         let low = hex_value(pair[1])?;
         bytes.push((high << 4) | low);
