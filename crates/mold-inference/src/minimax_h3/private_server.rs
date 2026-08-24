@@ -323,12 +323,33 @@ impl H3PrivateRuntimeEnvelopeRecord {
         task: Task,
         turbo_steps: Option<u32>,
     ) -> Result<()> {
-        let reviewed_steps = turbo_steps.unwrap_or(contract::COMFY_DEFAULT_STEPS);
-        if self.max_steps != reviewed_steps {
-            bail!(
-                "private H3 runtime qualification envelope allows {reviewed_steps} steps, not {}",
-                self.max_steps
-            )
+        // A Turbo tier's count is EXACT: it is the distilled adapter's own
+        // schedule length, a property of the weights rather than a
+        // qualification pin, so 21 steps on an 8-step adapter is a different
+        // model. The base tier takes a range — the sampler needs at least two
+        // grid points and nothing above the released default was ever a
+        // reviewed configuration.
+        match turbo_steps {
+            Some(reviewed_steps) => {
+                if self.max_steps != reviewed_steps {
+                    bail!(
+                        "private H3 Turbo tier renders exactly {reviewed_steps} steps, not {}",
+                        self.max_steps
+                    )
+                }
+            }
+            None => {
+                if !(contract::COMPACT_MIN_STEPS..=contract::COMPACT_MAX_STEPS)
+                    .contains(&self.max_steps)
+                {
+                    bail!(
+                        "private H3 runtime qualification envelope allows {}..={} steps, not {}",
+                        contract::COMPACT_MIN_STEPS,
+                        contract::COMPACT_MAX_STEPS,
+                        self.max_steps
+                    )
+                }
+            }
         }
         self.validate_shape(task)
     }
@@ -1729,8 +1750,16 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // worst failure this path had; both floors are provable lower bounds of
     // the exact per-attempt budget compared at the end of this function, so
     // this can only ever turn a slow refusal into a fast one.
+    // The request's own shape, not the measured one: the bounds grow with
+    // the render, so a bigger clip must be refused on a small card here rather
+    // than after ~37 GB of SHA-256. This stays a provable lower bound of the
+    // exact per-attempt budget compared at the end of this function, because
+    // it is the same scaling that budget's own grant is derived from.
     #[cfg(feature = "h3")]
-    let precheck_bounds = public_runtime_bounds();
+    let precheck_bounds = public_runtime_bounds_for_shape(
+        (request.width, request.height),
+        request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
+    );
     #[cfg(not(feature = "h3"))]
     let precheck_bounds = runtime_qualification_source.precheck_bounds();
     precheck_private_h3_admission_capacity(
@@ -1785,7 +1814,11 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // ceilings. The authenticated backstop below still validates the step axis
     // against the tier's own minted envelope.
     #[cfg(feature = "h3")]
-    let precheck_envelope = public_runtime_envelope();
+    let precheck_envelope = public_runtime_envelope_for_shape(
+        (request.width, request.height),
+        request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
+        contract::COMFY_DEFAULT_STEPS,
+    );
     #[cfg(not(feature = "h3"))]
     let precheck_envelope = runtime_qualification_source.precheck_envelope();
     precheck_private_h3_prepared_rows(
@@ -1880,6 +1913,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     let runtime_qualification = public_runtime_qualification(
         &artifact_report,
         (request.width, request.height),
+        request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
         device_id,
         device_ordinal,
         compute_capability,
@@ -2985,6 +3019,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     let runtime_qualification = public_runtime_qualification(
         &artifact_report,
         (request.width, request.height),
+        request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
         &owner_fence.device_id,
         owner_fence.device_ordinal,
         owner_fence.compute_capability,
@@ -4970,8 +5005,50 @@ const fn public_runtime_bound(observed_bytes: u64) -> u64 {
 /// pipeline's own allocation limits, so they stay tied to those constants. A
 /// render that legitimately produces a larger MP4 must still be charged for
 /// the buffer the pipeline is willing to allocate.
+///
+/// # Scaling
+///
+/// Every figure below was measured at [`MEASURED_CANVAS`] x
+/// [`MEASURED_FRAMES`], and a compact request may now name its own canvas and
+/// clip length. Three terms are therefore SCALED to the request's own shape,
+/// each by the quantity it is a function of:
+///
+/// * `attention` / `ffn` — per-forward denoise workspaces over the packed
+///   sequence, linear in packed rows (the route is FlashAttention v2, which
+///   materializes no score matrix, and the FFN materializes per-row
+///   projections). Scaled by `request packed rows / measured packed rows`.
+/// * `audio_decode` — the audio VAE decodes the clip's own latents, so it is
+///   linear in the clip length. Scaled by `frames / measured frames`.
+/// * `decoder_tile` — despite the name, the video VAE is NOT spatially tiled:
+///   `decode_normalized_to_sink` chunks TEMPORALLY at a fixed
+///   `tokens_per_chunk` and decodes the full canvas each chunk. It is
+///   therefore a function of the canvas area alone, not of the clip length.
+///   Scaled by `pixels / measured pixels`.
+///
+/// Steps scale NOTHING: a step is time, not memory — each denoise evaluation
+/// reuses the same workspaces.
+///
+/// The remaining terms are fixed runtime state, the VAE construction floor,
+/// the conditioner activation ceiling (already a per-request demand charged
+/// against this grant), and the pipeline's own host allocation limits. None
+/// is a function of the render's shape.
+///
+/// Scaling is applied through [`public_runtime_bound`], the same margin and
+/// 64 MiB grid policy the measurement itself passes through, so at the
+/// measured shape every value is byte-identical to the pre-scaling record.
 #[cfg(feature = "h3")]
-fn public_runtime_bounds() -> H3PrivateRuntimeBoundRecord {
+fn public_runtime_bounds_for_shape(canvas: (u32, u32), frames: u32) -> H3PrivateRuntimeBoundRecord {
+    let scale = |observed: u64, numerator: u64, denominator: u64| -> u64 {
+        // `u128` because the packed-row product overflows `u64` at the
+        // envelope's own ceiling times an 8 GB workspace.
+        let scaled = (u128::from(observed) * u128::from(numerator) / u128::from(denominator))
+            .try_into()
+            .unwrap_or(u64::MAX);
+        public_runtime_bound(scaled)
+    };
+    let request_packed_rows = compact_envelope_rows(canvas, frames).total;
+    let request_pixels = u64::from(canvas.0) * u64::from(canvas.1);
+    let measured_pixels = u64::from(MEASURED_CANVAS.0) * u64::from(MEASURED_CANVAS.1);
     H3PrivateRuntimeBoundRecord {
         // observed 659_701_760
         fixed_runtime_host_bytes: public_runtime_bound(659_701_760),
@@ -4986,19 +5063,41 @@ fn public_runtime_bounds() -> H3PrivateRuntimeBoundRecord {
         // admissible (the reload stages through it and the validator refuses
         // zero), so the previous 64 MiB allowance is retained as a floor.
         vae_construction_device_workspace_bytes: 67_108_864,
-        // observed 366_027_840
-        condition_vae_workspace_device_bytes: public_runtime_bound(366_027_840),
+        // observed 366_027_840, on one boundary frame at the measured
+        // canvas — the endpoint is normalized onto the request's canvas, so
+        // this is a per-encode transient linear in canvas area.
+        condition_vae_workspace_device_bytes: scale(
+            fl2va_observed::CONDITION_VAE_WORKSPACE_DEVICE_BYTES,
+            request_pixels,
+            measured_pixels,
+        ),
         // observed 6_323_525_308 (#1245 re-measurement; 6_172_029_280 at the
         // old envelope — the denoise transients are linear in packed rows and
         // the sequence grew 2.5%)
-        attention_workspace_device_bytes: public_runtime_bound(6_323_525_308),
+        attention_workspace_device_bytes: scale(
+            fl2va_observed::ATTENTION_WORKSPACE_DEVICE_BYTES,
+            request_packed_rows,
+            fl2va_observed::ENVELOPE_TOTAL_PACKED_ROWS,
+        ),
         // observed 7_826_714_044 (#1245 re-measurement; 7_641_748_832 at the
         // old envelope)
-        ffn_workspace_device_bytes: public_runtime_bound(7_826_714_044),
-        // observed 1_338_688_660
-        decoder_tile_workspace_device_bytes: public_runtime_bound(1_338_688_660),
+        ffn_workspace_device_bytes: scale(
+            fl2va_observed::FFN_WORKSPACE_DEVICE_BYTES,
+            request_packed_rows,
+            fl2va_observed::ENVELOPE_TOTAL_PACKED_ROWS,
+        ),
+        // observed 1_338_688_660, full canvas per temporal chunk
+        decoder_tile_workspace_device_bytes: scale(
+            fl2va_observed::DECODER_TILE_WORKSPACE_DEVICE_BYTES,
+            request_pixels,
+            measured_pixels,
+        ),
         // observed 204_867_120
-        audio_decode_workspace_device_bytes: public_runtime_bound(204_867_120),
+        audio_decode_workspace_device_bytes: scale(
+            fl2va_observed::AUDIO_DECODE_WORKSPACE_DEVICE_BYTES,
+            u64::from(frames),
+            u64::from(MEASURED_FRAMES),
+        ),
         encoded_video_host_bytes_bound: super::pipeline::SMALL_ENCODED_VIDEO_HOST_BYTES_BOUND,
         thumbnail_host_bytes_bound: super::pipeline::SMALL_THUMBNAIL_HOST_BYTES_BOUND,
         mux_output_host_bytes_bound: super::pipeline::SMALL_MUX_OUTPUT_HOST_BYTES_BOUND,
@@ -5023,6 +5122,13 @@ fn public_runtime_bounds() -> H3PrivateRuntimeBoundRecord {
 
 /// One boundary endpoint's merged vision pads, the fixed part of the FL2VA
 /// presentation overhead.
+///
+/// This is the DEFAULT canvas's `(width / 32) * (height / 32)`, and it stays a
+/// ceiling for every admitted canvas rather than being derived per request:
+/// one packed row is a 32x32 cell, so `rows = pixels / 1024`, and the compact
+/// rule's area ceiling IS the default canvas's area. `mold_core`'s
+/// `no_admitted_canvas_packs_more_rows_per_latent_than_the_default` pins that
+/// consequence.
 const REVIEWED_FL2VA_VISION_PAD_ROWS: u64 = 1_008;
 
 /// The reviewed conditioner text ceiling: the vision pads above, the
@@ -5041,67 +5147,94 @@ const REVIEWED_MAX_QWEN_VISION_ROWS: u64 = 4 * REVIEWED_FL2VA_VISION_PAD_ROWS;
 /// The boundary endpoint's conditioning latent rows.
 const REVIEWED_MAX_CONDITION_VISUAL_ROWS: u64 = REVIEWED_FL2VA_VISION_PAD_ROWS;
 
-/// 1344x768 x 124 frames of generated video latents — the LARGEST reviewed
-/// canvas, which is what makes this a ceiling rather than a transcription.
+/// The canvas every memory bound in [`public_runtime_bounds_for_shape`] was
+/// measured at (#827, #1245).
+const MEASURED_CANVAS: (u32, u32) = (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT);
+
+/// The clip length those same bounds were measured at.
+const MEASURED_FRAMES: u32 = contract::DEFAULT_COMPACT_FRAMES;
+
+/// The generated-side row counts one concrete request packs.
 ///
-/// Every row field on the envelope is a maximum (`row_cap_mismatches` compares
-/// with `<=`), so a smaller reviewed canvas is admitted with slack rather than
-/// needing its own number: 768x768 packs 21,312 target video rows against this
-/// 37,296. Deriving this per canvas would buy a tighter refusal for a request
-/// nothing can currently produce, and would have to move in lockstep with the
-/// memory bounds below — which are #827's 1344x768 measurements and are
-/// deliberately shared, so the smaller canvas is priced conservatively too.
+/// Derived through `mold_core::minimax_h3`, the ONE packed-row authority the
+/// server's admission also charges against — the envelope used to transcribe
+/// these as constants, which was invisible only while the canvas and the clip
+/// length were both pinned.
+#[derive(Clone, Copy)]
+struct CompactEnvelopeRows {
+    video: u64,
+    audio: u64,
+    total: u64,
+}
+
+fn compact_envelope_rows(canvas: (u32, u32), frames: u32) -> CompactEnvelopeRows {
+    // `saturating` rather than a `Result`: `validate_shape` refuses any shape
+    // off the canvas rule or the frame grid before this is asked, and a
+    // saturated ceiling can only ever refuse more.
+    let video = contract::target_video_rows(canvas.0, canvas.1, frames).unwrap_or(u64::MAX);
+    let audio = contract::target_audio_rows(frames).unwrap_or(u64::MAX);
+    CompactEnvelopeRows {
+        video,
+        audio,
+        total: REVIEWED_MAX_QWEN_OUTPUT_TEXT_ROWS
+            .saturating_add(REVIEWED_MAX_CONDITION_VISUAL_ROWS)
+            .saturating_add(video)
+            .saturating_add(audio),
+    }
+}
+
+/// The measured shape's generated video rows — 1344x768 x 124 frames.
 const REVIEWED_MAX_TARGET_VIDEO_ROWS: u64 = 37_296;
 
-/// The same duration of generated audio latents. Canvas-independent: audio
-/// rows follow the clip's duration, which every reviewed canvas shares.
+/// The measured shape's generated audio rows.
 const REVIEWED_MAX_TARGET_AUDIO_ROWS: u64 = 414;
 
-/// The packed sequence is exactly the four axes the FL2VA prepared request
-/// sums (`prepared_request_input`), so it is derived rather than transcribed:
-/// raising the text ceiling raises this by the same amount and nothing else
-/// moves.
+/// The packed sequence at the MEASURED shape, and therefore the denominator
+/// every workspace scaling divides by. It is exactly the four axes the FL2VA
+/// prepared request sums (`prepared_request_input`).
 const REVIEWED_MAX_TOTAL_PACKED_ROWS: u64 = REVIEWED_MAX_QWEN_OUTPUT_TEXT_ROWS
     + REVIEWED_MAX_CONDITION_VISUAL_ROWS
     + REVIEWED_MAX_TARGET_VIDEO_ROWS
     + REVIEWED_MAX_TARGET_AUDIO_ROWS;
 
-/// The reviewed public envelope on the DEFAULT canvas at the default step
-/// count.
+/// The public envelope at the DEFAULT shape and step count.
 ///
-/// Only the row precheck asks for this: it reads row ceilings alone, and
-/// those are canvas-independent (see [`REVIEWED_MAX_TARGET_VIDEO_ROWS`]).
-/// Every authority that gates a request mints the envelope for that
-/// request's own canvas instead.
+/// Nothing gating a request reads this any more — every authority mints the
+/// envelope for that request's own shape. It survives as the shape the
+/// measured bounds describe, which is what the byte-exact regression test
+/// compares against.
 #[cfg(feature = "h3")]
 fn public_runtime_envelope() -> H3PrivateRuntimeEnvelopeRecord {
-    public_runtime_envelope_for_canvas(
-        (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
+    public_runtime_envelope_for_shape(
+        MEASURED_CANVAS,
+        MEASURED_FRAMES,
         contract::COMFY_DEFAULT_STEPS,
     )
 }
 
-/// The reviewed public envelope on one reviewed canvas at a given step count.
+/// The public envelope for one concrete request shape.
 ///
-/// A Turbo tier renders the same envelope — 124 frames, 24 fps, one
-/// first-frame endpoint, identical row ceilings — and moves only the step
-/// count, which is the whole point of the distillation. Callers may only pass
-/// a count an authenticated adapter declares.
+/// The canvas, the clip length, and the step count all come from the REQUEST,
+/// and the fail-closed property is unmoved: `validate_shape` runs before every
+/// other check in `validate_prepared_with_adapter` and refuses a canvas the
+/// compact rule does not admit or a clip length off the family grid, so a
+/// request cannot mint an authority for a shape nobody would run.
 ///
-/// The canvas comes from the REQUEST, and the fail-closed property is
-/// unmoved: `validate_shape` runs before every other check in
-/// `validate_prepared_with_adapter` and refuses an envelope whose canvas is
-/// not in `mold_core`'s reviewed set, so a request cannot mint an authority
-/// for a canvas nobody qualified.
+/// The conditioning ceilings stay the measured ones. They are genuinely
+/// ceilings for every admitted shape (see [`REVIEWED_FL2VA_VISION_PAD_ROWS`]),
+/// and `row_cap_mismatches` compares with `<=`. The generated-side rows are
+/// derived, because they are what the memory scaling is a function of.
 #[cfg(feature = "h3")]
-fn public_runtime_envelope_for_canvas(
+fn public_runtime_envelope_for_shape(
     canvas: (u32, u32),
+    frames: u32,
     max_steps: u32,
 ) -> H3PrivateRuntimeEnvelopeRecord {
+    let rows = compact_envelope_rows(canvas, frames);
     H3PrivateRuntimeEnvelopeRecord {
         width: canvas.0,
         height: canvas.1,
-        frames: contract::REVIEWED_COMPACT_FRAMES,
+        frames,
         fps: contract::FIXED_FPS,
         batch_size: 1,
         max_steps,
@@ -5110,9 +5243,9 @@ fn public_runtime_envelope_for_canvas(
         max_qwen_output_text_rows: REVIEWED_MAX_QWEN_OUTPUT_TEXT_ROWS,
         max_qwen_vision_rows: REVIEWED_MAX_QWEN_VISION_ROWS,
         max_condition_visual_rows: REVIEWED_MAX_CONDITION_VISUAL_ROWS,
-        max_target_video_rows: REVIEWED_MAX_TARGET_VIDEO_ROWS,
-        max_target_audio_rows: REVIEWED_MAX_TARGET_AUDIO_ROWS,
-        max_total_packed_rows: REVIEWED_MAX_TOTAL_PACKED_ROWS,
+        max_target_video_rows: rows.video,
+        max_target_audio_rows: rows.audio,
+        max_total_packed_rows: rows.total,
     }
 }
 
@@ -5233,11 +5366,19 @@ const fn public_style_generated_caps() -> (u64, u64, u64) {
 /// The capture-scope ceilings these feed scale the observation by the ratio of
 /// the two envelopes' packed rows, and both halves of that ratio moved by the
 /// same ~2.5%, so the derived Ref2VA ceilings are unchanged.
-#[cfg(feature = "h3-private-uat")]
+///
+/// `public_runtime_bounds_for_shape` reads these directly now — the public
+/// build applies the same packed-row scaling to the same observations, so the
+/// two would otherwise be a transcription of each other.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 mod fl2va_observed {
     pub(super) const ATTENTION_WORKSPACE_DEVICE_BYTES: u64 = 6_323_525_308;
     pub(super) const FFN_WORKSPACE_DEVICE_BYTES: u64 = 7_826_714_044;
     pub(super) const CONDITION_VAE_WORKSPACE_DEVICE_BYTES: u64 = 366_027_840;
+    #[cfg(feature = "h3")]
+    pub(super) const DECODER_TILE_WORKSPACE_DEVICE_BYTES: u64 = 1_338_688_660;
+    #[cfg(feature = "h3")]
+    pub(super) const AUDIO_DECODE_WORKSPACE_DEVICE_BYTES: u64 = 204_867_120;
     /// The packed-row count of the reviewed FL2VA envelope the two denoise
     /// transients above were measured under (`max_total_packed_rows`,
     /// `public_runtime_envelope_for_steps`); the qualifying render packed the
@@ -5493,10 +5634,12 @@ pub fn h3_capture_bound_report(
 #[allow(clippy::too_many_arguments)]
 fn public_runtime_qualification(
     artifact: &H3PrivateArtifactQualificationReport,
-    // The request's own canvas. `validate_public_runtime_profile_with_turbo`
-    // refuses it below unless `mold_core` records it as reviewed, so this
-    // parameter can only ever narrow the minted authority, never widen it.
+    // The request's own canvas and clip length.
+    // `validate_public_runtime_profile_with_turbo` refuses them below unless
+    // `mold_core`'s canvas rule and frame grid admit them, so these can only
+    // ever shape the minted authority within what the door already allowed.
     canvas: (u32, u32),
+    frames: u32,
     device_id: &str,
     device_ordinal: usize,
     compute_capability: Option<(u16, u16)>,
@@ -5563,11 +5706,12 @@ fn public_runtime_qualification(
             cuda_driver_version: 0,
             cuda_toolkit_version: 0,
         },
-        envelope: public_runtime_envelope_for_canvas(
+        envelope: public_runtime_envelope_for_shape(
             canvas,
+            frames,
             turbo_steps.unwrap_or(contract::COMFY_DEFAULT_STEPS),
         ),
-        bounds: public_runtime_bounds(),
+        bounds: public_runtime_bounds_for_shape(canvas, frames),
         evidence_artifacts: Vec::new(),
         identity_sha256: String::new(),
     };
@@ -6457,11 +6601,11 @@ mod tests {
         }
     }
 
-    /// The reviewed canvas is a SET, and `mold_core` owns it. Both qualified
-    /// canvases validate; a canonical resolver output no campaign has run
-    /// does not.
+    /// The canvas is a RULE, and `mold_core` owns it. Every recommended
+    /// preset validates, so does an ordinary canvas nobody ran a campaign on,
+    /// and a shape outside the rule does not.
     #[test]
-    fn the_runtime_envelope_admits_every_reviewed_canvas_and_nothing_else() {
+    fn the_runtime_envelope_admits_every_canvas_the_rule_admits() {
         for &(width, height) in contract::REVIEWED_COMPACT_CANVASES {
             let mut envelope = reviewed_envelope(contract::COMFY_DEFAULT_STEPS);
             envelope.width = width;
@@ -6471,56 +6615,240 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{width}x{height}: {error}"));
         }
 
-        // 1024x768 is a canonical resolver output, 768x1344 is the transpose
-        // of a reviewed canvas, and 1344x769 is off the alignment grid.
-        // None has a campaign, so none is admitted.
-        for (width, height) in [(1024, 768), (768, 1344), (1344, 769), (1920, 1080)] {
+        // No campaign ran any of these; the rule admits them all.
+        for (width, height) in [(1024, 768), (768, 1344), (1024, 576), (512, 1984)] {
+            let mut envelope = reviewed_envelope(contract::COMFY_DEFAULT_STEPS);
+            envelope.width = width;
+            envelope.height = height;
+            envelope
+                .validate()
+                .unwrap_or_else(|error| panic!("{width}x{height}: {error}"));
+        }
+
+        // Off the stride, over the area ceiling, under the axis floor, and
+        // outside the family aspect bounds.
+        for (width, height) in [(1344, 769), (1920, 1080), (1056, 992), (224, 896)] {
             let mut envelope = reviewed_envelope(contract::COMFY_DEFAULT_STEPS);
             envelope.width = width;
             envelope.height = height;
             assert!(
                 envelope.validate().is_err(),
-                "unqualified canvas {width}x{height} was admitted"
+                "off-envelope canvas {width}x{height} was admitted"
+            );
+        }
+
+        // The clip length is the family grid, not one number.
+        for frames in [
+            contract::MIN_FRAMES,
+            contract::DEFAULT_COMPACT_FRAMES,
+            contract::MAX_FRAMES,
+        ] {
+            let mut envelope = reviewed_envelope(contract::COMFY_DEFAULT_STEPS);
+            envelope.frames = frames;
+            envelope
+                .validate()
+                .unwrap_or_else(|error| panic!("{frames} frames: {error}"));
+        }
+        for frames in [0, 90, 125, 362] {
+            let mut envelope = reviewed_envelope(contract::COMFY_DEFAULT_STEPS);
+            envelope.frames = frames;
+            assert!(
+                envelope.validate().is_err(),
+                "off-grid clip length {frames} was admitted"
+            );
+        }
+
+        // The base tier's step axis is a range; a Turbo tier's is exact.
+        for steps in [
+            contract::COMPACT_MIN_STEPS,
+            10,
+            contract::COMFY_DEFAULT_STEPS,
+            contract::COMPACT_MAX_STEPS,
+        ] {
+            reviewed_envelope(steps)
+                .validate()
+                .unwrap_or_else(|error| panic!("{steps} steps: {error}"));
+        }
+        for steps in [0, 1, contract::COMPACT_MAX_STEPS + 1] {
+            assert!(
+                reviewed_envelope(steps).validate().is_err(),
+                "out-of-range step count {steps} was admitted"
             );
         }
     }
 
-    /// The compiled public envelope is minted for the request's own canvas,
-    /// and every other axis is unmoved by that canvas.
+    /// The compiled public envelope is minted for the request's own shape.
+    ///
+    /// At the MEASURED shape it must be byte-identical to the record the #827
+    /// / #1245 campaigns produced — that is the whole basis for scaling every
+    /// other shape from it.
     #[cfg(feature = "h3")]
     #[test]
-    fn the_public_envelope_is_minted_for_the_requested_reviewed_canvas() {
+    fn the_public_envelope_is_minted_for_the_requested_shape() {
         let default = public_runtime_envelope();
+        assert_eq!((default.width, default.height), MEASURED_CANVAS);
+        assert_eq!(default.frames, MEASURED_FRAMES);
         assert_eq!(
-            (default.width, default.height),
-            (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT)
+            default.max_target_video_rows,
+            REVIEWED_MAX_TARGET_VIDEO_ROWS
         );
+        assert_eq!(
+            default.max_target_audio_rows,
+            REVIEWED_MAX_TARGET_AUDIO_ROWS
+        );
+        assert_eq!(
+            default.max_total_packed_rows,
+            REVIEWED_MAX_TOTAL_PACKED_ROWS
+        );
+        assert_eq!(
+            default.max_total_packed_rows,
+            fl2va_observed::ENVELOPE_TOTAL_PACKED_ROWS
+        );
+
         for &(width, height) in contract::REVIEWED_COMPACT_CANVASES {
-            let envelope =
-                public_runtime_envelope_for_canvas((width, height), contract::COMFY_DEFAULT_STEPS);
+            let envelope = public_runtime_envelope_for_shape(
+                (width, height),
+                contract::DEFAULT_COMPACT_FRAMES,
+                contract::COMFY_DEFAULT_STEPS,
+            );
             assert_eq!((envelope.width, envelope.height), (width, height));
             envelope.validate().unwrap();
-            // Row ceilings are the largest reviewed canvas's, shared by every
-            // smaller one — a slack admission, never a per-canvas number.
+            // The generated-side rows are the shape's own; the conditioning
+            // ceilings remain the measured canvas's, which is a ceiling for
+            // every admitted canvas.
             assert_eq!(
                 envelope.max_target_video_rows,
-                REVIEWED_MAX_TARGET_VIDEO_ROWS
+                contract::target_video_rows(width, height, contract::DEFAULT_COMPACT_FRAMES)
+                    .unwrap()
             );
-            assert_eq!(
-                envelope.max_total_packed_rows,
-                REVIEWED_MAX_TOTAL_PACKED_ROWS
-            );
-            assert_eq!(envelope.frames, contract::REVIEWED_COMPACT_FRAMES);
+            assert!(envelope.max_target_video_rows <= REVIEWED_MAX_TARGET_VIDEO_ROWS);
+            assert_eq!(envelope.max_qwen_vision_rows, REVIEWED_MAX_QWEN_VISION_ROWS);
+            assert_eq!(envelope.frames, contract::DEFAULT_COMPACT_FRAMES);
             assert_eq!(envelope.fps, contract::FIXED_FPS);
             assert_eq!(envelope.batch_size, 1);
             assert_eq!(envelope.endpoint_count, 1);
         }
-        // A canvas nobody qualified cannot mint an authority for itself.
-        assert!(
-            public_runtime_envelope_for_canvas((1024, 768), contract::COMFY_DEFAULT_STEPS)
-                .validate()
-                .is_err()
+
+        // The clip length rides the envelope too, and a longer clip packs
+        // strictly more rows.
+        let long = public_runtime_envelope_for_shape(
+            MEASURED_CANVAS,
+            contract::MAX_FRAMES,
+            contract::COMFY_DEFAULT_STEPS,
         );
+        long.validate().unwrap();
+        assert_eq!(long.frames, contract::MAX_FRAMES);
+        assert!(long.max_total_packed_rows > default.max_total_packed_rows);
+
+        // A shape the rule refuses cannot mint an authority for itself.
+        assert!(public_runtime_envelope_for_shape(
+            (1056, 992),
+            contract::DEFAULT_COMPACT_FRAMES,
+            contract::COMFY_DEFAULT_STEPS
+        )
+        .validate()
+        .is_err());
+        assert!(public_runtime_envelope_for_shape(
+            MEASURED_CANVAS,
+            125,
+            contract::COMFY_DEFAULT_STEPS
+        )
+        .validate()
+        .is_err());
+    }
+
+    /// The compiled bounds are the #827/#1245 measurements at the MEASURED
+    /// shape and a scaling of them everywhere else. Two things must hold:
+    /// byte-exactness at the measured shape (so the reviewed path is
+    /// unchanged), and monotonicity in the quantity each term is a function
+    /// of (so a bigger render is never admitted on a smaller grant).
+    #[cfg(feature = "h3")]
+    #[test]
+    fn the_public_bounds_scale_with_the_request_and_reproduce_the_measurement() {
+        let measured = public_runtime_bounds_for_shape(MEASURED_CANVAS, MEASURED_FRAMES);
+        // Byte-exact regression against the campaign's own record.
+        assert_eq!(measured.fixed_runtime_host_bytes, 805_306_368);
+        assert_eq!(measured.fixed_runtime_device_bytes, 603_979_776);
+        assert_eq!(measured.qwen_activation_workspace_bytes, 4_831_838_208);
+        assert_eq!(measured.vae_construction_device_workspace_bytes, 67_108_864);
+        assert_eq!(measured.condition_vae_workspace_device_bytes, 469_762_048);
+        assert_eq!(measured.attention_workspace_device_bytes, 7_314_866_176);
+        assert_eq!(measured.ffn_workspace_device_bytes, 9_059_696_640);
+        assert_eq!(measured.decoder_tile_workspace_device_bytes, 1_543_503_872);
+        assert_eq!(measured.audio_decode_workspace_device_bytes, 268_435_456);
+        measured.validate().unwrap();
+
+        // A longer clip packs more rows and decodes more audio, but the same
+        // canvas: the denoise transients and the audio decode grow, the
+        // decoder workspace does not.
+        let longer = public_runtime_bounds_for_shape(MEASURED_CANVAS, contract::MAX_FRAMES);
+        assert!(
+            longer.attention_workspace_device_bytes > measured.attention_workspace_device_bytes
+        );
+        assert!(longer.ffn_workspace_device_bytes > measured.ffn_workspace_device_bytes);
+        assert!(
+            longer.audio_decode_workspace_device_bytes
+                > measured.audio_decode_workspace_device_bytes
+        );
+        assert_eq!(
+            longer.decoder_tile_workspace_device_bytes,
+            measured.decoder_tile_workspace_device_bytes
+        );
+        assert_eq!(
+            longer.condition_vae_workspace_device_bytes,
+            measured.condition_vae_workspace_device_bytes
+        );
+        // Fixed runtime state never moves with the request.
+        assert_eq!(
+            longer.fixed_runtime_device_bytes,
+            measured.fixed_runtime_device_bytes
+        );
+        assert_eq!(
+            longer.fixed_runtime_host_bytes,
+            measured.fixed_runtime_host_bytes
+        );
+
+        // A smaller canvas is cheaper on every shape-dependent axis.
+        let smaller = public_runtime_bounds_for_shape((768, 768), MEASURED_FRAMES);
+        assert!(
+            smaller.attention_workspace_device_bytes < measured.attention_workspace_device_bytes
+        );
+        assert!(
+            smaller.decoder_tile_workspace_device_bytes
+                < measured.decoder_tile_workspace_device_bytes
+        );
+        assert_eq!(
+            smaller.audio_decode_workspace_device_bytes,
+            measured.audio_decode_workspace_device_bytes
+        );
+        smaller.validate().unwrap();
+
+        // Monotone across the whole grid the rule admits.
+        let mut previous = 0;
+        for frames in [
+            contract::MIN_FRAMES,
+            contract::DEFAULT_COMPACT_FRAMES,
+            226,
+            contract::MAX_FRAMES,
+        ] {
+            let bounds = public_runtime_bounds_for_shape(MEASURED_CANVAS, frames);
+            assert!(
+                bounds.ffn_workspace_device_bytes >= previous,
+                "{frames} frames"
+            );
+            previous = bounds.ffn_workspace_device_bytes;
+            bounds.validate().unwrap();
+        }
+
+        // The admission device floor is a NUMBER that grows with the clip
+        // now, rather than a pinned list refusing everything but one shape.
+        // At the longest clip it is 2.6x the measured floor, which is what
+        // makes a large request refusable with figures instead of a rule.
+        let measured_floor = private_h3_admission_device_floor_bytes(&measured).unwrap();
+        let long_floor = private_h3_admission_device_floor_bytes(&longer).unwrap();
+        assert_eq!(measured_floor, 9_663_676_416);
+        assert_eq!(long_floor, 24_293_408_768);
+        assert!(long_floor > measured_floor * 2);
     }
 
     /// A private build's authority is a record pinning ONE canvas, so the
@@ -6724,17 +7052,33 @@ mod tests {
         );
     }
 
-    /// Without an authenticated adapter the reviewed envelope is exactly as
-    /// strict as before: 21 steps and nothing else.
+    /// Without an authenticated adapter the envelope takes the base tier's
+    /// step RANGE. The 21-step pin was the qualifying campaign's own count
+    /// read as a contract; a step is time rather than memory, so nothing in
+    /// the bounds moves with it and there was never anything to qualify.
     #[test]
-    fn the_envelope_step_pin_is_unchanged_without_a_turbo_adapter() {
-        reviewed_envelope(contract::COMFY_DEFAULT_STEPS)
-            .validate()
-            .unwrap();
-        for steps in [5u32, 9, 20, 22, 50, 0] {
+    fn the_envelope_step_axis_is_a_range_without_a_turbo_adapter() {
+        for steps in [
+            contract::COMPACT_MIN_STEPS,
+            5,
+            9,
+            20,
+            contract::COMFY_DEFAULT_STEPS,
+            22,
+            contract::COMPACT_MAX_STEPS,
+        ] {
+            reviewed_envelope(steps)
+                .validate()
+                .unwrap_or_else(|error| panic!("{steps}: {error}"));
+        }
+        for steps in [0u32, 1, contract::COMPACT_MAX_STEPS + 1, 4_096] {
             let error = reviewed_envelope(steps).validate().unwrap_err().to_string();
             assert!(
-                error.contains(&format!("allows {} steps", contract::COMFY_DEFAULT_STEPS)),
+                error.contains(&format!(
+                    "allows {}..={} steps",
+                    contract::COMPACT_MIN_STEPS,
+                    contract::COMPACT_MAX_STEPS
+                )),
                 "{steps}: {error}"
             );
         }
@@ -6811,7 +7155,10 @@ mod tests {
                 .unwrap();
 
             // Any other count, including the baseline 21, is refused for that
-            // tier: an adapter distilled for N steps may not run at M.
+            // tier: an adapter distilled for N steps may not run at M. This
+            // stays EXACT while the base tier's axis became a range, because
+            // the count is the adapter's own schedule length rather than a
+            // qualification pin.
             for wrong in [contract::COMFY_DEFAULT_STEPS, reviewed_steps + 1, 4] {
                 if wrong == reviewed_steps {
                     continue;
@@ -6821,7 +7168,7 @@ mod tests {
                     .unwrap_err()
                     .to_string();
                 assert!(
-                    error.contains(&format!("allows {reviewed_steps} steps")),
+                    error.contains(&format!("renders exactly {reviewed_steps} steps")),
                     "{reviewed_steps}/{wrong}: {error}"
                 );
             }
@@ -6883,17 +7230,20 @@ mod tests {
                 .validate_prepared_with_adapter(&request, Some(&adapter))
                 .unwrap();
 
-            // The path admission took before this fix. It must fail, loudly and
-            // for the step reason — otherwise passing the wrong authority is
-            // silently harmless and nothing pins the call site.
-            let error = envelope
+            // The base tier's step axis is a range that CONTAINS every
+            // reviewed Turbo count, so the step number is no longer what
+            // separates the tiers — passing `None` here validates. What still
+            // separates them is adapter IDENTITY: `validate_for_task_with_
+            // adapter` checks the tier's reviewed task, `resolve_turbo_
+            // authority_for_request` selects by model name, and
+            // `media_model_matches_h3_authority` pairs the request with the
+            // frozen adapter. Each caller must still name which authority it
+            // holds.
+            assert!((contract::COMPACT_MIN_STEPS..=contract::COMPACT_MAX_STEPS)
+                .contains(&reviewed_steps));
+            envelope
                 .validate_prepared_with_adapter(&request, None)
-                .unwrap_err()
-                .to_string();
-            assert!(
-                error.contains(&format!("allows {} steps", contract::COMFY_DEFAULT_STEPS)),
-                "{reviewed_steps}: {error}"
-            );
+                .unwrap_or_else(|error| panic!("{reviewed_steps}: {error}"));
 
             // And the baseline request is still refused under the Turbo
             // authority, so the tier's count is a pin rather than a widening.
@@ -6932,6 +7282,7 @@ mod tests {
             public_runtime_qualification(
                 &artifact,
                 (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
+                contract::DEFAULT_COMPACT_FRAMES,
                 "gpu-0",
                 0,
                 Some((8, 9)),
@@ -9100,7 +9451,7 @@ mod tests {
         // Mirror production's own bounds selection so this test asks the gate
         // exactly what a real admission asks it.
         #[cfg(feature = "h3")]
-        let bounds = public_runtime_bounds();
+        let bounds = public_runtime_bounds_for_shape(MEASURED_CANVAS, MEASURED_FRAMES);
         #[cfg(not(feature = "h3"))]
         let bounds = capture_runtime_bounds();
         let host_floor = private_h3_admission_host_floor_bytes(&bounds).unwrap();
@@ -9173,6 +9524,7 @@ mod tests {
         let authority = public_runtime_qualification(
             &artifact,
             (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
+            contract::DEFAULT_COMPACT_FRAMES,
             DEVICE_0,
             0,
             Some((8, 9)),
@@ -9259,6 +9611,7 @@ mod tests {
             assert!(public_runtime_qualification(
                 &crossed,
                 (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
+                contract::DEFAULT_COMPACT_FRAMES,
                 DEVICE_0,
                 0,
                 Some(cc),
@@ -9272,6 +9625,7 @@ mod tests {
             assert!(public_runtime_qualification(
                 &crossed,
                 (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
+                contract::DEFAULT_COMPACT_FRAMES,
                 DEVICE_0,
                 0,
                 Some((8, 9)),
@@ -9287,6 +9641,7 @@ mod tests {
         assert!(public_runtime_qualification(
             &crossed_model,
             (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
+            contract::DEFAULT_COMPACT_FRAMES,
             DEVICE_0,
             0,
             Some((8, 9)),
