@@ -486,7 +486,7 @@ mod tests {
             .seal(
                 &owner,
                 "media-job",
-                &[SealMedia::bytes("source", "source.png", vec![1, 2, 3])],
+                vec![SealMedia::bytes("source", "source.png", vec![1, 2, 3])],
             )
             .unwrap();
         generation_queue::insert_with_media(
@@ -559,7 +559,7 @@ mod tests {
             .seal(
                 &owner,
                 "media-job",
-                &[SealMedia::bytes("source", "source.png", vec![1])],
+                vec![SealMedia::bytes("source", "source.png", vec![1])],
             )
             .unwrap();
         generation_queue::insert_with_media(
@@ -600,7 +600,7 @@ mod tests {
             .seal(
                 &owner,
                 "restore-job",
-                &[SealMedia::bytes("source", "restore.png", vec![1])],
+                vec![SealMedia::bytes("source", "restore.png", vec![1])],
             )
             .unwrap();
         generation_queue::insert_with_media(
@@ -615,7 +615,7 @@ mod tests {
             .seal(
                 &owner,
                 "gc-job",
-                &[SealMedia::bytes("source", "gc.png", vec![2])],
+                vec![SealMedia::bytes("source", "gc.png", vec![2])],
             )
             .unwrap();
         generation_queue::insert_with_media(
@@ -630,7 +630,7 @@ mod tests {
             .seal(
                 &owner,
                 "orphan-job",
-                &[SealMedia::bytes("source", "orphan.png", vec![3])],
+                vec![SealMedia::bytes("source", "orphan.png", vec![3])],
             )
             .unwrap();
 
@@ -671,7 +671,7 @@ mod tests {
             .seal(
                 &owner,
                 "complete-job",
-                &[SealMedia::bytes("source", "one", vec![1])],
+                vec![SealMedia::bytes("source", "one", vec![1])],
             )
             .unwrap();
         generation_queue::insert_claimed_with_media(
@@ -685,7 +685,7 @@ mod tests {
             .seal(
                 &owner,
                 "bulk-job",
-                &[SealMedia::bytes("source", "two", vec![2])],
+                vec![SealMedia::bytes("source", "two", vec![2])],
             )
             .unwrap();
         generation_queue::insert_with_media(
@@ -738,7 +738,7 @@ mod tests {
             .seal(
                 &owner,
                 "batch-child",
-                &[SealMedia::bytes("source", "one", vec![1])],
+                vec![SealMedia::bytes("source", "one", vec![1])],
             )
             .unwrap();
         let row = queue_row(&owner, "batch-child", &set.set_id);
@@ -820,7 +820,7 @@ mod tests {
                 .seal(
                     &owner,
                     "media-job",
-                    &[SealMedia::bytes("source", "one", vec![1])],
+                    vec![SealMedia::bytes("source", "one", vec![1])],
                 )
                 .unwrap();
             generation_queue::insert_claimed_with_media(
@@ -885,7 +885,7 @@ mod tests {
             .seal(
                 &owner,
                 "media-job",
-                &[SealMedia::bytes("source", "one", vec![1])],
+                vec![SealMedia::bytes("source", "one", vec![1])],
             )
             .unwrap();
         generation_queue::insert_with_media(

@@ -4630,14 +4630,14 @@ mod tests {
             .seal(
                 "claimed-owner",
                 "claimed-job",
-                &[SealMedia::bytes("source", "one", vec![1])],
+                vec![SealMedia::bytes("source", "one", vec![1])],
             )
             .unwrap();
         store
             .seal(
                 "peer-owner",
                 "peer-job",
-                &[SealMedia::bytes("source", "one", vec![2])],
+                vec![SealMedia::bytes("source", "one", vec![2])],
             )
             .unwrap();
 
