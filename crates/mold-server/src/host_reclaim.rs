@@ -45,6 +45,7 @@ use std::time::Instant;
 
 use crate::model_cache::ReclaimableEntry;
 use crate::state::AppState;
+use std::collections::BTreeSet;
 
 /// One cached engine this reclaim may release.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,6 +211,24 @@ fn worker_release_state(worker: &crate::gpu_pool::GpuWorker) -> WorkerReleaseSta
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .is_some(),
     }
+}
+
+/// Stable IDs of owners whose current work can return host memory when it
+/// settles.
+///
+/// These workers are deliberately not reclaim targets: an Admin unload would
+/// only wait behind the render that already owns the bytes. H3 preparation
+/// uses this snapshot to keep a short request queued until that transient
+/// pressure is gone.
+pub(crate) fn busy_worker_device_ids(state: &AppState) -> BTreeSet<String> {
+    state
+        .gpu_pool
+        .workers
+        .snapshot()
+        .into_iter()
+        .filter(|worker| worker_release_state(worker).busy)
+        .map(|worker| crate::scheduler::worker_device_id(&worker))
+        .collect()
 }
 
 /// Collect every engine this server could release right now.

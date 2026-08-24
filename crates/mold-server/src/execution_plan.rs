@@ -1076,6 +1076,17 @@ pub struct PreparedExecutionInputs {
     /// at least one sibling succeeded. These omissions are retryable; they
     /// must not silently become the device set for the lifetime of the job.
     pub retryable_device_failures: BTreeMap<String, String>,
+    /// Active GPU owners whose transient host allocations prevented exact
+    /// dependency admission.
+    ///
+    /// Preparation leaves the generation queued while any named owner is
+    /// busy, then retries once those owners settle. Placement preview turns
+    /// this marker into a non-authoritative answer so compatible clients take
+    /// their established direct-queue fallback. This is distinct from an
+    /// ordinary retryable device failure: polling admission while a long H3
+    /// render still owns the same host bytes would repeatedly hash the full
+    /// artifact set without changing the answer.
+    pub host_memory_retry_after_devices: BTreeSet<String>,
     /// Runtime-only catalog config synthesized from an installed sidecar.
     ///
     /// The scheduler applies this overlay when the current config lacks the
@@ -6257,6 +6268,7 @@ mod tests {
                 },
             )]),
             retryable_device_failures: BTreeMap::new(),
+            host_memory_retry_after_devices: Default::default(),
             model_config_overlay: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -6346,6 +6358,7 @@ mod tests {
                 },
             )]),
             retryable_device_failures: BTreeMap::new(),
+            host_memory_retry_after_devices: Default::default(),
             model_config_overlay: Some(Arc::new(model_config)),
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -6407,6 +6420,7 @@ mod tests {
                 },
             )]),
             retryable_device_failures: BTreeMap::new(),
+            host_memory_retry_after_devices: Default::default(),
             model_config_overlay: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -6876,6 +6890,7 @@ mod tests {
                 },
             )]),
             retryable_device_failures: BTreeMap::new(),
+            host_memory_retry_after_devices: Default::default(),
             model_config_overlay: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
