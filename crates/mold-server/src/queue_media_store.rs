@@ -949,9 +949,16 @@ impl QueueMediaStore {
         let path = self
             .locate_bundle(media_set)?
             .ok_or(QueueMediaError::NotFound)?;
-        let file = mold_core::secure_file::open_regular_file_no_follow(&path)
+        let mut file = mold_core::secure_file::open_regular_file_no_follow(&path)
             .map_err(|error| QueueMediaError::InsecurePath(error.to_string()))?;
-        let mut reader = BufReader::new(file);
+        self.open_projection_from_reader(media_set, &mut file)
+    }
+
+    fn open_projection_from_reader(
+        &self,
+        media_set: &MediaSetRef,
+        reader: &mut impl Read,
+    ) -> Result<QueueMediaProjection, QueueMediaError> {
         let mut header = [0_u8; PROJECTION_HEADER_BYTES];
         if let Err(error) = reader.read_exact(&mut header[..MAGIC.len()]) {
             return Err(if error.kind() == std::io::ErrorKind::UnexpectedEof {
@@ -3188,6 +3195,28 @@ mod tests {
     use super::*;
     use std::io::{Seek, SeekFrom};
 
+    struct CountingReader<R> {
+        inner: R,
+        bytes_read: usize,
+    }
+
+    impl<R> CountingReader<R> {
+        fn new(inner: R) -> Self {
+            Self {
+                inner,
+                bytes_read: 0,
+            }
+        }
+    }
+
+    impl<R: Read> Read for CountingReader<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.inner.read(buffer)?;
+            self.bytes_read += read;
+            Ok(read)
+        }
+    }
+
     fn open_store(home: &Path) -> QueueMediaStore {
         QueueMediaStore::open(home).unwrap().store
     }
@@ -3238,6 +3267,57 @@ mod tests {
             audio_inline: true,
             audio_path: true,
         }
+    }
+
+    #[test]
+    fn projection_reader_consumes_only_the_exact_authenticated_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        let store = open_store(home.path());
+        let expected = projection();
+        let v2 = store
+            .seal_v2_with_operation_fingerprint(
+                "owner",
+                "job-v2-prefix",
+                &QueueMediaOperationFingerprint::sha256_v1(b"projection prefix"),
+                &expected,
+                &[SealMedia::bytes(
+                    "source_image",
+                    "scalar",
+                    media_bytes(CHUNK_BYTES + 17),
+                )],
+            )
+            .unwrap();
+        let v2_bundle = bundle_bytes(&store, &v2);
+        assert!(v2_bundle.len() > PROJECTION_HEADER_BYTES);
+        let mut v2_reader = CountingReader::new(std::io::Cursor::new(v2_bundle));
+        assert_eq!(
+            store
+                .open_projection_from_reader(&v2, &mut v2_reader)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(v2_reader.bytes_read, PROJECTION_HEADER_BYTES);
+
+        let v1 = store
+            .seal(
+                "owner",
+                "job-v1-prefix",
+                &[SealMedia::bytes(
+                    "source_image",
+                    "scalar",
+                    media_bytes(CHUNK_BYTES + 17),
+                )],
+            )
+            .unwrap();
+        let v1_bundle = bundle_bytes(&store, &v1);
+        let mut v1_reader = CountingReader::new(std::io::Cursor::new(v1_bundle));
+        assert!(matches!(
+            store.open_projection_from_reader(&v1, &mut v1_reader),
+            Err(QueueMediaError::ProjectionUnavailable(
+                QueueMediaProjectionFailure::LegacyV1
+            ))
+        ));
+        assert_eq!(v1_reader.bytes_read, MAGIC.len());
     }
 
     #[test]
