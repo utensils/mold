@@ -454,6 +454,7 @@ import {
   type MobileDurableGenerationRecovery,
 } from "./mobileGenerationRecovery";
 import { watchMobileGenerationHost, type MobileGenerationHostWatch } from "./mobileGenerationWatch";
+import { beginMobileBackgroundTask } from "./backgroundTask";
 
 type Tab = "generate" | "gallery" | "catalog" | "hosts";
 
@@ -4223,6 +4224,7 @@ async function submitMobileSequence(): Promise<void> {
   const signal = sequenceSubmissionGuard.signalFor(token);
   const isCurrent = () => sequenceSubmissionGuard.isCurrent(token) && !signal.aborted;
   sequenceError.value = "";
+  const backgroundTask = await beginMobileBackgroundTask("Preparing remote sequence");
   try {
     // Stale limits would mis-gate audio and frame caps for the routed host.
     if (!chainLimits.value || chainLimits.value.model !== entry.name) await loadChainLimits();
@@ -4350,6 +4352,7 @@ async function submitMobileSequence(): Promise<void> {
     if (!isCurrent()) return;
     sequenceError.value = describeTransportError(error, host.name);
   } finally {
+    await backgroundTask.release();
     if (sequenceSubmissionGuard.isCurrent(token)) {
       sequenceStarting.value = false;
       sequenceCancellationRequest = null;
@@ -5827,6 +5830,9 @@ async function generate(): Promise<void> {
   )
     return;
 
+  const backgroundTask = await beginMobileBackgroundTask("Preparing remote generation");
+  let backgroundTaskTransferred = false;
+
   // Replaced by the fan-out winner under Auto / Most capable; frozen from here
   // on for every other path.
   let route: HostRoute = initialRoute;
@@ -5890,6 +5896,7 @@ async function generate(): Promise<void> {
       generationSubmissionPhase.value = null;
     }
     if (ownsPreparedSubmission()) preparedSubmitting.value = false;
+    if (!backgroundTaskTransferred) void backgroundTask.release();
   };
   let request: GenerateRequest;
   preparingGeneration.value = true;
@@ -6173,6 +6180,8 @@ async function generate(): Promise<void> {
     });
   if (durableLifecycle) {
     const admission = submitMobileDurableGeneration({ route, requests: durablePlans });
+    backgroundTaskTransferred = true;
+    void admission.finally(() => backgroundTask.release());
     releasePreparedSubmission();
     if (preparedSubmission) {
       const active = document.activeElement;
@@ -6198,25 +6207,40 @@ async function generate(): Promise<void> {
     });
     return;
   }
-  const { settled } = generation.submitBatch(
-    request,
-    batchSize,
-    {
-      hostId: route.hostId,
-      label: route.label,
-      kind: "remote",
-      target: { ...route.target },
-      instanceId: route.instanceId ?? null,
-      referenceUploads: route.referenceUploads ?? null,
-      heterogeneousBatch: route.heterogeneousBatch ?? false,
-      heterogeneousBatchMaxOutputs: route.heterogeneousBatchMaxOutputs ?? null,
-      mirrorRemoteOutput: false,
-      retainEncodedResult: false,
-      metadataOnlyCompletion: true,
-    },
-    chainRouting,
-    requestOptions,
-  );
+  let submission: ReturnType<typeof generation.submitBatch>;
+  try {
+    submission = generation.submitBatch(
+      request,
+      batchSize,
+      {
+        hostId: route.hostId,
+        label: route.label,
+        kind: "remote",
+        target: { ...route.target },
+        instanceId: route.instanceId ?? null,
+        referenceUploads: route.referenceUploads ?? null,
+        heterogeneousBatch: route.heterogeneousBatch ?? false,
+        heterogeneousBatchMaxOutputs: route.heterogeneousBatchMaxOutputs ?? null,
+        mirrorRemoteOutput: false,
+        retainEncodedResult: false,
+        metadataOnlyCompletion: true,
+      },
+      chainRouting,
+      requestOptions,
+    );
+  } catch (error) {
+    setGenerationStatus(describeTransportError(error, route.label), true);
+    releasePreparedSubmission();
+    return;
+  }
+  const { admitted, settled } = submission;
+  // Keep preprocessing, placement, reference upload, and server admission
+  // alive through iOS's finite background grace period. Once every sibling is
+  // accepted (or refused), foreground recovery and the remote queue own the
+  // remaining lifecycle; generation itself never depends on the phone staying
+  // awake.
+  backgroundTaskTransferred = true;
+  void (admitted ?? settled).finally(() => backgroundTask.release());
   releasePreparedSubmission();
   if (preparedSubmission) {
     const active = document.activeElement;

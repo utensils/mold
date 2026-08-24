@@ -5,6 +5,7 @@ import { flushPromises } from "@vue/test-utils";
 // Streams stay open until the test resolves them — models jobs sitting in
 // the server queue while more are submitted.
 const openStreams: Array<{
+  onOpen: ((response: Response) => void) | undefined;
   onEvent: (event: string, data: string) => void;
   signal: AbortSignal;
   onClose: ((error: Error | null) => void) | undefined;
@@ -16,6 +17,7 @@ vi.mock("../lib/api/sse", () => ({
     (
       _path: string,
       opts: {
+        onOpen?: (response: Response) => void;
         onEvent: (event: string, data: string) => void;
         signal: AbortSignal;
         onClose?: (error: Error | null) => void;
@@ -23,6 +25,7 @@ vi.mock("../lib/api/sse", () => ({
     ) =>
       new Promise<void>((resolve) => {
         openStreams.push({
+          onOpen: opts.onOpen,
           onEvent: opts.onEvent,
           signal: opts.signal,
           onClose: opts.onClose,
@@ -102,6 +105,21 @@ describe("generation queueing", () => {
     // The canvas tracks the developing job, not the queued one.
     expect(store.active!.clientId).toBe(store.jobs[0]!.clientId);
     expect(store.jobs[1]!.queuePosition).toBe(1);
+  });
+
+  it("reports admission only after the generation response opens", async () => {
+    const batch = useGenerationStore().submitBatch({ ...req }, 1);
+    let admitted = false;
+    void batch.admitted!.then(() => {
+      admitted = true;
+    });
+    await flushPromises();
+
+    expect(admitted).toBe(false);
+    openStreams[0]!.onOpen?.(new Response(null, { status: 200 }));
+    await flushPromises();
+
+    expect(admitted).toBe(true);
   });
 
   it("keeps an explicitly selected older job on the canvas", () => {
