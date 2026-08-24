@@ -72,9 +72,7 @@ impl DurableMediaAdmission {
         observer_mode: Option<ObserverMode>,
         completion_payload: SseCompletionPayload,
     ) -> Result<DurableAdmissionOutcome, ApiError> {
-        if uuid::Uuid::parse_str(body.client_batch_id.trim()).is_err() {
-            return Err(ApiError::validation("client_batch_id must be a UUID"));
-        }
+        body.client_batch_id = crate::routes::canonical_client_batch_id(&body.client_batch_id)?;
         if body.requests.is_empty() {
             return Err(ApiError::validation(
                 "requests must contain at least one child",
@@ -114,6 +112,16 @@ impl DurableMediaAdmission {
             .map_err(|error| ApiError::internal(format!("batch serialization failed: {error}")))?;
         let fingerprint = QueueMediaOperationFingerprint::sha256_v1(&canonical_operation);
 
+        // Protocol-level authority refusals are request facts, not stored
+        // operation state. Resolve them before even a read-only SQLite lookup;
+        // in particular an HDR output path must never cross the DB boundary.
+        for (offset, request) in body.requests.iter().enumerate() {
+            durable_media_preflight(request).map_err(|mut error| {
+                error.error = format!("requests[{}]: {}", offset + 1, error.error);
+                error
+            })?;
+        }
+
         if let Some(existing) = existing_by_client(state, &body.client_batch_id).await? {
             self.verify_existing(&body.client_batch_id, &fingerprint, &existing)?;
             return Ok(DurableAdmissionOutcome {
@@ -122,13 +130,6 @@ impl DurableMediaAdmission {
                 observer: None,
                 warnings: None,
             });
-        }
-
-        for (offset, request) in body.requests.iter().enumerate() {
-            durable_media_preflight(request).map_err(|mut error| {
-                error.error = format!("requests[{}]: {}", offset + 1, error.error);
-                error
-            })?;
         }
 
         let mut prepared = Vec::with_capacity(body.requests.len());

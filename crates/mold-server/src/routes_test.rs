@@ -5018,6 +5018,188 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_media_uuid_text_variants_converge_concurrently_and_conflict_once() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+        let canonical = uuid::Uuid::new_v4().to_string();
+        let decorated = format!("  {}  ", canonical.to_ascii_uppercase());
+        let mut request: serde_json::Value =
+            serde_json::from_str(&generate_body("canonical durable media", 64, 64)).unwrap();
+        request["source_image"] =
+            serde_json::json!(base64::engine::general_purpose::STANDARD.encode(minimal_png()));
+        request["source_image_name"] = serde_json::json!("canonical-source.png");
+        let first_body = serde_json::json!({
+            "client_batch_id": decorated,
+            "requests": [request.clone()],
+        });
+        let second_body = serde_json::json!({
+            "client_batch_id": canonical,
+            "requests": [request.clone()],
+        });
+
+        let (first, second) = tokio::join!(
+            app.clone().oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                first_body.clone(),
+            )),
+            app.clone()
+                .oneshot(json_request("POST", "/api/generation-batches", second_body,)),
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert!(matches!(
+            (first.status(), second.status()),
+            (StatusCode::ACCEPTED, StatusCode::OK) | (StatusCode::OK, StatusCode::ACCEPTED)
+        ));
+        let first = json_body(first).await;
+        let second = json_body(second).await;
+        assert_eq!(first["id"], second["id"]);
+        assert_eq!(first["client_batch_id"], canonical);
+        assert_eq!(second["client_batch_id"], canonical);
+        assert_eq!(journal.list_all().len(), 1);
+        let persisted: GenerateRequest =
+            serde_json::from_str(&journal.list_all()[0].request_json).unwrap();
+        assert_eq!(persisted.batch_id.as_deref(), Some(canonical.as_str()));
+
+        let retry = app
+            .clone()
+            .oneshot(json_request("POST", "/api/generation-batches", first_body))
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        assert_eq!(json_body(retry).await["id"], first["id"]);
+
+        let mut changed = request;
+        changed["prompt"] = serde_json::json!("canonical conflict");
+        let conflict = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": format!(" {} ", canonical.to_ascii_uppercase()),
+                    "requests": [changed],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(conflict).await["code"],
+            "GENERATION_BATCH_IDEMPOTENCY_CONFLICT"
+        );
+        assert_eq!(journal.list_all().len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn media_free_batch_uuid_text_variants_share_lookup_and_conflict_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+        let canonical = uuid::Uuid::new_v4().to_string();
+        let request: serde_json::Value =
+            serde_json::from_str(&generate_body("canonical plain batch", 64, 64)).unwrap();
+
+        let accepted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": format!("  {}  ", canonical.to_ascii_uppercase()),
+                    "requests": [request.clone()],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        let accepted = json_body(accepted).await;
+        assert_eq!(accepted["client_batch_id"], canonical);
+        let batch_id = accepted["id"].as_str().unwrap().to_string();
+
+        let recovered = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/generation-batches/by-client/{}",
+                    canonical.to_ascii_uppercase()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.status(), StatusCode::OK);
+        assert_eq!(json_body(recovered).await["id"], batch_id);
+
+        let reconciled = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches/status",
+                serde_json::json!({
+                    "client_batch_ids": [
+                        canonical.to_ascii_uppercase(),
+                        format!(" {canonical} "),
+                    ],
+                    "batch_ids": [],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(reconciled.status(), StatusCode::OK);
+        let reconciled = json_body(reconciled).await;
+        assert_eq!(reconciled["batches"].as_array().unwrap().len(), 1);
+        assert_eq!(reconciled["batches"][0]["id"], batch_id);
+        assert!(reconciled["missing"]["client_batch_ids"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        let retry = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": canonical,
+                    "requests": [request.clone()],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        assert_eq!(json_body(retry).await["id"], accepted["id"]);
+
+        let mut changed = request;
+        changed["prompt"] = serde_json::json!("plain conflict");
+        let conflict = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": format!(" {} ", canonical.to_ascii_uppercase()),
+                    "requests": [changed],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(conflict).await["code"],
+            "GENERATION_BATCH_IDEMPOTENCY_CONFLICT"
+        );
+        assert_eq!(journal.list_all().len(), 1);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn durable_media_mixed_siblings_commit_together_and_preflight_is_one_over_n_atomic() {
         let root = tempfile::tempdir().unwrap();
@@ -5128,6 +5310,71 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn durable_direct_authority_refusals_are_typed_and_never_reach_sqlite() {
+        let root = tempfile::tempdir().unwrap();
+        let db_path = root.path().join("mold.db");
+        let db = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+
+        let mut h3: serde_json::Value =
+            serde_json::from_str(&generate_body("direct H3 authority", 64, 64)).unwrap();
+        h3["model"] = serde_json::json!(mold_core::minimax_h3::FL2VA_COMFY);
+
+        let mut references: serde_json::Value =
+            serde_json::from_str(&generate_body("direct reference authority", 64, 64)).unwrap();
+        references["references"] =
+            serde_json::to_value(vec![mold_core::GenerationReference::Image {
+                media: mold_core::GenerationReferenceAuthority::Inline {
+                    data: minimal_png(),
+                },
+                provenance: mold_core::GenerationReferenceProvenance::default(),
+                mime_type: "image/png".to_string(),
+                width: 1,
+                height: 1,
+            }])
+            .unwrap();
+
+        let hdr_sentinel = "durable-hdr-must-never-enter-sqlite";
+        let mut hdr: serde_json::Value =
+            serde_json::from_str(&generate_body("direct HDR authority", 64, 64)).unwrap();
+        hdr["hdr_exr_dir"] = serde_json::json!(hdr_sentinel);
+
+        for path in ["/api/generate", "/api/generate/stream"] {
+            for (request, expected_code) in [
+                (&h3, "DURABLE_MEDIA_H3_UNSUPPORTED"),
+                (&references, "DURABLE_MEDIA_REFERENCES_UNSUPPORTED"),
+                (&hdr, "DURABLE_MEDIA_HDR_UNSUPPORTED"),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::post(path)
+                            .header("content-type", "application/json")
+                            .header("x-mold-operation-id", uuid::Uuid::new_v4().to_string())
+                            .body(Body::from(request.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+                assert_eq!(json_body(response).await["code"], expected_code);
+            }
+        }
+
+        assert!(journal.list_all().is_empty());
+        let mut sqlite = std::fs::read(&db_path).unwrap();
+        if let Ok(wal) = std::fs::read(format!("{}-wal", db_path.display())) {
+            sqlite.extend(wal);
+        }
+        assert!(!sqlite
+            .windows(hdr_sentinel.len())
+            .any(|window| window == hdr_sentinel.as_bytes()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn headerless_direct_media_remains_attached_and_never_enters_sqlite() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
@@ -5229,6 +5476,84 @@ mod tests {
         feeder_shutdown.cancel();
         feeder.await.unwrap();
         worker.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_direct_sse_yields_committed_id_before_claim_and_disconnect_does_not_cancel() {
+        use futures::StreamExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        state.queue_capacity = 1;
+        install_authoritative_v2(&mut state);
+        let full_runtime = state
+            .queue
+            .try_reserve(state.queue_capacity)
+            .expect("test owns the only runtime slot");
+        let journal = state.queue_journal.clone();
+        let admission = journal
+            .queue_media_admission()
+            .expect("admission installed");
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
+        let app = app_with_state(state);
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            app.clone().oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .header("x-mold-operation-id", uuid::Uuid::new_v4().to_string())
+                    .body(Body::from(durable_direct_media_body(
+                        "committed before claim",
+                    )))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("HTTP admission must not wait for feeder capacity")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 1);
+        let job_id = rows[0].id.clone();
+        assert_eq!(
+            rows[0].state,
+            mold_db::generation_queue::QueueRowState::Queued
+        );
+        let mut stream = response.into_body().into_data_stream();
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("committed queued event must be available before feeder claim")
+            .expect("SSE body remains open")
+            .unwrap();
+        let first = String::from_utf8_lossy(&first);
+        assert!(first.contains("\"type\":\"queued\""), "{first}");
+        assert!(first.contains(&job_id), "{first}");
+
+        drop(stream);
+        assert_eq!(admission.ingress().attached_len(), 0);
+        assert_eq!(journal.list_all().len(), 1, "disconnect only detaches");
+
+        let cancelled = app
+            .oneshot(
+                Request::delete(format!("/api/queue/{job_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::NO_CONTENT);
+        assert!(
+            journal.list_all().is_empty(),
+            "DELETE remains cancellation authority"
+        );
+
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
+        drop(full_runtime);
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -390,7 +390,7 @@ fn scrub_path_buf(path: &mut PathBuf) {
     bytes.zeroize();
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaManifestEntry {
     pub role: String,
     pub name: String,
@@ -399,16 +399,35 @@ pub struct MediaManifestEntry {
     pub sink: QueueMediaSink,
 }
 
+impl fmt::Debug for MediaManifestEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MediaManifestEntry")
+            .field("size_bytes", &self.size_bytes)
+            .field("sink", &self.sink)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A fingerprint of caller-defined canonical operation bytes.
 ///
 /// The store deliberately does not define or persist the canonical operation.
 /// It only keeps this value inside the encrypted, authenticated manifest so a
 /// caller can resolve an ambiguous seal without putting media-derived hashes in
 /// plaintext queue state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct QueueMediaOperationFingerprint {
     version: u16,
     sha256_hex: String,
+}
+
+impl fmt::Debug for QueueMediaOperationFingerprint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("QueueMediaOperationFingerprint")
+            .field("version", &self.version)
+            .finish_non_exhaustive()
+    }
 }
 
 impl QueueMediaOperationFingerprint {
@@ -526,14 +545,26 @@ pub enum QueueMediaSink {
     PrivateStaging,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct MediaSetManifest {
     pub media_set: MediaSetRef,
     pub operation_fingerprint: Option<QueueMediaOperationFingerprint>,
     pub entries: Vec<MediaManifestEntry>,
 }
 
-#[derive(Debug)]
+impl fmt::Debug for MediaSetManifest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MediaSetManifest")
+            .field(
+                "has_operation_fingerprint",
+                &self.operation_fingerprint.is_some(),
+            )
+            .field("entry_count", &self.entries.len())
+            .finish_non_exhaustive()
+    }
+}
+
 pub struct DecryptedMedia {
     pub role: String,
     pub name: String,
@@ -542,7 +573,15 @@ pub struct DecryptedMedia {
     pub sha256_hex: String,
 }
 
-#[derive(Debug)]
+impl fmt::Debug for DecryptedMedia {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DecryptedMedia")
+            .field("size_bytes", &self.size_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
 pub struct DecryptedMediaSet {
     pub manifest: MediaSetManifest,
     pub files: Vec<DecryptedMedia>,
@@ -551,26 +590,66 @@ pub struct DecryptedMediaSet {
     _runtime_staging: Arc<QueueMediaRuntimeStaging>,
 }
 
-#[derive(Debug)]
+impl fmt::Debug for DecryptedMediaSet {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DecryptedMediaSet")
+            .field("manifest_entry_count", &self.manifest.entries.len())
+            .field("file_count", &self.files.len())
+            .field("has_staging_root", &self.root.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 pub enum DecryptedQueueMediaPayload {
     Bytes(Vec<u8>),
     PrivatePath(PathBuf),
 }
 
-#[derive(Debug)]
+impl fmt::Debug for DecryptedQueueMediaPayload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bytes(bytes) => formatter
+                .debug_struct("Bytes")
+                .field("len", &bytes.len())
+                .finish_non_exhaustive(),
+            Self::PrivatePath(_) => formatter.write_str("PrivatePath(<redacted>)"),
+        }
+    }
+}
+
 pub struct DecryptedQueueMedia {
     pub role: String,
     pub name: String,
     pub payload: DecryptedQueueMediaPayload,
 }
 
-#[derive(Debug)]
+impl fmt::Debug for DecryptedQueueMedia {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DecryptedQueueMedia")
+            .field("payload", &self.payload)
+            .finish_non_exhaustive()
+    }
+}
+
 pub struct DecryptedQueueMediaSet {
     pub manifest: MediaSetManifest,
     pub media: Vec<DecryptedQueueMedia>,
     root: Option<PathBuf>,
     #[cfg(unix)]
     _runtime_staging: Arc<QueueMediaRuntimeStaging>,
+}
+
+impl fmt::Debug for DecryptedQueueMediaSet {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DecryptedQueueMediaSet")
+            .field("manifest_entry_count", &self.manifest.entries.len())
+            .field("media_count", &self.media.len())
+            .field("has_staging_root", &self.root.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 struct PlaintextStagingGuard {
@@ -4064,6 +4143,109 @@ mod tests {
         drop(decrypted);
         assert!(!staged.exists());
         assert!(!runtime_root.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_bearing_debug_output_exposes_only_structural_metadata() {
+        let home = tempfile::tempdir().unwrap();
+        let private_path = home.path().join("private-path-debug-sentinel.bin");
+        fs::write(&private_path, b"private-path-payload-sentinel").unwrap();
+        let store = open_store(home.path());
+        let fingerprint =
+            QueueMediaOperationFingerprint::sha256_v1(b"operation-fingerprint-sentinel");
+        let fingerprint_digest = fingerprint.sha256_hex().to_string();
+        let reference = store
+            .seal_v2_with_operation_fingerprint(
+                "owner-debug-sentinel",
+                "job-debug-sentinel",
+                &fingerprint,
+                &QueueMediaProjection {
+                    identity_present: true,
+                    identity_photograph_count: 1,
+                    ..Default::default()
+                },
+                vec![
+                    SealMedia::bytes(
+                        "role-debug-sentinel",
+                        "name-debug-sentinel",
+                        vec![222, 173, 190, 239],
+                    ),
+                    SealMedia::path(
+                        "path-role-debug-sentinel",
+                        "path-name-debug-sentinel",
+                        &private_path,
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap();
+        let mixed = store.decrypt_mixed(&reference).unwrap();
+        let entry_digest = mixed.manifest.entries[0].sha256_hex.clone();
+
+        let receipt_bytes =
+            vec![0x7d; PROJECTION_NONCE_BYTES + OPERATION_RECEIPT_PLAINTEXT_BYTES + AEAD_TAG_BYTES];
+        let receipt_encoded =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(receipt_bytes);
+        let receipt = QueueMediaOperationReceipt::parse(receipt_encoded.clone()).unwrap();
+
+        let legacy_reference = store
+            .seal(
+                "legacy-owner-debug-sentinel",
+                "legacy-job-debug-sentinel",
+                vec![SealMedia::path(
+                    "legacy-role-debug-sentinel",
+                    "legacy-name-debug-sentinel",
+                    &private_path,
+                )
+                .unwrap()],
+            )
+            .unwrap();
+        let legacy = store.decrypt_to_private_staging(&legacy_reference).unwrap();
+
+        let outputs = [
+            format!("{fingerprint:?}"),
+            format!("{:?}", mixed.manifest.entries[0]),
+            format!("{:?}", mixed.manifest),
+            format!("{:?}", mixed.media[0].payload),
+            format!("{:?}", mixed.media[1].payload),
+            format!("{:?}", mixed.media[0]),
+            format!("{:?}", mixed.media[1]),
+            format!("{mixed:?}"),
+            format!("{:?}", legacy.files[0]),
+            format!("{legacy:?}"),
+            format!("{receipt:?}"),
+        ];
+        let debug = outputs.join("\n");
+
+        for secret in [
+            "owner-debug-sentinel",
+            "job-debug-sentinel",
+            reference.set_id.as_str(),
+            "role-debug-sentinel",
+            "name-debug-sentinel",
+            "path-role-debug-sentinel",
+            "path-name-debug-sentinel",
+            "private-path-debug-sentinel",
+            "legacy-owner-debug-sentinel",
+            "legacy-job-debug-sentinel",
+            legacy_reference.set_id.as_str(),
+            "legacy-role-debug-sentinel",
+            "legacy-name-debug-sentinel",
+            fingerprint_digest.as_str(),
+            entry_digest.as_str(),
+            receipt_encoded.as_str(),
+            "222, 173, 190, 239",
+        ] {
+            assert!(!debug.contains(secret), "debug leaked {secret}: {debug}");
+        }
+        assert!(debug.contains("version: 1"));
+        assert!(debug.contains("entry_count: 2"));
+        assert!(debug.contains("media_count: 2"));
+        assert!(debug.contains("file_count: 1"));
+        assert!(debug.contains("Bytes { len: 4"));
+        assert!(debug.contains("PrivatePath(<redacted>)"));
+        assert!(debug.contains("QueueMediaOperationReceipt(<redacted>)"));
     }
 
     #[cfg(unix)]

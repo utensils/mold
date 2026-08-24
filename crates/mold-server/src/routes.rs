@@ -2290,6 +2290,12 @@ fn require_expand_model_activation(settings: &mold_core::ExpandSettings) -> Resu
 
 const OPERATION_ID_HEADER: &str = "x-mold-operation-id";
 
+pub(crate) fn canonical_client_batch_id(value: &str) -> Result<String, ApiError> {
+    uuid::Uuid::parse_str(value.trim())
+        .map(|id| id.to_string())
+        .map_err(|_| ApiError::validation("client_batch_id must be a UUID"))
+}
+
 fn requested_operation_id(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
     let Some(value) = headers.get(OPERATION_ID_HEADER) else {
         return Ok(None);
@@ -2397,9 +2403,7 @@ async fn admit_generation_batch(
             StatusCode::SERVICE_UNAVAILABLE,
         ));
     }
-    if uuid::Uuid::parse_str(body.client_batch_id.trim()).is_err() {
-        return Err(ApiError::validation("client_batch_id must be a UUID"));
-    }
+    body.client_batch_id = canonical_client_batch_id(&body.client_batch_id)?;
     if body.requests.is_empty() || body.requests.len() > MAX_HETEROGENEOUS_BATCH_OUTPUTS {
         return Err(ApiError::validation(format!(
             "requests must contain 1..={MAX_HETEROGENEOUS_BATCH_OUTPUTS} children"
@@ -2639,6 +2643,7 @@ async fn get_generation_batch_by_client(
     State(state): State<AppState>,
     Path(client_batch_id): Path<String>,
 ) -> Result<Json<mold_core::GenerationBatchStatus>, ApiError> {
+    let client_batch_id = canonical_client_batch_id(&client_batch_id)?;
     let journal = state.queue_journal.clone();
     let detail = spawn_queue_read(move || {
         journal
@@ -2672,10 +2677,22 @@ async fn reconcile_generation_batches(
     // The router's HTTP body limit is the authoritative request bound. Do not
     // add a second guessed item quota: every requested identity is resolved
     // without scanning unrelated rows, on the blocking pool.
+    let client_batch_ids = body
+        .client_batch_ids
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            canonical_client_batch_id(value).map_err(|mut error| {
+                error.error = format!("client_batch_ids[{index}]: {}", error.error);
+                error
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let batch_ids = body.batch_ids;
     let journal = state.queue_journal.clone();
     let lookup = spawn_queue_read(move || {
         journal
-            .durable_generation_batches(&body.client_batch_ids, &body.batch_ids)
+            .durable_generation_batches(&client_batch_ids, &batch_ids)
             .map_err(anyhow::Error::msg)
     })
     .await?;
@@ -2723,8 +2740,8 @@ async fn generate(
     mold_core::minimax_h3::canonicalize_request_model(&mut req);
     validate_live_server_batch_admission(&req)?;
     let operation_id = requested_operation_id(&headers)?;
-    if let Some(operation_id) =
-        operation_id.filter(|_| crate::queue_media_admission::request_has_durable_media(&req))
+    if let Some(operation_id) = operation_id
+        .filter(|_| crate::queue_media_admission::request_requires_durable_media_admission(&req))
     {
         if req.batch_size != 1 {
             return Err(ApiError::validation(
@@ -3916,8 +3933,8 @@ async fn generate_stream(
     let completion_payload = requested_sse_completion_payload(&headers)?;
     validate_live_server_batch_admission(&req)?;
     let operation_id = requested_operation_id(&headers)?;
-    if let Some(operation_id) =
-        operation_id.filter(|_| crate::queue_media_admission::request_has_durable_media(&req))
+    if let Some(operation_id) = operation_id
+        .filter(|_| crate::queue_media_admission::request_requires_durable_media_admission(&req))
     {
         if req.batch_size != 1 {
             return Err(ApiError::validation(
@@ -3953,21 +3970,8 @@ async fn generate_stream(
         let Some(observer) = outcome.observer else {
             return Ok((outcome.status_code, Json(status)).into_response());
         };
-        let attached = match observer.attached().await {
-            Ok(attached) => attached,
-            Err(_) => return Ok((StatusCode::ACCEPTED, Json(status)).into_response()),
-        };
-        let crate::queue_media_ingress::AttachedObserver::Sse { mut messages } = attached else {
-            return Err(ApiError::internal(
-                "durable SSE observer received a raw delivery",
-            ));
-        };
         let warnings = outcome.warnings.unwrap_or_default();
         let job_id = status.children[0].job_id.clone();
-        let position = state
-            .job_registry
-            .entry(&job_id)
-            .map_or(0, |entry| entry.position);
         let stream = async_stream::stream! {
             for warning in warnings.all() {
                 yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Progress(
@@ -3975,8 +3979,14 @@ async fn generate_stream(
                 )));
             }
             yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Progress(
-                SseProgressEvent::Queued { position, id: job_id }
+                SseProgressEvent::Queued { position: 0, id: job_id }
             )));
+            let Ok(attached) = observer.attached().await else {
+                return;
+            };
+            let crate::queue_media_ingress::AttachedObserver::Sse { mut messages } = attached else {
+                return;
+            };
             while let Some(message) = messages.recv().await {
                 let terminal = matches!(message, SseMessage::Error(_));
                 yield Ok::<_, Infallible>(sse_message_to_event(message));
