@@ -58,6 +58,7 @@ import {
   removeGalleryMutation,
   updateGalleryMutationFailure,
 } from "@studio/lib/galleryMutationOutbox";
+import { createUuid } from "@studio/lib/id";
 
 export type {
   MergedCollection,
@@ -1446,7 +1447,7 @@ export const useGalleryStore = defineStore("gallery", {
       if (!target) throw new Error("Host is not connected.");
       switch (op.kind) {
         case "setTitle": {
-          const bulk = galleryBulkRequest(crypto.randomUUID(), op);
+          const bulk = galleryBulkRequest(createUuid(), op);
           if (bulk && useHostsStore().capabilities[op.hostId]?.gallery?.bulk_mutations === true) {
             await mutateGalleryBulk(target, bulk);
             for (const filename of op.filenames) {
@@ -1549,7 +1550,7 @@ export const useGalleryStore = defineStore("gallery", {
           throw new Error(`${op.kind} is not an organize mutation; use the trash actions.`);
       }
     },
-    async retainOrganizationOp(op: OrganizationFanoutOp, operationId = crypto.randomUUID()) {
+    async retainOrganizationOp(op: OrganizationFanoutOp, operationId = createUuid()) {
       const host = this.hostFor(op.hostId);
       if (!host || host.kind !== "remote") throw new Error("Host is not connected.");
       await enqueueGalleryMutation({

@@ -38,6 +38,7 @@ vi.mock("@studio/api/galleryOrganization", () => ({
   emptyTrash: vi.fn(),
   sweepTrash: vi.fn(),
   listTrash: vi.fn(),
+  mutateGalleryBulk: vi.fn(),
 }));
 
 vi.mock("../lib/api/client", () => ({
@@ -1479,6 +1480,36 @@ describe("organization fan-out", () => {
     expect(organization.patchGalleryImage).toHaveBeenCalledWith(LOCAL_TARGET, "shared.png", {
       title: "",
     });
+  });
+
+  it("uses bulk organization mutations when crypto.randomUUID is unavailable", async () => {
+    const gallery = seed();
+    useHostsStore().capabilities.local!.gallery!.bulk_mutations = true;
+    useHostsStore().capabilities["hal9000-7680"]!.gallery!.bulk_mutations = true;
+    vi.mocked(organization.mutateGalleryBulk).mockResolvedValue({
+      operation_id: "op",
+      changed: 1,
+      revision: 1,
+    });
+    vi.stubGlobal("crypto", {
+      getRandomValues(bytes: Uint8Array) {
+        bytes.fill(0);
+        return bytes;
+      },
+    });
+    try {
+      const result = await gallery.setTitle(gallery.merged[0]!, "Compatible title");
+      expect(result.failed).toBe(0);
+      expect(organization.mutateGalleryBulk).toHaveBeenCalledWith(
+        HAL_TARGET,
+        expect.objectContaining({
+          operation_id: "00000000-0000-4000-8000-000000000000",
+          titles: [{ filename: "shared.png", title: "Compatible title" }],
+        }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("setFavorite / addTags / removeTags go through /organize per host and update rows + tag counts", async () => {
