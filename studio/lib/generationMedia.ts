@@ -23,6 +23,10 @@ export const GENERATION_MEDIA_AUTHORITY_FIELDS = [
 
 const GENERATION_PRIVATE_PERSISTENCE_FIELDS = new Set<string>([
   ...GENERATION_MEDIA_AUTHORITY_FIELDS,
+  // A local filename is still private source provenance. The generated
+  // gallery metadata may expose it after publication, but a browser recovery
+  // journal must not retain it before then.
+  "source_image_name",
   // Identity labels and controls describe a biometric input even without
   // carrying the photo bytes themselves.
   "id_image_name",

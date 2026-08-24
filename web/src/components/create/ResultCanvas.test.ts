@@ -195,6 +195,22 @@ describe("ResultCanvas", () => {
     ).toBe("Waveform of the generated audio");
   });
 
+  it("plays a video result instead of rendering MP4 bytes as an image", () => {
+    const wrapper = mount(ResultCanvas, {
+      props: {
+        mode: "result",
+        resultSrc: "data:image/png;base64,POSTER",
+        resultVideoSrc: "data:video/mp4;base64,VIDEO",
+      },
+    });
+    const video = wrapper.get("[data-test='canvas-video']");
+    expect(video.attributes("src")).toBe("data:video/mp4;base64,VIDEO");
+    expect(video.attributes("poster")).toBe("data:image/png;base64,POSTER");
+    expect(wrapper.find("[data-test='canvas-result'] img").exists()).toBe(
+      false,
+    );
+  });
+
   it("leaves every other kind of print without an audio transport", () => {
     const wrapper = mount(ResultCanvas, {
       props: { mode: "result", resultSrc: "blob:x" },

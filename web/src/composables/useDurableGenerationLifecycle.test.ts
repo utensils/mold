@@ -15,6 +15,7 @@ const generateStream = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const cancelQueueJob = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const listGalleryFrom = vi.hoisted(() => vi.fn());
 const fetchGalleryBlob = vi.hoisted(() => vi.fn());
+const fetchGalleryThumbnailBlob = vi.hoisted(() => vi.fn());
 
 vi.mock("@studio/api/generationAdmission", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@studio/api/generationAdmission")>()),
@@ -33,7 +34,10 @@ vi.mock("../api", () => ({
   listGalleryFrom,
 }));
 
-vi.mock("../lib/galleryMedia", () => ({ fetchGalleryBlob }));
+vi.mock("../lib/galleryMedia", () => ({
+  fetchGalleryBlob,
+  fetchGalleryThumbnailBlob,
+}));
 
 import { __testing__, useGenerateStream, type Job } from "./useGenerateStream";
 
@@ -133,6 +137,32 @@ function gallery(filename: string): GalleryImage {
   };
 }
 
+function wavBlob(sampleRate = 24_000, channels = 2, frames = 24): Blob {
+  const bytesPerSample = 2;
+  const dataBytes = frames * channels * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataBytes);
+  const view = new DataView(buffer);
+  const text = (offset: number, value: string) => {
+    for (let index = 0; index < value.length; index += 1) {
+      view.setUint8(offset + index, value.charCodeAt(index));
+    }
+  };
+  text(0, "RIFF");
+  view.setUint32(4, 36 + dataBytes, true);
+  text(8, "WAVE");
+  text(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, channels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * channels * bytesPerSample, true);
+  view.setUint16(32, channels * bytesPerSample, true);
+  view.setUint16(34, bytesPerSample * 8, true);
+  text(36, "data");
+  view.setUint32(40, dataBytes, true);
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
 function clearJobs(): void {
   const stream = useGenerateStream();
   for (const job of [...stream.jobs.value]) stream.remove(job.id);
@@ -150,11 +180,13 @@ beforeEach(() => {
   cancelQueueJob.mockClear();
   listGalleryFrom.mockReset();
   fetchGalleryBlob.mockReset();
+  fetchGalleryThumbnailBlob.mockReset();
   listGalleryFrom.mockResolvedValue([
     gallery("print-1.png"),
     gallery("print-2.png"),
   ]);
   fetchGalleryBlob.mockResolvedValue(new Blob(["media"]));
+  fetchGalleryThumbnailBlob.mockResolvedValue(new Blob(["thumbnail"]));
   lookupGenerationBatchByClientId.mockResolvedValue({ kind: "missing" });
 });
 
@@ -172,9 +204,10 @@ describe("web durable generation lifecycle", () => {
       source_image: "PRIVATE-DURABLE-SOURCE",
     });
     expect(generateStream).not.toHaveBeenCalled();
-    expect(localStorage.getItem("mold.generate.jobs")).not.toContain(
-      "PRIVATE-DURABLE-SOURCE",
-    );
+    const persisted = Array.from({ length: localStorage.length }, (_, index) =>
+      localStorage.getItem(localStorage.key(index)!),
+    ).join("\n");
+    expect(persisted).not.toContain("PRIVATE-DURABLE-SOURCE");
   });
 
   it("keeps an opaque H3 family on the legacy stream", () => {
@@ -249,11 +282,12 @@ describe("web durable generation lifecycle", () => {
     expect(admitGenerationBatch.mock.calls[1]![1].requests).toHaveLength(3);
   });
 
-  it("fails closed before admission when the durable recovery fence cannot persist", async () => {
+  it("never turns browser quota into a durable admission gate", async () => {
+    admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
     const storage = vi
       .spyOn(localStorage, "setItem")
       .mockImplementation(function (key, value) {
-        if (key === "mold.generate.jobs") {
+        if (key.startsWith("mold.generate.jobs")) {
           throw new DOMException("quota exceeded", "QuotaExceededError");
         }
         return Reflect.apply(nativeStorageSetItem, localStorage, [key, value]);
@@ -265,13 +299,13 @@ describe("web durable generation lifecycle", () => {
       await Promise.resolve();
 
       const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
-      expect(job.state).toBe("error");
-      expect(job.error).toMatch(/Nothing was submitted/);
-      expect(job.durableBatch).toBeUndefined();
-      expect(admitGenerationBatch).not.toHaveBeenCalled();
+      expect(job.state).toBe("running");
+      expect(job.error).toBeNull();
+      expect(job.durableBatch).toBeDefined();
+      expect(admitGenerationBatch).toHaveBeenCalledTimes(1);
       expect(generateStream).not.toHaveBeenCalled();
       expect(lookupGenerationBatchByClientId).not.toHaveBeenCalled();
-      expect(fetchEventSource).not.toHaveBeenCalled();
+      expect(fetchEventSource).toHaveBeenCalledTimes(1);
     } finally {
       storage.mockRestore();
     }
@@ -303,9 +337,11 @@ describe("web durable generation lifecycle", () => {
           stream.jobs.value.find((job) => job.id === id)?.serverId,
         ).toMatch(/^job-/),
       );
-      const persisted = localStorage.getItem("mold.generate.jobs")!;
       const clientBatchId = stream.jobs.value.find((job) => job.id === id)!
         .durableBatch!.clientBatchId;
+      const persisted = localStorage.getItem(
+        `mold.generate.jobs.recovery.${clientBatchId}`,
+      )!;
       expect(persisted).toContain(clientBatchId);
       expect(persisted).not.toContain("secret");
       expect(lookupGenerationBatchByClientId).toHaveBeenCalledWith(
@@ -318,10 +354,133 @@ describe("web durable generation lifecycle", () => {
     }
   });
 
+  it("persists each deep outstanding batch independently instead of rewriting the backlog", () => {
+    admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
+    const writes: Array<{ key: string; bytes: number }> = [];
+    const storage = vi
+      .spyOn(localStorage, "setItem")
+      .mockImplementation(function (key, value) {
+        writes.push({ key, bytes: value.length });
+        return Reflect.apply(nativeStorageSetItem, localStorage, [key, value]);
+      });
+    try {
+      const stream = useGenerateStream();
+      for (let index = 0; index < 250; index += 1) {
+        stream.submit(
+          request(`deep print ${index}`),
+          { kind: "single" },
+          route,
+        );
+      }
+
+      expect(admitGenerationBatch).toHaveBeenCalledTimes(250);
+      expect(
+        stream.jobs.value.filter((job) => job.state === "running"),
+      ).toHaveLength(250);
+      expect(writes.filter(({ key }) => key === "mold.generate.jobs")).toEqual(
+        [],
+      );
+      expect(localStorage.getItem("mold.generate.jobs")).toBeNull();
+      const recoveryWrites = writes.filter(({ key }) =>
+        key.startsWith("mold.generate.jobs.recovery."),
+      );
+      expect(recoveryWrites).toHaveLength(250);
+      expect(new Set(recoveryWrites.map(({ key }) => key)).size).toBe(250);
+      expect(
+        recoveryWrites.every(({ key }) => {
+          const record = JSON.parse(localStorage.getItem(key)!);
+          return record.jobs.length === 1;
+        }),
+      ).toBe(true);
+      const recovered = __testing__.loadDurableRecoveryJobs(localStorage);
+      expect(recovered).toHaveLength(250);
+      expect(
+        recovered.every(
+          (job) => job.state === "running" && job.detached === true,
+        ),
+      ).toBe(true);
+    } finally {
+      storage.mockRestore();
+    }
+  });
+
+  it("records cancel intent before admission resolves and deletes the exact admitted job", async () => {
+    let confirmAdmission!: (value: GenerationBatchStatus) => void;
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        new Promise<GenerationBatchStatus>((resolve) => {
+          confirmAdmission = (value) => resolve(value);
+          void body;
+        }),
+    );
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      request("cancel immediately"),
+      { kind: "single" },
+      route,
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    const clientBatchId = job.durableBatch!.clientBatchId;
+
+    await stream.cancel(id);
+    expect(job.state).toBe("running");
+    expect(job.cancelRequested).toBe(true);
+    expect(cancelQueueJob).not.toHaveBeenCalled();
+    expect(
+      localStorage.getItem(`mold.generate.jobs.recovery.${clientBatchId}`),
+    ).toContain('"cancelRequested":true');
+
+    confirmAdmission(batch(clientBatchId));
+    await vi.waitFor(() =>
+      expect(cancelQueueJob).toHaveBeenCalledWith(
+        `job-${clientBatchId}-1`,
+        route.target,
+      ),
+    );
+    await vi.waitFor(() => expect(job.state).toBe("canceled"));
+  });
+
+  it("carries early cancel intent through an ambiguous admission lookup", async () => {
+    let recover!: (value: {
+      kind: "found";
+      batch: GenerationBatchStatus;
+    }) => void;
+    admitGenerationBatch.mockRejectedValue(new TypeError("response lost"));
+    lookupGenerationBatchByClientId.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          recover = resolve;
+        }),
+    );
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      request("ambiguous cancel"),
+      { kind: "single" },
+      route,
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    const clientBatchId = job.durableBatch!.clientBatchId;
+
+    await stream.cancel(id);
+    await vi.waitFor(() =>
+      expect(lookupGenerationBatchByClientId).toHaveBeenCalled(),
+    );
+    recover({ kind: "found", batch: batch(clientBatchId) });
+
+    await vi.waitFor(() =>
+      expect(cancelQueueJob).toHaveBeenCalledWith(
+        `job-${clientBatchId}-1`,
+        route.target,
+      ),
+    );
+    await vi.waitFor(() => expect(job.state).toBe("canceled"));
+  });
+
   it("keeps recovery-record media redaction as defense in depth", () => {
     const redacted = __testing__.durablePersistenceSafeRequest({
       ...request(),
       source_image: "source",
+      source_image_name: "private-source-name.png",
       edit_images: ["edit"],
       references: [],
       id_image: "identity",
@@ -339,6 +498,7 @@ describe("web durable generation lifecycle", () => {
     for (const field of GENERATION_REQUEST_MEDIA_FIELDS) {
       expect(redacted).not.toHaveProperty(field);
     }
+    expect(redacted).not.toHaveProperty("source_image_name");
   });
 
   it("bulk-reconciles on event gaps and reconnect opens", async () => {
@@ -571,6 +731,271 @@ describe("web durable generation lifecycle", () => {
       "print-1.png",
     );
     expect(admitGenerationBatch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: "MP4",
+      filename: "print-1.mp4",
+      format: "mp4" as const,
+      artifact: new Blob(["video"], { type: "video/mp4" }),
+    },
+    {
+      name: "WAV",
+      filename: "print-1.wav",
+      format: "wav" as const,
+      artifact: wavBlob(),
+    },
+  ])(
+    "hydrates durable $name completion as typed playable media",
+    async (media) => {
+      admitGenerationBatch.mockImplementation(
+        (_target: unknown, body: { client_batch_id: string }) =>
+          Promise.resolve(batch(body.client_batch_id)),
+      );
+      const row = {
+        ...gallery(media.filename),
+        format: media.format,
+        metadata: {
+          ...gallery(media.filename).metadata,
+          output_format: media.format,
+          frames: media.format === "mp4" ? 25 : null,
+          fps: media.format === "mp4" ? 24 : null,
+        },
+      } satisfies GalleryImage;
+      listGalleryFrom.mockResolvedValue([row]);
+      fetchGalleryBlob.mockResolvedValue(media.artifact);
+      const stream = useGenerateStream();
+      const id = stream.submit(request(media.name), { kind: "single" }, route);
+      await vi.waitFor(() =>
+        expect(
+          stream.jobs.value.find((job) => job.id === id)?.serverId,
+        ).toBeTruthy(),
+      );
+      const clientBatchId = stream.jobs.value.find((job) => job.id === id)!
+        .durableBatch!.clientBatchId;
+      reconcileGenerationBatches.mockResolvedValue(
+        statusResponse([
+          batch(clientBatchId, ["complete"], {
+            children: [
+              {
+                ...batch(clientBatchId, ["complete"]).children[0]!,
+                result: { filename: media.filename },
+              },
+            ],
+          }),
+        ]),
+      );
+
+      await __testing__.reconcileDurableHost(route.hostId);
+      await vi.waitFor(() =>
+        expect(
+          stream.jobs.value.find((job) => job.id === id)?.result,
+        ).toBeTruthy(),
+      );
+      const result = stream.jobs.value.find((job) => job.id === id)!.result!;
+      expect(result.format).toBe(media.format);
+      if (media.format === "mp4") {
+        expect(result.video_frames).toBe(25);
+        expect(result.video_fps).toBe(24);
+        expect(result.video_thumbnail).toBeTruthy();
+        expect(result.audio_sample_rate).toBeUndefined();
+      } else {
+        expect(result.audio_sample_rate).toBe(24_000);
+        expect(result.audio_channels).toBe(2);
+        expect(result.audio_duration_ms).toBe(1);
+        expect(result.audio_thumbnail).toBeTruthy();
+        expect(result.video_frames).toBeUndefined();
+      }
+    },
+  );
+
+  it("shares one gallery snapshot and bounds exact artifact reads across a completion wave", async () => {
+    admitGenerationBatch.mockImplementation(
+      (
+        _target: unknown,
+        body: { client_batch_id: string; requests: unknown[] },
+      ) =>
+        Promise.resolve(
+          batch(
+            body.client_batch_id,
+            body.requests.map(() => "queued"),
+          ),
+        ),
+    );
+    listGalleryFrom.mockResolvedValue(
+      Array.from({ length: 8 }, (_, index) =>
+        gallery(`print-${index + 1}.png`),
+      ),
+    );
+    let releaseReads!: () => void;
+    const gate = new Promise<void>((resolve) => (releaseReads = resolve));
+    let activeReads = 0;
+    let maxActiveReads = 0;
+    fetchGalleryBlob.mockImplementation(async () => {
+      activeReads += 1;
+      maxActiveReads = Math.max(maxActiveReads, activeReads);
+      await gate;
+      activeReads -= 1;
+      return new Blob(["media"]);
+    });
+    const completed = vi.fn();
+    const stream = useGenerateStream(completed);
+    const ids = stream.submitBatch(
+      Array.from({ length: 8 }, (_, index) => request(`wave ${index}`)),
+      { kind: "single" },
+      route,
+    );
+    await vi.waitFor(() =>
+      expect(
+        ids.every(
+          (id) => stream.jobs.value.find((job) => job.id === id)?.serverId,
+        ),
+      ).toBe(true),
+    );
+    const clientBatchId = stream.jobs.value.find((job) => job.id === ids[0])!
+      .durableBatch!.clientBatchId;
+    reconcileGenerationBatches.mockResolvedValue(
+      statusResponse([
+        batch(
+          clientBatchId,
+          Array.from({ length: 8 }, () => "complete"),
+        ),
+      ]),
+    );
+
+    await __testing__.reconcileDurableHost(route.hostId);
+    await vi.waitFor(() => expect(fetchGalleryBlob).toHaveBeenCalledTimes(4));
+    expect(maxActiveReads).toBe(4);
+    expect(listGalleryFrom).toHaveBeenCalledTimes(1);
+    releaseReads();
+    await vi.waitFor(() => expect(completed).toHaveBeenCalledTimes(8));
+    expect(maxActiveReads).toBe(4);
+    expect(listGalleryFrom).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses an exact gallery event row without launching a gallery listing", async () => {
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(batch(body.client_batch_id)),
+    );
+    const stream = useGenerateStream();
+    const id = stream.submit(request("exact event"), { kind: "single" }, route);
+    await vi.waitFor(() =>
+      expect(
+        stream.jobs.value.find((job) => job.id === id)?.serverId,
+      ).toBeTruthy(),
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    const clientBatchId = job.durableBatch!.clientBatchId;
+    const image = gallery("print-1.png");
+    image.metadata.job_id = job.serverId;
+    reconcileGenerationBatches.mockResolvedValue(
+      statusResponse([batch(clientBatchId, ["complete"])]),
+    );
+
+    __testing__.handleDurableEvent(
+      route.hostId,
+      "event",
+      JSON.stringify({
+        type: "gallery_added",
+        filename: image.filename,
+        image,
+      }),
+    );
+
+    await vi.waitFor(() =>
+      expect(
+        stream.jobs.value.find((candidate) => candidate.id === id)?.result,
+      ).toBeTruthy(),
+    );
+    expect(listGalleryFrom).not.toHaveBeenCalled();
+    expect(fetchGalleryBlob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: route.hostId }),
+      "print-1.png",
+    );
+    expect(reconcileGenerationBatches.mock.calls[0]![1]).toMatchObject({
+      client_batch_ids: [],
+      batch_ids: [job.durableBatch!.serverBatchId],
+    });
+  });
+
+  it("keeps complete authority and retries after a transient artifact read failure", async () => {
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(batch(body.client_batch_id)),
+    );
+    fetchGalleryBlob
+      .mockRejectedValueOnce(new TypeError("temporary read failure"))
+      .mockResolvedValueOnce(new Blob(["media"]));
+    const stream = useGenerateStream();
+    const id = stream.submit(request("retry media"), { kind: "single" }, route);
+    await vi.waitFor(() =>
+      expect(
+        stream.jobs.value.find((job) => job.id === id)?.serverId,
+      ).toBeTruthy(),
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    const clientBatchId = job.durableBatch!.clientBatchId;
+    reconcileGenerationBatches.mockResolvedValue(
+      statusResponse([batch(clientBatchId, ["complete"])]),
+    );
+
+    await __testing__.reconcileDurableHost(route.hostId);
+    await vi.waitFor(() =>
+      expect(job.mediaHydrationError).toMatch(/temporary/),
+    );
+    expect(job.state).toBe("done");
+    expect(job.result).toBeNull();
+
+    await __testing__.reconcileDurableHost(route.hostId);
+    await vi.waitFor(() => expect(job.result?.image).toBeTruthy());
+    expect(job.state).toBe("done");
+    expect(job.mediaHydrationError).toBeNull();
+    expect(fetchGalleryBlob).toHaveBeenCalledTimes(2);
+  });
+
+  it("targets an exact batch for ordinary lifecycle hints", async () => {
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(batch(body.client_batch_id)),
+    );
+    const stream = useGenerateStream();
+    const firstId = stream.submit(request("first"), { kind: "single" }, route);
+    const secondId = stream.submit(
+      request("second"),
+      { kind: "single" },
+      route,
+    );
+    await vi.waitFor(() =>
+      expect(
+        [firstId, secondId].every(
+          (id) => stream.jobs.value.find((job) => job.id === id)?.serverId,
+        ),
+      ).toBe(true),
+    );
+    const first = stream.jobs.value.find((job) => job.id === firstId)!;
+    const second = stream.jobs.value.find((job) => job.id === secondId)!;
+    reconcileGenerationBatches
+      .mockReset()
+      .mockResolvedValue(
+        statusResponse([batch(first.durableBatch!.clientBatchId)]),
+      );
+
+    __testing__.handleDurableEvent(
+      route.hostId,
+      "event",
+      JSON.stringify({ type: "job_started", id: first.serverId }),
+    );
+
+    await vi.waitFor(() =>
+      expect(reconcileGenerationBatches).toHaveBeenCalledTimes(1),
+    );
+    const requestBody = reconcileGenerationBatches.mock.calls[0]![1];
+    expect(requestBody.batch_ids).toEqual([first.durableBatch!.serverBatchId]);
+    expect(requestBody.batch_ids).not.toContain(
+      second.durableBatch!.serverBatchId,
+    );
   });
 
   it.each([

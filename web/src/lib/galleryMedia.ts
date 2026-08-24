@@ -96,6 +96,22 @@ export async function fetchGalleryBlob(
   return res.blob();
 }
 
+/** Fetch the exact gallery poster/waveform without first listing the gallery.
+ * Durable completion hydration already owns the authoritative filename, so
+ * this keeps video/audio recovery on the same O(1) artifact path as the
+ * primary media. */
+export async function fetchGalleryThumbnailBlob(
+  host: HostEntry,
+  filename: string,
+): Promise<Blob> {
+  const path = thumbnailPath(filename);
+  const res = await fetch(`${hostMediaBase(host)}${path}`, {
+    headers: authHeaders(host),
+  });
+  if (!res.ok) throw new Error(`GET thumbnail failed: ${res.status}`);
+  return res.blob();
+}
+
 /**
  * Grid-tile thumbnail source. Keyless hosts (origin included) use the plain
  * direct URL so the browser can lazy-load it; authenticated hosts blob-fetch

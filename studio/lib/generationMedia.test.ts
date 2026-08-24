@@ -24,6 +24,7 @@ describe("generation media session boundary", () => {
       prompt: "safe prompt",
       model: "minimax-h3-ref2va",
       source_image: media,
+      source_image_name: "private-source.png",
       id_image: media,
       id_images: [media],
       id_image_name: "face.png",
@@ -37,7 +38,14 @@ describe("generation media session boundary", () => {
           provenance: { name: "face.png", sha256: "biometric-digest" },
         },
       ],
-      stages: [{ prompt: "one", frames: 9, source_image: media }],
+      stages: [
+        {
+          prompt: "one",
+          frames: 9,
+          source_image: media,
+          source_image_name: "private-stage-source.png",
+        },
+      ],
     });
 
     expect(() => JSON.stringify(redacted)).not.toThrow();

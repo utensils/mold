@@ -214,18 +214,24 @@ async function reloadQueue(
         listing.entries,
         listing.live_only_entries ?? [],
       ) as QueueEntry[];
-      // Continuation rows are a user-requested snapshot. A bounded live poll
-      // cannot revalidate them, so reset to the authoritative head and let the
-      // user explicitly load the current continuation again.
-      queue.value = head;
       queuePlan.value = listing.plan ?? null;
-      queuePageLimit.value = listing.page?.limit ?? null;
-      queueNextCursor.value = listing.page?.next_cursor ?? null;
-      queueTail.value = [];
-      queueContinued.value = false;
-      loadingMoreQueue.value = false;
-      queueLoadMoreGeneration += 1;
-      loadMoreQueueError.value = "";
+      if (queueContinued.value || loadingMoreQueue.value) {
+        // A routine head poll can refresh the live window without destroying
+        // continuation pages the user already loaded or invalidating a page
+        // currently in flight. Replace the head, retain the continuation
+        // snapshot, and de-duplicate rows that advanced into the live window.
+        const seen = new Set<string>();
+        queue.value = [...head, ...queueTail.value].filter(
+          ({ id }) => !seen.has(id) && !!seen.add(id),
+        );
+      } else {
+        queue.value = head;
+        queuePageLimit.value = listing.page?.limit ?? null;
+        queueNextCursor.value = listing.page?.next_cursor ?? null;
+        queueTail.value = [];
+        queueContinued.value = false;
+        loadMoreQueueError.value = "";
+      }
     }
   } catch {
     // Keep the last-good queue; the reconnecting banner covers the failure.

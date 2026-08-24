@@ -197,6 +197,37 @@ const running = computed(() =>
 const queued = computed(() =>
   props.jobs.filter((j) => j.state === "running" && !j.workStarted),
 );
+/** Render exactly the host-authoritative next queued print, then summarize the
+ * rest. Cancellation reveals the following row, so every job remains
+ * reachable without producing one interactive DOM subtree per backlog item. */
+const nextQueued = computed(() => {
+  let best: Job | null = null;
+  let bestPosition: number | null = null;
+  const actionable = queued.value.filter((job) => !job.cancelling);
+  for (const job of actionable.length > 0 ? actionable : queued.value) {
+    const position = queueStatusFor(
+      props.queueStatus,
+      job.hostId ?? ORIGIN_HOST_ID,
+      job.serverId,
+    )?.position;
+    if (
+      best === null ||
+      (position !== null &&
+        position !== undefined &&
+        (bestPosition === null || position < bestPosition)) ||
+      ((position === null || position === undefined) &&
+        bestPosition === null &&
+        job.startedAt < best.startedAt)
+    ) {
+      best = job;
+      bestPosition = position ?? null;
+    }
+  }
+  return best;
+});
+const summarizedQueuedCount = computed(() =>
+  Math.max(0, queued.value.length - (nextQueued.value ? 1 : 0)),
+);
 const active = computed(
   () =>
     running.value.length > 0 ||
@@ -345,41 +376,50 @@ const active = computed(
       </span>
     </div>
 
-    <div v-if="queued.length" class="activity__queued">
+    <div v-if="nextQueued" class="activity__queued">
       <span
-        v-for="job in queued"
-        :key="job.id"
+        :key="nextQueued.id"
         class="activity__pill"
-        :data-test="`activity-queued-${job.id}`"
+        :data-test="`activity-queued-${nextQueued.id}`"
         role="button"
         tabindex="0"
-        @click="emit('open', job)"
-        @keydown.enter.prevent="emit('open', job)"
-        @keydown.space.prevent="emit('open', job)"
+        @click="emit('open', nextQueued)"
+        @keydown.enter.prevent="emit('open', nextQueued)"
+        @keydown.space.prevent="emit('open', nextQueued)"
       >
         <span class="activity__pill-text">
           <span
-            v-if="hostBadge(job)"
+            v-if="hostBadge(nextQueued)"
             class="activity__host"
-            :data-test="`activity-host-${job.id}`"
-            >{{ hostBadge(job) }}</span
+            :data-test="`activity-host-${nextQueued.id}`"
+            >{{ hostBadge(nextQueued) }}</span
           >
           <span
             class="activity__queue-position"
-            :data-test="`activity-queue-position-${job.id}`"
-            >{{ queueLabel(job) }}</span
+            :data-test="`activity-queue-position-${nextQueued.id}`"
+            >{{ queueLabel(nextQueued) }}</span
           >
-          {{ promptFor(job) }}
+          {{ promptFor(nextQueued) }}
         </span>
         <button
           type="button"
           class="activity__cancel"
-          :aria-label="`Cancel ${promptFor(job)}`"
-          :data-test="`activity-cancel-${job.id}`"
-          @click.stop="emit('cancel', job.id)"
+          :aria-label="`Cancel ${promptFor(nextQueued)}`"
+          :data-test="`activity-cancel-${nextQueued.id}`"
+          :disabled="nextQueued.cancelling"
+          @click.stop="emit('cancel', nextQueued.id)"
         >
-          <Icon name="close" :size="12" />
+          <span v-if="nextQueued.cancelling" class="data-mono">…</span>
+          <Icon v-else name="close" :size="12" />
         </button>
+      </span>
+      <span
+        v-if="summarizedQueuedCount"
+        class="activity__queue-summary"
+        data-test="activity-queued-summary"
+      >
+        {{ summarizedQueuedCount }} other queued
+        {{ summarizedQueuedCount === 1 ? "print" : "prints" }}
       </span>
     </div>
 
@@ -635,6 +675,13 @@ const active = computed(
   display: flex;
   flex-wrap: wrap;
   gap: 7px;
+}
+
+.activity__queue-summary {
+  align-self: center;
+  font-family: var(--f-mono);
+  font-size: 10px;
+  color: var(--ink-3);
 }
 
 .activity__pill {

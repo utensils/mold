@@ -11,6 +11,7 @@ import {
 import type {
   ChainProgressEvent,
   ChainRequestWire,
+  GalleryImage,
   GenerateRequestWire,
   SseChainCompleteEvent,
   SseCompleteEvent,
@@ -28,7 +29,10 @@ import {
 import { redactGenerationMediaForPersistence } from "@studio/lib/generationMedia";
 import { getHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { toast } from "../lib/toasts";
-import { fetchGalleryBlob } from "../lib/galleryMedia";
+import {
+  fetchGalleryBlob,
+  fetchGalleryThumbnailBlob,
+} from "../lib/galleryMedia";
 import { blobToBase64 } from "../lib/base64";
 import { inferFormatFromName, type OutputFormat } from "../types";
 import { ApiError, apiHeaders, type ApiTarget } from "@studio/api/client";
@@ -80,6 +84,10 @@ export interface Job {
   state: "running" | "done" | "error" | "canceled";
   /** Immediate UI acknowledgement while DELETE revokes server authority. */
   cancelling?: boolean;
+  /** Durable cancellation is an intent until the host confirms DELETE or a
+   * terminal outcome wins. This survives ambiguous admission, where the
+   * client UUID is known before the server job UUID is. */
+  cancelRequested?: boolean;
   /** Wall clock when the job stopped moving; `null` while it is running.
    * The Create activity strip expires settled-but-failed rows against this
    * (shared @studio partition rule) instead of keeping them forever. */
@@ -149,6 +157,9 @@ export interface Job {
     serverBatchId: string | null;
     childIndex: number;
   };
+  /** A complete durable outcome whose exact media read failed transiently.
+   * Authority remains `done`; a later lifecycle reconciliation retries. */
+  mediaHydrationError?: string | null;
 }
 
 /**
@@ -599,12 +610,11 @@ export interface UseGenerateStream {
 
 const STORAGE_KEY = "mold.generate.jobs";
 
-/// Maximum number of *settled* (done/error/canceled) jobs we keep in
-/// localStorage. Running jobs are never dropped — the user might be
-/// watching them across navigations. Past this cap, oldest settled
-/// jobs are forgotten on the next persist cycle. The completed image
-/// itself lives in the gallery DB; the in-memory `jobs` list is just
-/// the SPA's "recent activity" rail.
+/// Maximum number of *settled* (done/error/canceled) jobs we keep in the
+/// ordinary localStorage rail. Actionable durable batches use independently
+/// projected recovery records; legacy running jobs remain in this rail.
+/// Past this cap, oldest settled jobs are forgotten on the next persist
+/// cycle. Completed media itself lives in the gallery DB.
 const SETTLED_HISTORY_CAP = 10;
 
 /** Shape we persist to localStorage — everything in `Job` minus the
@@ -643,9 +653,11 @@ interface PersistedJob {
    * resurrect it as an ordinary failure. */
   detached?: boolean;
   durableBatch?: Job["durableBatch"];
+  cancelRequested?: boolean;
 }
 
 const JOB_STORAGE_VERSION = 1;
+const DURABLE_RECOVERY_PREFIX = `${STORAGE_KEY}.recovery.`;
 
 interface PersistedJobs {
   version: typeof JOB_STORAGE_VERSION;
@@ -765,7 +777,8 @@ function loadPersistedState(raw: string | null): LoadedJobsState {
         result: p.result as SseCompleteEvent | null,
         error,
         state,
-        cancelling: false,
+        cancelling: p.cancelRequested === true && state === "running",
+        cancelRequested: p.cancelRequested === true,
         // This boot just discovered that a formerly-running row lost its
         // stream, so keep its recovery row present and dismissible from now.
         // Genuinely settled history retains its original age.
@@ -786,6 +799,7 @@ function loadPersistedState(raw: string | null): LoadedJobsState {
         serverId: p.serverId,
         durable: p.durableBatch ? true : undefined,
         durableBatch: p.durableBatch,
+        mediaHydrationError: null,
         streamStarted: false,
         // Previews are ephemeral SSE payload — never persisted.
         previewUrl: null,
@@ -802,6 +816,25 @@ function loadPersistedJobs(raw: string | null): Job[] {
   return loadPersistedState(raw).jobs;
 }
 
+/** Read the per-batch recovery journal. Each key is independent, so admitting
+ * the next job never serializes all older outstanding work. Malformed or
+ * future records are ignored without poisoning the ordinary activity rail. */
+function loadDurableRecoveryJobs(storage: Storage): Job[] {
+  const recovered: Job[] = [];
+  try {
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (!key?.startsWith(DURABLE_RECOVERY_PREFIX)) continue;
+      const loaded = loadPersistedJobs(storage.getItem(key));
+      recovered.push(...loaded.filter((job) => Boolean(job.durableBatch)));
+    }
+  } catch {
+    // Storage can be disabled wholesale in privacy mode. Admission remains a
+    // server concern and must not be coupled to this recovery convenience.
+  }
+  return recovered;
+}
+
 function initializePersistedState(raw: string | null): LoadedJobsState {
   const loaded = loadPersistedState(raw);
   // The deep watcher is intentionally not immediate. Write a boot-created
@@ -812,11 +845,18 @@ function initializePersistedState(raw: string | null): LoadedJobsState {
 }
 
 function persistedJobsJson(jobs: Job[]): string {
-  // Always keep running jobs (the user is watching them); cap the number of
-  // settled jobs persisted so localStorage doesn't grow unbounded across
-  // sessions. Order is preserved because submit prepends new jobs.
+  // Durable actionable rows live in independent per-batch recovery records.
+  // Keeping them out of this shared rail is the critical O(1) admission rule:
+  // adding job N does not stringify jobs 1..N-1 again. Settled durable rows
+  // may remain here briefly as ordinary presentation history.
   const settledCount = { n: 0 };
   const filtered = jobs.filter((j) => {
+    if (
+      j.durableBatch &&
+      (j.state === "running" || (j.state === "done" && !j.result))
+    ) {
+      return false;
+    }
     if (j.state === "running") return true;
     settledCount.n += 1;
     return settledCount.n <= SETTLED_HISTORY_CAP;
@@ -840,6 +880,7 @@ function persistedJobsJson(jobs: Job[]): string {
     serverId: j.serverId,
     detached: j.detached === true,
     durableBatch: j.durableBatch,
+    cancelRequested: j.cancelRequested === true,
   }));
   const payload: PersistedJobs = {
     version: JOB_STORAGE_VERSION,
@@ -848,15 +889,59 @@ function persistedJobsJson(jobs: Job[]): string {
   return JSON.stringify(payload);
 }
 
-/** The durable admission fence is intentionally strict: failure must reach
- * the submitter before any POST can create server-owned work. */
-function persistDurableRecoveryFence(jobs: Job[]): void {
-  localStorage.setItem(STORAGE_KEY, persistedJobsJson(jobs));
+function recoveryKey(clientBatchId: string): string {
+  return `${DURABLE_RECOVERY_PREFIX}${clientBatchId}`;
+}
+
+/** Persist only one actionable durable batch. The host is the admission and
+ * terminal authority; browser quota/privacy failures never veto its work.
+ * Records are deleted only after that batch has no unresolved outcome. */
+function persistDurableRecoveryBatch(clientBatchId: string): boolean {
+  const owned = jobsForClientBatch(clientBatchId);
+  const actionable = owned.filter(
+    (job) => job.state === "running" || (job.state === "done" && !job.result),
+  );
+  try {
+    if (actionable.length === 0) {
+      localStorage.removeItem(recoveryKey(clientBatchId));
+      return true;
+    }
+    localStorage.setItem(
+      recoveryKey(clientBatchId),
+      persistedJobsJsonFor(actionable),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function persistedJobsJsonFor(source: readonly Job[]): string {
+  const serializable: PersistedJob[] = source.map((j) => ({
+    id: j.id,
+    request: durablePersistenceSafeRequest(j.request),
+    startedAt: j.startedAt,
+    progress: j.progress,
+    result: stripHeavyResult(j.result),
+    error: j.error,
+    state: j.state,
+    settledAt: j.settledAt,
+    chain: j.chain,
+    lastProgressAt: j.lastProgressAt,
+    workStarted: j.workStarted,
+    hostId: j.hostId,
+    hostLabel: j.hostLabel,
+    serverId: j.serverId,
+    detached: j.detached === true,
+    durableBatch: j.durableBatch,
+    cancelRequested: j.cancelRequested === true,
+  }));
+  return JSON.stringify({ version: JOB_STORAGE_VERSION, jobs: serializable });
 }
 
 function persistJobs(jobs: Job[]) {
   try {
-    persistDurableRecoveryFence(jobs);
+    localStorage.setItem(STORAGE_KEY, persistedJobsJson(jobs));
   } catch {
     /* Ordinary history is best-effort in quota / privacy mode. */
   }
@@ -881,6 +966,15 @@ const initialPersistedState = initializePersistedState(
     ? localStorage.getItem(STORAGE_KEY)
     : null,
 );
+if (typeof localStorage !== "undefined") {
+  const seen = new Set(initialPersistedState.jobs.map(({ id }) => id));
+  for (const recovered of loadDurableRecoveryJobs(localStorage)) {
+    if (!seen.has(recovered.id)) {
+      seen.add(recovered.id);
+      initialPersistedState.jobs.push(recovered);
+    }
+  }
+}
 const jobs = ref<Job[]>(initialPersistedState.jobs);
 // A fresh SPA boot treats rehydrated failures as Activity history instead of
 // restoring one as the main canvas. A formerly-running row is different: this
@@ -1004,12 +1098,12 @@ export const __testing__ = {
   STALE_THRESHOLD_MS,
   loadPersistedJobs,
   loadPersistedState,
+  loadDurableRecoveryJobs,
   initializePersistedState,
   persistJobs,
   STORAGE_KEY,
   durableRequestIneligibility,
   durablePersistenceSafeRequest,
-  persistDurableRecoveryFence,
   reconcileDurableHost,
   handleDurableEvent,
   resetDurableLifecycleForTests,
@@ -1032,6 +1126,7 @@ function createJobRecord(
     error: null,
     state: "running",
     cancelling: false,
+    cancelRequested: false,
     settledAt: null,
     chain:
       decision.kind === "chain"
@@ -1051,10 +1146,12 @@ function createJobRecord(
     previewUrl: null,
     seedVisual: seedVisualFor(req),
     ...(durableBatch ? { durable: true, durableBatch } : {}),
+    mediaHydrationError: null,
   }) as Job;
 }
 
 const durableTrackers = new Map<string, GenerationBatchTracker>();
+const durableJobsByBatch = new Map<string, Job[]>();
 const durableRoutes = new Map<string, HostRoute>();
 const durableEffectKeys = new Set<string>();
 const durableEventSessions = new Map<
@@ -1062,7 +1159,11 @@ const durableEventSessions = new Map<
   { signature: string; controller: AbortController }
 >();
 const durableReconciliations = new Map<string, Promise<void>>();
-const durableReconciliationPending = new Set<string>();
+const durableReconciliationPending = new Map<string, Set<string> | null>();
+const durableHydrations = new Map<string, Promise<void>>();
+const durableCancellations = new Map<string, Promise<void>>();
+const durableGallerySnapshots = new Map<string, Promise<GalleryImage[]>>();
+const durableGalleryRows = new Map<string, GalleryImage>();
 let durableRecoveryStarted = false;
 let durableWakeListenersInstalled = false;
 
@@ -1111,9 +1212,13 @@ function routeApiTarget(route: HostRoute): ApiTarget {
 }
 
 function jobsForClientBatch(clientBatchId: string): Job[] {
-  return jobs.value.filter(
+  const indexed = durableJobsByBatch.get(clientBatchId);
+  if (indexed) return indexed;
+  const recovered = jobs.value.filter(
     (job) => job.durableBatch?.clientBatchId === clientBatchId,
   );
+  if (recovered.length > 0) durableJobsByBatch.set(clientBatchId, recovered);
+  return recovered;
 }
 
 function errorText(value: unknown): string {
@@ -1127,6 +1232,99 @@ function errorText(value: unknown): string {
   }
 }
 
+function durableHostKey(job: Job): string {
+  return job.hostId ?? ORIGIN_HOST_ID;
+}
+
+function durableGalleryRowKey(hostId: string, filename: string): string {
+  return `${hostId.length}:${hostId}|${filename.length}:${filename}`;
+}
+
+function galleryRowFromUnknown(
+  value: unknown,
+  filename: string,
+): GalleryImage | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Partial<GalleryImage>;
+  if (
+    row.filename !== filename ||
+    !row.metadata ||
+    typeof row.metadata !== "object"
+  ) {
+    return null;
+  }
+  return row as GalleryImage;
+}
+
+function sharedGallerySnapshot(job: Job): Promise<GalleryImage[]> {
+  const key = durableHostKey(job);
+  const existing = durableGallerySnapshots.get(key);
+  if (existing) return existing;
+  const request = listGalleryFrom(routeForDetachedJob(job));
+  durableGallerySnapshots.set(key, request);
+  return request;
+}
+
+async function galleryRowForCompletion(
+  job: Job,
+  filename: string,
+): Promise<GalleryImage> {
+  const hostId = durableHostKey(job);
+  const cached = durableGalleryRows.get(durableGalleryRowKey(hostId, filename));
+  if (cached) return cached;
+  const listing = await sharedGallerySnapshot(job);
+  const row = listing.find((candidate) => candidate.filename === filename);
+  if (!row) {
+    throw new Error(
+      `completed output '${filename}' is not in the host gallery`,
+    );
+  }
+  durableGalleryRows.set(durableGalleryRowKey(hostId, filename), row);
+  return row;
+}
+
+interface WavFacts {
+  sampleRate: number;
+  channels: number;
+  durationMs: number;
+}
+
+/** Read only the RIFF chunk table needed by the typed audio completion. */
+async function wavFacts(blob: Blob): Promise<WavFacts | null> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const ascii = (offset: number, length: number) =>
+    String.fromCharCode(...bytes.subarray(offset, offset + length));
+  if (bytes.length < 12 || ascii(0, 4) !== "RIFF" || ascii(8, 4) !== "WAVE") {
+    return null;
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let offset = 12;
+  let sampleRate: number | null = null;
+  let channels: number | null = null;
+  let byteRate: number | null = null;
+  let dataBytes: number | null = null;
+  while (offset + 8 <= bytes.length) {
+    const name = ascii(offset, 4);
+    const size = view.getUint32(offset + 4, true);
+    const body = offset + 8;
+    if (body + size > bytes.length) break;
+    if (name === "fmt " && size >= 16) {
+      channels = view.getUint16(body + 2, true);
+      sampleRate = view.getUint32(body + 4, true);
+      byteRate = view.getUint32(body + 8, true);
+    } else if (name === "data") {
+      dataBytes = size;
+    }
+    offset = body + size + (size % 2);
+  }
+  if (!sampleRate || !channels || !byteRate || dataBytes === null) return null;
+  return {
+    sampleRate,
+    channels,
+    durationMs: Math.ceil((dataBytes * 1000) / byteRate),
+  };
+}
+
 async function durableCompletionResult(
   job: Job,
   lifecycle: GenerationLifecycleJob,
@@ -1136,29 +1334,37 @@ async function durableCompletionResult(
     throw new Error("the host completed this print without an output filename");
   }
   const target = routeForDetachedJob(job);
-  const gallery = await listGalleryFrom(target);
-  const print = gallery.find((candidate) => candidate.filename === filename);
-  if (!print) {
-    throw new Error(
-      `completed output '${filename}' is not in the host gallery`,
-    );
-  }
+  const print = await galleryRowForCompletion(job, filename);
   const host = getHost(job.hostId ?? ORIGIN_HOST_ID) ?? {
     id: job.hostId ?? ORIGIN_HOST_ID,
     name: job.hostLabel ?? job.hostId ?? "this server",
     url: target?.baseUrl ?? "",
     ...(target?.apiKey ? { apiKey: target.apiKey } : {}),
   };
-  const image = await blobToBase64(await fetchGalleryBlob(host, filename));
+  const artifact = await fetchGalleryBlob(host, filename);
+  const image = await blobToBase64(artifact);
   const metadata = print.metadata;
   const format =
     print.format ?? metadata.output_format ?? inferFormatFromName(filename);
   if (!format) throw new Error(`completed output '${filename}' has no format`);
+  const kind =
+    format === "mp4" ? "video" : format === "wav" ? "audio" : "image";
+  let thumbnail: string | null = null;
+  if (kind !== "image") {
+    thumbnail = await fetchGalleryThumbnailBlob(host, filename)
+      .then(blobToBase64)
+      .catch(() => null);
+  }
   let originalImage: string | null = null;
   if (lifecycle.result?.originalFilename) {
     originalImage = await blobToBase64(
       await fetchGalleryBlob(host, lifecycle.result.originalFilename),
     );
+  }
+  const request = job.request as GenerateRequestWire;
+  const wav = kind === "audio" ? await wavFacts(artifact) : null;
+  if (kind === "audio" && !wav) {
+    throw new Error(`completed output '${filename}' is not a valid WAV`);
   }
   return {
     image,
@@ -1166,13 +1372,30 @@ async function durableCompletionResult(
     width: metadata.width,
     height: metadata.height,
     seed_used: metadata.seed,
-    generation_time_ms: 0,
+    generation_time_ms: Math.max(
+      0,
+      (lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs) -
+        lifecycle.createdAtMs,
+    ),
     model: metadata.model,
     ...(originalImage ? { original_image: originalImage } : {}),
-    ...((job.request as GenerateRequestWire).frames != null
-      ? { video_frames: (job.request as GenerateRequestWire).frames }
+    ...(kind === "video"
+      ? {
+          video_frames: metadata.frames ?? request.frames ?? null,
+          video_fps: metadata.fps ?? request.fps ?? null,
+          ...(thumbnail ? { video_thumbnail: thumbnail } : {}),
+        }
       : {}),
-    ...(job.request.fps != null ? { video_fps: job.request.fps } : {}),
+    ...(kind === "audio"
+      ? {
+          // `isAudioCompletion` keys on sample-rate presence, matching the
+          // live SSE contract. A valid WAV yields exact header-derived facts.
+          audio_sample_rate: wav!.sampleRate,
+          audio_channels: wav!.channels,
+          audio_duration_ms: wav!.durationMs,
+          ...(thumbnail ? { audio_thumbnail: thumbnail } : {}),
+        }
+      : {}),
   };
 }
 
@@ -1184,14 +1407,19 @@ function settleDurableTerminal(
   const isReloadedCompletion =
     lifecycle.phase === "complete" && job.state === "done" && !job.result;
   if (job.state !== "running" && !isReloadedCompletion) return;
-  durableEffectKeys.add(lifecycle.key);
   if (lifecycle.phase === "cancelled") {
+    durableEffectKeys.add(lifecycle.key);
     job.state = "canceled";
+    job.cancelling = false;
+    job.cancelRequested = false;
     job.settledAt = lifecycle.completedAtMs ?? Date.now();
     job.previewUrl = null;
     return;
   }
   if (lifecycle.phase === "failed") {
+    durableEffectKeys.add(lifecycle.key);
+    job.cancelling = false;
+    job.cancelRequested = false;
     job.error = lifecycle.error ?? errorText(lifecycle.terminalError);
     recordFailedSettlement(job);
     return;
@@ -1205,26 +1433,57 @@ function settleDurableTerminal(
     recordSuccessfulSettlement(job);
   }
   job.previewUrl = null;
-  void durableCompletionResult(job, lifecycle)
-    .then((result) => {
-      if (job.state !== "done") return;
-      job.result = result;
-      fireComplete(job);
-      scheduleAutoRemoveOnDone(job.id);
-      if (job.durableBatch) {
-        pruneDurableTrackerIfSettled(job.durableBatch.clientBatchId);
+  job.cancelling = false;
+  job.cancelRequested = false;
+  if (durableHydrations.has(lifecycle.key)) return;
+  const controller = new AbortController();
+  const targetKey = routeForDetachedJob(job)?.baseUrl ?? "__origin__";
+  // Use the same per-target connection authority as attached generation
+  // streams. Artifact hydration cannot create a second independent pool.
+  const hydration = streamSlots
+    .acquire(targetKey, controller.signal)
+    .then(async (release) => {
+      if (!release) return;
+      try {
+        const result = await durableCompletionResult(job, lifecycle);
+        if (job.state !== "done") return;
+        job.result = result;
+        job.mediaHydrationError = null;
+        job.error = null;
+        if (lifecycle.result?.filename) {
+          durableGalleryRows.delete(
+            durableGalleryRowKey(
+              durableHostKey(job),
+              lifecycle.result.filename,
+            ),
+          );
+        }
+        durableEffectKeys.add(lifecycle.key);
+        fireComplete(job);
+        scheduleAutoRemoveOnDone(job.id);
+        if (job.durableBatch) {
+          pruneDurableTrackerIfSettled(job.durableBatch.clientBatchId);
+        }
+      } finally {
+        release();
       }
     })
     .catch((error) => {
       if (job.state !== "done") return;
-      job.state = "error";
-      job.detached = true;
-      job.error = `Print completed, but its media could not be loaded: ${errorText(error)}`;
-      job.settledAt = Date.now();
+      // The durable outcome remains complete. Keep its tracker/actionable
+      // recovery record so the next exact lifecycle reconciliation retries.
+      job.mediaHydrationError = errorText(error);
+      job.progress.stage = "Completed · media temporarily unavailable";
       if (job.durableBatch) {
-        pruneDurableTrackerIfSettled(job.durableBatch.clientBatchId);
+        persistDurableRecoveryBatch(job.durableBatch.clientBatchId);
+      }
+    })
+    .finally(() => {
+      if (durableHydrations.get(lifecycle.key) === hydration) {
+        durableHydrations.delete(lifecycle.key);
       }
     });
+  durableHydrations.set(lifecycle.key, hydration);
 }
 
 function applyDurableTracker(tracker: GenerationBatchTracker): void {
@@ -1276,7 +1535,17 @@ function applyDurableTracker(tracker: GenerationBatchTracker): void {
     } else {
       settleDurableTerminal(job, lifecycle);
     }
+    if (
+      job.cancelRequested &&
+      (lifecycle.phase === "accepted" ||
+        lifecycle.phase === "queued" ||
+        lifecycle.phase === "held" ||
+        lifecycle.phase === "running")
+    ) {
+      void confirmDurableCancellation(job).catch(() => undefined);
+    }
   }
+  persistDurableRecoveryBatch(tracker.clientBatchId);
   pruneDurableTrackerIfSettled(tracker.clientBatchId);
 }
 
@@ -1292,6 +1561,16 @@ function pruneDurableTrackerIfSettled(clientBatchId: string): void {
   )
     return;
   durableTrackers.delete(clientBatchId);
+  durableJobsByBatch.delete(clientBatchId);
+  for (const lifecycle of Object.values(tracker.jobs)) {
+    durableEffectKeys.delete(lifecycle.key);
+  }
+  try {
+    localStorage.removeItem(recoveryKey(clientBatchId));
+  } catch {
+    // Privacy mode can disable deletion as well as writes. The stale record is
+    // harmless: the next authoritative recovery snapshot settles it again.
+  }
   if (
     [...durableTrackers.values()].some((row) => row.hostId === tracker.hostId)
   ) {
@@ -1314,7 +1593,6 @@ function applyDurableBatchStatus(
   });
   durableTrackers.set(clientBatchId, next);
   applyDurableTracker(next);
-  persistJobs(jobs.value);
 }
 
 async function recoverAmbiguousAdmission(
@@ -1424,21 +1702,11 @@ function submitDurableJobs(
     }),
   );
   jobs.value = [...admitted, ...jobs.value];
-  // This synchronous write is the pre-POST recovery fence. It contains only
-  // redacted request data and public authority IDs; the route/key stay memory-only.
-  try {
-    persistDurableRecoveryFence(jobs.value);
-  } catch {
-    const message =
-      "Durable queueing could not start because this browser could not save its recovery record. Free browser storage or allow site storage, then try again. Nothing was submitted.";
-    for (const job of admitted) {
-      job.durable = undefined;
-      job.durableBatch = undefined;
-      job.error = message;
-      recordFailedSettlement(job);
-    }
-    return admitted.map((job) => job.id);
-  }
+  durableJobsByBatch.set(clientBatchId, admitted);
+  // Journal only THIS batch before dispatch. The ordinary rail's debounced
+  // presentation write is deliberately outside admission, so submitting job
+  // N never projects or serializes jobs 1..N-1.
+  persistDurableRecoveryBatch(clientBatchId);
   durableTrackers.set(clientBatchId, tracker);
   durableRoutes.set(route.hostId, {
     ...route,
@@ -1449,10 +1717,20 @@ function submitDurableJobs(
   return admitted.map((job) => job.id);
 }
 
-async function runDurableReconciliation(hostId: string): Promise<void> {
+async function runDurableReconciliation(
+  hostId: string,
+  clientBatchIds?: ReadonlySet<string>,
+): Promise<void> {
   const route = durableRoutes.get(hostId);
   if (!route) return;
-  const current = [...durableTrackers.values()];
+  // One authoritative gallery snapshot is shared by every legacy completion
+  // in this REST reconciliation wave. The next wave invalidates it.
+  durableGallerySnapshots.delete(hostId);
+  const current = [...durableTrackers.values()].filter(
+    (tracker) =>
+      tracker.hostId === hostId &&
+      (!clientBatchIds || clientBatchIds.has(tracker.clientBatchId)),
+  );
   const request = buildGenerationBatchStatusRequest(current, hostId);
   if (request.client_batch_ids.length === 0 && !request.batch_ids?.length)
     return;
@@ -1465,25 +1743,50 @@ async function runDurableReconciliation(hostId: string): Promise<void> {
     durableTrackers.set(tracker.clientBatchId, tracker);
     if (tracker.hostId === hostId) applyDurableTracker(tracker);
   }
-  persistJobs(jobs.value);
 }
 
-function reconcileDurableHost(hostId: string): Promise<void> {
+function startDurableReconciliation(
+  hostId: string,
+  scope?: ReadonlySet<string>,
+): Promise<void> {
   const active = durableReconciliations.get(hostId);
   if (active) {
-    durableReconciliationPending.add(hostId);
+    const pending = durableReconciliationPending.get(hostId);
+    if (scope === undefined) {
+      durableReconciliationPending.set(hostId, null);
+    } else if (pending !== null) {
+      const next = pending ?? new Set<string>();
+      for (const clientBatchId of scope) next.add(clientBatchId);
+      durableReconciliationPending.set(hostId, next);
+    }
     return active;
   }
-  const task = runDurableReconciliation(hostId)
+  const task = runDurableReconciliation(hostId, scope)
     .catch(() => undefined)
     .finally(() => {
       durableReconciliations.delete(hostId);
-      if (durableReconciliationPending.delete(hostId)) {
-        void reconcileDurableHost(hostId);
+      const pending = durableReconciliationPending.get(hostId);
+      if (pending !== undefined) {
+        durableReconciliationPending.delete(hostId);
+        if (pending === null) {
+          void startDurableReconciliation(hostId);
+        } else {
+          void startDurableReconciliation(hostId, pending);
+        }
       }
     });
   durableReconciliations.set(hostId, task);
   return task;
+}
+
+function reconcileDurableHost(
+  hostId: string,
+  clientBatchId?: string,
+): Promise<void> {
+  return startDurableReconciliation(
+    hostId,
+    clientBatchId === undefined ? undefined : new Set([clientBatchId]),
+  );
 }
 
 function handleDurableEvent(
@@ -1501,7 +1804,8 @@ function handleDurableEvent(
     }
     data = parsed as Record<string, unknown>;
   } catch {
-    void reconcileDurableHost(hostId);
+    // Malformed hints carry no authority and no safe identity to target. The
+    // stream's explicit resync frame or wake/open snapshot performs repair.
     return;
   }
   if (eventName === "authority" || eventName === "resync_required") {
@@ -1511,33 +1815,46 @@ function handleDurableEvent(
     return;
   }
   if (eventName !== "event" || typeof data.type !== "string") {
-    void reconcileDurableHost(hostId);
     return;
   }
-  if (data.type === "job_started" && typeof data.id === "string") {
-    const job = jobs.value.find(
+  let exactJob: Job | undefined;
+  if (typeof data.id === "string") {
+    exactJob = jobs.value.find(
       (candidate) =>
         candidate.hostId === hostId && candidate.serverId === data.id,
     );
-    if (job?.state === "running") {
-      markWorkStarted(job);
-      job.progress.stage = "Developing";
-      if (typeof data.gpu === "number") job.progress.gpu = data.gpu;
+  }
+  if (data.type === "job_started" && typeof data.id === "string") {
+    if (exactJob?.state === "running") {
+      markWorkStarted(exactJob);
+      exactJob.progress.stage = "Developing";
+      if (typeof data.gpu === "number") exactJob.progress.gpu = data.gpu;
     }
   } else if (data.type === "job_queued" && typeof data.id === "string") {
-    const job = jobs.value.find(
-      (candidate) =>
-        candidate.hostId === hostId && candidate.serverId === data.id,
-    );
-    if (job?.state === "running") job.progress.stage = "Queued";
-  }
-  if (
-    data.type === "job_ended" ||
-    data.type === "gallery_added" ||
-    data.type === "job_started" ||
-    data.type === "job_queued"
+    if (exactJob?.state === "running") exactJob.progress.stage = "Queued";
+  } else if (
+    data.type === "gallery_added" &&
+    typeof data.filename === "string"
   ) {
-    void reconcileDurableHost(hostId);
+    const row = galleryRowFromUnknown(data.image, data.filename);
+    if (row) {
+      const jobId = row.metadata.job_id;
+      if (jobId) {
+        exactJob = jobs.value.find(
+          (candidate) =>
+            candidate.hostId === hostId && candidate.serverId === jobId,
+        );
+      }
+      if (exactJob) {
+        durableGalleryRows.set(
+          durableGalleryRowKey(hostId, data.filename),
+          row,
+        );
+      }
+    }
+  }
+  if (exactJob?.durableBatch) {
+    void reconcileDurableHost(hostId, exactJob.durableBatch.clientBatchId);
   }
 }
 
@@ -1607,6 +1924,7 @@ function recoverDurableLifecycle(): void {
     grouped.set(job.durableBatch.clientBatchId, group);
   }
   for (const [clientBatchId, owned] of grouped) {
+    durableJobsByBatch.set(clientBatchId, owned);
     const first = owned[0]!;
     const durable = first.durableBatch!;
     const hostId = first.hostId ?? ORIGIN_HOST_ID;
@@ -1662,10 +1980,15 @@ function resetDurableLifecycleForTests(): void {
   }
   durableEventSessions.clear();
   durableTrackers.clear();
+  durableJobsByBatch.clear();
   durableRoutes.clear();
   durableEffectKeys.clear();
   durableReconciliations.clear();
   durableReconciliationPending.clear();
+  durableHydrations.clear();
+  durableCancellations.clear();
+  durableGallerySnapshots.clear();
+  durableGalleryRows.clear();
   durableRecoveryStarted = false;
 }
 
@@ -1898,9 +2221,70 @@ function routeForDetachedJob(job: Job): StreamTarget | undefined {
   return target;
 }
 
+function markCancellationConfirmed(job: Job): void {
+  if (job.state !== "running") return;
+  durabilityByJob.delete(job.id);
+  job.controller.abort();
+  job.state = "canceled";
+  job.cancelling = false;
+  job.cancelRequested = false;
+  job.settledAt = Date.now();
+  job.previewUrl = null;
+  if (job.durableBatch) {
+    persistDurableRecoveryBatch(job.durableBatch.clientBatchId);
+    pruneDurableTrackerIfSettled(job.durableBatch.clientBatchId);
+  }
+  if (selectedJobId.value === job.id) selectedJobId.value = null;
+}
+
+async function confirmDurableCancellation(job: Job): Promise<void> {
+  if (job.state !== "running" || !job.serverId) return;
+  const active = durableCancellations.get(job.id);
+  if (active) return active;
+  job.cancelRequested = true;
+  job.cancelling = true;
+  if (job.durableBatch) {
+    persistDurableRecoveryBatch(job.durableBatch.clientBatchId);
+  }
+  const task = cancelQueueJob(job.serverId, routeForDetachedJob(job))
+    .then(() => {
+      // Complete/failed/cancelled authority may have arrived during DELETE.
+      if (job.state === "running") markCancellationConfirmed(job);
+    })
+    .catch((error) => {
+      if (job.state === "running") {
+        // Keep the intent and tracker. A later exact lifecycle snapshot can
+        // expose the final outcome or retry the exact DELETE.
+        job.cancelling = false;
+        if (job.durableBatch) {
+          persistDurableRecoveryBatch(job.durableBatch.clientBatchId);
+        }
+      }
+      throw error;
+    })
+    .finally(() => {
+      if (durableCancellations.get(job.id) === task) {
+        durableCancellations.delete(job.id);
+      }
+    });
+  durableCancellations.set(job.id, task);
+  return task;
+}
+
 async function cancelJob(id: string): Promise<void> {
   const job = jobs.value.find((j) => j.id === id);
   if (!job || job.state !== "running") return;
+  if (job.cancelling && !job.cancelRequested) return;
+  if (job.durableBatch) {
+    job.cancelRequested = true;
+    job.cancelling = true;
+    persistDurableRecoveryBatch(job.durableBatch.clientBatchId);
+    if (!job.serverId) {
+      job.progress.stage = "Cancelling when admission is confirmed";
+      return;
+    }
+    return confirmDurableCancellation(job);
+  }
   if (job.cancelling) return;
   job.cancelling = true;
   if (job.serverId) {
@@ -1924,16 +2308,7 @@ async function cancelJob(id: string): Promise<void> {
   // durable outcome has claimed the job, a late successful cancel response
   // cannot replace it with a local cancellation.
   if (job.state !== "running") return;
-  durabilityByJob.delete(id);
-  job.controller.abort();
-  job.state = "canceled";
-  job.cancelling = false;
-  job.settledAt = Date.now();
-  job.previewUrl = null;
-  if (job.durableBatch) {
-    pruneDurableTrackerIfSettled(job.durableBatch.clientBatchId);
-  }
-  if (selectedJobId.value === id) selectedJobId.value = null;
+  markCancellationConfirmed(job);
 }
 
 function clearDoneJobs() {
@@ -1943,6 +2318,15 @@ function clearDoneJobs() {
 
 function removeJob(id: string) {
   durabilityByJob.delete(id);
+  const removed = jobs.value.find((job) => job.id === id);
+  if (removed?.durableBatch) {
+    const clientBatchId = removed.durableBatch.clientBatchId;
+    const remaining = jobsForClientBatch(clientBatchId).filter(
+      (job) => job.id !== id,
+    );
+    if (remaining.length > 0) durableJobsByBatch.set(clientBatchId, remaining);
+    else durableJobsByBatch.delete(clientBatchId);
+  }
   jobs.value = jobs.value.filter((j) => j.id !== id);
   if (selectedJobId.value === id) selectedJobId.value = null;
   if (canvasErrorJobId.value === id) canvasErrorJobId.value = null;

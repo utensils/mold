@@ -2916,7 +2916,14 @@ const resultSrc = computed(() => {
       : "";
   }
   if (r.video_thumbnail) return `data:image/png;base64,${r.video_thumbnail}`;
+  if (r.format === "mp4") return "";
   return `data:image/${r.format};base64,${r.image}`;
+});
+/** The playable artifact for a video print. Never construct data:image/mp4. */
+const resultVideoSrc = computed(() => {
+  const r = latestDone.value?.result;
+  if (!r || r.format !== "mp4" || !r.image) return "";
+  return `data:video/mp4;base64,${r.image}`;
 });
 /** The playable artifact for an audio-only print; empty for every other kind. */
 const resultAudioSrc = computed(() => {
@@ -5394,6 +5401,7 @@ onBeforeUnmount(() => {
               selectedQueueRender?.height ?? runningJob?.request.height
             "
             :result-src="resultSrc"
+            :result-video-src="resultVideoSrc"
             :result-audio-src="resultAudioSrc"
             :result-caption="resultCaption"
             :error="latestErrorMessage"

@@ -653,8 +653,8 @@ describe("HostDetailPage — queue", () => {
     const refresh = subscribeToDeviceSnapshots.mock.calls[0]![2] as () => void;
     refresh();
     await flushPromises();
-    expect(w.findAll('[data-test="queue-row"]')).toHaveLength(2);
-    expect(w.find('[data-test="queue-load-more"]').exists()).toBe(true);
+    expect(w.findAll('[data-test="queue-row"]')).toHaveLength(3);
+    expect(w.find('[data-test="queue-load-more"]').exists()).toBe(false);
   });
 
   it("uses reachability and in-flight state to gate durable continuation", async () => {
@@ -699,6 +699,57 @@ describe("HostDetailPage — queue", () => {
       page: { limit: 2, cursor: "tail", returned: 1 },
     });
     await flushPromises();
+  });
+
+  it("keeps an in-flight continuation valid while a routine refresh replaces only the head", async () => {
+    poll.status.value = makeStatus({ queue_capacity: 2 });
+    const continuation = deferred<{
+      entries: QueueEntry[];
+      page: { limit: number; cursor: string; returned: number };
+    }>();
+    let refreshed = false;
+    hostQueueCall.mockImplementation(
+      (
+        _host: unknown,
+        _signal: unknown,
+        page?: { limit: number; cursor?: string },
+      ) => {
+        if (page?.cursor) return continuation.promise;
+        return Promise.resolve({
+          entries: refreshed
+            ? [queued("new", 0), queued("a", 1)]
+            : [queued("a", 0), queued("b", 1)],
+          page: {
+            limit: 2,
+            offset: 0,
+            returned: 2,
+            next_cursor: "tail",
+          },
+        });
+      },
+    );
+
+    const w = await mountDetail();
+    const loadMore = w.get('[data-test="queue-load-more"]');
+    await loadMore.trigger("click");
+    expect(loadMore.text()).toBe("Loading…");
+
+    refreshed = true;
+    const refresh = subscribeToDeviceSnapshots.mock.calls[0]![2] as () => void;
+    refresh();
+    await flushPromises();
+    expect(loadMore.text()).toBe("Loading…");
+    expect(w.findAll('[data-test="queue-row"]')).toHaveLength(2);
+    expect(w.text()).toContain("new");
+
+    continuation.resolve({
+      entries: [queued("c", 2)],
+      page: { limit: 2, cursor: "tail", returned: 1 },
+    });
+    await flushPromises();
+    expect(w.findAll('[data-test="queue-row"]')).toHaveLength(3);
+    expect(w.text()).toContain("new");
+    expect(w.text()).toContain("c");
   });
 
   it("wires advertised pause and cancel-all controls to the viewed host", async () => {
