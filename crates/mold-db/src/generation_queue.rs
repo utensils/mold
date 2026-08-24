@@ -605,6 +605,52 @@ pub fn claim_next(
     })
 }
 
+/// Reserve one exact queued row without changing durable queue order.
+///
+/// The caller has already selected `id` using its operation-aware policy. This
+/// statement is only the ownership CAS: owner, id, queued state, absent claim,
+/// and globally unused token must all still match. Ineligible or deleted rows
+/// return `None` without changing timestamps or any other queue state. The
+/// ordinary [`claim_next`] feeder therefore retains FIFO selection for every
+/// remaining unclaimed row.
+pub fn claim_by_id(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    id: &str,
+    claim_token: &str,
+    now_ms: i64,
+) -> Result<Option<QueueClaim>> {
+    if claim_token.is_empty() {
+        bail!("queue claim token must not be empty");
+    }
+    db.with_conn(|conn| {
+        conn.query_row(
+            "UPDATE generation_queue
+                SET claim_token = ?3, updated_at = ?4
+              WHERE id = ?2
+                AND owner_uuid = ?1
+                AND state = 'queued'
+                AND claim_token IS NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM generation_queue WHERE claim_token = ?3
+                )
+          RETURNING id, owner_uuid, state, model, request_json, output_dir,
+                    target_gpu, target_device_id, completion_payload, seed_pinned,
+                    dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
+                    started_at, media_set_id",
+            params![owner_uuid, id, claim_token, now_ms],
+            |row| {
+                Ok(QueueClaim {
+                    row: row_to_queue_row(row)?,
+                    claim_token: claim_token.to_string(),
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    })
+}
+
 /// Clear a reservation that has not started execution.
 pub fn release_claim(db: &MetadataDb, id: &str, claim_token: &str, now_ms: i64) -> Result<bool> {
     db.with_conn(|conn| {
@@ -1731,6 +1777,124 @@ mod tests {
                 .id,
             "next"
         );
+    }
+
+    #[test]
+    fn claim_by_id_is_exact_and_leaves_fifo_for_the_ordinary_feeder() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        for (id, created_at_ms) in [("first", 1), ("target", 2), ("last", 3)] {
+            insert(&db, &row(id, "owner-a", created_at_ms)).unwrap();
+        }
+
+        let exact = claim_by_id(&db, "owner-a", "target", "exact-token", 10)
+            .unwrap()
+            .unwrap();
+        assert_eq!(exact.row.id, "target");
+        assert_eq!(exact.claim_token, "exact-token");
+        assert_eq!(exact.row.updated_at_ms, 10);
+
+        assert_eq!(
+            claim_next(&db, "owner-a", "fifo-first", 11)
+                .unwrap()
+                .unwrap()
+                .row
+                .id,
+            "first"
+        );
+        assert_eq!(
+            claim_next(&db, "owner-a", "fifo-last", 12)
+                .unwrap()
+                .unwrap()
+                .row
+                .id,
+            "last"
+        );
+    }
+
+    #[test]
+    fn claim_by_id_refuses_ineligible_rows_without_mutation() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        for id in [
+            "held",
+            "running",
+            "foreign",
+            "claimed",
+            "cancelled",
+            "eligible",
+        ] {
+            let owner = if id == "foreign" {
+                "owner-b"
+            } else {
+                "owner-a"
+            };
+            insert(&db, &row(id, owner, 1)).unwrap();
+        }
+        hold(&db, "held", "review", 2).unwrap();
+        mark_dispatched(&db, "running", 3).unwrap();
+        claim_by_id(&db, "owner-a", "claimed", "existing-token", 4)
+            .unwrap()
+            .unwrap();
+        delete(&db, "cancelled").unwrap();
+
+        let snapshot = || {
+            db.with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, state, claim_token, updated_at
+                       FROM generation_queue ORDER BY id",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(Into::into)
+            })
+            .unwrap()
+        };
+        let before = snapshot();
+        for (owner, id, token) in [
+            ("owner-a", "held", "held-token"),
+            ("owner-a", "running", "running-token"),
+            ("owner-a", "foreign", "foreign-token"),
+            ("owner-a", "claimed", "new-token"),
+            ("owner-a", "cancelled", "cancelled-token"),
+            ("owner-a", "eligible", "existing-token"),
+        ] {
+            assert!(claim_by_id(&db, owner, id, token, 99).unwrap().is_none());
+        }
+        assert_eq!(snapshot(), before);
+        assert!(claim_by_id(&db, "owner-a", "held", "", 99).is_err());
+        assert_eq!(snapshot(), before);
+    }
+
+    #[test]
+    fn concurrent_claim_by_id_has_one_token_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mold.db");
+        let db = MetadataDb::open(&path).unwrap();
+        insert(&db, &row("target", "owner-a", 1)).unwrap();
+        drop(db);
+
+        let barrier = Arc::new(Barrier::new(2));
+        let handles = ["claim-a", "claim-b"].map(|token| {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let db = MetadataDb::open(&path).unwrap();
+                barrier.wait();
+                claim_by_id(&db, "owner-a", "target", token, 10).unwrap()
+            })
+        });
+        let claims = handles
+            .into_iter()
+            .filter_map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].row.id, "target");
     }
 
     #[test]
