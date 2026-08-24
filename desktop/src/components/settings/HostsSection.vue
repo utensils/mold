@@ -32,10 +32,9 @@ async function copyLocalApiKey() {
 }
 
 async function restartEngine() {
-  await conn.stopEngine();
-  await conn.useLocal();
-  if (conn.ready) toasts.push("Engine restarted");
-  else if (conn.error) toasts.push(conn.error, "error");
+  const result = await conn.restartEngine();
+  if (result === "restarted") toasts.push("Engine restarted");
+  else if (result === "failed" && conn.error) toasts.push(conn.error, "error");
 }
 
 function hostDot(status: "ready" | "connecting" | "error"): string {

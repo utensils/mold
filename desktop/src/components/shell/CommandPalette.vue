@@ -260,10 +260,10 @@ const staticCommands = computed<Command[]>(() => {
       title: "Restart engine",
       keywords: ["engine", "reload", "reboot"],
       run: () => {
-        void conn
-          .stopEngine()
-          .then(() => conn.useLocal())
-          .then(() => toasts.push("Engine restarted"));
+        void conn.restartEngine().then((result) => {
+          if (result === "restarted") toasts.push("Engine restarted");
+          else if (result === "failed" && conn.error) toasts.push(conn.error, "error");
+        });
         close();
       },
     },

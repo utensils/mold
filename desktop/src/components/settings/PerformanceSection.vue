@@ -30,12 +30,11 @@ async function setKnob(key: string, value: string) {
 }
 
 async function restartEngine() {
-  await conn.stopEngine();
-  await conn.useLocal();
-  if (conn.ready) {
+  const result = await conn.restartEngine();
+  if (result === "restarted") {
     dirty.clear();
     toasts.push("Engine restarted — knobs applied");
-  } else if (conn.error) {
+  } else if (result === "failed" && conn.error) {
     toasts.push(conn.error, "error");
   }
 }
