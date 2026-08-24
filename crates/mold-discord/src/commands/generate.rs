@@ -2362,6 +2362,12 @@ mod tests {
         }
     }
 
+    /// An attachment never bends a compact request off the reviewed envelope,
+    /// but it does CHOOSE within it: the fit lands on whichever reviewed
+    /// canvas is nearest the attachment's aspect ratio, so a square or
+    /// portrait attachment renders square instead of being letterboxed into
+    /// the 7:4 default. The free-form aspect-derived canvas remains
+    /// official-BF16 behaviour (the sibling test above).
     #[test]
     fn h3_attachment_dims_keep_the_compact_envelope() {
         for model in [
@@ -2369,20 +2375,25 @@ mod tests {
             mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
             mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
         ] {
-            for (source_width, source_height) in [(1024, 1024), (1920, 1080), (1080, 1920)] {
-                assert_eq!(
-                    fit_attachment_dims(
-                        source_width,
-                        source_height,
-                        Some(&defaults_1024()),
-                        Some("minimax-h3"),
-                        model,
-                    ),
-                    (
-                        mold_core::minimax_h3::DEFAULT_WIDTH,
-                        mold_core::minimax_h3::DEFAULT_HEIGHT
-                    ),
-                    "{model} {source_width}x{source_height}"
+            for (source_width, source_height, expected) in [
+                (1024, 1024, (768, 768)),
+                (1920, 1080, (1344, 768)),
+                (1080, 1920, (768, 768)),
+                (2048, 512, (1344, 768)),
+            ] {
+                let fitted = fit_attachment_dims(
+                    source_width,
+                    source_height,
+                    Some(&defaults_1024()),
+                    Some("minimax-h3"),
+                    model,
+                );
+                assert_eq!(fitted, expected, "{model} {source_width}x{source_height}");
+                // Whatever it picks is a canvas a campaign qualified — the
+                // attachment can never widen the envelope.
+                assert!(
+                    mold_core::minimax_h3::is_reviewed_compact_canvas(fitted.0, fitted.1),
+                    "{model} {source_width}x{source_height} left the reviewed set"
                 );
             }
         }
