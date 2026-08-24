@@ -16,8 +16,37 @@ describe("MobileSharedParams video duration", () => {
       family: "ltx2",
       guidance: 7,
     });
+    const model = profileModel(
+      form.model,
+      form.family,
+      { default: 20, min: 1, max: 100, step: 1, mode: "adjustable" },
+      { default: 1, min: 1, max: 1, step: 0.1, mode: "fixed", note: DISTILLED_NOTE },
+      [
+        {
+          id: "two-stage",
+          label: "Two stage",
+          request_selector: { pipeline: "two-stage" },
+          defaults: { width: 1024, height: 576, steps: 20, guidance: 3 },
+          resolution: {
+            domain: "dynamic",
+            alignment: 32,
+            min_width: 64,
+            min_height: 64,
+            max_pixels: 1_032_192,
+            aspect_groups: [],
+          },
+          steps: { default: 20, min: 1, max: 100, step: 1, mode: "adjustable" },
+          guidance: { default: 3, min: 0, max: 100, step: 0.1, mode: "adjustable" },
+          capabilities: {
+            ...baseCapabilities,
+            guidance: { adjustable: true, supports_negative_prompt: true },
+          },
+          provenance: [],
+        },
+      ],
+    );
     const wrapper = mount(MobileSharedParams, {
-      props: { form, lastSeed: null },
+      props: { form, model, lastSeed: null },
       global: { stubs: { MobileResolutionPicker: true, MobileSeedPicker: true } },
     });
     const guidance = wrapper.get("input[step='0.1']");
@@ -86,5 +115,154 @@ describe("MobileSharedParams video duration", () => {
 
     expect(wrapper.find("[data-test='mobile-duration']").exists()).toBe(false);
     expect(wrapper.find("[data-test='mobile-sequence-fps']").exists()).toBe(true);
+  });
+});
+
+const baseCapabilities = {
+  guidance: { adjustable: false, supports_negative_prompt: false, fixed_scale: 1 },
+  negative_prompt: { mode: "hidden", required: false },
+  supports_lora: false,
+  supports_controlnet: false,
+  supports_identity: false,
+  supports_sequence: false,
+  supports_extend: false,
+  supports_audio: false,
+  source_video: { mode: "hidden", required: false },
+  mask: { mode: "hidden", required: false },
+  keyframes: { mode: "hidden", required: false },
+  audio: { mode: "hidden", required: false },
+  lora: { mode: "hidden", max_count: 0 },
+  controlnet: { mode: "hidden", max_count: 0 },
+  output: { default_format: "mp4", formats: ["mp4"], audio_requires_mp4: false },
+  wan_recipe: {
+    mode: "hidden",
+    supports_distill_strength: false,
+    supports_first_last_frame: false,
+  },
+  schedulers: [],
+};
+
+/** A minimal advertised v1 profile: only the two controls under test carry
+ * interesting values, and their note is whatever the host authored. */
+function profileModel(
+  name: string,
+  family: string,
+  steps: { default: number; [key: string]: unknown },
+  guidance: { default: number; [key: string]: unknown },
+  extraRecipes: Record<string, unknown>[] = [],
+): ModelEntry {
+  return {
+    name,
+    family,
+    downloaded: true,
+    generation_profile: {
+      schema_version: 1,
+      profile_id: `${family}.${name}`,
+      profile_hash: "hash",
+      default_recipe_id: "default",
+      recipes: [
+        {
+          id: "default",
+          label: "Default",
+          request_selector: {},
+          // The validator cross-checks defaults against the controls, so the
+          // recipe default is the control default by construction.
+          defaults: {
+            width: 1024,
+            height: 576,
+            steps: steps.default,
+            guidance: guidance.default,
+          },
+          resolution: {
+            domain: "dynamic",
+            alignment: 32,
+            min_width: 64,
+            min_height: 64,
+            max_pixels: 1_032_192,
+            aspect_groups: [],
+          },
+          steps,
+          guidance,
+          capabilities: baseCapabilities,
+          provenance: [],
+        },
+        ...extraRecipes,
+      ],
+    },
+  } as unknown as ModelEntry;
+}
+
+const DISTILLED_NOTE =
+  "Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with Auto or a guided pipeline to adjust it.";
+const H3_GUIDANCE_NOTE =
+  "MiniMax H3 does not use classifier-free guidance; guidance is fixed at 0.";
+const H3_TURBO_STEPS_NOTE =
+  "Fixed by the 8-step Turbo tier: 9 terminal-inclusive sampler grid points (8 denoise intervals).";
+
+describe("MobileSharedParams fixed-control notes", () => {
+  beforeEach(() => setActivePinia(createPinia()));
+
+  it("renders the host's own note for a fixed H3 Turbo step count and guidance", () => {
+    const form = reactive({
+      ...newGenerateForm(),
+      model: "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step",
+      family: "minimax-h3",
+      steps: 9,
+      guidance: 0,
+    });
+    const model = profileModel(
+      form.model,
+      form.family,
+      { default: 9, min: 9, max: 9, step: 1, mode: "fixed", note: H3_TURBO_STEPS_NOTE },
+      { default: 0, min: 0, max: 0, step: 0.1, mode: "fixed", note: H3_GUIDANCE_NOTE },
+    );
+    const wrapper = mount(MobileSharedParams, {
+      props: { form, model, lastSeed: null },
+      global: { stubs: { MobileResolutionPicker: true, MobileSeedPicker: true } },
+    });
+
+    expect(wrapper.get("[data-test='mobile-fixed-steps-hint']").text()).toBe(H3_TURBO_STEPS_NOTE);
+    expect(wrapper.get("[data-test='mobile-fixed-guidance-hint']").text()).toBe(H3_GUIDANCE_NOTE);
+    // The old hard-coded sentence is false here: H3 pins guidance at 0 and
+    // offers no Dev checkpoint to switch to.
+    expect(wrapper.text()).not.toContain("Distilled recipe fixes CFG");
+  });
+
+  it("renders no note for adjustable controls", () => {
+    const form = reactive({ ...newGenerateForm(), model: "flux-dev:q8", family: "flux" });
+    const model = profileModel(
+      form.model,
+      form.family,
+      { default: 20, min: 1, max: 100, step: 1, mode: "adjustable" },
+      { default: 3.5, min: 0, max: 100, step: 0.1, mode: "adjustable" },
+    );
+    const wrapper = mount(MobileSharedParams, {
+      props: { form, model, lastSeed: null },
+      global: { stubs: { MobileResolutionPicker: true, MobileSeedPicker: true } },
+    });
+
+    expect(wrapper.find("[data-test='mobile-fixed-steps-hint']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-fixed-guidance-hint']").exists()).toBe(false);
+  });
+
+  it("invents no copy when a fixed control carries no note (older host)", () => {
+    const form = reactive({
+      ...newGenerateForm(),
+      model: "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step",
+      family: "minimax-h3",
+    });
+    const model = profileModel(
+      form.model,
+      form.family,
+      { default: 9, min: 9, max: 9, step: 1, mode: "fixed" },
+      { default: 0, min: 0, max: 0, step: 0.1, mode: "fixed" },
+    );
+    const wrapper = mount(MobileSharedParams, {
+      props: { form, model, lastSeed: null },
+      global: { stubs: { MobileResolutionPicker: true, MobileSeedPicker: true } },
+    });
+
+    expect(wrapper.find("[data-test='mobile-fixed-steps-hint']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-fixed-guidance-hint']").exists()).toBe(false);
   });
 });

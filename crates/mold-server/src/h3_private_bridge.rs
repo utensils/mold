@@ -731,14 +731,16 @@ fn reviewed_h3_private_generation_profile_for(
     // inside a compact aspect chip; replacing them with prose here made one
     // server-only presentation fork wrap outside the control even though
     // every surface already shares the profile.
+    // The presets keep the generated profile's own `recommended` tier, which
+    // every surface hides (`studio/lib/outputShape.ts`): a mark that sits on
+    // every pill says nothing, and "Reviewed" on an H3 size pill said less —
+    // the qualification it named is not a property of the pixels. The
+    // `Default` mark still comes from the recipe default.
     let mut reviewed_groups = recipe.resolution.aspect_groups.clone();
     for group in &mut reviewed_groups {
         group
             .presets
             .retain(|preset| reviewed_canvases.contains(&(preset.width, preset.height)));
-        for preset in &mut group.presets {
-            preset.tier = "reviewed".into();
-        }
     }
     reviewed_groups.retain(|group| !group.presets.is_empty());
     if reviewed_groups
@@ -1968,7 +1970,10 @@ mod presentation_tests {
         for group in &recipe.resolution.aspect_groups {
             assert_eq!(group.id, group.label);
             for preset in &group.presets {
-                assert_eq!(preset.tier, "reviewed");
+                // The bridge no longer overrides the tier: a "Reviewed" mark
+                // on every size pill is noise, and the generated profile's
+                // own `recommended` is the one every surface hides.
+                assert_eq!(preset.tier, "recommended");
             }
         }
         assert_eq!(
@@ -2493,7 +2498,7 @@ mod tests {
         }
         assert_eq!(
             recipe.resolution.aspect_groups[0].presets[0].tier,
-            "reviewed"
+            "recommended"
         );
         assert_eq!(recipe.steps.default, 21);
         let temporal = recipe.temporal.as_ref().unwrap();

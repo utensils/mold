@@ -61,15 +61,105 @@ describe("InspectorPanel — layout", () => {
     const form = formFor("ltx2");
     form.model = "ltx-2.3-22b-distilled:fp8";
     form.guidance = 6;
+    useModelStore().all = [
+      noteModel(
+        form.model,
+        "ltx2",
+        { default: 20, min: 1, max: 100, step: 1, mode: "adjustable" },
+        { default: 1, min: 1, max: 1, step: 0.1, mode: "fixed", note: DISTILLED_NOTE },
+        [
+          {
+            id: "two-stage",
+            label: "Two stage",
+            request_selector: { pipeline: "two-stage" },
+            defaults: { width: 1024, height: 576, steps: 20, guidance: 3 },
+            resolution: {
+              domain: "dynamic",
+              alignment: 32,
+              min_width: 64,
+              min_height: 64,
+              max_pixels: 1_032_192,
+              aspect_groups: [],
+            },
+            steps: { default: 20, min: 1, max: 100, step: 1, mode: "adjustable" },
+            guidance: { default: 3, min: 0, max: 100, step: 0.1, mode: "adjustable" },
+            capabilities: {
+              ...noteCapabilities,
+              guidance: { adjustable: true, supports_negative_prompt: true },
+            },
+            provenance: [],
+          },
+        ],
+      ),
+    ];
     const wrapper = mount(InspectorPanel, { props: { form } });
     const guidance = () =>
       wrapper.findAllComponents(SliderRow).find((row) => row.props("label") === "Prompt strength")!;
     expect(guidance().props("disabled")).toBe(true);
     expect(guidance().props("modelValue")).toBe(1);
-    expect(wrapper.get("[data-test='fixed-guidance-hint']").text()).toContain("fixes CFG at 1.0");
+    // The sentence is the profile's own note, not inspector copy.
+    expect(wrapper.get("[data-test='fixed-guidance-hint']").text()).toBe(DISTILLED_NOTE);
     form.pipeline = "two-stage";
     await flushPromises();
     expect(guidance().props("disabled")).toBe(false);
+    expect(wrapper.find("[data-test='fixed-guidance-hint']").exists()).toBe(false);
+  });
+
+  it("renders the host's own note for a fixed H3 Turbo step count and guidance", () => {
+    const name = "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step";
+    useModelStore().all = [
+      noteModel(
+        name,
+        "minimax-h3",
+        { default: 9, min: 9, max: 9, step: 1, mode: "fixed", note: H3_TURBO_STEPS_NOTE },
+        { default: 0, min: 0, max: 0, step: 0.1, mode: "fixed", note: H3_GUIDANCE_NOTE },
+      ),
+    ];
+    const form = formFor("minimax-h3");
+    form.model = name;
+    form.steps = 9;
+    form.guidance = 0;
+
+    const wrapper = mount(InspectorPanel, { props: { form } });
+
+    expect(wrapper.get("[data-test='fixed-steps-hint']").text()).toBe(H3_TURBO_STEPS_NOTE);
+    expect(wrapper.get("[data-test='fixed-guidance-hint']").text()).toBe(H3_GUIDANCE_NOTE);
+    // The old hard-coded sentence was false here: H3 pins guidance at 0 and
+    // offers no Dev checkpoint to switch to.
+    expect(wrapper.text()).not.toContain("Distilled recipe fixes CFG");
+  });
+
+  it("renders no note for adjustable controls, and none for a fixed one the host left silent", () => {
+    useModelStore().all = [
+      noteModel(
+        "flux-dev:q8",
+        "flux",
+        { default: 20, min: 1, max: 100, step: 1, mode: "adjustable" },
+        { default: 3.5, min: 0, max: 100, step: 0.1, mode: "adjustable" },
+      ),
+    ];
+    const adjustable = formFor("flux");
+    adjustable.model = "flux-dev:q8";
+    const open = mount(InspectorPanel, { props: { form: adjustable } });
+    expect(open.find("[data-test='fixed-steps-hint']").exists()).toBe(false);
+    expect(open.find("[data-test='fixed-guidance-hint']").exists()).toBe(false);
+
+    // An older host fixes the control and says nothing; invent no copy.
+    useModelStore().all = [
+      noteModel(
+        "silent:fixed",
+        "minimax-h3",
+        { default: 9, min: 9, max: 9, step: 1, mode: "fixed" },
+        { default: 0, min: 0, max: 0, step: 0.1, mode: "fixed" },
+      ),
+    ];
+    const silent = formFor("minimax-h3");
+    silent.model = "silent:fixed";
+    silent.steps = 9;
+    silent.guidance = 0;
+    const quiet = mount(InspectorPanel, { props: { form: silent } });
+    expect(quiet.find("[data-test='fixed-steps-hint']").exists()).toBe(false);
+    expect(quiet.find("[data-test='fixed-guidance-hint']").exists()).toBe(false);
   });
 
   it("renders every primary generation control", () => {
@@ -1356,3 +1446,83 @@ describe("InspectorPanel — File under", () => {
     );
   });
 });
+
+const noteCapabilities = {
+  guidance: { adjustable: false, supports_negative_prompt: false, fixed_scale: 1 },
+  negative_prompt: { mode: "hidden", required: false },
+  supports_lora: false,
+  supports_controlnet: false,
+  supports_identity: false,
+  supports_sequence: false,
+  supports_extend: false,
+  supports_audio: false,
+  source_video: { mode: "hidden", required: false },
+  mask: { mode: "hidden", required: false },
+  keyframes: { mode: "hidden", required: false },
+  audio: { mode: "hidden", required: false },
+  lora: { mode: "hidden", max_count: 0 },
+  controlnet: { mode: "hidden", max_count: 0 },
+  output: { default_format: "mp4", formats: ["mp4"], audio_requires_mp4: false },
+  wan_recipe: {
+    mode: "hidden",
+    supports_distill_strength: false,
+    supports_first_last_frame: false,
+  },
+  schedulers: [],
+};
+
+const DISTILLED_NOTE =
+  "Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with Auto or a guided pipeline to adjust it.";
+const H3_GUIDANCE_NOTE =
+  "MiniMax H3 does not use classifier-free guidance; guidance is fixed at 0.";
+const H3_TURBO_STEPS_NOTE =
+  "Fixed by the 8-step Turbo tier: 9 terminal-inclusive sampler grid points (8 denoise intervals).";
+
+/** A minimal advertised v1 profile whose two numeric controls carry exactly
+ * the mode and note under test. Defaults mirror the controls because the
+ * client validator cross-checks them. */
+function noteModel(
+  name: string,
+  family: string,
+  steps: { default: number; [key: string]: unknown },
+  guidance: { default: number; [key: string]: unknown },
+  extraRecipes: Record<string, unknown>[] = [],
+): ModelEntry {
+  return {
+    name,
+    family,
+    downloaded: true,
+    generation_profile: {
+      schema_version: 1,
+      profile_id: `${family}.${name}`,
+      profile_hash: "hash",
+      default_recipe_id: "default",
+      recipes: [
+        {
+          id: "default",
+          label: "Default",
+          request_selector: {},
+          defaults: {
+            width: 1024,
+            height: 576,
+            steps: steps.default,
+            guidance: guidance.default,
+          },
+          resolution: {
+            domain: "dynamic",
+            alignment: 32,
+            min_width: 64,
+            min_height: 64,
+            max_pixels: 1_032_192,
+            aspect_groups: [],
+          },
+          steps,
+          guidance,
+          capabilities: noteCapabilities,
+          provenance: [],
+        },
+        ...extraRecipes,
+      ],
+    },
+  } as unknown as ModelEntry;
+}

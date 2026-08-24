@@ -15,7 +15,7 @@ import MobileSeedPicker from "./MobileSeedPicker.vue";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
-import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
+import { controlNote, effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import type { CanvasIntent } from "@studio/lib/outputShape";
 
 const props = withDefaults(
@@ -74,6 +74,11 @@ const guidanceCaps = computed(() =>
 const recipe = computed(() => effectiveGenerationRecipe(props.model, props.form.pipeline));
 const stepsControl = computed(() => recipe.value?.steps);
 const guidanceControl = computed(() => recipe.value?.guidance);
+/* A fixed control explains itself with the host's own sentence, or with
+ * nothing at all — the phone never composes copy for a value the profile
+ * pinned, and an older host simply sends no note. */
+const stepsNote = computed(() => controlNote(stepsControl.value));
+const guidanceNote = computed(() => controlNote(guidanceControl.value));
 const fpsControl = computed(() => recipe.value?.temporal?.fps);
 const draft = useSequenceDraftStore();
 const sourceDimensions = computed(() => {
@@ -174,13 +179,11 @@ const sourceDimensions = computed(() => {
         "
     /></label>
   </div>
-  <p
-    v-if="!guidanceCaps.guidanceAdjustable"
-    class="mobile-generate-hint"
-    data-test="mobile-fixed-guidance-hint"
-  >
-    Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with Auto or a guided pipeline to
-    adjust it.
+  <p v-if="stepsNote" class="mobile-generate-hint" data-test="mobile-fixed-steps-hint">
+    {{ stepsNote }}
+  </p>
+  <p v-if="guidanceNote" class="mobile-generate-hint" data-test="mobile-fixed-guidance-hint">
+    {{ guidanceNote }}
   </p>
   <p
     v-if="stepsError || guidanceError"

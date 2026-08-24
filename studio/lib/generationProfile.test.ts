@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   advertisedGenerationProfile,
   closestProfileAspect,
+  controlNote,
   effectiveGenerationRecipe,
   fixedRecipeControlOverrides,
   generationRecipeSelectionError,
@@ -355,5 +356,32 @@ describe("closestProfileAspect — custom sizes highlight the nearest shape", ()
     expect(
       closestProfileAspect(profileModel(), "one-stage", 0, 576),
     ).toBeNull();
+  });
+});
+
+describe("controlNote", () => {
+  it("returns the server's own sentence for a fixed control", () => {
+    expect(
+      controlNote({
+        mode: "fixed",
+        note: "MiniMax H3 does not use classifier-free guidance; guidance is fixed at 0.",
+      }),
+    ).toBe(
+      "MiniMax H3 does not use classifier-free guidance; guidance is fixed at 0.",
+    );
+  });
+
+  it("invents nothing when the control is fixed but silent", () => {
+    // Exactly what an older server's response deserializes to.
+    expect(controlNote({ mode: "fixed" })).toBeNull();
+    expect(controlNote({ mode: "fixed", note: null })).toBeNull();
+    expect(controlNote({ mode: "fixed", note: "   " })).toBeNull();
+  });
+
+  it("stays silent for adjustable, hidden, and absent controls", () => {
+    expect(controlNote({ mode: "adjustable", note: "unreachable" })).toBeNull();
+    expect(controlNote({ mode: "hidden", note: "unreachable" })).toBeNull();
+    expect(controlNote(null)).toBeNull();
+    expect(controlNote(undefined)).toBeNull();
   });
 });

@@ -282,7 +282,7 @@ Provenance: MoldPolicy `mold-qualified compatibility profile`, qualified: `true`
 
 ### `ltx-video-0.9.6-distilled:bf16`
 
-Schema 1 · hash `6c676c8eb6e1a48293d78c37bbd02ad285689ad6b071f47381f7a5fa65f303e6` · default recipe `default`
+Schema 1 · hash `b8f641db607215bae12a800be43e7e9ba1468bf8d63bc1f9116fedcd7312c3e3` · default recipe `default`
 
 Models: `ltx-video-0.9.6-distilled:bf16`.
 
@@ -357,7 +357,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d05305762
 
 ### `ltx-video-0.9.8-13b-distilled:bf16`
 
-Schema 1 · hash `34a39dedcc17bcfbdf5c5d8ea26f9333d62947113668e9043b4e31a883c58fe6` · default recipe `default`
+Schema 1 · hash `469e4aaace703fe8311df355a55cbff9d09b9ca1c88407701f1cfcc4d9e50b85` · default recipe `default`
 
 Models: `ltx-video-0.9.8-13b-distilled:bf16`.
 
@@ -382,7 +382,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d05305762
 
 ### `ltx-video-0.9.8-2b-distilled:bf16`
 
-Schema 1 · hash `535a8d81f93cf5dcba2e8b1df1a27da6c624a2072beceb703a06cdf8c1ae67c5` · default recipe `default`
+Schema 1 · hash `5e09a6d58f002345d34b252142ce22b05d9c5945accbc1d3bb2aa7c950d068aa` · default recipe `default`
 
 Models: `ltx-video-0.9.8-2b-distilled:bf16`.
 
@@ -409,7 +409,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-Video) at `4b2d05305762
 
 ### `ltx-2-19b-dev:fp8`
 
-Schema 1 · hash `a6694306248cddf9f0cc546491317bc77485bd2aaec5865c0b21cc2f0299bae1` · default recipe `auto`
+Schema 1 · hash `963f985fa5920da30525bd221cf672f7fd33716aba04364bc6abc090604a630e` · default recipe `auto`
 
 Models: `ltx-2-19b-dev:fp8`.
 
@@ -652,7 +652,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 
 ### `ltx-2-19b-distilled:fp8`
 
-Schema 1 · hash `27da20ff7f9009319b653c2baddb8249d4775870a8b549e333b06a66ffbb96f1` · default recipe `auto`
+Schema 1 · hash `872e1151d3d9dc6d20c592eca46d96435c64352af705c12358d5242a34652215` · default recipe `auto`
 
 Models: `ltx-2-19b-distilled:fp8`.
 
@@ -895,7 +895,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 
 ### Profile `ltx2.ltx-2.3-22b-dev`
 
-Schema 1 · hash `666308717914f80890749360df277750c7a547ba84e0d76c766d1cf92317004b` · default recipe `auto`
+Schema 1 · hash `9d6bdb4b42697ff95c09c0acb8af13abec882b6ef24f6f19dc2caf962abece21` · default recipe `auto`
 
 Models: `ltx-2.3-22b-dev:bf16`, `ltx-2.3-22b-dev:fp8`.
 
@@ -1138,7 +1138,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 
 ### Profile `ltx2.ltx-2.3-22b-distilled`
 
-Schema 1 · hash `dc0eaf549b9fc3f453acb77663512e848ed0b41c664db2e8a39a60470956f230` · default recipe `auto`
+Schema 1 · hash `cdda32d4f1d4880beab48e6aeb841ec661c213b99c21c7c4f1fdd1724dc7cfe1` · default recipe `auto`
 
 Models: `ltx-2.3-22b-distilled:bf16`, `ltx-2.3-22b-distilled:fp8`.
 
@@ -1383,7 +1383,7 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 
 ### Profile `minimax-h3.minimax-h3-fl2va`
 
-Schema 1 · hash `5fb2a1d3842188b6ecbe422bf7b2e7a8c27434895d4ee3ef1a1c73c75a69f8fd` · default recipe `default`
+Schema 1 · hash `32625add077a99efd0615bd39a0c4be3111a991bdf7155f43952af5908ec82b1` · default recipe `default`
 
 Models: `minimax-h3-fl2va:comfy-pruned-int8`, `minimax-h3-fl2va:comfy-pruned-nvfp4`.
 
@@ -1407,7 +1407,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`
 
-Schema 1 · hash `6fe5777405776525b5c588ac414b23bf95de551bfb09eb5e08b4c7bc5c09f5a0` · default recipe `default`
+Schema 1 · hash `300adbb5b687157440f4e6a534c9f6149323962e67036758288f98cf11a03ed6` · default recipe `default`
 
 Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p`.
 
@@ -1431,7 +1431,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`
 
-Schema 1 · hash `11400669df06113da0c5e01139c701d0a914b26bba3d68cbd0f65c51c1f04cf8` · default recipe `default`
+Schema 1 · hash `df811a935b60a2fe62930854ff5fb690f2ff4301d08bdfc209e1270552d72eb9` · default recipe `default`
 
 Models: `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`.
 
@@ -1455,7 +1455,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### `minimax-h3-fl2va:official-bf16`
 
-Schema 1 · hash `f4cf59a95e3d30301960f0acd08393ddb8431a532510fef48b692ab711c3aa05` · default recipe `default`
+Schema 1 · hash `375a7b8d43951b155e0008ded0f2565c9fd8346f63ccda0d4ba415dc5efaaa90` · default recipe `default`
 
 Models: `minimax-h3-fl2va:official-bf16`.
 
@@ -1479,7 +1479,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### Profile `minimax-h3.minimax-h3-ref2va`
 
-Schema 1 · hash `f69b8f2fce0228d02c85f5d4bf9979f7beefa6cb421c2a37bba0b682e8269d5a` · default recipe `default`
+Schema 1 · hash `6896a1a4dd25dc57b9ab01a6ceabe0b2d23337319f7388facd2f3e4c8327ee98` · default recipe `default`
 
 Models: `minimax-h3-ref2va:comfy-pruned-int8`, `minimax-h3-ref2va:comfy-pruned-nvfp4`.
 
@@ -1503,7 +1503,7 @@ Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cd
 
 ### `minimax-h3-ref2va:official-bf16`
 
-Schema 1 · hash `5fdc7173e1186bed5cb11809aa474bfe924047c21d9647cb00c010507657dfbe` · default recipe `default`
+Schema 1 · hash `2db91a6dc4de7238f59c5ce035f6bb053ad4c4d5f9012016d9a866fde959043a` · default recipe `default`
 
 Models: `minimax-h3-ref2va:official-bf16`.
 

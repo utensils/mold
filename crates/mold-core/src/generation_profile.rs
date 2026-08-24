@@ -140,6 +140,13 @@ pub struct ResolutionProfile {
     pub aspect_groups: Vec<AspectGroup>,
 }
 
+/// The one human sentence explaining why a control cannot be changed.
+///
+/// Authored at the single place the fixedness is decided, so no client ever
+/// composes copy for a value it did not choose. Absent for every adjustable
+/// control and for a fixed control with nothing worth saying — a client that
+/// finds no note renders nothing rather than inventing a sentence, which is
+/// exactly what an older server's response deserializes to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
 pub struct IntegerControl {
     pub default: u32,
@@ -149,6 +156,9 @@ pub struct IntegerControl {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recommended: Vec<u32>,
     pub mode: ControlMode,
+    /// See [`IntegerControl`]'s note on fixed-control copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
@@ -158,6 +168,9 @@ pub struct FloatControl {
     pub max: f64,
     pub step: f64,
     pub mode: ControlMode,
+    /// See [`IntegerControl`]'s note on fixed-control copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema, ts_rs::TS)]
@@ -987,6 +1000,44 @@ pub fn resolve_generation_profile(input: GenerationProfileInput<'_>) -> Generati
     set
 }
 
+/// The sentence explaining a fixed guidance control.
+///
+/// Authored beside the decision that fixes the scale, so the wording can never
+/// describe a value the recipe did not pin. H3 does not run a guided branch at
+/// all, so its copy names that rather than a distilled CFG the user could
+/// escape by picking a Dev checkpoint.
+fn fixed_guidance_note(
+    family: &str,
+    guidance_caps: GuidanceCapabilities,
+    scale: f64,
+) -> Option<String> {
+    if guidance_caps.adjustable {
+        return None;
+    }
+    if family == "minimax-h3" {
+        return Some(
+            "MiniMax H3 does not use classifier-free guidance; guidance is fixed at 0.".to_string(),
+        );
+    }
+    Some(format!(
+        "Distilled recipe fixes CFG at {scale:.1}. Choose a Dev checkpoint with Auto or a guided pipeline to adjust it."
+    ))
+}
+
+/// The sentence explaining a Turbo tier's fixed step count.
+///
+/// A reviewed Turbo tier's `steps` is terminal-inclusive — the published
+/// N-step schedule has N denoise intervals and therefore N+1 sampler grid
+/// points ([`crate::minimax_h3::TurboManifestTier::steps`]) — so the field
+/// shows 9 for the 8-step tier. Saying so is the whole point of the note.
+fn fixed_turbo_steps_note(tier: &crate::minimax_h3::TurboManifestTier) -> String {
+    let intervals = tier.steps.saturating_sub(1);
+    let points = tier.steps;
+    format!(
+        "Fixed by the {intervals}-step Turbo tier: {points} terminal-inclusive sampler grid points ({intervals} denoise intervals)."
+    )
+}
+
 fn recipe(
     input: &GenerationProfileInput<'_>,
     id: &str,
@@ -1002,8 +1053,8 @@ fn recipe(
     // A Turbo tier's step count is a property of the distilled adapter, not
     // a qualification pin: its schedule has exactly that many grid points, so
     // it stays a fixed control. The base compact tag takes a range.
-    let h3_compact_turbo_steps =
-        crate::minimax_h3::turbo_tier_for_model(input.model).map(|tier| tier.steps);
+    let h3_compact_turbo = crate::minimax_h3::turbo_tier_for_model(input.model);
+    let h3_compact_turbo_steps = h3_compact_turbo.map(|tier| tier.steps);
     let h3_compact_steps = h3_compact_turbo_steps.unwrap_or(crate::minimax_h3::COMFY_DEFAULT_STEPS);
     let audio_only = pipeline == Some(Ltx2PipelineMode::T2a);
     let source_driven = family == "qwen-image-edit"
@@ -1147,6 +1198,7 @@ fn recipe(
                 crate::minimax_h3::MAX_FRAMES,
             ],
             mode: ControlMode::Adjustable,
+            note: None,
         };
     }
     let flux2_dev = family == "flux2"
@@ -1269,6 +1321,7 @@ fn recipe(
             } else {
                 ControlMode::Adjustable
             },
+            note: h3_compact_turbo.map(fixed_turbo_steps_note),
         },
         guidance: FloatControl {
             default: effective_guidance,
@@ -1288,6 +1341,7 @@ fn recipe(
             } else {
                 ControlMode::Fixed
             },
+            note: fixed_guidance_note(family, guidance_caps, effective_guidance),
         },
         temporal,
         capabilities: GenerationCapabilitiesProfile {
@@ -1420,6 +1474,7 @@ fn temporal_profile(input: &GenerationProfileInput<'_>, family: &str) -> Option<
             step,
             recommended: vec![default],
             mode: ControlMode::Adjustable,
+            note: None,
         },
         frame_offset: offset,
         fps: if let Some(fixed) = validation::fixed_fps_for_family(family) {
@@ -2458,5 +2513,139 @@ mod tests {
         assert!(validate_request_against_generation_profile(&h3, &request)
             .unwrap_err()
             .contains("guidance is fixed"));
+    }
+
+    /// A fixed control's explanation is authored server-side, at the one
+    /// place the fixedness is decided. Clients render it verbatim; the old
+    /// hard-coded FLUX/LTX sentence claimed "Distilled recipe fixes CFG at
+    /// 1.0" for H3, whose guidance is pinned at 0 by a pipeline that has no
+    /// classifier-free branch and no Dev checkpoint to switch to.
+    #[test]
+    fn h3_guidance_carries_its_own_fixed_control_note() {
+        for model in [
+            crate::minimax_h3::FL2VA_COMFY,
+            crate::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
+            crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
+        ] {
+            let profile = resolve_generation_profile(input(model, "minimax-h3"));
+            let recipe = profile.default_recipe().unwrap();
+            assert_eq!(recipe.guidance.mode, ControlMode::Fixed);
+            assert_eq!(
+                recipe.guidance.note.as_deref(),
+                Some("MiniMax H3 does not use classifier-free guidance; guidance is fixed at 0."),
+                "{model}"
+            );
+        }
+    }
+
+    /// The base compact tag takes a step RANGE, so there is nothing to
+    /// explain and no note is authored — a client renders nothing rather
+    /// than inventing copy.
+    #[test]
+    fn h3_base_steps_are_adjustable_and_carry_no_note() {
+        let profile =
+            resolve_generation_profile(input(crate::minimax_h3::FL2VA_COMFY, "minimax-h3"));
+        let steps = &profile.default_recipe().unwrap().steps;
+        assert_eq!(steps.mode, ControlMode::Adjustable);
+        assert_eq!(steps.min, crate::minimax_h3::COMPACT_MIN_STEPS);
+        assert_eq!(steps.max, crate::minimax_h3::COMPACT_MAX_STEPS);
+        assert_eq!(steps.note, None);
+    }
+
+    /// A Turbo tier's step count is terminal-inclusive: the published N-step
+    /// schedule has N denoise intervals and N+1 sampler grid points, which is
+    /// why the field reads 9 for the 8-step tier.
+    #[test]
+    fn h3_turbo_steps_explain_the_terminal_inclusive_count() {
+        let eight = resolve_generation_profile(input(
+            crate::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
+            "minimax-h3",
+        ));
+        let steps = &eight.default_recipe().unwrap().steps;
+        assert_eq!(steps.mode, ControlMode::Fixed);
+        assert_eq!(steps.default, 9);
+        assert_eq!(
+            steps.note.as_deref(),
+            Some(
+                "Fixed by the 8-step Turbo tier: 9 terminal-inclusive sampler grid points \
+                 (8 denoise intervals)."
+            )
+        );
+
+        let four = resolve_generation_profile(input(
+            crate::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
+            "minimax-h3",
+        ));
+        let steps = &four.default_recipe().unwrap().steps;
+        assert_eq!(steps.mode, ControlMode::Fixed);
+        assert_eq!(steps.default, 5);
+        assert_eq!(
+            steps.note.as_deref(),
+            Some(
+                "Fixed by the 4-step Turbo tier: 5 terminal-inclusive sampler grid points \
+                 (4 denoise intervals)."
+            )
+        );
+    }
+
+    /// The distilled FLUX/LTX case keeps the sentence clients used to
+    /// hard-code, now generated from the value the recipe actually pinned.
+    #[test]
+    fn a_distilled_recipe_keeps_the_existing_fixed_cfg_sentence() {
+        const DISTILLED: &str = "Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with \
+                                 Auto or a guided pipeline to adjust it.";
+        let ltx = resolve_generation_profile(input("ltx-2.3-22b-distilled:fp8", "ltx2"));
+        let recipe = ltx.default_recipe().unwrap();
+        assert_eq!(recipe.guidance.mode, ControlMode::Fixed);
+        assert_eq!(recipe.guidance.note.as_deref(), Some(DISTILLED));
+
+        let ltx_video = resolve_generation_profile(input("ltx-video-distilled", "ltx-video"));
+        assert_eq!(
+            ltx_video.default_recipe().unwrap().guidance.note.as_deref(),
+            Some(DISTILLED)
+        );
+    }
+
+    /// An adjustable control has nothing to explain.
+    #[test]
+    fn an_adjustable_control_carries_no_note() {
+        let flux = resolve_generation_profile(input("flux-dev:q8", "flux"));
+        let recipe = flux.default_recipe().unwrap();
+        assert_eq!(recipe.guidance.mode, ControlMode::Adjustable);
+        assert_eq!(recipe.guidance.note, None);
+        assert_eq!(recipe.steps.note, None);
+        assert_eq!(
+            recipe.temporal.as_ref().and_then(|t| t.frames.note.clone()),
+            None
+        );
+    }
+
+    /// The field is additive: an older server never sends it, and that
+    /// response must deserialize to `None` rather than failing.
+    #[test]
+    fn an_absent_note_deserializes_to_none() {
+        let integer: IntegerControl = serde_json::from_str(
+            r#"{"default":20,"min":1,"max":100,"step":1,"mode":"adjustable"}"#,
+        )
+        .unwrap();
+        assert_eq!(integer.note, None);
+        let float: FloatControl = serde_json::from_str(
+            r#"{"default":3.5,"min":0.0,"max":100.0,"step":0.1,"mode":"adjustable"}"#,
+        )
+        .unwrap();
+        assert_eq!(float.note, None);
+
+        // An absent note is never serialized, so a recipe carrying none is
+        // byte-identical to a pre-`note` build's.
+        let encoded = serde_json::to_string(&FloatControl {
+            default: 0.0,
+            min: 0.0,
+            max: 0.0,
+            step: 0.1,
+            mode: ControlMode::Fixed,
+            note: None,
+        })
+        .unwrap();
+        assert!(!encoded.contains("note"), "{encoded}");
     }
 }
