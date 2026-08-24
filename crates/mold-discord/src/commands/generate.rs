@@ -2362,12 +2362,12 @@ mod tests {
         }
     }
 
-    /// An attachment never bends a compact request off the reviewed envelope,
-    /// but it does CHOOSE within it: the fit lands on whichever reviewed
-    /// canvas is nearest the attachment's aspect ratio, so a square or
-    /// portrait attachment renders square instead of being letterboxed into
-    /// the 7:4 default. The free-form aspect-derived canvas remains
-    /// official-BF16 behaviour (the sibling test above).
+    /// An attachment never bends a compact request off the compact canvas
+    /// rule, but it does choose within it: the fit renders the attachment's
+    /// own aspect as large as the compact area ceiling allows, so a square or
+    /// portrait attachment is never letterboxed into the 7:4 default. The
+    /// official short-edge/area resolver remains BF16-reference behaviour
+    /// (the sibling test above).
     #[test]
     fn h3_attachment_dims_keep_the_compact_envelope() {
         for model in [
@@ -2376,10 +2376,10 @@ mod tests {
             mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
         ] {
             for (source_width, source_height, expected) in [
-                (1024, 1024, (768, 768)),
-                (1920, 1080, (1344, 768)),
-                (1080, 1920, (768, 768)),
-                (2048, 512, (1344, 768)),
+                (1024, 1024, (992, 992)),
+                (1920, 1080, (1312, 736)),
+                (1080, 1920, (736, 1312)),
+                (2048, 512, (1920, 480)),
             ] {
                 let fitted = fit_attachment_dims(
                     source_width,
@@ -2389,11 +2389,11 @@ mod tests {
                     model,
                 );
                 assert_eq!(fitted, expected, "{model} {source_width}x{source_height}");
-                // Whatever it picks is a canvas a campaign qualified — the
+                // Whatever it picks is a canvas admission accepts — the
                 // attachment can never widen the envelope.
                 assert!(
-                    mold_core::minimax_h3::is_reviewed_compact_canvas(fitted.0, fitted.1),
-                    "{model} {source_width}x{source_height} left the reviewed set"
+                    mold_core::minimax_h3::is_admitted_compact_canvas(fitted.0, fitted.1),
+                    "{model} {source_width}x{source_height} left the compact envelope"
                 );
             }
         }

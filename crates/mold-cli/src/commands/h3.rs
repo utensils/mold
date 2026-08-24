@@ -784,7 +784,8 @@ mod tests {
         .unwrap();
         assert_eq!(prepared.frames, Some(124));
         assert_eq!(prepared.fps, Some(24));
-        assert_eq!(prepared.width.zip(prepared.height), Some((1344, 768)));
+        // 16:9 renders as 16:9 now rather than being flattened into 7:4.
+        assert_eq!(prepared.width.zip(prepared.height), Some((1312, 736)));
         let keyframe = &prepared.keyframes.unwrap()[0];
         assert_eq!(keyframe.frame, 123);
         assert_eq!(keyframe.name.as_deref(), Some("closing.png"));
@@ -792,9 +793,9 @@ mod tests {
 
     /// The authoring path promotes inferred dimensions to explicit values
     /// before `effective_dimensions` runs, so it must apply the same layout
-    /// policy: a compact tag submits one of the REVIEWED canvases — the one
-    /// nearest the source's aspect — and only the official BF16 reference
-    /// keeps the free-form aspect-derived canvas.
+    /// policy: a compact tag renders the source's own aspect at the largest
+    /// size its canvas rule admits, and only the official BF16 reference
+    /// keeps the short-edge/area resolver.
     #[test]
     fn boundary_image_dimensions_keep_the_compact_envelope() {
         let dir = tempfile::tempdir().unwrap();
@@ -830,11 +831,11 @@ mod tests {
                 None,
             )
             .unwrap();
-            // A square source now lands on the square reviewed canvas
-            // instead of being letterboxed into the 7:4 default.
+            // A square source stays square, at the largest square the
+            // compact area ceiling admits.
             assert_eq!(
                 prepared.width.zip(prepared.height),
-                Some((768, 768)),
+                Some((992, 992)),
                 "{model}"
             );
         }

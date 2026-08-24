@@ -346,14 +346,15 @@ impl H3PrivateRuntimeEnvelopeRecord {
                     && self.max_condition_visual_rows > 0
             }
         };
-        // The canvas is a SET membership, not an equality: `mold_core`'s
-        // `REVIEWED_COMPACT_CANVASES` is the single authority for which
-        // canvases a hardware campaign qualified, and the generation
-        // profile's buckets, the private bridge's advertised
-        // recommendations, and this gate all read that same slice. Every
-        // other axis stays pinned by equality.
-        if !contract::is_reviewed_compact_canvas(self.width, self.height)
-            || self.frames != contract::REVIEWED_COMPACT_FRAMES
+        // The canvas and the clip length are RULES, not equalities:
+        // `mold_core`'s `is_admitted_compact_canvas` and `valid_frame_count`
+        // are the single authorities, and the generation profile's range, the
+        // private bridge's advertised bounds, and this gate all read them.
+        // The envelope is minted for the request's own shape, so the row
+        // ceilings below travel with it; the memory bounds it carries are
+        // scaled from the campaign's measurement by that shape's packed rows.
+        if !contract::is_admitted_compact_canvas(self.width, self.height)
+            || !contract::valid_frame_count(self.frames)
             || self.fps != contract::FIXED_FPS
             || self.batch_size != 1
             // The step axis is owned by `validate_for_task_with_adapter`,
