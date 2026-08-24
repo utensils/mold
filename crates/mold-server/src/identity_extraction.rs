@@ -57,6 +57,77 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use mold_core::identity::FrozenIdentityEmbedding;
 use mold_core::pulid_assets::PulidPaths;
 use mold_core::GenerateRequest;
+use zeroize::{Zeroize, Zeroizing};
+
+/// The request-owned photographs copied for one extraction attempt.
+///
+/// This owner is deliberately not cloneable. The request remains the wire
+/// authority, but the extractor needs owned bytes that survive for the whole
+/// synchronous call. Keeping those copies behind one RAII boundary guarantees
+/// they are wiped on every return path, including an extractor panic.
+struct OwnedIdentityPhotographs {
+    images: Zeroizing<Vec<Vec<u8>>>,
+    #[cfg(test)]
+    drop_probe: Option<std::sync::Arc<PhotographDropProbe>>,
+}
+
+impl OwnedIdentityPhotographs {
+    fn from_request(request: &GenerateRequest) -> Self {
+        Self {
+            images: Zeroizing::new(
+                mold_core::identity::identity_images(request)
+                    .into_iter()
+                    .map(<[u8]>::to_vec)
+                    .collect(),
+            ),
+            #[cfg(test)]
+            drop_probe: None,
+        }
+    }
+
+    fn as_slice(&self) -> &[Vec<u8>] {
+        self.images.as_slice()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.images.is_empty()
+    }
+
+    #[cfg(test)]
+    fn with_drop_probe(
+        images: Vec<Vec<u8>>,
+        drop_probe: std::sync::Arc<PhotographDropProbe>,
+    ) -> Self {
+        Self {
+            images: Zeroizing::new(images),
+            drop_probe: Some(drop_probe),
+        }
+    }
+}
+
+impl Drop for OwnedIdentityPhotographs {
+    fn drop(&mut self) {
+        // Wipe before the test hook observes the allocation. `Zeroizing` also
+        // wipes during field drop, so this explicit pass is intentionally
+        // redundant in production and makes the destructor probe exact.
+        self.images.zeroize();
+        #[cfg(test)]
+        if let Some(probe) = &self.drop_probe {
+            probe.dropped.store(true, Ordering::SeqCst);
+            probe.zeroized.store(
+                self.images.iter().flatten().all(|byte| *byte == 0),
+                Ordering::SeqCst,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct PhotographDropProbe {
+    dropped: std::sync::atomic::AtomicBool,
+    zeroized: std::sync::atomic::AtomicBool,
+}
 
 /// Every identity extraction this process has performed.
 ///
@@ -235,10 +306,7 @@ pub fn resolve_identity_for_lease(
     // Either wire shape, in request order. The photographs are processed
     // serially, and each one hits or misses the per-photograph cache
     // independently.
-    let images: Vec<Vec<u8>> = mold_core::identity::identity_images(request)
-        .into_iter()
-        .map(<[u8]>::to_vec)
-        .collect();
+    let images = OwnedIdentityPhotographs::from_request(request);
     if images.is_empty() {
         return Err(IdentityFailure::user_input(
             "id_image (or id_images) is required when id_weight, id_start_step, id_image_name, \
@@ -267,11 +335,11 @@ pub fn resolve_identity_for_lease(
 
     #[cfg(test)]
     let resolved = match test_stub() {
-        Some(stub) => stub(&paths, &images, want_uncond)?,
-        None => extract_on_device(paths, images, want_uncond, backend, ordinal)?,
+        Some(stub) => stub(&paths, images.as_slice(), want_uncond)?,
+        None => extract_on_device(paths, images.as_slice(), want_uncond, backend, ordinal)?,
     };
     #[cfg(not(test))]
-    let resolved = extract_on_device(paths, images, want_uncond, backend, ordinal)?;
+    let resolved = extract_on_device(paths, images.as_slice(), want_uncond, backend, ordinal)?;
 
     // Counted on what was COMPUTED, not on what was asked for, and through the
     // one arm both paths take. Four siblings of one parent resolve four times
@@ -294,7 +362,7 @@ pub fn resolve_identity_for_lease(
 #[cfg(feature = "pulid")]
 fn extract_on_device(
     paths: PulidPaths,
-    images: Vec<Vec<u8>>,
+    images: &[Vec<u8>],
     want_uncond: bool,
     backend: mold_core::GpuBackend,
     ordinal: usize,
@@ -333,7 +401,7 @@ fn extract_on_device(
 #[cfg(not(feature = "pulid"))]
 fn extract_on_device(
     _paths: PulidPaths,
-    _images: Vec<Vec<u8>>,
+    _images: &[Vec<u8>],
     _want_uncond: bool,
     _backend: mold_core::GpuBackend,
     _ordinal: usize,
@@ -436,6 +504,54 @@ pub(crate) fn stub_embedding_for(images: &[Vec<u8>], want_uncond: bool) -> Froze
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_photographs_zeroize_after(operation: impl FnOnce(&[Vec<u8>])) {
+        let probe = std::sync::Arc::new(PhotographDropProbe::default());
+        let photographs = OwnedIdentityPhotographs::with_drop_probe(
+            vec![
+                b"first-private-photo".to_vec(),
+                b"second-private-photo".to_vec(),
+            ],
+            std::sync::Arc::clone(&probe),
+        );
+        operation(photographs.as_slice());
+        drop(photographs);
+        assert!(probe.dropped.load(Ordering::SeqCst));
+        assert!(probe.zeroized.load(Ordering::SeqCst));
+    }
+
+    fn error_with_owned_photographs(
+        probe: std::sync::Arc<PhotographDropProbe>,
+    ) -> Result<(), IdentityFailure> {
+        let photographs =
+            OwnedIdentityPhotographs::with_drop_probe(vec![b"error-private-photo".to_vec()], probe);
+        assert_eq!(photographs.as_slice().len(), 1);
+        Err(IdentityFailure::user_input("deterministic error probe"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn owned_photographs_zeroize_on_success_error_and_panic() {
+        assert_photographs_zeroize_after(|images| assert_eq!(images.len(), 2));
+
+        let error_probe = std::sync::Arc::new(PhotographDropProbe::default());
+        assert!(error_with_owned_photographs(std::sync::Arc::clone(&error_probe)).is_err());
+        assert!(error_probe.dropped.load(Ordering::SeqCst));
+        assert!(error_probe.zeroized.load(Ordering::SeqCst));
+
+        let probe = std::sync::Arc::new(PhotographDropProbe::default());
+        let photographs = OwnedIdentityPhotographs::with_drop_probe(
+            vec![b"panic-private-photo".to_vec()],
+            std::sync::Arc::clone(&probe),
+        );
+        let panicked = std::panic::catch_unwind(move || {
+            let _owner = photographs;
+            panic!("deterministic destructor probe");
+        });
+        assert!(panicked.is_err());
+        assert!(probe.dropped.load(Ordering::SeqCst));
+        assert!(probe.zeroized.load(Ordering::SeqCst));
+    }
 
     fn request(id_weight: Option<f64>) -> GenerateRequest {
         let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
