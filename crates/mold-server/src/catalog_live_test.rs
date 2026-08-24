@@ -789,6 +789,39 @@ async fn live_search_returns_normalized_civitai_rows() {
     );
 }
 
+#[tokio::test]
+async fn live_search_accepts_null_civitai_aggregate_counts() {
+    let server = MockServer::start().await;
+    let fixture = FLUX_LORA_FIXTURE
+        .replace("\"downloadCount\": 4242", "\"downloadCount\": null")
+        .replace("\"favoriteCount\": 1", "\"favoriteCount\": null")
+        .replace("\"downloadCount\": 1", "\"downloadCount\": null");
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(fixture))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = AppState::for_tests().with_civitai_base(server.uri());
+    {
+        let mut cfg = state.config.write().await;
+        cfg.models_dir = tmp.path().to_string_lossy().into_owned();
+    }
+    let router = create_router(state);
+
+    let (status, body) = get(
+        router,
+        "/api/catalog/search?family=flux&kind=lora&source=civitai",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("json response");
+    assert_eq!(parsed["entries"][0]["download_count"], 0);
+    assert_eq!(parsed["entries"][0]["likes"], 0);
+}
+
 /// Two Flux LoRAs so page 2 with page_size 1 has a distinct row to
 /// return. Served for every request regardless of paging params —
 /// exactly how the real Civitai API behaves (`page=` is ignored;

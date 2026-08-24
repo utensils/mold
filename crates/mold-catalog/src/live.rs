@@ -1889,6 +1889,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn civitai_null_aggregate_counts_do_not_poison_the_page() {
+        let server = MockServer::start().await;
+        let mut item = civitai_item(8001, false);
+        item["stats"]["downloadCount"] = serde_json::Value::Null;
+        item["stats"]["favoriteCount"] = serde_json::Value::Null;
+        item["modelVersions"][0]["files"][0]["downloadCount"] = serde_json::Value::Null;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"items": [item], "metadata": {}})),
+            )
+            .mount(&server)
+            .await;
+
+        let result = civitai_search_paged(&server.uri(), &test_cache(), &civitai_opts(1, 20))
+            .await
+            .expect("nullable counters are non-authoritative metadata");
+
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].download_count, 0);
+        assert_eq!(result.entries[0].likes, 0);
+    }
+
+    #[tokio::test]
     async fn civitai_pagination_advances_with_the_stored_cursor() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
