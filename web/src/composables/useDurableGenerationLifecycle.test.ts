@@ -590,6 +590,74 @@ describe("web durable generation lifecycle", () => {
     await vi.waitFor(() => expect(completed).toHaveBeenCalledTimes(1));
   });
 
+  it("scopes child commits and reserves host-wide reads for bulk commits", async () => {
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(batch(body.client_batch_id)),
+    );
+    const stream = useGenerateStream();
+    const firstId = stream.submit(request("first"), { kind: "single" }, route);
+    const secondId = stream.submit(
+      request("second"),
+      { kind: "single" },
+      route,
+    );
+    await vi.waitFor(() =>
+      expect(
+        stream.jobs.value.filter(
+          (job) => (job.id === firstId || job.id === secondId) && job.serverId,
+        ),
+      ).toHaveLength(2),
+    );
+    const first = stream.jobs.value.find((job) => job.id === firstId)!;
+    const second = stream.jobs.value.find((job) => job.id === secondId)!;
+    reconcileGenerationBatches.mockImplementation(
+      (_target: unknown, body: { batch_ids?: string[] }) => {
+        const requested = new Set(body.batch_ids ?? []);
+        return Promise.resolve(
+          statusResponse(
+            [first, second]
+              .filter((job) => requested.has(job.durableBatch!.serverBatchId!))
+              .map((job) =>
+                batch(job.durableBatch!.clientBatchId, ["running"]),
+              ),
+          ),
+        );
+      },
+    );
+    reconcileGenerationBatches.mockClear();
+
+    __testing__.handleDurableEvent(
+      route.hostId,
+      "event",
+      JSON.stringify({ type: "job_state_committed", id: first.serverId }),
+    );
+    await vi.waitFor(() =>
+      expect(reconcileGenerationBatches).toHaveBeenCalledTimes(1),
+    );
+    expect(reconcileGenerationBatches.mock.calls[0]![1].batch_ids).toEqual([
+      first.durableBatch!.serverBatchId,
+    ]);
+
+    reconcileGenerationBatches.mockClear();
+    __testing__.handleDurableEvent(
+      route.hostId,
+      "event",
+      JSON.stringify({ type: "generation_states_committed" }),
+    );
+    await vi.waitFor(() =>
+      expect(reconcileGenerationBatches).toHaveBeenCalledTimes(1),
+    );
+    expect(
+      new Set(reconcileGenerationBatches.mock.calls[0]![1].batch_ids),
+    ).toEqual(
+      new Set([
+        first.durableBatch!.serverBatchId,
+        second.durableBatch!.serverBatchId,
+      ]),
+    );
+  });
+
   it("fences a replacement server instance instead of adopting its work", async () => {
     admitGenerationBatch.mockImplementation(
       (_target: unknown, body: { client_batch_id: string }) =>

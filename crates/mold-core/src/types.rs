@@ -9243,6 +9243,10 @@ pub enum ServerEvent {
     JobStateCommitted {
         id: String,
     },
+    /// One transaction committed authoritative state for multiple durable
+    /// generation children. Clients must reconcile the host once; emitting a
+    /// child event per row would turn bulk cancellation into an event storm.
+    GenerationStatesCommitted,
     /// A new output landed in the gallery. `image` carries the full gallery
     /// row when the metadata DB recorded it (clients can insert without a
     /// refetch); `None` when the DB is disabled — refetch `/api/gallery`.
@@ -9360,6 +9364,11 @@ mod server_event_tests {
         assert_eq!(
             serde_json::to_string(&committed).unwrap(),
             r#"{"type":"job_state_committed","id":"j1"}"#
+        );
+
+        assert_eq!(
+            serde_json::to_string(&ServerEvent::GenerationStatesCommitted).unwrap(),
+            r#"{"type":"generation_states_committed"}"#
         );
     }
 

@@ -11,18 +11,22 @@ function harness() {
       }
     | undefined;
   const reasons: string[] = [];
+  const scopes: Array<string[] | undefined> = [];
   const gaps: Array<{ instanceId: string; missedEvents?: number }> = [];
   const watch = watchMobileGenerationHost({
     target: { baseUrl: "https://host", apiKey: "native-secret" },
     expectedInstanceId: "instance-1",
-    onReconcile: (reason) => reasons.push(reason),
+    onReconcile: (reason, jobIds) => {
+      reasons.push(reason);
+      scopes.push(jobIds ? [...jobIds].sort() : undefined);
+    },
     onGap: (gap) => gaps.push(gap),
     stream: vi.fn(async (_path, options) => {
       callbacks = options;
     }),
   });
   const flush = async () => await Promise.resolve();
-  return { watch, reasons, gaps, callbacks: () => callbacks!, flush };
+  return { watch, reasons, scopes, gaps, callbacks: () => callbacks!, flush };
 }
 
 describe("mobile durable generation host watch", () => {
@@ -37,6 +41,20 @@ describe("mobile durable generation host watch", () => {
     h.callbacks().onEvent("event", JSON.stringify({ type: "job_state_committed", id: "a" }));
     await h.flush();
     expect(h.reasons).toEqual(["open", "event"]);
+    expect(h.scopes).toEqual([undefined, ["a"]]);
+
+    h.callbacks().onEvent("event", JSON.stringify({ type: "gallery_added" }));
+    await h.flush();
+    expect(h.reasons).toEqual(["open", "event"]);
+
+    h.callbacks().onEvent("event", JSON.stringify({ type: "job_state_committed", id: "b" }));
+    h.callbacks().onEvent("event", JSON.stringify({ type: "job_state_committed", id: "c" }));
+    await h.flush();
+    expect(h.scopes.at(-1)).toEqual(["b", "c"]);
+
+    h.callbacks().onEvent("event", JSON.stringify({ type: "generation_states_committed" }));
+    await h.flush();
+    expect(h.scopes.at(-1)).toBeUndefined();
   });
 
   it("reconciles event gaps, malformed frames, close, and wake", async () => {

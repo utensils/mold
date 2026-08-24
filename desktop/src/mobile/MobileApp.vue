@@ -1052,7 +1052,8 @@ const durableGenerationRequests = new Map<string, GenerateRequest>();
 const durableGenerationWatches = new Map<string, MobileGenerationHostWatch>();
 const durableGenerationWatchRoutes = new Map<string, string>();
 const durableGenerationReconciles = new Map<string, Promise<void>>();
-const durableGenerationReconcileAgain = new Set<string>();
+/** Missing = no follow-up; null = host-wide; Set = selected client batches. */
+const durableGenerationReconcilePending = new Map<string, Set<string> | null>();
 const durableGenerationCancelAttempts = new Map<string, Promise<boolean>>();
 let nextDurableGenerationClientId = -1;
 let selectedDurableGenerationClientId: number | null = null;
@@ -2932,58 +2933,90 @@ function ensureDurableGenerationHostWatches(): void {
         target: mobileHostTarget(host),
         expectedInstanceId: instanceId,
         onGap: (authority) => markDurableHostGap(hostId, authority.instanceId),
-        onReconcile: () => void reconcileMobileDurableHost(hostId),
+        onReconcile: (_reason, jobIds) => {
+          let scope: Set<string> | undefined;
+          if (jobIds) {
+            scope = new Set<string>();
+            for (const jobId of jobIds) {
+              const owner = durableGenerationRecoveries.value.find(
+                (recovery) =>
+                  recovery.tracker.hostId === hostId &&
+                  mobileDurableJobs(recovery).some((job) => job.authority.jobId === jobId),
+              );
+              if (!owner) {
+                scope = undefined;
+                break;
+              }
+              scope.add(owner.tracker.clientBatchId);
+            }
+          }
+          void reconcileMobileDurableHost(hostId, scope);
+        },
       }),
     );
   }
 }
 
-async function reconcileMobileDurableHost(hostId: string): Promise<void> {
+async function reconcileMobileDurableHost(
+  hostId: string,
+  clientBatchIds?: ReadonlySet<string>,
+): Promise<void> {
   const inFlight = durableGenerationReconciles.get(hostId);
   if (inFlight) {
-    durableGenerationReconcileAgain.add(hostId);
+    const pending = durableGenerationReconcilePending.get(hostId);
+    if (clientBatchIds === undefined) {
+      durableGenerationReconcilePending.set(hostId, null);
+    } else if (pending !== null) {
+      const next = pending ?? new Set<string>();
+      for (const clientBatchId of clientBatchIds) next.add(clientBatchId);
+      durableGenerationReconcilePending.set(hostId, next);
+    }
     return inFlight;
   }
   const task = (async () => {
-    do {
-      durableGenerationReconcileAgain.delete(hostId);
-      const records = durableGenerationRecoveries.value.filter(
-        (recovery) =>
-          recovery.tracker.hostId === hostId && !mobileDurableRecoveryIsTerminal(recovery),
+    const records = durableGenerationRecoveries.value.filter(
+      (recovery) =>
+        recovery.tracker.hostId === hostId &&
+        !mobileDurableRecoveryIsTerminal(recovery) &&
+        (!clientBatchIds || clientBatchIds.has(recovery.tracker.clientBatchId)),
+    );
+    if (records.length === 0) return;
+    const host = resolveMobileDurableHost(records[0]!, connectedHosts.value);
+    if (!host) return;
+    const request = buildMobileDurableHostStatusRequest(records, hostId);
+    if (request.client_batch_ids.length === 0 && (request.batch_ids?.length ?? 0) === 0) return;
+    try {
+      const response = await reconcileGenerationBatches(mobileHostTarget(host), request);
+      const requestedClients = new Set(records.map((recovery) => recovery.tracker.clientBatchId));
+      const latestRequested = durableGenerationRecoveries.value.filter((recovery) =>
+        requestedClients.has(recovery.tracker.clientBatchId),
       );
-      if (records.length === 0) return;
-      const host = resolveMobileDurableHost(records[0]!, connectedHosts.value);
-      if (!host) return;
-      const request = buildMobileDurableHostStatusRequest(records, hostId);
-      if (request.client_batch_ids.length === 0 && (request.batch_ids?.length ?? 0) === 0) return;
-      try {
-        const response = await reconcileGenerationBatches(mobileHostTarget(host), request);
-        const requestedClients = new Set(records.map((recovery) => recovery.tracker.clientBatchId));
-        const latestRequested = durableGenerationRecoveries.value.filter((recovery) =>
-          requestedClients.has(recovery.tracker.clientBatchId),
-        );
-        const merged = new Map(
-          mergeMobileDurableHostStatus(latestRequested, hostId, response).map((recovery) => [
-            recovery.tracker.clientBatchId,
-            recovery,
-          ]),
-        );
-        durableGenerationRecoveries.value = durableGenerationRecoveries.value.map(
-          (recovery) => merged.get(recovery.tracker.clientBatchId) ?? recovery,
-        );
-        persistDurableGenerationRecoveries();
-        syncDurableGenerationJobs();
-        scheduleMobileDurableCancelIntents();
-        await processDurableGenerationTerminalEffects();
-      } catch {
-        // A transport failure is not a lifecycle outcome. The retained
-        // recovery identity stays queued and the host stream/wake path retries
-        // one bulk read later; it is never converted into legacy resubmission.
-      }
-    } while (durableGenerationReconcileAgain.has(hostId));
+      const merged = new Map(
+        mergeMobileDurableHostStatus(latestRequested, hostId, response).map((recovery) => [
+          recovery.tracker.clientBatchId,
+          recovery,
+        ]),
+      );
+      durableGenerationRecoveries.value = durableGenerationRecoveries.value.map(
+        (recovery) => merged.get(recovery.tracker.clientBatchId) ?? recovery,
+      );
+      persistDurableGenerationRecoveries();
+      syncDurableGenerationJobs();
+      scheduleMobileDurableCancelIntents();
+      await processDurableGenerationTerminalEffects();
+    } catch {
+      // A transport failure is not a lifecycle outcome. The retained
+      // recovery identity stays queued and the host stream/wake path retries
+      // one bulk read later; it is never converted into legacy resubmission.
+    }
   })().finally(() => {
     durableGenerationReconciles.delete(hostId);
     ensureDurableGenerationHostWatches();
+    const pending = durableGenerationReconcilePending.get(hostId);
+    if (pending !== undefined) {
+      durableGenerationReconcilePending.delete(hostId);
+      void reconcileMobileDurableHost(hostId, pending ?? undefined);
+    }
   });
   durableGenerationReconciles.set(hostId, task);
   return task;

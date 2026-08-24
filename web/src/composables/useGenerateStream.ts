@@ -1160,6 +1160,8 @@ const durableEventSessions = new Map<
 >();
 const durableReconciliations = new Map<string, Promise<void>>();
 const durableReconciliationPending = new Map<string, Set<string> | null>();
+/** Server instance signatures that proved they emit post-commit lifecycle hints. */
+const durablePostCommitSignatures = new Map<string, string>();
 const durableHydrations = new Map<string, Promise<void>>();
 const durableCancellations = new Map<string, Promise<void>>();
 const durableGallerySnapshots = new Map<string, Promise<GalleryImage[]>>();
@@ -1817,19 +1819,26 @@ function handleDurableEvent(
   if (eventName !== "event" || typeof data.type !== "string") {
     return;
   }
-  if (data.type === "job_state_committed") {
-    // Admission and execution are concurrent: a very fast child can commit
-    // before the POST response gives this client its server id. Reconcile the
-    // host, not only an already-mapped row. The bulk read is coalesced above.
-    void reconcileDurableHost(hostId);
-    return;
-  }
   let exactJob: Job | undefined;
   if (typeof data.id === "string") {
     exactJob = jobs.value.find(
       (candidate) =>
         candidate.hostId === hostId && candidate.serverId === data.id,
     );
+  }
+  if (data.type === "job_state_committed") {
+    // Normal settlements reconcile only their owning batch. Admission and
+    // execution are concurrent, so an event whose id is not mapped yet must
+    // still fall back to the coalesced host-wide authority read.
+    durablePostCommitSignatures.set(hostId, routeSignature(route));
+    void reconcileDurableHost(hostId, exactJob?.durableBatch?.clientBatchId);
+    return;
+  }
+  if (data.type === "generation_states_committed") {
+    // Bulk cancellation deliberately emits one host-wide post-commit hint.
+    durablePostCommitSignatures.set(hostId, routeSignature(route));
+    void reconcileDurableHost(hostId);
+    return;
   }
   if (data.type === "job_started" && typeof data.id === "string") {
     if (exactJob?.state === "running") {
@@ -1859,6 +1868,11 @@ function handleDurableEvent(
         );
       }
     }
+    // Older servers need gallery invalidation as their last completion hint.
+    // Once this exact server instance proves it emits the ordered commit hint,
+    // reconciling here would duplicate every completion read.
+    if (durablePostCommitSignatures.get(hostId) === routeSignature(route))
+      return;
   }
   if (exactJob?.durableBatch) {
     void reconcileDurableHost(hostId, exactJob.durableBatch.clientBatchId);
@@ -1992,6 +2006,7 @@ function resetDurableLifecycleForTests(): void {
   durableEffectKeys.clear();
   durableReconciliations.clear();
   durableReconciliationPending.clear();
+  durablePostCommitSignatures.clear();
   durableHydrations.clear();
   durableCancellations.clear();
   durableGallerySnapshots.clear();

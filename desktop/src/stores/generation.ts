@@ -324,7 +324,10 @@ const durableJobIds = new Map<string, Map<number, number>>();
 const durableSettlements = new Map<string, DurableSettlement>();
 const durableHostStreams = new Map<string, DurableHostStream>();
 const durableReconciles = new Map<string, Promise<void>>();
-const durableReconcileAgain = new Set<string>();
+/** Missing = no follow-up; null = host-wide; Set = selected client batches. */
+const durableReconcilePending = new Map<string, Set<string> | null>();
+/** Host instance ids that proved they emit ordered post-commit hints. */
+const durablePostCommitInstances = new Map<string, string>();
 const durableCancelAttempts = new Map<string, Promise<boolean>>();
 const sharedDurableEventHosts = new Set<string>();
 let durableRecoveryLoaded = false;
@@ -606,14 +609,25 @@ export const useGenerationStore = defineStore("generation", {
       }
       try {
         const frame = JSON.parse(data) as { type?: unknown; id?: unknown };
-        if (
+        if (frame.type === "job_state_committed") {
+          durablePostCommitInstances.set(hostId, records[0]!.tracker.expectedInstanceId);
+          const owner = records.find((record) =>
+            Object.values(record.tracker.jobs).some((job) => job.authority.jobId === frame.id),
+          );
+          void this.reconcileDurableHost(
+            hostId,
+            owner ? new Set([owner.tracker.clientBatchId]) : undefined,
+          );
+        } else if (frame.type === "generation_states_committed") {
+          durablePostCommitInstances.set(hostId, records[0]!.tracker.expectedInstanceId);
+          void this.reconcileDurableHost(hostId);
+        } else if (
           (frame.type === "job_queued" ||
             frame.type === "job_started" ||
             frame.type === "job_ended" ||
-            frame.type === "job_state_committed" ||
             frame.type === "gallery_added") &&
-          (frame.type === "gallery_added" ||
-            frame.type === "job_state_committed" ||
+          ((frame.type === "gallery_added" &&
+            durablePostCommitInstances.get(hostId) !== records[0]!.tracker.expectedInstanceId) ||
             records.some((record) =>
               Object.values(record.tracker.jobs).some((job) => job.authority.jobId === frame.id),
             ))
@@ -680,48 +694,58 @@ export const useGenerationStore = defineStore("generation", {
         }),
       );
     },
-    async reconcileDurableHost(hostId: string): Promise<void> {
+    async reconcileDurableHost(
+      hostId: string,
+      clientBatchIds?: ReadonlySet<string>,
+    ): Promise<void> {
       const existing = durableReconciles.get(hostId);
       if (existing) {
-        durableReconcileAgain.add(hostId);
+        const pending = durableReconcilePending.get(hostId);
+        if (clientBatchIds === undefined) {
+          durableReconcilePending.set(hostId, null);
+        } else if (pending !== null) {
+          const next = pending ?? new Set<string>();
+          for (const clientBatchId of clientBatchIds) next.add(clientBatchId);
+          durableReconcilePending.set(hostId, next);
+        }
         return existing;
       }
       const operation = (async () => {
-        do {
-          durableReconcileAgain.delete(hostId);
-          const records = [...durableRecords.values()].filter(
-            (record) => record.tracker.hostId === hostId && !recordIsTerminal(record),
+        const records = [...durableRecords.values()].filter(
+          (record) =>
+            record.tracker.hostId === hostId &&
+            !recordIsTerminal(record) &&
+            (!clientBatchIds || clientBatchIds.has(record.tracker.clientBatchId)),
+        );
+        const host = useHostsStore().all.find((candidate) => candidate.id === hostId);
+        if (records.length > 0 && host?.baseUrl && host.status === "ready") {
+          const matching = records.filter(
+            (record) => host.instanceId === record.tracker.expectedInstanceId,
           );
-          const host = useHostsStore().all.find((candidate) => candidate.id === hostId);
-          if (records.length > 0 && host?.baseUrl && host.status === "ready") {
-            const matching = records.filter(
-              (record) => host.instanceId === record.tracker.expectedInstanceId,
-            );
-            for (const record of records) {
-              if (host.instanceId === record.tracker.expectedInstanceId) continue;
-              record.tracker = reduceGenerationLifecycle(record.tracker, {
-                type: "event_gap",
-                instanceId: host.instanceId ?? "",
-              });
-              this.applyDurableRecord(record);
-            }
-            if (matching.length > 0) {
-              const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
-              const trackers = matching.map((record) => record.tracker);
-              const request = buildGenerationBatchStatusRequest(trackers, hostId);
-              if (request.client_batch_ids.length > 0 || request.batch_ids?.length) {
-                const response = await reconcileGenerationBatches(target, request);
-                const merged = mergeBulkGenerationBatchResponse(trackers, hostId, response);
-                merged.trackers.forEach((tracker, index) => {
-                  const record = matching[index]!;
-                  record.tracker = tracker;
-                  this.applyDurableRecord(record);
-                });
-              }
-            }
-            persistDurableRecords();
+          for (const record of records) {
+            if (host.instanceId === record.tracker.expectedInstanceId) continue;
+            record.tracker = reduceGenerationLifecycle(record.tracker, {
+              type: "event_gap",
+              instanceId: host.instanceId ?? "",
+            });
+            this.applyDurableRecord(record);
           }
-        } while (durableReconcileAgain.has(hostId));
+          if (matching.length > 0) {
+            const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
+            const trackers = matching.map((record) => record.tracker);
+            const request = buildGenerationBatchStatusRequest(trackers, hostId);
+            if (request.client_batch_ids.length > 0 || request.batch_ids?.length) {
+              const response = await reconcileGenerationBatches(target, request);
+              const merged = mergeBulkGenerationBatchResponse(trackers, hostId, response);
+              merged.trackers.forEach((tracker, index) => {
+                const record = matching[index]!;
+                record.tracker = tracker;
+                this.applyDurableRecord(record);
+              });
+            }
+          }
+          persistDurableRecords();
+        }
       })();
       durableReconciles.set(hostId, operation);
       try {
@@ -730,7 +754,11 @@ export const useGenerationStore = defineStore("generation", {
         // Last-good authority remains visible; the next event/reconnect/wake retries.
       } finally {
         if (durableReconciles.get(hostId) === operation) durableReconciles.delete(hostId);
-        if (durableReconcileAgain.delete(hostId)) void this.reconcileDurableHost(hostId);
+        const pending = durableReconcilePending.get(hostId);
+        if (pending !== undefined) {
+          durableReconcilePending.delete(hostId);
+          void this.reconcileDurableHost(hostId, pending ?? undefined);
+        }
       }
     },
     applyDurableRecord(record: DurableGenerationRecoveryRecord): void {
@@ -1561,7 +1589,8 @@ export const useGenerationStore = defineStore("generation", {
       for (const stream of durableHostStreams.values()) stream.abort.abort();
       durableHostStreams.clear();
       durableReconciles.clear();
-      durableReconcileAgain.clear();
+      durableReconcilePending.clear();
+      durablePostCommitInstances.clear();
       durableCancelAttempts.clear();
       durableJobIds.clear();
       durableSettlements.clear();

@@ -12,7 +12,8 @@ export interface MobileGenerationEventAuthority {
 export interface MobileGenerationHostWatchOptions {
   target: ApiTarget;
   expectedInstanceId: string;
-  onReconcile: (reason: MobileGenerationReconcileReason) => void;
+  /** Undefined job ids request one host-wide authority read. */
+  onReconcile: (reason: MobileGenerationReconcileReason, jobIds?: ReadonlySet<string>) => void;
   onGap: (authority: MobileGenerationEventAuthority) => void;
   stream?: typeof sseStream;
 }
@@ -45,13 +46,25 @@ export function watchMobileGenerationHost(
   const abort = new AbortController();
   let stopped = false;
   let reconcileQueued = false;
+  let queuedReason: MobileGenerationReconcileReason = "event";
+  let queuedJobIds: Set<string> | null = new Set();
+  let postCommitEventsAvailable = false;
 
-  function reconcile(reason: MobileGenerationReconcileReason): void {
-    if (stopped || reconcileQueued) return;
+  function reconcile(reason: MobileGenerationReconcileReason, jobId?: string): void {
+    if (stopped) return;
+    if (reconcileQueued) {
+      if (jobId === undefined) queuedJobIds = null;
+      else queuedJobIds?.add(jobId);
+      return;
+    }
     reconcileQueued = true;
+    queuedReason = reason;
+    queuedJobIds = jobId === undefined ? null : new Set([jobId]);
     queueMicrotask(() => {
       reconcileQueued = false;
-      if (!stopped) options.onReconcile(reason);
+      const ids = queuedJobIds;
+      queuedJobIds = new Set();
+      if (!stopped) options.onReconcile(queuedReason, ids ?? undefined);
     });
   }
 
@@ -105,7 +118,17 @@ export function watchMobileGenerationHost(
         reconcile("malformed");
         return;
       }
-      if (INVALIDATION_EVENT_TYPES.has(payload.type)) reconcile("event");
+      if (payload.type === "job_state_committed" && typeof payload.id === "string") {
+        postCommitEventsAvailable = true;
+        reconcile("event", payload.id);
+      } else if (payload.type === "generation_states_committed") {
+        postCommitEventsAvailable = true;
+        reconcile("event");
+      } else if (payload.type === "gallery_added" && postCommitEventsAvailable) {
+        // This exact stream proved that a correctly ordered commit hint follows.
+      } else if (INVALIDATION_EVENT_TYPES.has(payload.type)) {
+        reconcile("event", typeof payload.id === "string" ? payload.id : undefined);
+      }
     },
     onClose: () => reconcile("close"),
   });

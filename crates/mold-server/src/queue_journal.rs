@@ -660,6 +660,12 @@ impl QueueJournal {
         }
     }
 
+    fn publish_states_committed(&self) {
+        if let Some(events) = self.events.get() {
+            events.publish(mold_core::ServerEvent::GenerationStatesCommitted);
+        }
+    }
+
     pub(crate) fn queue_media_admission(
         &self,
     ) -> Option<Arc<crate::queue_media_admission::DurableMediaAdmission>> {
@@ -1328,6 +1334,9 @@ impl QueueJournal {
         let additional =
             generation_batches::cancel_all_queued(db, owner, already_counted_live, terminal)?;
         self.cleanup_media_candidates(candidates);
+        if additional > 0 || !already_counted_live.is_empty() {
+            self.publish_states_committed();
+        }
         self.wake_feeder();
         Ok(additional)
     }
@@ -2899,6 +2908,50 @@ mod tests {
             child.result_json.as_deref(),
             Some(r#"{"filename":"event.png"}"#)
         );
+    }
+
+    #[test]
+    fn bulk_cancel_publishes_one_post_commit_host_invalidation() {
+        let journal = journal_with_db();
+        let events = crate::events::EventBroadcaster::new();
+        journal.install_event_broadcaster(events.clone()).unwrap();
+        let request = request();
+        journal
+            .record_batch(BatchJournalAdmission {
+                id: "bulk-event-batch",
+                client_batch_id: "bulk-event-client",
+                request_sha256: "bulk-event-sha",
+                children: &[
+                    admission("bulk-event-claimed", &request, Path::new("/gallery")),
+                    admission("bulk-event-deep", &request, Path::new("/gallery")),
+                ],
+            })
+            .unwrap();
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        assert_eq!(claim.row.id, "bulk-event-claimed");
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+        let mut receiver = events.subscribe();
+
+        assert_eq!(
+            journal
+                .cancel_all_queued(&["bulk-event-claimed".to_string()])
+                .unwrap(),
+            1
+        );
+
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            mold_core::ServerEvent::GenerationStatesCommitted
+        ));
+        assert!(receiver.try_recv().is_err(), "bulk cancel emits one hint");
+        let detail = journal
+            .durable_generation_batch("bulk-event-batch")
+            .unwrap()
+            .unwrap();
+        assert_eq!(detail.children[0].state, "cancelling");
+        assert_eq!(detail.children[1].state, "cancelled");
+
+        ticket.discard();
     }
 
     #[test]
