@@ -1652,6 +1652,7 @@ pub(crate) async fn prepare_inputs_for_devices(
         authority_fingerprint,
         by_device,
         retryable_device_failures: failures,
+        host_memory_retry_after_devices: Default::default(),
         model_config_overlay,
         identity_embedding,
         identity_warning,
@@ -1814,6 +1815,22 @@ fn h3_reclaim_requirement(
     Some(shortfall?.required_host_bytes)
 }
 
+/// Admit one bounded retry only when a newer host sample changes the answer.
+/// Attempt indexes 0 and 1 may advance to the second and third pass; attempt 2
+/// is terminal even if memory keeps moving.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+fn h3_fresh_retry_headroom(
+    attempt: usize,
+    admitted_headroom: u64,
+    shortfall: Option<HostShortfall>,
+    fresh_headroom: u64,
+) -> Option<u64> {
+    (attempt < 2
+        && fresh_headroom > admitted_headroom
+        && shortfall.is_some_and(|shortfall| shortfall.required_host_bytes <= fresh_headroom))
+    .then_some(fresh_headroom)
+}
+
 /// Why one device's H3 admission attempt did not produce evidence.
 ///
 /// The two arms fail for unrelated reasons — a staged reference could not be
@@ -1883,12 +1900,14 @@ async fn prepare_h3_private_inputs_for_devices(
     // A host-headroom refusal is asked one more question before it becomes an
     // answer: is mold's own model cache holding the memory? If it is, the cache
     // is released least-recently-used first and admission is retried exactly
-    // once against a fresh sample (#1289). Two attempts, never more — the first
-    // reclaim already released everything it could, so a third pass would only
-    // re-ask a question whose answer cannot have changed.
+    // against a fresh sample (#1289). A third and final attempt is allowed only
+    // when a later exact-target failure discovers a larger requirement and a
+    // new sample proves that requirement now fits (for example, because the
+    // active render finished during the artifact hash). Reclaim itself still
+    // runs at most once.
     let mut host_shortfall: Option<mold_inference::H3PrivateHostHeadroomShortfall> = None;
     let mut reclaim = crate::host_reclaim::HostReclaimOutcome::default();
-    for attempt in 0..2 {
+    for attempt in 0..3 {
         evidence_by_device.clear();
         failures.clear();
         host_shortfall = None;
@@ -2028,6 +2047,16 @@ async fn prepare_h3_private_inputs_for_devices(
         if !evidence_by_device.is_empty() {
             break;
         }
+        let fresh_headroom = crate::h3_admission::current_h3_host_memory().headroom_bytes();
+        if let Some(retry_headroom) = h3_fresh_retry_headroom(
+            attempt,
+            available_host_headroom_bytes,
+            host_shortfall,
+            fresh_headroom,
+        ) {
+            available_host_headroom_bytes = retry_headroom;
+            continue;
+        }
         let (Some(required_host_bytes), Some(state)) = (
             h3_reclaim_requirement(policy, attempt, host_shortfall),
             state,
@@ -2044,13 +2073,35 @@ async fn prepare_h3_private_inputs_for_devices(
             &|| crate::h3_admission::current_h3_host_memory().headroom_bytes(),
         )
         .await;
-        if !reclaim.released_anything() {
-            break;
-        }
         available_host_headroom_bytes =
             crate::h3_admission::current_h3_host_memory().headroom_bytes();
+        if available_host_headroom_bytes < required_host_bytes {
+            break;
+        }
     }
     if evidence_by_device.is_empty() {
+        let busy_devices = state
+            .filter(|_| host_shortfall.is_some())
+            .map(crate::host_reclaim::busy_worker_device_ids)
+            .unwrap_or_default();
+        if !busy_devices.is_empty() {
+            let reason = host_shortfall
+                .map(|shortfall| shortfall.to_string())
+                .unwrap_or_else(|| "MiniMax H3 is waiting for host memory".to_string());
+            send_dependency_wait(progress, "MiniMax H3 host memory", reason);
+            return Ok(PreparedExecutionInputs {
+                authority_fingerprint: ingress_grant.authority_identity_sha256().to_string(),
+                by_device: BTreeMap::new(),
+                retryable_device_failures: failures,
+                host_memory_retry_after_devices: busy_devices,
+                model_config_overlay: None,
+                identity_embedding: None,
+                identity_warning: None,
+                identity_pin: crate::execution_plan::IdentityPin::default(),
+                h3_private_ingress_grant: Some(ingress_grant),
+                h3_private_admission_by_device: BTreeMap::new(),
+            });
+        }
         let mut message = format!(
             "no request-eligible device passed MiniMax H3 private admission: {}",
             failures
@@ -2136,6 +2187,7 @@ async fn prepare_h3_private_inputs_for_devices(
         authority_fingerprint: format!("{:x}", authority.finalize()),
         by_device,
         retryable_device_failures: failures,
+        host_memory_retry_after_devices: Default::default(),
         model_config_overlay: None,
         // The private H3 ingress has no face-identity path; FLUX is the only
         // family qualified for it. The pin is minted empty rather than omitted
@@ -2331,6 +2383,31 @@ mod tests {
             ),
             None,
             "a read-only placement preview must never evict a model cache"
+        );
+    }
+
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    #[test]
+    fn a_fresh_exact_target_sample_can_start_one_bounded_third_attempt() {
+        let exact = HostShortfall {
+            context: "private H3 canonical target",
+            required_host_bytes: 22_893_717_751,
+            available_host_headroom_bytes: 19_948_656_026,
+        };
+        assert_eq!(
+            h3_fresh_retry_headroom(1, 19_948_656_026, Some(exact), 22_893_717_751),
+            Some(22_893_717_751),
+            "an owner finishing during attempt two must permit the final pass"
+        );
+        assert_eq!(
+            h3_fresh_retry_headroom(2, 19_948_656_026, Some(exact), 22_893_717_751),
+            None,
+            "the third pass is the hard retry bound"
+        );
+        assert_eq!(
+            h3_fresh_retry_headroom(1, 19_948_656_026, Some(exact), 22_893_717_750),
+            None,
+            "a fresh sample must cover the exact target"
         );
     }
 

@@ -2812,6 +2812,15 @@ impl Coordinator {
         pending: &PendingGeneration,
         device_facts: &[crate::execution_plan::DeviceFact],
     ) -> Result<Vec<crate::execution_plan::ResolvedExecutionPlan>, GenerationPlanFailure> {
+        if pending
+            .prepared_inputs
+            .as_ref()
+            .is_some_and(|prepared| !prepared.host_memory_retry_after_devices.is_empty())
+        {
+            return Err(GenerationPlanFailure::Transient(
+                "waiting for active GPU work to release host memory".to_string(),
+            ));
+        }
         let config = self.state.config.try_read().map_err(|_| {
             GenerationPlanFailure::Transient(
                 "configuration changed while resolving execution plan".to_string(),
@@ -3022,6 +3031,7 @@ impl Coordinator {
             .collect::<BTreeSet<_>>();
         let device_facts = self.device_facts_from_snapshots(&self.device_snapshots());
         let now_ms = monotonic_ms();
+        let busy_worker_devices = crate::host_reclaim::busy_worker_device_ids(&self.state);
         let mut refresh = BTreeSet::new();
         for (id, pending) in &mut self.pending {
             if stale.contains(id) || pending.preparation != PreparationState::Ready {
@@ -3031,6 +3041,16 @@ impl Coordinator {
                 pending.preparation_refresh_observation = None;
                 continue;
             };
+            if !prepared.host_memory_retry_after_devices.is_empty() {
+                pending.preparation_refresh_observation = None;
+                if prepared
+                    .host_memory_retry_after_devices
+                    .is_disjoint(&busy_worker_devices)
+                {
+                    refresh.insert(id.clone());
+                }
+                continue;
+            }
             let signature = Self::preparation_refresh_signature(prepared, &device_facts);
             if signature.is_empty() {
                 pending.preparation_refresh_observation = None;
@@ -12842,6 +12862,83 @@ mod tests {
 
     struct SelectiveBlockingPreparer {
         release_blocked: Arc<tokio::sync::Notify>,
+    }
+
+    /// An H3 sibling submitted while another render owns transient host RAM
+    /// must stay in the scheduler queue. Retrying only after the owner settles
+    /// avoids both the old terminal refusal and repeated full artifact hashes
+    /// while the capacity fact cannot change.
+    #[tokio::test]
+    async fn h3_host_shortfall_waits_in_queue_until_the_busy_owner_settles() {
+        let (worker, _worker_rx) = test_worker(0);
+        let device_id = worker_device_id(&worker);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(2);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 2);
+        state
+            .job_registry
+            .register("waiting-h3", "minimax-h3-fl2va");
+        let (job, _result) = fake_generation("waiting-h3");
+        queue.submit(job, 2).await.unwrap();
+
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        coordinator
+            .pending
+            .get_mut("waiting-h3")
+            .unwrap()
+            .preparation = PreparationState::Preparing;
+        worker.in_flight.store(1, Ordering::SeqCst);
+        let mut deferred = crate::execution_plan::PreparedExecutionInputs::default();
+        deferred
+            .host_memory_retry_after_devices
+            .insert(device_id.clone());
+        coordinator.handle_preparation_event(
+            PreparationEvent::Ready {
+                work_id: "waiting-h3".to_string(),
+                prepared: Box::new(PreparedGeneration {
+                    execution_inputs: Some(deferred),
+                    ..Default::default()
+                }),
+            },
+            &mut immediate,
+        );
+
+        assert!(!coordinator.reset_stale_preparations());
+        assert_eq!(
+            coordinator.pending["waiting-h3"].preparation,
+            PreparationState::Ready
+        );
+        assert!(matches!(
+            coordinator.generation_plans(&coordinator.pending["waiting-h3"]),
+            Err(GenerationPlanFailure::Transient(_))
+        ));
+
+        worker.in_flight.store(0, Ordering::SeqCst);
+        assert!(coordinator.reset_stale_preparations());
+        assert_eq!(
+            coordinator.pending["waiting-h3"].preparation,
+            PreparationState::Preparing
+        );
+        let event = tokio::time::timeout(Duration::from_secs(1), coordinator.preparation_rx.recv())
+            .await
+            .expect("settled owner must trigger preparation")
+            .expect("preparation event");
+        coordinator.handle_preparation_event(event, &mut immediate);
+        assert!(coordinator.pending.contains_key("waiting-h3"));
+        assert_eq!(
+            coordinator.pending["waiting-h3"].preparation,
+            PreparationState::Ready
+        );
+        coordinator.stop_preparations().await;
     }
 
     impl DependencyPreparer for SelectiveBlockingPreparer {
