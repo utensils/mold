@@ -2594,10 +2594,19 @@ button:disabled {
 }
 
 .mobile-library-heading {
+  position: sticky;
+  top: -16px;
+  z-index: 9;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  margin: -16px -16px 0;
+  padding: 16px 16px 12px;
+  border-bottom: 1px solid var(--edge);
+  background: color-mix(in srgb, var(--bath) 94%, transparent);
+  box-shadow: 0 8px 18px color-mix(in srgb, var(--bath) 72%, transparent);
+  backdrop-filter: blur(16px);
 }
 
 .mobile-library-heading .section-note {

@@ -486,6 +486,16 @@ describe("mobile gallery viewer", () => {
 });
 
 describe("mobile Library organization", () => {
+  it("keeps the Library heading and Select action reachable while the grid scrolls", () => {
+    const heading = css.match(/\.mobile-library-heading\s*\{([^}]*)\}/s);
+
+    expect(heading?.[1]).toMatch(/position:\s*sticky\s*;/);
+    expect(heading?.[1]).toMatch(/top:\s*-16px\s*;/);
+    expect(heading?.[1]).toMatch(/z-index:\s*9\s*;/);
+    expect(heading?.[1]).toMatch(/background:/);
+    expect(heading?.[1]).toMatch(/backdrop-filter:\s*blur\(/);
+  });
+
   it("keeps the scope row, chips, and tag targets at the 44pt floor", () => {
     for (const selector of [
       ".mobile-library-scope button",
