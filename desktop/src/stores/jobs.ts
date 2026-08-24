@@ -1,8 +1,11 @@
 import { defineStore } from "pinia";
 import { listDevices, type DeviceInfo } from "@studio/api/devices";
 import {
+  mergeQueueEntries,
   parseQueueListing,
   predictedCompletionUnixMs,
+  queueListingPath,
+  queuePageRequestForCapacity,
   type QueuePlan,
 } from "@studio/api/queuePlan";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
@@ -58,6 +61,16 @@ export interface HostQueueSnapshot {
   gpuOrdinals: number[];
   devices?: DeviceInfo[] | null;
   plan?: QueuePlan | null;
+  /** The server-authorized page size and opaque continuation. Absent/null on
+   * legacy hosts, whose in-memory queue was already capacity-bounded. */
+  pageLimit?: number | null;
+  nextCursor?: string | null;
+  /** Explicitly loaded durable tail. Hot polls refresh the capacity-sized
+   * live head and retain this user-requested snapshot without rescanning it. */
+  tailEntries?: QueueEntry[];
+  continued?: boolean;
+  loadingMore?: boolean;
+  loadMoreError?: string | null;
   error: string | null;
 }
 
@@ -88,6 +101,28 @@ function queueSurfaceRank(entry: EnrichedQueueEntry): number {
   return entry.state === "held" ? 2 : 1;
 }
 
+function visibleQueueEntries(entries: readonly import("@studio/api/queuePlan").QueueEntry[]) {
+  return entries
+    .filter(
+      (entry) => entry.state === "queued" || entry.state === "running" || entry.state === "held",
+    )
+    .map((entry) => {
+      const { target_gpu: targetGpu, ...rest } = entry;
+      const local = rest as QueueEntry;
+      if (targetGpu != null) local.target_gpu = targetGpu;
+      return local;
+    });
+}
+
+function distinctQueueEntries(entries: readonly QueueEntry[]): QueueEntry[] {
+  const seen = new Set<string>();
+  return entries.filter(({ id }) => {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
 /**
  * Join a host's server-side queue listing with this app's jobs. An entry is
  * ours only when both the server id AND the host match — ids from different
@@ -116,7 +151,8 @@ export const useJobsStore = defineStore("jobs", {
   state: () => ({
     queues: {} as Record<string, HostQueueSnapshot>,
     requestGenerations: {} as Record<string, number>,
-    pollTimer: null as ReturnType<typeof setInterval> | null,
+    pollTimer: null as ReturnType<typeof setTimeout> | null,
+    pollRunning: false,
     /** Views currently asking for the cross-host poll. Machines wants it while
      * it is open and Create wants it only while something is queued, so the
      * one that leaves first must not silence the other. */
@@ -197,34 +233,40 @@ export const useJobsStore = defineStore("jobs", {
             }),
             () => null,
           ));
+        const statusRequest = apiJsonTo<ServerStatus & { queue_paused?: boolean }>(
+          target,
+          "/api/status",
+        );
         const [listing, status, devices] = await Promise.all([
-          apiJsonTo<unknown>(target, "/api/queue").then(parseQueueListing),
-          apiJsonTo<ServerStatus & { queue_paused?: boolean }>(target, "/api/status"),
+          statusRequest.then((current) =>
+            apiJsonTo<unknown>(
+              target,
+              queueListingPath(queuePageRequestForCapacity(current.queue_capacity)),
+            ).then(parseQueueListing),
+          ),
+          statusRequest,
           listDevices(target).then(
             (snapshot) => snapshot.devices,
             () => null,
           ),
         ]);
         if (!isCurrent()) return;
+        // Continuation rows are an explicit snapshot, not live authority. A
+        // bounded head refresh cannot prove that older rows still exist (an
+        // external client may have cancelled one), so discard that snapshot
+        // and re-arm its cursor rather than rendering ghost jobs forever.
         this.queues[host.id] = {
           hostId: host.id,
-          entries: (listing.entries ?? [])
-            .filter(
-              (entry) =>
-                entry.state === "queued" ||
-                entry.state === "running" ||
-                // Held rows exist only in the journal: dropping them here is
-                // what would make the one job guaranteed never to run also the
-                // one nobody can see or clear.
-                entry.state === "held",
-            )
-            .map((entry) => {
-              const { target_gpu: targetGpu, ...rest } = entry;
-              const local = rest as QueueEntry;
-              if (targetGpu != null) local.target_gpu = targetGpu;
-              return local;
-            }),
+          entries: visibleQueueEntries(
+            mergeQueueEntries(listing.entries, listing.live_only_entries ?? []),
+          ),
           plan: listing.plan,
+          pageLimit: listing.page?.limit ?? null,
+          nextCursor: listing.page?.next_cursor ?? null,
+          tailEntries: [],
+          continued: false,
+          loadingMore: false,
+          loadMoreError: null,
           paused: status.queue_paused ?? null,
           caps,
           gpuOrdinals:
@@ -253,8 +295,74 @@ export const useJobsStore = defineStore("jobs", {
           gpuOrdinals: previous?.gpuOrdinals ?? [],
           devices: previous?.devices ?? null,
           plan: previous?.plan ?? null,
+          pageLimit: previous?.pageLimit ?? null,
+          nextCursor: previous?.nextCursor ?? null,
+          tailEntries: previous?.tailEntries ?? [],
+          continued: previous?.continued ?? false,
+          loadingMore: false,
+          loadMoreError: previous?.loadMoreError ?? null,
           error: String(err),
         };
+      }
+    },
+    async loadMoreHost(hostId: string) {
+      const snapshot = this.queues[hostId];
+      const cursor = snapshot?.nextCursor;
+      const limit = snapshot?.pageLimit;
+      if (!snapshot || !cursor || !limit || snapshot.loadingMore) return;
+      const hosts = useHostsStore();
+      const host = hosts.all.find((candidate) => candidate.id === hostId);
+      const target = host ? this.targetFor(host) : null;
+      if (!host || !target || host.status !== "ready") return;
+      const authority = snapshot;
+      snapshot.loadingMore = true;
+      snapshot.loadMoreError = null;
+      try {
+        const listing = await apiJsonTo<unknown>(target, queueListingPath({ limit, cursor })).then(
+          parseQueueListing,
+        );
+        const currentHost = hosts.all.find((candidate) => candidate.id === hostId);
+        const current = this.queues[hostId];
+        if (
+          current !== authority ||
+          current.nextCursor !== cursor ||
+          currentHost?.baseUrl !== host.baseUrl ||
+          currentHost.apiKey !== host.apiKey
+        )
+          return;
+        if (!listing.page) {
+          current.entries = visibleQueueEntries(listing.entries);
+          current.pageLimit = null;
+          current.nextCursor = null;
+          current.tailEntries = [];
+          current.continued = false;
+          return;
+        }
+        const tail = distinctQueueEntries([
+          ...(current.tailEntries ?? []),
+          ...visibleQueueEntries(listing.entries),
+        ]);
+        current.tailEntries = tail;
+        current.entries = distinctQueueEntries([
+          ...current.entries,
+          ...tail,
+          ...visibleQueueEntries(listing.live_only_entries ?? []),
+        ]);
+        current.nextCursor = listing.page.next_cursor ?? null;
+        current.continued = true;
+        current.plan = listing.plan ?? current.plan ?? null;
+      } catch (error) {
+        const current = this.queues[hostId];
+        if (
+          current === authority &&
+          current.nextCursor === cursor &&
+          hosts.all.find((candidate) => candidate.id === hostId)?.baseUrl === host.baseUrl &&
+          hosts.all.find((candidate) => candidate.id === hostId)?.apiKey === host.apiKey
+        )
+          current.loadMoreError = String(error);
+      } finally {
+        const current = this.queues[hostId];
+        if (current === authority) current.loadingMore = false;
       }
     },
     async refresh() {
@@ -287,6 +395,11 @@ export const useJobsStore = defineStore("jobs", {
     /** Cancel one job on a host directly (used for other clients' jobs). */
     async cancelJob(hostId: string, jobId: string) {
       await this.queueControl(hostId, `/api/queue/${encodeURIComponent(jobId)}`, "DELETE");
+      const snapshot = this.queues[hostId];
+      if (snapshot) {
+        snapshot.entries = snapshot.entries.filter(({ id }) => id !== jobId);
+        snapshot.tailEntries = snapshot.tailEntries?.filter(({ id }) => id !== jobId) ?? [];
+      }
       void this.refresh();
     },
     /**
@@ -365,14 +478,28 @@ export const useJobsStore = defineStore("jobs", {
     },
     startPolling() {
       this.pollConsumers += 1;
-      if (this.pollTimer) return;
-      void this.refresh();
-      this.pollTimer = setInterval(() => void this.refresh(), POLL_INTERVAL_MS);
+      if (this.pollRunning || this.pollTimer) return;
+      void this.runPoll();
+    },
+    async runPoll() {
+      if (this.pollRunning || this.pollConsumers === 0) return;
+      this.pollRunning = true;
+      try {
+        await this.refresh();
+      } finally {
+        this.pollRunning = false;
+        if (this.pollConsumers > 0 && !this.pollTimer) {
+          this.pollTimer = setTimeout(() => {
+            this.pollTimer = null;
+            void this.runPoll();
+          }, POLL_INTERVAL_MS);
+        }
+      }
     },
     stopPolling() {
       this.pollConsumers = Math.max(0, this.pollConsumers - 1);
       if (this.pollConsumers > 0) return;
-      if (this.pollTimer) clearInterval(this.pollTimer);
+      if (this.pollTimer) clearTimeout(this.pollTimer);
       this.pollTimer = null;
     },
   },

@@ -316,7 +316,7 @@ pub fn activity_line(app: &App) -> (ActivityKind, String) {
         .server_status
         .as_ref()
         .and_then(|s| s.queue_depth)
-        .map(|n| format!(" · queue {n}"))
+        .map(|n| format!(" · queue load {n} reported"))
         .unwrap_or_default();
     let ram_seg = host_ram_segment(app.resource_info.server_status.as_ref());
 

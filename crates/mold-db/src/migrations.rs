@@ -612,6 +612,22 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 23,
         kind: MigrationKind::Sql(V23_HETEROGENEOUS_GENERATION_BATCHES),
     },
+    Migration {
+        version: 24,
+        kind: MigrationKind::Sql(V24_DURABLE_QUEUE_CLAIMS),
+    },
+    Migration {
+        version: 25,
+        kind: MigrationKind::Rust(add_generation_job_lookup_indexes),
+    },
+    Migration {
+        version: 26,
+        kind: MigrationKind::Sql(V26_GENERATION_QUEUE_MEDIA),
+    },
+    Migration {
+        version: 27,
+        kind: MigrationKind::Sql(V27_GENERATION_QUEUE_OWNER_ORDER),
+    },
 ];
 
 /// #1227 phase 2 moved face-identity extraction from admission onto the
@@ -660,9 +676,207 @@ CREATE TABLE gallery_mutation_receipts (
 );
 "#;
 
+/// Token-fenced runtime claims and reconnectable batch-child outcomes.
+///
+/// Queue order remains `(created_at, rowid)`: v24 deliberately does not
+/// rewrite the existing admission rows or introduce a second ordering
+/// authority. A partial claimable index lets the feeder reserve one oldest
+/// row without reading the backlog into memory. The token is runtime-only and
+/// cleared during startup recovery.
+///
+/// Structured terminal payloads are opaque JSON at this layer. Their schemas
+/// belong to the server/core wire contract; SQLite only commits them beside
+/// the legacy `state`/`error` columns and queue-row deletion.
+const V24_DURABLE_QUEUE_CLAIMS: &str = r#"
+ALTER TABLE generation_queue ADD COLUMN claim_token TEXT;
+
+CREATE UNIQUE INDEX generation_queue_claim_token
+ON generation_queue(claim_token)
+WHERE claim_token IS NOT NULL;
+
+CREATE INDEX generation_queue_claimable
+ON generation_queue(owner_uuid, state, created_at)
+WHERE claim_token IS NULL;
+
+ALTER TABLE generation_batch_children ADD COLUMN terminal_error_json TEXT;
+ALTER TABLE generation_batch_children ADD COLUMN result_json TEXT;
+ALTER TABLE generation_batch_children ADD COLUMN completed_at_ms INTEGER;
+"#;
+
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 23;
+pub const SCHEMA_VERSION: i64 = 27;
+
+/// Opaque staged-media ownership for durable queue rows.
+///
+/// SQLite records only the random set identifier and cleanup obligation. The
+/// staging format, members, roles, names, digests, paths, and byte counts stay
+/// outside the database. A partial unique index makes one non-NULL marker
+/// belong to one queue row while preserving every legacy/media-free NULL.
+///
+/// Cleanup cannot cascade from `generation_queue`: the obligation must
+/// survive authority deletion until the filesystem cleanup has succeeded.
+/// The AFTER DELETE trigger is therefore the singular retirement authority
+/// for direct, bulk, legacy, batch, and claimed deletion paths.
+const V26_GENERATION_QUEUE_MEDIA: &str = r#"
+CREATE TABLE generation_queue_media (
+    media_set_id  TEXT PRIMARY KEY NOT NULL CHECK (length(media_set_id) > 0),
+    owner_uuid    TEXT NOT NULL CHECK (length(owner_uuid) > 0),
+    state         TEXT NOT NULL CHECK (state IN ('active', 'gc_pending')),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX generation_queue_media_owner_state
+ON generation_queue_media(owner_uuid, state, created_at_ms, media_set_id);
+
+ALTER TABLE generation_queue ADD COLUMN media_set_id TEXT
+    REFERENCES generation_queue_media(media_set_id);
+
+CREATE UNIQUE INDEX generation_queue_media_set
+ON generation_queue(media_set_id)
+WHERE media_set_id IS NOT NULL;
+
+CREATE TRIGGER generation_queue_media_reference_insert
+BEFORE INSERT ON generation_queue
+WHEN NEW.media_set_id IS NOT NULL
+ AND NOT EXISTS (
+        SELECT 1 FROM generation_queue_media AS media
+         WHERE media.media_set_id = NEW.media_set_id
+           AND media.owner_uuid = NEW.owner_uuid
+           AND media.state = 'active'
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'queue media obligation is not active for this owner');
+END;
+
+CREATE TRIGGER generation_queue_media_marker_immutable
+BEFORE UPDATE OF media_set_id ON generation_queue
+WHEN OLD.media_set_id IS NOT NEW.media_set_id
+BEGIN
+    SELECT RAISE(ABORT, 'queue media marker is immutable');
+END;
+
+CREATE TRIGGER generation_queue_media_owner_update
+BEFORE UPDATE OF owner_uuid ON generation_queue
+WHEN NEW.media_set_id IS NOT NULL
+ AND NOT EXISTS (
+        SELECT 1 FROM generation_queue_media AS media
+         WHERE media.media_set_id = NEW.media_set_id
+           AND media.owner_uuid = NEW.owner_uuid
+           AND media.state = 'active'
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'queue media obligation is not active for this owner');
+END;
+
+CREATE TRIGGER generation_queue_media_retire
+AFTER DELETE ON generation_queue
+WHEN OLD.media_set_id IS NOT NULL
+BEGIN
+    UPDATE generation_queue_media
+       SET state = 'gc_pending',
+           updated_at_ms = MAX(
+               updated_at_ms,
+               CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)
+           )
+     WHERE media_set_id = OLD.media_set_id
+       AND state = 'active';
+END;
+"#;
+
+/// Owner-first stable ordering for payload-free queue pagination.
+///
+/// SQLite appends the table rowid to every ordinary secondary-index entry,
+/// so `(owner_uuid, created_at)` also satisfies the queue's authoritative
+/// `(created_at, rowid)` order without a temporary sort. Unlike the older
+/// replay index, no state column interrupts the owner/order prefix.
+const V27_GENERATION_QUEUE_OWNER_ORDER: &str = r#"
+CREATE INDEX generation_queue_owner_order
+ON generation_queue(owner_uuid, created_at);
+"#;
+
+/// Build a serde-compatible reverse lookup for durable publication recovery.
+///
+/// SQLite JSON projections are intentionally not the authority here: their
+/// duplicate-key and coercion behavior need not match the serde parse used by
+/// gallery metadata. The migration classifies every retained row with the
+/// exact Rust parser, and current writers maintain the same projection.
+fn add_generation_job_lookup_indexes(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        r#"
+        ALTER TABLE generations ADD COLUMN queue_job_id TEXT;
+        ALTER TABLE generations ADD COLUMN queue_job_metadata_state INTEGER;
+        "#,
+    )?;
+
+    let rows = {
+        let mut stmt = tx.prepare("SELECT id, metadata_json FROM generations ORDER BY id")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for (id, metadata_json) in rows {
+        let (job_id, state) = match metadata_json {
+            None => (None, 1_i64),
+            Some(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(value) => match value.get("job_id") {
+                    None => (None, 1),
+                    Some(serde_json::Value::String(job_id)) => (Some(job_id.clone()), 1),
+                    Some(_) => (None, 0),
+                },
+                Err(_) => (None, 0),
+            },
+        };
+        tx.execute(
+            "UPDATE generations
+                SET queue_job_id = ?1, queue_job_metadata_state = ?2
+              WHERE id = ?3",
+            rusqlite::params![job_id, state, id],
+        )?;
+    }
+
+    tx.execute_batch(
+        r#"
+        CREATE INDEX generations_queue_job_id
+        ON generations(queue_job_id, id)
+        WHERE queue_job_metadata_state = 1 AND queue_job_id IS NOT NULL;
+
+        CREATE INDEX generations_output_queue_job_id
+        ON generations(output_dir, queue_job_id, id)
+        WHERE queue_job_metadata_state = 1 AND queue_job_id IS NOT NULL;
+
+        CREATE INDEX generations_invalid_queue_metadata
+        ON generations(queue_job_metadata_state, id)
+        WHERE queue_job_metadata_state = 0;
+
+        CREATE INDEX generations_output_invalid_queue_metadata
+        ON generations(output_dir, queue_job_metadata_state, created_at_ms, id)
+        WHERE queue_job_metadata_state = 0;
+
+        CREATE INDEX generations_unknown_queue_metadata
+        ON generations(queue_job_metadata_state, id)
+        WHERE queue_job_metadata_state IS NULL;
+
+        CREATE INDEX generations_output_unknown_queue_metadata
+        ON generations(output_dir, queue_job_metadata_state, created_at_ms, id)
+        WHERE queue_job_metadata_state IS NULL;
+
+        CREATE TRIGGER generations_queue_job_projection_dirty
+        AFTER UPDATE OF metadata_json ON generations
+        WHEN NEW.metadata_json IS NOT OLD.metadata_json
+        BEGIN
+            UPDATE generations
+               SET queue_job_id = NULL, queue_job_metadata_state = NULL
+             WHERE id = NEW.id;
+        END;
+        "#,
+    )?;
+    Ok(())
+}
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep
@@ -1038,7 +1252,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 23);
+        assert_eq!(SCHEMA_VERSION, 27);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1191,8 +1405,8 @@ mod tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 23);
-        assert_eq!(SCHEMA_VERSION, 23);
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 27);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1227,6 +1441,77 @@ mod tests {
         assert_eq!(kept, 1, "the upgrade must not disturb existing rows");
     }
 
+    #[test]
+    fn v24_adds_claim_and_terminal_fields_without_changing_queue_order() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 23)
+        {
+            match &migration.kind {
+                MigrationKind::Sql(sql) => tx.execute_batch(sql).unwrap(),
+                MigrationKind::Rust(run) => run(&tx).unwrap(),
+            }
+        }
+        tx.execute_batch("PRAGMA user_version = 23;").unwrap();
+        tx.commit().unwrap();
+        for id in ["first", "second", "third"] {
+            conn.execute(
+                "INSERT INTO generation_queue (
+                    id, owner_uuid, state, model, request_json, output_dir,
+                    completion_payload, created_at, updated_at
+                 ) VALUES (?1, 'owner', 'queued', 'model', '{}', '/gallery', 'full', 7, 7)",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO generation_batches
+                (id, client_batch_id, owner_uuid, request_sha256, created_at_ms)
+             VALUES ('batch', 'client', 'owner', 'hash', 7)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO generation_batch_children
+                (batch_id, job_id, batch_index, state, updated_at_ms)
+             VALUES ('batch', 'first', 1, 'accepted', 7)",
+            [],
+        )
+        .unwrap();
+
+        apply_pending(&mut conn).unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
+        let ids = conn
+            .prepare(
+                "SELECT id FROM generation_queue
+                 WHERE owner_uuid = 'owner' ORDER BY created_at, rowid",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(ids, vec!["first", "second", "third"]);
+        let queue_columns = column_names(&conn, "generation_queue");
+        assert!(queue_columns.iter().any(|column| column == "claim_token"));
+        let child_columns = column_names(&conn, "generation_batch_children");
+        for expected in ["terminal_error_json", "result_json", "completed_at_ms"] {
+            assert!(child_columns.iter().any(|column| column == expected));
+        }
+        let fields: (Option<String>, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT terminal_error_json, result_json, completed_at_ms
+                   FROM generation_batch_children WHERE job_id = 'first'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(fields, (None, None, None));
+    }
+
     /// v20/v21: a v19 database gains organization plus hidden collections
     /// while every existing gallery row survives at neutral defaults.
     #[test]
@@ -1255,8 +1540,8 @@ mod tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 23);
-        assert_eq!(SCHEMA_VERSION, 23);
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 27);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -1517,7 +1802,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 23);
+        assert_eq!(SCHEMA_VERSION, 27);
     }
 
     #[test]
@@ -1584,6 +1869,7 @@ mod v15_tests {
         let mut conn = Connection::open_in_memory().unwrap();
         // Every real v14 database carries the gallery table; v20 alters it.
         conn.execute_batch(V1_INITIAL_SCHEMA).unwrap();
+        conn.execute_batch(V10_GENERATION_METADATA_JSON).unwrap();
         conn.execute_batch(V13_SCHEDULER_ESTIMATES).unwrap();
         conn.execute_batch(V14_SCHEDULER_ESTIMATE_EVIDENCE).unwrap();
         conn.execute(
@@ -1622,6 +1908,7 @@ mod v17_tests {
         let mut conn = Connection::open_in_memory().unwrap();
         // Every real v16 database carries the gallery table; v20 alters it.
         conn.execute_batch(V1_INITIAL_SCHEMA).unwrap();
+        conn.execute_batch(V10_GENERATION_METADATA_JSON).unwrap();
         conn.execute_batch(V13_SCHEDULER_ESTIMATES).unwrap();
         conn.execute_batch(V14_SCHEDULER_ESTIMATE_EVIDENCE).unwrap();
         conn.execute_batch(V15_SCHEDULER_ESTIMATE_RUNTIME).unwrap();
@@ -1651,5 +1938,320 @@ mod v17_tests {
             )
             .unwrap();
         assert_eq!(phases, (Some(321.0), None, None, None));
+    }
+}
+
+#[cfg(test)]
+mod v25_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn migrate_through(conn: &mut Connection, version: i64) {
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= version)
+        {
+            let tx = conn.transaction().unwrap();
+            match migration.kind {
+                MigrationKind::Sql(sql) => tx.execute_batch(sql).unwrap(),
+                MigrationKind::Rust(function) => function(&tx).unwrap(),
+            }
+            tx.pragma_update(None, "user_version", migration.version)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+    }
+
+    #[test]
+    fn v25_backfills_exact_job_projection_and_dirties_old_writer_updates() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_through(&mut conn, 24);
+        for (filename, metadata) in [
+            ("valid.png", Some(r#"{"job_id":"job-a"}"#)),
+            ("absent.png", Some(r#"{"seed":7}"#)),
+            ("malformed.png", Some(r#"{"job_id":"broken""#)),
+            ("nonstring.png", Some(r#"{"job_id":7}"#)),
+            (
+                "duplicate.png",
+                Some(r#"{"job_id":"first","job_id":"last"}"#),
+            ),
+            ("none.png", None),
+        ] {
+            conn.execute(
+                "INSERT INTO generations
+                    (filename, output_dir, created_at_ms, format, model, metadata_json)
+                 VALUES (?1, '/gallery', 1, 'png', 'model', ?2)",
+                rusqlite::params![filename, metadata],
+            )
+            .unwrap();
+        }
+
+        apply_pending(&mut conn).unwrap();
+        let projected = |filename: &str| {
+            conn.query_row(
+                "SELECT queue_job_id, queue_job_metadata_state
+                   FROM generations WHERE filename = ?1",
+                [filename],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                    ))
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(projected("valid.png"), (Some("job-a".into()), Some(1)));
+        assert_eq!(projected("absent.png"), (None, Some(1)));
+        assert_eq!(projected("malformed.png"), (None, Some(0)));
+        assert_eq!(projected("nonstring.png"), (None, Some(0)));
+        assert_eq!(projected("duplicate.png"), (Some("last".into()), Some(1)));
+        assert_eq!(projected("none.png"), (None, Some(1)));
+
+        conn.execute(
+            "UPDATE generations SET metadata_json = ?1 WHERE filename = 'valid.png'",
+            [r#"{"job_id":"old-writer"}"#],
+        )
+        .unwrap();
+        assert_eq!(
+            projected("valid.png"),
+            (None, None),
+            "an older writer must make the projection explicitly reparsable, never stale"
+        );
+    }
+}
+
+#[cfg(test)]
+mod v26_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn column_names(conn: &Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    fn migrate_through(conn: &mut Connection, version: i64) {
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= version)
+        {
+            let tx = conn.transaction().unwrap();
+            match migration.kind {
+                MigrationKind::Sql(sql) => tx.execute_batch(sql).unwrap(),
+                MigrationKind::Rust(function) => function(&tx).unwrap(),
+            }
+            tx.pragma_update(None, "user_version", migration.version)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+    }
+
+    fn insert_legacy_queue_row(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO generation_queue (
+                id, owner_uuid, state, model, request_json, output_dir,
+                completion_payload, created_at, updated_at
+             ) VALUES (?1, 'owner', 'queued', 'model', ?2, '/gallery', ?3, 7, 7)",
+            rusqlite::params![id, r#"{"prompt":"unchanged"}"#, "metadata_only"],
+        )
+        .unwrap();
+    }
+
+    fn assert_legacy_row_is_payload_identical(conn: &Connection, id: &str) {
+        let row: (String, String, String, Option<String>) = conn
+            .query_row(
+                "SELECT request_json, output_dir, completion_payload, media_set_id
+                   FROM generation_queue WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                r#"{"prompt":"unchanged"}"#.to_string(),
+                "/gallery".to_string(),
+                "metadata_only".to_string(),
+                None,
+            )
+        );
+        let obligations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM generation_queue_media", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(obligations, 0, "legacy rows must not invent media work");
+    }
+
+    #[test]
+    fn fresh_v26_schema_is_opaque_and_payload_free() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        apply_pending(&mut conn).unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            column_names(&conn, "generation_queue_media"),
+            [
+                "media_set_id",
+                "owner_uuid",
+                "state",
+                "created_at_ms",
+                "updated_at_ms",
+            ]
+        );
+        assert!(column_names(&conn, "generation_queue")
+            .iter()
+            .any(|column| column == "media_set_id"));
+        for invalid in [None, Some("")] {
+            assert!(conn
+                .execute(
+                    "INSERT INTO generation_queue_media
+                        (media_set_id, owner_uuid, state, created_at_ms, updated_at_ms)
+                     VALUES (?1, 'owner', 'active', 1, 1)",
+                    [invalid],
+                )
+                .is_err());
+        }
+        let trigger: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                  WHERE type = 'trigger' AND name = 'generation_queue_media_retire'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(trigger.contains("AFTER DELETE ON generation_queue"));
+
+        let normalized = conn
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                  WHERE type = 'table' AND name = 'generation_queue_media'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+            .to_ascii_lowercase();
+        for forbidden in [
+            "path", "byte", "digest", "role", "name", "member", "payload", "request",
+        ] {
+            assert!(
+                !normalized.contains(forbidden),
+                "queue-media schema leaked forbidden field {forbidden}: {normalized}"
+            );
+        }
+    }
+
+    #[test]
+    fn shipped_v23_upgrades_through_v26_without_touching_legacy_payloads() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        migrate_through(&mut conn, 23);
+        insert_legacy_queue_row(&conn, "from-v23");
+
+        apply_pending(&mut conn).unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_legacy_row_is_payload_identical(&conn, "from-v23");
+    }
+
+    #[test]
+    fn feature_v25_upgrades_to_v26_without_touching_legacy_payloads() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        migrate_through(&mut conn, 25);
+        insert_legacy_queue_row(&conn, "from-v25");
+
+        apply_pending(&mut conn).unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_legacy_row_is_payload_identical(&conn, "from-v25");
+    }
+}
+
+#[cfg(test)]
+mod v27_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn migrate_through(conn: &mut Connection, version: i64) {
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= version)
+        {
+            let tx = conn.transaction().unwrap();
+            match migration.kind {
+                MigrationKind::Sql(sql) => tx.execute_batch(sql).unwrap(),
+                MigrationKind::Rust(function) => function(&tx).unwrap(),
+            }
+            tx.pragma_update(None, "user_version", migration.version)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+    }
+
+    #[test]
+    fn v26_upgrade_adds_owner_order_index_without_rewriting_queue_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_through(&mut conn, 26);
+        for (id, owner) in [
+            ("first", "owner-a"),
+            ("second", "owner-a"),
+            ("foreign", "owner-b"),
+        ] {
+            conn.execute(
+                "INSERT INTO generation_queue (
+                    id, owner_uuid, state, model, request_json, output_dir,
+                    completion_payload, created_at, updated_at
+                 ) VALUES (?1, ?2, 'queued', 'model', ?3, '/gallery', 'metadata_only', 7, 7)",
+                rusqlite::params![id, owner, r#"{"prompt":"unchanged"}"#],
+            )
+            .unwrap();
+        }
+
+        apply_pending(&mut conn).unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
+        let index_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                  WHERE type = 'index' AND name = 'generation_queue_owner_order'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(index_sql.contains("owner_uuid, created_at"));
+        let rows = conn
+            .prepare(
+                "SELECT id, owner_uuid, request_json, created_at, rowid
+                   FROM generation_queue ORDER BY rowid",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].0, "first");
+        assert_eq!(rows[1].0, "second");
+        assert_eq!(rows[2].1, "owner-b");
+        assert!(rows.iter().all(|(_, _, request, created_at, _)| request
+            == r#"{"prompt":"unchanged"}"#
+            && *created_at == 7));
+        assert!(rows.windows(2).all(|pair| pair[0].4 < pair[1].4));
     }
 }

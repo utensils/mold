@@ -2034,8 +2034,11 @@ fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUp
         &upscale_model,
         job.image.clone(),
         &mut job.response,
-        job.execution_plan,
-        job.cancellation,
+        PostUpscaleRuntime {
+            output_metadata: job.output_metadata.as_ref(),
+            execution_plan: job.execution_plan,
+            cancellation: job.cancellation,
+        },
     );
     #[cfg(test)]
     pause_owner_stage_for_test(&job.id, TestOwnerStageBarrier::PostPostUpscale);
@@ -2064,7 +2067,13 @@ fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUp
             "post-generation upscale failed; keeping original image"
         );
     }
-    finish_generation_success(*job.generation, job.response, image, original);
+    finish_generation_success(
+        *job.generation,
+        job.response,
+        image,
+        original,
+        job.output_metadata,
+    );
     drop(cleanup);
     successful
 }
@@ -2092,12 +2101,14 @@ fn process_cpu_post_generation_upscale(mut job: PostGenerationUpscaleJob) -> boo
             image: job.image.data.clone(),
             output_format: job.image.format,
             tile_size: None,
-            metadata: Some(OutputMetadata::from_generate_request(
-                &job.generation.request,
-                job.response.seed_used,
-                None,
-                mold_core::build_info::version_string(),
-            )),
+            metadata: Some(job.output_metadata.clone().unwrap_or_else(|| {
+                OutputMetadata::from_generate_request(
+                    &job.generation.request,
+                    job.response.seed_used,
+                    None,
+                    mold_core::build_info::version_string(),
+                )
+            })),
         };
         run_cpu_upscale(
             job.execution_plan,
@@ -2122,7 +2133,13 @@ fn process_cpu_post_generation_upscale(mut job: PostGenerationUpscaleJob) -> boo
         report_post_generation_upscale_failure(job.generation.progress_tx.as_ref(), &error);
         tracing::warn!(%error, "CPU post-generation upscale failed; keeping original image");
     }
-    finish_generation_success(*job.generation, job.response, image, original);
+    finish_generation_success(
+        *job.generation,
+        job.response,
+        image,
+        original,
+        job.output_metadata,
+    );
     drop(cleanup);
     successful
 }
@@ -2162,7 +2179,13 @@ fn finish_post_generation_upscale_failure_blocking(
     report_post_generation_upscale_failure(job.generation.progress_tx.as_ref(), &error);
     tracing::warn!(%error, "post-generation upscale failed; keeping original image");
     let cleanup = GenerationCleanup::new(&job.generation);
-    finish_generation_success(*job.generation, job.response, job.image, None);
+    finish_generation_success(
+        *job.generation,
+        job.response,
+        job.image,
+        None,
+        job.output_metadata,
+    );
     drop(cleanup);
 }
 
@@ -2815,17 +2838,23 @@ fn is_video_family(family_slug: &str) -> bool {
     )
 }
 
+struct PostUpscaleRuntime<'a> {
+    output_metadata: Option<&'a OutputMetadata>,
+    execution_plan: Option<mold_inference::upscaler::ResolvedUpscaleExecutionPlan>,
+    cancellation: mold_inference::InferenceCancellationToken,
+}
+
 fn upscale_generated_image_on_worker(
     worker: &GpuWorker,
     job: &GpuJob,
     upscale_model: &str,
     img: ImageData,
     response: &mut mold_core::GenerateResponse,
-    exact_plan: Option<mold_inference::upscaler::ResolvedUpscaleExecutionPlan>,
-    cancellation: mold_inference::InferenceCancellationToken,
+    runtime: PostUpscaleRuntime<'_>,
 ) -> Result<ImageData, String> {
     let model_name = mold_core::manifest::resolve_model_name(upscale_model);
-    let plan = exact_plan
+    let plan = runtime
+        .execution_plan
         .ok_or_else(|| "post-generation upscaling lacked an exact execution plan".to_string())?;
     if plan.model_name != model_name {
         return Err(format!(
@@ -2855,14 +2884,16 @@ fn upscale_generated_image_on_worker(
         image: img.data.clone(),
         output_format: img.format,
         tile_size: None,
-        metadata: Some(OutputMetadata::from_generate_request(
-            &job.request,
-            response.seed_used,
-            None,
-            mold_core::build_info::version_string(),
-        )),
+        metadata: Some(runtime.output_metadata.cloned().unwrap_or_else(|| {
+            OutputMetadata::from_generate_request(
+                &job.request,
+                response.seed_used,
+                None,
+                mold_core::build_info::version_string(),
+            )
+        })),
     };
-    engine.set_cancellation_token(cancellation);
+    engine.set_cancellation_token(runtime.cancellation);
     let upscale_result = run_upscale_engine_safely(worker, engine, &req);
     let upscaled = upscale_result.map_err(|e| format!("upscale failed: {e:#}"))?;
     apply_upscale_response_to_image_generation(&job.request, response, img, upscaled)
@@ -3434,7 +3465,7 @@ fn finish_claimed_h3_success(
     };
     worker.consecutive_failures.store(0, Ordering::SeqCst);
     crate::gpu_pool::clear_model_cuda_oom(&job.model);
-    finish_generation_success(job, output.response, image, None);
+    finish_generation_success(job, output.response, image, None, None);
     true
 }
 
@@ -3753,24 +3784,32 @@ fn process_job_with_sink(
     // at replay instead would delete a job that merely waited behind a long
     // render through a few deploys, having never touched a GPU.
     if let Some(ticket) = job.journal.as_ref() {
-        if let crate::queue_journal::DispatchClaim::Exhausted { attempts, cap } =
-            ticket.claim_dispatch()
-        {
-            let err_msg = format!(
-                "'{model_name}' was started {attempts} times without finishing (limit {cap}); \
+        match ticket.claim_dispatch() {
+            crate::queue_journal::DispatchClaim::Exhausted { attempts, cap } => {
+                let err_msg = format!(
+                    "'{model_name}' was started {attempts} times without finishing (limit {cap}); \
                  it is held for review instead of being retried"
-            );
-            tracing::error!(gpu = ordinal, model = %model_name, attempts, cap, "held an exhausted durable queue row");
-            if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                );
+                tracing::error!(gpu = ordinal, model = %model_name, attempts, cap, "held an exhausted durable queue row");
+                if let Some(ref tx) = job.progress_tx {
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                }
+                // The row is already `held`; settle the ticket so its drop does
+                // not delete what the operator now needs to inspect.
+                if let Some(ticket) = job.journal.take() {
+                    ticket.hold("dispatch attempts exhausted");
+                }
+                let _ = job.result_tx.send(Err(err_msg));
+                return false;
             }
-            // The row is already `held`; settle the ticket so its drop does
-            // not delete what the operator now needs to inspect.
-            if let Some(ticket) = job.journal.take() {
-                ticket.hold("dispatch attempts exhausted");
+            crate::queue_journal::DispatchClaim::Fenced => {
+                let err_msg = "durable generation claim is stale; refusing dispatch".to_string();
+                tracing::warn!(job = %job.id, "refused a stale durable feeder claim");
+                let _ = job.result_tx.send(Err(err_msg));
+                return false;
             }
-            let _ = job.result_tx.send(Err(err_msg));
-            return false;
+            crate::queue_journal::DispatchClaim::Granted
+            | crate::queue_journal::DispatchClaim::Untracked => {}
         }
     }
 
@@ -3802,22 +3841,6 @@ fn process_job_with_sink(
         job.registry
             .install_running_cancellation(&job_id, cancellation.clone());
     }
-    let reference_bindings = match crate::reference_uploads::inference_bindings_for_request(
-        &job.request,
-        job.resolved_references.as_ref(),
-        inference_cancellation,
-    ) {
-        Ok(bindings) => bindings,
-        Err(error) => {
-            let err_msg = format!("generation reference binding error: {error:#}");
-            if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-            }
-            let _ = job.result_tx.send(Err(err_msg));
-            return false;
-        }
-    };
-
     // Mark the registry entry as running on this specific GPU. The /api/queue
     // listing now shows this row as `state: "running"` with `gpu: <ordinal>`.
     // The V2 coordinator claims the row atomically before transport. Legacy
@@ -3835,6 +3858,52 @@ fn process_job_with_sink(
         return false;
     }
 
+    // A GpuJob reaches this function only after the coordinator has granted a
+    // concrete device lease. Hydrate authenticated media now—not while it is
+    // queued, preparing dependencies, retrying transport, or waiting for the
+    // owner thread—and retain the staging owner for the complete attempt.
+    let hydrated_media_lease = if let Some(deferred) = job.deferred_media.take() {
+        match deferred.hydrate_into(&job_id, &mut job.request) {
+            Ok(lease) => Some(lease),
+            Err(error) => {
+                finish_generation_hydration_failure(job, error);
+                return false;
+            }
+        }
+    } else {
+        None
+    };
+    let request = match hydrated_media_lease {
+        Some(lease) => {
+            crate::queue_media_runtime::AttemptQueueMediaRequest::hydrated(&mut job.request, lease)
+        }
+        None => crate::queue_media_runtime::AttemptQueueMediaRequest::plain(&job.request),
+    };
+
+    if inference_cancellation.is_some_and(|token| token.is_cancelled()) {
+        let user_requested = job.registry.cancel_requested(&job_id);
+        drop(request);
+        finish_generation_cancelled(job, user_requested);
+        return false;
+    }
+
+    let reference_bindings = match crate::reference_uploads::inference_bindings_for_request(
+        &request,
+        job.resolved_references.as_ref(),
+        inference_cancellation,
+    ) {
+        Ok(bindings) => bindings,
+        Err(error) => {
+            let err_msg = format!("generation reference binding error: {error:#}");
+            let err_msg = request.redact_staging_paths(err_msg);
+            if let Some(ref tx) = job.progress_tx {
+                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+            }
+            let _ = job.result_tx.send(Err(err_msg));
+            return false;
+        }
+    };
+
     // Hand the frozen plan's admitted peak down to the engine for this
     // dispatch. Held for the whole job (load + inference) and released on
     // every exit path by the guard's Drop.
@@ -3850,7 +3919,7 @@ fn process_job_with_sink(
     // A chain/admin/auxiliary workload may have poisoned the context while
     // this job waited on the load lock. Recheck before any CUDA operation.
     if let Err(error) = ensure_worker_not_poisoned(worker, &model_name) {
-        let err_msg = error.to_string();
+        let err_msg = request.redact_staging_paths(error.to_string());
         if let Some(ref tx) = job.progress_tx {
             let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
         }
@@ -3923,7 +3992,7 @@ fn process_job_with_sink(
                 .and_then(|plan| plan.engine_config.identity_assets.clone());
             let pin = identity_pin.clone().unwrap_or_default();
             match crate::identity_extraction::resolve_pinned_identity_for_lease(
-                &job.request,
+                &request,
                 identity_paths.as_ref(),
                 &pin,
                 worker.gpu.backend,
@@ -3963,11 +4032,16 @@ fn process_job_with_sink(
                     resolved.embedding
                 }
                 Err(error) => {
-                    let err_msg = settle_identity_extraction_failure(worker, &model_name, &error);
+                    let err_msg = request.redact_staging_paths(settle_identity_extraction_failure(
+                        worker,
+                        &model_name,
+                        &error,
+                    ));
                     tracing::error!(
                         gpu = ordinal,
                         model = %model_name,
-                        "face-identity conditioning failed: {error}"
+                        %err_msg,
+                        "face-identity conditioning failed"
                     );
                     if let Some(ref tx) = job.progress_tx {
                         let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
@@ -3983,8 +4057,8 @@ fn process_job_with_sink(
     let config_snapshot = job.config.blocking_read().clone();
     let family_slug = crate::model_manager::family_for_model_sync(&model_name, &config_snapshot);
     let activation_hint =
-        crate::model_manager::activation_hint_for_request_sync(&config_snapshot, &job.request);
-    let request_has_lora = crate::model_manager::request_has_effective_lora(&job.request);
+        crate::model_manager::activation_hint_for_request_sync(&config_snapshot, &request);
+    let request_has_lora = crate::model_manager::request_has_effective_lora(&request);
     // `admission_host_demand_bytes` is already zero on Metal, whose host claim
     // rides the unified device gate — asking for headroom there would be the
     // #1038 double-count.
@@ -4004,7 +4078,7 @@ fn process_job_with_sink(
         predicted_host_increment_bytes: planned_host_increment_bytes,
         available_host_headroom_bytes: planned_host_headroom_bytes,
         execution_fingerprint: plan.execution_fingerprint.as_str(),
-        request: &job.request,
+        request: &request,
         engine_paths: &plan.engine_paths,
         engine_config: &plan.engine_config,
     });
@@ -4017,7 +4091,6 @@ fn process_job_with_sink(
         request_has_lora,
         planned_load,
     ) {
-        tracing::error!(gpu = ordinal, model = %model_name, "Failed to load model: {e}");
         // Detect CUDA OOM during load: synchronize the device so subsequent
         // allocations don't inherit a poisoned context, then surface a
         // user-friendly message instead of the opaque DriverError string.
@@ -4032,7 +4105,7 @@ fn process_job_with_sink(
                     worker,
                     &model_name,
                     family_slug.as_deref(),
-                    Some(&job.request),
+                    Some(&request),
                     job.execution_plan.as_ref().map(|plan| &plan.engine_paths),
                     job.execution_plan
                         .as_ref()
@@ -4055,6 +4128,8 @@ fn process_job_with_sink(
                 true,
             )
         };
+        let err_msg = request.redact_staging_paths(err_msg);
+        tracing::error!(gpu = ordinal, model = %model_name, %err_msg, "failed to load model");
         if let Some(ref tx) = job.progress_tx {
             let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
         }
@@ -4074,6 +4149,7 @@ fn process_job_with_sink(
     // lands during it must stop before inference or publication begins.
     if inference_cancellation.is_some_and(|token| token.is_cancelled()) {
         let user_requested = job.registry.cancel_requested(&job_id);
+        drop(request);
         finish_generation_cancelled(job, user_requested);
         return false;
     }
@@ -4087,7 +4163,7 @@ fn process_job_with_sink(
     }
 
     if let Err(error) = ensure_worker_not_poisoned(worker, &model_name) {
-        let err_msg = error.to_string();
+        let err_msg = request.redact_staging_paths(error.to_string());
         if let Some(ref tx) = job.progress_tx {
             let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
         }
@@ -4100,7 +4176,7 @@ fn process_job_with_sink(
         let mut gen = worker.active_generation.write().unwrap();
         *gen = Some(ActiveGeneration {
             model: model_name.clone(),
-            prompt_sha256: format!("{:x}", Sha256::digest(job.request.prompt.as_bytes())),
+            prompt_sha256: format!("{:x}", Sha256::digest(request.prompt.as_bytes())),
             started_at_unix_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -4204,11 +4280,11 @@ fn process_job_with_sink(
             Some(cancellation) => mold_inference::with_inference_cancellation(
                 &mut *cached_engine.engine,
                 cancellation.clone(),
-                |engine| engine.generate_with_reference_bindings(&job.request, &reference_bindings),
+                |engine| engine.generate_with_reference_bindings(&request, &reference_bindings),
             ),
             None => cached_engine
                 .engine
-                .generate_with_reference_bindings(&job.request, &reference_bindings),
+                .generate_with_reference_bindings(&request, &reference_bindings),
         }
     }));
 
@@ -4342,8 +4418,7 @@ fn process_job_with_sink(
                 unreachable!("checked above");
             };
             if response.video.is_none() && response.audio.is_none() {
-                if let Some(upscale_model) = job
-                    .request
+                if let Some(upscale_model) = request
                     .upscale_model
                     .as_deref()
                     .map(str::trim)
@@ -4391,10 +4466,14 @@ fn process_job_with_sink(
                                 %error,
                                 "post-generation upscale failed; keeping original image"
                             );
-                            finish_generation_success(job, response, img, None);
+                            let output_metadata = hydrated_output_metadata(&request, &response);
+                            drop(request);
+                            finish_generation_success(job, response, img, None, output_metadata);
                             return true;
                         }
                     };
+                    let output_metadata = hydrated_output_metadata(&request, &response);
+                    drop(request);
                     let followup_id = format!("{}::post-upscale", job.id);
                     let work = crate::scheduler::ScheduledOwnerWork::new(
                         followup_id.clone(),
@@ -4405,6 +4484,7 @@ fn process_job_with_sink(
                             generation: Box::new(job),
                             response,
                             image: img,
+                            output_metadata,
                             // Preserve the generation's exact attempt token so
                             // Cancel remains authoritative through this final
                             // owner stage instead of signalling a fresh token.
@@ -4444,12 +4524,13 @@ fn process_job_with_sink(
                 }
             }
 
-            finish_generation_success(job, response, img, None);
+            let output_metadata = hydrated_output_metadata(&request, &response);
+            drop(request);
+            finish_generation_success(job, response, img, None, output_metadata);
             drop(cleanup);
             true
         }
         Ok(Err(e)) => {
-            tracing::warn!(gpu = ordinal, model = %model_name, "Generation failed: {e}");
             // Fatal driver errors invalidate the CUDA context and permanently
             // quarantine this worker. Ordinary OOMs retain the existing
             // synchronize-and-retry policy.
@@ -4464,7 +4545,7 @@ fn process_job_with_sink(
                         worker,
                         &model_name,
                         family_slug.as_deref(),
-                        Some(&job.request),
+                        Some(&request),
                         job.execution_plan.as_ref().map(|plan| &plan.engine_paths),
                         job.execution_plan
                             .as_ref()
@@ -4486,6 +4567,8 @@ fn process_job_with_sink(
                     true,
                 )
             };
+            let err_msg = request.redact_staging_paths(err_msg);
+            tracing::warn!(gpu = ordinal, model = %model_name, %err_msg, "generation failed");
             if count_worker_failure {
                 record_failure(worker);
             }
@@ -4508,15 +4591,15 @@ fn process_job_with_sink(
             false
         }
         Err(panic_payload) => {
-            tracing::error!(gpu = ordinal, model = %model_name, "Inference panicked");
             let msg = panic_payload
                 .downcast_ref::<String>()
                 .map(|s| s.as_str())
                 .or_else(|| panic_payload.downcast_ref::<&str>().copied())
                 .unwrap_or("unknown panic");
-            let err_msg = format!(
+            let err_msg = request.redact_staging_paths(format!(
                 "inference panicked on GPU {ordinal}: {msg}; CUDA owner was quarantined and the server must restart"
-            );
+            ));
+            tracing::error!(gpu = ordinal, model = %model_name, %err_msg, "inference panicked");
             if let Some(ref tx) = job.progress_tx {
                 let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
             }
@@ -4526,11 +4609,25 @@ fn process_job_with_sink(
     }
 }
 
+fn hydrated_output_metadata(
+    request: &crate::queue_media_runtime::AttemptQueueMediaRequest<'_>,
+    response: &mold_core::GenerateResponse,
+) -> Option<OutputMetadata> {
+    request.is_hydrated().then(|| {
+        request.output_metadata(
+            response.seed_used,
+            None,
+            mold_core::build_info::version_string(),
+        )
+    })
+}
+
 fn finish_generation_success(
     mut job: GpuJob,
     response: mold_core::GenerateResponse,
     image: ImageData,
     original_image: Option<ImageData>,
+    prepared_metadata: Option<OutputMetadata>,
 ) {
     match job.registry.claim_completion(&job.id) {
         crate::job_registry::CompletionClaim::Claimed => {}
@@ -4543,12 +4640,14 @@ fn finish_generation_success(
             return;
         }
     }
-    let mut metadata = OutputMetadata::from_generate_request(
-        &job.request,
-        response.seed_used,
-        None,
-        mold_core::build_info::version_string(),
-    );
+    let mut metadata = prepared_metadata.unwrap_or_else(|| {
+        OutputMetadata::from_generate_request(
+            &job.request,
+            response.seed_used,
+            None,
+            mold_core::build_info::version_string(),
+        )
+    });
     // Written into the saved print before the save, so boot replay can tell a
     // job that already produced its output from one that never ran. Output
     // filenames are wall-clock, so nothing downstream could tell them apart.
@@ -4620,7 +4719,8 @@ fn finish_generation_success(
     // and replay it into a duplicate print.
     if let Some(ticket) = job.journal.take() {
         if saved_names.output.is_some() {
-            ticket.complete();
+            let result_json = saved_names.terminal_json();
+            ticket.complete_with_result(Some(&result_json));
         } else {
             tracing::error!(
                 job = %job.id,
@@ -4666,6 +4766,35 @@ fn finish_generation_cancelled(mut job: GpuJob, user_requested: bool) {
             SseErrorEvent::failed(message.clone())
         } else {
             SseErrorEvent::retained(message.clone())
+        };
+        let _ = tx.send(SseMessage::Error(event));
+    }
+    let _ = job.result_tx.send(Err(message));
+}
+
+fn finish_generation_hydration_failure(
+    mut job: GpuJob,
+    error: crate::queue_media_runtime::DeferredQueueMediaError,
+) {
+    use crate::queue_media_runtime::DeferredHydrationDisposition;
+
+    let disposition = error.disposition();
+    if let Some(ticket) = job.journal.take() {
+        match disposition {
+            DeferredHydrationDisposition::Hold => {
+                ticket.hold("durable queue-media validation failed")
+            }
+            DeferredHydrationDisposition::Retain => {
+                ticket.retain();
+            }
+        }
+    }
+    tracing::error!(job = %job.id, %error, "durable queue-media hydration failed");
+    let message = error.public_message().to_string();
+    if let Some(ref tx) = job.progress_tx {
+        let event = match disposition {
+            DeferredHydrationDisposition::Hold => SseErrorEvent::failed(message.clone()),
+            DeferredHydrationDisposition::Retain => SseErrorEvent::retained(message.clone()),
         };
         let _ = tx.send(SseMessage::Error(event));
     }
@@ -6071,6 +6200,50 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn durable_media_hydrates_only_inside_the_device_owner_after_two_cancel_fences() {
+        let source = include_str!("gpu_worker.rs");
+        let start = source
+            .find("fn process_job_with_sink(")
+            .expect("GPU generation owner");
+        let end = source[start..]
+            .find("\nfn finish_generation_success(")
+            .map(|offset| start + offset)
+            .expect("GPU generation owner boundary");
+        let body = &source[start..end];
+        let install = body
+            .find("install_running_cancellation")
+            .expect("attempt cancellation installation");
+        let hydrate = body
+            .find("deferred.hydrate_into")
+            .expect("lease-bound durable hydration");
+        let binding = body
+            .find("inference_bindings_for_request")
+            .expect("reference preparation");
+        let guard = body
+            .find("AttemptQueueMediaRequest::hydrated")
+            .expect("attempt-scoped hydrated request guard");
+        let metadata = body
+            .find("hydrated_output_metadata(&request")
+            .expect("sanitized metadata before owner transfer");
+        let cancel_checks = body
+            .match_indices("inference_cancellation.is_some_and(|token| token.is_cancelled())")
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+
+        assert!(install < cancel_checks[0]);
+        assert!(cancel_checks[0] < hydrate);
+        assert!(hydrate < guard && guard < cancel_checks[1]);
+        assert!(cancel_checks[1] < binding);
+        assert!(binding < metadata);
+        assert!(body.contains("request.redact_staging_paths"));
+        assert!(body.contains("drop(request);\n        finish_generation_cancelled"));
+        let guarded_tail = &body[guard..];
+        assert_eq!(guarded_tail.matches("&job.request").count(), 1);
+        assert!(!guarded_tail.contains("job.request.clone()"));
+        assert!(guarded_tail.contains("output_metadata,"));
+    }
+
+    #[test]
     fn claimed_h3_attempt_has_a_cache_free_execution_route() {
         let source = include_str!("gpu_worker.rs");
         let owner_start = source
@@ -6209,6 +6382,7 @@ mod tests {
                     GenerationJob {
                         id: format!("{id}-reserved-{index}"),
                         request: request.clone(),
+                        deferred_media: None,
                         resolved_references: None,
                         completion_payload: SseCompletionPayload::Full,
                         progress_tx: None,
@@ -6232,6 +6406,7 @@ mod tests {
             id: id.to_string(),
             model: request.model.clone(),
             request,
+            deferred_media: None,
             resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: Some(progress_tx),
@@ -8320,6 +8495,7 @@ mod tests {
             id: "job-upscale-test".to_string(),
             model: request.model.clone(),
             request,
+            deferred_media: None,
             resolved_references: None,
             completion_payload: crate::state::SseCompletionPayload::Full,
             progress_tx: None,
@@ -8618,6 +8794,7 @@ mod tests {
                 id: "stale".to_string(),
                 model: request.model.clone(),
                 request,
+                deferred_media: None,
                 resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
@@ -9483,6 +9660,7 @@ mod tests {
                 id: id.to_string(),
                 model: request.model.clone(),
                 request,
+                deferred_media: None,
                 resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
@@ -9519,6 +9697,7 @@ mod tests {
                         generation: Box::new(generation),
                         response,
                         image: original,
+                        output_metadata: None,
                         cancellation: mold_inference::InferenceCancellationToken::default(),
                         execution_plan: Some(
                             mold_inference::upscaler::resolve_upscale_execution_plan(
@@ -9615,6 +9794,7 @@ mod tests {
                     id: "barrier-generation".to_string(),
                     model: request.model.clone(),
                     request,
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
@@ -10251,6 +10431,7 @@ mod tests {
                     id: "invalidated".to_string(),
                     model: "test:q4".to_string(),
                     request,
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
@@ -10796,6 +10977,7 @@ mod tests {
                 GenerationJob {
                     id: "generate".to_string(),
                     request: request.clone(),
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
@@ -10818,6 +11000,7 @@ mod tests {
                 id: "generate".to_string(),
                 model: "lifecycle".to_string(),
                 request,
+                deferred_media: None,
                 resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
@@ -11093,6 +11276,7 @@ mod tests {
                 GenerationJob {
                     id: "placeholder".to_string(),
                     request: request.clone(),
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
@@ -11119,6 +11303,7 @@ mod tests {
                 id: "buffered-job".to_string(),
                 model: request.model.clone(),
                 request,
+                deferred_media: None,
                 resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: Some(progress_tx),
@@ -11186,6 +11371,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn prepared_durable_metadata_survives_request_scrub_without_staging_paths() {
+        use zeroize::Zeroize as _;
+
+        let mut job = fake_upscale_job(Config::default(), "unused");
+        job.request.source_image = Some(b"source-secret".to_vec());
+        job.request.source_image_name = Some("allowed-source-name.png".into());
+        job.request.source_video_path = Some("/private/runtime-secret/ready/source.mp4".into());
+        let mut metadata = OutputMetadata::from_generate_request(
+            &job.request,
+            7,
+            None,
+            mold_core::build_info::version_string(),
+        );
+        if let Some(path) = &mut metadata.source_video_path {
+            path.zeroize();
+        }
+        metadata.source_video_path = None;
+        crate::queue_media::scrub_request_media(&mut job.request);
+
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        job.progress_tx = Some(progress_tx);
+        finish_generation_success(job, fake_response(), fake_image(), None, Some(metadata));
+
+        let SseMessage::Complete(event) = progress_rx.try_recv().unwrap() else {
+            panic!("prepared metadata should complete over SSE");
+        };
+        let metadata = event
+            .metadata
+            .as_deref()
+            .expect("completion carries prepared metadata");
+        assert_eq!(
+            metadata.source_image_name.as_deref(),
+            Some("allowed-source-name.png")
+        );
+        assert!(metadata.source_image_sha256.is_some());
+        assert!(metadata.source_video_path.is_none());
+        let event_json = serde_json::to_string(&event).unwrap();
+        assert!(!event_json.contains("runtime-secret"));
+        assert!(!event_json.contains("source.mp4"));
+    }
+
     /// A replayed job has no client, so the gallery file IS the delivery.
     /// Deleting its row after a failed publication (unwritable directory, full
     /// disk, a refused archive) loses the generation outright — nothing on
@@ -11211,11 +11438,16 @@ mod tests {
                 request: &request,
                 output_dir: Some(&blocked),
                 target_gpu: None,
+                target_device_id: None,
                 completion_payload: SseCompletionPayload::Full,
                 batch_child: false,
                 carries_reference_authority: false,
             })
             .expect("a gallery-bound generation is durable");
+        assert_eq!(
+            ticket.claim_dispatch(),
+            crate::queue_journal::DispatchClaim::Granted
+        );
 
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
@@ -11223,6 +11455,7 @@ mod tests {
             id: "publish-fails".to_string(),
             model: "mock-model".to_string(),
             request,
+            deferred_media: None,
             resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
@@ -11242,7 +11475,7 @@ mod tests {
             journal: Some(ticket),
         };
 
-        finish_generation_success(job, fake_response(), fake_image(), None);
+        finish_generation_success(job, fake_response(), fake_image(), None, None);
 
         let rows = journal.list_all();
         assert_eq!(rows.len(), 1, "the row must not be deleted");
@@ -11274,11 +11507,16 @@ mod tests {
                 request: &request,
                 output_dir: Some(tmp.path()),
                 target_gpu: None,
+                target_device_id: None,
                 completion_payload: SseCompletionPayload::Full,
                 batch_child: false,
                 carries_reference_authority: false,
             })
             .unwrap();
+        assert_eq!(
+            ticket.claim_dispatch(),
+            crate::queue_journal::DispatchClaim::Granted
+        );
 
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
@@ -11286,6 +11524,7 @@ mod tests {
             id: "publishes".to_string(),
             model: "mock-model".to_string(),
             request,
+            deferred_media: None,
             resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
@@ -11305,7 +11544,7 @@ mod tests {
             journal: Some(ticket),
         };
 
-        finish_generation_success(job, fake_response(), fake_image(), None);
+        finish_generation_success(job, fake_response(), fake_image(), None, None);
 
         assert!(journal.list_all().is_empty());
     }
@@ -11340,6 +11579,7 @@ mod tests {
                     id: "cancelled-job".to_string(),
                     model: "cancel-model".to_string(),
                     request,
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
@@ -11409,6 +11649,7 @@ mod tests {
                 GenerationJob {
                     id: "placeholder".to_string(),
                     request: request.clone(),
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
@@ -11435,6 +11676,7 @@ mod tests {
                     id: "panic-job".to_string(),
                     model: "panic-model".to_string(),
                     request: panic_request,
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
@@ -11482,6 +11724,7 @@ mod tests {
                 GenerationJob {
                     id: "placeholder-2".to_string(),
                     request: request.clone(),
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
@@ -11506,6 +11749,7 @@ mod tests {
                     id: "followup".to_string(),
                     model: "panic-model".to_string(),
                     request,
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
@@ -11853,8 +12097,11 @@ mod tests {
             "real-esrgan-x4plus:fp16",
             fake_upscale_image(),
             &mut response,
-            None,
-            mold_inference::InferenceCancellationToken::default(),
+            PostUpscaleRuntime {
+                output_metadata: None,
+                execution_plan: None,
+                cancellation: mold_inference::InferenceCancellationToken::default(),
+            },
         )
         .expect_err("worker should reject a missing upscaler config");
 
@@ -11925,6 +12172,7 @@ mod tests {
                 GenerationJob {
                     id: "queue-slot".to_string(),
                     request: job.request.clone(),
+                    deferred_media: None,
                     resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,

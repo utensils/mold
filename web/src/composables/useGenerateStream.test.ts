@@ -994,18 +994,25 @@ describe("live latent preview", () => {
     }
   });
 
-  it("persists only reference descriptors, never inline bytes or one-use secrets", () => {
+  it("keeps media authority and biometric metadata out of localStorage", () => {
     const stream = useGenerateStream();
     const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
     const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
     job.request = singleGen({
       model: "minimax-h3-ref2va",
       frames: 124,
+      source_image: "PRIVATE-SOURCE-BYTES",
+      id_image: "PRIVATE-FACE-BYTES",
+      id_image_name: "identity.png",
+      id_weight: 1.5,
+      id_start_step: 2,
+      audio_file_path: "/private/audio.wav",
+      source_video_path: "/private/source.mp4",
       references: [
         {
           kind: "image",
           media: { authority: "inline", data: "PRIVATE-IMAGE-BYTES" },
-          provenance: { name: "identity.png", sha256: "a".repeat(64) },
+          provenance: { name: "identity.png", sha256: "BIOMETRIC-DIGEST" },
           mime_type: "image/png",
           width: 32,
           height: 24,
@@ -1021,16 +1028,27 @@ describe("live latent preview", () => {
         },
       ],
     });
-
     __testing__.persistJobs([job]);
     const raw = localStorage.getItem(__testing__.STORAGE_KEY)!;
+    expect(raw).not.toContain("PRIVATE-SOURCE-BYTES");
+    expect(raw).not.toContain("PRIVATE-FACE-BYTES");
     expect(raw).not.toContain("PRIVATE-IMAGE-BYTES");
     expect(raw).not.toContain("ONE-USE-HANDLE");
+    expect(raw).not.toContain("/private/audio.wav");
+    expect(raw).not.toContain("/private/source.mp4");
+    expect(raw).not.toContain("identity.png");
+    expect(raw).not.toContain("BIOMETRIC-DIGEST");
     const restored = __testing__.loadPersistedJobs(raw)[0]!;
-    expect((restored.request as GenerateRequestWire).references).toEqual([
-      expect.objectContaining({ media: { authority: "descriptor" } }),
-      expect.objectContaining({ media: { authority: "descriptor" } }),
-    ]);
+    expect(
+      (restored.request as GenerateRequestWire).references,
+    ).toBeUndefined();
+    expect(
+      (restored.request as GenerateRequestWire).id_image_name,
+    ).toBeUndefined();
+    expect((restored.request as GenerateRequestWire).id_weight).toBeUndefined();
+    expect(
+      (restored.request as GenerateRequestWire).id_start_step,
+    ).toBeUndefined();
   });
 });
 

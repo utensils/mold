@@ -1,5 +1,6 @@
 import type { Ref } from "vue";
 import { fetchQueue, listGalleryFrom } from "../api";
+import { mergeQueueEntries } from "@studio/api/queuePlan";
 import { getHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import type { StreamTarget } from "../api";
 import type { Job, UseGenerateStream } from "./useGenerateStream";
@@ -44,6 +45,10 @@ export function reconcileRound(
   const missing: Job[] = [];
   for (const j of jobs) {
     if (j.state !== "running") continue;
+    // Batch outcome REST is the sole terminal authority for streamless jobs.
+    // Absence from the live queue is expected while durable work is waiting in
+    // SQLite and must never detach or fail it.
+    if (j.durableBatch) continue;
     if (!j.serverId) continue; // Request has not received its queued frame yet.
     if (serverIds.has(j.serverId)) continue; // server confirms it's alive
     if (now - j.lastProgressAt < RECONCILE_GRACE_MS) continue;
@@ -102,7 +107,7 @@ export function startQueueReconciler(
   async function tick() {
     if (stopped) return;
     const candidates = jobs.value.filter(
-      (j) => j.state === "running" && j.serverId,
+      (j) => j.state === "running" && j.serverId && !j.durableBatch,
     );
     if (candidates.length === 0) {
       schedule(intervalMs);
@@ -118,9 +123,18 @@ export function startQueueReconciler(
     const results = await Promise.allSettled(
       [...groups.values()].map(async (group) => {
         const listing = await fetchQueue(group.target ?? undefined);
-        const known = new Set(listing.entries.map((e) => e.id));
+        const known = new Set(
+          mergeQueueEntries(
+            listing.entries,
+            listing.live_only_entries ?? [],
+          ).map((entry) => entry.id),
+        );
         const missing = reconcileRound(group.jobs, known, Date.now());
         if (missing.length === 0) return;
+        // A bounded first page cannot prove that an absent durable row is
+        // gone. Wait until it advances into the live window; never turn a hot
+        // health loop into a scan of every durable row.
+        if (listing.page?.next_cursor) return;
         // A row leaves the queue for two reasons this loop cannot tell apart:
         // the job died, or it FINISHED. Absence decides neither — so ask the
         // host what it actually has. A print stamped with the job's own id is

@@ -174,6 +174,99 @@ describe("held rows", () => {
 });
 
 describe("jobs store", () => {
+  it("uses the host queue capacity as the payload-free first page and explicitly continues", async () => {
+    const hosts = seedHosts();
+    const host = hosts.all.find((entry) => entry.id === "hal9000-7680")!;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status")
+        return Promise.resolve({ version: "0.20.0", queue_paused: false, queue_capacity: 2 });
+      if (path === "/api/capabilities") return Promise.resolve({ queue: {} });
+      if (path === "/api/queue?limit=2")
+        return Promise.resolve({
+          entries: [
+            { id: "one", model: "m", state: "running", started_at_unix_ms: 1, position: 0 },
+            { id: "two", model: "m", state: "queued", started_at_unix_ms: 2, position: 1 },
+          ],
+          live_only_entries: [],
+          page: { limit: 2, offset: 0, returned: 2, next_cursor: "page-2" },
+        });
+      if (path === "/api/queue?limit=2&cursor=page-2")
+        return Promise.resolve({
+          entries: [
+            { id: "three", model: "m", state: "queued", started_at_unix_ms: 3, position: 2 },
+          ],
+          live_only_entries: [],
+          page: { limit: 2, offset: 2, returned: 1 },
+        });
+      return Promise.reject(new Error(`unexpected path ${path}`));
+    });
+    listDevices.mockResolvedValue({ plan_version: 1, devices: [device(0)] });
+    const jobs = useJobsStore();
+
+    await jobs.refreshHost(host);
+    expect(jobs.queues[host.id]?.entries.map(({ id }) => id)).toEqual(["one", "two"]);
+    expect(apiJsonTo.mock.calls.some(([, path]) => path === "/api/queue")).toBe(false);
+
+    await jobs.loadMoreHost(host.id);
+    expect(jobs.queues[host.id]?.entries.map(({ id }) => id)).toEqual(["one", "two", "three"]);
+    expect(jobs.queues[host.id]?.nextCursor).toBeNull();
+
+    await jobs.refreshHost(host);
+    expect(jobs.queues[host.id]?.entries.map(({ id }) => id)).toEqual(["one", "two"]);
+    expect(jobs.queues[host.id]?.nextCursor).toBe("page-2");
+    expect(jobs.queues[host.id]?.continued).toBe(false);
+  });
+
+  it("cannot apply a load-more failure to a replacement queue authority", async () => {
+    const hosts = seedHosts();
+    const host = hosts.all.find((entry) => entry.id === "hal9000-7680")!;
+    const continuation = deferred<unknown>();
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve({ queue_capacity: 1 });
+      if (path === "/api/capabilities") return Promise.resolve({ queue: {} });
+      if (path === "/api/queue?limit=1")
+        return Promise.resolve({
+          entries: [
+            { id: "head", model: "m", state: "queued", started_at_unix_ms: 1, position: 0 },
+          ],
+          page: { limit: 1, offset: 0, returned: 1, next_cursor: "next" },
+        });
+      if (path === "/api/queue?limit=1&cursor=next") return continuation.promise;
+      return Promise.reject(new Error(`unexpected path ${path}`));
+    });
+    const jobs = useJobsStore();
+    await jobs.refreshHost(host);
+    const stale = jobs.loadMoreHost(host.id);
+    await jobs.refreshHost(host);
+    continuation.resolve({ error: "old host failed" });
+    await stale;
+
+    expect(jobs.queues[host.id]?.loadMoreError).toBeNull();
+    expect(jobs.queues[host.id]?.loadingMore).toBe(false);
+  });
+
+  it("self-schedules polling only after the previous refresh settles", async () => {
+    vi.useFakeTimers();
+    seedHosts();
+    const jobs = useJobsStore();
+    const first = deferred<void>();
+    const refresh = vi.spyOn(jobs, "refresh").mockReturnValueOnce(first.promise);
+
+    jobs.startPolling();
+    await Promise.resolve();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    refresh.mockResolvedValue(undefined);
+    first.resolve();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(5_001);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    jobs.stopPolling();
+    vi.useRealTimers();
+  });
+
   it("refresh() snapshots every ready host's queue, pause state, and capabilities", async () => {
     seedHosts();
     installApi({ paused: true });

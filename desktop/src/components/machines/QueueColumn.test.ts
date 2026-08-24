@@ -64,6 +64,17 @@ describe("QueueColumn", () => {
     expect(rows[0]!.text()).toContain("queued · This device");
   });
 
+  it("keeps deeper host work reachable through an explicit continuation", async () => {
+    const { wrapper, jobs } = await mountColumn();
+    jobs.queues.local!.pageLimit = 1;
+    jobs.queues.local!.nextCursor = "next";
+    const loadMore = vi.spyOn(jobs, "loadMoreHost").mockResolvedValue(undefined);
+    await flushPromises();
+
+    await wrapper.get("[data-test='queue-column-load-more']").trigger("click");
+    expect(loadMore).toHaveBeenCalledWith("local");
+  });
+
   it("shows a held row as held, not as something still waiting its turn", async () => {
     // Held rows only reach this column because the store stopped filtering
     // them out; without this they would render as "queued · This device",

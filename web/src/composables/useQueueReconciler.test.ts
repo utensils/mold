@@ -299,6 +299,50 @@ describe("startQueueReconciler (live polling)", () => {
     vi.useRealTimers();
   });
 
+  it.each([
+    [
+      "live-only",
+      {
+        entries: [],
+        live_only_entries: [
+          {
+            id: "srv-1",
+            model: "m",
+            state: "running",
+            started_at_unix_ms: 0,
+            position: 0,
+          },
+        ],
+      },
+    ],
+    [
+      "truncated",
+      {
+        entries: [],
+        page: { limit: 1, offset: 0, returned: 0, next_cursor: "older" },
+      },
+    ],
+  ])(
+    "does not dead-letter a %s bounded queue result",
+    async (_label, listing) => {
+      vi.useFakeTimers();
+      vi.mocked(fetchQueue).mockResolvedValue(listing as never);
+      const jobs = ref<Job[]>([
+        makeJob({ lastProgressAt: 0, workStarted: false }),
+      ]);
+      const failRunning = vi.fn();
+      const handle = startQueueReconciler(jobs, failRunning, {
+        intervalMs: 1_000,
+      });
+
+      await vi.advanceTimersByTimeAsync(RECONCILE_GRACE_MS + 2_100);
+
+      expect(failRunning).not.toHaveBeenCalled();
+      handle.stop();
+      vi.useRealTimers();
+    },
+  );
+
   it("polls each job's routed host and reconciles only against that host", async () => {
     vi.useFakeTimers();
     const studio = { baseUrl: "http://studio:7680", apiKey: "sk-studio" };

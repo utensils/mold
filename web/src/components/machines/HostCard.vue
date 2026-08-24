@@ -4,9 +4,9 @@
  * host's `/api/status`, then shows the status dot, name, GPU/address mono
  * line, a memory + queue mono row, and a memory bar. The primary origin uses
  * the accent memory tone; remotes use halide. While the first poll is in
- * flight the card is a shimmer skeleton; an offline host shows a stop dot,
- * last-seen text, a "reconnecting…" note (the poll retries on its own), and a
- * Retry that forces a fresh poll immediately.
+ * flight the card is a shimmer skeleton; a transient failure shows an amber
+ * reconnecting state with last-seen text and a Retry action while retaining
+ * the last-good metrics.
  */
 import { computed } from "vue";
 import CardSurface from "@ui/components/CardSurface.vue";
@@ -32,12 +32,16 @@ const poll = useHostPoll(
 const showSkeleton = computed(
   () => !disconnected.value && poll.loading.value && !poll.status.value,
 );
-const offline = computed(
-  () => !disconnected.value && !showSkeleton.value && !poll.online.value,
+const reconnecting = computed(
+  () =>
+    !disconnected.value &&
+    !showSkeleton.value &&
+    (!poll.online.value || poll.stale.value),
 );
 const dotState = computed<"online" | "offline" | "unknown">(() => {
-  if (disconnected.value || showSkeleton.value) return "unknown";
-  return poll.online.value ? "online" : "offline";
+  if (disconnected.value || showSkeleton.value || reconnecting.value)
+    return "unknown";
+  return "online";
 });
 
 function hostAddress(url: string): string | null {
@@ -152,9 +156,13 @@ function openContextMenu(event: MouseEvent) {
           </button>
         </div>
       </template>
-      <template v-else-if="offline">
-        <div class="hc__offline">
-          <span class="hc__offline-text" data-test="host-offline">
+      <template v-else>
+        <div
+          v-if="reconnecting"
+          class="hc__offline"
+          data-test="host-reconnecting-state"
+        >
+          <span class="hc__offline-text">
             {{ lastSeenLabel }}
             <!-- The card keeps polling, so the machine comes back on its own;
                  say so rather than implying Retry is the only way back. -->
@@ -171,13 +179,12 @@ function openContextMenu(event: MouseEvent) {
             Retry
           </button>
         </div>
-      </template>
-      <template v-else>
-        <div class="hc__row">
+        <div v-if="poll.status.value" class="hc__row">
           <span data-test="host-mem">{{ memLabel }}</span>
           <span data-test="host-queue">{{ queueLabel }}</span>
         </div>
         <ProgressBar
+          v-if="poll.status.value"
           :value="memPct"
           :tone="primary ? 'accent' : 'info'"
           :label="`${host.name} memory`"

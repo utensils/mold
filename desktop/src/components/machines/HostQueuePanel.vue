@@ -401,6 +401,19 @@ function loadQueueSettings(metadata: OutputMetadata) {
       </div>
     </template>
     <QueuePlanWorkList class="mt-2" :plan="snapshot?.plan ?? null" :exclude-ids="entryIds" />
+    <button
+      v-if="snapshot?.nextCursor"
+      type="button"
+      data-test="queue-load-more"
+      class="border-edge mt-2 h-8 w-full rounded-control border px-3 text-caption text-ink-2 hover:text-ink disabled:opacity-50"
+      :disabled="snapshot.loadingMore"
+      @click="jobs.loadMoreHost(host.id)"
+    >
+      {{ snapshot.loadingMore ? "Loading…" : "Load more jobs" }}
+    </button>
+    <p v-if="snapshot?.loadMoreError" class="mt-1 text-caption text-stop">
+      {{ snapshot.loadMoreError }}
+    </p>
     <p
       v-if="!hasEntries && !hasPlanOnlyWork"
       class="mt-1 text-caption text-ink-3"

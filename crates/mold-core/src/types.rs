@@ -3164,10 +3164,16 @@ pub struct ServerStatus {
     /// Per-GPU worker status (multi-GPU only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpus: Option<Vec<GpuWorkerStatus>>,
-    /// Current request queue depth (multi-GPU only).
+    /// Total waiting generation load owned by this server (multi-GPU only).
+    ///
+    /// This includes the durable SQLite backlog plus live non-durable jobs,
+    /// with hydrated durable jobs counted once. It is not limited by
+    /// `queue_capacity`, which describes only the hydrated runtime window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_depth: Option<usize>,
-    /// Maximum queue capacity (multi-GPU only).
+    /// Maximum hydrated runtime queue window (multi-GPU only).
+    ///
+    /// The durable generation backlog is not capped by this value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_capacity: Option<usize>,
     /// Whether new-job dispatch is currently paused (`POST /api/queue/pause`).
@@ -3239,6 +3245,13 @@ pub struct QueueJobEntryWire {
     /// older servers; never carries image payloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Box<OutputMetadata>>,
+    /// Whether this exact request is journalled across restart. Additive and
+    /// per-job because some request shapes intentionally remain live-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable: Option<bool>,
+    /// Why a durable row is parked in the additive `held` state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_reason: Option<String>,
 }
 
 /// Confidence attached to a learned scheduler ETA.
@@ -3628,6 +3641,21 @@ pub struct QueuePlan {
     pub host_memory: Option<HostMemorySnapshot>,
 }
 
+/// Metadata for an explicitly requested durable queue page.
+///
+/// The cursor is opaque: clients persist and return it unchanged. `offset`
+/// counts durable rows traversed by this cursor chain and is informational;
+/// continuation is always defined by `next_cursor`, never by arithmetic on
+/// the offset.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct QueuePage {
+    pub limit: usize,
+    pub offset: usize,
+    pub returned: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
 /// Whole-queue listing returned by `GET /api/queue` — the client-side twin of
 /// mold-server's `job_registry::QueueListing`. The server wraps the rows in
 /// an object (not a bare array) so the response can grow extra fields without
@@ -3636,10 +3664,17 @@ pub struct QueuePlan {
 pub struct QueueListingWire {
     #[serde(default)]
     pub entries: Vec<QueueJobEntryWire>,
+    /// Active rows without durable backing. Current servers repeat this
+    /// bounded set on every explicit durable page; absent on legacy hosts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub live_only_entries: Vec<QueueJobEntryWire>,
     /// Absent on legacy servers and before the V2 coordinator has produced
     /// its first plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<QueuePlan>,
+    /// Present only for an explicitly bounded durable request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<QueuePage>,
 }
 
 // ── GET /api/activity wire types ───────────────────────────────────────────
@@ -3694,6 +3729,22 @@ pub struct ActiveWorkSnapshot {
 }
 
 impl QueueListingWire {
+    /// Preserve the legacy `entries` view for Rust callers while accepting the
+    /// current split durable/live response. The first occurrence of an id is
+    /// authoritative, matching Studio consumers.
+    pub fn merge_live_only_entries(&mut self) {
+        let mut seen = self
+            .entries
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        self.entries.extend(
+            std::mem::take(&mut self.live_only_entries)
+                .into_iter()
+                .filter(|entry| seen.insert(entry.id.clone())),
+        );
+    }
+
     /// Normalize legacy internal lane identities before presenting this
     /// client-side projection to another consumer.
     pub fn normalize_planned_lanes_for_presentation(&mut self) {
@@ -4754,6 +4805,8 @@ mod tests {
             target_gpu: None,
             seed_pinned: None,
             metadata: None,
+            durable: None,
+            held_reason: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains(r#""state":"queued""#), "got: {json}");
@@ -4767,6 +4820,30 @@ mod tests {
         // Tolerate a hypothetical minimal wrapper — `entries` defaults empty.
         let listing: QueueListingWire = serde_json::from_str("{}").unwrap();
         assert!(listing.entries.is_empty());
+    }
+
+    #[test]
+    fn queue_page_keeps_the_cursor_opaque_and_omits_an_absent_continuation() {
+        let terminal = QueuePage {
+            limit: 32,
+            offset: 64,
+            returned: 7,
+            next_cursor: None,
+        };
+        let json = serde_json::to_value(&terminal).unwrap();
+        assert_eq!(json["limit"], 32);
+        assert_eq!(json["offset"], 64);
+        assert_eq!(json["returned"], 7);
+        assert!(json.get("next_cursor").is_none());
+
+        let continued: QueuePage = serde_json::from_value(serde_json::json!({
+            "limit": 32,
+            "offset": 32,
+            "returned": 32,
+            "next_cursor": "opaque-token"
+        }))
+        .unwrap();
+        assert_eq!(continued.next_cursor.as_deref(), Some("opaque-token"));
     }
 
     #[test]
@@ -7181,6 +7258,50 @@ mod tests {
         assert_eq!(parsed.models_disk, status.models_disk);
     }
 
+    #[test]
+    fn generation_batch_status_preserves_legacy_wire_and_enriched_outcome() {
+        let legacy = r#"{
+            "id":"batch-1",
+            "client_batch_id":"client-1",
+            "children":[{"index":1,"job_id":"job-1","state":"accepted"}]
+        }"#;
+        let legacy: super::GenerationBatchStatus = serde_json::from_str(legacy).unwrap();
+        assert_eq!(legacy.instance_id, "");
+        assert!(!legacy.durable);
+        assert_eq!(legacy.children[0].created_at_ms, 0);
+        assert_eq!(legacy.children[0].updated_at_ms, 0);
+        assert!(legacy.children[0].result.is_none());
+
+        let enriched = super::GenerationBatchStatus {
+            id: "batch-1".into(),
+            client_batch_id: "client-1".into(),
+            instance_id: "instance-1".into(),
+            durable: true,
+            children: vec![super::GenerationBatchChild {
+                index: 1,
+                job_id: "job-1".into(),
+                state: super::GenerationBatchChildState::Complete,
+                error: None,
+                created_at_ms: 10,
+                updated_at_ms: 20,
+                completed_at_ms: Some(20),
+                terminal_error: None,
+                result: Some(super::GenerationBatchResult {
+                    filename: Some("finished.png".into()),
+                    original_filename: Some("original.png".into()),
+                }),
+            }],
+        };
+        let json = serde_json::to_value(&enriched).unwrap();
+        assert_eq!(json["instance_id"], "instance-1");
+        assert_eq!(json["durable"], true);
+        assert_eq!(json["children"][0]["result"]["filename"], "finished.png");
+        assert_eq!(
+            serde_json::from_value::<super::GenerationBatchStatus>(json).unwrap(),
+            enriched
+        );
+    }
+
     // ── UpscaleRequest / UpscaleResponse tests ────────────────────────────
 
     #[test]
@@ -7762,13 +7883,66 @@ pub struct GenerationBatchChild {
     pub state: GenerationBatchChildState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Unix-epoch milliseconds when the durable child was admitted.
+    #[serde(default)]
+    pub created_at_ms: i64,
+    /// Unix-epoch milliseconds of the latest authoritative state transition.
+    #[serde(default)]
+    pub updated_at_ms: i64,
+    /// Unix-epoch milliseconds when the child reached a terminal state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<i64>,
+    /// Structured terminal failure/cancellation details. `error` remains for
+    /// compatibility with clients that only understand the legacy string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub terminal_error: Option<serde_json::Value>,
+    /// Durable gallery identities produced by a completed child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<GenerationBatchResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationBatchResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_filename: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GenerationBatchStatus {
     pub id: String,
     pub client_batch_id: String,
+    /// Exact serving instance. Clients fence cached lifecycle state when this
+    /// differs from the instance that admitted the request.
+    #[serde(default)]
+    pub instance_id: String,
+    /// Always true on this authoritative reconnectable status surface.
+    #[serde(default)]
+    pub durable: bool,
     pub children: Vec<GenerationBatchChild>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationBatchStatusRequest {
+    #[serde(default)]
+    pub client_batch_ids: Vec<String>,
+    #[serde(default)]
+    pub batch_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationBatchMissing {
+    pub client_batch_ids: Vec<String>,
+    pub batch_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationBatchStatusResponse {
+    pub instance_id: String,
+    pub batches: Vec<GenerationBatchStatus>,
+    pub missing: GenerationBatchMissing,
 }
 
 /// Body of `POST /api/gallery/collections`.
@@ -7908,6 +8082,41 @@ pub struct EventsCapabilities {
     pub available: bool,
 }
 
+/// Restart-safe encrypted request-media support for the durable generation
+/// queue. Presence of this record is the availability signal: servers must
+/// omit it until the owner-scoped media store has passed startup validation
+/// and reconciliation for the queue owner they actually claimed.
+///
+/// The version is intentionally independent from [`QueueCapabilities`]. A
+/// client may continue using ordinary media-free durability when this record
+/// is absent, while requiring an exact media protocol before submitting a
+/// request whose replay depends on captured bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DurableMediaCapabilities {
+    pub protocol_version: u32,
+    pub encrypted_at_rest: bool,
+    pub generate_request_media: bool,
+    pub identity: bool,
+    pub h3_references: bool,
+    pub private_h3: bool,
+}
+
+impl DurableMediaCapabilities {
+    /// The first queue-media wire contract. MiniMax H3 remains outside this
+    /// authority: encrypted bytes do not make an authenticated ingress grant
+    /// replayable.
+    pub const fn v1() -> Self {
+        Self {
+            protocol_version: 1,
+            encrypted_at_rest: true,
+            generate_request_media: true,
+            identity: true,
+            h3_references: false,
+            private_h3: false,
+        }
+    }
+}
+
 /// Whether the server exposes queue-wide controls. `can_pause` covers
 /// `POST /api/queue/pause` and `POST /api/queue/resume`; `can_cancel_all`
 /// covers `DELETE /api/queue`; `can_reorder` covers moving a queued job with
@@ -7944,6 +8153,10 @@ pub struct QueueCapabilities {
     pub heterogeneous_batch: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heterogeneous_batch_max_outputs: Option<u32>,
+    /// Enriched durable child outcomes plus by-client and bulk
+    /// reconciliation routes are available.
+    #[serde(default)]
+    pub durable_batch_outcomes: bool,
 }
 
 /// Authenticated, stable-URL reference-media ingress advertised by current
@@ -8352,6 +8565,11 @@ pub struct ServerCapabilities {
     /// of their responses working (can_pause = can_cancel_all = false).
     #[serde(default)]
     pub queue: QueueCapabilities,
+    /// Restart-safe encrypted request-media support for the durable queue.
+    /// Absence means unavailable; servers must keep this dark until the full
+    /// admission, reconciliation, hydration, and cleanup lifecycle is live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_media: Option<DurableMediaCapabilities>,
     /// Absent on older servers. Availability advertises the ingress protocol,
     /// not MiniMax H3 model/license activation; model_access remains the
     /// authority for whether a request may run.
@@ -9018,6 +9236,17 @@ pub enum ServerEvent {
     JobEnded {
         id: String,
     },
+    /// A durable generation batch child committed a new authoritative state.
+    /// Unlike `job_ended` and `gallery_added`, this is emitted only after the
+    /// SQLite transaction has completed, so reconnecting clients may safely
+    /// reconcile the child through `/api/generation-batches/status`.
+    JobStateCommitted {
+        id: String,
+    },
+    /// One transaction committed authoritative state for multiple durable
+    /// generation children. Clients must reconcile the host once; emitting a
+    /// child event per row would turn bulk cancellation into an event storm.
+    GenerationStatesCommitted,
     /// A new output landed in the gallery. `image` carries the full gallery
     /// row when the metadata DB recorded it (clients can insert without a
     /// refetch); `None` when the DB is disabled — refetch `/api/gallery`.
@@ -9129,6 +9358,17 @@ mod server_event_tests {
         assert_eq!(
             serde_json::to_string(&ended).unwrap(),
             r#"{"type":"job_ended","id":"j1"}"#
+        );
+
+        let committed = ServerEvent::JobStateCommitted { id: "j1".into() };
+        assert_eq!(
+            serde_json::to_string(&committed).unwrap(),
+            r#"{"type":"job_state_committed","id":"j1"}"#
+        );
+
+        assert_eq!(
+            serde_json::to_string(&ServerEvent::GenerationStatesCommitted).unwrap(),
+            r#"{"type":"generation_states_committed"}"#
         );
     }
 
@@ -10020,6 +10260,7 @@ mod queue_plan_wire_tests {
     fn presentation_normalization_only_rewrites_host_utility_identities() {
         let mut listing = QueueListingWire {
             entries: vec![],
+            live_only_entries: vec![],
             plan: Some(QueuePlan {
                 work_items: vec![
                     QueueWorkItem {
@@ -10051,6 +10292,7 @@ mod queue_plan_wire_tests {
                 ],
                 ..Default::default()
             }),
+            page: None,
         };
 
         listing.normalize_planned_lanes_for_presentation();
@@ -10146,6 +10388,46 @@ mod queue_plan_wire_tests {
             serde_json::from_str(r#"{"can_pause":true,"can_cancel_all":true}"#).unwrap();
         assert!(!legacy_queue.durable_queue);
         assert!(!legacy_queue.cooperative_cancellation);
+
+        let durable_media = serde_json::to_value(DurableMediaCapabilities::v1()).unwrap();
+        assert_eq!(
+            durable_media,
+            serde_json::json!({
+                "protocol_version": 1,
+                "encrypted_at_rest": true,
+                "generate_request_media": true,
+                "identity": true,
+                "h3_references": false,
+                "private_h3": false,
+            })
+        );
+
+        let legacy_server: ServerCapabilities = serde_json::from_value(serde_json::json!({
+            "gallery": {"can_delete": true},
+            "catalog": {"available": false, "families": []}
+        }))
+        .unwrap();
+        assert_eq!(legacy_server.durable_media, None);
+        assert!(
+            !serde_json::to_value(&legacy_server)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("durable_media"),
+            "an unavailable capability must remain absent rather than serialize as null"
+        );
+
+        let advertised = ServerCapabilities {
+            durable_media: Some(DurableMediaCapabilities::v1()),
+            ..ServerCapabilities::default()
+        };
+        let advertised_wire = serde_json::to_value(&advertised).unwrap();
+        assert_eq!(advertised_wire["durable_media"], durable_media);
+        let round_tripped: ServerCapabilities = serde_json::from_value(advertised_wire).unwrap();
+        assert_eq!(
+            round_tripped.durable_media,
+            Some(DurableMediaCapabilities::v1())
+        );
 
         let legacy_metadata: OutputMetadata = serde_json::from_value(serde_json::json!({
             "prompt": "a cat",

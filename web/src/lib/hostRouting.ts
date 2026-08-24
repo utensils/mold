@@ -24,6 +24,10 @@ import {
 import { ORIGIN_HOST_ID } from "./hostRegistry";
 import type { ModelInfoExtended } from "../types";
 import type { ReferenceUploadCapabilities } from "@studio/api/referenceUploads";
+import type {
+  DurableGenerationQueueCapabilities,
+  DurableMediaCapabilities,
+} from "@studio/api/generationAdmission";
 
 // The routing policy itself lives in `@studio/lib/hostRouting`, shared with
 // desktop and the iPhone app; this module binds it to the browser registry,
@@ -47,6 +51,9 @@ export interface RoutableHost {
   apiKey?: string;
   instanceId?: string;
   status: HostRoutingStatus;
+  /** Latest status transport failed after this host had supplied a verified
+   * snapshot. Routing continues from that snapshot while UI says stale. */
+  stale?: boolean;
   /** Live queue depth; null while unknown (counts as busiest). */
   queueDepth: number | null;
   /** Predicted end of this host's current plan. Null on legacy hosts. */
@@ -68,6 +75,14 @@ export interface HostRoute {
   instanceId?: string | null;
   /** Frozen authenticated reference-ingress contract for this exact host. */
   referenceUploads?: ReferenceUploadCapabilities | null;
+  /** Frozen streamless generation contract for this exact server instance. */
+  durableGeneration?: DurableGenerationQueueCapabilities | null;
+  /** Frozen encrypted request-media contract for this exact server instance. */
+  durableMedia?: DurableMediaCapabilities | null;
+  /** Authoritative family of the model frozen for this submission. */
+  modelFamily?: string | null;
+  /** Whether this host exposes the one-per-host lifecycle event stream. */
+  eventsAvailable?: boolean;
 }
 
 export function sameHostRoute(

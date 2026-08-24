@@ -109,12 +109,82 @@ describe("events subscription", () => {
       }),
     );
 
-    expect(refreshHost).toHaveBeenCalledTimes(3);
+    await Promise.resolve();
+    expect(refreshHost).toHaveBeenCalledTimes(1);
     expect(refreshHost.mock.calls[0]![0]).toMatchObject({
       id: "local",
       baseUrl: "http://127.0.0.1:49152",
       apiKey: null,
     });
+  });
+
+  it("coalesces bursts and runs exactly one follow-up refresh for in-flight invalidations", async () => {
+    vi.mocked(fetchServerCapabilities).mockResolvedValue(caps(true));
+    connectWithBucket();
+    const { useJobsStore } = await import("./jobs");
+    let release!: () => void;
+    const first = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const refreshHost = vi
+      .spyOn(useJobsStore(), "refreshHost")
+      .mockImplementationOnce(() => first)
+      .mockResolvedValue(undefined);
+    const events = useEventsStore();
+
+    await events.subscribe();
+    const options = vi.mocked(sseStream).mock.calls[0]![1]!;
+    options.onOpen?.(new Response());
+    options.onEvent?.("message", JSON.stringify({ type: "device_state_changed" }));
+    options.onEvent?.(
+      "message",
+      JSON.stringify({
+        type: "queue_plan_changed",
+        plan: {
+          plan_version: 1,
+          state_version: 1,
+          optimizer_state: "optimized",
+          dirty_since_unix_ms: null,
+          next_replan_at_unix_ms: null,
+          work_items: [],
+        },
+      }),
+    );
+    await Promise.resolve();
+    expect(refreshHost).toHaveBeenCalledTimes(1);
+
+    options.onEvent?.("message", JSON.stringify({ type: "device_state_changed" }));
+    options.onEvent?.("message", JSON.stringify({ type: "device_state_changed" }));
+    expect(refreshHost).toHaveBeenCalledTimes(1);
+    release();
+    await first;
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(refreshHost).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not lose a new-epoch invalidation behind the prior subscription's in-flight wave", async () => {
+    connectWithBucket();
+    const { useJobsStore } = await import("./jobs");
+    let release!: () => void;
+    const oldWave = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const refreshHost = vi
+      .spyOn(useJobsStore(), "refreshHost")
+      .mockImplementationOnce(() => oldWave)
+      .mockResolvedValue(undefined);
+    const events = useEventsStore();
+
+    events.refreshAuthoritativePrimary();
+    await Promise.resolve();
+    expect(refreshHost).toHaveBeenCalledTimes(1);
+
+    events.unsubscribe();
+    events.refreshAuthoritativePrimary();
+    release();
+    await oldWave;
+    await vi.waitFor(() => expect(refreshHost).toHaveBeenCalledTimes(2));
   });
 
   it("does not open the stream on servers without the capability", async () => {
@@ -245,7 +315,8 @@ describe("event routing", () => {
       admin_state: "draining",
     });
     expect(jobs.queues["local"]?.devices).toEqual([]);
-    expect(refreshHost).toHaveBeenCalledTimes(2);
+    await Promise.resolve();
+    expect(refreshHost).toHaveBeenCalledTimes(1);
 
     events.apply({
       type: "queue_plan_changed",

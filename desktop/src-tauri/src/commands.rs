@@ -264,33 +264,32 @@ async fn ensure_local_server_inner(
     state: &AppState,
     store: &SettingsStore,
 ) -> Result<LocalServerInfo, String> {
-    let mut local = state.local_server.lock().await;
-    let external_url = match &*local {
-        LocalServer::Embedded(engine) if engine.is_alive() => {
-            return Ok(local.info(&state.local_api_key).expect("embedded info"));
+    {
+        let mut local = state.local_server.lock().await;
+        if let Some(info) = settled_local_server_info(&mut local, &state.local_api_key) {
+            return Ok(info);
         }
-        LocalServer::Embedded(_) => {
-            tracing::warn!("embedded engine thread is gone; restarting");
-            *local = LocalServer::Off;
-            None
-        }
-        LocalServer::External { base_url } => Some(base_url.clone()),
-        LocalServer::Off => None,
-    };
-    if let Some(base_url) = external_url {
-        if server::is_mold_server(&base_url).await {
-            ensure_local_server_auth(&base_url, &state.local_api_key).await?;
-            return Ok(local.info(&state.local_api_key).expect("external info"));
-        }
-        tracing::warn!(%base_url, "external local server disappeared; replacing it");
-        *local = LocalServer::Off;
     }
 
     // A user-run server owns the shared model directory and metadata DB, so it
-    // wins over embedding another process on this Mac.
+    // wins over embedding another process on this Mac. Probe without holding
+    // the lifecycle/gallery-authority mutex: HTTP reachability is not process
+    // ownership, and another ensure call may need to inspect settled state.
     let well_known = format!("http://127.0.0.1:{}", server::WELL_KNOWN_PORT);
-    if server::is_mold_server(&well_known).await {
-        ensure_local_server_auth(&well_known, &state.local_api_key).await?;
+    let external_auth = if server::is_mold_server(&well_known).await {
+        Some(ensure_local_server_auth(&well_known, &state.local_api_key).await)
+    } else {
+        None
+    };
+
+    let mut local = state.local_server.lock().await;
+    // A concurrent ensure may have established authority while the probe was
+    // in flight. Its settled result wins over the stale observation above.
+    if let Some(info) = settled_local_server_info(&mut local, &state.local_api_key) {
+        return Ok(info);
+    }
+    if let Some(auth) = external_auth {
+        auth?;
         tracing::info!("using existing mold server at {well_known}");
         *local = LocalServer::External {
             base_url: well_known,
@@ -344,6 +343,24 @@ async fn ensure_local_server_inner(
     }
     *local = LocalServer::Embedded(engine);
     Ok(local.info(&state.local_api_key).expect("embedded info"))
+}
+
+/// Return an already-established lifecycle authority without using HTTP as a
+/// liveness oracle. Embedded ownership is authoritative while its thread is
+/// alive; adopted external ownership stays authoritative until an explicit
+/// lifecycle action or process restart because a timeout cannot prove that a
+/// separately-owned process released the shared gallery and database.
+fn settled_local_server_info(local: &mut LocalServer, api_key: &str) -> Option<LocalServerInfo> {
+    match local {
+        LocalServer::Embedded(engine) if engine.is_alive() => local.info(api_key),
+        LocalServer::Embedded(_) => {
+            tracing::warn!("embedded engine thread is gone; restarting");
+            *local = LocalServer::Off;
+            None
+        }
+        LocalServer::External { .. } => local.info(api_key),
+        LocalServer::Off => None,
+    }
 }
 
 async fn shutdown_embedded_or_retain(
@@ -768,6 +785,20 @@ mod tests {
             base_url: "http://127.0.0.1:7680".into(),
         }));
         assert!(!primary_uses_local_server(&Conn::Off));
+    }
+
+    #[test]
+    fn adopted_external_server_remains_authoritative_without_a_transport_probe() {
+        let mut local = LocalServer::External {
+            base_url: "http://127.0.0.1:9".into(),
+        };
+
+        let info = settled_local_server_info(&mut local, "desktop-test-key")
+            .expect("an adopted external server remains the lifecycle authority");
+
+        assert_eq!(info.kind, "external");
+        assert_eq!(info.base_url, "http://127.0.0.1:9");
+        assert!(matches!(local, LocalServer::External { .. }));
     }
 
     #[tokio::test]

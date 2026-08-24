@@ -78,7 +78,15 @@ fn identity_family_for(request: &GenerateRequest, family: &str) -> Result<Identi
 /// no identity at all, so it must plan no dependency, start no download,
 /// report no pending artifact, and freeze no paths.
 pub(crate) fn request_needs_identity_assets(request: &GenerateRequest) -> bool {
-    mold_core::identity::request_mentions_identity(request)
+    request_needs_identity_assets_with_projection(request, None)
+}
+
+pub(crate) fn request_needs_identity_assets_with_projection(
+    request: &GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> bool {
+    (mold_core::identity::request_mentions_identity(request)
+        || projection.is_some_and(|projection| projection.identity_present))
         && mold_core::identity::effective_id_weight(request) > 0.0
 }
 
@@ -163,11 +171,12 @@ fn require_identity_licenses(
 pub(crate) async fn materialize_identity_assets(
     context: &DependencyContext<'_>,
     request: &GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
     family: &str,
     frozen: &mut mold_inference::FrozenEngineConfig,
     pending: &mut Vec<MissingDependency>,
 ) -> Result<(), String> {
-    if !request_needs_identity_assets(request) {
+    if !request_needs_identity_assets_with_projection(request, projection) {
         return Ok(());
     }
     let identity_family = identity_family_for(request, family)?;
@@ -274,6 +283,38 @@ mod tests {
     use tempfile::TempDir;
 
     const MODEL: &str = "prepared-flux";
+
+    #[test]
+    fn projected_identity_presence_matches_hydrated_dependency_need() {
+        let mut hydrated: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "portrait",
+            "model": "flux-dev:q8",
+            "width": 512,
+            "height": 512,
+            "steps": 8,
+            "guidance": 3.0,
+            "id_image": "ZmFjZQ==",
+            "id_weight": 0.8
+        }))
+        .unwrap();
+        let mut sanitized = hydrated.clone();
+        sanitized.id_image = None;
+        let projection = crate::queue_media_store::QueueMediaProjection {
+            identity_present: true,
+            identity_photograph_count: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            request_needs_identity_assets_with_projection(&hydrated, None),
+            request_needs_identity_assets_with_projection(&sanitized, Some(&projection)),
+        );
+        hydrated.id_weight = Some(0.0);
+        sanitized.id_weight = Some(0.0);
+        assert!(!request_needs_identity_assets_with_projection(
+            &sanitized,
+            Some(&projection)
+        ));
+    }
 
     struct EnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,

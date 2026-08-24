@@ -11,7 +11,9 @@ import type { Job } from "./generationJob";
 /** Jobs that completed since the last pass (by clientId). The caller adds the
  *  returned ids to `seen` after handling so each completion notifies once. */
 export function newlyCompletedJobs(jobs: Job[], seen: Set<number>): Job[] {
-  return jobs.filter((j) => j.status === "complete" && !seen.has(j.clientId));
+  return jobs.filter(
+    (j) => j.status === "complete" && !j.suppressFreshCompletion && !seen.has(j.clientId),
+  );
 }
 
 /** A finished generation raises a foreground toast only when the user isn't

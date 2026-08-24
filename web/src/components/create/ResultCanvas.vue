@@ -38,6 +38,8 @@ const props = withDefaults(
     printHeight?: number;
     /** result — image URL and prebuilt mono caption. */
     resultSrc?: string;
+    /** result — playable MP4 artifact. `resultSrc` may carry its poster. */
+    resultVideoSrc?: string;
     /** result — playable WAV for an audio-only print; `resultSrc` is then the
      * rendered waveform. Empty for every other kind of print. */
     resultAudioSrc?: string;
@@ -200,8 +202,18 @@ watch(
       class="canvas__result ms-fade-up"
       data-test="canvas-result"
     >
+      <video
+        v-if="resultVideoSrc"
+        class="canvas__video"
+        :src="resultVideoSrc"
+        :poster="resultSrc || undefined"
+        controls
+        loop
+        playsinline
+        data-test="canvas-video"
+      />
       <img
-        v-if="resultSrc"
+        v-else-if="resultSrc"
         class="canvas__img"
         :src="resultSrc"
         :alt="
@@ -426,6 +438,14 @@ watch(
   border: 1px solid var(--edge);
   box-shadow: 0 20px 50px -12px rgba(0, 0, 0, 0.6);
   display: block;
+}
+
+.canvas__video {
+  display: block;
+  width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+  background: var(--print);
 }
 
 .canvas__audio {

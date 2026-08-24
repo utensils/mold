@@ -55,6 +55,7 @@ import { confirmCancellation } from "@studio/lib/cancellationRetry";
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
 import { requestNeedsReferenceUpload } from "@studio/api/referenceUploads";
+import { supportsDurableGenerationLifecycle } from "@studio/api/generationAdmission";
 import {
   expansionTaskForRequest,
   type ExpandTask,
@@ -177,7 +178,6 @@ import {
   loadLastSeed,
   storeLastSeed,
 } from "../lib/lastSeed";
-import { useQueue } from "../composables/useQueue";
 import { useLiveActivity } from "../composables/useLiveActivity";
 import { useOpenLiveWork } from "../composables/useOpenLiveWork";
 import { ORIGIN_HOST_ID, listHosts } from "../lib/hostRegistry";
@@ -296,7 +296,6 @@ const form = useGenerateForm();
 const pageRoute = useRoute();
 const router = useRouter();
 const { status } = useStatusPoll();
-const queue = useQueue();
 const routing = useHostRouting();
 const licenseAcceptance = useLicenseAcceptance();
 const installTargets = useModelInstallTargets();
@@ -595,10 +594,19 @@ function normalizeSubmitRoute(
   route: HostRoute | null,
   request?: GenerateRequestWire,
 ): HostRoute | null {
-  return route?.hostId === "origin" &&
-    !(request && requestNeedsReferenceUpload(request))
-    ? null
-    : route;
+  const normalized =
+    route?.hostId === "origin" &&
+    !(request && requestNeedsReferenceUpload(request)) &&
+    !supportsDurableGenerationLifecycle(route.durableGeneration)
+      ? null
+      : route;
+  if (!normalized) return null;
+  const modelFamily = (normalized.modelFamily ?? currentFamily.value).trim();
+  return {
+    ...normalized,
+    target: { ...normalized.target },
+    ...(modelFamily ? { modelFamily } : {}),
+  };
 }
 
 function sameRoute(
@@ -886,6 +894,22 @@ function hostRouteFor(hostId: string): HostRoute | null {
       ...(host.apiKey ? { apiKey: host.apiKey } : {}),
     },
     instanceId: host.instanceId ?? null,
+    ...(routing.capabilitiesByHost.value[host.id]?.durable_media
+      ? {
+          durableMedia:
+            routing.capabilitiesByHost.value[host.id]!.durable_media!,
+        }
+      : {}),
+    ...(routing.capabilitiesByHost.value[host.id]?.queue
+      ? { durableGeneration: routing.capabilitiesByHost.value[host.id]!.queue }
+      : {}),
+    ...(routing.capabilitiesByHost.value[host.id]?.events
+      ? {
+          eventsAvailable:
+            routing.capabilitiesByHost.value[host.id]!.events!.available ===
+            true,
+        }
+      : {}),
   };
 }
 
@@ -2892,7 +2916,14 @@ const resultSrc = computed(() => {
       : "";
   }
   if (r.video_thumbnail) return `data:image/png;base64,${r.video_thumbnail}`;
+  if (r.format === "mp4") return "";
   return `data:image/${r.format};base64,${r.image}`;
+});
+/** The playable artifact for a video print. Never construct data:image/mp4. */
+const resultVideoSrc = computed(() => {
+  const r = latestDone.value?.result;
+  if (!r || r.format !== "mp4" || !r.image) return "";
+  return `data:video/mp4;base64,${r.image}`;
 });
 /** The playable artifact for an audio-only print; empty for every other kind. */
 const resultAudioSrc = computed(() => {
@@ -3366,6 +3397,22 @@ function routeForHostId(hostId: string): HostRoute | null {
     instanceId: host.instanceId ?? null,
     referenceUploads:
       routing.capabilitiesByHost.value[host.id]?.reference_uploads ?? null,
+    ...(routing.capabilitiesByHost.value[host.id]?.durable_media
+      ? {
+          durableMedia:
+            routing.capabilitiesByHost.value[host.id]!.durable_media!,
+        }
+      : {}),
+    ...(routing.capabilitiesByHost.value[host.id]?.queue
+      ? { durableGeneration: routing.capabilitiesByHost.value[host.id]!.queue }
+      : {}),
+    ...(routing.capabilitiesByHost.value[host.id]?.events
+      ? {
+          eventsAvailable:
+            routing.capabilitiesByHost.value[host.id]!.events!.available ===
+            true,
+        }
+      : {}),
   };
 }
 
@@ -3460,7 +3507,17 @@ async function offerMissingModelPull(
     );
     return true;
   }
-  const resumeRoute = routing.multiHost.value ? routeForHostId(hostId) : null;
+  const frozenModelFamily = currentFamily.value.trim();
+  const resolvedResumeRoute = routing.multiHost.value
+    ? routeForHostId(hostId)
+    : null;
+  const resumeRoute = resolvedResumeRoute
+    ? {
+        ...resolvedResumeRoute,
+        target: { ...resolvedResumeRoute.target },
+        ...(frozenModelFamily ? { modelFamily: frozenModelFamily } : {}),
+      }
+    : null;
   const pendingPull = {
     model,
     // A catalog download reports its queue id on both routes; a plain
@@ -3602,20 +3659,15 @@ function submitRequestCopies(
     request.seed === null || request.seed === undefined
       ? crypto.getRandomValues(new Uint32Array(1))[0]!
       : request.seed;
-  for (let index = 0; index < copies; index += 1) {
-    stream.submit(
-      {
-        ...request,
-        batch_size: 1,
-        batch_id: batchId,
-        batch_index: index + 1,
-        batch_count: copies,
-        seed: baseSeed + index,
-      },
-      decision,
-      normalizeSubmitRoute(route, request),
-    );
-  }
+  const requests = Array.from({ length: copies }, (_, index) => ({
+    ...request,
+    batch_size: 1,
+    batch_id: batchId,
+    batch_index: index + 1,
+    batch_count: copies,
+    seed: baseSeed + index,
+  }));
+  stream.submitBatch(requests, decision, normalizeSubmitRoute(route, request));
 }
 
 /** True while a Generate click is being routed/admitted. The feasibility
@@ -4289,7 +4341,7 @@ async function queueVariations() {
           : `${feasibilityMessage(revalidated, "this complete batch")} Nothing was queued; your reviewed variations are preserved.`;
       return;
     }
-    for (const [index, prompt] of list.entries()) {
+    const requests = list.map((prompt, index) => {
       // Each variation already carries the style extras, so it is the final
       // prompt — override the base request's prompt rather than re-appending.
       // Each is one print; the batch size drove the variation count, not the
@@ -4320,12 +4372,13 @@ async function queueVariations() {
         batch_index: index + 1,
         batch_count: list.length,
       };
-      stream.submit(
-        request,
-        prepared.decision,
-        normalizeSubmitRoute(revalidated.route, request),
-      );
-    }
+      return request;
+    });
+    stream.submitBatch(
+      requests,
+      prepared.decision,
+      normalizeSubmitRoute(revalidated.route, requests[0]),
+    );
     variations.value = [];
     preparedBatch.value = null;
   } finally {
@@ -4785,7 +4838,6 @@ onBeforeUnmount(() => {
   window.removeEventListener("mold:new-print", onNewPrint);
   document.removeEventListener("pointerdown", onTemplatesPointerDown);
   document.removeEventListener("keydown", onTemplatesKeydown);
-  queue.stop();
 });
 </script>
 
@@ -5349,6 +5401,7 @@ onBeforeUnmount(() => {
               selectedQueueRender?.height ?? runningJob?.request.height
             "
             :result-src="resultSrc"
+            :result-video-src="resultVideoSrc"
             :result-audio-src="resultAudioSrc"
             :result-caption="resultCaption"
             :error="latestErrorMessage"

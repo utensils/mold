@@ -1,5 +1,6 @@
 export * from "./api/client";
 export * from "./api/devices";
+export * from "./api/generationAdmission";
 export * from "./platform";
 export * from "./stores/runtime";
 export * from "./lib/promptCycler";
@@ -9,3 +10,6 @@ export * from "./lib/modelDisplay";
 export * from "./lib/sequence";
 export * from "./lib/base64";
 export * from "./lib/starterModels";
+export * from "./lib/generationLifecycle";
+export * from "./lib/generationMedia";
+export * from "./lib/targetStreamSlots";

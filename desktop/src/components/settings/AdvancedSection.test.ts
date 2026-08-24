@@ -2,7 +2,8 @@ import { createPinia, setActivePinia } from "pinia";
 import { mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { listDevicesMock, listQueueMock, subscribeMock } = vi.hoisted(() => ({
+const { apiJsonToMock, listDevicesMock, listQueueMock, subscribeMock } = vi.hoisted(() => ({
+  apiJsonToMock: vi.fn().mockResolvedValue({ queue_capacity: 8 }),
   listDevicesMock: vi.fn().mockResolvedValue({ devices: [], plan_version: 0 }),
   listQueueMock: vi.fn().mockResolvedValue({ entries: [], plan: null }),
   subscribeMock: vi.fn(),
@@ -14,10 +15,15 @@ vi.mock("@studio/api/devices", () => ({
 }));
 vi.mock("@studio/api/queuePlan", () => ({
   listQueue: listQueueMock,
+  queuePageRequestForCapacity: (capacity: unknown) =>
+    typeof capacity === "number" && capacity > 0 ? { limit: capacity } : undefined,
   setQueueDevicePin: vi.fn(),
 }));
 vi.mock("../../lib/api/deviceEvents", () => ({
   subscribeToDeviceSnapshots: subscribeMock,
+}));
+vi.mock("../../lib/api/client", () => ({
+  apiJsonTo: apiJsonToMock,
 }));
 
 import AdvancedSection from "./AdvancedSection.vue";
@@ -26,6 +32,7 @@ import { useConnectionStore } from "../../stores/connection";
 beforeEach(() => {
   setActivePinia(createPinia());
   vi.clearAllMocks();
+  apiJsonToMock.mockResolvedValue({ queue_capacity: 8 });
 });
 
 describe("AdvancedSection device snapshots", () => {
@@ -36,6 +43,32 @@ describe("AdvancedSection device snapshots", () => {
     });
     return { promise, resolve };
   }
+
+  it("bounds its queue-plan snapshot by the server's queue capacity", async () => {
+    const connection = useConnectionStore();
+    connection.info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "desktop-secret",
+    };
+    connection.status = "ready";
+
+    mount(AdvancedSection, {
+      global: {
+        stubs: {
+          ConfigRowItem: true,
+          ConfigSettingRow: true,
+          PlacementSection: true,
+        },
+      },
+    });
+
+    await vi.waitFor(() => expect(listQueueMock).toHaveBeenCalled());
+    expect(listQueueMock).toHaveBeenCalledWith(
+      { baseUrl: "http://127.0.0.1:7680", apiKey: "desktop-secret" },
+      { limit: 8 },
+    );
+  });
 
   it("renders typed host utility work when the local server has no GPUs", async () => {
     const connection = useConnectionStore();

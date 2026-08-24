@@ -1,12 +1,17 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from "vue";
 import { parseDeviceListResponse, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
-import { listQueue, setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
+import {
+  listQueue,
+  queuePageRequestForCapacity,
+  setQueueDevicePin,
+  type QueuePlan,
+} from "@studio/api/queuePlan";
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import LicenseSettingsPanel from "@studio/components/LicenseSettingsPanel.vue";
 import { canMutateDevice } from "@studio/lib/deviceLifecycle";
 import { apiJsonTo } from "../lib/api/client";
-import type { ServerCapabilities } from "../lib/api/types";
+import type { ServerCapabilities, ServerStatus } from "../lib/api/types";
 import { describeTransportError } from "../lib/api/errors";
 import { openExternal } from "../lib/openExternal";
 import type { Theme, ThemeFamily } from "../lib/theme";
@@ -76,10 +81,14 @@ async function loadDevices(): Promise<void> {
     props.host.baseUrl === host.baseUrl &&
     props.host.apiKey === host.apiKey;
   const target = mobileHostTarget(host);
+  const statusRequest = apiJsonTo<ServerStatus>(target, "/api/status");
+  const queueRequest = statusRequest.then((status) =>
+    listQueue(target, queuePageRequestForCapacity(status.queue_capacity) ?? null),
+  );
   const [deviceResult, capabilityResult, queueResult] = await Promise.allSettled([
     apiJsonTo<unknown>(target, "/api/devices"),
     fetchServerCapabilities(target),
-    listQueue(target),
+    queueRequest,
   ]);
   if (!isCurrent()) return;
 

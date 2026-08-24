@@ -23,6 +23,7 @@ import type {
   GalleryTrashedEvent,
   GalleryUpdatedEvent,
 } from "@studio/lib/api/galleryOrganization";
+import type { DurableMediaCapabilities } from "@studio/api/generationAdmission";
 
 // Library organization wire shapes are shared across surfaces; re-export the
 // pieces desktop consumers reach for so `lib/api/types` stays the single
@@ -33,6 +34,18 @@ export type {
   GalleryTrashCapabilities,
   TagCount,
 } from "@studio/lib/api/galleryOrganization";
+// Durable generation admission and outcome types are singular across web,
+// desktop and mobile. Surfaces may keep importing them from this desktop
+// facade while the shared client/reducer remains the authority.
+export type {
+  GenerationBatchAdmissionRequest,
+  GenerationBatchChild,
+  GenerationBatchResult,
+  GenerationBatchStatus,
+  GenerationBatchStatusRequest,
+  GenerationBatchStatusResponse,
+  GenerationLifecyclePhase,
+} from "@studio/api/generationAdmission";
 
 export interface GpuSnapshot {
   ordinal: number;
@@ -114,6 +127,8 @@ export interface ExpandCapabilities {
 
 export interface ServerCapabilities {
   generation_profile_v1?: boolean;
+  /** Restart-safe encrypted request-media queueing. Absent is unsupported. */
+  durable_media?: DurableMediaCapabilities | null;
   gallery: {
     can_delete: boolean;
     /** Trash support (soft delete + retention). Absent on older servers,
@@ -190,27 +205,11 @@ export interface ServerCapabilities {
     durable_queue?: boolean;
     heterogeneous_batch?: boolean;
     heterogeneous_batch_max_outputs?: number | null;
+    /** Enriched durable outcomes, by-client recovery and bulk reconciliation. */
+    durable_batch_outcomes?: boolean;
   } | null;
   /** Absent on older servers means unknown, not unavailable. */
   expand?: ExpandCapabilities | null;
-}
-
-export interface GenerationBatchAdmissionRequest {
-  client_batch_id: string;
-  requests: GenerateRequest[];
-}
-
-export interface GenerationBatchChild {
-  index: number;
-  job_id: string;
-  state: "accepted" | "running" | "complete" | "failed" | "cancelled" | "held";
-  error?: string | null;
-}
-
-export interface GenerationBatchStatus {
-  id: string;
-  client_batch_id: string;
-  children: GenerationBatchChild[];
 }
 
 // ── Models ───────────────────────────────────────────────────────────────
@@ -899,6 +898,8 @@ export type ServerEvent =
   | { type: "job_queued"; id: string; model: string }
   | { type: "job_started"; id: string; model: string; gpu?: number | null }
   | { type: "job_ended"; id: string }
+  | { type: "job_state_committed"; id: string }
+  | { type: "generation_states_committed" }
   | { type: "gallery_added"; filename: string; image?: GalleryImage | null }
   | { type: "gallery_removed"; filename: string }
   | GalleryUpdatedEvent<GalleryImage>

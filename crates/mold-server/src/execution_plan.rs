@@ -1270,6 +1270,10 @@ pub enum ExecutionPlanError {
         /// compares this against device *total* VRAM: a peak no device could
         /// ever hold is terminal, anything else is transient pressure.
         required_peak_bytes: u64,
+        /// Stable IDs of the devices that were actually considered for this
+        /// request. Physical-impossibility classification must not borrow
+        /// capacity from a sibling excluded by placement or preparation.
+        eligible_device_ids: Vec<String>,
     },
     #[error("execution plan was invalidated before CUDA work: {0}")]
     PlanInvalidated(String),
@@ -1433,6 +1437,7 @@ pub fn resolve_execution_plans(
         devices,
         offload_requested,
         None,
+        None,
         EquivalenceFactPolicy::AllowBlockingWarmup,
     )
 }
@@ -1455,6 +1460,7 @@ pub fn resolve_execution_plans_with_prepared(
         devices,
         offload_requested,
         prepared,
+        None,
         fact_policy,
     )
 }
@@ -1473,12 +1479,31 @@ pub(crate) fn resolve_execution_plans_for_coordinator(
     offload_requested: bool,
     prepared: Option<&PreparedExecutionInputs>,
 ) -> Result<Vec<ResolvedExecutionPlan>, ExecutionPlanError> {
+    resolve_execution_plans_for_coordinator_with_projection(
+        config,
+        request,
+        devices,
+        offload_requested,
+        prepared,
+        None,
+    )
+}
+
+pub(crate) fn resolve_execution_plans_for_coordinator_with_projection(
+    config: &Config,
+    request: &GenerateRequest,
+    devices: &[DeviceFact],
+    offload_requested: bool,
+    prepared: Option<&PreparedExecutionInputs>,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> Result<Vec<ResolvedExecutionPlan>, ExecutionPlanError> {
     resolve_execution_plans_with_policy(
         config,
         request,
         devices,
         offload_requested,
         prepared,
+        projection,
         EquivalenceFactPolicy::CacheOnly,
     )
 }
@@ -1495,6 +1520,7 @@ fn resolve_execution_plans_with_policy(
     devices: &[DeviceFact],
     offload_requested: bool,
     prepared: Option<&PreparedExecutionInputs>,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
     fact_policy: EquivalenceFactPolicy,
 ) -> Result<Vec<ResolvedExecutionPlan>, ExecutionPlanError> {
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
@@ -1582,6 +1608,7 @@ fn resolve_execution_plans_with_policy(
                 family: &family,
                 capabilities: &capabilities,
                 request,
+                projection,
                 paths: &inputs.0,
                 engine_config: &inputs.1,
                 admission_paths: &paths,
@@ -1795,7 +1822,10 @@ fn ltx2_shape_advice(context: &PlanContext<'_>, device: &DeviceFact) -> Option<S
     let facts = crate::ltx2_admission::checkpoint_facts_cached(&context.paths.transformer)?;
     crate::ltx2_admission::supported_shape_advice(
         &facts,
-        crate::ltx2_admission::Ltx2ShapeHint::from_request(context.request),
+        crate::ltx2_admission::Ltx2ShapeHint::from_request_with_projection(
+            context.request,
+            context.projection,
+        ),
         device.available_vram_bytes,
     )
 }
@@ -1817,6 +1847,7 @@ pub(crate) fn insufficient_vram_error(rejections: &[DeviceInfeasibility]) -> Exe
         return ExecutionPlanError::InsufficientVram {
             reason: "no request-eligible device produced a concrete execution plan".to_string(),
             required_peak_bytes: 0,
+            eligible_device_ids: Vec::new(),
         };
     }
     let reason = rejections
@@ -1843,6 +1874,10 @@ pub(crate) fn insufficient_vram_error(rejections: &[DeviceInfeasibility]) -> Exe
             .map(|rejection| rejection.predicted_peak_bytes)
             .min()
             .unwrap_or(0),
+        eligible_device_ids: rejections
+            .iter()
+            .map(|rejection| rejection.device_id.clone())
+            .collect(),
     }
 }
 
@@ -2511,6 +2546,7 @@ struct PlanContext<'a> {
     family: &'a str,
     capabilities: &'a PlacementCapabilities,
     request: &'a GenerateRequest,
+    projection: Option<&'a crate::queue_media_store::QueueMediaProjection>,
     paths: &'a ModelPaths,
     engine_config: &'a mold_inference::FrozenEngineConfig,
     admission_paths: &'a ModelPaths,
@@ -2572,25 +2608,27 @@ fn build_plan(
     // conservative instead of an identical repeat of the failing plan (#641).
     let device_budget = crate::gpu_pool::reduced_vram_grant(
         context.model,
-        &crate::gpu_pool::oom_shape_bucket(context.request),
+        &crate::gpu_pool::oom_shape_bucket_with_projection(context.request, context.projection),
         device.ordinal,
     )
     .map_or(device.available_vram_bytes, |grant| {
         grant.min(device.available_vram_bytes)
     });
     let recent_oom_reduced_budget = device_budget < device.available_vram_bytes;
-    let initial_memory = crate::memory_preflight::estimate_generation_memory_for_request(
-        context.request,
-        context.paths,
-        hint,
-        crate::memory_preflight::GenerationOffloadPolicy::new(
-            context.offload_requested,
-            wan_block_offload_policy,
-        ),
-        Some(device_budget),
-        request_has_lora,
-        gemma_competes,
-    );
+    let initial_memory =
+        crate::memory_preflight::estimate_generation_memory_for_request_with_projection(
+            context.request,
+            context.paths,
+            hint,
+            crate::memory_preflight::GenerationOffloadPolicy::new(
+                context.offload_requested,
+                wan_block_offload_policy,
+            ),
+            Some(device_budget),
+            request_has_lora,
+            gemma_competes,
+            context.projection,
+        );
     // A process-wide offload preference is advisory for concrete formats
     // which cannot honor it (for example Flux.2 GGUF/NVFP4 or a LoRA merge).
     // The family capability gate above remains a typed error; this path-level
@@ -2640,18 +2678,20 @@ fn build_plan(
         })
         .all(|(_, cpu)| *cpu);
     let gpu_paths = gpu_resident_paths(context.paths, &placements);
-    let mut memory = crate::memory_preflight::estimate_generation_memory_for_request(
-        context.request,
-        &gpu_paths,
-        hint,
-        crate::memory_preflight::GenerationOffloadPolicy::new(
-            initial_memory.block_offload && !transformer_on_cpu,
-            wan_block_offload_policy,
-        ),
-        Some(device_budget),
-        request_has_lora,
-        gemma_competes,
-    );
+    let mut memory =
+        crate::memory_preflight::estimate_generation_memory_for_request_with_projection(
+            context.request,
+            &gpu_paths,
+            hint,
+            crate::memory_preflight::GenerationOffloadPolicy::new(
+                initial_memory.block_offload && !transformer_on_cpu,
+                wan_block_offload_policy,
+            ),
+            Some(device_budget),
+            request_has_lora,
+            gemma_competes,
+            context.projection,
+        );
     if memory.fits_available_memory != Some(true)
         && context.capabilities.supports_vae_cpu
         && context
@@ -2663,7 +2703,7 @@ fn build_plan(
     {
         placements.insert(ComponentRole::Vae, true);
         let gpu_paths = gpu_resident_paths(context.paths, &placements);
-        memory = crate::memory_preflight::estimate_generation_memory_for_request(
+        memory = crate::memory_preflight::estimate_generation_memory_for_request_with_projection(
             context.request,
             &gpu_paths,
             hint,
@@ -2674,6 +2714,7 @@ fn build_plan(
             Some(device_budget),
             request_has_lora,
             gemma_competes,
+            context.projection,
         );
     }
     if memory.fits_available_memory != Some(true) {
@@ -5422,6 +5463,38 @@ mod tests {
             ),
             "automatic CPU fallback must never override an explicit VAE GPU pin"
         );
+    }
+
+    #[test]
+    fn insufficient_vram_preserves_stable_and_ordinal_pin_eligibility() {
+        let root = TempDir::new().unwrap();
+        let (config, base_request) = sized_config(root.path(), "unknown-family", 10, 1, 1);
+        let candidates = devices(&[8 * GIB, 24 * GIB]);
+
+        assert!(
+            resolve_execution_plans(&config, &base_request, &candidates, false).is_ok(),
+            "Auto must retain the larger eligible sibling"
+        );
+
+        for pin in [DeviceRef::device("cuda:0"), DeviceRef::gpu(0)] {
+            let mut request = base_request.clone();
+            request.placement = Some(DevicePlacement {
+                text_encoders: DeviceRef::Auto,
+                advanced: Some(AdvancedPlacement {
+                    transformer: pin,
+                    ..AdvancedPlacement::default()
+                }),
+            });
+            let error = resolve_execution_plans(&config, &request, &candidates, false)
+                .expect_err("the 8 GiB pinned device cannot hold this request");
+            assert!(matches!(
+                error,
+                ExecutionPlanError::InsufficientVram {
+                    eligible_device_ids,
+                    ..
+                } if eligible_device_ids == ["cuda:0"]
+            ));
+        }
     }
 
     #[test]

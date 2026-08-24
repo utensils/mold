@@ -31,6 +31,7 @@ use candle_core::{safetensors::MmapedSafetensors, DType, Device, IndexOp, Tensor
 use mold_core::{
     GenerateRequest, GenerateResponse, ImageData, ModelPaths, OutputFormat, VideoData,
 };
+use zeroize::Zeroize;
 
 use crate::engine::{rand_seed, seeded_randn, LoadStrategy};
 use crate::engine_base::EngineBase;
@@ -2210,6 +2211,18 @@ impl crate::engine::InferenceEngine for WanEngine {
 /// restating 1 (#783).
 pub use mold_core::validation::WAN_HANDOFF_DUPLICATED_FRAMES;
 
+/// Clear one sensitive clone before replacing its request field.
+///
+/// `GenerateRequest` deliberately has no blanket `Drop`: most fields are
+/// ordinary metadata and many callers clone it. Continuation preparation is a
+/// narrower owner boundary, so it scrubs only the restored media fields that
+/// this clone will discard.
+fn zeroize_and_clear<T: Zeroize>(value: &mut Option<T>) {
+    if let Some(mut sensitive) = value.take() {
+        sensitive.zeroize();
+    }
+}
+
 /// The overlap [`WanEngine::extend_inner`] will run with, or the error it
 /// refuses the request with.
 ///
@@ -2295,8 +2308,8 @@ impl WanEngine {
             .context("Wan: encoding the continuation's seed frame")?;
 
         let mut continuation_req = req.clone();
-        continuation_req.extend_video = None;
-        continuation_req.extend_video_path = None;
+        zeroize_and_clear(&mut continuation_req.extend_video);
+        zeroize_and_clear(&mut continuation_req.extend_video_path);
         continuation_req.extend_overlap_frames = None;
         continuation_req.source_image = Some(png.into_inner());
         continuation_req.width = probe.width;
@@ -2434,6 +2447,26 @@ impl crate::chain::ChainStageRenderer for WanEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct ZeroizeProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Zeroize for ZeroizeProbe {
+        fn zeroize(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn continuation_discard_scrubs_the_replaced_owner() {
+        let zeroized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut value = Some(ZeroizeProbe(std::sync::Arc::clone(&zeroized)));
+
+        zeroize_and_clear(&mut value);
+
+        assert!(value.is_none());
+        assert!(zeroized.load(std::sync::atomic::Ordering::SeqCst));
+    }
     use crate::engine::InferenceEngine;
     use candle_nn::{VarBuilder, VarMap};
     use std::collections::HashMap;

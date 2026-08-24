@@ -17,6 +17,7 @@ import type {
   GalleryOrganizationFields,
   GalleryTrashCapabilities,
 } from "@studio/lib/api/galleryOrganization";
+import type { DurableMediaCapabilities } from "@studio/api/generationAdmission";
 
 export type { SourceFitPolicy } from "@studio/lib/sourceFit";
 export type {
@@ -214,6 +215,8 @@ export interface GalleryCapabilities {
 // Mirror of `mold_core::ServerCapabilities`.
 export interface ServerCapabilities {
   generation_profile_v1?: boolean;
+  /** Restart-safe encrypted request-media queueing. Absent is unsupported. */
+  durable_media?: DurableMediaCapabilities | null;
   gallery?: GalleryCapabilities;
   /** Server-enforced model families that are not activated in this build. */
   model_access?: {
@@ -274,7 +277,14 @@ export interface ServerCapabilities {
      * and runs them whether or not a client is still attached. Absent on
      * servers that predate the durable queue. */
     durable_queue?: boolean;
+    /** Atomic heterogeneous admission, including singleton requests. */
+    heterogeneous_batch?: boolean;
+    heterogeneous_batch_max_outputs?: number | null;
+    /** Enriched durable outcomes, by-client recovery and bulk reconciliation. */
+    durable_batch_outcomes?: boolean;
   };
+  /** One server-wide, authenticated lifecycle stream. */
+  events?: { available?: boolean };
   /** Prompt expansion. `model_present` is the routing input: a host that is
    * known to lack the expander is the one case expansion leaves the
    * generation route. `model` names what to pull; absent on older servers. */
@@ -598,6 +608,8 @@ export interface QueueEntry {
 export interface QueueListing {
   entries: QueueEntry[];
   plan?: import("@studio/api/queuePlan").QueuePlan | null;
+  live_only_entries?: QueueEntry[];
+  page?: import("@studio/api/queuePlan").QueuePage;
 }
 
 export type SseProgressEvent =

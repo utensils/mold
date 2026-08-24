@@ -11,6 +11,7 @@ import ProgressBar from "@ui/components/ProgressBar.vue";
 import Icon from "@ui/components/Icon.vue";
 import { useGenerationStore, jobProgress } from "../../stores/generation";
 import { useJobsStore, type QueueSurfaceRow } from "../../stores/jobs";
+import { useHostsStore } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 
 const generation = useGenerationStore();
@@ -19,6 +20,10 @@ const toasts = useToastStore();
 const cancellingIds = ref<string[]>([]);
 
 const rows = computed(() => jobs.queueSurface);
+const hostsWithMore = computed(() => {
+  const hosts = useHostsStore();
+  return hosts.all.filter((host) => jobs.queues[host.id]?.nextCursor);
+});
 
 function ownJob(row: QueueSurfaceRow) {
   const clientId = row.entry.clientId;
@@ -170,5 +175,29 @@ async function reorder(row: QueueSurfaceRow, delta: number) {
     <p v-else data-test="queue-empty" class="text-caption text-ink-3">
       Nothing running or queued right now.
     </p>
+    <div v-if="hostsWithMore.length" class="flex flex-col gap-1.5">
+      <button
+        v-for="host in hostsWithMore"
+        :key="host.id"
+        type="button"
+        data-test="queue-column-load-more"
+        class="border-edge h-8 rounded-control border px-3 text-caption text-ink-2 hover:text-ink disabled:opacity-50"
+        :disabled="jobs.queues[host.id]?.loadingMore"
+        @click="jobs.loadMoreHost(host.id)"
+      >
+        {{
+          jobs.queues[host.id]?.loadingMore
+            ? `Loading from ${host.label}…`
+            : `Load more from ${host.label}`
+        }}
+      </button>
+      <p
+        v-for="host in hostsWithMore.filter((host) => jobs.queues[host.id]?.loadMoreError)"
+        :key="`error:${host.id}`"
+        class="text-caption text-stop"
+      >
+        {{ jobs.queues[host.id]?.loadMoreError }}
+      </p>
+    </div>
   </div>
 </template>

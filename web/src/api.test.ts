@@ -136,29 +136,77 @@ describe("queue api", () => {
   });
 
   it("fetchQueue preserves queued target_gpu metadata", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          entries: [
-            {
-              id: "srv-1",
-              model: "flux-dev:q4",
-              state: "queued",
-              started_at_unix_ms: 0,
-              position: 0,
-              target_gpu: 1,
-            },
-          ],
-        }),
-        { status: 200 },
-      ),
-    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ queue_capacity: 2 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            entries: [
+              {
+                id: "srv-1",
+                model: "flux-dev:q4",
+                state: "queued",
+                started_at_unix_ms: 0,
+                position: 0,
+                target_gpu: 1,
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
+      );
     vi.stubGlobal("fetch", fetchMock);
 
     const listing = await fetchQueue();
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/queue", { signal: undefined });
+    expect(fetchMock).toHaveBeenCalledWith("/api/queue?limit=2", {
+      signal: undefined,
+    });
     expect(listing.entries[0].target_gpu).toBe(1);
+    expect(listing.page).toBeUndefined();
+  });
+
+  it("fetches an encoded page from the exact authenticated target with its signal", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      Response.json({
+        entries: [],
+        live_only_entries: [],
+        page: {
+          limit: 11,
+          offset: 0,
+          returned: 0,
+          next_cursor: "next-page",
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+
+    const listing = await fetchQueue(
+      { baseUrl: "https://render.example", apiKey: "secret" },
+      controller.signal,
+      { limit: 11, cursor: "opaque/+ token=" },
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://render.example/api/queue?limit=11&cursor=opaque%2F%2B+token%3D",
+      {
+        headers: { "x-api-key": "secret" },
+        signal: controller.signal,
+      },
+    );
+    expect(listing.page?.next_cursor).toBe("next-page");
+  });
+
+  it("rejects an invalid page limit without making a request", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchQueue(undefined, undefined, { limit: 0 }),
+    ).rejects.toThrow("positive integer");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("PATCHes queued job target_gpu including null for Auto", async () => {

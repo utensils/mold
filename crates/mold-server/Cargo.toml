@@ -115,9 +115,16 @@ cudarc = { version = "0.19.8", default-features = false, features = ["driver"], 
 sysinfo = "0.34"
 fs2 = "0.4"
 async-stream = "0.3"
+aead-stream = { version = "=0.6.0", features = ["alloc"] }
+chacha20poly1305 = { version = "=0.11.0", features = ["zeroize"] }
+zeroize = "=1.8.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+] }
 
 [dev-dependencies]
 # Test-only feature unification lets the server prove its frozen H3 authority

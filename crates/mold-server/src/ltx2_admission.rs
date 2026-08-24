@@ -87,18 +87,34 @@ pub(crate) struct Ltx2ShapeHint {
 
 impl Ltx2ShapeHint {
     pub(crate) fn from_request(req: &mold_core::GenerateRequest) -> Self {
+        Self::from_request_with_projection(req, None)
+    }
+
+    pub(crate) fn from_request_with_projection(
+        req: &mold_core::GenerateRequest,
+        projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+    ) -> Self {
         Self {
             width: req.width,
             height: req.height,
             frames: req.frames.unwrap_or(1),
             conditioned: req.source_image.is_some()
                 || req.source_video.is_some()
+                || req.source_video_path.is_some()
                 || req.extend_video.is_some()
                 || req.extend_video_path.is_some()
                 || req
                     .keyframes
                     .as_ref()
-                    .is_some_and(|keyframes| !keyframes.is_empty()),
+                    .is_some_and(|keyframes| !keyframes.is_empty())
+                || projection.is_some_and(|projection| {
+                    projection.source_image
+                        || projection.source_video_inline
+                        || projection.source_video_path
+                        || projection.extend_video_inline
+                        || projection.extend_video_path
+                        || projection.keyframe_count > 0
+                }),
         }
     }
 }
@@ -652,6 +668,42 @@ mod tests {
             frames: 97,
             conditioned: true,
         }
+    }
+
+    #[test]
+    fn projected_video_conditioning_matches_hydrated_shape() {
+        let hydrated: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "video",
+            "model": "ltx2:fp8",
+            "width": 768,
+            "height": 512,
+            "frames": 97,
+            "steps": 20,
+            "guidance": 3.0,
+            "extend_video": "dmlkZW8="
+        }))
+        .unwrap();
+        let mut sanitized = hydrated.clone();
+        sanitized.extend_video = None;
+        let projection = crate::queue_media_store::QueueMediaProjection {
+            extend_video_inline: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            Ltx2ShapeHint::from_request_with_projection(&hydrated, None),
+            Ltx2ShapeHint::from_request_with_projection(&sanitized, Some(&projection)),
+        );
+
+        let mut hydrated_path = sanitized.clone();
+        hydrated_path.source_video_path = Some("/private/source.mp4".into());
+        let path_projection = crate::queue_media_store::QueueMediaProjection {
+            source_video_path: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            Ltx2ShapeHint::from_request_with_projection(&hydrated_path, None),
+            Ltx2ShapeHint::from_request_with_projection(&sanitized, Some(&path_projection)),
+        );
     }
 
     /// LTX-2.3's 22B ships nine AdaLN components (`[36864, 4096]`) where the

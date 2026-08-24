@@ -16,6 +16,7 @@ import {
 import { styleHint } from "../lib/stylePresets";
 import { __testing__ as hostRoutingTesting } from "../composables/useHostRouting";
 import { useHostRouting } from "../composables/useHostRouting";
+import { usePullResume } from "../composables/usePullResume";
 import {
   __testing__ as chainJobsTesting,
   useChainJobs,
@@ -38,6 +39,7 @@ import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import type {
   GalleryImage,
   GenerateFormState,
+  GenerateRequestWire,
   ModelInfoExtended,
   OutputMetadata,
 } from "../types";
@@ -250,6 +252,11 @@ vi.mock("../composables/useGenerateStream", async (importOriginal) => ({
     canvasErrorJobId: streamCanvasErrorJobIdRef,
     selectedJob: streamSelectedJobRef,
     submit: submitMock,
+    submitBatch: (
+      requests: GenerateRequestWire[],
+      decision: unknown,
+      route: unknown,
+    ) => requests.map((request) => submitMock(request, decision, route)),
     cancel: cancelPrintMock,
     failRunning: vi.fn(),
     remove: vi.fn(),
@@ -287,6 +294,12 @@ const hostModelDownloadMock = vi.hoisted(() => vi.fn(async () => null));
 vi.mock("../components/machines/hostClient", () => ({
   hostStatus: hostStatusMock,
   hostModels: hostModelsMock,
+  hostDownloads: vi.fn(async () => ({
+    active: null,
+    active_jobs: [],
+    queued: [],
+    history: [],
+  })),
   hostModelDownload: hostModelDownloadMock,
   hostCapabilities: hostCapabilitiesMock,
   // The File under group reads each host's organization snapshot through
@@ -353,6 +366,7 @@ describe("CreatePage layout and behavior", () => {
     chainJobsTesting.reset();
     takeSequenceHandoff();
     takeGenerationHandoff();
+    usePullResume().cancel();
     generateFormTesting.resetForTest();
     resetNotifications();
     submitMock.mockClear();
@@ -2669,6 +2683,7 @@ describe("CreatePage layout and behavior", () => {
       hostId: studio.id,
       label: "Studio",
       instanceId: null,
+      modelFamily: "flux",
       referenceUploads: null,
       target: { baseUrl: "http://studio:7680", apiKey: "sk-studio" },
     });
@@ -3848,6 +3863,7 @@ describe("CreatePage host routing", () => {
       hostId: studio.id,
       label: "Studio",
       instanceId: null,
+      modelFamily: "flux2",
       referenceUploads: null,
       target: { baseUrl: "http://studio:7680", apiKey: "sk-studio" },
     });
@@ -4419,6 +4435,71 @@ describe("CreatePage host routing", () => {
       true,
     );
     expect(toasts.some((t) => /can't run this print/.test(t.text))).toBe(false);
+  });
+
+  it("freezes model family across delayed missing-model resume", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      apiKey: "sk-studio",
+    });
+    localStorage.setItem("mold.web.generateTarget.v1", studio.id);
+    hostModelsMock.mockResolvedValue([]);
+    hostCapabilitiesMock.mockResolvedValue({
+      gallery: { can_delete: true },
+      queue: {
+        heterogeneous_batch: true,
+        durable_batch_outcomes: true,
+      },
+      durable_media: {
+        protocol_version: 1,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        h3_references: false,
+        private_h3: false,
+      },
+    });
+    placementPreviewMock.mockResolvedValue({
+      version: 1,
+      authoritative: true,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "infeasible",
+      reason: "model is not installed",
+      missing_components: [
+        {
+          kind: "transformer",
+          name: "transformer",
+          present: false,
+          repair_model: "z-image-turbo:q6",
+        },
+      ],
+    });
+
+    const form = useGenerateForm();
+    form.state.value.model = "z-image-turbo:q6";
+    form.state.value.modelFamily = "zimage";
+    form.state.value.prompt = "frozen family";
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    const pending = usePullResume().pending.value;
+    expect(pending).not.toBeNull();
+
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    pending!.resume();
+
+    expect(submitMock).toHaveBeenCalledTimes(1);
+    expect(submitMock.mock.calls[0]?.[0].model).toBe("z-image-turbo:q6");
+    expect(submitMock.mock.calls[0]?.[2]).toMatchObject({
+      hostId: studio.id,
+      modelFamily: "zimage",
+    });
   });
 
   it("does not arm a late missing-model resume after planning is cancelled", async () => {

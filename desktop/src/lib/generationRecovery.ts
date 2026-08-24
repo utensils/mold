@@ -15,6 +15,7 @@ import {
   minimaxH3TaskForModel,
   type MinimaxH3Task,
 } from "@studio/lib/minimaxH3Authoring";
+import { queueListingPath, queuePageRequestForCapacity } from "@studio/api/queuePlan";
 
 /**
  * Reconciliation for generations whose stream died while the host kept going.
@@ -102,6 +103,10 @@ export interface GenerationRecoveryOptions {
   /** The exact target the batch was submitted to — the frozen route. */
   target: ApiTarget;
   hostLabel: string;
+  /** Current host runtime capacity. Production callers source this from the
+   * status snapshot that established reachability; null is the explicit
+   * older-host fallback, while undefined makes recovery read status first. */
+  queueCapacity?: number | null | undefined;
   /** Whether this batch went through the durable long-video chain shim. */
   chain?: boolean;
   /** Reacquire a renderable URL for a job settled as complete. */
@@ -675,17 +680,31 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
         return;
       }
 
-      const listing = await apiJsonTo<{ entries?: RecoveryQueueEntry[] }>(
-        opts.target,
-        "/api/queue",
-      );
+      const queueCapacity =
+        opts.queueCapacity === undefined
+          ? await apiJsonTo<{ queue_capacity?: number | null }>(opts.target, "/api/status").then(
+              (status) => status.queue_capacity ?? null,
+            )
+          : opts.queueCapacity;
+      const listing = await apiJsonTo<{
+        entries?: RecoveryQueueEntry[];
+        live_only_entries?: RecoveryQueueEntry[];
+        page?: { next_cursor?: string };
+      }>(opts.target, queueListingPath(queuePageRequestForCapacity(queueCapacity)));
       transportRetries = 0;
       if (settledExternally(job) || !isActive()) return;
       // `Array.prototype.entries` exists, so a body that is itself an array
       // must never be read as a listing — that yields a FUNCTION here and
       // throws deep inside the join, which the retry loop then mistakes for a
       // transport failure and waits out.
-      const rows = Array.isArray(listing?.entries) ? listing.entries : [];
+      const durableRows = Array.isArray(listing?.entries) ? listing.entries : [];
+      const liveOnlyRows = Array.isArray(listing?.live_only_entries)
+        ? listing.live_only_entries
+        : [];
+      const seenQueueIds = new Set<string>();
+      const rows = [...durableRows, ...liveOnlyRows].filter(
+        ({ id }) => !seenQueueIds.has(id) && !!seenQueueIds.add(id),
+      );
       const entry = findQueueEntry(rows, job, h3Identity);
       // Adopt the recovered id immediately. The pre-ID join identifies the row
       // by seed, timing, model and conditioning when suspension beat the queued
@@ -726,6 +745,14 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
           return;
         }
         queuedJobPolls += 1;
+        job.stage = `Waiting in ${opts.hostLabel}’s queue`;
+        await sleep(interval);
+        continue;
+      }
+      if (!entry && listing.page?.next_cursor) {
+        // The bounded live window is not evidence that a deeper durable row
+        // disappeared. Let it advance naturally instead of scanning the
+        // journal on every recovery poll.
         job.stage = `Waiting in ${opts.hostLabel}’s queue`;
         await sleep(interval);
         continue;

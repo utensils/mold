@@ -153,7 +153,7 @@ function installApi(): void {
             ],
       );
     }
-    if (path === "/api/queue") {
+    if (path === "/api/queue?limit=8") {
       return Promise.resolve({ entries: target.baseUrl === renderBox.baseUrl ? [] : queueEntries });
     }
     if (path === "/api/devices") {
@@ -259,7 +259,7 @@ describe("MobileHostDetail remote host data", () => {
   it("shows a CPU utility lane when the host reports no GPUs", async () => {
     const originalApi = apiJsonTo.getMockImplementation()!;
     apiJsonTo.mockImplementation((target, path) => {
-      if (path === "/api/queue") {
+      if (path === "/api/queue?limit=8") {
         return Promise.resolve({
           entries: [],
           plan: {
@@ -302,7 +302,7 @@ describe("MobileHostDetail remote host data", () => {
       if (path === "/api/devices") {
         return Promise.resolve({ devices: [visible], plan_version: 1 });
       }
-      if (path === "/api/queue") {
+      if (path === "/api/queue?limit=8") {
         return Promise.resolve({
           entries: [],
           plan: {
@@ -359,7 +359,7 @@ describe("MobileHostDetail remote host data", () => {
 
     expect(apiJsonTo).toHaveBeenCalledWith(studioTarget, "/api/status");
     expect(apiJsonTo).toHaveBeenCalledWith(studioTarget, "/api/models");
-    expect(apiJsonTo).toHaveBeenCalledWith(studioTarget, "/api/queue");
+    expect(apiJsonTo).toHaveBeenCalledWith(studioTarget, "/api/queue?limit=8");
     expect(stream("/api/resources/stream").options).toMatchObject({
       target: studioTarget,
       retry: true,
@@ -495,7 +495,7 @@ describe("MobileHostDetail remote host data", () => {
     let currentQueue = [...queueEntries];
     const originalApi = apiJsonTo.getMockImplementation()!;
     apiJsonTo.mockImplementation((requestTarget, path) => {
-      if (path === "/api/queue") return Promise.resolve({ entries: currentQueue });
+      if (path === "/api/queue?limit=8") return Promise.resolve({ entries: currentQueue });
       return originalApi(requestTarget, path);
     });
     const fetchMock = vi.fn(
@@ -590,7 +590,8 @@ describe("MobileHostDetail remote host data", () => {
     let deviceCall = 0;
     const existingApi = apiJsonTo.getMockImplementation()!;
     apiJsonTo.mockImplementation((requestTarget, path) => {
-      if (path === "/api/queue") return queueCall++ === 0 ? olderQueue.promise : newerQueue.promise;
+      if (path === "/api/queue?limit=8")
+        return queueCall++ === 0 ? olderQueue.promise : newerQueue.promise;
       if (path === "/api/devices")
         return deviceCall++ === 0 ? olderDevices.promise : newerDevices.promise;
       return existingApi(requestTarget, path);
@@ -985,7 +986,7 @@ describe("MobileHostDetail remote host data", () => {
         );
       }
       if (path === "/api/models") return Promise.resolve([]);
-      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/queue?limit=8") return Promise.resolve({ entries: [] });
       return Promise.reject(new Error(`Unexpected API path: ${path} for ${target.baseUrl}`));
     });
 
@@ -1145,33 +1146,100 @@ describe("MobileHostDetail remote host data", () => {
     expect(row.text()).not.toContain("unavailable");
   });
 
-  it("uses the live queue count after the queue API responds", async () => {
+  it("keeps durable backlog, loaded page, and runtime window as separate quantities", async () => {
     apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string): Promise<unknown> => {
       if (path === "/api/status") return Promise.resolve(serverStatus({ queue_depth: 7 }));
       if (path === "/api/models") return Promise.resolve([]);
-      if (path === "/api/queue") return Promise.resolve({ entries: [queueEntries[0]] });
+      if (path === "/api/queue?limit=8") return Promise.resolve({ entries: [queueEntries[0]] });
       return Promise.reject(new Error(`Unexpected API path: ${path} for ${target.baseUrl}`));
     });
 
     const view = await mountDetail();
 
-    expect(view.get("[aria-labelledby='host-queue-title'] .mobile-section-head span").text()).toBe(
-      "1/8",
+    expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("7 total");
+    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
+      "1 loaded · Runtime window 8",
     );
+  });
+
+  it("does not infer total backlog from an older host's loaded page or runtime window", async () => {
+    apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string): Promise<unknown> => {
+      if (path === "/api/status") {
+        return Promise.resolve(serverStatus({ queue_depth: null, queue_capacity: 2 }));
+      }
+      if (path === "/api/models") return Promise.resolve([]);
+      if (path === "/api/queue?limit=2") return Promise.resolve({ entries: [queueEntries[0]] });
+      return Promise.reject(new Error(`Unexpected API path: ${path} for ${target.baseUrl}`));
+    });
+
+    const view = await mountDetail();
+
+    expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("1 loaded");
+    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
+      "1 loaded · Runtime window 2",
+    );
+  });
+
+  it("pages by host capacity and loads the durable queue tail on demand", async () => {
+    vi.useFakeTimers();
+    apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string): Promise<unknown> => {
+      if (path === "/api/status") {
+        return Promise.resolve(serverStatus({ queue_depth: 3, queue_capacity: 2 }));
+      }
+      if (path === "/api/models") return Promise.resolve([]);
+      if (path === "/api/queue?limit=2") {
+        return Promise.resolve({
+          entries: [queueEntries[0], queueEntries[1]],
+          page: { limit: 2, offset: 0, returned: 2, next_cursor: "tail" },
+        });
+      }
+      if (path === "/api/queue?limit=2&cursor=tail") {
+        return Promise.resolve({
+          entries: [
+            {
+              ...queueEntries[1],
+              id: "job-tail",
+              position: 3,
+            },
+          ],
+          page: { limit: 2, offset: 2, returned: 1 },
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path} for ${target.baseUrl}`));
+    });
+
+    const view = await mountDetail();
+    expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("3 total");
+    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
+      "2 loaded · Runtime window 2",
+    );
+    expect(view.get("[data-test='host-detail-queue']").findAll("li")).toHaveLength(2);
+
+    await view.get("[data-test='host-detail-queue-load-more']").trigger("click");
+    await flushPromises();
+
+    expect(view.get("[data-test='host-detail-queue']").findAll("li")).toHaveLength(3);
+    expect(view.find("[data-test='host-detail-queue-load-more']").exists()).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(5_001);
+    expect(view.get("[data-test='host-detail-queue']").findAll("li")).toHaveLength(2);
+    expect(view.find("[data-test='host-detail-queue-load-more']").exists()).toBe(true);
+    vi.useRealTimers();
   });
 
   it("falls back to the status queue depth when the queue API is unavailable", async () => {
     apiJsonTo.mockImplementation((_target: { baseUrl: string }, path: string): Promise<unknown> => {
       if (path === "/api/status") return Promise.resolve(serverStatus({ queue_depth: 7 }));
       if (path === "/api/models") return Promise.resolve([]);
-      if (path === "/api/queue") return Promise.reject(new Error("queue unsupported"));
+      if (path === "/api/queue?limit=8") return Promise.reject(new Error("queue unsupported"));
       return Promise.reject(new Error(`Unexpected API path: ${path}`));
     });
 
     const view = await mountDetail();
 
-    expect(view.get("[aria-labelledby='host-queue-title'] .mobile-section-head span").text()).toBe(
-      "7/8",
+    expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("7 total");
+    expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
+      "Queue page unavailable · Runtime window 8",
     );
   });
 
@@ -1190,7 +1258,7 @@ describe("MobileHostDetail remote host data", () => {
           if (path === "/api/status") {
             return Promise.resolve(serverStatus({ queue_depth: 7 }));
           }
-          if (path === "/api/queue") {
+          if (path === "/api/queue?limit=8") {
             queueCalls += 1;
             if (queueCalls === 1) {
               return Promise.resolve({
@@ -1252,26 +1320,29 @@ describe("MobileHostDetail remote host data", () => {
         const view = await mountDetail();
         expect(view.text()).toContain("stale-cpu-work");
         expect(view.find("[data-test='host-detail-queue']").exists()).toBe(true);
-        expect(
-          view.get("[aria-labelledby='host-queue-title'] .mobile-section-head span").text(),
-        ).toBe("1/8");
+        expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("7 total");
+        expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
+          "1 loaded · Runtime window 8",
+        );
 
         await vi.advanceTimersByTimeAsync(5_000);
         await flushPromises();
 
         expect(view.text()).not.toContain("stale-cpu-work");
         expect(view.find("[data-test='host-detail-queue']").exists()).toBe(false);
-        expect(
-          view.get("[aria-labelledby='host-queue-title'] .mobile-section-head span").text(),
-        ).toBe("7/8");
+        expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("7 total");
+        expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
+          "Queue page unavailable · Runtime window 8",
+        );
 
         await vi.advanceTimersByTimeAsync(5_000);
         await flushPromises();
 
         expect(view.text()).toContain("restored-cpu-work");
-        expect(
-          view.get("[aria-labelledby='host-queue-title'] .mobile-section-head span").text(),
-        ).toBe("1/8");
+        expect(view.get("[data-test='host-detail-queue-total']").text()).toBe("7 total");
+        expect(view.get("[data-test='host-detail-queue-scope']").text()).toBe(
+          "1 loaded · Runtime window 8",
+        );
       } finally {
         vi.useRealTimers();
       }
@@ -1290,7 +1361,7 @@ describe("MobileHostDetail remote host data", () => {
       if (path === "/api/models") {
         return Promise.resolve([model("flux-dev:q8", "flux", { is_loaded: true })]);
       }
-      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/queue?limit=8") return Promise.resolve({ entries: [] });
       return Promise.reject(new Error(`Unexpected API path: ${path}`));
     });
 
@@ -1379,7 +1450,7 @@ describe("MobileHostDetail host switching", () => {
     expect(oldDeviceEvents.options.signal.aborted).toBe(true);
     expect(apiJsonTo).toHaveBeenCalledWith(renderTarget, "/api/status");
     expect(apiJsonTo).toHaveBeenCalledWith(renderTarget, "/api/models");
-    expect(apiJsonTo).toHaveBeenCalledWith(renderTarget, "/api/queue");
+    expect(apiJsonTo).toHaveBeenCalledWith(renderTarget, "/api/queue?limit=8");
     expect(stream("/api/resources/stream", renderTarget).options.signal.aborted).toBe(false);
     expect(stream("/api/downloads/stream", renderTarget).options.signal.aborted).toBe(false);
     expect(stream("/api/events", renderTarget).options.signal.aborted).toBe(false);
@@ -1459,7 +1530,7 @@ describe("MobileHostDetail host switching", () => {
             : [model("qwen-image:bf16", "qwen-image")],
         );
       }
-      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/queue?limit=8") return Promise.resolve({ entries: [] });
       return Promise.reject(new Error(`Unexpected API path: ${path}`));
     });
 

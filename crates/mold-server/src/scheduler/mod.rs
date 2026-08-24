@@ -48,9 +48,8 @@ const MAX_DISPATCH_REPLANS_PER_TURN: u8 = 3;
 const MAX_CONCURRENT_PREPARATIONS: usize = 2;
 const DISPATCH_RETRY_BASE_MS: u64 = 25;
 const DISPATCH_RETRY_MAX_MS: u64 = 1_000;
-/// How long a queued generation that resolves NO execution plan may keep
-/// waiting once the scheduler holds nothing that could return the resource it
-/// is short of.
+/// How long a queued generation with an unclassified empty plan set may keep
+/// waiting once the scheduler holds nothing that could change that result.
 ///
 /// Zero-candidate work is reconsidered on every planning turn and dispatched
 /// the moment a plan resolves, which is the right answer while something is
@@ -58,12 +57,37 @@ const DISPATCH_RETRY_MAX_MS: u64 = 1_000;
 /// otherwise idle scheduler nothing will change on its own, and #1272 is what
 /// that looks like from a client — an H3 print reported `no_schedulable_device`
 /// three times, then nothing at all for the rest of a forty-minute wait, with
-/// no failure, no message, and a queue row that outlived the request. The grace
-/// is deliberately generous because an idle scheduler is not the same as an
-/// idle *machine*: another process can hold the GPU, and a short external spike
-/// must not settle work that would have run.
+/// no failure, no message, and a queue row that outlived the request. Typed
+/// transient failures are excluded: external resource pressure remains queued
+/// for however long it exists and wakes on a changed resource sample.
 const UNSCHEDULABLE_IDLE_GRACE_MS: u64 = 60_000;
 pub(crate) const CPU_UTILITY_DEVICE_ID: &str = "cpu:utility:0";
+
+pub(crate) fn generation_hard_ordinal(
+    state: &AppState,
+    id: &str,
+    request: &mold_core::GenerateRequest,
+) -> Option<usize> {
+    let request_pin = state
+        .gpu_pool
+        .resolve_explicit_placement_gpu(request.placement.as_ref())
+        .ok()
+        .flatten();
+    request_pin.or_else(|| state.job_registry.target_gpu(id).flatten())
+}
+
+fn constrained_generation_device_facts(
+    devices: &[crate::execution_plan::DeviceFact],
+    hard_ordinal: Option<usize>,
+    required_device_id: Option<&str>,
+) -> Vec<crate::execution_plan::DeviceFact> {
+    devices
+        .iter()
+        .filter(|device| hard_ordinal.is_none_or(|ordinal| device.ordinal == ordinal))
+        .filter(|device| required_device_id.is_none_or(|id| device.id == id))
+        .cloned()
+        .collect()
+}
 
 fn wire_estimate_confidence(
     confidence: mold_scheduler::EstimateConfidence,
@@ -586,8 +610,8 @@ struct PendingGeneration {
     /// nothing that could free capacity. Cleared the moment a plan resolves or
     /// any work is leased, so it only accrues over a genuinely idle wait.
     unschedulable_since_ms: Option<u64>,
-    /// The last non-terminal planning failure, retained so the refusal names
-    /// the shortfall the plan named instead of a bare "never scheduled".
+    /// An unclassified planning reason, retained so a refusal can name it
+    /// instead of a bare "never scheduled".
     unschedulable_reason: Option<String>,
     /// Place in line this job's client was last told about, so a drained queue
     /// re-announces exactly once per actual move. `None` until first observed.
@@ -896,7 +920,11 @@ impl DependencyPreparer for PostUpscalePreparer {
                             .map_err(|_| "prompt expansion owner worker dropped its result".to_string())?;
                     }
                     _ = registry_notify.notified() => {
-                        if state.job_registry.entry(&work_id).is_none() {
+                        if state
+                            .job_registry
+                            .scheduler_lifecycle(&work_id)
+                            .is_none()
+                        {
                             cancellation.cancel();
                             return Err(format!(
                                 "generation job {work_id} was cancelled during prompt expansion"
@@ -1378,6 +1406,7 @@ struct Coordinator {
     last_worker_claims: BTreeMap<String, usize>,
     last_device_preferences_sequence: u64,
     last_device_event_signature: Option<DeviceEventSignature>,
+    last_resource_capacity_signature: Vec<(String, u64)>,
     device_state_dirty: bool,
     plan_invalidations: BTreeMap<String, u8>,
     dispatch_retry_round: u8,
@@ -1458,7 +1487,7 @@ impl Coordinator {
             warm_wait_max_ms: u64::from(scheduler.warm_wait_max_ms),
             ..mold_scheduler::PlannerConfig::default()
         };
-        Self {
+        let mut coordinator = Self {
             state,
             planner: Planner::new(planner_config.clone()),
             admission_planner: Planner::new(mold_scheduler::PlannerConfig {
@@ -1486,6 +1515,7 @@ impl Coordinator {
             last_worker_claims: BTreeMap::new(),
             last_device_preferences_sequence: 0,
             last_device_event_signature: None,
+            last_resource_capacity_signature: Vec::new(),
             device_state_dirty: true,
             plan_invalidations: BTreeMap::new(),
             dispatch_retry_round: 0,
@@ -1499,7 +1529,9 @@ impl Coordinator {
             before_grant_hook: None,
             #[cfg(test)]
             before_queue_control_plan_hook: None,
-        }
+        };
+        coordinator.last_resource_capacity_signature = coordinator.resource_capacity_signature();
+        coordinator
     }
 
     /// Sample host memory and republish it, so `/api/status` and the queue
@@ -1524,8 +1556,8 @@ impl Coordinator {
     /// notification and on a 10 ms ticker, so announcing unconditionally would
     /// be a firehose. The first observation seeds silently: the submit-time
     /// event has already told that client where it stands.
-    fn announce_queue_positions(&mut self, listing: &crate::job_registry::QueueListing) {
-        for entry in &listing.entries {
+    fn announce_queue_positions(&mut self, entries: &[crate::job_registry::SchedulerQueueEntry]) {
+        for entry in entries {
             if entry.state != crate::job_registry::JobLifecycle::Queued {
                 continue;
             }
@@ -1585,7 +1617,10 @@ impl Coordinator {
         let queue_rank = self.synthetic_id;
         self.synthetic_id = self.synthetic_id.saturating_add(1);
         let id = job.id.clone();
-        let shape_bucket = crate::gpu_pool::oom_shape_bucket(&job.request);
+        let shape_bucket = crate::gpu_pool::oom_shape_bucket_with_projection(
+            &job.request,
+            job.deferred_media.as_ref().map(|media| media.projection()),
+        );
         if let Some(error) =
             crate::gpu_pool::model_unschedulable_message(&job.request.model, Some(&shape_bucket))
         {
@@ -1779,6 +1814,11 @@ impl Coordinator {
             pending.preparation = PreparationState::Preparing;
             let state = self.state.clone();
             let request = pending.job.request.clone();
+            let queue_media_projection = pending
+                .job
+                .deferred_media
+                .as_ref()
+                .map(|media| media.projection().clone());
             let progress = pending.job.progress_tx.clone();
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             let context = crate::variant_dependencies::DependencyPreparationContext {
@@ -1817,11 +1857,13 @@ impl Coordinator {
             let context = crate::variant_dependencies::DependencyPreparationContext {
                 frozen_identity,
                 frozen_identity_warning,
+                queue_media_projection,
             };
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             let context = crate::variant_dependencies::DependencyPreparationContext {
                 frozen_identity,
                 frozen_identity_warning,
+                queue_media_projection,
                 ..context
             };
             let preparer = self.preparer.clone();
@@ -2594,10 +2636,9 @@ impl Coordinator {
             self.mutate(immediate);
         }
 
-        let listing = self.state.job_registry.snapshot();
-        self.announce_queue_positions(&listing);
-        let queue_shape = listing
-            .entries
+        let registry_entries = self.state.job_registry.scheduler_snapshot();
+        self.announce_queue_positions(&registry_entries);
+        let queue_shape = registry_entries
             .iter()
             .filter(|entry| entry.state == crate::job_registry::JobLifecycle::Queued)
             .map(|entry| (entry.id.clone(), entry.target_gpu))
@@ -2620,7 +2661,7 @@ impl Coordinator {
             .filter(|(id, pending)| {
                 pending.job.result_tx.is_closed()
                     || (!id.starts_with("runtime-generation-")
-                        && self.state.job_registry.entry(id).is_none())
+                        && self.state.job_registry.scheduler_lifecycle(id).is_none())
             })
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
@@ -2646,6 +2687,26 @@ impl Coordinator {
                 pending.work.cancel_queued();
                 self.mutate(immediate);
             }
+        }
+    }
+
+    fn resource_capacity_signature(&self) -> Vec<(String, u64)> {
+        self.device_snapshots()
+            .into_iter()
+            .map(|device| (device.id.to_string(), device.available_vram_bytes))
+            .collect()
+    }
+
+    /// Wake planning when sampled capacity changes, without turning the 1 Hz
+    /// telemetry stream into an unconditional scheduler retry loop.
+    fn reconcile_resource_capacity(&mut self, immediate: &mut bool) {
+        let signature = self.resource_capacity_signature();
+        if signature == self.last_resource_capacity_signature {
+            return;
+        }
+        self.last_resource_capacity_signature = signature;
+        if !self.pending.is_empty() || !self.pending_owner_work.is_empty() {
+            self.mutate(immediate);
         }
     }
 
@@ -2675,10 +2736,10 @@ impl Coordinator {
                             .active_vram_bytes()
                     })
                     .unwrap_or(0);
-                let reclaimable_cache_bytes = device
-                    .sampled_mold_vram_bytes
-                    .map(|used_by_mold| measured_cache_bytes.min(used_by_mold))
-                    .unwrap_or(0);
+                let reclaimable_cache_bytes = reclaimable_model_cache_bytes(
+                    measured_cache_bytes,
+                    device.sampled_mold_vram_bytes,
+                );
                 let mut warm = BTreeSet::new();
                 if let Some(fingerprint) = worker.and_then(|worker| {
                     worker
@@ -2758,17 +2819,17 @@ impl Coordinator {
         snapshots
     }
 
-    /// Largest physical VRAM capacity in the pool. A predicted peak above this
-    /// can never be satisfied by waiting, no matter how much other work
-    /// finishes.
-    fn largest_total_vram_bytes(&self) -> u64 {
+    /// Physical VRAM keyed by the same stable worker IDs carried by execution
+    /// planning. Eligibility is retained by `InsufficientVram`; keeping the
+    /// pool facts separate prevents an excluded sibling from lending capacity
+    /// to a pinned request's terminal/transient verdict.
+    fn total_vram_bytes_by_device_id(&self) -> BTreeMap<String, u64> {
         self.state
             .gpu_pool
             .workers
             .iter()
-            .map(|worker| worker.gpu.total_vram_bytes)
-            .max()
-            .unwrap_or(0)
+            .map(|worker| (worker_device_id(&worker), worker.gpu.total_vram_bytes))
+            .collect()
     }
 
     fn device_facts(&self) -> Vec<crate::execution_plan::DeviceFact> {
@@ -2830,13 +2891,23 @@ impl Coordinator {
             mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
             Some("1") | Some("true") | Some("yes")
         );
-        let resolved = crate::execution_plan::resolve_execution_plans_for_coordinator(
-            &config,
-            &pending.job.request,
-            device_facts,
-            offload_requested,
-            pending.prepared_inputs.as_ref(),
-        );
+        let hard_ordinal =
+            generation_hard_ordinal(&self.state, &pending.job.id, &pending.job.request);
+        let eligible_device_facts =
+            constrained_generation_device_facts(device_facts, hard_ordinal, None);
+        let resolved =
+            crate::execution_plan::resolve_execution_plans_for_coordinator_with_projection(
+                &config,
+                &pending.job.request,
+                &eligible_device_facts,
+                offload_requested,
+                pending.prepared_inputs.as_ref(),
+                pending
+                    .job
+                    .deferred_media
+                    .as_ref()
+                    .map(|media| media.projection()),
+            );
         let resolved = resolved.map(|plans| {
             let Some(expected) = pending
                 .job
@@ -2860,7 +2931,7 @@ impl Coordinator {
             // no filesystem model. Keep their transport/fencing focus without
             // weakening production admission.
             let estimate = crate::queue::estimate_model_vram(&pending.job.request.model);
-            return Ok(device_facts
+            let plans = eligible_device_facts
                 .iter()
                 .filter(|device| device.available_vram_bytes >= estimate)
                 .cloned()
@@ -2964,24 +3035,28 @@ impl Coordinator {
                         execution_fingerprint: pending.job.request.model.clone(),
                     }
                 })
-                .collect());
+                .collect::<Vec<_>>();
+            if plans.is_empty() {
+                let error = crate::execution_plan::insufficient_vram_error(
+                    &eligible_device_facts
+                        .iter()
+                        .map(|device| crate::execution_plan::DeviceInfeasibility {
+                            device_id: device.id.clone(),
+                            predicted_peak_bytes: estimate,
+                            available_bytes: device.available_vram_bytes,
+                            advice: None,
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                return Err(classify_generation_plan_failure(
+                    error,
+                    &self.total_vram_bytes_by_device_id(),
+                ));
+            }
+            return Ok(plans);
         }
-        let largest_total_vram_bytes = self.largest_total_vram_bytes();
-        resolved.map_err(|error| match error {
-            crate::execution_plan::ExecutionPlanError::InsufficientVram {
-                required_peak_bytes,
-                ..
-            } => {
-                if insufficient_vram_is_terminal(required_peak_bytes, largest_total_vram_bytes) {
-                    GenerationPlanFailure::Terminal(error)
-                } else {
-                    GenerationPlanFailure::Transient(error.to_string())
-                }
-            }
-            crate::execution_plan::ExecutionPlanError::PreparedInputsStale(_) => {
-                GenerationPlanFailure::StalePreparation(error.to_string())
-            }
-            _ => GenerationPlanFailure::Terminal(error),
+        resolved.map_err(|error| {
+            classify_generation_plan_failure(error, &self.total_vram_bytes_by_device_id())
         })
     }
 
@@ -3253,21 +3328,17 @@ impl Coordinator {
         true
     }
 
-    /// Settle a queued generation that can never be planned from here.
+    /// Settle an unclassified empty plan set that cannot change from here.
     ///
-    /// A ready job whose execution plan does not resolve contributes zero
+    /// A ready job whose resolver returns an empty plan set contributes zero
     /// candidates, and the planner has nothing left to say about it: with no
     /// candidate to compare against a device, `classify_no_candidate` reports
-    /// the untyped `NoSchedulableDevice`, and `generation_plan_catalog`
-    /// discards the actual reason at `debug`. That is correct as a *retry* —
-    /// the resource is usually held by work that is about to return it, and the
-    /// job is reconsidered every planning turn — but it is not an answer. On an
-    /// idle scheduler nobody is going to give the resource back, so #1272's
-    /// print sat `queued` past its client's forty-minute timeout with no
-    /// failure and no message while two later jobs ran.
+    /// the untyped `NoSchedulableDevice`. Typed transient failures do not enter
+    /// this settlement path; time cannot turn resource pressure into a terminal
+    /// verdict.
     ///
-    /// So: keep retrying while anything is leased or preparing, and settle the
-    /// job with the plan's own named shortfall once the wait has been idle for
+    /// Keep retrying while anything is leased or preparing, and settle only the
+    /// unclassified empty result once the wait has been idle for
     /// `UNSCHEDULABLE_IDLE_GRACE_MS`. This deliberately does NOT bound a job
     /// queued behind running work — that job is waiting for something real.
     fn settle_unschedulable_generations(&mut self) -> bool {
@@ -3303,7 +3374,11 @@ impl Coordinator {
                     // Terminal failures are rejected by their own pass, which
                     // already names the error.
                     Err(GenerationPlanFailure::Terminal(_)) => None,
-                    Err(error) => Some(error.to_string()),
+                    // Resource pressure and preparation refreshes are retry
+                    // states, not evidence that durable work became invalid.
+                    // Their duration cannot turn them into terminal failures.
+                    Err(GenerationPlanFailure::Transient(_))
+                    | Err(GenerationPlanFailure::StalePreparation(_)) => None,
                 };
                 (id.clone(), failure)
             })
@@ -3576,6 +3651,7 @@ impl Coordinator {
         // originally occupied by generations; owner work keeps its position
         // in the shared monotonic sequence.
         let queue_order = self.state.job_registry.queued_ids_in_order();
+        let queue_patch_blocked = self.state.job_registry.queue_patch_blocked_ids();
         let ranks = reordered_generation_ranks(
             self.pending
                 .iter()
@@ -3586,6 +3662,7 @@ impl Coordinator {
         let mut snapshots: Vec<WorkSnapshot> = self
             .pending
             .iter()
+            .filter(|(id, _)| !queue_patch_blocked.contains(*id))
             .map(|(id, pending)| {
                 let ready = pending.preparation == PreparationState::Ready
                     && pending
@@ -3609,6 +3686,11 @@ impl Coordinator {
                                     &self.state,
                                     &worker,
                                     &pending.job.request,
+                                    pending
+                                        .job
+                                        .deferred_media
+                                        .as_ref()
+                                        .map(|media| media.projection()),
                                     &plan.execution_fingerprint,
                                 )
                             })
@@ -3617,13 +3699,25 @@ impl Coordinator {
                                 model_family: plan.model_family.clone(),
                                 model_fingerprint: pending.job.request.model.clone(),
                                 work_kind: "generation".into(),
-                                shape_bucket: generation_shape_bucket(&pending.job.request),
+                                shape_bucket: generation_shape_bucket_with_projection(
+                                    &pending.job.request,
+                                    pending
+                                        .job
+                                        .deferred_media
+                                        .as_ref()
+                                        .map(|media| media.projection()),
+                                ),
                                 execution_fingerprint: plan.execution_fingerprint.clone(),
                             });
-                        let static_estimate = static_generation_estimate(
+                        let static_estimate = static_generation_estimate_with_projection(
                             &pending.job.request,
                             plan.predicted_vram_peak_bytes,
                             plan.admission_host_demand_bytes(),
+                            pending
+                                .job
+                                .deferred_media
+                                .as_ref()
+                                .map(|media| media.projection()),
                         );
                         let estimate = self.estimates.estimate(&key, static_estimate);
                         let (cold_setup_ms, warm_setup_ms, predicted_run_ms) =
@@ -3683,14 +3777,7 @@ impl Coordinator {
                 if let Some(started) = pending.warm_wait_started_ms {
                     work = work.with_warm_wait_started_at(started);
                 }
-                let request_pin = self
-                    .state
-                    .gpu_pool
-                    .resolve_explicit_placement_gpu(pending.job.request.placement.as_ref())
-                    .ok()
-                    .flatten();
-                let explicit =
-                    request_pin.or_else(|| self.state.job_registry.target_gpu(id).flatten());
+                let explicit = generation_hard_ordinal(&self.state, id, &pending.job.request);
                 if let Some(ordinal) = explicit {
                     if let Some(worker) = self.state.gpu_pool.worker_by_ordinal(ordinal) {
                         work = work.with_hard_device(DeviceId::new(worker_device_id(&worker)));
@@ -4052,6 +4139,8 @@ impl Coordinator {
             return self.cancelled_placement_preview();
         }
         let device_facts = self.device_facts_from_snapshots(&snapshot.devices);
+        let device_facts =
+            constrained_generation_device_facts(&device_facts, None, required_device_id);
         let config = match self.state.config.try_read() {
             Ok(config) => config,
             Err(_) => {
@@ -4073,7 +4162,12 @@ impl Coordinator {
             Some(prepared_inputs),
         ) {
             Ok(plans) => plans,
-            Err(error) => return empty("infeasible", error.to_string()),
+            Err(error) => {
+                let failure =
+                    classify_generation_plan_failure(error, &self.total_vram_bytes_by_device_id());
+                let outcome = placement_preview_outcome_for_plan_failure(&failure);
+                return empty(outcome, failure.to_string());
+            }
         };
         if cancelled() {
             return self.cancelled_placement_preview();
@@ -4125,6 +4219,7 @@ impl Coordinator {
                     &self.state,
                     &worker,
                     request,
+                    None,
                     &plan.execution_fingerprint,
                 );
                 let static_estimate = static_generation_estimate(
@@ -4709,9 +4804,9 @@ impl Coordinator {
                     .is_some_and(|pending| pending.preparation == PreparationState::Ready)
                     || utility.is_some();
                 let work_cancelled = if let Some(pending) = generation {
-                    self.state.job_registry.entry(&work_id).is_none_or(|entry| {
-                        entry.state != crate::job_registry::JobLifecycle::Queued
-                    }) || pending.job.result_tx.is_closed()
+                    self.state.job_registry.scheduler_lifecycle(&work_id)
+                        != Some(crate::job_registry::JobLifecycle::Queued)
+                        || pending.job.result_tx.is_closed()
                 } else {
                     utility.is_none_or(|pending| pending.work.is_cancelled())
                 };
@@ -5012,6 +5107,11 @@ impl Coordinator {
                         &self.state,
                         &worker,
                         &pending.job.request,
+                        pending
+                            .job
+                            .deferred_media
+                            .as_ref()
+                            .map(|media| media.projection()),
                         &execution_plan.execution_fingerprint,
                     );
                     // Admission reserved `max(static, learned)`; carry the
@@ -5430,6 +5530,11 @@ impl Coordinator {
                                     &self.state,
                                     worker.as_ref(),
                                     &pending.job.request,
+                                    pending
+                                        .job
+                                        .deferred_media
+                                        .as_ref()
+                                        .map(|media| media.projection()),
                                     assignment.placement.execution_fingerprint.as_str(),
                                 )
                             })
@@ -5594,6 +5699,7 @@ pub async fn run_scheduler_coordinator(
         .publish_host_memory(coordinator.memory.wire_snapshot());
     coordinator.install_cpu_utility_lane(cpu_utility_tx.clone());
     let registry_notify = coordinator.state.job_registry.mutation_notifier();
+    let mut resource_rx = coordinator.state.resources.subscribe();
     let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut memory_ticker = tokio::time::interval(MEMORY_SAMPLE_INTERVAL);
@@ -5601,6 +5707,7 @@ pub async fn run_scheduler_coordinator(
     let mut fatal = false;
     let mut generation_ingress_open = true;
     let mut owner_ingress_open = true;
+    let mut resource_stream_open = true;
     loop {
         let mut immediate = false;
         tokio::select! {
@@ -5696,6 +5803,16 @@ pub async fn run_scheduler_coordinator(
             _ = registry_notify.notified() => {
                 coordinator.reconcile_external_mutations(&mut immediate);
             }
+            resource = resource_rx.recv(), if resource_stream_open => {
+                match resource {
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        coordinator.reconcile_resource_capacity(&mut immediate);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        resource_stream_open = false;
+                    }
+                }
+            }
             _ = ticker.tick() => {
                 coordinator.reconcile_external_mutations(&mut immediate);
             }
@@ -5785,6 +5902,7 @@ fn gpu_job_from_generation(
         id: job.id,
         model: job.request.model.clone(),
         request: job.request,
+        deferred_media: job.deferred_media,
         resolved_references: job.resolved_references,
         completion_payload: job.completion_payload,
         progress_tx: job.progress_tx,
@@ -5821,6 +5939,7 @@ fn generation_and_prepared_from_gpu_job(
         GenerationJob {
             id: job.id,
             request: job.request,
+            deferred_media: job.deferred_media,
             resolved_references: job.resolved_references,
             completion_payload: job.completion_payload,
             progress_tx: job.progress_tx,
@@ -5866,13 +5985,16 @@ fn exact_leased_execution_plan(
         .cloned()
 }
 
-fn reject_generation(state: &AppState, job: GenerationJob, error: String) {
+fn reject_generation(state: &AppState, mut job: GenerationJob, error: String) {
     if let Some(progress) = job.progress_tx {
         let _ = progress.send(SseMessage::Error(mold_core::SseErrorEvent::failed(
             error.clone(),
         )));
     }
     let id = job.id.clone();
+    if let Some(ticket) = job.journal.take() {
+        ticket.fail(&error);
+    }
     let _ = job.result_tx.send(Err(error));
     state.queue.decrement();
     state.job_registry.remove(&id);
@@ -6270,6 +6392,7 @@ fn generation_estimate_key(
     state: &AppState,
     worker: &GpuWorker,
     request: &mold_core::GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
     execution_fingerprint: &str,
 ) -> EstimateKey {
     let model_family = state
@@ -6285,7 +6408,7 @@ fn generation_estimate_key(
         model_family,
         model_fingerprint: request.model.clone(),
         work_kind: "generation".into(),
-        shape_bucket: generation_shape_bucket(request),
+        shape_bucket: generation_shape_bucket_with_projection(request, projection),
         execution_fingerprint: execution_fingerprint.to_string(),
     }
 }
@@ -6436,12 +6559,72 @@ fn failure_only_vram_floor(estimates: &EstimateStore, key: &EstimateKey) -> u64 
 /// honest estimate an impossible shape would otherwise sit in the queue
 /// forever, re-resolving on every scheduler tick and never becoming feasible.
 ///
-/// A peak above the largest device's *physical* capacity can never be
-/// satisfied by waiting; a peak that only exceeds what is currently free is
-/// ordinary pressure and stays transient. An unknown capacity (`0`) stays
+/// A peak above the largest *eligible* device's physical capacity can never
+/// be satisfied by waiting; a peak that only exceeds what is currently free
+/// is ordinary pressure and stays transient. An unknown capacity (`0`) stays
 /// transient — never reject on missing evidence.
-fn insufficient_vram_is_terminal(required_peak_bytes: u64, largest_total_vram_bytes: u64) -> bool {
-    largest_total_vram_bytes > 0 && required_peak_bytes > largest_total_vram_bytes
+fn insufficient_vram_is_terminal(
+    required_peak_bytes: u64,
+    largest_eligible_total_vram_bytes: u64,
+) -> bool {
+    largest_eligible_total_vram_bytes > 0 && required_peak_bytes > largest_eligible_total_vram_bytes
+}
+
+fn largest_eligible_total_vram_bytes(
+    eligible_device_ids: &[String],
+    total_vram_bytes_by_device_id: &BTreeMap<String, u64>,
+) -> u64 {
+    let mut largest = 0;
+    for device_id in eligible_device_ids {
+        let Some(capacity) = total_vram_bytes_by_device_id
+            .get(device_id)
+            .copied()
+            .filter(|capacity| *capacity > 0)
+        else {
+            return 0;
+        };
+        largest = largest.max(capacity);
+    }
+    largest
+}
+
+fn classify_generation_plan_failure(
+    error: crate::execution_plan::ExecutionPlanError,
+    total_vram_bytes_by_device_id: &BTreeMap<String, u64>,
+) -> GenerationPlanFailure {
+    match &error {
+        crate::execution_plan::ExecutionPlanError::InsufficientVram {
+            required_peak_bytes,
+            eligible_device_ids,
+            ..
+        } => {
+            let largest_eligible_total_vram_bytes = largest_eligible_total_vram_bytes(
+                eligible_device_ids,
+                total_vram_bytes_by_device_id,
+            );
+            if insufficient_vram_is_terminal(
+                *required_peak_bytes,
+                largest_eligible_total_vram_bytes,
+            ) {
+                GenerationPlanFailure::Terminal(error)
+            } else {
+                GenerationPlanFailure::Transient(error.to_string())
+            }
+        }
+        crate::execution_plan::ExecutionPlanError::PreparedInputsStale(_) => {
+            GenerationPlanFailure::StalePreparation(error.to_string())
+        }
+        _ => GenerationPlanFailure::Terminal(error),
+    }
+}
+
+fn placement_preview_outcome_for_plan_failure(failure: &GenerationPlanFailure) -> &'static str {
+    match failure {
+        GenerationPlanFailure::Terminal(_) => "infeasible",
+        GenerationPlanFailure::Transient(_) | GenerationPlanFailure::StalePreparation(_) => {
+            "temporarily_unavailable"
+        }
+    }
 }
 
 /// The forward passes one denoise step of this request performs, as a
@@ -6457,8 +6640,21 @@ fn insufficient_vram_is_terminal(required_peak_bytes: u64, largest_total_vram_by
 /// Returns exactly `1_000` for every request that does not engage the branch,
 /// which keeps an inert scale and a zero identity weight byte-identical in the
 /// estimate rather than merely close.
+#[cfg(test)]
 fn denoise_forward_multiplier_permille(request: &mold_core::GenerateRequest) -> u64 {
-    if !mold_core::identity::request_uses_true_cfg(request) {
+    denoise_forward_multiplier_permille_with_projection(request, None)
+}
+
+fn denoise_forward_multiplier_permille_with_projection(
+    request: &mold_core::GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> u64 {
+    let uses_true_cfg = mold_core::identity::request_uses_true_cfg_with_identity_presence(
+        request,
+        mold_core::identity::request_carries_identity_photo(request)
+            || projection.is_some_and(|projection| projection.identity_present),
+    );
+    if !uses_true_cfg {
         return 1_000;
     }
     let steps = u64::from(request.steps).max(1);
@@ -6467,7 +6663,15 @@ fn denoise_forward_multiplier_permille(request: &mold_core::GenerateRequest) -> 
     1_000 + branched.saturating_mul(1_000) / steps
 }
 
+#[cfg(test)]
 fn generation_shape_bucket(request: &mold_core::GenerateRequest) -> String {
+    generation_shape_bucket_with_projection(request, None)
+}
+
+fn generation_shape_bucket_with_projection(
+    request: &mold_core::GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> String {
     // The true-CFG arm is part of the bucket KEY, not just the static estimate:
     // a branched run and an ordinary one of the same geometry take roughly
     // twice the denoise time, and letting their samples share a bucket teaches
@@ -6483,6 +6687,16 @@ fn generation_shape_bucket(request: &mold_core::GenerateRequest) -> String {
     // until it failed a second time. An unbranched request must therefore
     // produce the byte-identical legacy key, which
     // `an_ordinary_request_keeps_the_legacy_bucket_key` pins against a literal.
+    let source = request.source_image.is_some()
+        || request.source_video.is_some()
+        || request.source_video_path.is_some()
+        || projection.is_some_and(|projection| {
+            projection.source_image
+                || projection.source_video_inline
+                || projection.source_video_path
+        });
+    let edit_count = request.edit_images.as_ref().map_or(0, Vec::len)
+        + projection.map_or(0, |projection| projection.edit_image_count());
     let base = format!(
         "{}x{}:s{}:f{}:fps{}:a{}:src{}:edit{}:lora{}:b{}",
         request.width,
@@ -6491,18 +6705,26 @@ fn generation_shape_bucket(request: &mold_core::GenerateRequest) -> String {
         request.frames.unwrap_or(1),
         request.fps.unwrap_or(0),
         u8::from(request.enable_audio == Some(true)),
-        u8::from(request.source_image.is_some() || request.source_video.is_some()),
-        request.edit_images.as_ref().map_or(0, Vec::len),
+        u8::from(source),
+        edit_count,
         u8::from(request.lora.is_some() || request.loras.as_ref().is_some_and(|v| !v.is_empty())),
         request.batch_size,
     );
-    match denoise_forward_multiplier_permille(request) {
+    match denoise_forward_multiplier_permille_with_projection(request, projection) {
         1_000 => base,
         multiplier => format!("{base}:cfg{multiplier}"),
     }
 }
 
+#[cfg(test)]
 fn static_generation_time_ms(request: &mold_core::GenerateRequest) -> u64 {
+    static_generation_time_ms_with_projection(request, None)
+}
+
+fn static_generation_time_ms_with_projection(
+    request: &mold_core::GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> u64 {
     let megapixels = (u64::from(request.width) * u64::from(request.height)).div_ceil(1_000_000);
     let frames = u64::from(request.frames.unwrap_or(1));
     // The 1_000 ms term is fixed overhead and is deliberately outside the
@@ -6512,7 +6734,9 @@ fn static_generation_time_ms(request: &mold_core::GenerateRequest) -> u64 {
         .saturating_mul(u64::from(request.steps).max(1))
         .saturating_mul(frames)
         .saturating_mul(125)
-        .saturating_mul(denoise_forward_multiplier_permille(request))
+        .saturating_mul(denoise_forward_multiplier_permille_with_projection(
+            request, projection,
+        ))
         / 1_000;
     1_000u64.saturating_add(denoise_ms)
 }
@@ -6526,8 +6750,18 @@ fn static_generation_estimate(
     vram_bytes: u64,
     host_bytes: u64,
 ) -> StaticEstimate {
+    static_generation_estimate_with_projection(request, vram_bytes, host_bytes, None)
+}
+
+fn static_generation_estimate_with_projection(
+    request: &mold_core::GenerateRequest,
+    vram_bytes: u64,
+    host_bytes: u64,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> StaticEstimate {
     let timing = mold_scheduler::static_timing_for(mold_scheduler::WorkKind::Generation);
-    let predicted_run_ms = static_generation_time_ms(request).max(timing.predicted_run_ms);
+    let predicted_run_ms =
+        static_generation_time_ms_with_projection(request, projection).max(timing.predicted_run_ms);
     StaticEstimate {
         total_ms: timing.cold_setup_ms.saturating_add(predicted_run_ms),
         cold_setup_ms: timing.cold_setup_ms,
@@ -6707,6 +6941,22 @@ pub(crate) fn effective_available_vram_bytes(
         .min(total_vram_bytes)
 }
 
+/// Cache bytes recorded by Mold's owner thread are first-party evidence even
+/// when the operating system cannot attribute aggregate process VRAM (Metal,
+/// and CUDA telemetry fallbacks). When attribution is available it remains an
+/// upper bound, preventing a stale cache counter from reclaiming bytes the
+/// process sample says Mold does not own. This is planning evidence only:
+/// dispatch still requires an idle owner lane, and the GPU worker retains its
+/// final allocation-time predicted-peak validation.
+pub(crate) fn reclaimable_model_cache_bytes(
+    measured_cache_bytes: u64,
+    sampled_mold_bytes: Option<u64>,
+) -> u64 {
+    sampled_mold_bytes.map_or(measured_cache_bytes, |mold_bytes| {
+        measured_cache_bytes.min(mold_bytes)
+    })
+}
+
 /// Effective capacity for serialized work on a device. While a lease is
 /// active, the sampler's Mold-owned bytes belong to work that must finish
 /// before the next lease can start, so those bytes are future-reclaimable.
@@ -6746,6 +6996,23 @@ fn monotonic_deadline_ms(deadline: Instant) -> u64 {
 #[cfg(test)]
 mod true_cfg_estimate_tests {
     use super::*;
+
+    #[test]
+    fn scheduler_transport_and_retry_adapters_move_the_opaque_media_handle() {
+        let source = include_str!("mod.rs");
+        let to_gpu = source
+            .find("fn gpu_job_from_generation(")
+            .expect("generation-to-GPU adapter");
+        let from_gpu = source
+            .find("fn generation_and_prepared_from_gpu_job(")
+            .expect("GPU retry adapter");
+        assert!(source[to_gpu..from_gpu].contains("deferred_media: job.deferred_media"));
+        let retry_end = source[from_gpu..]
+            .find("\nfn generation_from_gpu_job(")
+            .map(|offset| from_gpu + offset)
+            .expect("retry adapter boundary");
+        assert!(source[from_gpu..retry_end].contains("deferred_media: job.deferred_media"));
+    }
 
     fn request() -> mold_core::GenerateRequest {
         let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
@@ -6847,6 +7114,78 @@ mod true_cfg_estimate_tests {
         assert_eq!(
             generation_shape_bucket(&plain),
             generation_shape_bucket(&zero)
+        );
+    }
+
+    #[test]
+    fn authenticated_projection_matches_hydrated_shape_and_true_cfg_timing() {
+        let mut hydrated = request();
+        hydrated.true_cfg = Some(2.0);
+        hydrated.source_image = Some(vec![1, 2, 3]);
+        hydrated.edit_images = Some(vec![vec![4], vec![5]]);
+        let mut sanitized = hydrated.clone();
+        sanitized.id_image = None;
+        sanitized.source_image = None;
+        sanitized.edit_images = None;
+        let projection = crate::queue_media_store::QueueMediaProjection {
+            source_image: true,
+            identity_present: true,
+            identity_photograph_count: 1,
+            edit_image_count: 2,
+            edit_images: vec![
+                crate::queue_media_store::ProjectedImageDimensions::UnreadableHeader,
+                crate::queue_media_store::ProjectedImageDimensions::UnreadableHeader,
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            generation_shape_bucket_with_projection(&hydrated, None),
+            generation_shape_bucket_with_projection(&sanitized, Some(&projection)),
+        );
+        assert_eq!(
+            static_generation_time_ms_with_projection(&hydrated, None),
+            static_generation_time_ms_with_projection(&sanitized, Some(&projection)),
+        );
+        assert_eq!(
+            crate::gpu_pool::oom_shape_bucket_with_projection(&hydrated, None),
+            crate::gpu_pool::oom_shape_bucket_with_projection(&sanitized, Some(&projection)),
+        );
+
+        let mut hydrated_path = request();
+        hydrated_path.id_image = None;
+        hydrated_path.source_video_path = Some("/private/video.mp4".into());
+        let mut sanitized_path = hydrated_path.clone();
+        sanitized_path.source_video_path = None;
+        let path_projection = crate::queue_media_store::QueueMediaProjection {
+            source_video_path: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            generation_shape_bucket_with_projection(&hydrated_path, None),
+            generation_shape_bucket_with_projection(&sanitized_path, Some(&path_projection)),
+        );
+    }
+
+    #[test]
+    fn qwen_edit_count_above_flux_dimension_slots_keeps_hydrated_projection_parity() {
+        let mut hydrated = request();
+        hydrated.model = "qwen-image-edit".into();
+        hydrated.edit_images = Some((0_u8..5).map(|byte| vec![byte]).collect());
+        let mut sanitized = hydrated.clone();
+        sanitized.edit_images = None;
+        let projection = crate::queue_media_store::QueueMediaProjection {
+            edit_image_count: 5,
+            edit_images: vec![
+                crate::queue_media_store::ProjectedImageDimensions::UnreadableHeader;
+                crate::queue_media_store::PROJECTED_EDIT_DIMENSION_SLOTS
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            generation_shape_bucket_with_projection(&hydrated, None),
+            generation_shape_bucket_with_projection(&sanitized, Some(&projection)),
         );
     }
 
@@ -7134,6 +7473,60 @@ mod tests {
         (worker, job_rx)
     }
 
+    #[test]
+    fn restart_without_top_level_pin_preserves_v2_component_identity_and_cpu() {
+        let (worker, _worker_rx) = test_worker(7);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(queue_tx),
+            pool,
+            1,
+        );
+        let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "restart placement",
+            "model": "mock-model",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "batch_size": 1,
+            "output_format": "png"
+        }))
+        .unwrap();
+        request.placement = Some(mold_core::DevicePlacement {
+            text_encoders: mold_core::DeviceRef::Cpu,
+            advanced: Some(mold_core::AdvancedPlacement {
+                transformer: mold_core::DeviceRef::gpu(7),
+                // This is a component's independently stable identity. The
+                // absent top-level row pin must not erase it.
+                vae: mold_core::DeviceRef::device(format!("cuda:{:032x}", 8)),
+                clip_l: Some(mold_core::DeviceRef::Cpu),
+                ..mold_core::AdvancedPlacement::default()
+            }),
+        });
+
+        assert_eq!(
+            generation_hard_ordinal(&state, "replayed", &request),
+            Some(7)
+        );
+        crate::queue_journal::resolve_replay_affinity(&mut request, Some(7), None, |id| {
+            (id == format!("cuda:{:032x}", 8)).then_some(7)
+        });
+        assert_eq!(
+            generation_hard_ordinal(&state, "replayed", &request),
+            Some(7)
+        );
+        let placement = request.placement.unwrap();
+        assert_eq!(placement.text_encoders, mold_core::DeviceRef::Cpu);
+        assert_eq!(
+            placement.advanced.unwrap().clip_l,
+            Some(mold_core::DeviceRef::Cpu)
+        );
+    }
+
     /// A worker whose device collapses VRAM and host RAM onto one pool.
     fn metal_test_worker(
         ordinal: usize,
@@ -7297,6 +7690,13 @@ mod tests {
 
         state.job_registry.remove("a");
         coordinator.reconcile_external_mutations(&mut immediate);
+        let cancelled = match results[0].try_recv() {
+            Ok(Err(error)) => error,
+            Ok(Ok(_)) => panic!("registry removal unexpectedly completed queued work"),
+            Err(error) => panic!("removed registry row did not settle queued work: {error}"),
+        };
+        assert!(cancelled.contains("generation job a was cancelled while queued"));
+        assert_eq!(state.queue.pending(), 2);
         assert_eq!(
             drain_queued_positions(&mut progress[1]),
             vec![0],
@@ -7411,6 +7811,7 @@ mod tests {
             GenerationJob {
                 id: id.to_string(),
                 request,
+                deferred_media: None,
                 resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
@@ -8103,20 +8504,28 @@ mod tests {
     /// so it is the single knob that turns a pending generation between
     /// "planned" and "zero candidates" without touching the planner.
     fn publish_free_vram(state: &AppState, free_bytes: u64) {
+        publish_free_vram_for_lanes(state, &[(mold_core::GpuBackend::Cuda, free_bytes)]);
+    }
+
+    fn publish_free_vram_for_lanes(state: &AppState, lanes: &[(mold_core::GpuBackend, u64)]) {
         const TOTAL: u64 = 24 << 30;
         state.resources.publish(mold_core::ResourceSnapshot {
             hostname: "test".into(),
             timestamp: 1,
-            gpus: vec![mold_core::GpuSnapshot {
-                ordinal: 0,
-                name: "gpu-0".into(),
-                backend: mold_core::GpuBackend::Cuda,
-                vram_total: TOTAL,
-                vram_used: TOTAL.saturating_sub(free_bytes),
-                vram_used_by_mold: Some(0),
-                vram_used_by_other: Some(TOTAL.saturating_sub(free_bytes)),
-                gpu_utilization: Some(0),
-            }],
+            gpus: lanes
+                .iter()
+                .enumerate()
+                .map(|(ordinal, (backend, free_bytes))| mold_core::GpuSnapshot {
+                    ordinal,
+                    name: format!("gpu-{ordinal}"),
+                    backend: *backend,
+                    vram_total: TOTAL,
+                    vram_used: TOTAL.saturating_sub(*free_bytes),
+                    vram_used_by_mold: Some(0),
+                    vram_used_by_other: Some(TOTAL.saturating_sub(*free_bytes)),
+                    gpu_utilization: Some(0),
+                })
+                .collect(),
             system_ram: mold_core::RamSnapshot {
                 total: 128 << 30,
                 used: 1 << 30,
@@ -8170,6 +8579,63 @@ mod tests {
         (coordinator, worker_rx, result_rx)
     }
 
+    async fn pressured_test_coordinator(
+        backend: mold_core::GpuBackend,
+        lane_count: usize,
+        free_vram_bytes: u64,
+    ) -> (
+        Coordinator,
+        Vec<std::sync::mpsc::Receiver<crate::gpu_pool::GpuWorkerCommand>>,
+        tokio::sync::oneshot::Receiver<Result<crate::state::GenerationJobResult, String>>,
+    ) {
+        let mut workers = Vec::new();
+        let mut worker_rxs = Vec::new();
+        for ordinal in 0..lane_count {
+            let (worker, worker_rx) = if backend == mold_core::GpuBackend::Metal {
+                metal_test_worker(ordinal)
+            } else {
+                test_worker(ordinal)
+            };
+            workers.push(worker);
+            worker_rxs.push(worker_rx);
+        }
+        let pool = Arc::new(GpuPool {
+            workers: workers.clone().into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 1);
+        state.job_registry.register("pressured", "flux-dev:q4");
+        let (mut job, result_rx) = fake_generation("pressured");
+        job.request.model = "flux-dev:q4".to_string();
+        queue.submit(job, 1).await.unwrap();
+        publish_free_vram_for_lanes(&state, &vec![(backend, free_vram_bytes); lane_count]);
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        coordinator
+            .pending
+            .get_mut("pressured")
+            .expect("queued")
+            .preparation = PreparationState::Ready;
+        for worker in workers {
+            coordinator.handle_worker_event(
+                WorkerEvent::Ready {
+                    device_id: worker_device_id(&worker),
+                    ordinal: worker.gpu.ordinal,
+                    owner_epoch: 1,
+                    worker_generation: 1,
+                },
+                &mut immediate,
+            );
+        }
+        (coordinator, worker_rxs, result_rx)
+    }
+
     /// The recovery half of #1272: a shortage that clears must not need a
     /// resubmission. The scheduler re-resolves plans on every planning turn, so
     /// the job dispatches on the first turn after capacity returns — nothing
@@ -8192,8 +8658,8 @@ mod tests {
         assert!(
             coordinator.pending["stranded"]
                 .unschedulable_since_ms
-                .is_some(),
-            "an idle unschedulable wait is observed from the first turn"
+                .is_none(),
+            "typed transient pressure must never start a terminal settlement timer"
         );
 
         publish_free_vram(&coordinator.state, 24 << 30);
@@ -8202,43 +8668,89 @@ mod tests {
         assert_eq!(recv_grant(&worker_rx).id, "stranded");
     }
 
-    /// The hang half of #1272. A queued generation that resolves no execution
-    /// plan on an idle scheduler is never going to: nothing is running that
-    /// could return the resource. It must be settled with the plan's own named
-    /// shortfall rather than left `queued` past the client's own timeout.
+    /// Physical capacity, rather than elapsed queue time, is the terminal
+    /// boundary. This covers Metal's one unified lane and the scheduler's
+    /// ordinary N-lane CUDA authority with 24 GiB physical VRAM but 22 GiB held
+    /// by another process on every lane.
     #[tokio::test]
-    async fn an_idle_scheduler_settles_a_permanently_unschedulable_generation() {
-        let (mut coordinator, worker_rx, mut result_rx) =
-            unschedulable_test_coordinator(2 << 30).await;
+    async fn external_vram_pressure_remains_queued_after_idle_grace_then_dispatches() {
+        for (label, backend, lane_count) in [
+            ("Metal single lane", mold_core::GpuBackend::Metal, 1),
+            ("CUDA N lane", mold_core::GpuBackend::Cuda, 2),
+        ] {
+            let (mut coordinator, worker_rxs, mut result_rx) =
+                pressured_test_coordinator(backend, lane_count, 2 << 30).await;
 
-        let _ = coordinator.dispatch_ready().await;
-        assert!(coordinator.pending.contains_key("stranded"));
-        assert!(
-            result_rx.try_recv().is_err(),
-            "the grace window must not settle the job on its first idle turn"
-        );
+            let failure = coordinator
+                .generation_plans(&coordinator.pending["pressured"])
+                .expect_err("22 GiB of external pressure must prevent a plan");
+            assert!(
+                matches!(failure, GenerationPlanFailure::Transient(_)),
+                "{label}: a peak that fits physical VRAM is transient"
+            );
 
-        // Collapse the grace window rather than sleeping through a minute of
-        // it. The observation itself already stands from the turn above.
-        coordinator.unschedulable_idle_grace_ms = 0;
+            // Collapse the existing grace instead of sleeping through it.
+            // Typed pressure must remain retryable even after that boundary.
+            coordinator.unschedulable_idle_grace_ms = 0;
+            for _ in 0..2 {
+                let _ = coordinator.dispatch_ready().await;
+            }
+            assert!(
+                coordinator.pending.contains_key("pressured"),
+                "{label}: elapsed pressure must not terminalize durable work"
+            );
+            assert!(
+                result_rx.try_recv().is_err(),
+                "{label}: the client must remain attached to queued work"
+            );
+            assert!(
+                worker_rxs.iter().all(|rx| rx.try_recv().is_err()),
+                "{label}: pressure must prevent transport"
+            );
 
-        let _ = coordinator.dispatch_ready().await;
+            let unchanged_version = coordinator.state_version;
+            let mut unchanged_immediate = false;
+            coordinator.reconcile_resource_capacity(&mut unchanged_immediate);
+            assert!(
+                !unchanged_immediate,
+                "{label}: an unchanged telemetry tick must not spin planning"
+            );
+            assert_eq!(coordinator.state_version, unchanged_version, "{label}");
 
-        assert!(
-            !coordinator.pending.contains_key("stranded"),
-            "an idle scheduler must not keep an unschedulable job queued forever"
-        );
-        assert!(
-            worker_rx.try_recv().is_err(),
-            "settling must never transport the job"
-        );
-        let Err(error) = result_rx.try_recv().expect("the client is told") else {
-            panic!("an unschedulable job settles as an error, never as a print");
-        };
-        assert!(
-            error.contains("flux-dev:q4"),
-            "the refusal names the model: {error}"
-        );
+            publish_free_vram_for_lanes(&coordinator.state, &vec![(backend, 24 << 30); lane_count]);
+            let mut immediate = false;
+            coordinator.reconcile_resource_capacity(&mut immediate);
+            assert!(immediate, "{label}: changed capacity must wake planning");
+            let _ = coordinator
+                .dispatch_ready_with(PlanningPass::Admission)
+                .await;
+
+            let grants = worker_rxs
+                .iter()
+                .filter_map(|rx| match rx.try_recv() {
+                    Ok(crate::gpu_pool::GpuWorkerCommand::Grant(grant)) => match grant.work {
+                        OwnerWork::Generation(job) => Some(*job),
+                        work => panic!("{label}: expected generation grant, got {:?}", work.kind()),
+                    },
+                    Ok(crate::gpu_pool::GpuWorkerCommand::Drain) => {
+                        panic!("{label}: unexpected drain command")
+                    }
+                    Ok(crate::gpu_pool::GpuWorkerCommand::Shutdown) => {
+                        panic!("{label}: unexpected shutdown command")
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        panic!("{label}: worker command channel disconnected")
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(grants.len(), 1, "{label}: one lane receives the job");
+            assert_eq!(grants[0].id, "pressured", "{label}");
+            assert!(
+                !coordinator.pending.contains_key("pressured"),
+                "{label}: cleared pressure restores dispatch eligibility"
+            );
+        }
     }
 
     /// Waiting behind real work is not the same failure. A job queued while
@@ -9211,6 +9723,79 @@ mod tests {
     }
 
     #[test]
+    fn busy_unattributed_metal_pressure_is_transient_when_the_peak_fits_physically() {
+        const GIB: u64 = 1 << 30;
+        let available = schedulable_available_vram_bytes(4 * GIB, 0, None, true, 24 * GIB);
+        assert_eq!(
+            available,
+            4 * GIB,
+            "a busy unattributed lane must not invent reclaimable bytes"
+        );
+
+        let failure = classify_generation_plan_failure(
+            crate::execution_plan::ExecutionPlanError::InsufficientVram {
+                reason: "metal:0 is currently busy".to_string(),
+                required_peak_bytes: 20 * GIB,
+                eligible_device_ids: vec!["metal:0".to_string()],
+            },
+            &BTreeMap::from([("metal:0".to_string(), 24 * GIB)]),
+        );
+        assert!(
+            matches!(&failure, GenerationPlanFailure::Transient(_)),
+            "a physically fitting job waits for the active lane instead of being refused"
+        );
+        assert_eq!(
+            placement_preview_outcome_for_plan_failure(&failure),
+            "temporarily_unavailable",
+            "placement preview must not turn current lane pressure into infeasibility"
+        );
+    }
+
+    #[test]
+    fn busy_unattributed_cuda_lanes_keep_an_additional_fitting_job_waiting() {
+        const GIB: u64 = 1 << 30;
+        let available = (0..2)
+            .map(|_| schedulable_available_vram_bytes(3 * GIB, 0, None, true, 24 * GIB))
+            .collect::<Vec<_>>();
+        assert_eq!(available, vec![3 * GIB, 3 * GIB]);
+
+        let failure = classify_generation_plan_failure(
+            crate::execution_plan::ExecutionPlanError::InsufficientVram {
+                reason: "both CUDA lanes are currently busy".to_string(),
+                required_peak_bytes: 18 * GIB,
+                eligible_device_ids: vec!["cuda:0".to_string(), "cuda:1".to_string()],
+            },
+            &BTreeMap::from([
+                ("cuda:0".to_string(), 24 * GIB),
+                ("cuda:1".to_string(), 24 * GIB),
+            ]),
+        );
+        assert!(matches!(failure, GenerationPlanFailure::Transient(_)));
+    }
+
+    #[test]
+    fn unattributed_external_allocations_are_not_dispatch_capacity() {
+        const GIB: u64 = 1 << 30;
+        assert_eq!(
+            schedulable_available_vram_bytes(3 * GIB, 0, None, false, 24 * GIB),
+            3 * GIB,
+            "neither physical total nor unknown process memory is immediate capacity"
+        );
+    }
+
+    #[test]
+    fn first_party_cache_remains_reclaimable_without_process_attribution() {
+        const GIB: u64 = 1 << 30;
+        let reclaimable = reclaimable_model_cache_bytes(16 * GIB, None);
+        assert_eq!(reclaimable, 16 * GIB);
+        assert_eq!(
+            schedulable_available_vram_bytes(4 * GIB, reclaimable, None, false, 24 * GIB),
+            20 * GIB,
+            "the owner can evict its measured cache even when the OS cannot attribute the process"
+        );
+    }
+
+    #[test]
     fn warm_and_cold_resident_capacity_is_safe_while_idle_or_busy() {
         const GIB: u64 = 1 << 30;
         let (worker, _rx) = test_worker(0);
@@ -9239,8 +9824,8 @@ mod tests {
                 backend: mold_core::GpuBackend::Cuda,
                 vram_total: 24 * GIB,
                 vram_used: 20 * GIB,
-                vram_used_by_mold: Some(16 * GIB),
-                vram_used_by_other: Some(4 * GIB),
+                vram_used_by_mold: None,
+                vram_used_by_other: None,
                 gpu_utilization: Some(0),
             }],
             system_ram: mold_core::RamSnapshot {
@@ -9312,7 +9897,11 @@ mod tests {
         let busy = coordinator.device_snapshots().remove(0);
         assert_eq!(busy.available_vram_bytes, 20 * GIB);
         assert_eq!(busy.available_at_ms, Some(5_000));
-        assert_eq!(busy.activity, DeviceActivity::Busy);
+        assert_eq!(
+            busy.activity,
+            DeviceActivity::Busy,
+            "first-party cache credit cannot bypass the scheduler-owned lane gate"
+        );
         worker.model_cache.lock().unwrap().restore(checked_out);
     }
 
@@ -9416,6 +10005,175 @@ mod tests {
         assert!(coordinator.pending.is_empty());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sqlite_blocked_queue_patch_omits_only_its_target_until_exact_release() {
+        use tower::ServiceExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (worker_a, worker_a_rx) = test_worker(0);
+        let (worker_b, worker_b_rx) = test_worker(1);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker_a.clone(), worker_b.clone()].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(8);
+        let queue = QueueHandle::new(ingress_tx);
+        let mut state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 8);
+        state.metadata_db = db.clone();
+        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            db.clone(),
+            Some(root.path()),
+            "blocked-patch-coordinator",
+        ));
+        let owner = state
+            .queue_journal
+            .owner_uuid()
+            .expect("real metadata DB must enable the durable journal")
+            .to_string();
+        mold_db::generation_queue::insert(
+            db.as_ref().as_ref().unwrap(),
+            &mold_db::generation_queue::GenerationQueueRow {
+                id: "patch-target".to_string(),
+                owner_uuid: owner,
+                state: mold_db::generation_queue::QueueRowState::Queued,
+                model: "flux-dev:q4".to_string(),
+                request_json: r#"{"prompt":"patch target","model":"flux-dev:q4"}"#.to_string(),
+                media_set_id: None,
+                output_dir: root.path().join("gallery"),
+                target_gpu: Some(0),
+                target_device_id: None,
+                completion_payload: "full".to_string(),
+                seed_pinned: false,
+                dispatch_attempts: 0,
+                replay_seen: 0,
+                held_reason: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                started_at_ms: None,
+            },
+        )
+        .unwrap();
+
+        // The target starts behind another lane-zero job. PATCH will move it
+        // to the queued frontier while SQLite is deliberately stalled.
+        let mut results = Vec::new();
+        for (id, target_gpu) in [
+            ("lane-zero-contender", 0),
+            ("unrelated-linux-lane", 1),
+            ("patch-target", 0),
+        ] {
+            let (job, result) = fake_generation(id);
+            results.push(result);
+            state.job_registry.register(id, "flux-dev:q4");
+            state
+                .job_registry
+                .set_target_gpu(id, Some(target_gpu))
+                .unwrap();
+            queue.submit(job, 8).await.unwrap();
+        }
+
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state.clone(),
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        for _ in 0..3 {
+            coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        }
+        coordinator
+            .pending
+            .get_mut("unrelated-linux-lane")
+            .unwrap()
+            .preparation = PreparationState::Ready;
+        coordinator
+            .pending
+            .get_mut("patch-target")
+            .unwrap()
+            .preparation = PreparationState::Ready;
+        for (worker, ordinal) in [(&worker_a, 0), (&worker_b, 1)] {
+            coordinator.handle_worker_event(
+                WorkerEvent::Ready {
+                    device_id: worker_device_id(worker),
+                    ordinal,
+                    owner_epoch: 1,
+                    worker_generation: 1,
+                },
+                &mut immediate,
+            );
+        }
+
+        // Hold the journal's real SQLite connection. The route can install
+        // its exact runtime token, but cannot apply the durable edit yet.
+        let locked_db = db.clone();
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let blocker = tokio::task::spawn_blocking(move || {
+            locked_db.as_ref().as_ref().unwrap().with_conn(|_| {
+                locked_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+        });
+        locked_rx.await.unwrap();
+        let patch = tokio::spawn(
+            crate::routes::create_router(state.clone()).oneshot(
+                axum::http::Request::patch("/api/queue/patch-target")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"target_gpu":0,"position":0}"#))
+                    .unwrap(),
+            ),
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !state
+                .job_registry
+                .queue_patch_blocked_ids()
+                .contains("patch-target")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("hydrated target must carry the exact PATCH exclusion token");
+        assert!(!patch.is_finished(), "PATCH must remain blocked on SQLite");
+
+        coordinator.dispatch_ready().await;
+        assert_eq!(
+            recv_grant(&worker_b_rx).id,
+            "unrelated-linux-lane",
+            "the unrelated lane must grant while the PATCH target is omitted"
+        );
+        assert!(matches!(
+            worker_a_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        assert!(coordinator.pending.contains_key("patch-target"));
+
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap().unwrap();
+        let response = patch.await.unwrap().unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            state.job_registry.queued_ids_in_order(),
+            ["patch-target", "lane-zero-contender"],
+            "the durable PATCH order must project before its token is cleared"
+        );
+
+        coordinator
+            .pending
+            .get_mut("lane-zero-contender")
+            .unwrap()
+            .preparation = PreparationState::Ready;
+        coordinator.dispatch_ready().await;
+        assert_eq!(
+            recv_grant(&worker_a_rx).id,
+            "patch-target",
+            "exact-token release must immediately restore target eligibility and order"
+        );
+        assert!(coordinator.pending.contains_key("lane-zero-contender"));
+        drop(results);
+    }
+
     #[tokio::test]
     async fn request_gpu_pin_wins_over_mutable_queue_target() {
         let (worker_a, worker_a_rx) = test_worker(0);
@@ -9475,6 +10233,42 @@ mod tests {
             worker_a_rx.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn generation_device_facts_apply_ordinal_and_stable_worker_constraints() {
+        let facts = vec![
+            crate::execution_plan::DeviceFact {
+                id: "cuda:stable-small".to_string(),
+                ordinal: 0,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
+                available_vram_bytes: 8 << 30,
+            },
+            crate::execution_plan::DeviceFact {
+                id: "cuda:stable-large".to_string(),
+                ordinal: 1,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 9)),
+                available_vram_bytes: 24 << 30,
+            },
+        ];
+
+        assert_eq!(
+            constrained_generation_device_facts(&facts, None, None),
+            facts,
+            "Auto retains every schedulable worker"
+        );
+        assert_eq!(
+            constrained_generation_device_facts(&facts, Some(0), None),
+            vec![facts[0].clone()],
+            "queue/request ordinal pins constrain planning before admission"
+        );
+        assert_eq!(
+            constrained_generation_device_facts(&facts, None, Some("cuda:stable-large"),),
+            vec![facts[1].clone()],
+            "per-worker planning uses the stable worker identity"
+        );
     }
 
     #[tokio::test]
@@ -9940,6 +10734,7 @@ mod tests {
                 &coordinator.state,
                 &worker,
                 &coordinator.pending["learned-memory"].job.request,
+                None,
                 &execution.execution_fingerprint,
             ),
             EstimateObservation {
@@ -10846,6 +11641,65 @@ mod tests {
             ranks["generation-b"] < owner_rank && owner_rank < ranks["generation-a"],
             "reordering generations must not collapse their ranks ahead of owner work"
         );
+    }
+
+    #[tokio::test]
+    async fn durable_position_insertion_dispatches_before_earlier_transport_rows() {
+        let (worker, worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(3);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 3);
+
+        state.job_registry.register("hydrated-a", "flux-dev:q4");
+        state.job_registry.register("hydrated-b", "flux-dev:q4");
+        state.job_registry.register_job_at_queued_position(
+            "deep-zero",
+            "flux-dev:q4",
+            None,
+            None,
+            None,
+            0,
+        );
+
+        let mut results = Vec::new();
+        for id in ["hydrated-a", "hydrated-b", "deep-zero"] {
+            let (job, result) = fake_generation(id);
+            results.push(result);
+            queue.submit(job, 3).await.unwrap();
+        }
+
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        for _ in 0..3 {
+            coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        }
+        for pending in coordinator.pending.values_mut() {
+            pending.preparation = PreparationState::Ready;
+        }
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: worker_device_id(&worker),
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        coordinator.dispatch_ready().await;
+
+        assert_eq!(
+            recv_grant(&worker_rx).id,
+            "deep-zero",
+            "scheduler dispatch follows the registry's durable position, not channel arrival"
+        );
+        drop(results);
     }
 
     #[test]
@@ -11888,6 +12742,7 @@ mod tests {
                     height: 64,
                     index: 0,
                 },
+                output_metadata: None,
                 cancellation: mold_inference::InferenceCancellationToken::default(),
                 execution_plan: None,
             })),
@@ -12067,6 +12922,7 @@ mod tests {
                 gpu: Some(0),
             },
             image: original.clone(),
+            output_metadata: None,
             cancellation: mold_inference::InferenceCancellationToken::default(),
             execution_plan: Some(plan),
         }));
@@ -12226,6 +13082,7 @@ mod tests {
                 gpu: Some(0),
             },
             image: original.clone(),
+            output_metadata: None,
             cancellation: mold_inference::InferenceCancellationToken::default(),
             execution_plan: None,
         }));
@@ -13626,6 +14483,7 @@ mod tests {
                 &coordinator.state,
                 &worker,
                 &request,
+                None,
                 &execution.execution_fingerprint,
             ),
             EstimateObservation {
@@ -14645,6 +15503,18 @@ mod tests {
             insufficient_vram_is_terminal(33_474_340_818, RTX_4090_TOTAL),
             "a peak no device could ever hold must be terminal"
         );
+        let impossible = classify_generation_plan_failure(
+            crate::execution_plan::ExecutionPlanError::InsufficientVram {
+                reason: "larger than every device".to_string(),
+                required_peak_bytes: 33_474_340_818,
+                eligible_device_ids: vec!["cuda:0".to_string()],
+            },
+            &BTreeMap::from([("cuda:0".to_string(), RTX_4090_TOTAL)]),
+        );
+        assert_eq!(
+            placement_preview_outcome_for_plan_failure(&impossible),
+            "infeasible"
+        );
         assert!(
             !insufficient_vram_is_terminal(20_000_000_000, RTX_4090_TOTAL),
             "a peak that only exceeds what is currently free stays transient"
@@ -14653,6 +15523,45 @@ mod tests {
             !insufficient_vram_is_terminal(33_474_340_818, 0),
             "unknown capacity must never reject on missing evidence"
         );
+    }
+
+    #[test]
+    fn insufficient_vram_uses_only_request_eligible_physical_capacity() {
+        const GIB: u64 = 1 << 30;
+        let capacities = BTreeMap::from([
+            ("cuda:small".to_string(), 8 * GIB),
+            ("cuda:large".to_string(), 24 * GIB),
+        ]);
+        let failure = |eligible_device_ids: &[&str]| {
+            classify_generation_plan_failure(
+                crate::execution_plan::ExecutionPlanError::InsufficientVram {
+                    reason: "currently short of VRAM".to_string(),
+                    required_peak_bytes: 12 * GIB,
+                    eligible_device_ids: eligible_device_ids
+                        .iter()
+                        .map(|id| (*id).to_string())
+                        .collect(),
+                },
+                &capacities,
+            )
+        };
+
+        assert!(matches!(
+            failure(&["cuda:small"]),
+            GenerationPlanFailure::Terminal(_)
+        ));
+        assert!(matches!(
+            failure(&["cuda:small", "cuda:large"]),
+            GenerationPlanFailure::Transient(_)
+        ));
+        assert!(matches!(
+            failure(&["cuda:large"]),
+            GenerationPlanFailure::Transient(_)
+        ));
+        assert!(matches!(
+            failure(&["cuda:unknown"]),
+            GenerationPlanFailure::Transient(_)
+        ));
     }
 
     /// #641: `mold.db` held a `scheduler_estimates` row for the failing shape

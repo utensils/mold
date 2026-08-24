@@ -37,7 +37,120 @@ const DISK_SAFETY_FLOOR_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Clone, Default)]
 pub struct GalleryPublicationGate {
     inner: Arc<tokio::sync::RwLock<()>>,
-    committed_archive_index: Arc<std::sync::RwLock<Option<(u64, CommittedArchiveIndex)>>>,
+    committed_archive_indexes:
+        Arc<std::sync::RwLock<BTreeMap<PathBuf, CachedCommittedArchiveIndex>>>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedCommittedArchiveIndex {
+    generation: u64,
+    index: CommittedArchiveIndex,
+    filenames_by_job_id: BTreeMap<String, Vec<String>>,
+}
+
+/// Typed result for the filesystem half of durable publication recovery.
+#[derive(Debug)]
+pub(crate) enum CompletedOutputArchiveLookupError {
+    InvalidAuthority(String),
+    Infrastructure(anyhow::Error),
+}
+
+impl CompletedOutputArchiveLookupError {
+    pub(crate) fn is_invalid_authority(&self) -> bool {
+        matches!(self, Self::InvalidAuthority(_))
+    }
+}
+
+impl std::fmt::Display for CompletedOutputArchiveLookupError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidAuthority(message) => formatter.write_str(message),
+            Self::Infrastructure(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for CompletedOutputArchiveLookupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidAuthority(_) => None,
+            Self::Infrastructure(error) => error.source(),
+        }
+    }
+}
+
+fn classify_existing_authority_error(error: anyhow::Error) -> CompletedOutputArchiveLookupError {
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<std::io::Error>().is_some())
+    {
+        CompletedOutputArchiveLookupError::Infrastructure(error)
+    } else {
+        CompletedOutputArchiveLookupError::InvalidAuthority(format!("{error:#}"))
+    }
+}
+
+impl CachedCommittedArchiveIndex {
+    fn new(generation: u64, index: CommittedArchiveIndex) -> Self {
+        let mut filenames_by_job_id: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (filename, entry) in &index.entries {
+            if let Some(job_id) = entry.record.metadata.job_id.as_ref() {
+                filenames_by_job_id
+                    .entry(job_id.clone())
+                    .or_default()
+                    .push(filename.clone());
+            }
+        }
+        Self {
+            generation,
+            index,
+            filenames_by_job_id,
+        }
+    }
+
+    fn completed_output(
+        &self,
+        output_dir: &Path,
+        job_id: &str,
+    ) -> Result<
+        Option<mold_db::generation_queue::CompletedGenerationOutput>,
+        CompletedOutputArchiveLookupError,
+    > {
+        let filenames = self
+            .filenames_by_job_id
+            .get(job_id)
+            .into_iter()
+            .flatten()
+            .map(|filename| {
+                if self.index.quarantined_names.contains(filename) {
+                    return Err(CompletedOutputArchiveLookupError::InvalidAuthority(format!(
+                        "committed gallery output for queue job {job_id} is quarantined: {filename}"
+                    )));
+                }
+                let entry = self.index.entries.get(filename).ok_or_else(|| {
+                    CompletedOutputArchiveLookupError::InvalidAuthority(format!(
+                        "indexed committed gallery output is missing: {filename}"
+                    ))
+                })?;
+                if entry.record.filename != *filename {
+                    return Err(CompletedOutputArchiveLookupError::InvalidAuthority(format!(
+                        "committed gallery output filename disagrees with its archive key: {filename}"
+                    )));
+                }
+                if !crate::gallery_authority::current_file_matches(output_dir, entry)
+                    .map_err(classify_existing_authority_error)?
+                {
+                    return Err(CompletedOutputArchiveLookupError::InvalidAuthority(format!(
+                        "committed gallery output changed after publication: {filename}"
+                    )));
+                }
+                Ok(filename.clone())
+            })
+            .collect::<Result<Vec<_>, CompletedOutputArchiveLookupError>>()?;
+        mold_db::generation_queue::resolve_completed_output_filenames(job_id, filenames).map_err(
+            |error| CompletedOutputArchiveLookupError::InvalidAuthority(format!("{error:#}")),
+        )
+    }
 }
 
 impl GalleryPublicationGate {
@@ -59,13 +172,15 @@ impl GalleryPublicationGate {
 
     pub(crate) fn install_committed_archive_index(
         &self,
+        output_dir: &Path,
         generation: u64,
         index: CommittedArchiveIndex,
     ) {
-        *self
-            .committed_archive_index
+        let key = fs::canonicalize(output_dir).unwrap_or_else(|_| output_dir.to_path_buf());
+        self.committed_archive_indexes
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((generation, index));
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key, CachedCommittedArchiveIndex::new(generation, index));
     }
 
     pub(crate) fn committed_archive_index(
@@ -73,7 +188,31 @@ impl GalleryPublicationGate {
         output_dir: &Path,
     ) -> anyhow::Result<CommittedArchiveIndex> {
         let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
-        self.committed_archive_index_while_locked(output_dir, &bookkeeping)
+        let key = bookkeeping.canonical_root().to_path_buf();
+        let Some(generation) = crate::gallery_authority::read_generation(output_dir, &bookkeeping)?
+        else {
+            return Ok(CommittedArchiveIndex::default());
+        };
+        if let Some(index) = self
+            .committed_archive_indexes
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&key)
+            .filter(|cached| cached.generation == generation)
+            .map(|cached| cached.index.clone())
+        {
+            return Ok(index);
+        }
+        let loaded =
+            crate::gallery_authority::load_existing_read_only(output_dir, &bookkeeping)?
+                .context("gallery authority generation exists without a readable checkpoint")?;
+        ensure!(
+            loaded.generation == generation,
+            "gallery authority generation changed during read-only lookup"
+        );
+        let index = loaded.index.clone();
+        self.install_committed_archive_index(output_dir, loaded.generation, loaded.index);
+        Ok(index)
     }
 
     pub(crate) fn committed_archive_index_while_locked(
@@ -82,12 +221,14 @@ impl GalleryPublicationGate {
         bookkeeping: &GalleryBookkeepingGuard,
     ) -> anyhow::Result<CommittedArchiveIndex> {
         let generation = crate::gallery_authority::read_generation(output_dir, bookkeeping)?;
+        let key = bookkeeping.canonical_root();
         if let (Some(generation), Some((cached_generation, index))) = (
             generation,
-            self.committed_archive_index
+            self.committed_archive_indexes
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .as_ref(),
+                .get(key)
+                .map(|cached| (&cached.generation, &cached.index)),
         ) {
             if generation == *cached_generation {
                 return Ok(index.clone());
@@ -103,8 +244,63 @@ impl GalleryPublicationGate {
             reactivated = loaded.stats.reactivated,
             "refreshed gallery metadata authority"
         );
-        self.install_committed_archive_index(loaded.generation, loaded.index.clone());
+        self.install_committed_archive_index(output_dir, loaded.generation, loaded.index.clone());
         Ok(loaded.index)
+    }
+
+    /// Resolve one durable job through the in-memory secondary index built
+    /// when startup/publication installs gallery authority. Cache misses read
+    /// only already-existing authority and never initialize or repair a
+    /// retained output directory from this hydration path.
+    pub(crate) fn completed_output_for_job(
+        &self,
+        output_dir: &Path,
+        job_id: &str,
+    ) -> Result<
+        Option<mold_db::generation_queue::CompletedGenerationOutput>,
+        CompletedOutputArchiveLookupError,
+    > {
+        let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)
+            .map_err(CompletedOutputArchiveLookupError::Infrastructure)?;
+        let key = bookkeeping.canonical_root().to_path_buf();
+        let Some(generation) = crate::gallery_authority::read_generation(output_dir, &bookkeeping)
+            .map_err(classify_existing_authority_error)?
+        else {
+            return Ok(None);
+        };
+        let cache_is_current = self
+            .committed_archive_indexes
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&key)
+            .is_some_and(|cached| cached.generation == generation);
+        if !cache_is_current {
+            let loaded =
+                crate::gallery_authority::load_existing_read_only(output_dir, &bookkeeping)
+                    .map_err(classify_existing_authority_error)?
+                    .ok_or_else(|| {
+                        CompletedOutputArchiveLookupError::InvalidAuthority(
+                            "gallery authority generation exists without a readable checkpoint"
+                                .to_string(),
+                        )
+                    })?;
+            if loaded.generation != generation {
+                return Err(CompletedOutputArchiveLookupError::InvalidAuthority(
+                    "gallery authority generation changed during indexed lookup".to_string(),
+                ));
+            }
+            self.install_committed_archive_index(output_dir, loaded.generation, loaded.index);
+        }
+        self.committed_archive_indexes
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&key)
+            .ok_or_else(|| {
+                CompletedOutputArchiveLookupError::Infrastructure(anyhow::anyhow!(
+                    "gallery authority cache disappeared during indexed lookup"
+                ))
+            })?
+            .completed_output(&key, job_id)
     }
 
     fn record_committed_manifest(
@@ -156,19 +352,23 @@ impl GalleryPublicationGate {
                 .map(|child| child.final_name.clone())
                 .collect(),
         )?;
-        self.install_committed_archive_index(generation, index);
+        self.install_committed_archive_index(output_dir, generation, index);
         Ok(())
     }
 
-    pub(crate) fn retire_committed_filename(&self, filename: &str) {
+    pub(crate) fn retire_committed_filename(&self, output_dir: &Path, filename: &str) {
+        let key = fs::canonicalize(output_dir).unwrap_or_else(|_| output_dir.to_path_buf());
         let mut current = self
-            .committed_archive_index
+            .committed_archive_indexes
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some((_, index)) = current.as_mut() {
-            index.entries.remove(filename);
-            index.quarantined_names.remove(filename);
-            index.retired_names.insert(filename.to_owned());
+        if let Some(cached) = current.get_mut(&key) {
+            cached.index.entries.remove(filename);
+            cached.index.quarantined_names.remove(filename);
+            cached.index.retired_names.insert(filename.to_owned());
+            for filenames in cached.filenames_by_job_id.values_mut() {
+                filenames.retain(|candidate| candidate != filename);
+            }
         }
     }
 
@@ -177,14 +377,15 @@ impl GalleryPublicationGate {
     /// bytes back, so stop hiding the name from listings. A name that still
     /// has a durable retired entry is left alone — only
     /// `restore_trashed_archive_filename` may un-retire those.
-    pub(crate) fn unretire_committed_filename(&self, filename: &str) {
+    pub(crate) fn unretire_committed_filename(&self, output_dir: &Path, filename: &str) {
+        let key = fs::canonicalize(output_dir).unwrap_or_else(|_| output_dir.to_path_buf());
         let mut current = self
-            .committed_archive_index
+            .committed_archive_indexes
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some((_, index)) = current.as_mut() {
-            if !index.retired_entries.contains_key(filename) {
-                index.retired_names.remove(filename);
+        if let Some(cached) = current.get_mut(&key) {
+            if !cached.index.retired_entries.contains_key(filename) {
+                cached.index.retired_names.remove(filename);
             }
         }
     }
@@ -229,7 +430,7 @@ impl GalleryPublicationGate {
             "retirement_projection_complete",
             exact_names,
         )?;
-        self.install_committed_archive_index(generation, index);
+        self.install_committed_archive_index(canonical_output_dir, generation, index);
         Ok(())
     }
 }
@@ -3140,7 +3341,7 @@ pub async fn recover_transactions(
             crate::gallery_authority::load_or_initialize(output_dir, &bookkeeping_lock, || {
                 Ok(CommittedArchiveIndex::default())
             })?;
-        gate.install_committed_archive_index(loaded.generation, loaded.index);
+        gate.install_committed_archive_index(output_dir, loaded.generation, loaded.index);
         return Ok(RecoveryReport::default());
     }
     sweep_stale_reservations(&root)?;
@@ -3331,7 +3532,7 @@ pub async fn recover_transactions(
     let loaded = crate::gallery_authority::load_or_initialize(output_dir, &bookkeeping, || {
         Ok(archive_index)
     })?;
-    gate.install_committed_archive_index(loaded.generation, loaded.index);
+    gate.install_committed_archive_index(output_dir, loaded.generation, loaded.index);
     drop(bookkeeping);
     gate.acknowledge_retirement_projections(output_dir, retired_names)?;
     Ok(report)
@@ -5565,6 +5766,21 @@ pub(crate) fn load_committed_archive_index(
     )
 }
 
+/// Recover one durable singleton's exact result from committed gallery
+/// authority when the process died after file/archive publication but before
+/// the best-effort `generations` upsert. The caller supplies the queue row's
+/// owner-scoped output directory and must hold the gallery reader gate.
+pub(crate) fn find_completed_output_in_committed_archive(
+    gate: &GalleryPublicationGate,
+    output_dir: &Path,
+    job_id: &str,
+) -> Result<
+    Option<mold_db::generation_queue::CompletedGenerationOutput>,
+    CompletedOutputArchiveLookupError,
+> {
+    gate.completed_output_for_job(output_dir, job_id)
+}
+
 /// Persist one ordinary server publication into the same committed authority
 /// domain used by atomic batches. The public file must already be fsynced and
 /// remain hidden behind the gallery writer until this function succeeds.
@@ -5685,11 +5901,11 @@ pub(crate) fn tombstone_committed_archive_filename(
                 "delete_replacement_quarantine",
                 vec![filename.to_owned()],
             )?;
-            gate.install_committed_archive_index(next_generation, index);
+            gate.install_committed_archive_index(output_dir, next_generation, index);
             return Ok(ArchiveDeleteDisposition::PreservedReplacement);
         }
     }
-    gate.install_committed_archive_index(next_generation, index);
+    gate.install_committed_archive_index(output_dir, next_generation, index);
     Ok(disposition)
 }
 
@@ -5743,7 +5959,7 @@ pub(crate) fn trash_committed_archive_filename(
             "trash_replacement_quarantine",
             vec![filename.to_owned()],
         )?;
-        gate.install_committed_archive_index(next_generation, index);
+        gate.install_committed_archive_index(output_dir, next_generation, index);
         return Ok(TrashArchiveDisposition::PreservedReplacement);
     }
     let live_path = output_dir.join(filename);
@@ -5773,7 +5989,7 @@ pub(crate) fn trash_committed_archive_filename(
             return Err(error);
         }
     };
-    gate.install_committed_archive_index(next_generation, index);
+    gate.install_committed_archive_index(output_dir, next_generation, index);
     Ok(TrashArchiveDisposition::Moved)
 }
 
@@ -5852,7 +6068,7 @@ pub(crate) fn restore_trashed_archive_filename(
         "user_restore",
         vec![filename.to_owned()],
     )?;
-    gate.install_committed_archive_index(next_generation, index);
+    gate.install_committed_archive_index(output_dir, next_generation, index);
     let live_path = output_dir.join(filename);
     fs::rename(trash_path, &live_path).with_context(|| {
         format!(
@@ -9099,6 +9315,23 @@ mod tests {
     }
 
     #[test]
+    fn completion_probe_does_not_initialize_an_empty_gallery() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = GalleryPublicationGate::default();
+
+        assert_eq!(
+            gate.completed_output_for_job(dir.path(), "not-published")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "a durable hydration read must not create gallery authority state"
+        );
+    }
+
+    #[test]
     fn concurrent_processes_replay_one_named_publication_without_duplicates() {
         let dir = tempfile::tempdir().unwrap();
         let spawn = || {
@@ -9196,6 +9429,11 @@ mod tests {
             fs::write(&path, b"x").unwrap();
             let mut saved = record(&name, child_index as u64);
             saved.output_dir = dir.path().to_string_lossy().into_owned();
+            saved.metadata.job_id = Some(if child_index == 5_000 {
+                "wanted-job".to_string()
+            } else {
+                format!("unrelated-job-{child_index}")
+            });
             index.entries.insert(
                 name.clone(),
                 CommittedArchiveEntry {
@@ -9223,8 +9461,29 @@ mod tests {
         )
         .unwrap();
         let gate = GalleryPublicationGate::default();
-        gate.install_committed_archive_index(generation, index);
+        gate.install_committed_archive_index(dir.path(), generation, index);
         drop(bookkeeping);
+
+        {
+            let caches = gate
+                .committed_archive_indexes
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let cache = caches.get(&fs::canonicalize(dir.path()).unwrap()).unwrap();
+            assert_eq!(cache.filenames_by_job_id.len(), 10_000);
+            assert_eq!(
+                cache.filenames_by_job_id.get("wanted-job").unwrap(),
+                &["entry-05000.png"],
+                "one completion lookup visits only that job's indexed filenames"
+            );
+        }
+        assert_eq!(
+            gate.completed_output_for_job(dir.path(), "wanted-job")
+                .unwrap()
+                .unwrap()
+                .filename,
+            "entry-05000.png"
+        );
 
         reset_authority_hash_count();
         assert_eq!(
@@ -9259,7 +9518,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        gate.install_committed_archive_index(next_generation, current);
+        gate.install_committed_archive_index(dir.path(), next_generation, current);
         drop(bookkeeping);
         assert!(
             !gate

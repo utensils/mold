@@ -4,12 +4,38 @@ use mold_core::{GenerateRequest, TimeRange};
 use std::fs;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
+use zeroize::Zeroize;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub(crate) struct StagedImage {
     pub(crate) path: String,
     pub(crate) frame: u32,
     pub(crate) strength: f32,
+    #[cfg(test)]
+    drop_probe: Option<std::sync::Arc<StagedImageDropProbe>>,
+}
+
+impl PartialEq for StagedImage {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path && self.frame == other.frame && self.strength == other.strength
+    }
+}
+
+impl Drop for StagedImage {
+    fn drop(&mut self) {
+        self.path.zeroize();
+        #[cfg(test)]
+        if let Some(probe) = &self.drop_probe {
+            probe
+                .drops
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.path.is_empty() {
+                probe
+                    .zeroized_drops
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
 }
 
 /// Pre-decoded RGB frame window that the runtime re-encodes through the
@@ -53,6 +79,42 @@ pub(crate) struct StagedConditioning {
     pub(crate) latents: Vec<StagedLatent>,
     pub(crate) audio_path: Option<String>,
     pub(crate) video_path: Option<String>,
+    #[cfg(test)]
+    drop_probe: Option<std::sync::Arc<ConditioningDropProbe>>,
+}
+
+impl Drop for StagedConditioning {
+    fn drop(&mut self) {
+        self.audio_path.zeroize();
+        self.video_path.zeroize();
+        #[cfg(test)]
+        if let Some(probe) = &self.drop_probe {
+            let zeroized = self.audio_path.as_ref().is_none_or(String::is_empty)
+                && self.video_path.as_ref().is_none_or(String::is_empty);
+            probe
+                .drops
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if zeroized {
+                probe
+                    .zeroized_drops
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct ConditioningDropProbe {
+    drops: std::sync::atomic::AtomicUsize,
+    zeroized_drops: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct StagedImageDropProbe {
+    drops: std::sync::atomic::AtomicUsize,
+    zeroized_drops: std::sync::atomic::AtomicUsize,
 }
 
 fn infer_staged_extension<'a>(data: &[u8], default_ext: &'a str) -> &'a str {
@@ -102,6 +164,8 @@ pub(crate) fn stage_conditioning(
             path: path.to_string_lossy().to_string(),
             frame: 0,
             strength: req.strength as f32,
+            #[cfg(test)]
+            drop_probe: None,
         });
     }
     if let Some(keyframes) = &req.keyframes {
@@ -116,6 +180,8 @@ pub(crate) fn stage_conditioning(
                 path: path.to_string_lossy().to_string(),
                 frame: keyframe.frame,
                 strength: 1.0,
+                #[cfg(test)]
+                drop_probe: None,
             });
         }
     }
@@ -141,6 +207,8 @@ pub(crate) fn stage_conditioning(
         latents: Vec::new(),
         audio_path,
         video_path,
+        #[cfg(test)]
+        drop_probe: None,
     })
 }
 
@@ -189,6 +257,58 @@ pub(crate) fn retake_temporal_mask(
 mod tests {
     use super::*;
     use mold_core::KeyframeCondition;
+
+    #[test]
+    fn cloned_conditioning_paths_zeroize_on_every_drop() {
+        let work_dir = tempfile::tempdir().unwrap();
+        let mut request = req();
+        request.audio_file_path = Some("/private/staging/audio.wav".to_string());
+        request.source_video_path = Some("/private/staging/video.mp4".to_string());
+        request.source_image = Some(fake_png_bytes());
+        request.keyframes = Some(vec![
+            KeyframeCondition {
+                frame: 8,
+                image: fake_png_bytes(),
+                name: None,
+            },
+            KeyframeCondition {
+                frame: 16,
+                image: fake_png_bytes(),
+                name: None,
+            },
+        ]);
+        let probe = std::sync::Arc::new(ConditioningDropProbe::default());
+        let image_probe = std::sync::Arc::new(StagedImageDropProbe::default());
+        let mut staged = stage_conditioning(&request, work_dir.path()).unwrap();
+        staged.drop_probe = Some(std::sync::Arc::clone(&probe));
+        for image in &mut staged.images {
+            image.drop_probe = Some(std::sync::Arc::clone(&image_probe));
+        }
+
+        let cloned = staged.clone();
+        drop(cloned);
+        drop(staged);
+
+        assert_eq!(probe.drops.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            probe
+                .zeroized_drops
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        assert_eq!(
+            image_probe.drops.load(std::sync::atomic::Ordering::SeqCst),
+            6,
+            "the source image and both keyframes are independently owned by each clone",
+        );
+        assert_eq!(
+            image_probe
+                .zeroized_drops
+                .load(std::sync::atomic::Ordering::SeqCst),
+            6,
+            "every cloned image path must be zeroized before its owner is released",
+        );
+    }
 
     fn req() -> GenerateRequest {
         GenerateRequest {

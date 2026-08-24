@@ -1,6 +1,6 @@
 import { useRouter } from "vue-router";
 import type { FleetActiveWork } from "@studio/api/activity";
-import { listQueue } from "@studio/api/queuePlan";
+import { findQueueEntryById } from "@studio/api/queuePlan";
 import { selectedQueueGeneration } from "@studio/api/generationSelection";
 import type { OutputMetadata } from "../lib/api/types";
 import { useComposerStore } from "../stores/composer";
@@ -27,8 +27,11 @@ export function useOpenLiveWork() {
         return;
       }
       try {
-        const queue = await listQueue({ baseUrl: host.baseUrl, apiKey: host.apiKey });
-        const selection = selectedQueueGeneration<OutputMetadata>(queue.entries, row.id);
+        const entry = await findQueueEntryById(
+          { baseUrl: host.baseUrl, apiKey: host.apiKey },
+          row.id,
+        );
+        const selection = selectedQueueGeneration<OutputMetadata>(entry ? [entry] : [], row.id);
         if (!selection) {
           toasts.push("This host cannot restore settings for that generation", "error");
           return;

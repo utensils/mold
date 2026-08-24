@@ -445,6 +445,9 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
         theme.dim().add_modifier(Modifier::BOLD),
     )));
     let listing = st.queue.as_ref().filter(|(id, _)| id == host_id);
+    if let Some(summary) = queue_scope_label(status, listing.map(|(_, listing)| listing)) {
+        lines.push(Line::from(Span::styled(summary, theme.dim())));
+    }
     if let Some(plan) = listing.and_then(|(_, listing)| listing.plan.as_ref()) {
         if let Some(deadline) = plan.next_replan_at_unix_ms {
             let now = std::time::SystemTime::now()
@@ -505,8 +508,22 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
                 }
             }
             lines.push(Line::default());
+            let more = if listing
+                .page
+                .as_ref()
+                .and_then(|page| page.next_cursor.as_ref())
+                .is_some()
+            {
+                if st.queue_loading_more {
+                    " · Loading more…"
+                } else {
+                    " · l Load more"
+                }
+            } else {
+                ""
+            };
             lines.push(Line::from(Span::styled(
-                "Tab Focus lanes · x Cancel queued",
+                format!("Tab Focus lanes · x Cancel queued{more}"),
                 theme.dim(),
             )));
         }
@@ -514,6 +531,32 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
             lines.push(Line::from(Span::styled("— queue empty.", theme.dim())));
         }
     }
+}
+
+pub(crate) fn queue_scope_label(
+    status: Option<&mold_core::ServerStatus>,
+    queue: Option<&mold_core::QueueListingWire>,
+) -> Option<String> {
+    let depth = status.and_then(|status| status.queue_depth);
+    let capacity = status.and_then(|status| status.queue_capacity);
+    let mut parts = Vec::new();
+    match (depth, queue.and_then(|listing| listing.page.as_ref())) {
+        (Some(depth), Some(_)) => parts.push(format!("Backlog {depth} total")),
+        (Some(depth), None) => parts.push(format!("Queue load {depth} reported")),
+        (None, _) => {}
+    }
+    if let Some(queue) = queue {
+        let scope = if queue.page.is_some() {
+            "Hydrated page"
+        } else {
+            "Queue response"
+        };
+        parts.push(format!("{scope} {} rows", queue.entries.len()));
+    }
+    if let Some(capacity) = capacity {
+        parts.push(format!("Runtime capacity {capacity}"));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 fn render_devices(app: &App, host_id: &str, lines: &mut Vec<Line>) {
@@ -1206,6 +1249,48 @@ mod tests {
         assert_eq!(queue_elapsed_label(0, 7_200_000), "2h");
         // Clock skew (start in the future) must not underflow.
         assert_eq!(queue_elapsed_label(10_000, 5_000), "0s");
+    }
+
+    #[test]
+    fn queue_scope_label_never_turns_backlog_and_runtime_capacity_into_a_fraction() {
+        let mut server = status(None);
+        server.queue_depth = Some(80);
+        server.queue_capacity = Some(8);
+        let row = mold_core::QueueJobEntryWire {
+            id: "job".into(),
+            model: "flux-dev:q8".into(),
+            state: "queued".into(),
+            started_at_unix_ms: 0,
+            position: 0,
+            gpu: None,
+            target_gpu: None,
+            seed_pinned: None,
+            metadata: None,
+            durable: Some(true),
+            held_reason: None,
+        };
+        let queue = mold_core::QueueListingWire {
+            entries: vec![row; 4],
+            page: Some(mold_core::QueuePage {
+                limit: 4,
+                offset: 0,
+                returned: 4,
+                next_cursor: Some("opaque".into()),
+            }),
+            ..Default::default()
+        };
+        let label = queue_scope_label(Some(&server), Some(&queue)).unwrap();
+        assert_eq!(
+            label,
+            "Backlog 80 total · Hydrated page 4 rows · Runtime capacity 8"
+        );
+        assert!(!label.contains("80/8"));
+
+        let mut legacy = queue;
+        legacy.page = None;
+        assert!(queue_scope_label(Some(&server), Some(&legacy))
+            .unwrap()
+            .starts_with("Queue load 80 reported · Queue response 4 rows"));
     }
 
     fn host_memory_snapshot(headroom_bytes: u64) -> mold_core::HostMemorySnapshot {

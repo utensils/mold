@@ -4,6 +4,7 @@ import {
   __resetGalleryMediaForTests,
   evictHostMedia,
   fetchGalleryBlob,
+  fetchGalleryThumbnailBlob,
   needsAuthedMedia,
   resolveStreamableSrc,
   resolveThumbnailSrc,
@@ -165,6 +166,23 @@ describe("fetchGalleryBlob", () => {
       return { ok: true, blob: async () => new Blob(["bytes"]) };
     });
     const blob = await fetchGalleryBlob(authedRemote, "cat.png");
+    expect(blob).toBeInstanceOf(Blob);
+    expect(sentKey).toBe("secret-key");
+  });
+});
+
+describe("fetchGalleryThumbnailBlob", () => {
+  it("fetches the exact encoded poster path with the host key", async () => {
+    let sentKey: string | undefined;
+    mockFetch((url, init) => {
+      expect(url).toBe(
+        "http://halcyon:7680/api/gallery/thumbnail/clip%20one.mp4",
+      );
+      sentKey = (init?.headers as Record<string, string>)?.["x-api-key"];
+      return { ok: true, blob: async () => new Blob(["poster"]) };
+    });
+
+    const blob = await fetchGalleryThumbnailBlob(authedRemote, "clip one.mp4");
     expect(blob).toBeInstanceOf(Blob);
     expect(sentKey).toBe("secret-key");
   });

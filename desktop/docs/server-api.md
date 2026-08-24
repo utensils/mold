@@ -252,7 +252,7 @@ pub async fn run_server(
 ) -> anyhow::Result<()>
 ```
 
-Called from `crates/mold-cli/src/commands/serve.rs::run` (line 132). It re-arms SIGPIPE ignore, discovers GPUs (`mold_inference::device`), builds a per-GPU worker pool + tokio generation queue, opens the metadata DB (`mold_db::open_default`), spawns the chain-job runner, resource aggregator, download driver and idle-evictor, then `axum::serve` with graceful shutdown (SIGTERM or `POST /api/shutdown`). `queue_size` default is 600 (CLI). `logging::init_tracing` is also a public library helper the CLI uses. A Tauri backend could call `run_server` directly to host the same API in-process, or import the router builder.
+Called from `crates/mold-cli/src/commands/serve.rs::run` (line 132). It re-arms SIGPIPE ignore, discovers GPUs (`mold_inference::device`), builds a per-GPU worker pool + tokio generation queue, opens the metadata DB (`mold_db::open_default`), spawns the chain-job runner, resource aggregator, download driver and idle-evictor, then `axum::serve` with graceful shutdown (SIGTERM or `POST /api/shutdown`). `queue_size` defaults to 200 and bounds only the hydrated runtime window; it does not cap the durable backlog. `logging::init_tracing` is also a public library helper the CLI uses. A Tauri backend could call `run_server` directly to host the same API in-process, or import the router builder.
 
 ### mold-core types reusable directly by a Tauri Rust backend
 

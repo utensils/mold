@@ -136,6 +136,8 @@ mod tests {
         progress_set_count: Arc<AtomicUsize>,
         progress_clear_count: Arc<AtomicUsize>,
         generate_blocker: Option<Arc<GenerateBlocker>>,
+        cancellation: Option<mold_inference::InferenceCancellationToken>,
+        ignore_cancellation: bool,
         /// When set, load() emits progress events through the stored callback.
         emit_load_progress: bool,
         progress_callback: Option<ProgressCallback>,
@@ -157,6 +159,8 @@ mod tests {
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
                 generate_blocker: None,
+                cancellation: None,
+                ignore_cancellation: false,
                 emit_load_progress: false,
                 progress_callback: None,
             }
@@ -172,6 +176,8 @@ mod tests {
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
                 generate_blocker: None,
+                cancellation: None,
+                ignore_cancellation: false,
                 emit_load_progress: false,
                 progress_callback: None,
             }
@@ -187,6 +193,8 @@ mod tests {
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
                 generate_blocker: None,
+                cancellation: None,
+                ignore_cancellation: false,
                 emit_load_progress: false,
                 progress_callback: None,
             }
@@ -202,6 +210,8 @@ mod tests {
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
                 generate_blocker: None,
+                cancellation: None,
+                ignore_cancellation: false,
                 emit_load_progress: false,
                 progress_callback: None,
             }
@@ -221,6 +231,8 @@ mod tests {
                 progress_set_count,
                 progress_clear_count,
                 generate_blocker: None,
+                cancellation: None,
+                ignore_cancellation: false,
                 emit_load_progress: false,
                 progress_callback: None,
             }
@@ -237,9 +249,19 @@ mod tests {
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
                 generate_blocker: Some(blocker),
+                cancellation: None,
+                ignore_cancellation: false,
                 emit_load_progress: false,
                 progress_callback: None,
             }
+        }
+
+        /// Simulates an engine family that finishes a result after its token
+        /// was revoked. Publication fencing must still discard those bytes.
+        fn blocking_generate_ignoring_cancellation(blocker: Arc<GenerateBlocker>) -> Self {
+            let mut engine = Self::blocking_generate(blocker);
+            engine.ignore_cancellation = true;
+            engine
         }
 
         /// Create an unloaded engine that emits progress events during load(),
@@ -255,6 +277,8 @@ mod tests {
                 progress_set_count: Arc::new(AtomicUsize::new(0)),
                 progress_clear_count: Arc::new(AtomicUsize::new(0)),
                 generate_blocker: None,
+                cancellation: None,
+                ignore_cancellation: false,
                 emit_load_progress: true,
                 progress_callback: None,
             }
@@ -270,6 +294,11 @@ mod tests {
                     .released_cv
                     .wait_while(released, |released| !*released)
                     .unwrap();
+            }
+            if !self.ignore_cancellation {
+                if let Some(cancellation) = &self.cancellation {
+                    cancellation.checkpoint()?;
+                }
             }
             if self.fail {
                 anyhow::bail!("mock engine error");
@@ -332,6 +361,14 @@ mod tests {
         fn clear_on_progress(&mut self) {
             self.progress_clear_count.fetch_add(1, Ordering::SeqCst);
             self.progress_callback = None;
+        }
+
+        fn set_cancellation_token(&mut self, token: mold_inference::InferenceCancellationToken) {
+            self.cancellation = Some(token);
+        }
+
+        fn clear_cancellation_token(&mut self) {
+            self.cancellation = None;
         }
     }
 
@@ -783,6 +820,18 @@ mod tests {
         gpu_worker_stub_with_receiver(ordinal).0
     }
 
+    fn gpu_worker_stub_with_stable_id(
+        ordinal: usize,
+        stable_id: &str,
+    ) -> Arc<crate::gpu_pool::GpuWorker> {
+        let (worker, _receiver) = gpu_worker_stub_with_receiver(ordinal);
+        let Ok(mut worker) = Arc::try_unwrap(worker) else {
+            unreachable!("fresh worker has one owner")
+        };
+        worker.gpu.stable_id = Some(stable_id.to_string());
+        Arc::new(worker)
+    }
+
     fn gpu_worker_stub_with_receiver(
         ordinal: usize,
     ) -> (
@@ -829,7 +878,10 @@ mod tests {
         (worker, job_rx)
     }
 
-    fn install_worker_registry(state: &mut AppState) {
+    fn install_worker_registry_with_metadata(
+        state: &mut AppState,
+        metadata_db: Arc<Option<mold_db::MetadataDb>>,
+    ) {
         let devices = state
             .gpu_pool
             .worker_snapshot()
@@ -854,8 +906,12 @@ mod tests {
             .collect();
         state.device_registry = Arc::new(crate::device_registry::DeviceRegistry::new(
             Arc::new(crate::device_registry::StaticDeviceDiscovery::new(devices)),
-            Arc::new(None),
+            metadata_db,
         ));
+    }
+
+    fn install_worker_registry(state: &mut AppState) {
+        install_worker_registry_with_metadata(state, Arc::new(None));
     }
 
     fn install_authoritative_v2(state: &mut AppState) {
@@ -1458,6 +1514,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_queue_depth_reports_total_waiting_load_without_durable_overlay_duplicates() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
+        state.queue_capacity = 2;
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        for index in 0..5 {
+            seed_durable_projection_row(
+                &db,
+                &owner,
+                &format!("durable-{index}"),
+                mold_db::generation_queue::QueueRowState::Queued,
+                index,
+                0,
+            );
+        }
+        seed_durable_projection_row(
+            &db,
+            &owner,
+            "durable-running",
+            mold_db::generation_queue::QueueRowState::Running,
+            6,
+            0,
+        );
+        seed_durable_projection_row(
+            &db,
+            &owner,
+            "durable-held",
+            mold_db::generation_queue::QueueRowState::Held,
+            7,
+            0,
+        );
+        state.job_registry.register("durable-0", "model-durable-0");
+        state.job_registry.register("live-only", "model-live-only");
+        state
+            .job_registry
+            .register("durable-running", "model-durable-running");
+        state.job_registry.mark_running("durable-running", Some(0));
+
+        let status = json_body(
+            app_with_state(state)
+                .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status["queue_depth"], 6);
+        assert_eq!(status["queue_capacity"], 2);
+    }
+
+    #[tokio::test]
     async fn devices_returns_registry_workers_with_nullable_telemetry() {
         let worker = gpu_worker_stub(0);
         let mut state = AppState::with_engine(MockEngine::ready());
@@ -1685,6 +1792,189 @@ mod tests {
             crate::gpu_pool::DRAIN_RUNNING
         );
         assert!(registry.desired_enabled(id));
+    }
+
+    #[tokio::test]
+    async fn blocked_device_preference_db_does_not_hold_scheduler_fence_and_patches_stay_ordered() {
+        let worker = gpu_worker_stub(0);
+        worker.in_flight.store(1, Ordering::SeqCst);
+        let pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = pool;
+        install_worker_registry_with_metadata(&mut state, db.clone());
+        install_authoritative_v2(&mut state);
+        let registry = state.device_registry.clone();
+        let scheduler_fence = state.scheduler_mutation_fence.clone();
+        let app = app_with_state(state);
+        let id = "cuda:00000000000000000000000000000000";
+
+        let (db_locked_tx, db_locked_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_db_tx, release_db_rx) = std::sync::mpsc::sync_channel(1);
+        let locked_db = db.clone();
+        let db_holder = std::thread::spawn(move || {
+            locked_db
+                .as_ref()
+                .as_ref()
+                .unwrap()
+                .with_conn(|_| {
+                    db_locked_tx.send(()).unwrap();
+                    release_db_rx.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        db_locked_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("test must hold the real metadata connection mutex");
+
+        let (persist_started_tx, persist_started_rx) = std::sync::mpsc::sync_channel(1);
+        let notified = Arc::new(AtomicBool::new(false));
+        registry.set_preference_persistence_hook(Some(Arc::new({
+            let notified = notified.clone();
+            move |_, _| {
+                if !notified.swap(true, Ordering::SeqCst) {
+                    persist_started_tx.send(()).unwrap();
+                }
+                Ok(())
+            }
+        })));
+
+        let disabling = tokio::spawn(
+            app.clone().oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            ),
+        );
+        tokio::task::spawn_blocking(move || {
+            persist_started_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("PATCH must reach real metadata persistence");
+        })
+        .await
+        .unwrap();
+        let unrelated_scheduler_operation = scheduler_fence
+            .try_lock_owned()
+            .expect("blocked metadata must not hold the scheduler mutation fence");
+        drop(unrelated_scheduler_operation);
+
+        let enabling = tokio::spawn(
+            app.oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .unwrap(),
+            ),
+        );
+        release_db_tx.send(()).unwrap();
+        db_holder.join().unwrap();
+
+        let disabled = disabling.await.unwrap().unwrap();
+        assert_eq!(disabled.status(), StatusCode::ACCEPTED);
+        assert_eq!(json_body(disabled).await["desired_enabled"], false);
+        let enabled = enabling.await.unwrap().unwrap();
+        assert_eq!(enabled.status(), StatusCode::OK);
+        assert_eq!(json_body(enabled).await["desired_enabled"], true);
+        assert!(registry.desired_enabled(id));
+        assert_eq!(
+            mold_db::DevicePreferences::new(db.as_ref().as_ref().unwrap())
+                .get(id)
+                .unwrap(),
+            Some(true),
+            "same-device persistence and publication must retain request order"
+        );
+        assert_eq!(
+            worker.drain_state.load(Ordering::SeqCst),
+            crate::gpu_pool::DRAIN_RUNNING,
+            "the later enable must cancel the earlier pending drain"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_concurrent_device_patch_does_not_publish_or_block_its_ordered_successor() {
+        let worker = gpu_worker_stub(0);
+        worker.in_flight.store(1, Ordering::SeqCst);
+        let pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = pool;
+        install_worker_registry_with_metadata(&mut state, db.clone());
+        install_authoritative_v2(&mut state);
+        let registry = state.device_registry.clone();
+        let app = app_with_state(state);
+        let id = "cuda:00000000000000000000000000000000";
+
+        let (first_started_tx, first_started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_first_tx, release_first_rx) = std::sync::mpsc::sync_channel(1);
+        let release_first_rx = Arc::new(Mutex::new(release_first_rx));
+        let calls = Arc::new(AtomicUsize::new(0));
+        registry.set_preference_persistence_hook(Some(Arc::new({
+            let calls = calls.clone();
+            let release_first_rx = release_first_rx.clone();
+            move |_, _| {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    first_started_tx.send(()).unwrap();
+                    release_first_rx.lock().unwrap().recv().unwrap();
+                    anyhow::bail!("injected preference persistence failure");
+                }
+                Ok(())
+            }
+        })));
+
+        let failing = tokio::spawn(
+            app.clone().oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            ),
+        );
+        tokio::task::spawn_blocking(move || {
+            first_started_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("first PATCH must own same-device persistence ordering");
+        })
+        .await
+        .unwrap();
+        let succeeding = tokio::spawn(
+            app.oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            ),
+        );
+        release_first_tx.send(()).unwrap();
+
+        let failed = failing.await.unwrap().unwrap();
+        assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(json_body(failed).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("injected preference persistence failure"));
+        let succeeded = succeeding.await.unwrap().unwrap();
+        assert_eq!(succeeded.status(), StatusCode::ACCEPTED);
+        assert_eq!(json_body(succeeded).await["desired_enabled"], false);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(!registry.desired_enabled(id));
+        assert_eq!(
+            mold_db::DevicePreferences::new(db.as_ref().as_ref().unwrap())
+                .get(id)
+                .unwrap(),
+            Some(false),
+            "the failed write must not publish, and its ordered successor must persist"
+        );
+        assert_eq!(
+            worker.drain_state.load(Ordering::SeqCst),
+            crate::gpu_pool::DRAIN_REQUESTED,
+            "only the successfully persisted mutation may touch lifecycle state"
+        );
     }
 
     #[tokio::test]
@@ -2728,7 +3018,30 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = json_body(resp).await;
-        assert_eq!(body["entries"], serde_json::json!([]));
+        assert_eq!(
+            body,
+            serde_json::json!({"entries": []}),
+            "omitting pagination must preserve the legacy response shape"
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_pagination_rejects_zero_and_malformed_inputs() {
+        let app = app_empty();
+        for uri in [
+            "/api/queue?limit=0",
+            "/api/queue?limit=1&cursor=not-a-valid-cursor",
+            "/api/queue?cursor=not-a-valid-cursor",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "INVALID_QUEUE_PAGE", "{uri}");
+        }
     }
 
     #[tokio::test]
@@ -3262,6 +3575,224 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn patch_queue_reorders_and_relanes_a_durable_row_beyond_the_runtime_window() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
+        state.queue_capacity = 2;
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![gpu_worker_stub(0)].into(),
+        });
+        install_worker_registry(&mut state);
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        for index in 0..5 {
+            seed_durable_projection_row(
+                &db,
+                &owner,
+                &format!("deep-patch-{index}"),
+                mold_db::generation_queue::QueueRowState::Queued,
+                index,
+                0,
+            );
+        }
+        assert!(state.job_registry.snapshot().entries.is_empty());
+        let app = app_with_state(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::patch("/api/queue/deep-patch-4")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"target_gpu":0,"position":0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["id"], "deep-patch-4");
+        assert_eq!(body["position"], 0);
+        assert_eq!(body["target_gpu"], 0);
+        assert_eq!(body["durable"], true);
+
+        let page = state.queue_journal.projection_page(None, 2).unwrap();
+        assert_eq!(page.rows[0].id, "deep-patch-4");
+        assert_eq!(page.rows[0].target_gpu, Some(0));
+        assert_eq!(page.rows[1].id, "deep-patch-0");
+    }
+
+    #[tokio::test]
+    async fn patch_queue_uses_live_authority_for_a_claimed_feeder_handoff() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        seed_durable_projection_row(
+            &db,
+            &owner,
+            "live-running",
+            mold_db::generation_queue::QueueRowState::Queued,
+            0,
+            0,
+        );
+        let _claim = state
+            .queue_journal
+            .claim_feeder_by_id("live-running")
+            .unwrap()
+            .expect("feeder claims the handoff row");
+        state.job_registry.register("other-live", "model-other");
+        state
+            .job_registry
+            .register_with_target_gpu("live-running", "model-live-running", Some(2));
+
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::patch("/api/queue/live-running")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"target_gpu":null,"position":0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["id"], "live-running");
+        assert_eq!(body["position"], 0);
+        assert!(body.get("target_gpu").is_none());
+
+        let durable = mold_db::generation_queue::get(db.as_ref().as_ref().unwrap(), "live-running")
+            .unwrap()
+            .expect("claimed durable row remains present");
+        assert_eq!(durable.target_gpu, None);
+        assert_eq!(
+            state.job_registry.queued_ids_in_order(),
+            ["live-running", "other-live"]
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_queue_returns_failure_without_mutating_runtime_when_sqlite_mutation_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        seed_durable_projection_row(
+            &db,
+            &owner,
+            "durable-failure",
+            mold_db::generation_queue::QueueRowState::Queued,
+            0,
+            0,
+        );
+        state.job_registry.register_with_target_gpu(
+            "durable-failure",
+            "model-durable-failure",
+            Some(7),
+        );
+        db.as_ref()
+            .as_ref()
+            .unwrap()
+            .with_conn(|conn| {
+                conn.execute_batch("DROP TABLE generation_queue")?;
+                Ok(())
+            })
+            .unwrap();
+
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::patch("/api/queue/durable-failure")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"target_gpu":null}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            state
+                .job_registry
+                .entry("durable-failure")
+                .unwrap()
+                .target_gpu,
+            Some(7),
+            "SQLite-first failure must leave the runtime projection untouched"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_durable_patch_never_blocks_scheduler_grant_or_cancellation() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        seed_durable_projection_row(
+            &db,
+            &owner,
+            "blocked-patch",
+            mold_db::generation_queue::QueueRowState::Queued,
+            0,
+            0,
+        );
+        state.job_registry.register("grant-live", "model-grant");
+        state.job_registry.register("cancel-live", "model-cancel");
+
+        // Hold the journal's actual SQLite connection mutex so PATCH reaches
+        // its spawn_blocking DB operation and remains there deterministically.
+        let locked_db = db.clone();
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let blocker = tokio::task::spawn_blocking(move || {
+            locked_db.as_ref().as_ref().unwrap().with_conn(|_| {
+                locked_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+        });
+        locked_rx.await.unwrap();
+
+        let journal = state.queue_journal.clone();
+        let patch = tokio::spawn(
+            app_with_state(state.clone()).oneshot(
+                Request::patch("/api/queue/blocked-patch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"position":0}"#))
+                    .unwrap(),
+            ),
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !journal.durable_transition_is_locked() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("PATCH enters the durable transition before waiting on SQLite");
+        assert!(!patch.is_finished(), "the PATCH remains DB-blocked");
+
+        let scheduler = tokio::time::timeout(
+            Duration::from_secs(2),
+            state.scheduler_mutation_fence.lock(),
+        )
+        .await
+        .expect("blocked PATCH must not own the scheduler fence");
+        state.job_registry.reorder_queued("grant-live", 0).unwrap();
+        state.job_registry.cancel_queued("cancel-live").unwrap();
+        state
+            .job_registry
+            .dispatch_if_queued("grant-live", 0, (), |_| Ok(()))
+            .unwrap();
+        drop(scheduler);
+
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap().unwrap();
+        let response = patch.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            state.job_registry.entry("grant-live").unwrap().state,
+            crate::job_registry::JobLifecycle::Running
+        );
+        assert!(state.job_registry.entry("cancel-live").is_none());
+    }
+
+    #[tokio::test]
     async fn patch_queue_position_rejects_running_jobs() {
         let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
         state.job_registry.register("aaaa", "flux-dev:fp16");
@@ -3517,6 +4048,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_cancellation_lookup_never_holds_the_scheduler_mutation_fence() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        seed_durable_projection_row(
+            &db,
+            &owner,
+            "deep-cancel",
+            mold_db::generation_queue::QueueRowState::Queued,
+            0,
+            0,
+        );
+
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let locked_db = db.clone();
+        let holder = std::thread::spawn(move || {
+            locked_db
+                .as_ref()
+                .as_ref()
+                .unwrap()
+                .with_conn(|_| {
+                    locked_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        locked_rx.recv().unwrap();
+
+        let app = app_with_state(state.clone());
+        let mut cancellation = Box::pin(
+            app.oneshot(
+                Request::delete("/api/queue/deep-cancel")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        );
+        assert!(
+            futures::poll!(cancellation.as_mut()).is_pending(),
+            "the cancellation lookup must wait behind the held SQLite connection"
+        );
+        let scheduler_guard = state
+            .scheduler_mutation_fence
+            .try_lock()
+            .expect("blocking SQLite lookup must not own the scheduler mutation fence");
+        drop(scheduler_guard);
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert_eq!(cancellation.await.unwrap().status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
     async fn queue_mutation_response_waits_for_scheduler_transaction_fence() {
         let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
         state.job_registry.register("aaaa", "flux-dev:fp16");
@@ -3561,6 +4146,68 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let body = json_body(resp).await;
         assert_eq!(body["code"], "QUEUE_JOB_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn delete_queue_cannot_cross_a_live_owner_in_the_same_mold_home() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (first, _first_rx) = durable_state(db.clone(), root.path());
+        let (second, _second_rx) = durable_state(db.clone(), root.path());
+        let first_owner = first.queue_journal.owner_uuid().unwrap();
+        let second_owner = second.queue_journal.owner_uuid().unwrap();
+        assert_ne!(first_owner, second_owner);
+        seed_durable_projection_row(
+            &db,
+            second_owner,
+            "foreign-job",
+            mold_db::generation_queue::QueueRowState::Queued,
+            1,
+            0,
+        );
+
+        let response = app_with_state(first)
+            .oneshot(
+                Request::delete("/api/queue/foreign-job")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(second.queue_journal.list_all().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_queue_terminalizes_a_held_batch_child_before_acknowledging() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db, root.path());
+        admit_one_durable_batch(&state, "held-child", "held-batch");
+        let claim = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        state
+            .queue_journal
+            .attach_claimed(&claim.row.id, claim.claim_token)
+            .hold("operator review");
+
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::delete("/api/queue/held-child")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(state.queue_journal.list_all().is_empty());
+        let child = &state
+            .queue_journal
+            .generation_batch("held-batch")
+            .unwrap()
+            .children[0];
+        assert_eq!(child.state, "cancelled");
     }
 
     #[tokio::test]
@@ -3946,6 +4593,10 @@ mod tests {
         assert_eq!(body["queue"]["can_cancel_all"], true);
         assert_eq!(body["queue"]["can_reorder"], true);
         assert_eq!(body["queue"]["server_batch"], true);
+        assert!(
+            body.get("durable_media").is_none(),
+            "the server must keep durable request-media capability dark until activation is complete"
+        );
         assert_eq!(
             body["queue"]["server_batch_max_outputs"],
             crate::batch_runtime::MAX_LIVE_SERVER_BATCH_OUTPUTS
@@ -3967,6 +4618,67 @@ mod tests {
             body["reference_uploads"]["max_file_bytes"],
             crate::reference_uploads::MAX_REFERENCE_UPLOAD_FILE_BYTES
         );
+    }
+
+    #[tokio::test]
+    async fn capabilities_keep_durable_media_dark_without_installed_services() {
+        let state = AppState::for_tests();
+        state.queue_journal.set_durable_media_ready(true);
+        assert_eq!(state.queue_journal.durable_media_capabilities(), None);
+
+        let resp = app_with_state(state)
+            .oneshot(
+                Request::get("/api/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            json_body(resp).await.get("durable_media").is_none(),
+            "readiness without lifecycle/admission services must remain dark"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn capabilities_advertise_exact_v1_for_single_and_multi_lane_runtime_matrices() {
+        for ordinals in [vec![0], vec![0, 1, 2]] {
+            let root = tempfile::tempdir().unwrap();
+            let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+            let (mut state, _rx) = durable_state(db, root.path());
+            state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+                workers: ordinals
+                    .iter()
+                    .copied()
+                    .map(gpu_worker_stub)
+                    .collect::<Vec<_>>()
+                    .into(),
+            });
+            install_authoritative_v2(&mut state);
+
+            let response = app_with_state(state)
+                .oneshot(
+                    Request::get("/api/capabilities")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                json_body(response).await["durable_media"],
+                serde_json::json!({
+                    "protocol_version": 1,
+                    "encrypted_at_rest": true,
+                    "generate_request_media": true,
+                    "identity": true,
+                    "h3_references": false,
+                    "private_h3": false,
+                }),
+                "lane count must not darken an otherwise complete runtime"
+            );
+        }
     }
 
     /// The identity block is what stops a client silently degrading a request
@@ -4208,16 +4920,52 @@ mod tests {
         AppState,
         tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
     ) {
+        durable_state_with_engine(db, root, MockEngine::ready())
+    }
+
+    fn durable_state_with_engine(
+        db: Arc<Option<mold_db::MetadataDb>>,
+        root: &std::path::Path,
+        engine: MockEngine,
+    ) -> (
+        AppState,
+        tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
+    ) {
         let gallery = durable_gallery_dir(root);
         std::fs::create_dir_all(&gallery).unwrap();
-        let (mut state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let (mut state, rx) = AppState::with_engine_and_queue(engine);
         state.output_disabled_override = false;
         state.metadata_db = db.clone();
         state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
-            db,
+            db.clone(),
             Some(root),
             "test-instance",
         ));
+        if let Some(owner) = state.queue_journal.owner_uuid() {
+            let lifecycle = Arc::new(crate::queue_media_lifecycle::QueueMediaLifecycle::new(
+                db,
+                root.to_path_buf(),
+                owner.to_string(),
+            ));
+            state
+                .queue_journal
+                .install_queue_media_lifecycle(lifecycle.clone())
+                .unwrap();
+            let report = crate::queue_media_startup::reconcile_claimed_owner(
+                &state.queue_journal,
+                lifecycle.as_ref(),
+            )
+            .unwrap();
+            assert!(report.durable_media_ready);
+            let admission = crate::queue_media_admission::DurableMediaAdmission::new(
+                lifecycle,
+                state.queue_capacity,
+            );
+            state
+                .queue_journal
+                .install_queue_media_admission(admission)
+                .unwrap();
+        }
         state
             .config
             .try_write()
@@ -4230,7 +4978,1202 @@ mod tests {
         root.join("gallery")
     }
 
+    fn published_gallery_file_count(root: &std::path::Path) -> usize {
+        std::fs::read_dir(durable_gallery_dir(root))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            .count()
+    }
+
+    fn admit_one_durable_batch(state: &AppState, id: &str, batch_id: &str) {
+        let request: GenerateRequest =
+            serde_json::from_str(&generate_body("publication fence", 64, 64)).unwrap();
+        let output = state.config.try_read().unwrap().effective_output_dir();
+        state
+            .queue_journal
+            .record_batch(crate::queue_journal::BatchJournalAdmission {
+                id: batch_id,
+                client_batch_id: &format!("client-{batch_id}"),
+                request_sha256: "publication-fence-sha",
+                children: &[crate::queue_journal::JournalAdmission {
+                    id,
+                    request: &request,
+                    output_dir: Some(&output),
+                    target_gpu: None,
+                    target_device_id: None,
+                    completion_payload: crate::state::SseCompletionPayload::MetadataOnly,
+                    batch_child: false,
+                    carries_reference_authority: false,
+                }],
+            })
+            .unwrap();
+    }
+
+    async fn wait_for_attempt_cleanup(state: &AppState, id: &str) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if state.queue.pending() == 0 && !state.generation_cancel.is_registered(id) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("single-worker attempt must settle and unregister its token");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_racing_single_worker_completion_cannot_publish_or_overwrite_cancel() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let blocker = Arc::new(GenerateBlocker::default());
+        let (mut state, rx) = durable_state_with_engine(
+            db,
+            root.path(),
+            MockEngine::blocking_generate_ignoring_cancellation(blocker.clone()),
+        );
+        state.queue_capacity = 1;
+        admit_one_durable_batch(&state, "cancel-at-publication", "cancel-batch");
+
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
+        let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
+        let app = app_with_state(state.clone());
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !blocker.entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("single-worker fallback must enter inference");
+        assert!(state
+            .generation_cancel
+            .is_registered("cancel-at-publication"));
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
+
+        let cancelled = app
+            .oneshot(
+                Request::delete("/api/queue/cancel-at-publication")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::NO_CONTENT);
+        blocker.release();
+        wait_for_attempt_cleanup(&state, "cancel-at-publication").await;
+
+        assert_eq!(
+            published_gallery_file_count(root.path()),
+            0,
+            "a success returned after DELETE must not reach the gallery"
+        );
+        assert!(state.queue_journal.list_all().is_empty());
+        let detail = state
+            .queue_journal
+            .generation_batch("cancel-batch")
+            .unwrap();
+        assert_eq!(detail.children[0].state, "cancelled");
+
+        worker.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_cancellation_retains_single_worker_attempt_without_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let blocker = Arc::new(GenerateBlocker::default());
+        let (mut state, rx) = durable_state_with_engine(
+            db,
+            root.path(),
+            MockEngine::blocking_generate(blocker.clone()),
+        );
+        state.queue_capacity = 1;
+        admit_one_durable_batch(&state, "retain-on-shutdown", "retain-batch");
+
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
+        let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !blocker.entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("single-worker fallback must enter inference");
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
+
+        assert_eq!(state.generation_cancel.request_all(), 1);
+        blocker.release();
+        wait_for_attempt_cleanup(&state, "retain-on-shutdown").await;
+
+        let rows = state.queue_journal.list_all();
+        assert_eq!(rows.len(), 1, "shutdown must retain the durable attempt");
+        assert_eq!(rows[0].id, "retain-on-shutdown");
+        assert_eq!(
+            rows[0].state,
+            mold_db::generation_queue::QueueRowState::Queued
+        );
+        assert_eq!(
+            published_gallery_file_count(root.path()),
+            0,
+            "shutdown-cancelled inference must not publish"
+        );
+        let detail = state
+            .queue_journal
+            .generation_batch("retain-batch")
+            .unwrap();
+        assert_ne!(detail.children[0].state, "complete");
+
+        worker.abort();
+    }
+
+    fn seed_durable_projection_row(
+        db: &Arc<Option<mold_db::MetadataDb>>,
+        owner: &str,
+        id: &str,
+        state: mold_db::generation_queue::QueueRowState,
+        created_at_ms: i64,
+        payload_bytes: usize,
+    ) {
+        mold_db::generation_queue::insert(
+            db.as_ref().as_ref().unwrap(),
+            &mold_db::generation_queue::GenerationQueueRow {
+                id: id.to_string(),
+                owner_uuid: owner.to_string(),
+                state,
+                model: format!("model-{id}"),
+                request_json: format!(
+                    r#"{{"prompt":"{id}","source_image":"{}"}}"#,
+                    "x".repeat(payload_bytes)
+                ),
+                media_set_id: None,
+                output_dir: PathBuf::from(format!("/large-payload/{id}")),
+                target_gpu: (id == "live-running").then_some(2),
+                target_device_id: None,
+                completion_payload: "full".repeat(1024),
+                seed_pinned: id == "queued",
+                dispatch_attempts: (id == "live-running") as u32,
+                replay_seen: (id == "retained-running") as u32,
+                held_reason: (state == mold_db::generation_queue::QueueRowState::Held)
+                    .then(|| "held for review".to_string()),
+                created_at_ms,
+                updated_at_ms: created_at_ms,
+                started_at_ms: (state == mold_db::generation_queue::QueueRowState::Running)
+                    .then_some(created_at_ms),
+            },
+        )
+        .unwrap();
+    }
+
     #[tokio::test]
+    async fn paginated_queue_reads_payload_free_pages_and_keeps_live_only_work_visible() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        for (id, row_state) in [
+            (
+                "live-running",
+                mold_db::generation_queue::QueueRowState::Running,
+            ),
+            ("queued", mold_db::generation_queue::QueueRowState::Queued),
+            (
+                "retained-running",
+                mold_db::generation_queue::QueueRowState::Running,
+            ),
+            ("held", mold_db::generation_queue::QueueRowState::Held),
+            ("tail-a", mold_db::generation_queue::QueueRowState::Queued),
+            ("tail-b", mold_db::generation_queue::QueueRowState::Queued),
+        ] {
+            // Six MiB of payload would dominate the legacy `list_all` result.
+            // The paginated SQL/type regression test proves these columns are
+            // absent; this route test proves the deep rows still page cleanly.
+            seed_durable_projection_row(&db, &owner, id, row_state, 500, 1024 * 1024);
+        }
+        state
+            .job_registry
+            .register("live-running", "model-live-running");
+        state.job_registry.mark_running("live-running", Some(2));
+        // Models whose replay authority cannot be reconstructed (H3,
+        // identity/reference requests) remain live in the registry only.
+        state.job_registry.register("h3-live-only", "minimax-h3");
+        let app = app_with_state(state.clone());
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::get("/api/queue?limit=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let first = json_body(first).await;
+        assert_eq!(first["page"]["limit"], 2);
+        assert_eq!(first["page"]["offset"], 0);
+        assert_eq!(first["page"]["returned"], 2);
+        let cursor = first["page"]["next_cursor"]
+            .as_str()
+            .expect("deep queue has a next page")
+            .to_string();
+        assert!(!cursor.contains(':'));
+        assert_eq!(first["entries"][0]["id"], "live-running");
+        assert_eq!(first["entries"][0]["state"], "running");
+        assert_eq!(first["entries"][0]["gpu"], 2);
+        assert_eq!(first["entries"][0]["durable"], true);
+        assert_eq!(first["entries"][0]["position"], 0);
+        assert_eq!(first["entries"][1]["id"], "queued");
+        assert_eq!(first["entries"][1]["position"], 1);
+        assert_eq!(first["entries"][1]["seed_pinned"], true);
+        assert_eq!(first["live_only_entries"].as_array().unwrap().len(), 1);
+        assert_eq!(first["live_only_entries"][0]["id"], "h3-live-only");
+        assert_eq!(first["live_only_entries"][0]["durable"], false);
+
+        // The keyset is coordinates, not a foreign key. Deleting the row that
+        // emitted the cursor cannot invalidate or rewind continuation.
+        mold_db::generation_queue::delete(db.as_ref().as_ref().unwrap(), "queued").unwrap();
+        let second = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/queue?limit=2&cursor={cursor}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        let second = json_body(second).await;
+        assert_eq!(second["page"]["offset"], 2);
+        assert_eq!(second["entries"][0]["id"], "retained-running");
+        assert_eq!(
+            second["entries"][0]["state"], "queued",
+            "an unowned interrupted running row keeps the legacy queued projection"
+        );
+        assert_eq!(second["entries"][0]["replayed"], true);
+        assert_eq!(second["entries"][1]["id"], "held");
+        assert_eq!(second["entries"][1]["state"], "held");
+        assert_eq!(second["entries"][1]["held_reason"], "held for review");
+        assert_eq!(second["live_only_entries"][0]["id"], "h3-live-only");
+    }
+
+    #[tokio::test]
+    async fn queue_default_and_explicit_pages_are_bounded_by_the_runtime_window() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
+        state.queue_capacity = 2;
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        for index in 0..5 {
+            seed_durable_projection_row(
+                &db,
+                &owner,
+                &format!("deep-{index}"),
+                mold_db::generation_queue::QueueRowState::Queued,
+                index,
+                1024 * 1024,
+            );
+        }
+        let app = app_with_state(state);
+
+        let default = json_body(
+            app.clone()
+                .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(default["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(default["page"]["limit"], 2);
+        let cursor = default["page"]["next_cursor"]
+            .as_str()
+            .expect("bounded default exposes continuation")
+            .to_string();
+
+        let clamped = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get("/api/queue?limit=999999")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(clamped["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(clamped["page"]["limit"], 2);
+
+        let continued = json_body(
+            app.oneshot(
+                Request::get(format!("/api/queue?cursor={cursor}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(continued["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(continued["page"]["limit"], 2);
+        assert_eq!(continued["page"]["offset"], 2);
+        assert_eq!(continued["entries"][0]["id"], "deep-2");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn heterogeneous_batch_matches_attached_route_model_refusal_before_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+        let unavailable = generate_body_for_model(
+            "must not become a stranded durable row",
+            "not-installed-at-admission",
+            512,
+            512,
+        );
+        let attached = app
+            .clone()
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(unavailable.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let attached_status = attached.status();
+        let attached = json_body(attached).await;
+        assert!(attached_status.is_client_error());
+
+        let body = serde_json::json!({
+            "client_batch_id": uuid::Uuid::new_v4().to_string(),
+            "requests": [serde_json::from_str::<serde_json::Value>(
+                &unavailable
+            ).unwrap()],
+        });
+
+        let response = app
+            .oneshot(json_request("POST", "/api/generation-batches", body))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), attached_status);
+        let response = json_body(response).await;
+        assert_eq!(response["code"], attached["code"]);
+        assert!(journal.list_all().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn heterogeneous_batch_persists_the_attached_routes_prepared_filing() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let collection = db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .create_collection("Durable Shelf", None)
+            .unwrap();
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+        let mut request: serde_json::Value =
+            serde_json::from_str(&generate_body("file this once", 512, 512)).unwrap();
+        request["output_format"] = serde_json::Value::Null;
+        request["collection"] = serde_json::json!({ "id": collection.id });
+        request["tags"] = serde_json::json!(["  Night Sky  ", "night sky", "Blue"]);
+
+        let response = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [request],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 1);
+        let persisted: GenerateRequest = serde_json::from_str(&rows[0].request_json).unwrap();
+        assert_eq!(persisted.output_format, Some(OutputFormat::Png));
+        assert_eq!(persisted.embed_metadata, Some(true));
+        assert_eq!(
+            persisted.tags,
+            Some(vec!["Night Sky".into(), "Blue".into()])
+        );
+        assert_eq!(
+            persisted.collection,
+            Some(mold_core::CollectionRef {
+                id: Some(collection.id),
+                name: Some("Durable Shelf".into()),
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn heterogeneous_batch_replay_ignores_later_host_unavailability() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let app = app_with_state(state.clone());
+        let body = serde_json::json!({
+            "client_batch_id": uuid::Uuid::new_v4().to_string(),
+            "requests": [serde_json::from_str::<serde_json::Value>(
+                &generate_body("stable retry", 512, 512)
+            ).unwrap()],
+        });
+
+        let admitted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+        let admitted = json_body(admitted).await;
+
+        state.set_generation_unavailable("test host is draining");
+        let replay = app
+            .oneshot(json_request("POST", "/api/generation-batches", body))
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay = json_body(replay).await;
+        assert_eq!(replay["id"], admitted["id"]);
+        assert_eq!(replay["children"], admitted["children"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn heterogeneous_batch_seals_media_before_ack_without_sqlite_plaintext() {
+        let root = tempfile::tempdir().unwrap();
+        let db_path = root.path().join("mold.db");
+        let db = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+        let mut request: serde_json::Value =
+            serde_json::from_str(&generate_body("volatile source", 512, 512)).unwrap();
+        let source = base64::engine::general_purpose::STANDARD.encode(minimal_png());
+        request["source_image"] = serde_json::json!(source);
+        request["source_image_name"] = serde_json::json!("sqlite-media-name-sentinel.png");
+
+        let response = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [request],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let response = json_body(response).await;
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, response["children"][0]["job_id"]);
+        assert!(rows[0].media_set_id.is_some());
+        assert!(!rows[0].request_json.contains("sqlite-media-name-sentinel"));
+        assert!(!rows[0].request_json.contains(&source));
+
+        let mut sqlite = std::fs::read(&db_path).unwrap();
+        for suffix in ["-wal", "-shm"] {
+            if let Ok(bytes) = std::fs::read(format!("{}{}", db_path.display(), suffix)) {
+                sqlite.extend(bytes);
+            }
+        }
+        assert!(!sqlite
+            .windows(b"sqlite-media-name-sentinel".len())
+            .any(|window| window == b"sqlite-media-name-sentinel"));
+        assert!(!sqlite
+            .windows(source.len())
+            .any(|window| window == source.as_bytes()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn durable_media_receipt_survives_gc_and_rejects_changes_and_tampering() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+        let client_id = uuid::Uuid::new_v4().to_string();
+        let source = base64::engine::general_purpose::STANDARD.encode(minimal_png());
+        let mut request: serde_json::Value =
+            serde_json::from_str(&generate_body("receipt survives media GC", 512, 512)).unwrap();
+        request["source_image"] = serde_json::json!(source);
+        request["source_image_name"] = serde_json::json!("first-name.png");
+        let body = serde_json::json!({
+            "client_batch_id": client_id,
+            "requests": [request],
+        });
+
+        let admitted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+        let admitted = json_body(admitted).await;
+        let job_id = admitted["children"][0]["job_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(journal.cancel_id(&job_id).unwrap());
+        assert!(journal.list_all().is_empty());
+
+        let retry = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        let retry = json_body(retry).await;
+        assert_eq!(retry["id"], admitted["id"]);
+        assert_eq!(retry["children"][0]["job_id"], job_id);
+
+        let mut changed = body.clone();
+        changed["requests"][0]["source_image_name"] = serde_json::json!("changed-name.png");
+        let conflict = app
+            .clone()
+            .oneshot(json_request("POST", "/api/generation-batches", changed))
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(conflict).await["code"],
+            "GENERATION_BATCH_IDEMPOTENCY_CONFLICT"
+        );
+
+        db.as_ref()
+            .as_ref()
+            .unwrap()
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE generation_batches SET request_sha256 = 'tampered'\
+                      WHERE client_batch_id = ?1",
+                    [client_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let undecidable = app
+            .oneshot(json_request("POST", "/api/generation-batches", body))
+            .await
+            .unwrap();
+        assert_eq!(undecidable.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json_body(undecidable).await["code"],
+            crate::queue_media_admission::DURABLE_MEDIA_IDENTITY_UNDECIDABLE
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_media_uuid_text_variants_converge_concurrently_and_conflict_once() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+        let canonical = uuid::Uuid::new_v4().to_string();
+        let decorated = format!("  {}  ", canonical.to_ascii_uppercase());
+        let mut request: serde_json::Value =
+            serde_json::from_str(&generate_body("canonical durable media", 64, 64)).unwrap();
+        request["source_image"] =
+            serde_json::json!(base64::engine::general_purpose::STANDARD.encode(minimal_png()));
+        request["source_image_name"] = serde_json::json!("canonical-source.png");
+        let first_body = serde_json::json!({
+            "client_batch_id": decorated,
+            "requests": [request.clone()],
+        });
+        let second_body = serde_json::json!({
+            "client_batch_id": canonical,
+            "requests": [request.clone()],
+        });
+
+        let (first, second) = tokio::join!(
+            app.clone().oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                first_body.clone(),
+            )),
+            app.clone()
+                .oneshot(json_request("POST", "/api/generation-batches", second_body,)),
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert!(matches!(
+            (first.status(), second.status()),
+            (StatusCode::ACCEPTED, StatusCode::OK) | (StatusCode::OK, StatusCode::ACCEPTED)
+        ));
+        let first = json_body(first).await;
+        let second = json_body(second).await;
+        assert_eq!(first["id"], second["id"]);
+        assert_eq!(first["client_batch_id"], canonical);
+        assert_eq!(second["client_batch_id"], canonical);
+        assert_eq!(journal.list_all().len(), 1);
+        let persisted: GenerateRequest =
+            serde_json::from_str(&journal.list_all()[0].request_json).unwrap();
+        assert_eq!(persisted.batch_id.as_deref(), Some(canonical.as_str()));
+
+        let retry = app
+            .clone()
+            .oneshot(json_request("POST", "/api/generation-batches", first_body))
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        assert_eq!(json_body(retry).await["id"], first["id"]);
+
+        let mut changed = request;
+        changed["prompt"] = serde_json::json!("canonical conflict");
+        let conflict = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": format!(" {} ", canonical.to_ascii_uppercase()),
+                    "requests": [changed],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(conflict).await["code"],
+            "GENERATION_BATCH_IDEMPOTENCY_CONFLICT"
+        );
+        assert_eq!(journal.list_all().len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn media_free_batch_uuid_text_variants_share_lookup_and_conflict_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+        let canonical = uuid::Uuid::new_v4().to_string();
+        let request: serde_json::Value =
+            serde_json::from_str(&generate_body("canonical plain batch", 64, 64)).unwrap();
+
+        let accepted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": format!("  {}  ", canonical.to_ascii_uppercase()),
+                    "requests": [request.clone()],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        let accepted = json_body(accepted).await;
+        assert_eq!(accepted["client_batch_id"], canonical);
+        let batch_id = accepted["id"].as_str().unwrap().to_string();
+
+        let recovered = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/generation-batches/by-client/{}",
+                    canonical.to_ascii_uppercase()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.status(), StatusCode::OK);
+        assert_eq!(json_body(recovered).await["id"], batch_id);
+
+        let reconciled = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches/status",
+                serde_json::json!({
+                    "client_batch_ids": [
+                        canonical.to_ascii_uppercase(),
+                        format!(" {canonical} "),
+                    ],
+                    "batch_ids": [],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(reconciled.status(), StatusCode::OK);
+        let reconciled = json_body(reconciled).await;
+        assert_eq!(reconciled["batches"].as_array().unwrap().len(), 1);
+        assert_eq!(reconciled["batches"][0]["id"], batch_id);
+        assert!(reconciled["missing"]["client_batch_ids"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        let retry = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": canonical,
+                    "requests": [request.clone()],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        assert_eq!(json_body(retry).await["id"], accepted["id"]);
+
+        let mut changed = request;
+        changed["prompt"] = serde_json::json!("plain conflict");
+        let conflict = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": format!(" {} ", canonical.to_ascii_uppercase()),
+                    "requests": [changed],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(conflict).await["code"],
+            "GENERATION_BATCH_IDEMPOTENCY_CONFLICT"
+        );
+        assert_eq!(journal.list_all().len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn durable_media_mixed_siblings_commit_together_and_preflight_is_one_over_n_atomic() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+        let source = base64::engine::general_purpose::STANDARD.encode(minimal_png());
+        let mut media: serde_json::Value =
+            serde_json::from_str(&generate_body("mixed media", 64, 64)).unwrap();
+        media["source_image"] = serde_json::json!(source);
+        media["source_image_name"] = serde_json::json!("mixed-source.png");
+        let plain: serde_json::Value =
+            serde_json::from_str(&generate_body("mixed plain", 64, 64)).unwrap();
+
+        let accepted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [media.clone(), plain],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].media_set_id.is_some());
+        assert!(rows[1].media_set_id.is_none());
+        for row in rows {
+            assert!(journal.cancel_id(&row.id).unwrap());
+        }
+
+        let mut refused = media;
+        refused["lora"] = serde_json::json!({
+            "path": "must-not-be-resolved.safetensors",
+            "scale": 1.0
+        });
+        let rejected = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [
+                        serde_json::from_str::<serde_json::Value>(
+                            &generate_body("would otherwise admit", 64, 64)
+                        ).unwrap(),
+                        refused
+                    ],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(rejected).await["code"],
+            "DURABLE_MEDIA_LORA_UNSUPPORTED"
+        );
+        assert!(journal.list_all().is_empty());
+        let owner = journal.owner_uuid().unwrap();
+        assert!(mold_db::generation_queue_media::list_obligations(
+            db.as_ref().as_ref().unwrap(),
+            owner,
+            mold_db::generation_queue_media::QueueMediaObligationState::Active,
+        )
+        .unwrap()
+        .is_empty());
+    }
+
+    fn durable_direct_media_body(prompt: &str) -> String {
+        let mut request: serde_json::Value =
+            serde_json::from_str(&generate_body(prompt, 64, 64)).unwrap();
+        request["source_image"] =
+            serde_json::json!(base64::engine::general_purpose::STANDARD.encode(minimal_png()));
+        request["source_image_name"] = serde_json::json!("direct-source.png");
+        request.to_string()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn durable_direct_header_is_validated_before_any_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+
+        for path in ["/api/generate", "/api/generate/stream"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(path)
+                        .header("content-type", "application/json")
+                        .header("x-mold-operation-id", "not-a-uuid")
+                        .body(Body::from(durable_direct_media_body("invalid header")))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        assert!(journal.list_all().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn durable_direct_authority_refusals_are_typed_and_never_reach_sqlite() {
+        let root = tempfile::tempdir().unwrap();
+        let db_path = root.path().join("mold.db");
+        let db = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+
+        let mut h3: serde_json::Value =
+            serde_json::from_str(&generate_body("direct H3 authority", 64, 64)).unwrap();
+        h3["model"] = serde_json::json!(mold_core::minimax_h3::FL2VA_COMFY);
+
+        let mut references: serde_json::Value =
+            serde_json::from_str(&generate_body("direct reference authority", 64, 64)).unwrap();
+        references["references"] =
+            serde_json::to_value(vec![mold_core::GenerationReference::Image {
+                media: mold_core::GenerationReferenceAuthority::Inline {
+                    data: minimal_png(),
+                },
+                provenance: mold_core::GenerationReferenceProvenance::default(),
+                mime_type: "image/png".to_string(),
+                width: 1,
+                height: 1,
+            }])
+            .unwrap();
+
+        let hdr_sentinel = "durable-hdr-must-never-enter-sqlite";
+        let mut hdr: serde_json::Value =
+            serde_json::from_str(&generate_body("direct HDR authority", 64, 64)).unwrap();
+        hdr["hdr_exr_dir"] = serde_json::json!(hdr_sentinel);
+
+        for path in ["/api/generate", "/api/generate/stream"] {
+            for (request, expected_code) in [
+                (&h3, "DURABLE_MEDIA_H3_UNSUPPORTED"),
+                (&references, "DURABLE_MEDIA_REFERENCES_UNSUPPORTED"),
+                (&hdr, "DURABLE_MEDIA_HDR_UNSUPPORTED"),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::post(path)
+                            .header("content-type", "application/json")
+                            .header("x-mold-operation-id", uuid::Uuid::new_v4().to_string())
+                            .body(Body::from(request.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+                assert_eq!(json_body(response).await["code"], expected_code);
+            }
+        }
+
+        assert!(journal.list_all().is_empty());
+        let mut sqlite = std::fs::read(&db_path).unwrap();
+        if let Ok(wal) = std::fs::read(format!("{}-wal", db_path.display())) {
+            sqlite.extend(wal);
+        }
+        assert!(!sqlite
+            .windows(hdr_sentinel.len())
+            .any(|window| window == hdr_sentinel.as_bytes()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headerless_direct_media_remains_attached_and_never_enters_sqlite() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, mut rx) = durable_state(db, root.path());
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+        let request = tokio::spawn(async move {
+            app.oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(durable_direct_media_body("legacy attached")))
+                    .unwrap(),
+            )
+            .await
+        });
+
+        let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("headerless media must enter the attached runtime queue")
+            .expect("runtime queue remains open");
+        assert!(job.journal.is_none());
+        assert!(job.deferred_media.is_none());
+        assert!(journal.list_all().is_empty());
+        drop(job);
+        request.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_direct_raw_observer_preserves_the_legacy_media_response() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
+        let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            app_with_state(state.clone()).oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .header("x-mold-operation-id", operation_id)
+                    .body(Body::from(durable_direct_media_body("durable raw")))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("durable raw observer must settle")
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("content-type").unwrap(), "image/png");
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap()
+                .as_ref(),
+            minimal_png()
+        );
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
+        worker.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_direct_sse_observer_preserves_queued_and_complete_events() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
+        let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            app_with_state(state).oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .header("x-mold-operation-id", uuid::Uuid::new_v4().to_string())
+                    .body(Body::from(durable_direct_media_body("durable SSE")))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("durable SSE observer must attach")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = tokio::time::timeout(
+            Duration::from_secs(5),
+            axum::body::to_bytes(response.into_body(), 1024 * 1024),
+        )
+        .await
+        .expect("durable SSE stream must terminate")
+        .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("\"type\":\"queued\""), "{body}");
+        assert!(body.contains("event: complete"), "{body}");
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
+        worker.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_direct_sse_yields_committed_id_before_claim_and_disconnect_does_not_cancel() {
+        use futures::StreamExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        state.queue_capacity = 1;
+        install_authoritative_v2(&mut state);
+        let full_runtime = state
+            .queue
+            .try_reserve(state.queue_capacity)
+            .expect("test owns the only runtime slot");
+        let journal = state.queue_journal.clone();
+        let admission = journal
+            .queue_media_admission()
+            .expect("admission installed");
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
+        let app = app_with_state(state);
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            app.clone().oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .header("x-mold-operation-id", uuid::Uuid::new_v4().to_string())
+                    .body(Body::from(durable_direct_media_body(
+                        "committed before claim",
+                    )))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("HTTP admission must not wait for feeder capacity")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 1);
+        let job_id = rows[0].id.clone();
+        assert_eq!(
+            rows[0].state,
+            mold_db::generation_queue::QueueRowState::Queued
+        );
+        let mut stream = response.into_body().into_data_stream();
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("committed queued event must be available before feeder claim")
+            .expect("SSE body remains open")
+            .unwrap();
+        let first = String::from_utf8_lossy(&first);
+        assert!(first.contains("\"type\":\"queued\""), "{first}");
+        assert!(first.contains(&job_id), "{first}");
+
+        drop(stream);
+        assert_eq!(admission.ingress().attached_len(), 0);
+        assert_eq!(journal.list_all().len(), 1, "disconnect only detaches");
+
+        let cancelled = app
+            .oneshot(
+                Request::delete(format!("/api/queue/{job_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::NO_CONTENT);
+        assert!(
+            journal.list_all().is_empty(),
+            "DELETE remains cancellation authority"
+        );
+
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
+        drop(full_runtime);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn full_observer_registry_degrades_to_committed_202_status() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let admission = state
+            .queue_journal
+            .queue_media_admission()
+            .expect("admission installed");
+        let registrations = (0..state.queue_capacity)
+            .map(|index| {
+                admission
+                    .ingress()
+                    .reserve(
+                        &format!("occupied-observer-{index}"),
+                        crate::queue_media_ingress::ObserverMode::Raw,
+                    )
+                    .expect("registry has its authoritative runtime capacity")
+            })
+            .collect::<Vec<_>>();
+        let journal = state.queue_journal.clone();
+        let response = app_with_state(state)
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .header("x-mold-operation-id", uuid::Uuid::new_v4().to_string())
+                    .body(Body::from(durable_direct_media_body("detached overflow")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(json_body(response).await["durable"], true);
+        assert_eq!(journal.list_all().len(), 1);
+        drop(registrations);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn heterogeneous_batch_admits_thirty_once_and_returns_same_ids_on_retry() {
         let root = tempfile::tempdir().unwrap();
         let db_path = root.path().join("mold.db");
@@ -4241,7 +6184,7 @@ mod tests {
             let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
             state.scheduled_work = crate::scheduler::ScheduledWorkHandle::new(scheduled_tx);
             let journal = state.queue_journal.clone();
-            let app = app_with_state(state);
+            let app = app_with_state(state.clone());
             let client_batch_id = uuid::Uuid::new_v4().to_string();
             let requests: Vec<serde_json::Value> = (0..30)
                 .map(|index| {
@@ -4268,6 +6211,7 @@ mod tests {
                 .unwrap();
             assert_eq!(admitted.status(), StatusCode::ACCEPTED);
             let admitted = json_body(admitted).await;
+            let batch_id = admitted["id"].as_str().unwrap().to_string();
             let first_ids: Vec<String> = admitted["children"]
                 .as_array()
                 .unwrap()
@@ -4282,6 +6226,7 @@ mod tests {
             );
 
             let retry = app
+                .clone()
                 .oneshot(json_request("POST", "/api/generation-batches", body))
                 .await
                 .unwrap();
@@ -4295,8 +6240,38 @@ mod tests {
                 .collect();
             assert_eq!(retry_ids, first_ids);
 
+            let cancelled_id = first_ids.last().unwrap().clone();
+            let cancelled = app
+                .clone()
+                .oneshot(
+                    Request::delete(format!("/api/queue/{cancelled_id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(cancelled.status(), StatusCode::NO_CONTENT);
+            let status = app
+                .oneshot(
+                    Request::get(format!("/api/generation-batches/{batch_id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = json_body(status).await;
+            assert_eq!(status["children"][29]["state"], "cancelled");
+            assert_eq!(journal.list_all().len(), 29);
+
+            assert!(
+                rx.try_recv().is_err(),
+                "admission must not construct or submit child jobs"
+            );
+            assert_eq!(state.job_registry.len(), 0, "the feeder owns hydration");
+            let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+            let feeder = crate::durable_queue_feeder::spawn(state, feeder_shutdown.clone());
             let mut admitted_jobs = Vec::new();
-            for _ in 0..30 {
+            for _ in 0..29 {
                 admitted_jobs.push(
                     tokio::time::timeout(Duration::from_secs(5), rx.recv())
                         .await
@@ -4305,18 +6280,22 @@ mod tests {
                 );
             }
             journal.retain_all();
+            feeder_shutdown.cancel();
+            feeder.await.unwrap();
             drop(admitted_jobs);
             drop(journal);
-            first_ids
+            first_ids[..29].to_vec()
         };
 
         let reopened = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
         let (state, mut rx) = durable_state(reopened, root.path());
-        let replay_state = state.clone();
-        let replay_task =
-            tokio::spawn(async move { crate::queue_journal::replay(&replay_state, true).await });
+        crate::durable_queue_feeder::recover_runtime(&state)
+            .await
+            .expect("restart clears the prior runtime's retained claim tokens");
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
         let mut replayed = Vec::new();
-        for _ in 0..30 {
+        for _ in 0..29 {
             replayed.push(
                 tokio::time::timeout(Duration::from_secs(5), rx.recv())
                     .await
@@ -4325,10 +6304,399 @@ mod tests {
                     .id,
             );
         }
-        let report = replay_task.await.unwrap();
-        assert_eq!(report.resumed, 30);
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
         assert_eq!(replayed, first_ids);
         assert!(rx.try_recv().is_err(), "no child replays twice");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn heterogeneous_batch_records_typed_prompt_history_after_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
+        install_authoritative_v2(&mut state);
+        let app = app_with_state(state);
+
+        let mut first: serde_json::Value = serde_json::from_str(&generate_body_for_model(
+            "  first prompt exactly as typed  ",
+            "mock-model",
+            512,
+            512,
+        ))
+        .unwrap();
+        first["negative_prompt"] = serde_json::json!("  literal negative prompt  ");
+        let duplicate = first.clone();
+        let second: serde_json::Value =
+            serde_json::from_str(&generate_body("second prompt", 512, 512)).unwrap();
+        let response = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [first, duplicate, second],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let history = mold_db::PromptHistory::new(db.as_ref().as_ref().unwrap());
+        let entries = history.recent(10).unwrap();
+        assert_eq!(entries.len(), 2, "consecutive identical siblings dedupe");
+        assert_eq!(entries[0].prompt, "second prompt");
+        assert_eq!(entries[0].negative, None);
+        assert_eq!(entries[0].model, "mock-model");
+        assert_eq!(entries[1].prompt, "  first prompt exactly as typed  ");
+        assert_eq!(
+            entries[1].negative.as_deref(),
+            Some("  literal negative prompt  ")
+        );
+        assert_eq!(entries[1].model, "mock-model");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn heterogeneous_batch_idempotent_retry_does_not_record_history_again() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
+        install_authoritative_v2(&mut state);
+        let app = app_with_state(state);
+        let body = serde_json::json!({
+            "client_batch_id": uuid::Uuid::new_v4().to_string(),
+            "requests": [serde_json::from_str::<serde_json::Value>(
+                &generate_body("durable batch prompt", 512, 512)
+            ).unwrap()],
+        });
+
+        let admitted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+
+        let history = mold_db::PromptHistory::new(db.as_ref().as_ref().unwrap());
+        history
+            .push(&mold_db::HistoryEntry::new(
+                "intervening prompt",
+                "mock-model",
+            ))
+            .unwrap();
+
+        let retry = app
+            .oneshot(json_request("POST", "/api/generation-batches", body))
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        assert_eq!(
+            history
+                .recent(10)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.prompt)
+                .collect::<Vec<_>>(),
+            vec![
+                "intervening prompt".to_string(),
+                "durable batch prompt".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn durable_batch_outcomes_recover_by_client_and_bulk_with_instance_fencing() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
+        install_authoritative_v2(&mut state);
+        state.instance_id = Arc::new("serving-instance-not-journal-owner".into());
+        let queue_owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        let app = app_with_state(state);
+
+        let capabilities = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get("/api/capabilities")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(capabilities["queue"]["heterogeneous_batch"], true);
+        assert_eq!(capabilities["queue"]["durable_batch_outcomes"], true);
+
+        let client_batch_id = uuid::Uuid::new_v4().to_string();
+        let requests = ["complete", "failed"]
+            .into_iter()
+            .map(|prompt| {
+                serde_json::from_str::<serde_json::Value>(&generate_body(prompt, 512, 512)).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let admitted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": client_batch_id,
+                    "requests": requests,
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+        let admitted = json_body(admitted).await;
+        assert_eq!(
+            admitted["instance_id"],
+            "serving-instance-not-journal-owner"
+        );
+        assert_eq!(admitted["durable"], true);
+        assert!(admitted["children"][0]["created_at_ms"].as_i64().unwrap() > 0);
+        let batch_id = admitted["id"].as_str().unwrap().to_string();
+        let complete_job = admitted["children"][0]["job_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let failed_job = admitted["children"][1]["job_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let db = db.as_ref().as_ref().unwrap();
+        mold_db::generation_batches::finish_unclaimed_queued(
+            db,
+            &queue_owner,
+            &complete_job,
+            mold_db::generation_batches::GenerationBatchTerminal {
+                state: mold_db::generation_batches::GenerationBatchTerminalState::Complete,
+                error: None,
+                terminal_error_json: None,
+                result_json: Some(
+                    r#"{"filename":"finished.png","original_filename":"original.png"}"#,
+                ),
+                completed_at_ms: 200,
+            },
+        )
+        .unwrap();
+        mold_db::generation_batches::finish_unclaimed_queued(
+            db,
+            &queue_owner,
+            &failed_job,
+            mold_db::generation_batches::GenerationBatchTerminal {
+                state: mold_db::generation_batches::GenerationBatchTerminalState::Failed,
+                error: Some("render failed"),
+                terminal_error_json: Some(r#"{"code":"RENDER_FAILED","message":"render failed"}"#),
+                result_json: None,
+                completed_at_ms: 201,
+            },
+        )
+        .unwrap();
+
+        let lookup_path = format!("/api/generation-batches/by-client/{client_batch_id}");
+        let first = app
+            .clone()
+            .oneshot(Request::get(&lookup_path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let first = json_body(first).await;
+        let retry = json_body(
+            app.clone()
+                .oneshot(Request::get(&lookup_path).body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(retry, first, "lookup is an idempotent authoritative read");
+        assert_eq!(first["id"], batch_id);
+        assert_eq!(first["instance_id"], "serving-instance-not-journal-owner");
+        assert_eq!(first["children"][0]["state"], "complete");
+        assert_eq!(first["children"][0]["completed_at_ms"], 200);
+        assert_eq!(first["children"][0]["result"]["filename"], "finished.png");
+        assert_eq!(
+            first["children"][0]["result"]["original_filename"],
+            "original.png"
+        );
+        assert_eq!(first["children"][1]["state"], "failed");
+        assert_eq!(first["children"][1]["error"], "render failed");
+        assert_eq!(
+            first["children"][1]["terminal_error"]["code"],
+            "RENDER_FAILED"
+        );
+        assert_eq!(first["children"][1]["updated_at_ms"], 201);
+        let by_server_id = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get(format!("/api/generation-batches/{batch_id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(by_server_id, first);
+
+        let unknown_client = uuid::Uuid::new_v4().to_string();
+        let unknown_batch = uuid::Uuid::new_v4().to_string();
+        let bulk = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches/status",
+                serde_json::json!({
+                    "client_batch_ids": [client_batch_id, unknown_client],
+                    "batch_ids": [batch_id, unknown_batch],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bulk.status(), StatusCode::OK);
+        let bulk = json_body(bulk).await;
+        assert_eq!(bulk["instance_id"], "serving-instance-not-journal-owner");
+        assert_eq!(bulk["batches"].as_array().unwrap().len(), 1);
+        assert_eq!(bulk["batches"][0], first);
+        assert_eq!(bulk["missing"]["client_batch_ids"][0], unknown_client);
+        assert_eq!(bulk["missing"]["batch_ids"][0], unknown_batch);
+
+        let missing = app
+            .oneshot(
+                Request::get(format!(
+                    "/api/generation-batches/by-client/{}",
+                    uuid::Uuid::new_v4()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bulk_cancel_counts_deep_batch_legacy_and_claimed_rows_once() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let blocking_db = db.clone();
+        let (mut state, _rx) = durable_state(db, root.path());
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::new(scheduled_tx);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state.clone());
+        let client_batch_id = uuid::Uuid::new_v4().to_string();
+        let requests = (0..12)
+            .map(|index| {
+                let mut request: serde_json::Value =
+                    serde_json::from_str(&generate_body(&format!("cancel {index}"), 512, 512))
+                        .unwrap();
+                request["batch_size"] = serde_json::json!(1);
+                request
+            })
+            .collect::<Vec<_>>();
+        let admitted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": client_batch_id,
+                    "requests": requests,
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+        let admitted = json_body(admitted).await;
+        let durable_id = admitted["id"].as_str().unwrap().to_string();
+        let claimed = journal.claim_next_feeder().unwrap().unwrap();
+        let claimed_ticket = journal.attach_claimed(&claimed.row.id, claimed.claim_token);
+        state
+            .job_registry
+            .register(&claimed.row.id, &claimed.row.model);
+        let owner = journal.owner_uuid().unwrap().to_string();
+        for index in 0..5 {
+            seed_durable_projection_row(
+                &blocking_db,
+                &owner,
+                &format!("legacy-deep-{index}"),
+                mold_db::generation_queue::QueueRowState::Queued,
+                100 + index,
+                0,
+            );
+        }
+
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let watchdog_released = Arc::new(AtomicBool::new(false));
+        let watchdog_released_in_thread = watchdog_released.clone();
+        let db_holder = std::thread::spawn(move || {
+            blocking_db
+                .as_ref()
+                .as_ref()
+                .unwrap()
+                .with_conn(|_| {
+                    locked_tx.send(()).unwrap();
+                    if release_rx.recv_timeout(Duration::from_secs(2)).is_err() {
+                        watchdog_released_in_thread.store(true, Ordering::SeqCst);
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        });
+        locked_rx.recv().unwrap();
+
+        let cancel_app = app.clone();
+        let cancel_task = tokio::spawn(async move {
+            cancel_app
+                .oneshot(Request::delete("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+        });
+        tokio::task::yield_now().await;
+        let live_health = app
+            .clone()
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(live_health.status(), StatusCode::OK);
+        assert!(
+            !watchdog_released.load(Ordering::SeqCst),
+            "bulk cancellation blocked the current-thread async executor"
+        );
+        release_tx.send(()).unwrap();
+        db_holder.join().unwrap();
+
+        let cancelled = cancel_task.await.unwrap();
+        assert_eq!(cancelled.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(cancelled).await["cancelled"],
+            17,
+            "twelve durable batch children plus five legacy rows, with the claimed live child counted once"
+        );
+        claimed_ticket.discard();
+        let status = app
+            .oneshot(
+                Request::get(format!("/api/generation-batches/{durable_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = json_body(status).await;
+        assert_eq!(status["children"].as_array().unwrap().len(), 12);
+        assert!(status["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|child| child["state"] == "cancelled"));
+        assert!(journal.list_all().is_empty());
     }
 
     /// The end-to-end shape: admit jobs, fence, drop the coordinator, rebuild
@@ -4420,6 +6788,179 @@ mod tests {
             "replay re-registers under the original ids, so /api/queue and \
              /api/events see resumed jobs with no new event type"
         );
+    }
+
+    #[tokio::test]
+    async fn direct_admission_rebinds_a_stable_gpu_after_restart_and_renumbering() {
+        const STABLE_ID: &str = "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let output_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+
+        let submitted_id = {
+            let (mut state, mut rx) = durable_state(db.clone(), output_dir.path());
+            state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+                workers: vec![gpu_worker_stub_with_stable_id(2, STABLE_ID)].into(),
+            });
+            install_worker_registry(&mut state);
+            let journal = state.queue_journal.clone();
+            let app = app_with_state(state.clone());
+            let mut body: serde_json::Value =
+                serde_json::from_str(&generate_body("stable direct", 64, 64)).unwrap();
+            body["placement"] = serde_json::json!({
+                "text_encoders": { "kind": "cpu" },
+                "advanced": {
+                    "transformer": { "kind": "gpu", "ordinal": 2 },
+                    "vae": { "kind": "auto" },
+                    "clip_l": { "kind": "cpu" }
+                }
+            });
+            let task = tokio::spawn(async move {
+                app.oneshot(json_request("POST", "/api/generate", body))
+                    .await
+            });
+            let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("direct admission")
+                .expect("queue open");
+            task.abort();
+            let _ = task.await;
+            let row = journal
+                .list_all()
+                .into_iter()
+                .find(|row| row.id == job.id)
+                .expect("durable direct row");
+            assert_eq!(row.target_gpu, Some(2));
+            assert_eq!(row.target_device_id.as_deref(), Some(STABLE_ID));
+            let id = job.id.clone();
+            journal.retain_all();
+            drop(job);
+            id
+        };
+
+        let (mut state, mut rx) = durable_state(db, output_dir.path());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![gpu_worker_stub_with_stable_id(7, STABLE_ID)].into(),
+        });
+        install_worker_registry(&mut state);
+        let report = crate::queue_journal::replay(&state, true).await;
+        assert_eq!(report.resumed, 1);
+        let mut replayed = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("direct replay")
+            .expect("queue open");
+        assert_eq!(replayed.id, submitted_id);
+        assert_eq!(state.job_registry.target_gpu(&submitted_id), Some(Some(7)));
+        assert_eq!(
+            crate::scheduler::generation_hard_ordinal(&state, &submitted_id, &replayed.request),
+            Some(7),
+            "scheduler V2 resolves the current ordinal"
+        );
+        assert_eq!(
+            crate::queue::legacy_generation_preferred_gpu(
+                &state,
+                &submitted_id,
+                replayed.request.placement.as_ref(),
+            ),
+            Ok(Some(7)),
+            "legacy dispatch resolves the current ordinal"
+        );
+        let placement = replayed.request.placement.as_ref().unwrap();
+        assert_eq!(placement.text_encoders, mold_core::DeviceRef::Cpu);
+        let advanced = placement.advanced.as_ref().unwrap();
+        assert_eq!(
+            advanced.transformer,
+            mold_core::DeviceRef::device(STABLE_ID)
+        );
+        assert_eq!(advanced.vae, mold_core::DeviceRef::Auto);
+        assert_eq!(advanced.clip_l, Some(mold_core::DeviceRef::Cpu));
+        replayed.journal.take().unwrap().discard();
+        state.job_registry.remove(&submitted_id);
+        state.queue.decrement();
+    }
+
+    #[tokio::test]
+    async fn batch_admission_rebinds_a_stable_gpu_after_restart_and_renumbering() {
+        const STABLE_ID: &str = "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let output_dir = tempfile::tempdir().unwrap();
+        let db_path = output_dir.path().join("mold.db");
+        let submitted_id = {
+            let db = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
+            let (mut state, _rx) = durable_state(db, output_dir.path());
+            state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+                workers: vec![gpu_worker_stub_with_stable_id(2, STABLE_ID)].into(),
+            });
+            install_worker_registry(&mut state);
+            let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+            state.scheduled_work = crate::scheduler::ScheduledWorkHandle::new(scheduled_tx);
+            let journal = state.queue_journal.clone();
+            let app = app_with_state(state);
+            let mut request: serde_json::Value =
+                serde_json::from_str(&generate_body("stable batch", 64, 64)).unwrap();
+            request["placement"] = serde_json::json!({
+                "text_encoders": { "kind": "cpu" },
+                "advanced": {
+                    "transformer": { "kind": "gpu", "ordinal": 2 },
+                    "vae": { "kind": "auto" }
+                }
+            });
+            let response = app
+                .oneshot(json_request(
+                    "POST",
+                    "/api/generation-batches",
+                    serde_json::json!({
+                        "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                        "requests": [request],
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let body = json_body(response).await;
+            let id = body["children"][0]["job_id"].as_str().unwrap().to_string();
+            let row = journal
+                .list_all()
+                .into_iter()
+                .find(|row| row.id == id)
+                .expect("durable batch row");
+            assert_eq!(row.target_gpu, Some(2));
+            assert_eq!(row.target_device_id.as_deref(), Some(STABLE_ID));
+            id
+        };
+
+        let db = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
+        let (mut state, mut rx) = durable_state(db, output_dir.path());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![gpu_worker_stub_with_stable_id(7, STABLE_ID)].into(),
+        });
+        install_worker_registry(&mut state);
+        crate::durable_queue_feeder::recover_runtime(&state)
+            .await
+            .unwrap();
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), shutdown.clone());
+        let mut replayed = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("batch replay")
+            .expect("queue open");
+        assert_eq!(replayed.id, submitted_id);
+        assert_eq!(state.job_registry.target_gpu(&submitted_id), Some(Some(7)));
+        assert_eq!(
+            crate::scheduler::generation_hard_ordinal(&state, &submitted_id, &replayed.request),
+            Some(7)
+        );
+        assert_eq!(
+            crate::queue::legacy_generation_preferred_gpu(
+                &state,
+                &submitted_id,
+                replayed.request.placement.as_ref(),
+            ),
+            Ok(Some(7))
+        );
+        replayed.journal.take().unwrap().discard();
+        state.job_registry.remove(&submitted_id);
+        state.queue.decrement();
+        shutdown.cancel();
+        feeder.await.unwrap();
     }
 
     /// `PATCH /api/queue/:id` is authoritative over the lane and the order, so
@@ -4856,6 +7397,7 @@ mod tests {
                 state: mold_db::generation_queue::QueueRowState::Queued,
                 model: "mock-model".to_string(),
                 request_json: "{\"prompt\":".to_string(),
+                media_set_id: None,
                 output_dir: output_dir.path().to_path_buf(),
                 target_gpu: None,
                 target_device_id: None,
@@ -4895,6 +7437,7 @@ mod tests {
                 model: "mock-model".to_string(),
                 request_json: r#"{"prompt":"a cat","model":"mock-model","width":512,"height":512,"steps":4,"guidance":3.5}"#
                     .to_string(),
+                media_set_id: None,
                 output_dir: output_dir.path().to_path_buf(),
                 target_gpu: None,
                 target_device_id: None,
@@ -9409,6 +11952,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generation_batch_recovery_routes_require_the_configured_api_key() {
+        let keys = std::collections::HashSet::from(["test-key".to_string()]);
+        let auth = Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys)));
+        let app = app_with_auth(auth);
+
+        let lookup = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/api/generation-batches/by-client/{}",
+                    uuid::Uuid::new_v4()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(lookup.status(), StatusCode::UNAUTHORIZED);
+
+        let bulk = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches/status",
+                serde_json::json!({"client_batch_ids": [], "batch_ids": []}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bulk.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn auth_rejects_missing_api_key() {
         let keys = std::collections::HashSet::from(["test-key".to_string()]);
         let auth = Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys)));
@@ -11168,7 +13742,7 @@ mod tests {
     // ── GET /api/events ─────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn get_api_events_streams_published_server_events() {
+    async fn get_api_events_starts_with_instance_authority() {
         use futures::StreamExt as _;
         let state = AppState::empty(
             mold_core::Config::default(),
@@ -11198,30 +13772,66 @@ mod tests {
             "expected SSE content-type, got: {ct}"
         );
 
-        // Publish AFTER subscribing (SSE response already established) —
-        // registering on the job registry must surface as a job_queued frame.
-        let state_for_send = state.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            state_for_send.job_registry.register("j1", "flux-dev:q4");
-        });
+        let expected_instance_id = state.instance_id.as_str();
+        let mut body = res.into_body().into_data_stream();
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(1), body.next())
+            .await
+            .expect("authority frame must be immediately available")
+            .expect("authority frame stream must remain open")
+            .expect("authority frame body must be readable");
+        let frame = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(frame.starts_with("event: authority\n"), "frame: {frame:?}");
+        assert!(
+            frame.contains(&format!(r#""instance_id":"{expected_instance_id}""#)),
+            "frame: {frame:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_api_events_preserves_published_server_event_frames() {
+        use futures::StreamExt as _;
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let app = app_with_state(state.clone());
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
 
         let mut body = res.into_body().into_data_stream();
-        let mut saw_queued = false;
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        while tokio::time::Instant::now() < deadline {
-            match tokio::time::timeout(std::time::Duration::from_millis(300), body.next()).await {
-                Ok(Some(Ok(bytes))) => {
-                    let text = String::from_utf8_lossy(&bytes).to_string();
-                    if text.contains("\"type\":\"job_queued\"") && text.contains("\"id\":\"j1\"") {
-                        saw_queued = true;
-                        break;
-                    }
-                }
-                _ => continue,
-            }
-        }
-        assert!(saw_queued, "did not observe a job_queued SSE event");
+        let authority = tokio::time::timeout(std::time::Duration::from_secs(1), body.next())
+            .await
+            .expect("authority frame must be immediately available")
+            .expect("authority frame stream must remain open")
+            .expect("authority frame body must be readable");
+        assert!(String::from_utf8_lossy(&authority).starts_with("event: authority\n"));
+
+        // Publish only after consuming the opening authority frame. This
+        // deterministically proves the additive frame did not change the
+        // existing `event` name or ServerEvent JSON payload.
+        state.job_registry.register("j1", "flux-dev:q4");
+
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(1), body.next())
+            .await
+            .expect("published event must be immediately available")
+            .expect("event stream must remain open")
+            .expect("event frame body must be readable");
+        let frame = String::from_utf8(bytes.to_vec()).unwrap();
+        assert_eq!(
+            frame,
+            "event: event\ndata: {\"type\":\"job_queued\",\"id\":\"j1\",\"model\":\"flux-dev:q4\"}\n\n"
+        );
     }
 
     #[tokio::test]

@@ -420,8 +420,8 @@ export const ENV_KNOB_SCHEMAS: KeySchema[] = [
   {
     key: "env.MOLD_QUEUE_SIZE",
     section: "performance",
-    label: "Queue capacity",
-    help: "How many generations may wait in line (default 200).",
+    label: "Runtime queue window",
+    help: "How many jobs may be hydrated for dispatch at once (default 200). The durable backlog remains uncapped.",
     editor: "number",
     min: 1,
     max: 10000,

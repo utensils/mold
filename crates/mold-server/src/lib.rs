@@ -25,6 +25,7 @@ pub mod test_support;
 pub mod device_registry;
 pub mod dispatch_mode;
 pub mod downloads;
+mod durable_queue_feeder;
 pub mod events;
 pub mod execution_plan;
 mod gallery_organization;
@@ -59,6 +60,16 @@ pub mod model_cache;
 pub mod model_manager;
 pub mod queue;
 pub mod queue_journal;
+pub mod queue_media;
+mod queue_media_admission;
+mod queue_media_ingress;
+mod queue_media_lifecycle;
+pub mod queue_media_runtime;
+// This dependency-free policy seam lands default-dark. The concrete
+// schema/store adapter activates it atomically with queue-media admission.
+#[allow(dead_code)]
+mod queue_media_startup;
+pub mod queue_media_store;
 pub mod rate_limit;
 pub mod reference_uploads;
 pub mod request_id;
@@ -333,6 +344,33 @@ pub async fn run_server(
         Config::mold_dir().as_deref(),
         &instance_id,
     ));
+    if let Some(owner_uuid) = queue_journal.owner_uuid() {
+        let mold_home = Config::mold_dir().ok_or_else(|| {
+            anyhow::anyhow!(
+                "durable queue claimed an owner but MOLD_HOME became unavailable before media reconciliation"
+            )
+        })?;
+        let lifecycle = std::sync::Arc::new(queue_media_lifecycle::QueueMediaLifecycle::new(
+            metadata_db.clone(),
+            mold_home,
+            owner_uuid.to_string(),
+        ));
+        queue_journal
+            .install_queue_media_lifecycle(lifecycle.clone())
+            .map_err(anyhow::Error::msg)?;
+        let media_report =
+            queue_media_startup::reconcile_claimed_owner(&queue_journal, lifecycle.as_ref())?;
+        info!(
+            durable_media_ready = media_report.durable_media_ready,
+            restored = media_report.restored.len(),
+            deleted = media_report.deleted.len(),
+            cleared_gc_pending = media_report.cleared_gc_pending.len(),
+            held_jobs = media_report.held_jobs.len(),
+            issues = media_report.issues.len(),
+            unclaimed_owner_roots = media_report.unclaimed_owner_roots.len(),
+            "durable queue-media startup reconciliation complete"
+        );
+    }
     let generation_cancel = std::sync::Arc::new(generation_cancel::CancelRegistry::new());
     if queue_journal.is_enabled() {
         info!("durable generation queue enabled");
@@ -657,8 +695,27 @@ pub async fn run_server(
     }
     state.metadata_db = metadata_db;
     state.queue_journal = queue_journal.clone();
+    queue_journal
+        .install_event_broadcaster(state.events.clone())
+        .map_err(anyhow::Error::msg)?;
     state.generation_cancel = generation_cancel.clone();
     state.device_registry = device_registry;
+
+    // One admission/observer service is shared by both route shapes and the
+    // sole durable feeder. Install it before runtime recovery or the router.
+    if let Some(lifecycle) = queue_journal.queue_media_lifecycle() {
+        let admission =
+            queue_media_admission::DurableMediaAdmission::new(lifecycle, state.queue_capacity);
+        queue_journal
+            .install_queue_media_admission(admission)
+            .map_err(anyhow::Error::msg)?;
+    }
+
+    // Startup token recovery is a serving precondition. Await it before any
+    // generation producer or router exists, so an HTTP admission from this
+    // runtime can never have its freshly minted ownership token cleared by a
+    // late feeder recovery pass. Propagating the error fails startup closed.
+    durable_queue_feeder::recover_runtime(&state).await?;
 
     let mut recovered_live_batches = None;
     // Batch recovery is a serving precondition, including when SQLite is
@@ -900,26 +957,12 @@ pub async fn run_server(
         }
     }
 
-    // Retained generations resume before the router serves, as ONE sequential
-    // task: `submit_when_available` serializes on a single global capacity
-    // mutex, so parallel replay would land in arbitrary order and destroy the
-    // ordering the journal exists to preserve.
-    {
-        let report = crate::queue_journal::replay(&state, startup.start_generation_runner).await;
-        if report.resumed > 0
-            || report.held > 0
-            || report.already_completed > 0
-            || report.skipped_unverified > 0
-        {
-            info!(
-                resumed = report.resumed,
-                already_completed = report.already_completed,
-                held = report.held,
-                skipped_unverified = report.skipped_unverified,
-                "durable generation queue replay complete"
-            );
-        }
-    }
+    // Runtime-token recovery already completed as a startup barrier. The
+    // feeder performs bounded claims and per-claim output idempotence without
+    // materializing the retained backlog.
+    let durable_feeder_handle = startup
+        .start_generation_runner
+        .then(|| durable_queue_feeder::spawn(state.clone(), scheduler_shutdown.child_token()));
 
     // Background idle-TTL sweeper: reclaims parked engines that haven't been
     // touched for `MOLD_CACHE_IDLE_TTL_SECS` seconds. Abort handle bound to
@@ -1314,6 +1357,9 @@ pub async fn run_server(
         let _ = handle.await;
     }
     scheduler_shutdown.cancel();
+    if let Some(handle) = durable_feeder_handle {
+        let _ = handle.await;
+    }
     if let Some(handle) = trash_sweeper_handle {
         // Its token is a child of `scheduler_shutdown`, so the loop exits on
         // the cancel above; a pass already inside `spawn_blocking` finishes.

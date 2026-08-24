@@ -29,6 +29,8 @@ let poll: {
   deviceState: ReturnType<typeof ref<DeviceListResponse | null>>;
   resources: ReturnType<typeof ref<ResourceSnapshot | null>>;
   online: ReturnType<typeof ref<boolean>>;
+  stale: ReturnType<typeof ref<boolean>>;
+  authorityRejected: ReturnType<typeof ref<boolean>>;
   lastSeen: ReturnType<typeof ref<number | null>>;
   error: ReturnType<typeof ref<string | null>>;
   loading: ReturnType<typeof ref<boolean>>;
@@ -291,6 +293,8 @@ beforeEach(() => {
     deviceState: ref<DeviceListResponse | null>(null),
     resources: ref<ResourceSnapshot | null>(makeResources()),
     online: ref(true),
+    stale: ref(false),
+    authorityRejected: ref(false),
     lastSeen: ref<number | null>(Date.now()),
     error: ref<string | null>(null),
     loading: ref(false),
@@ -305,6 +309,20 @@ afterEach(() => {
 });
 
 describe("HostDetailPage — telemetry", () => {
+  it("shows reconnecting with last-good detail instead of a false offline state", async () => {
+    poll.stale.value = true;
+    poll.online.value = true;
+    poll.status.value = makeStatus({ queue_depth: 6 });
+
+    const w = await mountDetail();
+
+    expect(w.find('[data-test="detail-offline"]').exists()).toBe(false);
+    expect(w.get('[data-test="detail-reconnecting"]').text()).toContain(
+      "reconnecting",
+    );
+    expect(w.text()).toContain("6");
+  });
+
   it("subscribes with the viewed host key and refreshes authoritative state", async () => {
     const host = getHost(routeHolder.id)!;
     updateHost(routeHolder.id, { apiKey: "host-key" });
@@ -329,30 +347,33 @@ describe("HostDetailPage — telemetry", () => {
     expect(subscribeToDeviceSnapshots).toHaveBeenCalledTimes(1);
   });
 
-  it("threads the active session signal through interval and SSE reloads", async () => {
+  it("serializes interval and SSE reloads behind the active session wave", async () => {
     vi.useFakeTimers();
     try {
+      const first = deferred<{ entries: QueueEntry[] }>();
+      const second = deferred<{ entries: QueueEntry[] }>();
+      hostQueueCall
+        .mockImplementationOnce(() => first.promise)
+        .mockImplementationOnce(() => second.promise);
       wrapper = mount(HostDetailPage);
       await nextTick();
       await Promise.resolve();
       const sessionSignal = hostQueueCall.mock.calls[0]![1] as AbortSignal;
       const refresh = subscribeToDeviceSnapshots.mock
         .calls[0]![2] as () => void;
-
-      hostQueueCall.mockClear();
       await vi.advanceTimersByTimeAsync(4_000);
-      expect(hostQueueCall).toHaveBeenCalledWith(
-        expect.objectContaining({ id: routeHolder.id }),
-        sessionSignal,
-      );
-
-      hostQueueCall.mockClear();
       refresh();
       await Promise.resolve();
-      expect(hostQueueCall).toHaveBeenCalledWith(
+      expect(hostQueueCall).toHaveBeenCalledTimes(1);
+
+      first.resolve({ entries: [queued("first", 0)] });
+      await vi.waitFor(() => expect(hostQueueCall).toHaveBeenCalledTimes(2));
+      expect(hostQueueCall).toHaveBeenLastCalledWith(
         expect.objectContaining({ id: routeHolder.id }),
         sessionSignal,
       );
+      second.resolve({ entries: [queued("second", 0)] });
+      await flushPromises();
       expect(sessionSignal.aborted).toBe(false);
     } finally {
       wrapper?.unmount();
@@ -361,7 +382,29 @@ describe("HostDetailPage — telemetry", () => {
     }
   });
 
-  it("ignores an older same-host queue response after a newer event refresh", async () => {
+  it("preserves last-good capabilities when a later wave times out", async () => {
+    const lastGood = { ...caps, gallery: { can_delete: true } };
+    poll.devices.value = [makeDevice(0)];
+    poll.deviceState.value = {
+      devices: poll.devices.value,
+      plan_version: 1,
+    };
+    hostCapabilitiesCall
+      .mockResolvedValueOnce(lastGood)
+      .mockRejectedValueOnce(new Error("capability timeout"));
+
+    wrapper = mount(HostDetailPage);
+    await flushPromises();
+    const refresh = subscribeToDeviceSnapshots.mock.calls[0]![2] as () => void;
+    refresh();
+    await flushPromises();
+
+    expect(hostCapabilitiesCall).toHaveBeenCalledTimes(2);
+    expect(wrapper.find('[data-test="detail-offline"]').exists()).toBe(false);
+    expect(wrapper.find('[data-test="device-toggle-0"]').exists()).toBe(true);
+  });
+
+  it("runs an event refresh after the current same-host queue wave settles", async () => {
     const older = deferred<{ entries: QueueEntry[] }>();
     const newer = deferred<{ entries: QueueEntry[] }>();
     hostQueueCall
@@ -374,10 +417,11 @@ describe("HostDetailPage — telemetry", () => {
     const refresh = subscribeToDeviceSnapshots.mock.calls[0]![2] as () => void;
     refresh();
     await Promise.resolve();
+    expect(hostQueueCall).toHaveBeenCalledTimes(1);
 
-    newer.resolve({ entries: [queued("newer", 0)] });
-    await flushPromises();
     older.resolve({ entries: [queued("older", 0)] });
+    await vi.waitFor(() => expect(hostQueueCall).toHaveBeenCalledTimes(2));
+    newer.resolve({ entries: [queued("newer", 0)] });
     await flushPromises();
 
     expect(wrapper.text()).toContain("flux-newer");
@@ -561,6 +605,153 @@ describe("HostDetailPage — telemetry", () => {
 });
 
 describe("HostDetailPage — queue", () => {
+  it("pages by host capacity and exposes the durable tail on demand", async () => {
+    poll.status.value = makeStatus({ queue_capacity: 2 });
+    hostQueueCall.mockImplementation(
+      (
+        _host: unknown,
+        _signal: unknown,
+        page?: { limit: number; cursor?: string },
+      ) =>
+        Promise.resolve(
+          page?.cursor
+            ? {
+                entries: [queued("c", 2)],
+                page: { limit: 2, cursor: "tail", returned: 1 },
+              }
+            : {
+                entries: [queued("a", 0), queued("b", 1)],
+                page: {
+                  limit: 2,
+                  offset: 0,
+                  returned: 2,
+                  next_cursor: "tail",
+                },
+              },
+        ),
+    );
+
+    const w = await mountDetail();
+    expect(hostQueueCall).toHaveBeenCalledWith(
+      expect.objectContaining({ id: routeHolder.id }),
+      expect.any(AbortSignal),
+      { limit: 2 },
+    );
+    expect(w.findAll('[data-test="queue-row"]')).toHaveLength(2);
+
+    await w.get('[data-test="queue-load-more"]').trigger("click");
+    await flushPromises();
+
+    expect(hostQueueCall).toHaveBeenCalledWith(
+      expect.objectContaining({ id: routeHolder.id }),
+      undefined,
+      { limit: 2, cursor: "tail" },
+    );
+    expect(w.findAll('[data-test="queue-row"]')).toHaveLength(3);
+    expect(w.find('[data-test="queue-load-more"]').exists()).toBe(false);
+
+    const refresh = subscribeToDeviceSnapshots.mock.calls[0]![2] as () => void;
+    refresh();
+    await flushPromises();
+    expect(w.findAll('[data-test="queue-row"]')).toHaveLength(3);
+    expect(w.find('[data-test="queue-load-more"]').exists()).toBe(false);
+  });
+
+  it("uses reachability and in-flight state to gate durable continuation", async () => {
+    poll.status.value = makeStatus({ queue_capacity: 2 });
+    hostQueueCall.mockResolvedValue({
+      entries: [queued("a", 0), queued("b", 1)],
+      page: {
+        limit: 2,
+        offset: 0,
+        returned: 2,
+        next_cursor: "tail",
+      },
+    });
+
+    const w = await mountDetail();
+    const loadMore = w.get('[data-test="queue-load-more"]');
+    expect(loadMore.attributes("disabled")).toBeUndefined();
+
+    poll.stale.value = true;
+    await nextTick();
+    expect(w.find('[data-test="detail-reconnecting"]').exists()).toBe(true);
+    expect(loadMore.attributes("disabled")).toBeUndefined();
+
+    poll.stale.value = false;
+    poll.online.value = false;
+    await nextTick();
+    expect(loadMore.attributes("disabled")).toBeDefined();
+
+    poll.online.value = true;
+    await nextTick();
+    const continuation = deferred<{
+      entries: QueueEntry[];
+      page: { limit: number; cursor: string; returned: number };
+    }>();
+    hostQueueCall.mockReturnValueOnce(continuation.promise);
+    await loadMore.trigger("click");
+    expect(loadMore.attributes("disabled")).toBeDefined();
+    expect(loadMore.text()).toBe("Loading…");
+
+    continuation.resolve({
+      entries: [queued("c", 2)],
+      page: { limit: 2, cursor: "tail", returned: 1 },
+    });
+    await flushPromises();
+  });
+
+  it("keeps an in-flight continuation valid while a routine refresh replaces only the head", async () => {
+    poll.status.value = makeStatus({ queue_capacity: 2 });
+    const continuation = deferred<{
+      entries: QueueEntry[];
+      page: { limit: number; cursor: string; returned: number };
+    }>();
+    let refreshed = false;
+    hostQueueCall.mockImplementation(
+      (
+        _host: unknown,
+        _signal: unknown,
+        page?: { limit: number; cursor?: string },
+      ) => {
+        if (page?.cursor) return continuation.promise;
+        return Promise.resolve({
+          entries: refreshed
+            ? [queued("new", 0), queued("a", 1)]
+            : [queued("a", 0), queued("b", 1)],
+          page: {
+            limit: 2,
+            offset: 0,
+            returned: 2,
+            next_cursor: "tail",
+          },
+        });
+      },
+    );
+
+    const w = await mountDetail();
+    const loadMore = w.get('[data-test="queue-load-more"]');
+    await loadMore.trigger("click");
+    expect(loadMore.text()).toBe("Loading…");
+
+    refreshed = true;
+    const refresh = subscribeToDeviceSnapshots.mock.calls[0]![2] as () => void;
+    refresh();
+    await flushPromises();
+    expect(loadMore.text()).toBe("Loading…");
+    expect(w.findAll('[data-test="queue-row"]')).toHaveLength(2);
+    expect(w.text()).toContain("new");
+
+    continuation.resolve({
+      entries: [queued("c", 2)],
+      page: { limit: 2, cursor: "tail", returned: 1 },
+    });
+    await flushPromises();
+    expect(w.findAll('[data-test="queue-row"]')).toHaveLength(3);
+    expect(w.text()).toContain("new");
+    expect(w.text()).toContain("c");
+  });
+
   it("wires advertised pause and cancel-all controls to the viewed host", async () => {
     caps = {
       queue: { can_pause: true, can_cancel_all: true, can_reorder: false },

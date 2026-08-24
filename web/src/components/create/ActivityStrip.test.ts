@@ -102,6 +102,26 @@ describe("ActivityStrip", () => {
     expect(wrapper.emitted("shared-open")?.[0]).toEqual([shared]);
   });
 
+  it("does not label an authority-detached print as failed", () => {
+    const wrapper = mount(ActivityStrip, {
+      props: {
+        jobs: [
+          makeJob({
+            state: "error",
+            error: "machine replaced",
+            detached: true,
+            settledAt: Date.now(),
+          }),
+        ],
+      },
+    });
+
+    expect(wrapper.text()).toContain(
+      "Detached — the original machine still owns the outcome",
+    );
+    expect(wrapper.text()).not.toContain("Failed — open Create for details");
+  });
+
   it("is hidden when nothing is in flight", () => {
     const wrapper = mount(ActivityStrip, {
       props: { jobs: [makeJob({ state: "done" })] },
@@ -173,6 +193,45 @@ describe("ActivityStrip", () => {
     );
     await wrapper.get("[data-test='activity-cancel-job-2']").trigger("click");
     expect(wrapper.emitted("cancel")?.[0]).toEqual(["job-2"]);
+  });
+
+  it("windows an unlimited queued backlog to one interactive next row plus a summary", () => {
+    const jobs = Array.from({ length: 10_000 }, (_, index) =>
+      makeJob({
+        id: `queued-${index}`,
+        startedAt: index,
+        workStarted: false,
+      }),
+    );
+    const wrapper = mount(ActivityStrip, { props: { jobs } });
+
+    expect(wrapper.findAll("[data-test^='activity-queued-']")).toHaveLength(2);
+    expect(wrapper.findAll(".activity__pill")).toHaveLength(1);
+    expect(
+      wrapper.get("[data-test='activity-queued-summary']").text(),
+    ).toContain("9999 other queued prints");
+  });
+
+  it("reveals the next actionable queued print while an earlier cancel is pending", () => {
+    const wrapper = mount(ActivityStrip, {
+      props: {
+        jobs: [
+          makeJob({
+            id: "queued-cancelling",
+            startedAt: 0,
+            workStarted: false,
+            cancelling: true,
+            cancelRequested: true,
+          }),
+          makeJob({ id: "queued-next", startedAt: 1, workStarted: false }),
+        ],
+      },
+    });
+
+    expect(
+      wrapper.find("[data-test='activity-queued-queued-next']").exists(),
+    ).toBe(true);
+    expect(wrapper.text()).toContain("1 other queued print");
   });
 
   it("opens queued prints and sequences with Space", async () => {

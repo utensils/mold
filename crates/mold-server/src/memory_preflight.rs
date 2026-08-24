@@ -726,8 +726,17 @@ pub(crate) const IDENTITY_ADAPTER_BF16_BYTES: u64 = 839_270_400;
 /// Weight zero is completely inert — no assets are planned, nothing is
 /// downloaded, and no memory is charged — so the predicate is the effective
 /// weight, never the mere presence of the fields.
+#[cfg(test)]
 pub(crate) fn request_charges_identity_overhead(req: &GenerateRequest) -> bool {
-    mold_core::identity::request_mentions_identity(req)
+    request_charges_identity_overhead_with_projection(req, None)
+}
+
+pub(crate) fn request_charges_identity_overhead_with_projection(
+    req: &GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> bool {
+    (mold_core::identity::request_mentions_identity(req)
+        || projection.is_some_and(|projection| projection.identity_present))
         && mold_core::identity::effective_id_weight(req) > 0.0
 }
 
@@ -737,10 +746,18 @@ pub(crate) fn request_charges_identity_overhead(req: &GenerateRequest) -> bool {
 /// Both halves are required: a request may name identity fields on a model
 /// that is not qualified — admission refuses it, but the estimate runs first
 /// and must not invent an adapter for a checkpoint that has none.
+#[cfg(test)]
 pub(crate) fn identity_overhead_family(
     req: &GenerateRequest,
 ) -> Option<mold_core::identity::IdentityFamily> {
-    request_charges_identity_overhead(req)
+    identity_overhead_family_with_projection(req, None)
+}
+
+pub(crate) fn identity_overhead_family_with_projection(
+    req: &GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> Option<mold_core::identity::IdentityFamily> {
+    request_charges_identity_overhead_with_projection(req, projection)
         .then(|| mold_core::identity::identity_family(&req.model))
         .flatten()
 }
@@ -777,8 +794,20 @@ pub(crate) const TRUE_CFG_VRAM_OVERHEAD_BYTES: u64 = 150_000_000;
 /// Delegates to the request contract so admission and the engine cannot
 /// disagree about which requests are true-CFG requests — an inert 1.0 scale and
 /// a zero identity weight both answer `false` here exactly as they do there.
+#[cfg(test)]
 pub(crate) fn request_charges_true_cfg_overhead(req: &GenerateRequest) -> bool {
-    mold_core::identity::request_uses_true_cfg(req)
+    request_charges_true_cfg_overhead_with_projection(req, None)
+}
+
+pub(crate) fn request_charges_true_cfg_overhead_with_projection(
+    req: &GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> bool {
+    mold_core::identity::request_uses_true_cfg_with_identity_presence(
+        req,
+        mold_core::identity::request_carries_identity_photo(req)
+            || projection.is_some_and(|projection| projection.identity_present),
+    )
 }
 
 fn activation_memory_for_estimate(hint: Option<ActivationHint>, qwen_quantized: bool) -> u64 {
@@ -1431,6 +1460,29 @@ pub(crate) fn estimate_generation_memory_for_request(
     request_has_lora: bool,
     gemma_competes: bool,
 ) -> GenerationMemoryBudget {
+    estimate_generation_memory_for_request_with_projection(
+        req,
+        paths,
+        hint,
+        offload_policy,
+        available_memory_bytes,
+        request_has_lora,
+        gemma_competes,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn estimate_generation_memory_for_request_with_projection(
+    req: &GenerateRequest,
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    offload_policy: GenerationOffloadPolicy,
+    available_memory_bytes: Option<u64>,
+    request_has_lora: bool,
+    gemma_competes: bool,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+) -> GenerationMemoryBudget {
     let transformer_path = transformer_path_lower(paths);
     let streaming = hint
         .map(|h| h.family.streaming_transformer())
@@ -1448,6 +1500,7 @@ pub(crate) fn estimate_generation_memory_for_request(
         hint,
         qwen_quantized,
         wan_geometry,
+        projection,
     );
     let conservative_block_offload = server_offload_enabled_for_paths_with_request(
         paths,
@@ -1481,7 +1534,9 @@ pub(crate) fn estimate_generation_memory_for_request(
     // set the engine will actually keep, and a fragmentation margin. The flat
     // streaming cap below is only the cold-cache fallback.
     let ltx2 = streaming
-        .then(|| crate::ltx2_admission::Ltx2ShapeHint::from_request(req))
+        .then(|| {
+            crate::ltx2_admission::Ltx2ShapeHint::from_request_with_projection(req, projection)
+        })
         .zip(available_memory_bytes)
         .and_then(|(shape, available)| {
             crate::ltx2_admission::checkpoint_facts_cached(&paths.transformer)
@@ -1524,6 +1579,7 @@ pub(crate) fn estimate_generation_memory_for_request(
                 hint,
                 qwen_quantized,
                 wan_geometry,
+                projection,
             );
             (base_peak.saturating_add(activation), activation)
         }
@@ -1534,7 +1590,7 @@ pub(crate) fn estimate_generation_memory_for_request(
     // The adapter term follows the FAMILY, because the adapter does. The
     // extraction term does not: the detector, recognizer, parser, and tower are
     // shared, and only the IDFormer's prefix differs.
-    let peak = match identity_overhead_family(req) {
+    let peak = match identity_overhead_family_with_projection(req, projection) {
         Some(family) => peak
             .saturating_add(identity_adapter_overhead_bytes(family))
             .saturating_add(IDENTITY_EXTRACTION_VRAM_OVERHEAD_BYTES),
@@ -1544,7 +1600,7 @@ pub(crate) fn estimate_generation_memory_for_request(
     // conditioning and a second cross-attention pass. Charged separately from
     // the identity overhead because only a request that engages the branch pays
     // it — never let one be admitted on the plain estimate.
-    let peak = if request_charges_true_cfg_overhead(req) {
+    let peak = if request_charges_true_cfg_overhead_with_projection(req, projection) {
         peak.saturating_add(TRUE_CFG_VRAM_OVERHEAD_BYTES)
     } else {
         peak
@@ -1554,7 +1610,7 @@ pub(crate) fn estimate_generation_memory_for_request(
         paths,
         hint,
         request_has_lora,
-        req.source_image.is_some(),
+        req.source_image.is_some() || projection.is_some_and(|projection| projection.source_image),
     );
     let eager_peak =
         mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Eager)
@@ -1648,7 +1704,7 @@ fn request_sensitive_activation_memory(
     hint: Option<ActivationHint>,
     qwen_quantized: bool,
 ) -> u64 {
-    request_sensitive_activation_memory_with_wan_geometry(req, hint, qwen_quantized, None)
+    request_sensitive_activation_memory_with_wan_geometry(req, hint, qwen_quantized, None, None)
 }
 
 /// As [`request_sensitive_activation_memory`], with the wan checkpoint's real
@@ -1707,6 +1763,7 @@ fn request_sensitive_activation_memory_with_wan_geometry(
     hint: Option<ActivationHint>,
     qwen_quantized: bool,
     wan_geometry: Option<mold_inference::device::WanActivationGeometry>,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
 ) -> u64 {
     let batch = u64::from(req.batch_size.max(1));
     // Wan prices its own CFG: `wan::pipeline::needs_cfg_pass` keys on guidance
@@ -1731,7 +1788,7 @@ fn request_sensitive_activation_memory_with_wan_geometry(
         // source image and the distill tiers ship two adapters, both of which
         // are real resident memory.
         crate::wan_admission::wan_activation_bytes(
-            crate::wan_admission::WanShapeHint::from_request(req),
+            crate::wan_admission::WanShapeHint::from_request_with_projection(req, projection),
             wan_geometry.unwrap_or_else(mold_inference::device::WanActivationGeometry::a14b),
         )
     } else if hint.is_some_and(|h| h.family.streaming_transformer()) {
@@ -1740,7 +1797,7 @@ fn request_sensitive_activation_memory_with_wan_geometry(
         // The authoritative path in `estimate_generation_memory_for_request`
         // passes the checkpoint's real width.
         crate::ltx2_admission::ltx2_activation_bytes(
-            crate::ltx2_admission::Ltx2ShapeHint::from_request(req),
+            crate::ltx2_admission::Ltx2ShapeHint::from_request_with_projection(req, projection),
             None,
         )
     } else {
@@ -1750,11 +1807,17 @@ fn request_sensitive_activation_memory_with_wan_geometry(
     let mut activation = base.saturating_mul(batch).saturating_mul(cfg_factor);
 
     if !wan && hint.is_some_and(|h| h.family == ActivationFamily::Flux2Dit) {
-        if let Some(images) = req.edit_images.as_ref().filter(|images| !images.is_empty()) {
+        let request_images = req.edit_images.as_ref().filter(|images| !images.is_empty());
+        let projected_images = projection
+            .map(|projection| projection.edit_images.as_slice())
+            .filter(|images| !images.is_empty());
+        let image_count =
+            request_images.map_or_else(|| projected_images.map_or(0, <[_]>::len), Vec::len);
+        if image_count > 0 {
             let target_pixels = u64::from(req.width)
                 .saturating_mul(u64::from(req.height))
                 .max(1);
-            let per_image_cap = if images.len() == 1 {
+            let per_image_cap = if image_count == 1 {
                 mold_core::validation::FLUX2_DEV_SINGLE_REFERENCE_MAX_PIXELS
             } else {
                 mold_core::validation::FLUX2_DEV_MULTI_REFERENCE_MAX_PIXELS
@@ -1762,19 +1825,35 @@ fn request_sensitive_activation_memory_with_wan_geometry(
             // Reference bytes are already part of the finalized request, so
             // plan against their real dimensions. Falling back to the full
             // preprocessing cap on an unreadable header remains fail-closed.
-            let reference_pixels = images.iter().fold(0u64, |total, bytes| {
-                let pixels = image::ImageReader::new(std::io::Cursor::new(bytes))
-                    .with_guessed_format()
-                    .ok()
-                    .and_then(|reader| reader.into_dimensions().ok())
-                    .map(|(width, height)| {
-                        u64::from(width)
-                            .saturating_mul(u64::from(height))
-                            .min(per_image_cap)
+            let reference_pixels = if let Some(images) = request_images {
+                images.iter().fold(0u64, |total, bytes| {
+                    let pixels = image::ImageReader::new(std::io::Cursor::new(bytes))
+                        .with_guessed_format()
+                        .ok()
+                        .and_then(|reader| reader.into_dimensions().ok())
+                        .map(|(width, height)| {
+                            u64::from(width)
+                                .saturating_mul(u64::from(height))
+                                .min(per_image_cap)
+                        })
+                        .unwrap_or(per_image_cap);
+                    total.saturating_add(pixels)
+                })
+            } else {
+                projected_images
+                    .into_iter()
+                    .flatten()
+                    .fold(0u64, |total, dimensions| {
+                        use crate::queue_media_store::ProjectedImageDimensions;
+                        let pixels = match dimensions {
+                            ProjectedImageDimensions::Known { width, height } => u64::from(*width)
+                                .saturating_mul(u64::from(*height))
+                                .min(per_image_cap),
+                            ProjectedImageDimensions::UnreadableHeader => per_image_cap,
+                        };
+                        total.saturating_add(pixels)
                     })
-                    .unwrap_or(per_image_cap);
-                total.saturating_add(pixels)
-            });
+            };
             let token_factor = target_pixels
                 .saturating_add(reference_pixels)
                 .div_ceil(target_pixels);
@@ -1790,13 +1869,18 @@ fn request_sensitive_activation_memory_with_wan_geometry(
             .edit_images
             .as_ref()
             .is_some_and(|images| !images.is_empty())
+        || projection
+            .is_some_and(|projection| projection.source_image || !projection.edit_images.is_empty())
     {
         activation = activation.saturating_add(pixel_bytes.saturating_mul(batch));
     }
-    if req.mask_image.is_some() {
+    if req.mask_image.is_some() || projection.is_some_and(|projection| projection.mask_image) {
         activation = activation.saturating_add(pixel_bytes / 2);
     }
-    if req.control_image.is_some() || req.control_model.as_deref().is_some_and(|m| !m.is_empty()) {
+    if req.control_image.is_some()
+        || projection.is_some_and(|projection| projection.control_image)
+        || req.control_model.as_deref().is_some_and(|m| !m.is_empty())
+    {
         activation = activation.saturating_add(pixel_bytes.saturating_mul(2));
     }
     if req.upscale_model.as_deref().is_some_and(|m| !m.is_empty()) {
@@ -1813,6 +1897,7 @@ fn request_sensitive_activation_memory_with_wan_geometry(
 #[cfg(test)]
 mod fail_closed_tests {
     use super::*;
+    use base64::Engine as _;
     use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
     use mold_inference::wan::block_offload::AdmissionPolicy;
     use std::io::Cursor;
@@ -1829,6 +1914,88 @@ mod fail_closed_tests {
             .write_to(&mut bytes, ImageFormat::Png)
             .unwrap();
         bytes.into_inner()
+    }
+
+    #[test]
+    fn authenticated_projection_matches_hydrated_media_memory_facts() {
+        use crate::queue_media_store::{ProjectedImageDimensions, QueueMediaProjection};
+
+        let image = png(320, 240);
+        let mut hydrated: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a portrait",
+            "model": "flux-dev:q8",
+            "width": 1024,
+            "height": 768,
+            "steps": 20,
+            "guidance": 3.5,
+            "id_image": base64::engine::general_purpose::STANDARD.encode(&image),
+            "id_weight": 0.8,
+            "true_cfg": 2.0,
+            "source_image": base64::engine::general_purpose::STANDARD.encode(&image),
+            "edit_images": [base64::engine::general_purpose::STANDARD.encode(&image)],
+            "mask_image": base64::engine::general_purpose::STANDARD.encode(&image),
+            "control_image": base64::engine::general_purpose::STANDARD.encode(&image)
+        }))
+        .unwrap();
+        let projection = QueueMediaProjection {
+            source_image: true,
+            identity_present: true,
+            identity_photograph_count: 1,
+            edit_image_count: 1,
+            edit_images: vec![ProjectedImageDimensions::Known {
+                width: 320,
+                height: 240,
+            }],
+            mask_image: true,
+            control_image: true,
+            ..QueueMediaProjection::default()
+        };
+        let mut sanitized = hydrated.clone();
+        sanitized.source_image = None;
+        sanitized.id_image = None;
+        sanitized.edit_images = None;
+        sanitized.mask_image = None;
+        sanitized.control_image = None;
+
+        let hint = Some(hint(ActivationFamily::Flux2Dit));
+        assert_eq!(
+            request_sensitive_activation_memory_with_wan_geometry(
+                &hydrated, hint, false, None, None,
+            ),
+            request_sensitive_activation_memory_with_wan_geometry(
+                &sanitized,
+                hint,
+                false,
+                None,
+                Some(&projection),
+            )
+        );
+        assert_eq!(
+            identity_overhead_family_with_projection(&hydrated, None),
+            identity_overhead_family_with_projection(&sanitized, Some(&projection)),
+        );
+        assert_eq!(
+            request_charges_true_cfg_overhead_with_projection(&hydrated, None),
+            request_charges_true_cfg_overhead_with_projection(&sanitized, Some(&projection)),
+        );
+
+        // An unreadable header uses the same fail-closed preprocessing cap as
+        // an unreadable hydrated image.
+        hydrated.edit_images = Some(vec![b"not-an-image".to_vec()]);
+        let mut unreadable = projection;
+        unreadable.edit_images = vec![ProjectedImageDimensions::UnreadableHeader];
+        assert_eq!(
+            request_sensitive_activation_memory_with_wan_geometry(
+                &hydrated, hint, false, None, None,
+            ),
+            request_sensitive_activation_memory_with_wan_geometry(
+                &sanitized,
+                hint,
+                false,
+                None,
+                Some(&unreadable),
+            )
+        );
     }
 
     #[test]

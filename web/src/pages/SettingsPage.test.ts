@@ -63,6 +63,18 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function statusWire(): ServerStatus {
+  return {
+    version: "0.20.0",
+    instance_id: "settings-host",
+    hostname: "settings",
+    models_loaded: [],
+    busy: false,
+    uptime_secs: 1,
+    queue_depth: 0,
+  };
+}
+
 describe("SettingsPage", () => {
   it("keeps its padded content inside narrow web viewports", () => {
     const settingsRule = settingsPageSource.match(/\.settings\s*\{([^}]*)\}/s);
@@ -456,6 +468,9 @@ describe("SettingsPage", () => {
   it("shows CPU utility work when the server reports no GPUs", async () => {
     globalThis.fetch = vi.fn(async (input) => {
       const url = String(input);
+      if (url.endsWith("/api/status")) {
+        return { ok: true, json: async () => statusWire() } as Response;
+      }
       const body = url.endsWith("/api/devices")
         ? { devices: [], plan_version: 1 }
         : url.endsWith("/api/queue")
@@ -513,6 +528,9 @@ describe("SettingsPage", () => {
     const device = deviceWire();
     globalThis.fetch = vi.fn(async (input) => {
       const url = String(input);
+      if (url.endsWith("/api/status")) {
+        return { ok: true, json: async () => statusWire() } as Response;
+      }
       const body = url.endsWith("/api/devices")
         ? { devices: [device], plan_version: 1 }
         : url.endsWith("/api/queue")
@@ -590,6 +608,9 @@ describe("SettingsPage", () => {
     let failPanel = false;
     globalThis.fetch = vi.fn(async (input) => {
       const url = String(input);
+      if (url.endsWith("/api/status")) {
+        return { ok: true, json: async () => statusWire() } as Response;
+      }
       if (
         failPanel &&
         (url.endsWith("/api/devices") || url.endsWith("/api/queue"))

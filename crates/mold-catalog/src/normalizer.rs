@@ -340,12 +340,30 @@ pub struct CivitaiCreator {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct CivitaiStats {
-    #[serde(default, rename = "downloadCount")]
+    #[serde(
+        default,
+        rename = "downloadCount",
+        deserialize_with = "deserialize_nullable_count"
+    )]
     pub download_count: u64,
     #[serde(default)]
     pub rating: Option<f32>,
-    #[serde(default, rename = "favoriteCount")]
+    #[serde(
+        default,
+        rename = "favoriteCount",
+        deserialize_with = "deserialize_nullable_count"
+    )]
     pub favorite_count: u64,
+}
+
+/// Civitai occasionally emits explicit JSON `null` for aggregate counters.
+/// These values are display metadata, so missing and null both mean "unknown"
+/// and normalize to zero. Required identities remain strict numeric fields.
+fn deserialize_nullable_count<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -382,7 +400,11 @@ pub struct CivitaiFile {
     pub file_type: Option<String>,
     #[serde(default, rename = "sizeKB")]
     pub size_kb: Option<f64>,
-    #[serde(default, rename = "downloadCount")]
+    #[serde(
+        default,
+        rename = "downloadCount",
+        deserialize_with = "deserialize_nullable_count"
+    )]
     pub download_count: u64,
     #[serde(default)]
     pub metadata: CivitaiFileMetadata,

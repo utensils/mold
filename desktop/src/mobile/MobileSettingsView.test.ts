@@ -3,19 +3,31 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../lib/api/client";
 import MobileSettingsView from "./MobileSettingsView.vue";
 
-const { apiJsonTo, listQueueMock, openExternalMock, setDeviceEnabled, subscribeMock } = vi.hoisted(
-  () => ({
-    apiJsonTo: vi.fn(),
-    listQueueMock: vi.fn(),
-    openExternalMock: vi.fn(),
-    setDeviceEnabled: vi.fn(),
-    subscribeMock: vi.fn(),
-  }),
-);
+const {
+  apiJsonTo,
+  statusJsonTo,
+  fetchLicenseListingMock,
+  listQueueMock,
+  openExternalMock,
+  setDeviceEnabled,
+  subscribeMock,
+} = vi.hoisted(() => ({
+  apiJsonTo: vi.fn(),
+  statusJsonTo: vi.fn(),
+  fetchLicenseListingMock: vi.fn(),
+  listQueueMock: vi.fn(),
+  openExternalMock: vi.fn(),
+  setDeviceEnabled: vi.fn(),
+  subscribeMock: vi.fn(),
+}));
 vi.mock("../lib/openExternal", () => ({ openExternal: openExternalMock }));
 vi.mock("../lib/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api/client")>()),
-  apiJsonTo,
+  apiJsonTo: (...args: Parameters<typeof apiJsonTo>) =>
+    args[1] === "/api/status" ? statusJsonTo(...args) : apiJsonTo(...args),
+}));
+vi.mock("@studio/api/licenseAcceptance", () => ({
+  fetchLicenseListing: fetchLicenseListingMock,
 }));
 vi.mock("@studio/api/devices", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@studio/api/devices")>()),
@@ -32,6 +44,8 @@ vi.mock("../lib/api/deviceEvents", () => ({
 beforeEach(() => {
   openExternalMock.mockClear();
   apiJsonTo.mockReset();
+  statusJsonTo.mockReset().mockResolvedValue({ queue_capacity: null });
+  fetchLicenseListingMock.mockReset().mockResolvedValue({ licenses: [] });
   listQueueMock.mockReset().mockResolvedValue({ entries: [], plan: null });
   setDeviceEnabled.mockReset().mockResolvedValue(undefined);
   subscribeMock.mockReset();
@@ -49,6 +63,39 @@ describe("MobileSettingsView", () => {
     });
     return { promise, resolve };
   }
+
+  it("bounds its queue-plan snapshot by the selected host's queue capacity", async () => {
+    statusJsonTo.mockResolvedValue({ queue_capacity: 3 });
+    apiJsonTo.mockImplementation((_target, path) => {
+      if (path === "/api/devices") return { devices: [], plan_version: 1 };
+      return null;
+    });
+
+    mount(MobileSettingsView, {
+      props: {
+        settings: {
+          theme: "system",
+          themeFamily: "mold",
+          autoSavePhotos: true,
+          autoTagTitle: true,
+        },
+        hostCount: 1,
+        appVersion: "0.18.0",
+        host: {
+          id: "studio",
+          name: "Studio",
+          hostname: "studio.local",
+          version: "0.25.0",
+          online: true,
+          baseUrl: "http://studio.local:7680",
+          apiKey: "secret",
+        },
+      },
+    });
+
+    await vi.waitFor(() => expect(listQueueMock).toHaveBeenCalled());
+    expect(listQueueMock).toHaveBeenCalledWith(expect.any(Object), { limit: 3 });
+  });
 
   it("offers accessible theme choices and emits immediate updates", async () => {
     const wrapper = mount(MobileSettingsView, {

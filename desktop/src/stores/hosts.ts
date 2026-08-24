@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import { modelAccessRestrictionFor } from "@studio/lib/modelAccess";
 import { profileHashConflict } from "@studio/lib/profileFleet";
 import { listDevices, type DeviceInfo } from "@studio/api/devices";
-import { listQueue, predictedCompletionUnixMs } from "@studio/api/queuePlan";
+import { listQueue, mergeQueueEntries, predictedCompletionUnixMs } from "@studio/api/queuePlan";
 import {
   classifyMissingModel,
   comparePlacementPreviews,
@@ -38,6 +38,7 @@ import type {
   ServerStatus,
 } from "../lib/api/types";
 import type { ReferenceUploadCapabilities } from "@studio/api/referenceUploads";
+import type { DurableMediaCapabilities } from "@studio/api/generationAdmission";
 import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
 import { useDownloadsStore } from "./downloads";
@@ -101,6 +102,9 @@ export interface HostView {
   baseUrl: string | null;
   apiKey: string | null;
   status: "connecting" | "ready" | "error";
+  /** The host answered successfully before, but its latest status poll did
+   * not. Last-good telemetry remains routable while the UI says reconnecting. */
+  stale?: boolean;
   primary: boolean;
   queueDepth: number | null;
   queueCapacity: number | null;
@@ -130,6 +134,9 @@ export interface HostTelemetry {
   instanceId?: string | null;
   /** Server-reported hostname from `/api/status`; drives the display label. */
   hostname?: string | null;
+  /** False after a successful status read; true while a later transient
+   * transport failure leaves this verified snapshot as the best authority. */
+  stale?: boolean;
 }
 
 /** Exported so a view can rank an arbitrary subset of hosts (expansion
@@ -186,6 +193,12 @@ export interface HostRoute {
   /** Exact host supports one durable heterogeneous prepared-batch admission. */
   heterogeneousBatch?: boolean;
   heterogeneousBatchMaxOutputs?: number | null;
+  /** Exact host exposes idempotent admission plus durable terminal outcomes. */
+  durableBatchOutcomes?: boolean;
+  /** Exact host encrypts and durably replays supported request media. */
+  durableMedia?: DurableMediaCapabilities | null;
+  /** Authoritative family of the model frozen for this submission. */
+  modelFamily?: string | null;
 }
 
 export interface HostPlacementFailure {
@@ -238,8 +251,10 @@ function hostRoute(host: HostView, capabilities?: ServerCapabilities): HostRoute
     target: { baseUrl: host.baseUrl, apiKey: host.apiKey },
     instanceId: host.instanceId,
     referenceUploads: capabilities?.reference_uploads ?? null,
+    ...(capabilities?.durable_media ? { durableMedia: capabilities.durable_media } : {}),
     heterogeneousBatch: capabilities?.queue?.heterogeneous_batch === true,
     heterogeneousBatchMaxOutputs: capabilities?.queue?.heterogeneous_batch_max_outputs ?? null,
+    ...(capabilities?.queue?.durable_batch_outcomes === true ? { durableBatchOutcomes: true } : {}),
   };
 }
 
@@ -292,7 +307,10 @@ export const useHostsStore = defineStore("hosts", {
      *  instance-id dedupe stay hostname-qualified while a host is down. */
     hostnames: {} as Record<string, string>,
     refreshGenerations: {} as Record<string, number>,
-    pollTimer: null as ReturnType<typeof setInterval> | null,
+    refreshInFlight: null as Promise<void> | null,
+    pollTimer: null as ReturnType<typeof setTimeout> | null,
+    polling: false,
+    pollGeneration: 0,
     initializing: false,
     initialized: false,
   }),
@@ -311,6 +329,7 @@ export const useHostsStore = defineStore("hosts", {
         apiKey: conn.info.apiKey,
         status:
           conn.status === "ready" ? "ready" : conn.status === "starting" ? "connecting" : "error",
+        stale: t?.stale ?? false,
         primary: true,
         queueDepth: t?.queueDepth ?? null,
         queueCapacity: t?.queueCapacity ?? null,
@@ -355,6 +374,7 @@ export const useHostsStore = defineStore("hosts", {
           baseUrl: extra.url,
           apiKey: extra.apiKey,
           status: extra.status,
+          stale: t?.stale ?? false,
           primary: false,
           queueDepth: t?.queueDepth ?? null,
           queueCapacity: t?.queueCapacity ?? null,
@@ -413,7 +433,10 @@ export const useHostsStore = defineStore("hosts", {
             if (test.ok) {
               live.status = "ready";
             } else {
-              live.status = "error";
+              // A failed transport probe is not evidence that the remembered
+              // process died. Keep polling it as reconnecting until it either
+              // answers or the user explicitly disconnects it.
+              live.status = "connecting";
               live.error = test.error;
               // Boot probes are intentionally quiet. The Machines status row
               // is sufficient; an offline server must not create a startup
@@ -438,7 +461,16 @@ export const useHostsStore = defineStore("hosts", {
       // primary's secret/routing keys.
       if (id === "local") throw new Error("That address is reserved for the built-in engine.");
       const existing = this.all.find((h) => h.id === id);
-      if (existing?.status === "ready") return existing;
+      // A fresh row already validated with this authority needs no work. A
+      // stale row (or an explicitly supplied replacement key) must probe:
+      // returning it here would make credential rotation and address recovery
+      // impossible precisely when the user needs them.
+      if (
+        existing?.status === "ready" &&
+        !existing.stale &&
+        (apiKey === null || existing.apiKey === apiKey)
+      )
+        return existing;
 
       const test = await ipc.testRemoteHost(url, apiKey);
       if (!test.ok) throw new Error(test.error ?? "Connection failed.");
@@ -469,42 +501,91 @@ export const useHostsStore = defineStore("hosts", {
           if (apiKey) await ipc.secretSet(`remote-api-key.${twin.id}`, apiKey);
           const live = this.extras.find((h) => h.id === twin.id);
           if (live) {
+            const keyChanged = apiKey !== null && live.apiKey !== apiKey;
+            const urlChanged = live.url !== url;
+            const needsRevival = twin.status !== "ready" || twin.stale;
+            const authorityChanged = keyChanged || urlChanged;
+            if (authorityChanged || needsRevival) {
+              // Fence a status/capability response started under the retired
+              // address or credential before mutating the live authority.
+              this.refreshGenerations[twin.id] = (this.refreshGenerations[twin.id] ?? 0) + 1;
+            }
             if (apiKey) live.apiKey = apiKey;
-            if (twin.status !== "ready") {
+            if (authorityChanged) {
+              // Even a probe that proves the same instance cannot make queue,
+              // model, or capability data read under another URL/key current.
+              delete this.telemetry[twin.id];
+              delete this.capabilities[twin.id];
+              delete useHostModelsStore().byHost[twin.id];
               live.url = url;
-              live.status = "ready";
+              live.status = "connecting";
               live.error = null;
               live.instanceId = instanceId;
               await this.persist(twin.id, url, name, instanceId);
-              void this.refresh();
+              void this.refreshAfterCurrent();
+            } else if (needsRevival) {
+              live.status = "ready";
+              live.error = null;
+              live.instanceId = instanceId;
+              void this.refreshAfterCurrent();
             }
           }
           return this.all.find((h) => h.id === twin.id) ?? twin;
         }
       }
 
+      let retiredExistingAuthority = false;
+      if (existing) {
+        this.refreshGenerations[id] = (this.refreshGenerations[id] ?? 0) + 1;
+        const previousInstanceId = this.telemetry[id]?.instanceId ?? existing.instanceId;
+        const existingExtra = this.extras.find((host) => host.id === id);
+        const keyChanged =
+          apiKey !== null && existingExtra !== undefined && existingExtra.apiKey !== apiKey;
+        const urlChanged = existingExtra !== undefined && existingExtra.url !== url;
+        const unverifiedAddressReplacement =
+          urlChanged &&
+          (instanceId === null || previousInstanceId === null || previousInstanceId !== instanceId);
+        if (
+          keyChanged ||
+          urlChanged ||
+          (previousInstanceId !== null &&
+            instanceId !== null &&
+            previousInstanceId !== instanceId) ||
+          unverifiedAddressReplacement
+        ) {
+          retiredExistingAuthority = true;
+          delete this.telemetry[id];
+          delete this.capabilities[id];
+          delete useHostModelsStore().byHost[id];
+        }
+      }
       this.extras = this.extras.filter((h) => h.id !== id);
       this.extras.push({
         id,
         label: name ?? test.hostname ?? url.replace(/^https?:\/\//, ""),
         url,
         apiKey,
-        status: "ready",
+        status: retiredExistingAuthority ? "connecting" : "ready",
         error: null,
         instanceId,
       });
       if (test.hostname) this.hostnames[id] = test.hostname;
       if (apiKey) await ipc.secretSet(`remote-api-key.${id}`, apiKey);
       await this.persist(id, url, name, instanceId);
-      void this.refresh();
+      void this.refreshAfterCurrent();
       return this.all.find((h) => h.id === id)!;
     },
     /** Drop a live extra host. Its saved entry and key stay for later. */
     async disconnect(id: string) {
       useDownloadsStore().unsubscribeHost(id);
+      // Retire every request issued before the explicit disconnect. URL/key
+      // equality is insufficient when the same slug reconnects to a replaced
+      // instance before an old response settles.
+      this.refreshGenerations[id] = (this.refreshGenerations[id] ?? 0) + 1;
       this.extras = this.extras.filter((h) => h.id !== id);
       delete this.telemetry[id];
       delete this.capabilities[id];
+      delete useHostModelsStore().byHost[id];
       let clearedTarget = false;
       await withSettingsLock(async () => {
         const settings = await ipc.appSettingsGet();
@@ -559,10 +640,9 @@ export const useHostsStore = defineStore("hosts", {
       if (!extra) return;
       extra.status = "connecting";
       const test = await ipc.testRemoteHost(extra.url, extra.apiKey);
-      extra.status = test.ok ? "ready" : "error";
+      extra.status = test.ok ? "ready" : "connecting";
       extra.error = test.ok ? null : test.error;
-      if (test.ok) void this.refresh();
-      else delete this.capabilities[id];
+      if (test.ok) void this.refreshAfterCurrent();
     },
     /**
      * Resolve where a batch should run. `null` = Auto (least busy);
@@ -636,9 +716,15 @@ export const useHostsStore = defineStore("hosts", {
         target: { baseUrl: chosen.baseUrl, apiKey: chosen.apiKey },
         instanceId: chosen.instanceId,
         referenceUploads: this.capabilities[chosen.id]?.reference_uploads ?? null,
+        ...(this.capabilities[chosen.id]?.durable_media
+          ? { durableMedia: this.capabilities[chosen.id]!.durable_media! }
+          : {}),
         heterogeneousBatch: this.capabilities[chosen.id]?.queue?.heterogeneous_batch === true,
         heterogeneousBatchMaxOutputs:
           this.capabilities[chosen.id]?.queue?.heterogeneous_batch_max_outputs ?? null,
+        ...(this.capabilities[chosen.id]?.queue?.durable_batch_outcomes === true
+          ? { durableBatchOutcomes: true }
+          : {}),
       };
     },
     async resolveFeasible(
@@ -1079,13 +1165,42 @@ export const useHostsStore = defineStore("hosts", {
       const result = await this.resolveFeasible(selection, request, copies, options);
       return result.kind === "route" ? result.route : null;
     },
-    /** Pull queue depth/capacity from every live host. */
-    async refresh() {
+    /** Pull queue depth/capacity from every live host. Concurrent callers join
+     * the same wave so a slow server cannot accumulate status/device/queue/
+     * capability requests behind the browser's transport limit. */
+    refresh(): Promise<void> {
+      if (this.refreshInFlight) return this.refreshInFlight;
+      const run = this.refreshOnce().finally(() => {
+        if (this.refreshInFlight === run) this.refreshInFlight = null;
+      });
+      this.refreshInFlight = run;
+      return run;
+    },
+    /** Host connection state changed and needs a wave that sees the new
+     * snapshot. Join an active wave, then run once more after it settles;
+     * otherwise refresh immediately. */
+    async refreshAfterCurrent() {
+      const active = this.refreshInFlight;
+      if (active) {
+        try {
+          await active;
+        } catch {
+          // The follow-up wave still needs the changed host snapshot.
+        }
+      }
+      try {
+        await this.refresh();
+      } catch {
+        // This is a background refresh after a successful connect/reconnect;
+        // the normal polling loop owns later recovery.
+      }
+    },
+    async refreshOnce() {
       /** hostId → instanceId learned this poll, to reconcile saved entries once. */
       const learned = new Map<string, string>();
       await Promise.all(
         this.all.map(async (host) => {
-          if (!host.baseUrl || host.status === "connecting") return;
+          if (!host.baseUrl) return;
           const generation = (this.refreshGenerations[host.id] ?? 0) + 1;
           this.refreshGenerations[host.id] = generation;
           const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
@@ -1097,31 +1212,82 @@ export const useHostsStore = defineStore("hosts", {
               current.apiKey === host.apiKey
             );
           };
+          const retireRejectedAuthority = (error: unknown): boolean => {
+            if (!(error instanceof ApiError) || (error.status !== 401 && error.status !== 403))
+              return false;
+            delete this.telemetry[host.id];
+            delete this.capabilities[host.id];
+            delete useHostModelsStore().byHost[host.id];
+            const extra = this.extras.find((candidate) => candidate.id === host.id);
+            if (extra) {
+              extra.status = "connecting";
+              extra.error = String(error);
+            }
+            if (host.id === "local") {
+              const conn = useConnectionStore();
+              conn.status = "starting";
+              conn.error = String(error);
+            }
+            return true;
+          };
           try {
-            const [status, devices, queue] = await Promise.all([
-              apiJsonTo<ServerStatus>(target, "/api/status"),
+            const previousTelemetry = this.telemetry[host.id];
+            const previousInstanceId = previousTelemetry?.instanceId ?? host.instanceId ?? null;
+            const statusRequest = apiJsonTo<ServerStatus>(target, "/api/status");
+            const queueRequest = statusRequest.then((status) => {
+              const capacity = status.queue_capacity;
+              const request =
+                typeof capacity === "number" && Number.isInteger(capacity) && capacity > 0
+                  ? { limit: capacity }
+                  : undefined;
+              const listingRequest = request ? listQueue(target, request) : listQueue(target);
+              return listingRequest.then((listing) => ({
+                ...listing,
+                entries: mergeQueueEntries(listing.entries, listing.live_only_entries ?? []),
+              }));
+            });
+            const [status, devicesResult, queueResult] = await Promise.all([
+              statusRequest,
               listDevices(target).then(
-                (snapshot) => snapshot.devices,
-                () => null,
+                (snapshot) => ({ value: snapshot.devices, error: null }),
+                (error: unknown) => ({ value: null, error }),
               ),
-              listQueue(target).then(
-                (listing) => listing,
-                () => null,
+              queueRequest.then(
+                (listing) => ({ value: listing, error: null }),
+                (error: unknown) => ({ value: null, error }),
               ),
             ]);
             if (!isCurrent()) return;
+            if (
+              retireRejectedAuthority(devicesResult.error) ||
+              retireRejectedAuthority(queueResult.error)
+            )
+              return;
+            const devices = devicesResult.value;
+            const queue = queueResult.value;
+            const nextInstanceId = status.instance_id ?? null;
+            const instanceChanged = previousInstanceId !== nextInstanceId;
+            if (instanceChanged) delete useHostModelsStore().byHost[host.id];
+            const previousPredictedCompletion = previousTelemetry?.predictedCompletionMs ?? null;
             this.telemetry[host.id] = {
               queueDepth: status.queue_depth ?? null,
               queueCapacity: status.queue_capacity ?? null,
               predictedCompletionMs:
-                queue?.plan == null ? null : predictedCompletionUnixMs(queue.plan),
+                queue === null
+                  ? instanceChanged
+                    ? null
+                    : previousPredictedCompletion
+                  : queue.plan == null
+                    ? null
+                    : predictedCompletionUnixMs(queue.plan),
               version: status.version ?? null,
               modelsLoaded: status.models_loaded ?? [],
               gpuInfo: status.gpu_info ?? null,
               gpuWorkers: status.gpus ?? null,
               devices,
-              instanceId: status.instance_id ?? null,
+              instanceId: nextInstanceId,
               hostname: status.hostname ?? null,
+              stale: false,
             };
             if (status.instance_id) learned.set(host.id, status.instance_id);
             if (status.hostname) this.hostnames[host.id] = status.hostname;
@@ -1129,6 +1295,11 @@ export const useHostsStore = defineStore("hosts", {
             if (extra && extra.status !== "ready") {
               extra.status = "ready";
               extra.error = null;
+            }
+            if (host.id === "local") {
+              const conn = useConnectionStore();
+              conn.status = "ready";
+              conn.error = null;
             }
             try {
               const capabilities = await fetchServerCapabilities(target);
@@ -1141,28 +1312,42 @@ export const useHostsStore = defineStore("hosts", {
               } else {
                 delete this.capabilities[host.id];
               }
-            } catch {
+            } catch (error) {
               // Capability discovery is advisory. A failed/unsupported probe
-              // must not mark a healthy host unavailable or imply expand=false.
-              delete this.capabilities[host.id];
+              // must not mark a healthy host unavailable or erase last-good
+              // policy. A changed server identity is the exception: authority
+              // from the prior installation is security-sensitive and cannot
+              // cross that fence.
+              if (retireRejectedAuthority(error)) return;
+              if (instanceChanged) delete this.capabilities[host.id];
             }
           } catch (err) {
             if (!isCurrent()) return;
+            if (retireRejectedAuthority(err)) return;
+            const previous = this.telemetry[host.id];
+            if (previous) this.telemetry[host.id] = { ...previous, stale: true };
             const extra = this.extras.find((h) => h.id === host.id);
             if (extra) {
-              extra.status = "error";
+              // A verified last-good host stays routable; an unverified one
+              // stays in the non-authoritative connecting state. Neither a
+              // single failure nor an arbitrary count is proof of death.
+              extra.status = previous ? "ready" : "connecting";
               extra.error = String(err);
             }
             if (host.id === "local") {
               const conn = useConnectionStore();
-              conn.localStatus = "error";
-              conn.localError = String(err);
               // The native lifecycle distinguishes a dead embedded engine (or
-              // vanished external server) and brings this Mac back online.
-              void conn.ensureLocal(true);
+              // vanished external server) from a congested HTTP poll. It alone
+              // may transition lifecycle state to error and restart the engine.
+              void conn.ensureLocal(true).then(() => {
+                // A newer successful poll supersedes this failed generation.
+                if (!isCurrent() || conn.localStatus !== "error") return;
+                conn.status = "error";
+                conn.error = conn.localError ?? String(err);
+                delete this.telemetry[host.id];
+                delete this.capabilities[host.id];
+              });
             }
-            delete this.telemetry[host.id];
-            delete this.capabilities[host.id];
           }
         }),
       );
@@ -1255,13 +1440,30 @@ export const useHostsStore = defineStore("hosts", {
           prefs.settings = { ...prefs.settings, savedHosts, connectedHostIds, generateTargetHost };
       });
     },
+    async runPoll(generation: number) {
+      try {
+        await this.refresh();
+      } catch {
+        // Background polling is self-healing. Direct refresh callers still
+        // receive reconciliation failures, but one failed cycle must not stop
+        // future connectivity checks.
+      }
+      if (!this.polling || this.pollGeneration !== generation) return;
+      this.pollTimer = setTimeout(() => {
+        this.pollTimer = null;
+        void this.runPoll(generation);
+      }, POLL_INTERVAL_MS);
+    },
     startPolling() {
-      if (this.pollTimer) return;
-      void this.refresh();
-      this.pollTimer = setInterval(() => void this.refresh(), POLL_INTERVAL_MS);
+      if (this.polling) return;
+      this.polling = true;
+      const generation = ++this.pollGeneration;
+      void this.runPoll(generation);
     },
     stopPolling() {
-      if (this.pollTimer) clearInterval(this.pollTimer);
+      this.polling = false;
+      this.pollGeneration += 1;
+      if (this.pollTimer) clearTimeout(this.pollTimer);
       this.pollTimer = null;
     },
     /** Remember the host across launches (MRU list + reconnect set). */

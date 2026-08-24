@@ -14,6 +14,7 @@ mod device_preferences;
 pub mod gallery_mutations;
 pub mod generation_batches;
 pub mod generation_queue;
+pub mod generation_queue_media;
 pub mod metadata_io;
 pub mod migrations;
 mod model_prefs;
@@ -29,7 +30,7 @@ mod scheduler_estimates;
 pub mod settings;
 pub mod trash;
 
-pub use db::MetadataDb;
+pub use db::{MetadataDb, METADATA_DB_BUSY_TIMEOUT};
 pub use device_preferences::{DevicePreference, DevicePreferences};
 pub use gallery_mutations::GalleryMutationApply;
 pub use migrations::SCHEMA_VERSION;

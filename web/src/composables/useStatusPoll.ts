@@ -5,34 +5,51 @@ import type { ServerStatus } from "../types";
 export interface UseStatusPoll {
   status: Ref<ServerStatus | null>;
   error: Ref<string | null>;
+  /** The latest read failed after at least one verified status snapshot. */
+  stale: Ref<boolean>;
 }
 
 export function useStatusPoll(intervalMs = 5000): UseStatusPoll {
   const status = ref<ServerStatus | null>(null);
   const error = ref<string | null>(null);
-  let timer: ReturnType<typeof setInterval> | null = null;
+  const stale = ref(false);
+  let timer: ReturnType<typeof setTimeout> | null = null;
   let controller: AbortController | null = null;
 
   async function tick() {
-    controller?.abort();
-    controller = new AbortController();
+    if (controller !== null) return;
+
+    const requestController = new AbortController();
+    controller = requestController;
     try {
-      status.value = await fetchStatus(controller.signal);
+      const nextStatus = await fetchStatus(requestController.signal);
+      if (requestController.signal.aborted || controller !== requestController)
+        return;
+      status.value = nextStatus;
       error.value = null;
+      stale.value = false;
     } catch (e) {
-      if (controller.signal.aborted) return;
+      if (requestController.signal.aborted || controller !== requestController)
+        return;
       error.value = e instanceof Error ? e.message : String(e);
+      stale.value = status.value !== null;
+    } finally {
+      if (controller !== requestController) return;
+      controller = null;
+      timer = setTimeout(() => {
+        timer = null;
+        void tick();
+      }, intervalMs);
     }
   }
 
   function start() {
-    if (timer) return;
-    tick();
-    timer = setInterval(tick, intervalMs);
+    if (timer !== null || controller !== null) return;
+    void tick();
   }
 
   function stop() {
-    if (timer) clearInterval(timer);
+    if (timer !== null) clearTimeout(timer);
     timer = null;
     controller?.abort();
     controller = null;
@@ -52,5 +69,5 @@ export function useStatusPoll(intervalMs = 5000): UseStatusPoll {
     document.removeEventListener("visibilitychange", onVisibilityChange);
   });
 
-  return { status, error };
+  return { status, error, stale };
 }

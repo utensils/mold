@@ -52,9 +52,6 @@ pub async fn run() -> Result<()> {
                         format_vram(device.memory.used_bytes, device.memory.total_bytes),
                     );
                 }
-                if let (Some(depth), Some(capacity)) = (status.queue_depth, status.queue_capacity) {
-                    println!("Queue: {}/{}", depth, capacity);
-                }
             } else if let Some(gpus) = &status.gpus {
                 println!();
                 for gpu in gpus {
@@ -106,7 +103,15 @@ pub async fn run() -> Result<()> {
                 );
             }
 
-            if let Ok(queue) = ctx.client().list_queue().await {
+            let queue = ctx
+                .client()
+                .list_queue_for_capacity(status.queue_capacity)
+                .await
+                .ok();
+            for line in queue_status_lines(&status, queue.as_ref()) {
+                println!("{line}");
+            }
+            if let Some(queue) = queue {
                 if let Some(plan) = queue.plan {
                     print_queue_plan(&plan);
                 }
@@ -184,6 +189,37 @@ pub async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn queue_status_lines(
+    status: &mold_core::ServerStatus,
+    queue: Option<&mold_core::QueueListingWire>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    match (
+        status.queue_depth,
+        queue.and_then(|listing| listing.page.as_ref()),
+    ) {
+        (Some(depth), Some(_)) => {
+            lines.push(format!("Queue backlog: {depth} total nonterminal jobs"));
+        }
+        (Some(depth), None) => {
+            lines.push(format!("Queue load (server-reported): {depth} jobs"));
+        }
+        (None, _) => {}
+    }
+    if let Some(queue) = queue {
+        let label = if queue.page.is_some() {
+            "Hydrated queue page"
+        } else {
+            "Queue response"
+        };
+        lines.push(format!("{label}: {} rows", queue.entries.len()));
+    }
+    if let Some(capacity) = status.queue_capacity {
+        lines.push(format!("Runtime window capacity: {capacity} jobs"));
+    }
+    lines
 }
 
 fn format_vram(used: Option<u64>, total: Option<u64>) -> String {
@@ -318,5 +354,57 @@ mod tests {
         });
         assert!(future.contains("assigned/3"));
         assert!(!future.contains("future-internal-id"));
+    }
+
+    #[test]
+    fn queue_labels_separate_total_backlog_hydrated_page_and_runtime_capacity() {
+        let status: mold_core::ServerStatus = serde_json::from_value(serde_json::json!({
+            "version": "test",
+            "models_loaded": [],
+            "busy": true,
+            "gpu_info": null,
+            "uptime_secs": 1,
+            "queue_depth": 91,
+            "queue_capacity": 8
+        }))
+        .unwrap();
+        let row = mold_core::QueueJobEntryWire {
+            id: "job".into(),
+            model: "flux-dev:q8".into(),
+            state: "queued".into(),
+            started_at_unix_ms: 0,
+            position: 0,
+            gpu: None,
+            target_gpu: None,
+            seed_pinned: None,
+            metadata: None,
+            durable: Some(true),
+            held_reason: None,
+        };
+        let queue = mold_core::QueueListingWire {
+            entries: vec![row; 3],
+            page: Some(mold_core::QueuePage {
+                limit: 3,
+                offset: 0,
+                returned: 3,
+                next_cursor: Some("opaque".into()),
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            queue_status_lines(&status, Some(&queue)),
+            vec![
+                "Queue backlog: 91 total nonterminal jobs",
+                "Hydrated queue page: 3 rows",
+                "Runtime window capacity: 8 jobs",
+            ]
+        );
+        let mut legacy = queue;
+        legacy.page = None;
+        assert_eq!(
+            queue_status_lines(&status, Some(&legacy))[0],
+            "Queue load (server-reported): 91 jobs"
+        );
     }
 }

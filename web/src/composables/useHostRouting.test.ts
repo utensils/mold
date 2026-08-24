@@ -6,6 +6,7 @@ import {
 } from "./useHostRouting";
 import {
   addHost,
+  HOSTS_STORAGE_KEY,
   ORIGIN_HOST_ID,
   setGenerateTargetId,
   updateHost,
@@ -20,6 +21,8 @@ import type {
 import type { DeviceInfo, DeviceListResponse } from "@studio/api/devices";
 import type { GenerationPlacementPreview } from "@studio/api/generationPlacement";
 import { ApiError } from "@studio/api/client";
+import { ApiHttpError } from "../api";
+import { queueStatusFor } from "@studio/lib/queuePosition";
 import {
   AUTHENTICATED_MINIMAX_H3_PROFILE_SHA256,
   authenticatedMiniMaxH3Capabilities,
@@ -27,10 +30,11 @@ import {
 
 /** Per-host canned `/api/status` + `/api/models` responses, keyed by host id. */
 const statuses = new Map<string, unknown>();
-const models = new Map<string, ModelInfoExtended[]>();
-const devices = new Map<string, DeviceListResponse>();
-const capabilities = new Map<string, ServerCapabilities>();
+const models = new Map<string, ModelInfoExtended[] | Error>();
+const devices = new Map<string, DeviceListResponse | Error>();
+const capabilities = new Map<string, ServerCapabilities | Error>();
 const hostStatusCall = vi.hoisted(() => vi.fn());
+const hostQueueCall = vi.hoisted(() => vi.fn());
 const placementCall = vi.hoisted(() => vi.fn());
 
 vi.mock("@studio/api/generationPlacement", async (importOriginal) => {
@@ -47,23 +51,27 @@ vi.mock("../components/machines/hostClient", () => ({
   hostStatus: (...args: unknown[]) => hostStatusCall(...args),
   hostModels: (host: HostEntry) => {
     const canned = models.get(host.id);
-    return canned
-      ? Promise.resolve(canned)
-      : Promise.reject(new Error("unreachable"));
+    return canned instanceof Error
+      ? Promise.reject(canned)
+      : canned
+        ? Promise.resolve(canned)
+        : Promise.reject(new Error("unreachable"));
   },
   hostDevices: (host: HostEntry) => {
     const canned = devices.get(host.id);
-    return canned
-      ? Promise.resolve(canned)
-      : Promise.reject(new Error("legacy server"));
+    return canned instanceof Error
+      ? Promise.reject(canned)
+      : canned
+        ? Promise.resolve(canned)
+        : Promise.reject(new Error("legacy server"));
   },
-  hostQueue: () => Promise.resolve({ entries: [], plan: null }),
-  hostCapabilities: (host: HostEntry) =>
-    Promise.resolve(
-      capabilities.get(host.id) ?? {
-        gallery: { can_delete: true },
-      },
-    ),
+  hostQueue: (...args: unknown[]) => hostQueueCall(...args),
+  hostCapabilities: (host: HostEntry) => {
+    const canned = capabilities.get(host.id);
+    return canned instanceof Error
+      ? Promise.reject(canned)
+      : Promise.resolve(canned ?? { gallery: { can_delete: true } });
+  },
 }));
 
 function placement(
@@ -168,6 +176,14 @@ function routeOf(result: FeasibilityResult) {
   return result.route;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 describe("useHostRouting", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -181,6 +197,7 @@ describe("useHostRouting", () => {
         ? Promise.resolve(canned)
         : Promise.reject(new Error("unreachable"));
     });
+    hostQueueCall.mockReset().mockResolvedValue({ entries: [], plan: null });
     placementCall
       .mockReset()
       .mockImplementation((target: { baseUrl: string }) =>
@@ -203,6 +220,116 @@ describe("useHostRouting", () => {
 
     expect(routing.hosts.value.map((h) => h.id)).toEqual([ORIGIN_HOST_ID]);
     expect(routing.multiHost.value).toBe(false);
+  });
+
+  it("bounds the first queue read by current status capacity and merges live-only rows once", async () => {
+    statuses.set(ORIGIN_HOST_ID, status({ queue_capacity: 17 }));
+    models.set(ORIGIN_HOST_ID, []);
+    hostQueueCall.mockResolvedValue({
+      entries: [
+        {
+          id: "durable",
+          model: "flux-dev:q4",
+          state: "queued",
+          started_at_unix_ms: 1,
+          position: 4,
+        },
+      ],
+      live_only_entries: [
+        {
+          id: "durable",
+          model: "flux-dev:q4",
+          state: "running",
+          started_at_unix_ms: 1,
+          position: 9,
+        },
+        {
+          id: "live",
+          model: "flux-dev:q4",
+          state: "running",
+          started_at_unix_ms: 2,
+          position: 1,
+        },
+        {
+          id: "live",
+          model: "flux-dev:q4",
+          state: "running",
+          started_at_unix_ms: 2,
+          position: 8,
+        },
+      ],
+      plan: null,
+    });
+
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    expect(hostQueueCall).toHaveBeenCalledWith(
+      expect.objectContaining({ id: ORIGIN_HOST_ID }),
+      undefined,
+      { limit: 17 },
+    );
+    expect(
+      hostQueueCall.mock.calls.every(
+        ([, signal, page]) =>
+          signal === undefined &&
+          (page as { limit?: number } | undefined)?.limit === 17,
+      ),
+    ).toBe(true);
+    expect(
+      queueStatusFor(routing.queueStatus.value, ORIGIN_HOST_ID, "durable"),
+    ).toMatchObject({ position: 4 });
+    expect(
+      queueStatusFor(routing.queueStatus.value, ORIGIN_HOST_ID, "live"),
+    ).toMatchObject({ position: 1 });
+  });
+
+  it.each([undefined, null, 0, -1, 1.5, Number.NaN])(
+    "keeps the legacy queue read when status capacity is %s",
+    async (queueCapacity) => {
+      statuses.set(ORIGIN_HOST_ID, status({ queue_capacity: queueCapacity }));
+      models.set(ORIGIN_HOST_ID, []);
+
+      await useHostRouting().refresh();
+
+      expect(hostQueueCall).toHaveBeenCalledWith(
+        expect.objectContaining({ id: ORIGIN_HOST_ID }),
+      );
+      expect(hostQueueCall.mock.calls.every((call) => call.length === 1)).toBe(
+        true,
+      );
+    },
+  );
+
+  it("keeps a healthy status and the last good queue when its bounded queue page fails", async () => {
+    statuses.set(ORIGIN_HOST_ID, status({ queue_depth: 1, queue_capacity: 8 }));
+    models.set(ORIGIN_HOST_ID, []);
+    hostQueueCall.mockResolvedValue({
+      entries: [
+        {
+          id: "still-live",
+          model: "flux-dev:q4",
+          state: "queued",
+          started_at_unix_ms: 1,
+          position: 2,
+        },
+      ],
+      plan: null,
+    });
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    statuses.set(ORIGIN_HOST_ID, status({ queue_depth: 2, queue_capacity: 8 }));
+    hostQueueCall.mockRejectedValue(new Error("queue unavailable"));
+    await routing.refresh();
+
+    expect(routing.hosts.value[0]).toMatchObject({
+      status: "ready",
+      queueDepth: 2,
+    });
+    expect(
+      queueStatusFor(routing.queueStatus.value, ORIGIN_HOST_ID, "still-live"),
+    ).toMatchObject({ position: 2 });
   });
 
   it("reacts to same-tab host and generation-target changes", async () => {
@@ -368,7 +495,7 @@ describe("useHostRouting", () => {
     },
   );
 
-  it("ignores an older same-host poll after a newer refresh settles", async () => {
+  it("coalesces concurrent refresh callers into one same-host poll", async () => {
     statuses.set(ORIGIN_HOST_ID, status({ queue_depth: 0 }));
     models.set(ORIGIN_HOST_ID, [model("flux-dev:q4")]);
     devices.set(ORIGIN_HOST_ID, {
@@ -377,27 +504,38 @@ describe("useHostRouting", () => {
     });
     const routing = useHostRouting();
     await routing.refresh();
+    hostStatusCall.mockClear();
+    hostQueueCall.mockClear();
 
-    let resolveOlder!: (value: unknown) => void;
-    let resolveNewer!: (value: unknown) => void;
-    const older = new Promise((resolve) => {
-      resolveOlder = resolve;
+    const current = deferred<ReturnType<typeof status>>();
+    hostStatusCall.mockImplementationOnce(() => current.promise);
+    hostQueueCall.mockResolvedValueOnce({
+      entries: [
+        {
+          id: "current-queue",
+          model: "flux-dev:q4",
+          state: "queued",
+          started_at_unix_ms: 1,
+          position: 1,
+        },
+      ],
+      plan: null,
     });
-    const newer = new Promise((resolve) => {
-      resolveNewer = resolve;
-    });
-    hostStatusCall
-      .mockImplementationOnce(() => older)
-      .mockImplementationOnce(() => newer);
 
     const first = routing.refresh();
     const second = routing.refresh();
-    resolveNewer(status({ queue_depth: 9 }));
-    await second;
-    resolveOlder(status({ queue_depth: 1 }));
-    await first;
+    expect(hostStatusCall).toHaveBeenCalledTimes(1);
+    current.resolve(status({ queue_depth: 1 }));
+    await Promise.all([first, second]);
 
-    expect(routing.hosts.value[0]?.queueDepth).toBe(9);
+    expect(routing.hosts.value[0]?.queueDepth).toBe(1);
+    expect(
+      queueStatusFor(
+        routing.queueStatus.value,
+        ORIGIN_HOST_ID,
+        "current-queue",
+      ),
+    ).toMatchObject({ position: 1 });
   });
 
   it("reports a remote host as ready with its live queue depth and GPU", async () => {
@@ -1135,6 +1273,7 @@ describe("useHostRouting", () => {
       batch_size: 1,
     });
     await vi.waitFor(() => expect(placementCall).toHaveBeenCalledOnce());
+    statuses.set(studio.id, status({ instance_id: "instance-b" }));
     updateHost(studio.id, { instanceId: "instance-b" });
     release(placement(100));
 
@@ -1424,7 +1563,7 @@ describe("useHostRouting", () => {
     });
   });
 
-  it("marks an unreachable host errored without dropping it from the list", async () => {
+  it("keeps a never-reached host connecting without dropping it from the list", async () => {
     const studio = addHost({ url: "http://studio:7680", name: "Studio" });
     statuses.set(ORIGIN_HOST_ID, status());
     models.set(ORIGIN_HOST_ID, [model("flux2-klein:q4")]);
@@ -1433,9 +1572,300 @@ describe("useHostRouting", () => {
     await routing.refresh();
 
     const remote = routing.hosts.value.find((h) => h.id === studio.id);
-    expect(remote?.status).toBe("error");
+    expect(remote).toMatchObject({ status: "connecting", stale: false });
     // Auto never routes to it.
     expect(routing.resolve("flux2-klein:q4")?.hostId).toBe(ORIGIN_HOST_ID);
+  });
+
+  it("keeps scheduled and host-change refreshes single-flight", async () => {
+    vi.useFakeTimers();
+    try {
+      const first = deferred<ReturnType<typeof status>>();
+      const second = deferred<ReturnType<typeof status>>();
+      let calls = 0;
+      hostStatusCall.mockImplementation(() => {
+        calls += 1;
+        return calls === 1 ? first.promise : second.promise;
+      });
+      models.set(ORIGIN_HOST_ID, []);
+      const routing = useHostRouting();
+
+      routing.start();
+      const initial = routing.refresh();
+      expect(hostStatusCall).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(__testing__.POLL_INTERVAL_MS * 2);
+      window.dispatchEvent(new Event("mold:hosts-changed"));
+      window.dispatchEvent(new Event("mold:hosts-changed"));
+      await Promise.resolve();
+      expect(hostStatusCall).toHaveBeenCalledTimes(1);
+
+      first.resolve(status({ version: "first" }));
+      await initial;
+      await Promise.resolve();
+      expect(hostStatusCall).toHaveBeenCalledTimes(2);
+
+      second.resolve(status({ version: "second" }));
+      await routing.refresh();
+      routing.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a verified host routable with last-good state through repeated status failures", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      instanceId: "instance-a",
+    });
+    statuses.set(ORIGIN_HOST_ID, status());
+    models.set(ORIGIN_HOST_ID, []);
+    statuses.set(
+      studio.id,
+      status({
+        queue_depth: 5,
+        queue_capacity: 8,
+        instance_id: "instance-a",
+        gpu_info: {
+          backend: "cuda",
+          name: "RTX 4090",
+          vram_total_mb: 24_564,
+          vram_used_mb: 1_024,
+        },
+      }),
+    );
+    models.set(studio.id, [model("flux-dev:q4")]);
+    capabilities.set(studio.id, {
+      gallery: { can_delete: true },
+      queue: { heterogeneous_batch: true },
+    });
+    hostQueueCall.mockImplementation((host: HostEntry) =>
+      Promise.resolve({
+        entries:
+          host.id === studio.id
+            ? [
+                {
+                  id: "still-queued",
+                  model: "flux-dev:q4",
+                  state: "queued",
+                  started_at_unix_ms: 1,
+                  position: 3,
+                },
+              ]
+            : [],
+        plan: null,
+      }),
+    );
+    setGenerateTargetId(studio.id);
+    const routing = useHostRouting();
+    await routing.refresh();
+    const capabilitySnapshot = routing.capabilitiesByHost.value[studio.id];
+
+    hostStatusCall.mockImplementation((host: HostEntry) =>
+      host.id === studio.id
+        ? Promise.reject(new Error("status timeout"))
+        : Promise.resolve(status()),
+    );
+    hostQueueCall.mockRejectedValue(new Error("status unavailable"));
+    await routing.refresh();
+    await routing.refresh();
+
+    expect(
+      routing.hosts.value.find((host) => host.id === studio.id),
+    ).toMatchObject({
+      status: "ready",
+      stale: true,
+      queueDepth: 5,
+      gpu: { name: "RTX 4090", vramTotalMb: 24_564 },
+    });
+    expect(
+      queueStatusFor(routing.queueStatus.value, studio.id, "still-queued"),
+    ).toMatchObject({ position: 3 });
+    expect(routing.capabilitiesByHost.value[studio.id]).toBe(
+      capabilitySnapshot,
+    );
+    expect(routing.resolve("flux-dev:q4")?.hostId).toBe(studio.id);
+
+    hostStatusCall.mockImplementation((host: HostEntry) =>
+      Promise.resolve(
+        host.id === studio.id
+          ? status({
+              queue_depth: 7,
+              queue_capacity: 8,
+              instance_id: "instance-a",
+            })
+          : status(),
+      ),
+    );
+    hostQueueCall.mockResolvedValue({ entries: [], plan: null });
+    await routing.refresh();
+    expect(
+      routing.hosts.value.find((host) => host.id === studio.id),
+    ).toMatchObject({
+      status: "ready",
+      stale: false,
+      queueDepth: 7,
+    });
+  });
+
+  it.each(["status", "models", "devices", "queue", "capabilities"] as const)(
+    "retires verified routing authority when %s rejects the host credential",
+    async (endpoint) => {
+      const studio = addHost({
+        url: "http://studio:7680",
+        name: "Studio",
+        apiKey: "rejected-key",
+        instanceId: "instance-a",
+      });
+      statuses.set(ORIGIN_HOST_ID, status());
+      models.set(ORIGIN_HOST_ID, []);
+      statuses.set(
+        studio.id,
+        status({ instance_id: "instance-a", queue_depth: 4 }),
+      );
+      models.set(studio.id, [model("old-model")]);
+      capabilities.set(studio.id, { gallery: { can_delete: true } });
+      setGenerateTargetId(studio.id);
+      const routing = useHostRouting();
+      await routing.refresh();
+
+      const rejection = new ApiHttpError(
+        `GET /api/${endpoint}`,
+        401,
+        "API key was rejected",
+      );
+      if (endpoint === "status") {
+        hostStatusCall.mockImplementation((host: HostEntry) =>
+          host.id === studio.id
+            ? Promise.reject(rejection)
+            : Promise.resolve(status()),
+        );
+      } else if (endpoint === "models") {
+        models.set(studio.id, rejection);
+      } else if (endpoint === "devices") {
+        devices.set(studio.id, rejection);
+      } else if (endpoint === "queue") {
+        hostQueueCall.mockImplementation((host: HostEntry) =>
+          host.id === studio.id
+            ? Promise.reject(rejection)
+            : Promise.resolve({ entries: [], plan: null }),
+        );
+      } else {
+        capabilities.set(studio.id, rejection);
+      }
+      await routing.refresh();
+
+      expect(
+        routing.hosts.value.find((host) => host.id === studio.id),
+      ).toMatchObject({
+        status: "connecting",
+        stale: false,
+        queueDepth: null,
+      });
+      expect(routing.capabilitiesByHost.value[studio.id]).toBeUndefined();
+      expect(routing.inventoryKnown(studio.id)).toBe(false);
+      expect(routing.resolve("old-model")).toBeNull();
+    },
+  );
+
+  it("fences last-good authority when a successful poll reports a replacement instance", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      instanceId: "instance-a",
+    });
+    statuses.set(ORIGIN_HOST_ID, status());
+    models.set(ORIGIN_HOST_ID, []);
+    statuses.set(
+      studio.id,
+      status({ instance_id: "instance-a", queue_depth: 2 }),
+    );
+    models.set(studio.id, [model("old-model")]);
+    capabilities.set(studio.id, {
+      gallery: { can_delete: true },
+      model_access: { restrictions: [] },
+    });
+    hostQueueCall.mockResolvedValue({
+      entries: [
+        {
+          id: "old-job",
+          model: "old-model",
+          state: "queued",
+          started_at_unix_ms: 1,
+          position: 1,
+        },
+      ],
+      plan: null,
+    });
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    statuses.set(
+      studio.id,
+      status({ instance_id: "instance-b", queue_depth: 0 }),
+    );
+    models.delete(studio.id);
+    capabilities.set(studio.id, new Error("capabilities unavailable"));
+    hostQueueCall.mockRejectedValue(new Error("queue unavailable"));
+    await routing.refresh();
+
+    expect(
+      routing.hosts.value.find((host) => host.id === studio.id),
+    ).toMatchObject({
+      instanceId: "instance-b",
+      stale: false,
+      queueDepth: 0,
+    });
+    expect(
+      queueStatusFor(routing.queueStatus.value, studio.id, "old-job"),
+    ).toBeNull();
+    expect(routing.capabilitiesByHost.value[studio.id]).toBeUndefined();
+    expect(routing.inventoryKnown(studio.id)).toBe(false);
+  });
+
+  it("retires last-good authority across an explicit disconnect", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      instanceId: "instance-a",
+    });
+    statuses.set(ORIGIN_HOST_ID, status());
+    models.set(ORIGIN_HOST_ID, []);
+    statuses.set(
+      studio.id,
+      status({ instance_id: "instance-a", queue_depth: 4 }),
+    );
+    models.set(studio.id, [model("old-model")]);
+    capabilities.set(studio.id, { gallery: { can_delete: true } });
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    const stored = JSON.parse(
+      localStorage.getItem(HOSTS_STORAGE_KEY) ?? "[]",
+    ) as HostEntry[];
+    localStorage.setItem(
+      HOSTS_STORAGE_KEY,
+      JSON.stringify(stored.map((host) => ({ ...host, connected: false }))),
+    );
+    await routing.refresh();
+    localStorage.setItem(
+      HOSTS_STORAGE_KEY,
+      JSON.stringify(stored.map((host) => ({ ...host, connected: true }))),
+    );
+    statuses.delete(studio.id);
+    models.delete(studio.id);
+    capabilities.set(studio.id, new Error("unreachable"));
+    await routing.refresh();
+
+    expect(
+      routing.hosts.value.find((host) => host.id === studio.id),
+    ).toMatchObject({
+      status: "connecting",
+      stale: false,
+      queueDepth: null,
+    });
+    expect(routing.capabilitiesByHost.value[studio.id]).toBeUndefined();
+    expect(routing.inventoryKnown(studio.id)).toBe(false);
   });
 
   it("carries the remote's api key into the resolved route, never a URL", async () => {
@@ -1459,6 +1889,32 @@ describe("useHostRouting", () => {
       apiKey: "sk-studio",
     });
     expect(route?.target.baseUrl).not.toContain("sk-studio");
+  });
+
+  it("freezes the exact durable-media capability into the selected host route", async () => {
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    const durableMedia = {
+      protocol_version: 1,
+      encrypted_at_rest: true,
+      generate_request_media: true,
+      identity: true,
+      h3_references: false,
+      private_h3: false,
+    };
+    statuses.set(ORIGIN_HOST_ID, status());
+    models.set(ORIGIN_HOST_ID, []);
+    statuses.set(studio.id, status({ instance_id: "studio-instance" }));
+    models.set(studio.id, [model("flux-dev:q4")]);
+    capabilities.set(studio.id, {
+      gallery: { can_delete: true },
+      durable_media: durableMedia,
+    });
+    setGenerateTargetId(studio.id);
+
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    expect(routing.resolve("flux-dev:q4")?.durableMedia).toEqual(durableMedia);
   });
 
   it("allows Auto across differing model profiles on the same Mold major version", async () => {

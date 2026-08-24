@@ -103,6 +103,21 @@ pub struct QueueListing {
     pub plan: Option<mold_core::QueuePlan>,
 }
 
+/// Payload-free registry row for the scheduler's frequent reconciliation.
+///
+/// This is deliberately distinct from [`JobEntry`]: the coordinator needs
+/// only queue identity, lifecycle, order, and lane preference. Keeping the
+/// type exhaustive prevents a 10 ms scheduler tick from accidentally cloning
+/// request metadata, denoise previews, cancellation handles, or other
+/// registry-owned state as those types grow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SchedulerQueueEntry {
+    pub(crate) id: String,
+    pub(crate) state: JobLifecycle,
+    pub(crate) position: usize,
+    pub(crate) target_gpu: Option<usize>,
+}
+
 #[derive(Debug, Clone)]
 struct EntryInternal {
     id: String,
@@ -127,6 +142,9 @@ struct EntryInternal {
     /// hand-off race and cancels the token as soon as it appears.
     running_cancel: Option<mold_inference::InferenceCancellationToken>,
     cancel_requested: bool,
+    /// Exact route-owned token that temporarily excludes this queued row from
+    /// scheduler planning/grant while its durable PATCH is in flight.
+    queue_patch_token: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +195,7 @@ pub struct JobRegistry {
     inner: RwLock<Vec<EntryInternal>>,
     batch_parents: RwLock<HashMap<String, BatchParentEntry>>,
     mutation_sequence: AtomicU64,
+    queue_patch_sequence: AtomicU64,
     mutation_notify: Arc<Notify>,
     /// Optional lifecycle broadcast (`GET /api/events`). Emitting from the
     /// registry — rather than each call site — guarantees every submit /
@@ -207,6 +226,7 @@ impl JobRegistry {
             inner: RwLock::new(Vec::new()),
             batch_parents: RwLock::new(HashMap::new()),
             mutation_sequence: AtomicU64::new(0),
+            queue_patch_sequence: AtomicU64::new(0),
             mutation_notify: Arc::new(Notify::new()),
             events: None,
         })
@@ -219,6 +239,7 @@ impl JobRegistry {
             inner: RwLock::new(Vec::new()),
             batch_parents: RwLock::new(HashMap::new()),
             mutation_sequence: AtomicU64::new(0),
+            queue_patch_sequence: AtomicU64::new(0),
             mutation_notify: Arc::new(Notify::new()),
             events: Some(events),
         })
@@ -265,6 +286,33 @@ impl JobRegistry {
         seed_pinned: Option<bool>,
         metadata: Option<Box<mold_core::OutputMetadata>>,
     ) -> Arc<Notify> {
+        self.register_job_at_queued_position(
+            id,
+            model,
+            target_gpu,
+            seed_pinned,
+            metadata,
+            usize::MAX,
+        )
+    }
+
+    /// Insert a hydrated durable job at its authoritative queued position.
+    ///
+    /// `position` is interpreted among queued rows, exactly like
+    /// [`reorder_queued`](Self::reorder_queued), and clamps to the live tail.
+    /// The feeder supplies a position from SQLite's bounded runtime-order
+    /// window while holding the scheduler mutation fence. Keeping insertion
+    /// and ordinary PATCH reorders on the same registry lock makes the new
+    /// row visible to the scheduler in one fully ordered mutation.
+    pub(crate) fn register_job_at_queued_position(
+        &self,
+        id: impl Into<String>,
+        model: impl Into<String>,
+        target_gpu: Option<usize>,
+        seed_pinned: Option<bool>,
+        metadata: Option<Box<mold_core::OutputMetadata>>,
+        position: usize,
+    ) -> Arc<Notify> {
         let started_at_unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -274,20 +322,31 @@ impl JobRegistry {
         let cancel = Arc::new(Notify::new());
         {
             let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
-            entries.push(EntryInternal {
-                id: id.clone(),
-                model: model.clone(),
-                state: JobLifecycle::Queued,
-                started_at_unix_ms,
-                gpu: None,
-                target_gpu,
-                seed_pinned,
-                metadata,
-                preview: None,
-                cancel: cancel.clone(),
-                running_cancel: None,
-                cancel_requested: false,
-            });
+            let queued_slots = entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.state == JobLifecycle::Queued)
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            let insert_at = queued_slots.get(position).copied().unwrap_or(entries.len());
+            entries.insert(
+                insert_at,
+                EntryInternal {
+                    id: id.clone(),
+                    model: model.clone(),
+                    state: JobLifecycle::Queued,
+                    started_at_unix_ms,
+                    gpu: None,
+                    target_gpu,
+                    seed_pinned,
+                    metadata,
+                    preview: None,
+                    cancel: cancel.clone(),
+                    running_cancel: None,
+                    cancel_requested: false,
+                    queue_patch_token: None,
+                },
+            );
         }
         self.mark_mutated();
         self.emit(ServerEvent::JobQueued { id, model });
@@ -447,8 +506,14 @@ impl JobRegistry {
     /// and close every open server-batch parent authority. Ordinary running
     /// jobs remain untouched; running batch children drain without publication.
     /// After dropping the entry lock this emits one `JobEnded` per removed
-    /// queued row. The return value remains that queued-row count.
+    /// queued row. The public wrapper returns the established queued-row
+    /// count; the route uses the exact ids to avoid double-counting durable
+    /// rows in the same cancellation.
     pub fn cancel_all_queued(&self) -> usize {
+        self.cancel_all_queued_ids().len()
+    }
+
+    pub(crate) fn cancel_all_queued_ids(&self) -> Vec<String> {
         let batch_children = {
             // Hold the write side while closing every still-open parent
             // authority. This orders bulk cancellation against
@@ -493,7 +558,7 @@ impl JobRegistry {
         if !cancelled_ids.is_empty() {
             self.mark_mutated();
         }
-        cancelled_ids.len()
+        cancelled_ids
     }
 
     /// Promote a registry entry from `Queued` to `Running`. No-op if `id`
@@ -520,17 +585,21 @@ impl JobRegistry {
 
     /// Attach the exact attempt token to a running row. If DELETE won the
     /// dispatch hand-off race, installation immediately observes that fact.
+    /// Returns `false` when the row was already removed before hand-off.
     pub(crate) fn install_running_cancellation(
         &self,
         id: &str,
         token: mold_inference::InferenceCancellationToken,
-    ) {
+    ) -> bool {
         let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) {
             if entry.cancel_requested {
                 token.cancel();
             }
             entry.running_cancel = Some(token);
+            true
+        } else {
+            false
         }
     }
 
@@ -594,7 +663,7 @@ impl JobRegistry {
                 payload,
             ));
         };
-        if entry.state != JobLifecycle::Queued {
+        if entry.state != JobLifecycle::Queued || entry.queue_patch_token.is_some() {
             return Err(DispatchAttemptError::Claim(
                 DispatchClaimError::NotQueued,
                 payload,
@@ -635,6 +704,58 @@ impl JobRegistry {
                 })
         };
         if restored {
+            self.mark_mutated();
+        }
+    }
+
+    /// Exclude one hydrated queued row from scheduler planning and final
+    /// dispatch while its durable PATCH is persisted without the scheduler
+    /// mutation fence. The returned token fences cleanup from any later PATCH.
+    pub(crate) fn begin_queue_patch(&self, id: &str) -> Result<u64, TargetGpuUpdateError> {
+        let token = self
+            .queue_patch_sequence
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1);
+        {
+            let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) else {
+                return Err(TargetGpuUpdateError::NotFound);
+            };
+            if entry.state == JobLifecycle::Running {
+                return Err(TargetGpuUpdateError::AlreadyRunning);
+            }
+            entry.queue_patch_token = Some(token);
+        }
+        self.mark_mutated();
+        Ok(token)
+    }
+
+    pub(crate) fn queue_patch_token_matches(&self, id: &str, token: u64) -> bool {
+        self.inner
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .find(|entry| entry.id == id)
+            .is_some_and(|entry| entry.queue_patch_token == Some(token))
+    }
+
+    /// Release only the exact PATCH exclusion installed by
+    /// [`begin_queue_patch`](Self::begin_queue_patch).
+    pub(crate) fn finish_queue_patch(&self, id: &str, token: u64) {
+        let cleared = {
+            let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            entries
+                .iter_mut()
+                .find(|entry| entry.id == id)
+                .is_some_and(|entry| {
+                    if entry.queue_patch_token != Some(token) {
+                        return false;
+                    }
+                    entry.queue_patch_token = None;
+                    true
+                })
+        };
+        if cleared {
             self.mark_mutated();
         }
     }
@@ -869,6 +990,66 @@ impl JobRegistry {
         }
     }
 
+    /// Snapshot only the fields consumed by scheduler reconciliation.
+    ///
+    /// Unlike [`snapshot`](Self::snapshot), work here is independent of the
+    /// size of retained request metadata and previews: one small row is
+    /// projected per registry entry and no payload-bearing field is touched.
+    pub(crate) fn scheduler_snapshot(&self) -> Vec<SchedulerQueueEntry> {
+        self.inner
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .enumerate()
+            .map(|(position, entry)| SchedulerQueueEntry {
+                id: entry.id.clone(),
+                state: if entry.queue_patch_token.is_some() {
+                    JobLifecycle::Held
+                } else {
+                    entry.state
+                },
+                position,
+                target_gpu: entry.target_gpu,
+            })
+            .collect()
+    }
+
+    /// Exact queued rows temporarily excluded while a durable PATCH owns
+    /// their runtime-projection token.
+    ///
+    /// The coordinator omits these ids from planning without removing their
+    /// pending generation or changing its durable lifecycle. Clearing the
+    /// exact token marks the registry mutated, making the retained work
+    /// eligible on the next immediate replan.
+    pub(crate) fn queue_patch_blocked_ids(&self) -> BTreeSet<String> {
+        self.inner
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .filter(|entry| entry.queue_patch_token.is_some())
+            .map(|entry| entry.id.clone())
+            .collect()
+    }
+
+    /// Read only the lifecycle needed by scheduler cancellation/grant checks.
+    ///
+    /// This retains the full snapshot API for wire callers without making a
+    /// scheduler existence check clone the selected row's metadata.
+    pub(crate) fn scheduler_lifecycle(&self, id: &str) -> Option<JobLifecycle> {
+        self.inner
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| {
+                if entry.queue_patch_token.is_some() {
+                    JobLifecycle::Held
+                } else {
+                    entry.state
+                }
+            })
+    }
+
     /// Currently-tracked job count. Exposed for tests and metrics.
     pub fn len(&self) -> usize {
         self.inner.read().unwrap_or_else(|e| e.into_inner()).len()
@@ -898,6 +1079,39 @@ mod tests {
         assert_eq!(snap.entries[0].state, JobLifecycle::Queued);
         assert_eq!(snap.entries[1].id, "b");
         assert_eq!(snap.entries[1].position, 1);
+    }
+
+    #[test]
+    fn exact_queue_patch_block_excludes_only_its_target_from_dispatch() {
+        let reg = JobRegistry::new();
+        reg.register("patching", "model-a");
+        reg.register("unrelated", "model-b");
+
+        let first = reg.begin_queue_patch("patching").unwrap();
+        assert_eq!(
+            reg.scheduler_lifecycle("patching"),
+            Some(JobLifecycle::Held)
+        );
+        assert!(reg
+            .dispatch_if_queued("patching", 0, (), |_| Ok(()))
+            .is_err());
+        assert!(reg
+            .dispatch_if_queued("unrelated", 0, (), |_| Ok(()))
+            .is_ok());
+
+        reg.finish_queue_patch("patching", first);
+        let second = reg.begin_queue_patch("patching").unwrap();
+        reg.finish_queue_patch("patching", first);
+        assert_eq!(
+            reg.scheduler_lifecycle("patching"),
+            Some(JobLifecycle::Held),
+            "stale cleanup cannot clear a later PATCH exclusion"
+        );
+        reg.finish_queue_patch("patching", second);
+        assert_eq!(
+            reg.scheduler_lifecycle("patching"),
+            Some(JobLifecycle::Queued)
+        );
     }
 
     #[test]
@@ -1401,6 +1615,127 @@ mod tests {
         let rich = snap.entries[1].metadata.as_ref().expect("metadata rides");
         assert_eq!(rich.prompt, "a cat");
         assert_eq!(rich.width, 512);
+    }
+
+    #[test]
+    fn scheduler_projection_matches_wire_queue_semantics_without_payload_fields() {
+        let reg = JobRegistry::new();
+        let mut request: mold_core::GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"payload","model":"flux-dev:fp16","width":512,"height":512,"steps":4,"guidance":3.5}"#,
+        )
+        .expect("minimal request parses");
+        request.prompt = "metadata".repeat(8 * 1024);
+        let metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
+            &request,
+            0,
+            None,
+            "test-version",
+        ));
+        reg.register_job(
+            "queued",
+            "flux-dev:fp16",
+            Some(2),
+            Some(true),
+            Some(metadata),
+        );
+        reg.record_preview("queued", "preview".repeat(8 * 1024), 3, 20);
+        reg.register("running", "sdxl:q8");
+        reg.mark_running("running", Some(1));
+
+        let full = reg.snapshot();
+        let scheduler = reg.scheduler_snapshot();
+        let full_semantics = full
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.id.as_str(),
+                    entry.state,
+                    entry.position,
+                    entry.target_gpu,
+                )
+            })
+            .collect::<Vec<_>>();
+        let scheduler_semantics = scheduler
+            .iter()
+            .map(|entry| {
+                (
+                    entry.id.as_str(),
+                    entry.state,
+                    entry.position,
+                    entry.target_gpu,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(scheduler_semantics, full_semantics);
+
+        // Exhaustive destructuring is a compile-time guard on the hot-path
+        // contract: adding metadata, previews, request bodies, or any other
+        // field to this type must make this test fail to compile.
+        let SchedulerQueueEntry {
+            id,
+            state,
+            position,
+            target_gpu,
+        } = &scheduler[0];
+        assert_eq!(id, "queued");
+        assert_eq!(*state, JobLifecycle::Queued);
+        assert_eq!(*position, 0);
+        assert_eq!(*target_gpu, Some(2));
+        assert_eq!(
+            reg.scheduler_lifecycle("queued"),
+            Some(JobLifecycle::Queued)
+        );
+        assert_eq!(
+            reg.scheduler_lifecycle("running"),
+            Some(JobLifecycle::Running)
+        );
+        assert_eq!(reg.scheduler_lifecycle("missing"), None);
+        assert!(full.entries[0].metadata.is_some());
+        assert!(reg.preview_snapshot("queued").flatten().is_some());
+    }
+
+    #[test]
+    fn scheduler_projection_work_is_structurally_independent_of_payload_size_at_depth() {
+        fn projection(depth: usize, payload_bytes: usize) -> Vec<SchedulerQueueEntry> {
+            let reg = JobRegistry::new();
+            for index in 0..depth {
+                let mut request: mold_core::GenerateRequest = serde_json::from_str(
+                    r#"{"prompt":"","model":"flux-dev:fp16","width":512,"height":512,"steps":4,"guidance":3.5}"#,
+                )
+                .expect("minimal request parses");
+                request.prompt = "m".repeat(payload_bytes);
+                let metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
+                    &request,
+                    index as u64,
+                    None,
+                    "test-version",
+                ));
+                let id = format!("job-{index:03}");
+                reg.register_job(
+                    &id,
+                    "flux-dev:fp16",
+                    Some(index % 3),
+                    Some(index % 2 == 0),
+                    Some(metadata),
+                );
+                reg.record_preview(&id, "p".repeat(payload_bytes), 1, 2);
+                if index % 5 == 0 {
+                    reg.mark_running(&id, Some(index % 3));
+                }
+            }
+            reg.scheduler_snapshot()
+        }
+
+        const DEPTH: usize = 64;
+        let empty_payloads = projection(DEPTH, 0);
+        let large_payloads = projection(DEPTH, 64 * 1024);
+
+        // This is deliberately not a timing assertion. The exhaustive entry
+        // shape above and equality here establish that projection work is one
+        // fixed-size row per queue entry, regardless of retained payload size.
+        assert_eq!(large_payloads, empty_payloads);
+        assert_eq!(large_payloads.len(), DEPTH);
     }
 
     mod event_emission {

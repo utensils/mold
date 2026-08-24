@@ -3,7 +3,7 @@
  * Host detail (spec §04 / §08 G3). Live telemetry, the relocated queue
  * management card, active downloads, and installed models for one machine —
  * the primary origin or any remembered remote, all through the same per-host
- * client. Absent metrics render as em dashes and an offline host keeps its
+ * client. Absent metrics render as em dashes and a reconnecting host keeps its
  * last-good data dimmed behind a retry banner (G4).
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
@@ -14,7 +14,12 @@ import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import MinimaxH3InventoryPanel from "@studio/components/MinimaxH3InventoryPanel.vue";
-import { setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
+import {
+  mergeQueueEntries,
+  queuePageRequestForCapacity,
+  setQueueDevicePin,
+  type QueuePlan,
+} from "@studio/api/queuePlan";
 import { hostMemoryLevel } from "@studio/lib/hostMemory";
 import {
   modelDisplayName,
@@ -57,7 +62,7 @@ import {
   setGenerateTargetId,
   updateHost,
 } from "../lib/hostRegistry";
-import { reorderQueueJob, updateQueueJobTargetGpu } from "../api";
+import { ApiHttpError, reorderQueueJob, updateQueueJobTargetGpu } from "../api";
 import { requestConfirm, requestText, toast } from "../lib/toasts";
 import { subscribeToDeviceSnapshots } from "../lib/deviceEvents";
 import type { DownloadJobWire, ModelInfoExtended, QueueEntry } from "../types";
@@ -79,6 +84,12 @@ const hostName = ref(host.value?.name ?? "");
 const caps = ref<HostCapabilities | null>(null);
 const queue = ref<QueueEntry[]>([]);
 const queuePlan = ref<QueuePlan | null>(null);
+const queueTail = ref<QueueEntry[]>([]);
+const queuePageLimit = ref<number | null>(null);
+const queueNextCursor = ref<string | null>(null);
+const queueContinued = ref(false);
+const loadingMoreQueue = ref(false);
+const loadMoreQueueError = ref("");
 const cancellingIds = ref<string[]>([]);
 const mutatingDeviceIds = ref(new Set<string>());
 const models = ref<ModelInfoExtended[]>([]);
@@ -89,12 +100,17 @@ const poll = useHostPoll(liveHost, { withResources: true, intervalMs: 4000 });
 
 const online = computed(() => poll.online.value);
 const loading = computed(() => poll.loading.value);
-const offline = computed(
-  () => !!host.value && !disconnected.value && !loading.value && !online.value,
+const reconnecting = computed(
+  () =>
+    !!host.value &&
+    !disconnected.value &&
+    !loading.value &&
+    (!online.value || poll.stale.value),
 );
 const dotState = computed<"online" | "offline" | "unknown">(() => {
-  if (!host.value || disconnected.value || loading.value) return "unknown";
-  return online.value ? "online" : "offline";
+  if (!host.value || disconnected.value || loading.value || reconnecting.value)
+    return "unknown";
+  return "online";
 });
 
 const telemetry = computed(() =>
@@ -159,6 +175,10 @@ const h3Host = computed(() => [
 
 let sessionEpoch = 0;
 let queueRequestGeneration = 0;
+let capabilityRequestGeneration = 0;
+let modelRequestGeneration = 0;
+let downloadRequestGeneration = 0;
+let queueLoadMoreGeneration = 0;
 
 function isCurrentSession(
   entry: NonNullable<typeof host.value>,
@@ -182,16 +202,95 @@ async function reloadQueue(
   if (!entry) return;
   const generation = ++queueRequestGeneration;
   try {
-    const listing = await hostQueue(entry, signal);
+    const page = queuePageRequestForCapacity(poll.status.value?.queue_capacity);
+    const listing = page
+      ? await hostQueue(entry, signal, page)
+      : await hostQueue(entry, signal);
     if (
       generation === queueRequestGeneration &&
       isCurrentSession(entry, epoch)
     ) {
-      queue.value = listing.entries;
+      const head = mergeQueueEntries(
+        listing.entries,
+        listing.live_only_entries ?? [],
+      ) as QueueEntry[];
       queuePlan.value = listing.plan ?? null;
+      if (queueContinued.value || loadingMoreQueue.value) {
+        // A routine head poll can refresh the live window without destroying
+        // continuation pages the user already loaded or invalidating a page
+        // currently in flight. Replace the head, retain the continuation
+        // snapshot, and de-duplicate rows that advanced into the live window.
+        const seen = new Set<string>();
+        queue.value = [...head, ...queueTail.value].filter(
+          ({ id }) => !seen.has(id) && !!seen.add(id),
+        );
+      } else {
+        queue.value = head;
+        queuePageLimit.value = listing.page?.limit ?? null;
+        queueNextCursor.value = listing.page?.next_cursor ?? null;
+        queueTail.value = [];
+        queueContinued.value = false;
+        loadMoreQueueError.value = "";
+      }
     }
   } catch {
-    // Keep the last-good queue; the offline banner covers the failure.
+    // Keep the last-good queue; the reconnecting banner covers the failure.
+  }
+}
+
+async function loadMoreQueue() {
+  const entry = host.value;
+  const cursor = queueNextCursor.value;
+  const limit = queuePageLimit.value;
+  if (!entry || !cursor || !limit || loadingMoreQueue.value) return;
+  loadingMoreQueue.value = true;
+  loadMoreQueueError.value = "";
+  const epoch = sessionEpoch;
+  const generation = ++queueLoadMoreGeneration;
+  try {
+    const listing = await hostQueue(entry, undefined, { limit, cursor });
+    if (
+      generation !== queueLoadMoreGeneration ||
+      !isCurrentSession(entry, epoch) ||
+      queueNextCursor.value !== cursor
+    )
+      return;
+    if (!listing.page) {
+      queue.value = listing.entries;
+      queueTail.value = [];
+      queuePageLimit.value = null;
+      queueNextCursor.value = null;
+      queueContinued.value = false;
+      return;
+    }
+    const seenTail = new Set(queueTail.value.map(({ id }) => id));
+    queueTail.value = [
+      ...queueTail.value,
+      ...(listing.entries as QueueEntry[]).filter(
+        ({ id }) => !seenTail.has(id),
+      ),
+    ];
+    const seen = new Set<string>();
+    queue.value = [
+      ...queue.value,
+      ...queueTail.value,
+      ...(listing.live_only_entries ?? []),
+    ].filter(({ id }) => !seen.has(id) && !!seen.add(id)) as QueueEntry[];
+    queueNextCursor.value = listing.page.next_cursor ?? null;
+    queueContinued.value = true;
+    queuePlan.value = listing.plan ?? queuePlan.value;
+  } catch (error) {
+    if (
+      generation === queueLoadMoreGeneration &&
+      isCurrentSession(entry, epoch)
+    )
+      loadMoreQueueError.value = errMsg(error);
+  } finally {
+    if (
+      generation === queueLoadMoreGeneration &&
+      isCurrentSession(entry, epoch)
+    )
+      loadingMoreQueue.value = false;
   }
 }
 
@@ -254,9 +353,11 @@ async function reloadModels(
   signal?: AbortSignal,
 ) {
   if (!entry) return;
+  const generation = ++modelRequestGeneration;
   try {
     const next = await hostModels(entry, signal);
-    if (isCurrentSession(entry, epoch)) models.value = next;
+    if (generation === modelRequestGeneration && isCurrentSession(entry, epoch))
+      models.value = next;
   } catch {
     /* keep stale */
   }
@@ -268,6 +369,7 @@ async function reloadDownloads(
   signal?: AbortSignal,
 ) {
   if (!entry) return;
+  const generation = ++downloadRequestGeneration;
   try {
     const listing = await hostDownloads(entry, signal);
     const active = [
@@ -275,13 +377,17 @@ async function reloadDownloads(
       ...(listing.active_jobs ?? []),
       ...listing.queued,
     ];
-    if (isCurrentSession(entry, epoch)) downloads.value = active;
+    if (
+      generation === downloadRequestGeneration &&
+      isCurrentSession(entry, epoch)
+    )
+      downloads.value = active;
   } catch {
     /* keep stale */
   }
 }
 
-async function reloadAll(
+async function reloadAllOnce(
   entry = host.value,
   epoch = sessionEpoch,
   signal?: AbortSignal,
@@ -398,11 +504,24 @@ async function reloadCapabilities(
   signal?: AbortSignal,
 ) {
   if (!entry) return;
+  const generation = ++capabilityRequestGeneration;
   try {
     const next = await hostCapabilities(entry, signal);
-    if (isCurrentSession(entry, epoch)) caps.value = next;
-  } catch {
-    if (isCurrentSession(entry, epoch)) caps.value = null;
+    if (
+      generation === capabilityRequestGeneration &&
+      isCurrentSession(entry, epoch)
+    )
+      caps.value = next;
+  } catch (error) {
+    // A transport blip cannot erase verified capability policy. HTTP auth is
+    // different authority and must fail closed until the credential changes.
+    if (
+      generation === capabilityRequestGeneration &&
+      isCurrentSession(entry, epoch) &&
+      error instanceof ApiHttpError &&
+      (error.status === 401 || error.status === 403)
+    )
+      caps.value = null;
   }
 }
 
@@ -538,19 +657,66 @@ function downloadPct(job: DownloadJobWire): number {
   return Math.min(100, (job.bytes_done / job.bytes_total) * 100);
 }
 
-let timer: ReturnType<typeof setInterval> | null = null;
+let timer: ReturnType<typeof setTimeout> | null = null;
 let deviceEventsAbort: AbortController | null = null;
 let sessionAbort: AbortController | null = null;
+let reloadAllInFlight: Promise<void> | null = null;
+let reloadAllPending = false;
+
+function reloadAll(
+  entry: NonNullable<typeof host.value>,
+  epoch: number,
+  signal: AbortSignal,
+): Promise<void> {
+  if (reloadAllInFlight) {
+    reloadAllPending = true;
+    return reloadAllInFlight;
+  }
+  const run = (async () => {
+    do {
+      reloadAllPending = false;
+      await reloadAllOnce(entry, epoch, signal);
+    } while (
+      reloadAllPending &&
+      !signal.aborted &&
+      isCurrentSession(entry, epoch)
+    );
+  })().finally(() => {
+    if (reloadAllInFlight === run) reloadAllInFlight = null;
+  });
+  reloadAllInFlight = run;
+  return run;
+}
+
+function scheduleReload(
+  entry: NonNullable<typeof host.value>,
+  epoch: number,
+  signal: AbortSignal,
+) {
+  if (timer || signal.aborted || !isCurrentSession(entry, epoch)) return;
+  timer = setTimeout(() => {
+    timer = null;
+    void reloadAll(entry, epoch, signal).finally(() =>
+      scheduleReload(entry, epoch, signal),
+    );
+  }, 4000);
+}
 
 function stopHostSession() {
   sessionEpoch += 1;
   queueRequestGeneration += 1;
-  if (timer) clearInterval(timer);
+  queueLoadMoreGeneration += 1;
+  capabilityRequestGeneration += 1;
+  modelRequestGeneration += 1;
+  downloadRequestGeneration += 1;
+  if (timer) clearTimeout(timer);
   timer = null;
   deviceEventsAbort?.abort();
   deviceEventsAbort = null;
   sessionAbort?.abort();
   sessionAbort = null;
+  reloadAllPending = false;
+  reloadAllInFlight = null;
 }
 
 function startHostSession() {
@@ -560,23 +726,32 @@ function startHostSession() {
   caps.value = null;
   queue.value = [];
   queuePlan.value = null;
+  queueTail.value = [];
+  queuePageLimit.value = null;
+  queueNextCursor.value = null;
+  queueContinued.value = false;
+  loadMoreQueueError.value = "";
   models.value = [];
   downloads.value = [];
   hostName.value = host.value?.name ?? "";
   if (!entry) return;
   sessionAbort = new AbortController();
   const signal = sessionAbort.signal;
-  void reloadAll(entry, epoch, signal);
+  void reloadAll(entry, epoch, signal).finally(() =>
+    scheduleReload(entry, epoch, signal),
+  );
   deviceEventsAbort = new AbortController();
   subscribeToDeviceSnapshots(
     { baseUrl: entry.url, apiKey: entry.apiKey ?? null },
     deviceEventsAbort.signal,
     () => {
       void poll.refresh();
+      // The queued follow-up is single-flight, but the now-stale queue answer
+      // must not become visible while the current wave settles.
+      queueRequestGeneration += 1;
       void reloadAll(entry, epoch, signal);
     },
   );
-  timer = setInterval(() => void reloadAll(entry, epoch, signal), 4000);
 }
 
 function onHostsChanged() {
@@ -680,14 +855,20 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <div v-if="offline" class="md-offline" data-test="detail-offline">
-        <span>This machine is offline. Showing the last known values.</span>
+      <div
+        v-if="reconnecting"
+        class="md-offline"
+        data-test="detail-reconnecting"
+      >
+        <span
+          >This machine is reconnecting. Showing the last known values.</span
+        >
         <button type="button" class="md-retry" @click="poll?.refresh()">
           Retry
         </button>
       </div>
 
-      <div class="md-grid" :data-dimmed="offline ? 'true' : undefined">
+      <div class="md-grid" :data-dimmed="reconnecting ? 'true' : undefined">
         <CardSurface class="md-telemetry">
           <div class="md-label">Telemetry</div>
           <div class="md-gpu" data-test="telemetry-gpu">
@@ -853,7 +1034,7 @@ onBeforeUnmount(() => {
         </CardSurface>
       </div>
 
-      <div class="md-queue" :data-dimmed="offline ? 'true' : undefined">
+      <div class="md-queue" :data-dimmed="reconnecting ? 'true' : undefined">
         <CardSurface class="mb-4">
           <DevicePanel
             :devices="poll?.devices.value ?? []"
@@ -880,18 +1061,31 @@ onBeforeUnmount(() => {
           :can-cancel-running="caps?.queue?.cooperative_cancellation === true"
           :cancelling-ids="cancellingIds"
           :paused="paused"
-          :dimmed="offline"
+          :dimmed="reconnecting"
           @cancel="onCancel"
           @set-lane="onSetLane"
           @move="onMove"
           @toggle-pause="onTogglePause"
           @cancel-all="onCancelAll"
         />
+        <button
+          v-if="queueNextCursor"
+          type="button"
+          class="md-library__empty mt-2"
+          data-test="queue-load-more"
+          :disabled="loadingMoreQueue || !online"
+          @click="loadMoreQueue"
+        >
+          {{ loadingMoreQueue ? "Loading…" : "Load more jobs" }}
+        </button>
+        <p v-if="loadMoreQueueError" class="error-text" role="alert">
+          {{ loadMoreQueueError }}
+        </p>
       </div>
 
       <CardSurface
         class="md-downloads"
-        :data-dimmed="offline ? 'true' : undefined"
+        :data-dimmed="reconnecting ? 'true' : undefined"
       >
         <div class="md-label">Downloads</div>
         <p

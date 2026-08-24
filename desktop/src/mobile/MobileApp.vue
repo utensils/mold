@@ -162,7 +162,13 @@ import {
   type ActivityHostSnapshot,
   type FleetActiveWork,
 } from "@studio/api/activity";
-import { listQueue, type QueueListing } from "@studio/api/queuePlan";
+import {
+  listQueue,
+  mergeQueueEntries,
+  queuePageRequestForCapacity,
+  type QueueListing,
+} from "@studio/api/queuePlan";
+import { admitGenerationBatch, reconcileGenerationBatches } from "@studio/api/generationAdmission";
 import {
   selectedQueueGeneration,
   watchSelectedQueuePreview,
@@ -245,7 +251,12 @@ import {
   hydrateGenerationTemplate,
   type GenerationTemplate,
 } from "../lib/generationTemplates";
-import { galleryMediaPath, isAudioItem, isVideoItem } from "../lib/gallery/media";
+import {
+  galleryMediaPath,
+  isAudioItem,
+  isVideoItem,
+  streamableMediaUrl,
+} from "../lib/gallery/media";
 import { isUpscaledImage } from "../lib/gallery/upscaled";
 import { percent } from "../lib/format";
 import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
@@ -309,15 +320,22 @@ import {
   jobPhase,
   jobProgress,
   jobStatusCode,
+  planBatchRequests,
   railOrder,
+  resolveBaseSeed,
   useGenerationStore,
   type Job,
 } from "../stores/generation";
+import { markJobSettled, newJob } from "../lib/generationJob";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import {
+  mobileHostHealthLabel,
   mobileHostMatchesRoute,
   mobileHostTarget,
   normalizeRemoteAddress,
+  recordMobileHostAuthorityRejection,
+  recordMobileHostProbeFailure,
+  recordMobileHostStatus,
   remoteHostId,
   type MobileHost,
 } from "./hosts";
@@ -418,6 +436,24 @@ import {
 } from "./mobileExpansionRecovery";
 import { reconcileInterruptedGenerationJobs } from "../lib/generationRecovery";
 import { watchChainJob, type SequenceWatchHandle } from "./sequenceWatch";
+import {
+  buildMobileDurableHostStatusRequest,
+  claimMobileDurableTerminalEffect,
+  createMobileDurableGenerationRecovery,
+  loadMobileDurableGenerationRecoveries,
+  mergeMobileDurableHostStatus,
+  mobileDurableAdmissionEffectKey,
+  mobileDurableJobs,
+  mobileDurableRecoveryIsTerminal,
+  mobileDurableTerminalEffectsClaimed,
+  reduceMobileDurableGenerationRecovery,
+  resolveMobileDurableHost,
+  saveMobileDurableGenerationRecoveries,
+  useMobileDurableGenerationLifecycle,
+  type MobileDurableGenerationPresentation,
+  type MobileDurableGenerationRecovery,
+} from "./mobileGenerationRecovery";
+import { watchMobileGenerationHost, type MobileGenerationHostWatch } from "./mobileGenerationWatch";
 
 type Tab = "generate" | "gallery" | "catalog" | "hosts";
 
@@ -911,6 +947,8 @@ const libraryPrintCount = ref(0);
 const organizationError = ref("");
 /** Accepted-request advisories stay visible until dismissed or superseded. */
 const requestAdvisories = ref<string[]>([]);
+const DURABLE_RECOVERY_STORAGE_WARNING =
+  "Recovery storage is unavailable. This generation is still being submitted, but closing the app before Mold confirms it may hide it from Create.";
 const organizationBusy = ref(false);
 const pendingGalleryMutationCount = ref(0);
 let flushingGalleryOutbox = false;
@@ -995,6 +1033,30 @@ const hostProbes = new Map<
 >();
 const knownHostReachability = new Set<string>();
 const generation = useGenerationStore();
+/**
+ * Ordinary media-free prints admitted through the durable batch endpoint.
+ * The Pinia generation store remains the legacy POST-SSE implementation used
+ * by old hosts, chains, identity and every request carrying media. Keeping the
+ * durable runtime local to MobileApp prevents the desktop shell from silently
+ * inheriting phone recovery or native-credential policy.
+ */
+const durableGenerationRecoveries = ref<MobileDurableGenerationRecovery[]>(
+  loadMobileDurableGenerationRecoveries(localStorage),
+);
+const durableGenerationJobs = reactive(new Map<string, Job>());
+const durableGenerationJobIdentity = new Map<
+  number,
+  { clientBatchId: string; childIndex: number }
+>();
+const durableGenerationRequests = new Map<string, GenerateRequest>();
+const durableGenerationWatches = new Map<string, MobileGenerationHostWatch>();
+const durableGenerationWatchRoutes = new Map<string, string>();
+const durableGenerationReconciles = new Map<string, Promise<void>>();
+/** Missing = no follow-up; null = host-wide; Set = selected client batches. */
+const durableGenerationReconcilePending = new Map<string, Set<string> | null>();
+const durableGenerationCancelAttempts = new Map<string, Promise<boolean>>();
+let nextDurableGenerationClientId = -1;
+let selectedDurableGenerationClientId: number | null = null;
 const mobileDownloads = useMobileDownloadsStore();
 function loadLibrarySeenAt(): Record<string, number> {
   try {
@@ -1020,6 +1082,10 @@ interface HostTelemetry {
   vramUsedMb: number | null;
   vramTotalMb: number | null;
   queueDepth: number | null;
+  /** Runtime queue capacity is the server's authority for one hot queue page.
+   * `null` means a legacy status response; an absent telemetry row means the
+   * host has not answered status yet and queue polling must wait. */
+  queueCapacity: number | null;
   /** `gpu_info.backend` as this machine reported it; null on servers ≤ 0.16,
    *  where the routing ladder falls back to inferring it from the GPU name. */
   gpuBackend: string | null;
@@ -1049,8 +1115,22 @@ function captureHostTelemetry(hostId: string, status: ServerStatus): void {
     vramUsedMb: memory?.usedMb ?? null,
     vramTotalMb: memory?.totalMb ?? null,
     queueDepth: status.queue_depth ?? null,
+    queueCapacity: status.queue_capacity ?? null,
     gpuBackend: status.gpu_info?.backend ?? null,
     gpuName: status.gpu_info?.name ?? null,
+  };
+}
+
+async function listMobileQueue(host: MobileHost, target: ApiTarget): Promise<QueueListing | null> {
+  const telemetry = hostTelemetry[host.id];
+  if (!telemetry) return null;
+  const listing = await listQueue(
+    target,
+    queuePageRequestForCapacity(telemetry.queueCapacity) ?? null,
+  );
+  return {
+    ...listing,
+    entries: mergeQueueEntries(listing.entries, listing.live_only_entries ?? []),
   };
 }
 
@@ -1084,10 +1164,13 @@ const routingHint = computed(() =>
 const headerTargetLabel = computed(() =>
   automaticRouting.value
     ? mobileGenerateTargetLabel(generateTarget.value, connectedHosts.value)
-    : (selectedHost.value?.name ?? "Remote only"),
+    : selectedHost.value
+      ? mobileGenerateTargetLabel(selectedHost.value.id, connectedHosts.value)
+      : "Remote only",
 );
 const developOnNote = computed(() => {
-  if (!automaticRouting.value) return `Develop on ${selectedHost.value?.name ?? "this machine"}`;
+  if (!automaticRouting.value)
+    return `Develop on ${selectedHost.value ? mobileGenerateTargetLabel(selectedHost.value.id, connectedHosts.value) : "this machine"}`;
   return generateTarget.value === CAPABLE_TARGET_ID
     ? "Develop on the most capable machine"
     : "Develop on the least busy machine";
@@ -1793,9 +1876,179 @@ const estimateRequest = computed(() => {
   if (!form.model) return null;
   return buildGenerationEstimateRequest(buildRequest(form), form.family);
 });
-const queuedJobs = computed(() => railOrder(generation.pending));
+
+function durableGenerationKey(clientBatchId: string, childIndex: number): string {
+  return `${clientBatchId}:${childIndex}`;
+}
+
+function durableRecoveryForJob(job: Job): {
+  recovery: MobileDurableGenerationRecovery;
+  childIndex: number;
+} | null {
+  const identity = durableGenerationJobIdentity.get(job.clientId);
+  if (!identity) return null;
+  const recovery = durableGenerationRecoveries.value.find(
+    (candidate) => candidate.tracker.clientBatchId === identity.clientBatchId,
+  );
+  return recovery ? { recovery, childIndex: identity.childIndex } : null;
+}
+
+function presentationRequest(
+  presentation: MobileDurableGenerationPresentation,
+  prompt = "Recovered print",
+): GenerateRequest {
+  return {
+    prompt,
+    model: presentation.model,
+    width: presentation.width,
+    height: presentation.height,
+    steps: presentation.steps,
+    guidance: presentation.guidance,
+    seed: presentation.seed,
+    batch_size: 1,
+    output_format: presentation.format,
+  };
+}
+
+function durableCompleteEvent(
+  presentation: MobileDurableGenerationPresentation,
+  lifecycle: ReturnType<typeof mobileDurableJobs>[number],
+  job: Job,
+): CompleteEvent {
+  return {
+    image: "",
+    format: presentation.format,
+    width: presentation.width,
+    height: presentation.height,
+    seed_used: presentation.seed,
+    generation_time_ms: Math.max(
+      0,
+      (lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs) - lifecycle.createdAtMs,
+    ),
+    model: presentation.model,
+    filename: lifecycle.result?.filename ?? null,
+    original_filename: lifecycle.result?.originalFilename ?? null,
+    metadata: {
+      prompt: job.prompt,
+      model: presentation.model,
+      seed: presentation.seed,
+      steps: presentation.steps,
+      guidance: presentation.guidance,
+      width: presentation.width,
+      height: presentation.height,
+      job_id: lifecycle.authority.jobId,
+      output_format: presentation.format,
+    },
+  };
+}
+
+function persistDurableGenerationRecoveries(): boolean {
+  const saved = saveMobileDurableGenerationRecoveries(
+    localStorage,
+    durableGenerationRecoveries.value.filter(
+      (recovery) => !mobileDurableTerminalEffectsClaimed(recovery),
+    ),
+  );
+  if (saved) {
+    requestAdvisories.value = requestAdvisories.value.filter(
+      (warning) => warning !== DURABLE_RECOVERY_STORAGE_WARNING,
+    );
+  } else if (!requestAdvisories.value.includes(DURABLE_RECOVERY_STORAGE_WARNING)) {
+    requestAdvisories.value = [...requestAdvisories.value, DURABLE_RECOVERY_STORAGE_WARNING];
+  }
+  return saved;
+}
+
+function syncDurableGenerationJobs(): void {
+  for (const recovery of durableGenerationRecoveries.value) {
+    const host = hosts.value.find((candidate) => candidate.id === recovery.tracker.hostId);
+    const lifecycleByIndex = new Map(
+      mobileDurableJobs(recovery).map((job) => [job.childIndex, job]),
+    );
+    for (const presentation of recovery.presentations) {
+      const key = durableGenerationKey(recovery.tracker.clientBatchId, presentation.index);
+      let job = durableGenerationJobs.get(key);
+      if (!job) {
+        const liveRequest = durableGenerationRequests.get(key);
+        job = reactive(newJob(liveRequest ?? presentationRequest(presentation)));
+        job.clientId = nextDurableGenerationClientId--;
+        job.batchId = job.clientId;
+        job.hostId = recovery.tracker.hostId;
+        job.hostLabel = host?.name ?? "Saved machine";
+        job.remote = true;
+        job.mirrorRemoteOutput = false;
+        job.retainEncodedResult = false;
+        job.metadataOnlyCompletion = true;
+        job.submittedAtUnixMs = presentation.submittedAtMs;
+        durableGenerationJobs.set(key, job);
+        durableGenerationJobIdentity.set(job.clientId, {
+          clientBatchId: recovery.tracker.clientBatchId,
+          childIndex: presentation.index,
+        });
+      }
+      if (host) job.hostLabel = host.name;
+      const lifecycle = lifecycleByIndex.get(presentation.index);
+      if (!lifecycle) {
+        if (recovery.tracker.admission.phase === "rejected") {
+          job.status = "error";
+          job.error = recovery.tracker.admission.error ?? "Generation was not accepted";
+          markJobSettled(job);
+          continue;
+        }
+        job.status = "queued";
+        job.cancelling = recovery.cancelRequestedChildIndexes.includes(presentation.index);
+        job.stage =
+          recovery.tracker.admission.phase === "uncertain"
+            ? "Waiting for host confirmation"
+            : "Accepted";
+        continue;
+      }
+      job.id = lifecycle.authority.jobId;
+      switch (lifecycle.phase) {
+        case "accepted":
+        case "queued":
+        case "held":
+          job.status = "queued";
+          job.cancelling = recovery.cancelRequestedChildIndexes.includes(presentation.index);
+          job.stage = lifecycle.phase === "held" ? "Held by host — action required" : null;
+          break;
+        case "running":
+          job.status = "loading";
+          job.cancelling = recovery.cancelRequestedChildIndexes.includes(presentation.index);
+          job.stage = "Rendering";
+          break;
+        case "complete":
+          job.status = "complete";
+          job.cancelling = false;
+          job.error = null;
+          job.result ??= durableCompleteEvent(presentation, lifecycle, job);
+          job.settledAtMs ??= lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs;
+          break;
+        case "failed":
+          job.status = "error";
+          job.cancelling = false;
+          job.error = lifecycle.error ?? "Generation failed";
+          job.settledAtMs ??= lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs;
+          break;
+        case "cancelled":
+          job.status = "error";
+          job.cancelling = false;
+          job.error = "Cancelled";
+          job.settledAtMs ??= lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs;
+          break;
+      }
+    }
+  }
+}
+
+const allGenerationJobs = computed(() => [...generation.jobs, ...durableGenerationJobs.values()]);
+const queuedJobs = computed(() =>
+  railOrder(
+    allGenerationJobs.value.filter((job) => job.status !== "complete" && job.status !== "error"),
+  ),
+);
 const printJobsByKey = computed(
-  () => new Map(generation.pending.map((job) => [`print:${job.clientId}`, job])),
+  () => new Map(queuedJobs.value.map((job) => [`print:${job.clientId}`, job])),
 );
 /** Live dispatch order across every connected host, folded from the queue
  *  listings the activity poll already reads. */
@@ -1887,7 +2140,7 @@ function activityRowStatus(row: ActivityRow): string {
 }
 const sharedMobileActivity = computed(() => {
   const local = new Set(
-    generation.jobs.flatMap((job) =>
+    allGenerationJobs.value.flatMap((job) =>
       job.id ? [`${job.hostId ?? selectedHostId.value}:generation:${job.id}`] : [],
     ),
   );
@@ -1926,7 +2179,14 @@ function clearSelectedQueueRender(): void {
 async function selectMobilePrint(job: Job): Promise<void> {
   const epoch = ++mobilePrintSelectionEpoch;
   clearSelectedQueueRender();
-  generation.select(job.clientId);
+  const durable = durableRecoveryForJob(job);
+  if (durable) {
+    generation.select(null);
+    selectedDurableGenerationClientId = job.clientId;
+  } else {
+    selectedDurableGenerationClientId = null;
+    generation.select(job.clientId);
+  }
   if (job.hostId && hosts.value.some((host) => host.id === job.hostId)) {
     await selectHost(job.hostId);
   }
@@ -1943,6 +2203,40 @@ async function selectMobilePrint(job: Job): Promise<void> {
   draft.output = "single";
   latestResultClientId.value = job.status === "complete" ? job.clientId : null;
   tab.value = "generate";
+  if (
+    durable &&
+    job.id &&
+    job.status !== "queued" &&
+    job.status !== "complete" &&
+    job.status !== "error"
+  ) {
+    const host = resolveMobileDurableHost(durable.recovery, connectedHosts.value);
+    if (!host) return;
+    selectedQueueRender.value = {
+      hostId: host.id,
+      jobId: job.id,
+      width: job.width,
+      height: job.height,
+      preview: null,
+    };
+    stopSelectedQueuePreview = watchSelectedQueuePreview(
+      mobileHostTarget(host),
+      job.id,
+      (preview) => {
+        if (
+          epoch === mobilePrintSelectionEpoch &&
+          selectedQueueRender.value?.hostId === host.id &&
+          selectedQueueRender.value.jobId === job.id
+        ) {
+          selectedQueueRender.value = { ...selectedQueueRender.value, preview };
+        }
+      },
+      750,
+      () => {
+        if (selectedQueueRender.value?.jobId === job.id) clearSelectedQueueRender();
+      },
+    );
+  }
 }
 
 async function restoreRunningJobSource(request: GenerateRequest, epoch: number): Promise<void> {
@@ -2039,13 +2333,17 @@ async function openMobileLiveWork(row: FleetActiveWork): Promise<void> {
       if (current.instance_id !== snapshot.instanceId) {
         throw new Error("This queue item belongs to a different Mold server instance.");
       }
+      captureHostTelemetry(host.id, current);
     };
     await verifyAuthority();
     if (epoch !== mobileLiveWorkSelectionEpoch) return;
 
     if (row.kind === "generation") {
-      const queue = await listQueue(target);
+      const queue = await listMobileQueue(host, target);
       if (epoch !== mobileLiveWorkSelectionEpoch) return;
+      if (!queue) {
+        throw new Error("This host has not reported its queue capacity yet.");
+      }
       await verifyAuthority();
       if (epoch !== mobileLiveWorkSelectionEpoch) return;
       const selection = selectedQueueGeneration<OutputMetadata>(queue.entries, row.id);
@@ -2153,18 +2451,30 @@ const sequenceRowProgress = computed(() => {
 });
 const activeGeneration = computed(() => {
   if (selectedQueueRender.value) return null;
+  if (selectedDurableGenerationClientId !== null) {
+    const selected = [...durableGenerationJobs.values()].find(
+      (job) => job.clientId === selectedDurableGenerationClientId,
+    );
+    if (selected && selected.status !== "complete" && selected.status !== "error") return selected;
+  }
+  const latestDurable = [...durableGenerationJobs.values()]
+    .reverse()
+    .find((job) => job.status !== "complete" && job.status !== "error");
   const active = generation.active;
-  return active && active.status !== "complete" && active.status !== "error" ? active : null;
+  if (!active || active.status === "complete" || active.status === "error")
+    return latestDurable ?? null;
+  if (!latestDurable) return active;
+  return latestDurable.submittedAtUnixMs > active.submittedAtUnixMs ? latestDurable : active;
 });
 const latestResultJob = computed(() => {
-  const latest = generation.jobs.find((job) => job.clientId === latestResultClientId.value);
+  const latest = allGenerationJobs.value.find((job) => job.clientId === latestResultClientId.value);
   // Once a completion is promoted, never put an older print underneath its
   // new seed/status while a saved-file URL is loading or has failed.
   if (latestResultClientId.value !== null) {
     return latest?.status === "complete" ? latest : null;
   }
-  for (let index = generation.jobs.length - 1; index >= 0; index -= 1) {
-    const job = generation.jobs[index];
+  for (let index = allGenerationJobs.value.length - 1; index >= 0; index -= 1) {
+    const job = allGenerationJobs.value[index];
     if (job?.status === "complete") return job;
   }
   return null;
@@ -2265,6 +2575,7 @@ const generationStatus = computed(() => {
   if (!active) return progress.value;
   switch (active.status) {
     case "queued": {
+      if (active.stage) return active.stage;
       // Live listing over the one-shot SSE frame, so the number counts down.
       const live = queueStatusFor(
         queueStatusIndex.value,
@@ -2337,9 +2648,453 @@ function routeForMobileHost(host: MobileHost): HostRoute {
     target: { ...mobileHostTarget(host) },
     instanceId: host.instanceId ?? null,
     referenceUploads: serverCapabilities[host.id]?.reference_uploads ?? null,
+    ...(serverCapabilities[host.id]?.durable_media
+      ? { durableMedia: serverCapabilities[host.id]!.durable_media! }
+      : {}),
     heterogeneousBatch: queue?.heterogeneous_batch === true,
     heterogeneousBatchMaxOutputs: queue?.heterogeneous_batch_max_outputs ?? null,
+    durableBatchOutcomes: queue?.durable_batch_outcomes === true,
   };
+}
+
+function replaceDurableRecovery(updated: MobileDurableGenerationRecovery): void {
+  durableGenerationRecoveries.value = durableGenerationRecoveries.value.map((candidate) =>
+    candidate.tracker.clientBatchId === updated.tracker.clientBatchId ? updated : candidate,
+  );
+}
+
+function markDurableHostGap(hostId: string, instanceId: string): void {
+  durableGenerationRecoveries.value = durableGenerationRecoveries.value.map((recovery) =>
+    recovery.tracker.hostId === hostId
+      ? reduceMobileDurableGenerationRecovery(recovery, {
+          type: "event_gap",
+          instanceId,
+        })
+      : recovery,
+  );
+  syncDurableGenerationJobs();
+  const mismatched = durableGenerationRecoveries.value.filter(
+    (recovery) =>
+      recovery.tracker.hostId === hostId &&
+      recovery.tracker.reconciliation.reason === "instance_mismatch",
+  );
+  if (mismatched.length > 0) {
+    const retired = new Set(mismatched.map((recovery) => recovery.tracker.clientBatchId));
+    for (const recovery of mismatched) {
+      for (const presentation of recovery.presentations) {
+        const key = durableGenerationKey(recovery.tracker.clientBatchId, presentation.index);
+        const job = durableGenerationJobs.get(key);
+        if (job && job.status !== "complete" && job.status !== "error") {
+          job.status = "error";
+          job.stage = "Original machine identity changed";
+          job.error =
+            "The original server instance is no longer at this machine address; its outcome is unknown.";
+          job.cancelling = false;
+          markJobSettled(job);
+        }
+        durableGenerationRequests.delete(key);
+      }
+    }
+    durableGenerationRecoveries.value = durableGenerationRecoveries.value.filter(
+      (recovery) => !retired.has(recovery.tracker.clientBatchId),
+    );
+    setGenerationStatus(
+      "The original server instance changed. Its queued work is no longer shown here because this replacement cannot authoritatively report the outcome.",
+      true,
+    );
+    generationAnnouncement.value =
+      "Generation tracking stopped because the server identity changed.";
+  }
+  persistDurableGenerationRecoveries();
+}
+
+function clearMobileDurableCancelIntent(clientBatchId: string, childIndex: number): void {
+  const recovery = durableGenerationRecoveries.value.find(
+    (candidate) => candidate.tracker.clientBatchId === clientBatchId,
+  );
+  if (!recovery?.cancelRequestedChildIndexes.includes(childIndex)) return;
+  replaceDurableRecovery({
+    ...recovery,
+    cancelRequestedChildIndexes: recovery.cancelRequestedChildIndexes.filter(
+      (index) => index !== childIndex,
+    ),
+  });
+  persistDurableGenerationRecoveries();
+}
+
+async function fulfillMobileDurableCancelIntent(
+  clientBatchId: string,
+  childIndex: number,
+): Promise<boolean> {
+  const attemptKey = durableGenerationKey(clientBatchId, childIndex);
+  const existing = durableGenerationCancelAttempts.get(attemptKey);
+  if (existing) return existing;
+  const attempt = (async () => {
+    const recovery = durableGenerationRecoveries.value.find(
+      (candidate) => candidate.tracker.clientBatchId === clientBatchId,
+    );
+    if (!recovery?.cancelRequestedChildIndexes.includes(childIndex)) return false;
+    const job = durableGenerationJobs.get(attemptKey);
+    if (!job) return false;
+    if (durableGenerationJobIsTerminal(job)) {
+      clearMobileDurableCancelIntent(clientBatchId, childIndex);
+      job.cancelling = false;
+      return isCancelledError(job.error);
+    }
+    if (!job.id) return false;
+    const host = resolveMobileDurableHost(recovery, connectedHosts.value);
+    if (!host?.online) return false;
+    try {
+      await apiFetchTo(mobileHostTarget(host), `/api/queue/${encodeURIComponent(job.id)}`, {
+        method: "DELETE",
+      });
+    } catch (error) {
+      await reconcileMobileDurableHost(recovery.tracker.hostId);
+      if (durableGenerationJobIsTerminal(job)) {
+        clearMobileDurableCancelIntent(clientBatchId, childIndex);
+        return isCancelledError(job.error);
+      }
+      throw error;
+    }
+    await reconcileMobileDurableHost(recovery.tracker.hostId);
+    if (durableGenerationJobIsTerminal(job)) {
+      clearMobileDurableCancelIntent(clientBatchId, childIndex);
+      return isCancelledError(job.error);
+    }
+    return false;
+  })().finally(() => durableGenerationCancelAttempts.delete(attemptKey));
+  durableGenerationCancelAttempts.set(attemptKey, attempt);
+  return attempt;
+}
+
+function scheduleMobileDurableCancelIntents(): void {
+  for (const recovery of durableGenerationRecoveries.value) {
+    for (const childIndex of recovery.cancelRequestedChildIndexes) {
+      void fulfillMobileDurableCancelIntent(recovery.tracker.clientBatchId, childIndex).catch(
+        () => {
+          // Persisted intent remains pending for the next event, wake, or
+          // exact-instance reconnect. No second tap is required.
+        },
+      );
+    }
+  }
+}
+
+async function processDurableGenerationTerminalEffects(): Promise<void> {
+  const effects: Array<() => Promise<unknown> | void> = [];
+  let changed = false;
+  for (const original of durableGenerationRecoveries.value) {
+    let recovery = original;
+    const host = resolveMobileDurableHost(recovery, connectedHosts.value);
+    // A persisted instance id is not fresh authority after process restart.
+    // Terminal media/Photos wait until this session's status probe marks the
+    // host online with the same instance, so an address now serving a
+    // replacement machine is never asked for the old print.
+    if (!host?.online) continue;
+    const target = mobileHostTarget(host);
+    if (recovery.tracker.admission.phase === "rejected") {
+      const admission = claimMobileDurableTerminalEffect(
+        recovery,
+        mobileDurableAdmissionEffectKey(recovery),
+        "viewer",
+      );
+      recovery = admission.recovery;
+      changed ||= admission.claimed;
+      if (admission.claimed) {
+        const detail = recovery.tracker.admission.error ?? "Generation was not accepted";
+        effects.push(() => {
+          setGenerationStatus(detail, true);
+          generationAnnouncement.value = `Generation failed. ${detail}`;
+        });
+      }
+    }
+    for (const lifecycle of mobileDurableJobs(recovery)) {
+      if (
+        lifecycle.phase !== "complete" &&
+        lifecycle.phase !== "failed" &&
+        lifecycle.phase !== "cancelled"
+      ) {
+        continue;
+      }
+      const key = durableGenerationKey(recovery.tracker.clientBatchId, lifecycle.childIndex);
+      const job = durableGenerationJobs.get(key);
+      if (!job) continue;
+
+      const viewer = claimMobileDurableTerminalEffect(recovery, lifecycle.key, "viewer");
+      recovery = viewer.recovery;
+      changed ||= viewer.claimed;
+      if (viewer.claimed) {
+        if (lifecycle.phase === "complete" && job.result) {
+          effects.push(async () => {
+            latestResultClientId.value = job.clientId;
+            setGenerationStatus(completionSummary(job.result!));
+            generationAnnouncement.value = "Generation completed.";
+            await refreshDurableGenerationResultUrl(job).catch(() => {
+              generationAnnouncement.value =
+                "Generation completed, but its preview is unavailable from the exact host.";
+            });
+          });
+        } else if (lifecycle.phase === "cancelled") {
+          effects.push(() => {
+            setGenerationStatus("Cancelled");
+            generationAnnouncement.value = "Generation cancelled.";
+          });
+        } else {
+          const detail = lifecycle.error ?? "Generation failed";
+          effects.push(() => {
+            setGenerationStatus(detail, true);
+            generationAnnouncement.value = `Generation failed. ${detail}`;
+          });
+        }
+      }
+
+      if (lifecycle.phase === "complete" && job.result) {
+        const photos = claimMobileDurableTerminalEffect(recovery, lifecycle.key, "photos");
+        recovery = photos.recovery;
+        changed ||= photos.claimed;
+        if (photos.claimed) effects.push(() => saveCompletedStillToPhotos(job.result!, target));
+
+        const galleryEffect = claimMobileDurableTerminalEffect(recovery, lifecycle.key, "gallery");
+        recovery = galleryEffect.recovery;
+        changed ||= galleryEffect.claimed;
+        if (galleryEffect.claimed && tab.value === "gallery") effects.push(() => refreshGallery());
+      }
+    }
+    if (recovery !== original) replaceDurableRecovery(recovery);
+  }
+  // Persist claims before starting native Photos, viewer-media, or Library
+  // effects. Duplicate events and process restarts can then only observe the
+  // claimed state, never replay an effect.
+  if (changed) persistDurableGenerationRecoveries();
+  await Promise.allSettled(effects.map(async (run) => await run()));
+  pruneDurableTerminalRuntime();
+}
+
+/** The Create canvas owns one current result, matching the existing generation
+ * store's proven pruning policy. All nonterminal records remain untouched; of
+ * claimed terminal records, only the newest batch with a completed result is
+ * retained in memory so its exact-host media ticket can still be renewed. */
+function pruneDurableTerminalRuntime(): void {
+  const releasable = durableGenerationRecoveries.value.filter(mobileDurableTerminalEffectsClaimed);
+  const latestCompleted = releasable
+    .filter((recovery) => mobileDurableJobs(recovery).some((job) => job.phase === "complete"))
+    .sort(
+      (left, right) =>
+        Math.max(...left.presentations.map((presentation) => presentation.submittedAtMs)) -
+        Math.max(...right.presentations.map((presentation) => presentation.submittedAtMs)),
+    )
+    .at(-1);
+  const removed = new Set(
+    releasable
+      .filter(
+        (recovery) => recovery.tracker.clientBatchId !== latestCompleted?.tracker.clientBatchId,
+      )
+      .map((recovery) => recovery.tracker.clientBatchId),
+  );
+  if (removed.size === 0) return;
+  durableGenerationRecoveries.value = durableGenerationRecoveries.value.filter(
+    (recovery) => !removed.has(recovery.tracker.clientBatchId),
+  );
+  for (const [key, job] of durableGenerationJobs) {
+    const identity = durableGenerationJobIdentity.get(job.clientId);
+    if (!identity || !removed.has(identity.clientBatchId)) continue;
+    durableGenerationJobs.delete(key);
+    durableGenerationJobIdentity.delete(job.clientId);
+    durableGenerationRequests.delete(key);
+    if (selectedDurableGenerationClientId === job.clientId) {
+      selectedDurableGenerationClientId = null;
+    }
+  }
+}
+
+function ensureDurableGenerationHostWatches(): void {
+  const needed = new Map<string, { host: MobileHost; instanceId: string }>();
+  for (const recovery of durableGenerationRecoveries.value) {
+    if (mobileDurableRecoveryIsTerminal(recovery)) continue;
+    const host = resolveMobileDurableHost(recovery, connectedHosts.value);
+    if (host) needed.set(host.id, { host, instanceId: recovery.tracker.expectedInstanceId });
+  }
+  for (const [hostId, watch] of durableGenerationWatches) {
+    const next = needed.get(hostId);
+    const signature = next ? `${next.host.baseUrl}|${next.instanceId}` : null;
+    if (!next || durableGenerationWatchRoutes.get(hostId) !== signature) {
+      watch.stop();
+      durableGenerationWatches.delete(hostId);
+      durableGenerationWatchRoutes.delete(hostId);
+    }
+  }
+  for (const [hostId, { host, instanceId }] of needed) {
+    if (durableGenerationWatches.has(hostId)) continue;
+    const signature = `${host.baseUrl}|${instanceId}`;
+    durableGenerationWatchRoutes.set(hostId, signature);
+    durableGenerationWatches.set(
+      hostId,
+      watchMobileGenerationHost({
+        target: mobileHostTarget(host),
+        expectedInstanceId: instanceId,
+        onGap: (authority) => markDurableHostGap(hostId, authority.instanceId),
+        onReconcile: (_reason, jobIds) => {
+          let scope: Set<string> | undefined;
+          if (jobIds) {
+            scope = new Set<string>();
+            for (const jobId of jobIds) {
+              const owner = durableGenerationRecoveries.value.find(
+                (recovery) =>
+                  recovery.tracker.hostId === hostId &&
+                  mobileDurableJobs(recovery).some((job) => job.authority.jobId === jobId),
+              );
+              if (!owner) {
+                scope = undefined;
+                break;
+              }
+              scope.add(owner.tracker.clientBatchId);
+            }
+          }
+          void reconcileMobileDurableHost(hostId, scope);
+        },
+      }),
+    );
+  }
+}
+
+async function reconcileMobileDurableHost(
+  hostId: string,
+  clientBatchIds?: ReadonlySet<string>,
+): Promise<void> {
+  const inFlight = durableGenerationReconciles.get(hostId);
+  if (inFlight) {
+    const pending = durableGenerationReconcilePending.get(hostId);
+    if (clientBatchIds === undefined) {
+      durableGenerationReconcilePending.set(hostId, null);
+    } else if (pending !== null) {
+      const next = pending ?? new Set<string>();
+      for (const clientBatchId of clientBatchIds) next.add(clientBatchId);
+      durableGenerationReconcilePending.set(hostId, next);
+    }
+    return inFlight;
+  }
+  const task = (async () => {
+    const records = durableGenerationRecoveries.value.filter(
+      (recovery) =>
+        recovery.tracker.hostId === hostId &&
+        !mobileDurableRecoveryIsTerminal(recovery) &&
+        (!clientBatchIds || clientBatchIds.has(recovery.tracker.clientBatchId)),
+    );
+    if (records.length === 0) return;
+    const host = resolveMobileDurableHost(records[0]!, connectedHosts.value);
+    if (!host) return;
+    const request = buildMobileDurableHostStatusRequest(records, hostId);
+    if (request.client_batch_ids.length === 0 && (request.batch_ids?.length ?? 0) === 0) return;
+    try {
+      const response = await reconcileGenerationBatches(mobileHostTarget(host), request);
+      const requestedClients = new Set(records.map((recovery) => recovery.tracker.clientBatchId));
+      const latestRequested = durableGenerationRecoveries.value.filter((recovery) =>
+        requestedClients.has(recovery.tracker.clientBatchId),
+      );
+      const merged = new Map(
+        mergeMobileDurableHostStatus(latestRequested, hostId, response).map((recovery) => [
+          recovery.tracker.clientBatchId,
+          recovery,
+        ]),
+      );
+      durableGenerationRecoveries.value = durableGenerationRecoveries.value.map(
+        (recovery) => merged.get(recovery.tracker.clientBatchId) ?? recovery,
+      );
+      persistDurableGenerationRecoveries();
+      syncDurableGenerationJobs();
+      scheduleMobileDurableCancelIntents();
+      await processDurableGenerationTerminalEffects();
+    } catch {
+      // A transport failure is not a lifecycle outcome. The retained
+      // recovery identity stays queued and the host stream/wake path retries
+      // one bulk read later; it is never converted into legacy resubmission.
+    }
+  })().finally(() => {
+    durableGenerationReconciles.delete(hostId);
+    ensureDurableGenerationHostWatches();
+    const pending = durableGenerationReconcilePending.get(hostId);
+    if (pending !== undefined) {
+      durableGenerationReconcilePending.delete(hostId);
+      void reconcileMobileDurableHost(hostId, pending ?? undefined);
+    }
+  });
+  durableGenerationReconciles.set(hostId, task);
+  return task;
+}
+
+async function submitMobileDurableGeneration(input: {
+  route: HostRoute;
+  requests: GenerateRequest[];
+}): Promise<void> {
+  const instanceId = input.route.instanceId?.trim() ?? "";
+  if (!instanceId) throw new Error("This host did not provide a stable server instance.");
+  const clientBatchId = createUuid();
+  const submittedAtMs = Date.now();
+  let recovery = createMobileDurableGenerationRecovery({
+    hostId: input.route.hostId,
+    expectedInstanceId: instanceId,
+    clientBatchId,
+    requests: input.requests,
+    submittedAtMs,
+  });
+  for (const [offset, request] of input.requests.entries()) {
+    durableGenerationRequests.set(durableGenerationKey(clientBatchId, offset + 1), request);
+  }
+  durableGenerationRecoveries.value = [...durableGenerationRecoveries.value, recovery];
+  // Prefer putting idempotency and instance identity on disk before the first
+  // byte of POST is sent. If Web Storage refuses, the same authority remains
+  // live in memory and this durable path still owns admission/reconciliation;
+  // no key, URL, body or media is persisted and no legacy submit is attempted.
+  persistDurableGenerationRecoveries();
+  syncDurableGenerationJobs();
+  // Attach the per-host invalidation stream at the same crash-safe boundary.
+  // A response that stalls forever must not prevent wake/event reconciliation
+  // from finding the admission by its already-persisted client UUID.
+  ensureDurableGenerationHostWatches();
+
+  try {
+    const admitted = await admitGenerationBatch(input.route.target, {
+      client_batch_id: clientBatchId,
+      requests: input.requests,
+    });
+    const latest =
+      durableGenerationRecoveries.value.find(
+        (candidate) => candidate.tracker.clientBatchId === clientBatchId,
+      ) ?? recovery;
+    recovery = reduceMobileDurableGenerationRecovery(latest, {
+      type: "batch_snapshot",
+      batch: admitted,
+    });
+  } catch (error) {
+    const authoritativeRejection =
+      error instanceof ApiError && error.status >= 400 && error.status < 500;
+    const latest =
+      durableGenerationRecoveries.value.find(
+        (candidate) => candidate.tracker.clientBatchId === clientBatchId,
+      ) ?? recovery;
+    recovery = reduceMobileDurableGenerationRecovery(
+      latest,
+      authoritativeRejection
+        ? { type: "admission_rejected", error: error.message }
+        : {
+            type: "admission_uncertain",
+            error: error instanceof Error ? error.message : String(error),
+          },
+    );
+  }
+  replaceDurableRecovery(recovery);
+  persistDurableGenerationRecoveries();
+  syncDurableGenerationJobs();
+  scheduleMobileDurableCancelIntents();
+  void processDurableGenerationTerminalEffects();
+  ensureDurableGenerationHostWatches();
+  if (recovery.tracker.admission.phase === "uncertain") {
+    // The POST may already have committed. Recover only through the same
+    // client UUID; never retry the POST or fall back to a stream.
+    void reconcileMobileDurableHost(input.route.hostId);
+  } else if (recovery.tracker.admission.phase === "rejected") {
+    setGenerationStatus(recovery.tracker.admission.error ?? "Generation was not accepted", true);
+  }
 }
 
 function loadHosts(): MobileHost[] {
@@ -2350,6 +3105,10 @@ function loadHosts(): MobileHost[] {
       connected: host.connected !== false,
       apiKey: "",
       online: false,
+      stale: false,
+      healthError: undefined,
+      authorityRejected: false,
+      instanceMismatch: undefined,
     }));
   } catch {
     return [];
@@ -2359,7 +3118,18 @@ function loadHosts(): MobileHost[] {
 function persistHosts(): void {
   localStorage.setItem(
     STORAGE_KEY,
-    JSON.stringify(hosts.value.map(({ apiKey: _apiKey, ...host }) => host)),
+    JSON.stringify(
+      hosts.value.map(
+        ({
+          apiKey: _apiKey,
+          stale: _stale,
+          healthError: _healthError,
+          authorityRejected: _authorityRejected,
+          instanceMismatch: _instanceMismatch,
+          ...host
+        }) => host,
+      ),
+    ),
   );
 }
 
@@ -2403,6 +3173,10 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
       instanceId,
       connected: true,
       online: true,
+      stale: false,
+      healthError: undefined,
+      authorityRejected: false,
+      instanceMismatch: undefined,
     };
     if (existing) Object.assign(existing, saved);
     else hosts.value.push(saved);
@@ -2538,22 +3312,52 @@ function renameHost(payload: { id: string; name: string }): void {
   persistHosts();
 }
 
-function updateHostStatus(payload: { id: string; status: ServerStatus | null }): void {
+/** Retire every routing cache whose authority belongs to the remembered
+ * instance. A replacement at the same URL must start from unknown instead of
+ * inheriting plausible model/capability data from another server. */
+function retireMobileHostAuthority(id: string): void {
+  delete hostTelemetry[id];
+  delete expandCapabilities[id];
+  delete serverCapabilities[id];
+  const nextModels = { ...modelsByHost.value };
+  delete nextModels[id];
+  modelsByHost.value = nextModels;
+  const nextIdentities = { ...modelSnapshotIdentities.value };
+  delete nextIdentities[id];
+  modelSnapshotIdentities.value = nextIdentities;
+  if (modelsHostId.value === id) {
+    models.value = [];
+    modelsHostId.value = "";
+  }
+}
+
+function updateHostStatus(payload: {
+  id: string;
+  status: ServerStatus | null;
+  error?: unknown;
+}): boolean {
   const host = hosts.value.find((candidate) => candidate.id === payload.id);
-  if (!host) return;
-  host.online = payload.status !== null;
+  if (!host) return false;
   if (payload.status) {
     const priorCacheKey = host.instanceId?.trim() || host.id;
-    const nextInstanceId = payload.status.instance_id ?? host.instanceId;
-    const nextCacheKey = nextInstanceId?.trim() || host.id;
+    if (recordMobileHostStatus(host, payload.status) === "instance_mismatch") {
+      retireMobileHostAuthority(host.id);
+      void clearCachedGalleryHosts([priorCacheKey]);
+      return false;
+    }
+    const nextCacheKey = host.instanceId?.trim() || host.id;
     if (priorCacheKey !== nextCacheKey) void clearCachedGalleryHosts([priorCacheKey]);
-    host.version = payload.status.version;
-    host.hostname = payload.status.hostname ?? undefined;
-    host.instanceId = nextInstanceId;
     captureHostTelemetry(host.id, payload.status);
   } else {
-    delete hostTelemetry[host.id];
+    const error = payload.error ?? new Error("Status probe failed");
+    if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+      recordMobileHostAuthorityRejection(host, error);
+      retireMobileHostAuthority(host.id);
+    } else {
+      recordMobileHostProbeFailure(host, error);
+    }
   }
+  return true;
 }
 
 function cancelHostProbe(id: string): void {
@@ -2568,7 +3372,7 @@ async function probeHost(host: MobileHost): Promise<void> {
   cancelHostProbe(host.id);
   const controller = new AbortController();
   const epoch = ++hostProbeEpoch;
-  const wasKnownOffline = knownHostReachability.has(host.id) && !host.online;
+  const wasUnavailable = !host.online || host.stale || Boolean(host.instanceMismatch);
   const timeout = setTimeout(() => controller.abort(), HOST_PROBE_TIMEOUT_MS);
   const probe = { epoch, controller, timeout };
   hostProbes.set(host.id, probe);
@@ -2578,12 +3382,12 @@ async function probeHost(host: MobileHost): Promise<void> {
     });
     if (hostProbes.get(host.id)?.epoch !== epoch) return;
     knownHostReachability.add(host.id);
-    updateHostStatus({ id: host.id, status });
-    if (wasKnownOffline && tab.value === "gallery") void refreshGallery();
-  } catch {
+    const verified = updateHostStatus({ id: host.id, status });
+    if (verified && wasUnavailable && tab.value === "gallery") void refreshGallery();
+  } catch (error) {
     if (hostProbes.get(host.id)?.epoch !== epoch) return;
     knownHostReachability.add(host.id);
-    updateHostStatus({ id: host.id, status: null });
+    updateHostStatus({ id: host.id, status: null, error });
   } finally {
     if (hostProbes.get(host.id)?.epoch === epoch) hostProbes.delete(host.id);
     clearTimeout(timeout);
@@ -2636,7 +3440,7 @@ async function refreshMobileActivity(): Promise<void> {
           (async (): Promise<QueueListing | null> => {
             try {
               if (!host.online) return null;
-              return await listQueue(route.target);
+              return await listMobileQueue(host, route.target);
             } catch {
               return previousQueue;
             }
@@ -2689,7 +3493,11 @@ function disconnectHost(id: string): void {
   if (!host) return;
   host.connected = false;
   host.online = false;
-  delete hostTelemetry[id];
+  host.stale = false;
+  host.healthError = undefined;
+  host.authorityRejected = false;
+  host.instanceMismatch = undefined;
+  retireMobileHostAuthority(id);
   pruneHostOrganization(id);
   if (selectedHostId.value === id) {
     selectedHostId.value = connectedHosts.value[0]?.id ?? "";
@@ -2705,6 +3513,11 @@ function reconnectHost(id: string): void {
   const host = hosts.value.find((candidate) => candidate.id === id);
   if (!host) return;
   host.connected = true;
+  host.online = false;
+  host.stale = false;
+  host.healthError = undefined;
+  host.authorityRejected = false;
+  host.instanceMismatch = undefined;
   knownHostReachability.delete(id);
   persistHosts();
   void probeHost(host);
@@ -2713,6 +3526,7 @@ function reconnectHost(id: string): void {
 function removeHost(id: string): void {
   cancelHostProbe(id);
   knownHostReachability.delete(id);
+  retireMobileHostAuthority(id);
   pruneHostOrganization(id);
   const removedSelectedHost = selectedHostId.value === id;
   const removedCatalogHost = catalogHostId.value === id;
@@ -2775,8 +3589,12 @@ async function refreshModels(): Promise<boolean> {
   const target = { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
   loadingModels.value = true;
   modelLoadError.value = "";
-  models.value = [];
-  modelsHostId.value = "";
+  // Keep a same-host last-good presentation mounted while its refresh is in
+  // flight. A different browsed host starts unknown and cannot inherit it.
+  if (modelsHostId.value !== hostId) {
+    models.value = [];
+    modelsHostId.value = "";
+  }
   try {
     const [status, entries, capabilities] = await Promise.all([
       apiJsonTo<ServerStatus>(target, "/api/status"),
@@ -2785,14 +3603,13 @@ async function refreshModels(): Promise<boolean> {
     ]);
     if (unmounted || epoch !== modelLoadEpoch || selectedHostId.value !== hostId) return false;
     knownHostReachability.add(hostId);
-    host.online = true;
-    host.version = status.version;
-    host.hostname = status.hostname ?? undefined;
     const priorCacheKey = mobileGalleryCacheKey(host);
-    host.instanceId = status.instance_id ?? host.instanceId;
+    if (!updateHostStatus({ id: hostId, status })) {
+      modelLoadError.value = `${host.name} now reports a different server identity. Remove and re-add this machine before generating.`;
+      return false;
+    }
     const nextCacheKey = mobileGalleryCacheKey(host);
     if (priorCacheKey !== nextCacheKey) await clearCachedGalleryHosts([priorCacheKey]);
-    captureHostTelemetry(hostId, status);
     expandCapabilities[hostId] = capabilities?.expand;
     serverCapabilities[hostId] = capabilities;
     // Keep auxiliary entries for the Upscale and ControlNet pickers, while
@@ -2827,7 +3644,11 @@ async function refreshModels(): Promise<boolean> {
   } catch (error) {
     if (unmounted || epoch !== modelLoadEpoch || selectedHostId.value !== hostId) return false;
     knownHostReachability.add(hostId);
-    host.online = false;
+    updateHostStatus({ id: hostId, status: null, error });
+    if (!host.online) {
+      models.value = [];
+      modelsHostId.value = "";
+    }
     // The banner above the model select owns this failure; the generation
     // status line keeps showing generation state, not background loads.
     const detail = describeTransportError(error, host.name);
@@ -2859,6 +3680,7 @@ async function refreshRoutingModels(): Promise<void> {
         const currentHost = hosts.value.find((candidate) => candidate.id === host.id);
         if (
           !currentHost ||
+          currentHost.instanceMismatch ||
           mobileGalleryCacheKey(currentHost) !== cacheKey ||
           currentHost.baseUrl !== target.baseUrl ||
           (currentHost.apiKey || null) !== target.apiKey
@@ -5331,6 +6153,51 @@ async function generate(): Promise<void> {
   // Batch sibling spreads this one request, so they share the outcome.
   request = fileUnderForFrozenRoute(request, route);
   requestAdvisories.value = [];
+  const durablePlans = planBatchRequests(
+    request,
+    batchSize,
+    resolveBaseSeed(request.seed),
+    requestOptions,
+  );
+  const durableLifecycle =
+    Boolean(route.instanceId?.trim()) &&
+    useMobileDurableGenerationLifecycle({
+      queue: {
+        heterogeneous_batch: route.heterogeneousBatch === true,
+        durable_batch_outcomes: route.durableBatchOutcomes === true,
+      },
+      durableMedia: route.durableMedia,
+      requests: durablePlans,
+      chain: chainRouting.kind === "chain",
+      modelFamily: form.family,
+    });
+  if (durableLifecycle) {
+    const admission = submitMobileDurableGeneration({ route, requests: durablePlans });
+    releasePreparedSubmission();
+    if (preparedSubmission) {
+      const active = document.activeElement;
+      const restoreFocus =
+        preparedSubmissionOwnedFocus &&
+        (active === document.body || (!!active && !!preparedSection?.contains(active)));
+      preparedBatch.value = null;
+      if (restoreFocus) {
+        void nextTick(() => document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus());
+      }
+    }
+    if (
+      quickSubmission &&
+      quickExpansionSnapshot.value?.requestToken === quickSubmission.requestToken
+    ) {
+      quickExpansionSnapshot.value = null;
+    }
+    if (!progressIsError.value) setGenerationStatus("Queued");
+    generationAnnouncement.value = "";
+    void admission.catch((error) => {
+      setGenerationStatus(describeTransportError(error, route.label), true);
+      generationAnnouncement.value = `Generation admission failed. ${progress.value}`;
+    });
+    return;
+  }
   const { settled } = generation.submitBatch(
     request,
     batchSize,
@@ -5379,6 +6246,7 @@ async function generate(): Promise<void> {
     await reconcileInterruptedGenerationJobs(jobs, {
       target: { ...route.target },
       hostLabel: route.label,
+      queueCapacity: hostTelemetry[route.hostId]?.queueCapacity,
       chain: chainRouting.kind === "chain",
       refreshResultUrl: (clientId) =>
         void generation.refreshRemoteResultUrl(clientId).catch(() => {
@@ -5497,6 +6365,51 @@ async function generate(): Promise<void> {
 }
 
 async function cancelGeneration(job: Job): Promise<void> {
+  const durable = durableRecoveryForJob(job);
+  if (durable) {
+    if (job.cancelling || job.status === "complete" || job.status === "error") return;
+    const clientBatchId = durable.recovery.tracker.clientBatchId;
+    if (!durable.recovery.cancelRequestedChildIndexes.includes(durable.childIndex)) {
+      replaceDurableRecovery({
+        ...durable.recovery,
+        cancelRequestedChildIndexes: [
+          ...durable.recovery.cancelRequestedChildIndexes,
+          durable.childIndex,
+        ],
+      });
+      // Persist intent before the by-client lookup or server-id DELETE.
+      persistDurableGenerationRecoveries();
+    }
+    job.cancelling = true;
+    try {
+      if (!job.id) {
+        await reconcileMobileDurableHost(durable.recovery.tracker.hostId);
+      }
+      const cancelled = await fulfillMobileDurableCancelIntent(clientBatchId, durable.childIndex);
+      const completedResult = durableGenerationCompletedResult(job);
+      if (completedResult) {
+        latestResultClientId.value = job.clientId;
+        setGenerationStatus(completionSummary(completedResult));
+        generationAnnouncement.value = "Generation completed.";
+      } else if (cancelled || isCancelledError(job.error)) {
+        setGenerationStatus("Cancelled");
+        generationAnnouncement.value = "Generation cancelled.";
+      } else {
+        setGenerationStatus("Cancellation requested — waiting for the exact host to confirm it");
+      }
+    } catch (error) {
+      if (!durableGenerationCompletedResult(job) && !isCancelledError(job.error)) {
+        setGenerationStatus(
+          `Cancellation is still pending on ${job.hostLabel}; it will retry against the same server instance. ${describeTransportError(error, job.hostLabel)}`,
+          true,
+        );
+        generationAnnouncement.value = "Cancellation is pending host confirmation.";
+      }
+    } finally {
+      if (durableGenerationJobIsTerminal(job)) job.cancelling = false;
+    }
+    return;
+  }
   try {
     await generation.cancel(job.clientId);
     if (job.status === "complete" && job.result) {
@@ -5518,6 +6431,14 @@ async function cancelGeneration(job: Job): Promise<void> {
   }
 }
 
+function durableGenerationJobIsTerminal(job: Job): boolean {
+  return job.status === "complete" || job.status === "error";
+}
+
+function durableGenerationCompletedResult(job: Job): CompleteEvent | null {
+  return job.status === "complete" ? job.result : null;
+}
+
 function cancelGenerationSubmission(): void {
   if (!preparingGeneration.value) return;
   submissionGuard.invalidate();
@@ -5529,12 +6450,54 @@ function cancelGenerationSubmission(): void {
   generationAnnouncement.value = "Generation planning cancelled. Nothing was queued.";
 }
 
+async function refreshDurableGenerationResultUrl(job: Job, force = false): Promise<void> {
+  const identity = durableRecoveryForJob(job);
+  const result = job.result;
+  const filename = result?.filename;
+  if (!identity || !filename) throw new Error("This host did not provide a saved result filename.");
+  const host = resolveMobileDurableHost(identity.recovery, connectedHosts.value);
+  if (!host?.online) throw new Error("The saved result host is not currently verified.");
+  if (job.resultUrlLoading) return;
+  if (!force && job.resultUrl && job.resultUrlExpiresAt === null) return;
+  job.resultUrlLoading = true;
+  job.resultError = null;
+  try {
+    const url = await streamableMediaUrl(galleryMediaPath(filename, "host"), {
+      target: mobileHostTarget(host),
+      cacheKey: host.id,
+      allowLegacyBlob: result.format !== "mp4",
+    });
+    const previousUrl = job.resultUrl;
+    if (previousUrl?.startsWith("blob:") && previousUrl !== url) {
+      URL.revokeObjectURL(previousUrl);
+      objectUrls.delete(previousUrl);
+    }
+    job.resultUrl = url;
+    job.resultUrlIsObjectUrl = url.startsWith("blob:");
+    if (job.resultUrlIsObjectUrl) objectUrls.add(url);
+    try {
+      const expires = new URL(url).searchParams.get("expires");
+      job.resultUrlExpiresAt =
+        expires && Number.isSafeInteger(Number(expires)) ? Number(expires) * 1000 : null;
+    } catch {
+      job.resultUrlExpiresAt = null;
+    }
+  } catch (error) {
+    job.resultError = error instanceof Error ? error.message : String(error);
+    throw error;
+  } finally {
+    job.resultUrlLoading = false;
+  }
+}
+
 function renewGeneratedResult(force: boolean): void {
   const job = latestResultJob.value;
   if (!job?.metadataOnlyCompletion || !job.result || job.resultUrlLoading) return;
   const previousUrl = job.resultUrl;
-  void generation
-    .refreshRemoteResultUrl(job.clientId, force)
+  const refresh = durableGenerationJobIdentity.has(job.clientId)
+    ? refreshDurableGenerationResultUrl(job, force)
+    : generation.refreshRemoteResultUrl(job.clientId, force);
+  void refresh
     .then(() => {
       if (latestResultClientId.value !== job.clientId || job.resultError || !job.resultUrl) return;
       if (force) resultMediaLoadKey.value += 1;
@@ -5846,7 +6809,11 @@ async function performGalleryRefresh(): Promise<void> {
         clearTimeout(timeout);
       }
       const currentHost = hosts.value.find((candidate) => candidate.id === host.id);
-      if (!currentHost || mobileGalleryCacheKey(currentHost) !== cacheKey) {
+      if (
+        !currentHost ||
+        currentHost.instanceMismatch ||
+        mobileGalleryCacheKey(currentHost) !== cacheKey
+      ) {
         throw new Error("Gallery host identity changed while refreshing");
       }
       if (capabilities !== undefined) serverCapabilities[host.id] = capabilities;
@@ -6162,7 +7129,11 @@ async function readReusePresentation(
       throw new Error("This machine now reports a different server identity.");
     }
     const currentHost = hosts.value.find((candidate) => candidate.id === print.hostId);
-    if (!currentHost || mobileGalleryCacheKey(currentHost) !== print.cacheKey) {
+    if (
+      !currentHost ||
+      currentHost.instanceMismatch ||
+      mobileGalleryCacheKey(currentHost) !== print.cacheKey
+    ) {
       throw new Error("This machine changed while its saved settings were refreshing.");
     }
     const presentation: CachedHostPresentation = {
@@ -8315,7 +9286,16 @@ watch(
 watch(
   () => connectedHosts.value.map((host) => `${host.id}:${host.online}:${host.instanceId ?? ""}`),
   (next, previous) => {
-    if (next.join("|") !== previous?.join("|")) void flushGalleryMutationOutbox();
+    if (next.join("|") !== previous?.join("|")) {
+      void flushGalleryMutationOutbox();
+      ensureDurableGenerationHostWatches();
+      void processDurableGenerationTerminalEffects();
+      for (const hostId of new Set(
+        durableGenerationRecoveries.value.map((recovery) => recovery.tracker.hostId),
+      )) {
+        void reconcileMobileDurableHost(hostId);
+      }
+    }
   },
 );
 
@@ -8339,6 +9319,8 @@ function handleForegroundResume(): void {
     void invoke("restore_mobile_viewport").catch(() => undefined);
   }
   probeHosts();
+  ensureDurableGenerationHostWatches();
+  for (const watch of durableGenerationWatches.values()) watch.wake();
   void flushGalleryMutationOutbox();
   void refreshMobileActivity();
   if (modelLoadError.value && !loadingModels.value) void refreshModels();
@@ -8464,6 +9446,14 @@ onMounted(async () => {
   }
   await hydrateApiKeys();
   if (unmounted) return;
+  syncDurableGenerationJobs();
+  scheduleMobileDurableCancelIntents();
+  ensureDurableGenerationHostWatches();
+  for (const hostId of new Set(
+    durableGenerationRecoveries.value.map((recovery) => recovery.tracker.hostId),
+  )) {
+    void reconcileMobileDurableHost(hostId);
+  }
   pendingGalleryMutationCount.value = (await listGalleryMutations()).length;
   if (pendingGalleryMutationCount.value > 0) {
     organizationError.value = `${pendingGalleryMutationCount.value} retained gallery edit${pendingGalleryMutationCount.value === 1 ? " is" : "s are"} waiting for its host.`;
@@ -8563,6 +9553,9 @@ onBeforeUnmount(() => {
   if (galleryWindowFrame !== null) cancelAnimationFrame(galleryWindowFrame);
   galleryWindowFrame = null;
   stopSequenceTransport();
+  for (const watch of durableGenerationWatches.values()) watch.stop();
+  durableGenerationWatches.clear();
+  durableGenerationWatchRoutes.clear();
   for (const id of [...hostProbes.keys()]) cancelHostProbe(id);
   generation.resetJobs();
   for (const url of objectUrls) URL.revokeObjectURL(url);
@@ -8702,7 +9695,7 @@ onBeforeUnmount(() => {
               <option v-if="autoRoutingAvailable" :value="AUTO_TARGET_ID">Auto</option>
               <option v-if="autoRoutingAvailable" :value="CAPABLE_TARGET_ID">Most capable</option>
               <option v-for="host in connectedHosts" :key="host.id" :value="host.id">
-                {{ host.name }}{{ host.online ? "" : " · offline" }}
+                {{ mobileGenerateTargetLabel(host.id, connectedHosts) }}
               </option>
             </select>
           </label>
@@ -10337,14 +11330,18 @@ onBeforeUnmount(() => {
                 <span class="host-row-state">
                   <span
                     class="status-dot"
-                    :class="host.connected !== false ? (host.online ? 'is-ready' : 'is-error') : ''"
+                    :class="
+                      host.connected !== false
+                        ? host.stale
+                          ? 'is-reconnecting'
+                          : host.online
+                            ? 'is-ready'
+                            : 'is-error'
+                        : ''
+                    "
                   />
-                  <span class="host-chip">{{
-                    host.connected === false
-                      ? "disconnected"
-                      : host.online
-                        ? `v${host.version ?? ""}`
-                        : "offline"
+                  <span class="host-chip" data-test="mobile-host-health">{{
+                    mobileHostHealthLabel(host)
                   }}</span>
                   <span aria-hidden="true">›</span>
                 </span>

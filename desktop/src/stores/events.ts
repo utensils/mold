@@ -9,6 +9,7 @@ import { useJobsStore } from "./jobs";
 
 /** Old-server fallback: refetch cadence while the queue is non-empty. */
 const POLL_INTERVAL_MS = 5_000;
+const authoritativeRefreshes = new WeakMap<object, Promise<void>>();
 
 /**
  * App-wide subscriber to `GET /api/events` — one SSE connection that keeps
@@ -24,7 +25,11 @@ export const useEventsStore = defineStore("events", {
     /** True when the connected server streams `/api/events`. */
     live: false,
     abort: null as AbortController | null,
+    sharedHostId: null as string | null,
     pollTimer: null as ReturnType<typeof setInterval> | null,
+    refreshScheduled: false,
+    refreshAgain: false,
+    refreshEpoch: 0,
   }),
   actions: {
     /** Subscribe (or start the fallback poller). Idempotent. */
@@ -47,10 +52,15 @@ export const useEventsStore = defineStore("events", {
     unsubscribe() {
       this.abort?.abort();
       this.abort = null;
+      if (this.sharedHostId) useGenerationStore().detachSharedDurableEventHost(this.sharedHostId);
+      this.sharedHostId = null;
       if (this.pollTimer) clearInterval(this.pollTimer);
       this.pollTimer = null;
       this.subscribed = false;
       this.live = false;
+      this.refreshEpoch += 1;
+      this.refreshScheduled = false;
+      this.refreshAgain = false;
     },
     /** Re-probe after a connection change (new host may differ in caps). */
     async resubscribe() {
@@ -66,18 +76,27 @@ export const useEventsStore = defineStore("events", {
       }
       const abort = new AbortController();
       this.abort = abort;
+      this.sharedHostId = primary.id;
+      useGenerationStore().attachSharedDurableEventHost(primary.id);
       void sseStream("/api/events", {
         target: { baseUrl: primary.baseUrl, apiKey: primary.apiKey },
         signal: abort.signal,
         retry: true,
         terminalHttpStatuses: [401, 403, 404],
-        onOpen: () => this.refreshAuthoritativePrimary(),
-        onEvent: (_event, data) => {
+        onOpen: () => {
+          this.refreshAuthoritativePrimary();
+        },
+        onEvent: (event, data) => {
+          useGenerationStore().onDurableEvent(primary.id, event, data);
+          if (event !== "event" && event !== "message") return;
           try {
             this.apply(JSON.parse(data) as ServerEvent);
           } catch {
             /* skip malformed frame */
           }
+        },
+        onClose: () => {
+          if (!abort.signal.aborted) useGenerationStore().onDurableEventClose(primary.id);
         },
       });
     },
@@ -135,8 +154,31 @@ export const useEventsStore = defineStore("events", {
       }
     },
     refreshAuthoritativePrimary() {
-      const primary = useHostsStore().primaryHost;
-      if (primary) void useJobsStore().refreshHost(primary);
+      this.refreshAgain = true;
+      if (this.refreshScheduled || authoritativeRefreshes.has(this)) return;
+      this.refreshScheduled = true;
+      const epoch = this.refreshEpoch;
+      queueMicrotask(() => {
+        this.refreshScheduled = false;
+        if (epoch !== this.refreshEpoch || authoritativeRefreshes.has(this)) return;
+        const refresh = (async () => {
+          do {
+            this.refreshAgain = false;
+            const primary = useHostsStore().primaryHost;
+            if (primary)
+              await useJobsStore()
+                .refreshHost(primary)
+                .catch(() => undefined);
+          } while (this.refreshAgain && epoch === this.refreshEpoch);
+        })().finally(() => {
+          authoritativeRefreshes.delete(this);
+          // A resubscribe advances the epoch while the old host's read can
+          // still be in flight. Preserve an invalidation raised by the new
+          // stream and start it only after the old wave releases single-flight.
+          if (this.refreshAgain) this.refreshAuthoritativePrimary();
+        });
+        authoritativeRefreshes.set(this, refresh);
+      });
     },
     /**
      * Old-server fallback: while any generation is pending, refetch the

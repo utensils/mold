@@ -566,10 +566,10 @@ fn resource_device_facts(state: &AppState) -> Vec<DeviceFact> {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .active_vram_bytes();
-            let reclaimable_cache_bytes = device
-                .sampled_mold_vram_bytes
-                .map(|used_by_mold| reclaimable_cache_bytes.min(used_by_mold))
-                .unwrap_or(0);
+            let reclaimable_cache_bytes = crate::scheduler::reclaimable_model_cache_bytes(
+                reclaimable_cache_bytes,
+                device.sampled_mold_vram_bytes,
+            );
             let available = crate::scheduler::effective_available_vram_bytes(
                 device.sampled_free_vram_bytes,
                 reclaimable_cache_bytes,
@@ -596,9 +596,8 @@ fn effective_preparation_available_vram(
     let sampled_free_bytes = used_vram_bytes
         .map(|used| total_vram_bytes.saturating_sub(used))
         .unwrap_or(0);
-    let reclaimable_cache_bytes = mold_used_bytes
-        .map(|used_by_mold| active_cache_bytes.min(used_by_mold))
-        .unwrap_or(0);
+    let reclaimable_cache_bytes =
+        crate::scheduler::reclaimable_model_cache_bytes(active_cache_bytes, mold_used_bytes);
     crate::scheduler::effective_available_vram_bytes(
         sampled_free_bytes,
         reclaimable_cache_bytes,
@@ -1558,6 +1557,7 @@ pub(crate) async fn prepare_inputs_for_devices(
                 crate::identity_dependencies::materialize_identity_assets(
                     &dependency_context,
                     request,
+                    context.queue_media_projection.as_ref(),
                     &family,
                     &mut frozen,
                     &mut pending,
@@ -2212,6 +2212,9 @@ const fn h3_preparation_capacity_sensitive(backend: mold_core::GpuBackend) -> bo
 
 #[derive(Clone, Debug, Default)]
 pub struct DependencyPreparationContext {
+    /// Authenticated scheduling facts for durable media that intentionally
+    /// remains encrypted during dependency preparation.
+    pub(crate) queue_media_projection: Option<crate::queue_media_store::QueueMediaProjection>,
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) h3_private_ingress_grant: Option<crate::h3_private_bridge::H3PrivateIngressGrant>,
     /// Staged Ref2VA references, as a payload-free view.
@@ -2634,8 +2637,13 @@ mod tests {
         );
         assert_eq!(
             effective_preparation_available_vram(24 * GIB, Some(20 * GIB), None, 16 * GIB),
+            20 * GIB,
+            "owner-accounted cache remains reclaimable without OS process attribution"
+        );
+        assert_eq!(
+            effective_preparation_available_vram(24 * GIB, Some(20 * GIB), None, 0),
             4 * GIB,
-            "unattributed process memory must never be assumed reclaimable"
+            "unknown external allocations are never reclaimed"
         );
     }
 

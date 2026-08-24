@@ -147,6 +147,16 @@ describe("MachinesView overview", () => {
     expect(notes[0]!.classes()).toContain("text-warning");
   });
 
+  it("shows a stale verified machine as reconnecting without discarding its telemetry", async () => {
+    const wrapper = await mountView((hosts) => {
+      hosts.telemetry["hal9000-7680"]!.stale = true;
+    });
+
+    expect(wrapper.get("[data-test='host-reconnecting']").text()).toBe("reconnecting…");
+    expect(wrapper.get("[data-test='host-card']").text()).toContain("NVIDIA B200");
+    expect(wrapper.get("[data-test='host-card']").text()).toContain("queue 0");
+  });
+
   it("offers common context-menu actions for connected, remembered, and discovered hosts", async () => {
     const wrapper = await mountView();
 

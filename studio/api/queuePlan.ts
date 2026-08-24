@@ -21,6 +21,8 @@ export interface QueueEntry {
    * studio because desktop and web own structurally compatible metadata types. */
   metadata?: unknown;
   seed_pinned?: boolean | null;
+  durable?: boolean | null;
+  held_reason?: string | null;
 }
 
 export interface QueueWorkItem {
@@ -74,6 +76,38 @@ export interface QueuePlan {
 export interface QueueListing {
   entries: QueueEntry[];
   plan: QueuePlan | null;
+  /** Active rows without durable backing. Repeated on every explicit page. */
+  live_only_entries?: QueueEntry[];
+  /** Present only when the caller explicitly requested a durable page. */
+  page?: QueuePage;
+}
+
+export interface QueuePageRequest {
+  limit: number;
+  cursor?: string;
+}
+
+export interface QueuePage {
+  limit: number;
+  offset: number;
+  returned: number;
+  next_cursor?: string;
+}
+
+/** Current servers expose the runtime queue capacity in `/api/status`. That
+ * is the authoritative amount of live work a hot client needs in one frame,
+ * and therefore the only honest default for a payload-free durable page.
+ * `undefined` keeps old hosts on their legacy endpoint; callers must never
+ * substitute a guessed cap. */
+export function queuePageRequestForCapacity(
+  capacity: unknown,
+): QueuePageRequest | undefined {
+  return typeof capacity === "number" &&
+    Number.isFinite(capacity) &&
+    Number.isInteger(capacity) &&
+    capacity > 0
+    ? { limit: capacity }
+    : undefined;
 }
 
 export type QueuePlanChangedEvent = {
@@ -91,12 +125,9 @@ function nullableNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-export function parseQueueListing(value: unknown): QueueListing {
-  const root = record(value);
-  if (!root || !Array.isArray(root.entries)) {
-    throw new IncompatibleHostError(["entries"]);
-  }
-  const entries = root.entries.map((raw, index) => {
+function queueEntries(value: unknown, field: string): QueueEntry[] {
+  if (!Array.isArray(value)) throw new IncompatibleHostError([field]);
+  return value.map((raw, index) => {
     const row = record(raw);
     if (
       !row ||
@@ -106,14 +137,110 @@ export function parseQueueListing(value: unknown): QueueListing {
       typeof row.started_at_unix_ms !== "number" ||
       typeof row.position !== "number"
     ) {
-      throw new IncompatibleHostError([`entries[${index}]`]);
+      throw new IncompatibleHostError([`${field}[${index}]`]);
     }
     return row as unknown as QueueEntry;
   });
+}
+
+function nonnegativeInteger(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    Number.isInteger(value) &&
+    value >= 0
+  );
+}
+
+function parseQueuePage(value: unknown): QueuePage {
+  const page = record(value);
+  const missing: string[] = [];
+  if (!page || !nonnegativeInteger(page.limit) || page.limit === 0) {
+    missing.push("page.limit");
+  }
+  if (!page || !nonnegativeInteger(page.offset)) {
+    missing.push("page.offset");
+  }
+  if (
+    !page ||
+    !nonnegativeInteger(page.returned) ||
+    (nonnegativeInteger(page.limit) && page.returned > page.limit)
+  ) {
+    missing.push("page.returned");
+  }
+  if (
+    page?.next_cursor !== undefined &&
+    (typeof page.next_cursor !== "string" || page.next_cursor.length === 0)
+  ) {
+    missing.push("page.next_cursor");
+  }
+  if (!page || missing.length > 0) throw new IncompatibleHostError(missing);
+  return {
+    limit: page.limit as number,
+    offset: page.offset as number,
+    returned: page.returned as number,
+    ...(typeof page.next_cursor === "string"
+      ? { next_cursor: page.next_cursor }
+      : {}),
+  };
+}
+
+/** Build an explicit queue-page path without interpreting the opaque cursor. */
+export function queueListingPath(request?: QueuePageRequest): string {
+  if (!request) return "/api/queue";
+  if (
+    !Number.isFinite(request.limit) ||
+    !Number.isInteger(request.limit) ||
+    request.limit <= 0
+  ) {
+    throw new RangeError("queue page limit must be a positive integer");
+  }
+  if (
+    request.cursor !== undefined &&
+    (typeof request.cursor !== "string" || request.cursor.length === 0)
+  ) {
+    throw new TypeError("queue page cursor must be a nonempty string");
+  }
+  const query = new URLSearchParams({ limit: String(request.limit) });
+  if (request.cursor !== undefined) query.set("cursor", request.cursor);
+  return `/api/queue?${query.toString()}`;
+}
+
+export function parseQueueListing(value: unknown): QueueListing {
+  const root = record(value);
+  if (!root || !Array.isArray(root.entries)) {
+    throw new IncompatibleHostError(["entries"]);
+  }
+  const entries = queueEntries(root.entries, "entries");
   return {
     entries,
     plan: root.plan == null ? null : parseQueuePlan(root.plan),
+    ...(root.live_only_entries === undefined
+      ? {}
+      : {
+          live_only_entries: queueEntries(
+            root.live_only_entries,
+            "live_only_entries",
+          ),
+        }),
+    ...(root.page === undefined ? {} : { page: parseQueuePage(root.page) }),
   };
+}
+
+/** Keep durable page order, then append the first occurrence of each live-only
+ * id. Callers may flatten live-only rows from several pages before merging. */
+export function mergeQueueEntries(
+  entries: readonly QueueEntry[],
+  liveOnlyEntries: readonly QueueEntry[],
+): QueueEntry[] {
+  const seen = new Set(entries.map(({ id }) => id));
+  const merged = [...entries];
+  for (const entry of liveOnlyEntries) {
+    if (seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    merged.push(entry);
+  }
+  return merged;
 }
 
 export function parseQueuePlan(value: unknown): QueuePlan {
@@ -138,8 +265,55 @@ export function parseQueuePlan(value: unknown): QueuePlan {
   };
 }
 
-export async function listQueue(target: ApiTarget): Promise<QueueListing> {
-  return parseQueueListing(await apiJsonTo<unknown>(target, "/api/queue"));
+export async function listQueue(
+  target: ApiTarget,
+  /** undefined discovers the host capacity first; null records that the
+   * caller already observed a legacy status response with no capacity. */
+  page?: QueuePageRequest | null,
+  signal?: AbortSignal,
+): Promise<QueueListing> {
+  let request = page ?? undefined;
+  if (page === undefined) {
+    const status =
+      signal === undefined
+        ? await apiJsonTo<unknown>(target, "/api/status")
+        : await apiJsonTo<unknown>(target, "/api/status", { signal });
+    request = queuePageRequestForCapacity(record(status)?.queue_capacity);
+  }
+  const path = queueListingPath(request);
+  const value =
+    signal === undefined
+      ? await apiJsonTo<unknown>(target, path)
+      : await apiJsonTo<unknown>(target, path, { signal });
+  return parseQueueListing(value);
+}
+
+/** Resolve one queue row for an explicit user action without ever asking the
+ * server for its legacy all-rows response. This may traverse every bounded
+ * page, but only on demand (for example, opening one activity row), never from
+ * a health or polling loop. */
+export async function findQueueEntryById(
+  target: ApiTarget,
+  id: string,
+  signal?: AbortSignal,
+): Promise<QueueEntry | null> {
+  let listing = await listQueue(target, undefined, signal);
+  const seenCursors = new Set<string>();
+  for (;;) {
+    const match = mergeQueueEntries(
+      listing.entries,
+      listing.live_only_entries ?? [],
+    ).find((entry) => entry.id === id);
+    if (match) return match;
+    const cursor = listing.page?.next_cursor;
+    const limit = listing.page?.limit;
+    if (!cursor || !limit) return null;
+    if (seenCursors.has(cursor)) {
+      throw new Error("host repeated a queue continuation cursor");
+    }
+    seenCursors.add(cursor);
+    listing = await listQueue(target, { limit, cursor }, signal);
+  }
 }
 
 /** Cancel work that is still waiting in the explicit host's generation queue. */

@@ -54,9 +54,9 @@ const chipReady = computed(() => {
     props.targetId === AUTO_TARGET_ID ||
     props.targetId === CAPABLE_TARGET_ID
   ) {
-    return props.hosts.some((h) => h.status === "ready");
+    return props.hosts.some((h) => h.status === "ready" && !h.stale);
   }
-  return pinnedHost.value?.status === "ready";
+  return pinnedHost.value?.status === "ready" && !pinnedHost.value.stale;
 });
 
 const chipStatus = computed(() => {
@@ -64,15 +64,19 @@ const chipStatus = computed(() => {
     props.targetId === AUTO_TARGET_ID ||
     props.targetId === CAPABLE_TARGET_ID
   ) {
+    if (props.hosts.some((host) => host.status === "ready" && host.stale))
+      return chipReady.value ? "ready" : "reconnecting";
     return chipReady.value ? "ready" : "connecting";
   }
   const status = pinnedHost.value?.status;
+  if (pinnedHost.value?.stale) return "reconnecting";
   if (status === "ready") return "ready";
   if (status === "error") return "offline";
   return status ?? "connecting";
 });
 
 function hostLine(host: RoutableHost): string {
+  if (host.stale) return "reconnecting";
   if (host.status === "error") return "offline";
   if (host.status === "connecting") return "connecting";
   return host.queueDepth !== null ? `queue ${host.queueDepth}` : "ready";
@@ -123,7 +127,9 @@ onBeforeUnmount(() => {
         :class="{ 'hostpick__dot--wait': !chipReady }"
       />
       <span class="hostpick__label">Run on {{ chipLabel }}</span>
-      <span class="hostpick__hint">add a machine</span>
+      <span class="hostpick__hint">{{
+        originHostEntry?.stale ? "reconnecting" : "add a machine"
+      }}</span>
       <Icon name="chevron-right" :size="14" />
     </button>
 
@@ -195,7 +201,9 @@ onBeforeUnmount(() => {
         >
           <span
             class="hostpick__dot"
-            :class="{ 'hostpick__dot--wait': host.status !== 'ready' }"
+            :class="{
+              'hostpick__dot--wait': host.status !== 'ready' || host.stale,
+            }"
           />
           <span class="hostpick__item-label">{{ host.label }}</span>
           <span class="hostpick__item-sub">{{ hostLine(host) }}</span>

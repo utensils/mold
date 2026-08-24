@@ -1,11 +1,41 @@
 import { describe, expect, it } from "vitest";
 import {
+  mobileHostHealthLabel,
   mobileHostMatchesRoute,
   normalizeRemoteAddress,
+  recordMobileHostAuthorityRejection,
+  recordMobileHostProbeFailure,
+  recordMobileHostStatus,
   remoteHostId,
   type MobileHost,
 } from "./hosts";
+import type { ServerStatus } from "../lib/api/types";
 import type { HostRoute } from "../stores/hosts";
+
+function status(overrides: Partial<ServerStatus> = {}): ServerStatus {
+  return {
+    version: "0.18.0",
+    models_loaded: [],
+    uptime_secs: 60,
+    hostname: "studio",
+    instance_id: "studio-instance",
+    ...overrides,
+  };
+}
+
+function verifiedHost(overrides: Partial<MobileHost> = {}): MobileHost {
+  return {
+    id: "studio-id",
+    name: "Studio",
+    baseUrl: "http://studio.tailnet.ts.net:7680",
+    apiKey: "secret",
+    hostname: "studio",
+    version: "0.18.0",
+    instanceId: "studio-instance",
+    online: true,
+    ...overrides,
+  };
+}
 
 describe("mobile remote hosts", () => {
   it("accepts Tailscale MagicDNS names and applies Mold's default port", () => {
@@ -81,5 +111,95 @@ describe("mobile remote hosts", () => {
         online: true,
       }),
     ).toBe(true);
+  });
+
+  it("keeps a verified host stale through one or many transient failures, then recovers", () => {
+    const host = verifiedHost();
+
+    recordMobileHostProbeFailure(host, new Error("status timeout"));
+    expect(host).toMatchObject({
+      online: true,
+      stale: true,
+      instanceId: "studio-instance",
+      version: "0.18.0",
+      healthError: "status timeout",
+    });
+    expect(mobileHostHealthLabel(host)).toBe("reconnecting…");
+
+    recordMobileHostProbeFailure(host, new Error("backend busy"));
+    expect(host).toMatchObject({
+      online: true,
+      stale: true,
+      instanceId: "studio-instance",
+      healthError: "backend busy",
+    });
+
+    expect(
+      recordMobileHostStatus(
+        host,
+        status({ version: "0.19.0", uptime_secs: 90, instance_id: "studio-instance" }),
+      ),
+    ).toBe("verified");
+    expect(host).toMatchObject({
+      online: true,
+      stale: false,
+      instanceId: "studio-instance",
+      version: "0.19.0",
+    });
+    expect(host.healthError).toBeUndefined();
+    expect(mobileHostHealthLabel(host)).toBe("v0.19.0");
+  });
+
+  it("keeps a never-verified host unreachable and non-authoritative", () => {
+    const host = verifiedHost({ online: false, instanceId: undefined, version: undefined });
+
+    recordMobileHostProbeFailure(host, new Error("network unreachable"));
+
+    expect(host).toMatchObject({
+      online: false,
+      stale: false,
+      healthError: "network unreachable",
+    });
+    expect(mobileHostHealthLabel(host)).toBe("unreachable");
+  });
+
+  it("fences an explicit instance mismatch without adopting replacement identity", () => {
+    const host = verifiedHost();
+
+    expect(recordMobileHostStatus(host, status({ instance_id: "replacement-instance" }))).toBe(
+      "instance_mismatch",
+    );
+    expect(host).toMatchObject({
+      online: false,
+      stale: false,
+      instanceId: "studio-instance",
+      instanceMismatch: {
+        expected: "studio-instance",
+        reported: "replacement-instance",
+      },
+    });
+    expect(mobileHostHealthLabel(host)).toBe("identity changed");
+
+    recordMobileHostProbeFailure(host, new Error("replacement timed out"));
+    expect(host.instanceMismatch).toEqual({
+      expected: "studio-instance",
+      reported: "replacement-instance",
+    });
+    expect(host.online).toBe(false);
+  });
+
+  it("retires last-good authority when the exact credential is rejected", () => {
+    const host = verifiedHost();
+
+    recordMobileHostAuthorityRejection(host, new Error("API key was rejected"));
+
+    expect(host).toMatchObject({
+      online: false,
+      stale: false,
+      authorityRejected: true,
+      instanceId: "studio-instance",
+      healthError: "API key was rejected",
+    });
+    expect(mobileHostHealthLabel(host)).toBe("access denied");
   });
 });

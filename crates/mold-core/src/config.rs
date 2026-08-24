@@ -635,7 +635,9 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpus: Option<crate::types::GpuSelection>,
 
-    /// Max queued requests before 503 (default: 200).
+    /// Jobs hydrated into the runtime window (default: 200).
+    ///
+    /// The durable generation backlog is not capped by this value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_size: Option<usize>,
 
@@ -934,7 +936,7 @@ impl Config {
         self.gpus.clone().unwrap_or_default()
     }
 
-    /// Return the configured queue size or the default (200).
+    /// Return the configured runtime queue window or the default (200).
     pub fn queue_size(&self) -> usize {
         self.queue_size.unwrap_or(200)
     }

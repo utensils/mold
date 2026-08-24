@@ -3,7 +3,9 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { parseDeviceListResponse, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
 import {
   cancelQueueJob,
-  parseQueueListing,
+  listQueue,
+  mergeQueueEntries,
+  queuePageRequestForCapacity,
   setQueueDevicePin,
   type QueuePlan,
 } from "@studio/api/queuePlan";
@@ -33,7 +35,7 @@ import { unloadModel } from "../lib/api/models";
 import { modelDisplayName, modelDisplayNameForId, modelSizeLabels } from "../lib/models";
 import { applyDownloadEvent, emptyDownloadsState, type DownloadsState } from "../stores/downloads";
 import type { QueueEntry } from "../stores/jobs";
-import { mobileHostTarget, type MobileHost } from "./hosts";
+import { mobileHostHealthLabel, mobileHostTarget, type MobileHost } from "./hosts";
 import { emptyTrash as emptyHostTrash, listTrash } from "@studio/api/galleryOrganization";
 import { RETENTION_OPTIONS, retentionLabel } from "@studio/lib/libraryOrganization";
 import {
@@ -77,6 +79,12 @@ const installed = ref<ModelEntry[]>([]);
 const queue = ref<QueueEntry[]>([]);
 const queuePlan = ref<QueuePlan | null>(null);
 const queueApiAvailable = ref(false);
+const queueTail = ref<QueueEntry[]>([]);
+const queuePageLimit = ref<number | null>(null);
+const queueNextCursor = ref<string | null>(null);
+const queueContinued = ref(false);
+const loadingMoreQueue = ref(false);
+const loadMoreQueueError = ref("");
 const downloads = ref<DownloadsState>(emptyDownloadsState());
 const loading = ref(false);
 const error = ref("");
@@ -97,11 +105,14 @@ const emptyTrashArmed = ref(false);
 const emptyingTrash = ref(false);
 let loadEpoch = 0;
 let queueRequestGeneration = 0;
+let queueLoadMoreGeneration = 0;
 let deviceRequestGeneration = 0;
 let resourceAbort: AbortController | null = null;
 let downloadsAbort: AbortController | null = null;
 let deviceEventsAbort: AbortController | null = null;
 let livePollTimer: ReturnType<typeof setTimeout> | null = null;
+let queueRefreshPromise: Promise<void> | null = null;
+let queueRefreshQueued = false;
 let deviceRefreshPromise: Promise<void> | null = null;
 let deviceRefreshQueued = false;
 
@@ -112,8 +123,18 @@ const inFlightDownloads = computed(() => [
 ]);
 const loadedModels = computed(() => status.value?.models_loaded ?? []);
 const uptime = computed(() => status.value?.uptime_secs ?? null);
-const queueDepth = computed(() =>
-  queueApiAvailable.value ? queue.value.length : (status.value?.queue_depth ?? queue.value.length),
+const durableBacklog = computed(() => {
+  const depth = status.value?.queue_depth;
+  return typeof depth === "number" && Number.isSafeInteger(depth) && depth >= 0 ? depth : null;
+});
+const runtimeWindow = computed(() => {
+  const capacity = status.value?.queue_capacity;
+  return typeof capacity === "number" && Number.isSafeInteger(capacity) && capacity > 0
+    ? capacity
+    : null;
+});
+const queueSummary = computed(() =>
+  durableBacklog.value === null ? `${queue.value.length} loaded` : `${durableBacklog.value} total`,
 );
 const modelLabel = (name: string) => modelDisplayNameForId(name, installed.value);
 
@@ -163,6 +184,8 @@ function stopLiveServices(): void {
   deviceEventsAbort = null;
   if (livePollTimer) clearTimeout(livePollTimer);
   livePollTimer = null;
+  queueRefreshPromise = null;
+  queueRefreshQueued = false;
   deviceRefreshPromise = null;
   deviceRefreshQueued = false;
 }
@@ -171,15 +194,28 @@ async function refreshQueue(epoch = loadEpoch): Promise<void> {
   const generation = ++queueRequestGeneration;
   const requestTarget = target.value;
   try {
-    const listing = parseQueueListing(await apiJsonTo<unknown>(requestTarget, "/api/queue"));
+    const listing = await listQueue(
+      requestTarget,
+      queuePageRequestForCapacity(status.value?.queue_capacity) ?? null,
+    );
     if (
       epoch === loadEpoch &&
       generation === queueRequestGeneration &&
       requestTarget.baseUrl === target.value.baseUrl &&
       requestTarget.apiKey === target.value.apiKey
     ) {
-      queue.value = listing.entries as QueueEntry[];
+      const head = mergeQueueEntries(
+        listing.entries,
+        listing.live_only_entries ?? [],
+      ) as QueueEntry[];
+      queue.value = head;
       queuePlan.value = listing.plan;
+      queuePageLimit.value = listing.page?.limit ?? null;
+      queueNextCursor.value = listing.page?.next_cursor ?? null;
+      queueTail.value = [];
+      queueContinued.value = false;
+      loadingMoreQueue.value = false;
+      queueLoadMoreGeneration += 1;
       queueApiAvailable.value = true;
     }
   } catch {
@@ -195,6 +231,78 @@ async function refreshQueue(epoch = loadEpoch): Promise<void> {
       queuePlan.value = null;
       queueApiAvailable.value = false;
     }
+  }
+}
+
+function requestQueueRefresh(epoch = loadEpoch): Promise<void> {
+  if (queueRefreshPromise) {
+    queueRefreshQueued = true;
+    queueRequestGeneration += 1;
+    return queueRefreshPromise;
+  }
+  const refresh = (async () => {
+    do {
+      queueRefreshQueued = false;
+      await refreshQueue(epoch);
+    } while (queueRefreshQueued && epoch === loadEpoch);
+  })();
+  queueRefreshPromise = refresh;
+  return refresh.finally(() => {
+    if (queueRefreshPromise === refresh) queueRefreshPromise = null;
+  });
+}
+
+async function loadMoreQueue(): Promise<void> {
+  const cursor = queueNextCursor.value;
+  const limit = queuePageLimit.value;
+  if (!cursor || !limit || loadingMoreQueue.value) return;
+  loadingMoreQueue.value = true;
+  loadMoreQueueError.value = "";
+  const epoch = loadEpoch;
+  const requestTarget = target.value;
+  const generation = ++queueLoadMoreGeneration;
+  try {
+    const listing = await listQueue(requestTarget, { limit, cursor });
+    if (
+      generation !== queueLoadMoreGeneration ||
+      epoch !== loadEpoch ||
+      queueNextCursor.value !== cursor ||
+      requestTarget.baseUrl !== target.value.baseUrl ||
+      requestTarget.apiKey !== target.value.apiKey
+    )
+      return;
+    const seenTail = new Set(queueTail.value.map(({ id }) => id));
+    queueTail.value = [
+      ...queueTail.value,
+      ...(listing.entries as QueueEntry[]).filter(({ id }) => !seenTail.has(id)),
+    ];
+    const seen = new Set<string>();
+    queue.value = [...queue.value, ...queueTail.value, ...(listing.live_only_entries ?? [])].filter(
+      ({ id }) => {
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      },
+    ) as QueueEntry[];
+    queueNextCursor.value = listing.page?.next_cursor ?? null;
+    queueContinued.value = listing.page !== undefined;
+    queuePlan.value = listing.plan ?? queuePlan.value;
+  } catch (error) {
+    if (
+      generation === queueLoadMoreGeneration &&
+      epoch === loadEpoch &&
+      requestTarget.baseUrl === target.value.baseUrl &&
+      requestTarget.apiKey === target.value.apiKey
+    )
+      loadMoreQueueError.value = describeTransportError(error, props.host.name);
+  } finally {
+    if (
+      generation === queueLoadMoreGeneration &&
+      epoch === loadEpoch &&
+      requestTarget.baseUrl === target.value.baseUrl &&
+      requestTarget.apiKey === target.value.apiKey
+    )
+      loadingMoreQueue.value = false;
   }
 }
 
@@ -314,8 +422,7 @@ function scheduleLivePoll(epoch: number): void {
     livePollTimer = null;
     // Queue authority has its own generation fence and must not hold device
     // freshness hostage if an older endpoint never settles.
-    void refreshQueue(epoch);
-    await refreshDevicesSafely(epoch);
+    await Promise.all([requestQueueRefresh(epoch), refreshDevicesSafely(epoch)]);
     scheduleLivePoll(epoch);
   }, 5_000);
 }
@@ -353,11 +460,11 @@ function startLiveServices(epoch: number): void {
 
   deviceEventsAbort = new AbortController();
   subscribeToDeviceSnapshots(target.value, deviceEventsAbort.signal, () => {
-    void refreshQueue(epoch);
+    void requestQueueRefresh(epoch);
     void refreshDevicesSafely(epoch);
   });
 
-  void refreshQueue(epoch);
+  void requestQueueRefresh(epoch);
   scheduleLivePoll(epoch);
 }
 
@@ -451,6 +558,12 @@ async function loadHost(): Promise<void> {
   queue.value = [];
   queuePlan.value = null;
   queueApiAvailable.value = false;
+  queueTail.value = [];
+  queuePageLimit.value = null;
+  queueNextCursor.value = null;
+  queueContinued.value = false;
+  loadingMoreQueue.value = false;
+  loadMoreQueueError.value = "";
   downloads.value = emptyDownloadsState();
   renameValue.value = props.host.name;
   renaming.value = false;
@@ -474,6 +587,12 @@ async function loadHost(): Promise<void> {
       apiJsonTo<ModelEntry[]>(target.value, "/api/models"),
     ]);
     if (epoch !== loadEpoch) return;
+    const expectedInstanceId = props.host.instanceId?.trim();
+    const reportedInstanceId = nextStatus.instance_id?.trim();
+    if (expectedInstanceId && reportedInstanceId && expectedInstanceId !== reportedInstanceId) {
+      emit("status", { id: props.host.id, status: nextStatus });
+      throw new Error("This address now reports a different Mold server identity.");
+    }
     status.value = nextStatus;
     installed.value = models.filter((model) => model.downloaded);
     emit("status", { id: props.host.id, status: nextStatus });
@@ -515,7 +634,7 @@ async function toggleDeviceById(deviceId: string, enabled: boolean): Promise<voi
 async function unpinWork(workId: string): Promise<void> {
   try {
     await setQueueDevicePin(target.value, workId, null);
-    await refreshQueue();
+    await requestQueueRefresh();
   } catch (caught) {
     error.value = describeTransportError(caught, props.host.name);
   }
@@ -544,7 +663,7 @@ async function cancelQueuedJob(entry: QueueEntry): Promise<void> {
       requestTarget.baseUrl === target.value.baseUrl &&
       requestTarget.apiKey === target.value.apiKey
     ) {
-      await refreshQueue(epoch);
+      await requestQueueRefresh(epoch);
     }
   } catch (caught) {
     if (
@@ -640,17 +759,17 @@ onBeforeUnmount(() => {
       >
         <span aria-hidden="true">‹</span> Hosts
       </button>
-      <span class="host-chip">{{
-        host.connected === false
-          ? "disconnected"
-          : host.online
-            ? `v${host.version ?? ""}`
-            : "offline"
+      <span class="host-chip" data-test="host-detail-health">{{
+        mobileHostHealthLabel(host)
       }}</span>
     </div>
 
     <div class="mobile-detail-title">
-      <span class="status-dot" :class="host.online ? 'is-ready' : 'is-error'" aria-hidden="true" />
+      <span
+        class="status-dot"
+        :class="host.stale ? 'is-reconnecting' : host.online ? 'is-ready' : 'is-error'"
+        aria-hidden="true"
+      />
       <div>
         <h1 class="section-title">{{ host.name }}</h1>
         <p class="host-url">{{ host.baseUrl }}</p>
@@ -701,6 +820,13 @@ onBeforeUnmount(() => {
 
     <p v-if="host.connected === false" class="status-line">
       Disconnected. This host stays out of generation, Library, Models, and background checks.
+    </p>
+    <p v-else-if="host.instanceMismatch" class="status-line error-text" role="alert">
+      This address now reports a different Mold server identity. Remove and re-add the machine to
+      trust that replacement.
+    </p>
+    <p v-else-if="host.stale" class="status-line" role="status">
+      Reconnecting… Showing the last verified host state.
     </p>
     <p v-else-if="loading" class="status-line">Reading host…</p>
     <div v-if="error" class="row-actions">
@@ -804,11 +930,13 @@ onBeforeUnmount(() => {
       <section class="mobile-detail-section" aria-labelledby="host-queue-title">
         <div class="mobile-section-head">
           <h2 id="host-queue-title">Queue</h2>
-          <span
-            >{{ queueDepth
-            }}<template v-if="status.queue_capacity">/{{ status.queue_capacity }}</template></span
-          >
+          <span data-test="host-detail-queue-total">{{ queueSummary }}</span>
         </div>
+        <p class="mobile-empty-note" data-test="host-detail-queue-scope">
+          <template v-if="queueApiAvailable">{{ queue.length }} loaded</template>
+          <template v-else>Queue page unavailable</template>
+          <template v-if="runtimeWindow"> · Runtime window {{ runtimeWindow }}</template>
+        </p>
         <div
           v-if="devices !== null || queuePlan !== null || deviceError"
           data-test="host-detail-devices"
@@ -871,7 +999,22 @@ onBeforeUnmount(() => {
             </button>
           </li>
         </ul>
-        <p v-else class="mobile-empty-note">Queue is empty.</p>
+        <p v-else class="mobile-empty-note">
+          {{ durableBacklog === 0 ? "Queue is empty." : "No queue rows are loaded." }}
+        </p>
+        <button
+          v-if="queueNextCursor"
+          type="button"
+          class="secondary-button mobile-host-queue-more"
+          data-test="host-detail-queue-load-more"
+          :disabled="loadingMoreQueue"
+          @click="loadMoreQueue"
+        >
+          {{ loadingMoreQueue ? "Loading…" : "Load more jobs" }}
+        </button>
+        <p v-if="loadMoreQueueError" class="status-line error-text" role="alert">
+          {{ loadMoreQueueError }}
+        </p>
 
         <div v-if="loadedModels.length" class="mobile-chip-list" aria-label="Loaded models">
           <span v-for="model in loadedModels" :key="model" class="mobile-model-chip">

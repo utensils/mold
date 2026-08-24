@@ -6,16 +6,59 @@ vi.mock("../lib/api/sse", () => ({ sseStream: vi.fn() }));
 vi.mock("../lib/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api/client")>()),
   apiJsonTo: vi.fn(),
+  apiFetchTo: vi.fn(() => Promise.resolve(new Response(null, { status: 204 }))),
 }));
-vi.mock("../lib/notify", () => ({
+const effectMocks = vi.hoisted(() => ({
   notifyGenerated: vi.fn(),
   notifyGenerationFailed: vi.fn(),
+  fetchGalleryMediaBytes: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3])),
+  saveOutputBytes: vi.fn().mockResolvedValue("saved.png"),
+}));
+vi.mock("../lib/notify", () => ({
+  notifyGenerated: effectMocks.notifyGenerated,
+  notifyGenerationFailed: effectMocks.notifyGenerationFailed,
+}));
+vi.mock("../lib/gallery/media", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/gallery/media")>()),
+  streamableMediaUrl: vi.fn().mockResolvedValue("blob:durable-result"),
+  fetchGalleryMediaBytes: effectMocks.fetchGalleryMediaBytes,
+}));
+vi.mock("../lib/ipc", () => ({
+  ipc: { saveOutputBytes: effectMocks.saveOutputBytes },
+}));
+const durableApi = vi.hoisted(() => ({
+  admit: vi.fn(),
+  lookup: vi.fn(),
+  reconcile: vi.fn(),
+}));
+vi.mock("@studio/api/generationAdmission", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/generationAdmission")>()),
+  admitGenerationBatch: (...args: unknown[]) => durableApi.admit(...args),
+  lookupGenerationBatchByClientId: (...args: unknown[]) => durableApi.lookup(...args),
+  reconcileGenerationBatches: (...args: unknown[]) => durableApi.reconcile(...args),
 }));
 
 import { sseStream } from "../lib/api/sse";
-import { apiJsonTo } from "../lib/api/client";
+import { apiFetchTo, apiJsonTo } from "../lib/api/client";
 import { runWithConcurrency, useGenerationStore } from "./generation";
+import { useHostsStore } from "./hosts";
+import { useToastStore } from "./toasts";
 import type { GenerateRequest } from "../lib/api/types";
+import { DURABLE_GENERATION_STORAGE_KEY } from "../lib/durableGeneration";
+import {
+  createGenerationBatchTracker,
+  reduceGenerationLifecycle,
+} from "@studio/lib/generationLifecycle";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
 
 describe("runWithConcurrency", () => {
   it("never exceeds the concurrency limit", async () => {
@@ -73,6 +116,7 @@ describe("submitBatch connection cap", () => {
   const mockSse = vi.mocked(sseStream);
   const streams: Array<{
     seed: number;
+    target: string;
     onEvent: (event: string, data: string) => void;
     resolve: () => void;
   }> = [];
@@ -80,6 +124,22 @@ describe("submitBatch connection cap", () => {
   function resolveStream(seed: number) {
     const idx = streams.findIndex((c) => c.seed === seed);
     streams[idx]!.resolve();
+  }
+
+  function completeStream(seed: number) {
+    const stream = streams.find((candidate) => candidate.seed === seed);
+    stream!.onEvent(
+      "complete",
+      JSON.stringify({
+        image: btoa("generated"),
+        format: "png",
+        width: 1024,
+        height: 1024,
+        seed_used: seed,
+        generation_time_ms: 100,
+        model: req.model,
+      }),
+    );
   }
 
   const req: GenerateRequest = {
@@ -96,6 +156,15 @@ describe("submitBatch connection cap", () => {
     streams.length = 0;
     mockSse.mockReset();
     vi.mocked(apiJsonTo).mockReset();
+    vi.mocked(apiFetchTo).mockReset();
+    vi.mocked(apiFetchTo).mockResolvedValue(new Response(null, { status: 204 }));
+    durableApi.admit.mockReset();
+    durableApi.lookup.mockReset();
+    durableApi.reconcile.mockReset();
+    effectMocks.notifyGenerated.mockClear();
+    effectMocks.notifyGenerationFailed.mockClear();
+    effectMocks.fetchGalleryMediaBytes.mockClear();
+    effectMocks.saveOutputBytes.mockClear();
     // Each POST parks open until the test resolves it, so we can observe how
     // many held streams the batch opens at once.
     mockSse.mockImplementation((_url, opts) => {
@@ -103,6 +172,7 @@ describe("submitBatch connection cap", () => {
         let settled = false;
         const stream = {
           seed: (opts.body as { seed: number }).seed,
+          target: opts.target?.baseUrl ?? "__primary__",
           onEvent: opts.onEvent,
           resolve: () => {},
         };
@@ -124,6 +194,7 @@ describe("submitBatch connection cap", () => {
   afterEach(() => {
     const store = useGenerationStore();
     store.resetJobs();
+    vi.unstubAllGlobals();
   });
 
   it("holds at most four sibling streams open at once", async () => {
@@ -189,6 +260,1029 @@ describe("submitBatch connection cap", () => {
     expect(mockSse).not.toHaveBeenCalled();
   });
 
+  it.each(["QuotaExceededError", "SecurityError"])(
+    "admits once through the durable endpoint when recovery storage raises %s",
+    async (name) => {
+      const storage = new Map<string, string>();
+      vi.stubGlobal("localStorage", {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          if (key === DURABLE_GENERATION_STORAGE_KEY) {
+            throw Object.assign(new Error("storage unavailable"), { name });
+          }
+          storage.set(key, value);
+        },
+      });
+      const store = useGenerationStore();
+      durableApi.admit.mockImplementation(async (_target, body) => {
+        const clientBatchId = (body as { client_batch_id: string }).client_batch_id;
+        return {
+          id: "storage-failure-batch",
+          client_batch_id: clientBatchId,
+          instance_id: "instance-1",
+          durable: true,
+          children: [
+            {
+              index: 1,
+              job_id: "storage-failure-job",
+              state: "queued",
+              created_at_ms: 1,
+              updated_at_ms: 1,
+            },
+          ],
+        } as never;
+      });
+
+      const submitted = store.submitBatch(req, 1, {
+        hostId: "hal9000",
+        label: "hal9000",
+        kind: "remote",
+        target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+        instanceId: "instance-1",
+        heterogeneousBatch: true,
+        durableBatchOutcomes: true,
+        mirrorRemoteOutput: false,
+      });
+      await flushPromises();
+
+      expect(durableApi.admit).toHaveBeenCalledTimes(1);
+      expect(mockSse).not.toHaveBeenCalled();
+      expect(submitted.jobs[0]).toMatchObject({
+        id: "storage-failure-job",
+        status: "queued",
+        error: null,
+      });
+      expect(
+        useToastStore().items.some(
+          (toast) =>
+            toast.kind === "warning" && toast.message.includes("Recovery storage is unavailable"),
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it("admits singleton and Batch N durably without held generation streams", async () => {
+    const store = useGenerationStore();
+    const hosts = useHostsStore();
+    hosts.extras = [
+      {
+        id: "hal9000",
+        label: "hal9000",
+        url: "http://hal9000:7680",
+        apiKey: "fresh-key",
+        status: "ready",
+        error: null,
+        instanceId: "instance-1",
+      },
+    ];
+    store.attachSharedDurableEventHost("hal9000");
+    let nextBatch = 0;
+    durableApi.admit.mockImplementation(async (_target, body) => {
+      nextBatch += 1;
+      const requestBody = body as {
+        client_batch_id: string;
+        requests: GenerateRequest[];
+      };
+      return {
+        id: `batch-${nextBatch}`,
+        client_batch_id: requestBody.client_batch_id,
+        instance_id: "instance-1",
+        durable: true,
+        children: requestBody.requests.map((_request, index) => ({
+          index: index + 1,
+          job_id: `job-${nextBatch}-${index + 1}`,
+          state: "queued",
+          created_at_ms: 1,
+          updated_at_ms: 1,
+        })),
+      };
+    });
+    const route = {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote" as const,
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      instanceId: "instance-1",
+      heterogeneousBatch: true,
+      heterogeneousBatchMaxOutputs: 64,
+      durableBatchOutcomes: true,
+      mirrorRemoteOutput: false,
+    };
+
+    const singleton = store.submitBatch(req, 1, route);
+    const batch = store.submitBatch(req, 5, route);
+    await flushPromises();
+
+    expect(singleton.jobs.map((job) => job.id)).toEqual(["job-1-1"]);
+    expect(batch.jobs.map((job) => job.id)).toEqual([
+      "job-2-1",
+      "job-2-2",
+      "job-2-3",
+      "job-2-4",
+      "job-2-5",
+    ]);
+    expect(mockSse).not.toHaveBeenCalled();
+  });
+
+  it("recovers an ambiguous durable POST by client id without legacy fallback", async () => {
+    const store = useGenerationStore();
+    const hosts = useHostsStore();
+    hosts.extras = [
+      {
+        id: "hal9000",
+        label: "hal9000",
+        url: "http://hal9000:7680",
+        apiKey: "fresh-key",
+        status: "ready",
+        error: null,
+        instanceId: "instance-1",
+      },
+    ];
+    store.attachSharedDurableEventHost("hal9000");
+    let clientBatchId = "";
+    durableApi.admit.mockImplementation(async (_target, body) => {
+      clientBatchId = (body as { client_batch_id: string }).client_batch_id;
+      throw new TypeError("response lost");
+    });
+    durableApi.lookup.mockImplementation(async () => ({
+      kind: "found",
+      batch: {
+        id: "batch-recovered",
+        client_batch_id: clientBatchId,
+        instance_id: "instance-1",
+        durable: true,
+        children: [
+          {
+            index: 1,
+            job_id: "job-recovered",
+            state: "queued",
+            created_at_ms: 1,
+            updated_at_ms: 1,
+          },
+        ],
+      },
+    }));
+
+    const submitted = store.submitBatch(req, 1, {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      instanceId: "instance-1",
+      heterogeneousBatch: true,
+      durableBatchOutcomes: true,
+      mirrorRemoteOutput: false,
+    });
+    await flushPromises();
+    await flushPromises();
+
+    expect(submitted.jobs[0]!.id).toBe("job-recovered");
+    expect(mockSse).not.toHaveBeenCalled();
+    expect(durableApi.admit).toHaveBeenCalledTimes(1);
+    expect(durableApi.lookup).toHaveBeenCalledWith(
+      expect.objectContaining({ baseUrl: "http://hal9000:7680" }),
+      clientBatchId,
+    );
+  });
+
+  it("uses host events as hints and bulk status as the only terminal authority", async () => {
+    const store = useGenerationStore();
+    useHostsStore().extras = [
+      {
+        id: "hal9000",
+        label: "hal9000",
+        url: "http://hal9000:7680",
+        apiKey: "fresh-key",
+        status: "ready",
+        error: null,
+        instanceId: "instance-1",
+      },
+    ];
+    store.attachSharedDurableEventHost("hal9000");
+    let clientBatchId = "";
+    let phase: "running" | "complete" = "running";
+    const status = () => ({
+      id: "batch-1",
+      client_batch_id: clientBatchId,
+      instance_id: "instance-1",
+      durable: true,
+      children: [
+        {
+          index: 1,
+          job_id: "job-1",
+          state: phase,
+          created_at_ms: 1,
+          updated_at_ms: phase === "running" ? 2 : 3,
+          ...(phase === "complete"
+            ? {
+                completed_at_ms: 3,
+                result: { filename: "finished.png" },
+              }
+            : {}),
+        },
+      ],
+    });
+    durableApi.admit.mockImplementation(async (_target, body) => {
+      clientBatchId = (body as { client_batch_id: string }).client_batch_id;
+      return { ...status(), children: [{ ...status().children[0], state: "queued" }] };
+    });
+    durableApi.reconcile.mockImplementation(async () => ({
+      instance_id: "instance-1",
+      batches: [status()],
+      missing: { client_batch_ids: [], batch_ids: [] },
+    }));
+    const submitted = store.submitBatch(req, 1, {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      instanceId: "instance-1",
+      heterogeneousBatch: true,
+      durableBatchOutcomes: true,
+      mirrorRemoteOutput: true,
+    });
+    await flushPromises();
+
+    store.onDurableEvent("hal9000", "authority", '{"instance_id":"instance-1"}');
+    await flushPromises();
+    expect(submitted.jobs[0]!.status).toBe("loading");
+
+    store.onDurableEvent("hal9000", "event", '{"type":"job_ended","id":"job-1"}');
+    await flushPromises();
+    expect(submitted.jobs[0]!.status).toBe("loading");
+
+    phase = "complete";
+    store.onDurableEvent(
+      "hal9000",
+      "event",
+      '{"type":"job_state_committed","id":"committed-before-client-map"}',
+    );
+    await submitted.settled;
+    expect(submitted.jobs[0]).toMatchObject({
+      status: "complete",
+      id: "job-1",
+      result: { filename: "finished.png", image: "" },
+    });
+    await flushPromises();
+    store.onDurableEvent("hal9000", "event", '{"type":"job_ended","id":"job-1"}');
+    await flushPromises();
+    expect(effectMocks.notifyGenerated).toHaveBeenCalledTimes(1);
+    expect(effectMocks.fetchGalleryMediaBytes).toHaveBeenCalledTimes(1);
+    expect(effectMocks.fetchGalleryMediaBytes).toHaveBeenCalledWith(
+      "/api/gallery/image/finished.png",
+      { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+    );
+    expect(effectMocks.saveOutputBytes).toHaveBeenCalledTimes(1);
+    expect(mockSse).not.toHaveBeenCalled();
+  });
+
+  it("reconciles mapped lifecycle hints only against their owning durable batch", async () => {
+    const store = useGenerationStore();
+    useHostsStore().extras = [
+      {
+        id: "hal9000",
+        label: "hal9000",
+        url: "http://hal9000:7680",
+        apiKey: "fresh-key",
+        status: "ready",
+        error: null,
+        instanceId: "instance-1",
+      },
+    ];
+    store.attachSharedDurableEventHost("hal9000");
+    const admitted = new Map<string, { batchId: string; jobId: string }>();
+    let ordinal = 0;
+    durableApi.admit.mockImplementation(async (_target, body) => {
+      const clientBatchId = (body as { client_batch_id: string }).client_batch_id;
+      ordinal += 1;
+      const identity = { batchId: `batch-scope-${ordinal}`, jobId: `job-scope-${ordinal}` };
+      admitted.set(clientBatchId, identity);
+      return {
+        id: identity.batchId,
+        client_batch_id: clientBatchId,
+        instance_id: "instance-1",
+        durable: true,
+        children: [
+          {
+            index: 1,
+            job_id: identity.jobId,
+            state: "queued",
+            created_at_ms: 1,
+            updated_at_ms: 1,
+          },
+        ],
+      };
+    });
+    durableApi.reconcile.mockImplementation(async (_target, body) => {
+      const requested = new Set((body as { batch_ids?: string[] }).batch_ids ?? []);
+      return {
+        instance_id: "instance-1",
+        batches: [...admitted.entries()]
+          .filter(([, identity]) => requested.has(identity.batchId))
+          .map(([clientBatchId, identity]) => ({
+            id: identity.batchId,
+            client_batch_id: clientBatchId,
+            instance_id: "instance-1",
+            durable: true,
+            children: [
+              {
+                index: 1,
+                job_id: identity.jobId,
+                state: "running",
+                created_at_ms: 1,
+                updated_at_ms: 2,
+              },
+            ],
+          })),
+        missing: { client_batch_ids: [], batch_ids: [] },
+      };
+    });
+    const route = {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote" as const,
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      instanceId: "instance-1",
+      heterogeneousBatch: true,
+      durableBatchOutcomes: true,
+      mirrorRemoteOutput: false,
+    };
+    store.submitBatch(req, 1, route);
+    store.submitBatch(req, 1, route);
+    await flushPromises();
+    expect(admitted.size).toBe(2);
+    durableApi.reconcile.mockClear();
+
+    store.onDurableEvent(
+      "hal9000",
+      "event",
+      JSON.stringify({ type: "job_ended", id: "job-scope-1" }),
+    );
+    await flushPromises();
+
+    expect(durableApi.reconcile).toHaveBeenCalledTimes(1);
+    expect(durableApi.reconcile.mock.calls[0]![1]).toMatchObject({
+      batch_ids: ["batch-scope-1"],
+    });
+  });
+
+  it("guarantees a follow-up reconcile when an invalidation arrives in flight", async () => {
+    const store = useGenerationStore();
+    useHostsStore().extras = [
+      {
+        id: "hal9000",
+        label: "hal9000",
+        url: "http://hal9000:7680",
+        apiKey: "fresh-key",
+        status: "ready",
+        error: null,
+        instanceId: "instance-1",
+      },
+    ];
+    store.attachSharedDurableEventHost("hal9000");
+    let clientBatchId = "";
+    const firstRead = deferred<Record<string, unknown>>();
+    const batch = (state: "queued" | "running" | "complete") => ({
+      id: "batch-dirty",
+      client_batch_id: clientBatchId,
+      instance_id: "instance-1",
+      durable: true,
+      children: [
+        {
+          index: 1,
+          job_id: "job-dirty",
+          state,
+          created_at_ms: 1,
+          updated_at_ms: state === "queued" ? 1 : state === "running" ? 2 : 3,
+          ...(state === "complete"
+            ? { completed_at_ms: 3, result: { filename: "dirty-finished.png" } }
+            : {}),
+        },
+      ],
+    });
+    durableApi.admit.mockImplementation(async (_target, body) => {
+      clientBatchId = (body as { client_batch_id: string }).client_batch_id;
+      return batch("queued");
+    });
+    durableApi.reconcile
+      .mockImplementationOnce(() => firstRead.promise)
+      .mockImplementationOnce(async () => ({
+        instance_id: "instance-1",
+        batches: [batch("complete")],
+        missing: { client_batch_ids: [], batch_ids: [] },
+      }));
+
+    const submitted = store.submitBatch(req, 1, {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      instanceId: "instance-1",
+      heterogeneousBatch: true,
+      durableBatchOutcomes: true,
+      mirrorRemoteOutput: false,
+    });
+    await flushPromises();
+    store.onDurableEvent("hal9000", "authority", '{"instance_id":"instance-1"}');
+    await flushPromises();
+    expect(durableApi.reconcile).toHaveBeenCalledTimes(1);
+
+    store.onDurableEvent("hal9000", "event", '{"type":"job_started","id":"job-dirty"}');
+    firstRead.resolve({
+      instance_id: "instance-1",
+      batches: [batch("running")],
+      missing: { client_batch_ids: [], batch_ids: [] },
+    });
+
+    await submitted.settled;
+    expect(durableApi.reconcile).toHaveBeenCalledTimes(2);
+    expect(submitted.jobs[0]).toMatchObject({
+      status: "complete",
+      result: { filename: "dirty-finished.png" },
+    });
+  });
+
+  it("persists a pre-admission cancel and deletes the reconciled exact server id", async () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, value),
+    });
+    const store = useGenerationStore();
+    useHostsStore().extras = [
+      {
+        id: "hal9000",
+        label: "hal9000",
+        url: "http://hal9000:7680",
+        apiKey: "fresh-key",
+        status: "ready",
+        error: null,
+        instanceId: "instance-1",
+      },
+    ];
+    store.attachSharedDurableEventHost("hal9000");
+    const admission = deferred<Record<string, unknown>>();
+    const firstRead = deferred<Record<string, unknown>>();
+    let clientBatchId = "";
+    const batch = (state: "queued" | "cancelled") => ({
+      id: "batch-pre-id",
+      client_batch_id: clientBatchId,
+      instance_id: "instance-1",
+      durable: true,
+      children: [
+        {
+          index: 1,
+          job_id: "server-job-pre-id",
+          state,
+          created_at_ms: 1,
+          updated_at_ms: state === "queued" ? 2 : 3,
+          ...(state === "cancelled" ? { completed_at_ms: 3 } : {}),
+        },
+      ],
+    });
+    durableApi.admit.mockImplementation((_target, body) => {
+      clientBatchId = (body as { client_batch_id: string }).client_batch_id;
+      return admission.promise;
+    });
+    durableApi.reconcile
+      .mockImplementationOnce(() => firstRead.promise)
+      .mockImplementationOnce(async () => ({
+        instance_id: "instance-1",
+        batches: [batch("cancelled")],
+        missing: { client_batch_ids: [], batch_ids: [] },
+      }));
+    const submitted = store.submitBatch(req, 1, {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      instanceId: "instance-1",
+      heterogeneousBatch: true,
+      durableBatchOutcomes: true,
+      mirrorRemoteOutput: false,
+    });
+    await flushPromises();
+
+    const cancelled = store.cancel(submitted.jobs[0]!.clientId);
+    await flushPromises();
+    expect(JSON.parse(storage.get(DURABLE_GENERATION_STORAGE_KEY) ?? "null")).toMatchObject({
+      records: [{ cancelRequestedChildIndexes: [1] }],
+    });
+    firstRead.resolve({
+      instance_id: "instance-1",
+      batches: [batch("queued")],
+      missing: { client_batch_ids: [], batch_ids: [] },
+    });
+
+    await expect(cancelled).resolves.toBe(true);
+    expect(apiFetchTo).toHaveBeenCalledWith(
+      { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      "/api/queue/server-job-pre-id",
+      { method: "DELETE" },
+    );
+    expect(submitted.jobs[0]).toMatchObject({ status: "error", error: "Cancelled" });
+
+    admission.resolve(batch("queued"));
+    await flushPromises();
+    expect(submitted.jobs[0]).toMatchObject({ status: "error", error: "Cancelled" });
+  });
+
+  it("restores running durable work and accepts a newer queued snapshot after restart", async () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, value),
+    });
+    let tracker = createGenerationBatchTracker({
+      hostId: "hal9000",
+      expectedInstanceId: "instance-1",
+      clientBatchId: "client-restored",
+      submittedAtMs: 1,
+    });
+    tracker = reduceGenerationLifecycle(tracker, {
+      type: "batch_snapshot",
+      batch: {
+        id: "batch-restored",
+        client_batch_id: "client-restored",
+        instance_id: "instance-1",
+        durable: true,
+        children: [
+          {
+            index: 1,
+            job_id: "job-restored",
+            state: "running",
+            created_at_ms: 1,
+            updated_at_ms: 20,
+          },
+        ],
+      },
+    });
+    let staleTracker = createGenerationBatchTracker({
+      hostId: "hal9000",
+      expectedInstanceId: "retired-instance",
+      clientBatchId: "client-stale",
+      submittedAtMs: 1,
+    });
+    staleTracker = reduceGenerationLifecycle(staleTracker, {
+      type: "batch_snapshot",
+      batch: {
+        id: "batch-stale",
+        client_batch_id: "client-stale",
+        instance_id: "retired-instance",
+        durable: true,
+        children: [
+          {
+            index: 1,
+            job_id: "job-stale",
+            state: "queued",
+            created_at_ms: 1,
+            updated_at_ms: 1,
+          },
+        ],
+      },
+    });
+    let terminalTracker = createGenerationBatchTracker({
+      hostId: "hal9000",
+      expectedInstanceId: "retired-instance",
+      clientBatchId: "client-terminal",
+      submittedAtMs: 1,
+    });
+    terminalTracker = reduceGenerationLifecycle(terminalTracker, {
+      type: "batch_snapshot",
+      batch: {
+        id: "batch-terminal",
+        client_batch_id: "client-terminal",
+        instance_id: "retired-instance",
+        durable: true,
+        children: [
+          {
+            index: 1,
+            job_id: "job-terminal",
+            state: "complete",
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            completed_at_ms: 2,
+            result: { filename: "terminal-on-retired-host.png" },
+          },
+        ],
+      },
+    });
+    const child = {
+      index: 1,
+      clientId: null,
+      model: req.model,
+      width: req.width,
+      height: req.height,
+      steps: req.steps,
+      guidance: 1,
+      seed: req.seed,
+      format: "png",
+    };
+    storage.set(
+      DURABLE_GENERATION_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        records: [
+          {
+            tracker,
+            hostLabel: "hal9000",
+            hostKind: "remote",
+            mirrorRemoteOutput: false,
+            children: [child],
+            cancelRequestedChildIndexes: [],
+            effectReceipts: [],
+          },
+          {
+            tracker: staleTracker,
+            hostLabel: "old hal9000",
+            hostKind: "remote",
+            mirrorRemoteOutput: false,
+            children: [child],
+            cancelRequestedChildIndexes: [],
+            effectReceipts: [],
+          },
+          {
+            tracker: terminalTracker,
+            hostLabel: "old hal9000",
+            hostKind: "remote",
+            mirrorRemoteOutput: true,
+            children: [child],
+            cancelRequestedChildIndexes: [],
+            effectReceipts: [],
+          },
+        ],
+      }),
+    );
+    useHostsStore().extras = [
+      {
+        id: "hal9000",
+        label: "hal9000",
+        url: "http://hal9000:7680",
+        apiKey: "fresh-key",
+        status: "ready",
+        error: null,
+        instanceId: "instance-1",
+      },
+    ];
+    durableApi.reconcile.mockResolvedValue({
+      instance_id: "instance-1",
+      batches: [
+        {
+          id: "batch-restored",
+          client_batch_id: "client-restored",
+          instance_id: "instance-1",
+          durable: true,
+          children: [
+            {
+              index: 1,
+              job_id: "job-restored",
+              state: "queued",
+              created_at_ms: 1,
+              updated_at_ms: 30,
+            },
+          ],
+        },
+      ],
+      missing: { client_batch_ids: [], batch_ids: [] },
+    });
+
+    const store = useGenerationStore();
+    store.attachSharedDurableEventHost("hal9000");
+    store.resumeDurableGenerations();
+    expect(store.jobs[0]).toMatchObject({ id: "job-restored", status: "loading" });
+    await flushPromises();
+    expect(store.jobs[0]).toMatchObject({ id: "job-restored", status: "queued" });
+    expect(store.jobs[1]).toMatchObject({
+      id: "job-stale",
+      status: "queued",
+      interrupted: true,
+      stage: "Original machine identity changed — outcome unknown",
+    });
+    expect(store.jobs[2]).toMatchObject({
+      id: "job-terminal",
+      status: "complete",
+      result: { filename: "terminal-on-retired-host.png" },
+    });
+    expect(effectMocks.fetchGalleryMediaBytes).not.toHaveBeenCalled();
+    expect(storage.get(DURABLE_GENERATION_STORAGE_KEY)).toContain("client-terminal");
+    expect(durableApi.reconcile).toHaveBeenCalledTimes(1);
+    expect(durableApi.reconcile).toHaveBeenCalledWith(
+      { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      expect.objectContaining({
+        client_batch_ids: [],
+        batch_ids: ["batch-restored"],
+      }),
+    );
+  });
+
+  it("suppresses restored completion per already-terminal child, not for its live sibling", () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, value),
+    });
+    let tracker = createGenerationBatchTracker({
+      hostId: "hal9000",
+      expectedInstanceId: "instance-1",
+      clientBatchId: "client-partial",
+      submittedAtMs: 1,
+    });
+    tracker = reduceGenerationLifecycle(tracker, {
+      type: "batch_snapshot",
+      batch: {
+        id: "batch-partial",
+        client_batch_id: "client-partial",
+        instance_id: "instance-1",
+        durable: true,
+        children: [
+          {
+            index: 1,
+            job_id: "job-finished-before-restart",
+            state: "complete",
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            completed_at_ms: 2,
+            result: { filename: "restored.png" },
+          },
+          {
+            index: 2,
+            job_id: "job-still-live",
+            state: "queued",
+            created_at_ms: 1,
+            updated_at_ms: 2,
+          },
+        ],
+      },
+    });
+    const child = (index: number) => ({
+      index,
+      clientId: null,
+      model: req.model,
+      width: req.width,
+      height: req.height,
+      steps: req.steps,
+      guidance: 1,
+      seed: (req.seed ?? 0) + index - 1,
+      format: "png" as const,
+    });
+    storage.set(
+      DURABLE_GENERATION_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        records: [
+          {
+            tracker,
+            hostLabel: "hal9000",
+            hostKind: "remote",
+            mirrorRemoteOutput: false,
+            children: [child(1), child(2)],
+            cancelRequestedChildIndexes: [],
+            effectReceipts: [],
+          },
+        ],
+      }),
+    );
+
+    const store = useGenerationStore();
+    store.resumeDurableGenerations();
+
+    expect(store.jobs.map((job) => job.suppressFreshCompletion)).toEqual([true, false]);
+  });
+
+  it("lets a durable completion win a concurrent cancellation request", async () => {
+    const store = useGenerationStore();
+    useHostsStore().extras = [
+      {
+        id: "hal9000",
+        label: "hal9000",
+        url: "http://hal9000:7680",
+        apiKey: "fresh-key",
+        status: "ready",
+        error: null,
+        instanceId: "instance-1",
+      },
+    ];
+    store.attachSharedDurableEventHost("hal9000");
+    let clientBatchId = "";
+    durableApi.admit.mockImplementation(async (_target, body) => {
+      clientBatchId = (body as { client_batch_id: string }).client_batch_id;
+      return {
+        id: "batch-race",
+        client_batch_id: clientBatchId,
+        instance_id: "instance-1",
+        durable: true,
+        children: [
+          {
+            index: 1,
+            job_id: "job-race",
+            state: "queued",
+            created_at_ms: 1,
+            updated_at_ms: 1,
+          },
+        ],
+      };
+    });
+    durableApi.reconcile.mockImplementation(async () => ({
+      instance_id: "instance-1",
+      batches: [
+        {
+          id: "batch-race",
+          client_batch_id: clientBatchId,
+          instance_id: "instance-1",
+          durable: true,
+          children: [
+            {
+              index: 1,
+              job_id: "job-race",
+              state: "complete",
+              created_at_ms: 1,
+              updated_at_ms: 2,
+              completed_at_ms: 2,
+              result: { filename: "race-winner.png" },
+            },
+          ],
+        },
+      ],
+      missing: { client_batch_ids: [], batch_ids: [] },
+    }));
+    const submitted = store.submitBatch(req, 1, {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      instanceId: "instance-1",
+      heterogeneousBatch: true,
+      durableBatchOutcomes: true,
+      mirrorRemoteOutput: false,
+    });
+    await flushPromises();
+
+    await expect(store.cancel(submitted.jobs[0]!.clientId)).resolves.toBe(false);
+    expect(submitted.jobs[0]).toMatchObject({
+      status: "complete",
+      error: null,
+      result: { filename: "race-winner.png" },
+    });
+    expect(vi.mocked(apiFetchTo)).not.toHaveBeenCalled();
+  });
+
+  it("keeps repeated durable submissions off the held-stream pool", async () => {
+    const store = useGenerationStore();
+    useHostsStore().extras = [
+      {
+        id: "hal9000",
+        label: "hal9000",
+        url: "http://hal9000:7680",
+        apiKey: "fresh-key",
+        status: "ready",
+        error: null,
+        instanceId: "instance-1",
+      },
+    ];
+    store.attachSharedDurableEventHost("hal9000");
+    let admissions = 0;
+    durableApi.admit.mockImplementation(async (_target, body) => {
+      admissions += 1;
+      const client = (body as { client_batch_id: string }).client_batch_id;
+      return {
+        id: `batch-${admissions}`,
+        client_batch_id: client,
+        instance_id: "instance-1",
+        durable: true,
+        children: [
+          {
+            index: 1,
+            job_id: `job-${admissions}`,
+            state: "queued",
+            created_at_ms: admissions,
+            updated_at_ms: admissions,
+          },
+        ],
+      };
+    });
+    const route = {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote" as const,
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      instanceId: "instance-1",
+      heterogeneousBatch: true,
+      durableBatchOutcomes: true,
+      mirrorRemoteOutput: false,
+    };
+
+    for (let index = 0; index < 40; index += 1) {
+      store.submitBatch({ ...req, seed: index }, 1, route);
+    }
+    await flushPromises();
+
+    expect(admissions).toBe(40);
+    expect(mockSse).not.toHaveBeenCalled();
+    expect(store.pending).toHaveLength(40);
+  });
+
+  it("admits supported media through the encrypted durable capability without a stream slot", async () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, value),
+    });
+    const store = useGenerationStore();
+    useHostsStore().extras = [
+      {
+        id: "hal9000",
+        label: "hal9000",
+        url: "http://hal9000:7680",
+        apiKey: "fresh-key",
+        status: "ready",
+        error: null,
+        instanceId: "instance-1",
+      },
+    ];
+    store.attachSharedDurableEventHost("hal9000");
+    durableApi.admit.mockImplementation(async (_target, body) => {
+      const client = (body as { client_batch_id: string }).client_batch_id;
+      return {
+        id: "media-batch",
+        client_batch_id: client,
+        instance_id: "instance-1",
+        durable: true,
+        children: [
+          {
+            index: 1,
+            job_id: "media-job",
+            state: "queued",
+            created_at_ms: 1,
+            updated_at_ms: 1,
+          },
+        ],
+      };
+    });
+
+    store.submitBatch({ ...req, source_image: "PRIVATE-DURABLE-SOURCE" }, 1, {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      instanceId: "instance-1",
+      heterogeneousBatch: true,
+      durableBatchOutcomes: true,
+      durableMedia: {
+        protocol_version: 1,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        h3_references: false,
+        private_h3: false,
+      },
+      mirrorRemoteOutput: false,
+    });
+    await flushPromises();
+
+    expect(durableApi.admit).toHaveBeenCalledTimes(1);
+    expect(durableApi.admit.mock.calls[0]![1].requests[0]).toMatchObject({
+      source_image: "PRIVATE-DURABLE-SOURCE",
+    });
+    expect(mockSse).not.toHaveBeenCalled();
+    expect(storage.get(DURABLE_GENERATION_STORAGE_KEY) ?? "").not.toContain(
+      "PRIVATE-DURABLE-SOURCE",
+    );
+  });
+
+  it("keeps an opaque H3 family on the legacy stream", async () => {
+    const store = useGenerationStore();
+    store.submitBatch(
+      {
+        ...req,
+        model: "hf:opaque-h3-checkpoint",
+        source_image: "PRIVATE-H3-SOURCE",
+      },
+      1,
+      {
+        hostId: "hal9000",
+        label: "hal9000",
+        kind: "remote",
+        target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+        instanceId: "instance-1",
+        heterogeneousBatch: true,
+        durableBatchOutcomes: true,
+        durableMedia: {
+          protocol_version: 1,
+          encrypted_at_rest: true,
+          generate_request_media: true,
+          identity: true,
+          h3_references: false,
+          private_h3: false,
+        },
+        modelFamily: "minimax-h3",
+      },
+    );
+    await flushPromises();
+
+    expect(durableApi.admit).not.toHaveBeenCalled();
+    expect(mockSse).toHaveBeenCalledTimes(1);
+  });
+
   it("holds at most four streams across separate Generate submissions", async () => {
     const store = useGenerationStore();
     const first = store.submitBatch({ ...req, seed: 200 }, 1);
@@ -234,6 +1328,53 @@ describe("submitBatch connection cap", () => {
 
     while (streams.length > 0) {
       streams[0]!.resolve();
+      await flushPromises();
+    }
+    await Promise.all([first.settled, second.settled]);
+  });
+
+  it("drains the mobile media backlog per target and keeps waiting jobs visible and cancellable", async () => {
+    const store = useGenerationStore();
+    const mobileRoute = (hostId: string, baseUrl: string) => ({
+      hostId,
+      label: hostId,
+      kind: "remote" as const,
+      target: { baseUrl, apiKey: `${hostId}-secret` },
+      instanceId: `${hostId}-instance`,
+      heterogeneousBatch: true,
+      durableBatchOutcomes: true,
+      mirrorRemoteOutput: false,
+      retainEncodedResult: false,
+      metadataOnlyCompletion: true,
+    });
+    const first = store.submitBatch(
+      { ...req, seed: 600, source_image: "session-only-a" },
+      5,
+      mobileRoute("phone-a", "http://phone-a:7680"),
+    );
+    const second = store.submitBatch(
+      { ...req, seed: 700, source_image: "session-only-b" },
+      5,
+      mobileRoute("phone-b", "http://phone-b:7680"),
+    );
+
+    await flushPromises();
+    expect(store.jobs.map((job) => job.error)).toEqual(Array(10).fill(null));
+    expect(store.pending).toHaveLength(10);
+    expect(streams.filter((stream) => stream.target === "http://phone-a:7680")).toHaveLength(4);
+    expect(streams.filter((stream) => stream.target === "http://phone-b:7680")).toHaveLength(4);
+
+    expect(await store.cancel(first.jobs[4]!.clientId)).toBe(true);
+    completeStream(600);
+    await flushPromises();
+    expect(streams.some((stream) => stream.seed === 604)).toBe(false);
+
+    completeStream(700);
+    await flushPromises();
+    expect(streams.some((stream) => stream.seed === 704)).toBe(true);
+
+    while (streams.length > 0) {
+      completeStream(streams[0]!.seed);
       await flushPromises();
     }
     await Promise.all([first.settled, second.settled]);

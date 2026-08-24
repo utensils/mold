@@ -14,16 +14,22 @@
 //!
 //! Rows never carry a secret. Reference-upload handles and resolved reference
 //! paths are excluded at admission rather than redacted here, which is why
-//! [`QueueJournal::record`] refuses any request carrying them.
+//! [`QueueJournal::record`] refuses any request carrying them. MiniMax H3
+//! requests are excluded too: replay cannot reconstruct their authenticated
+//! ingress grant, so claiming they are durable would be false.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use mold_db::generation_batches::{
-    self, GenerationBatchChildRow, GenerationBatchDetail, GenerationBatchRow,
+    self, GenerationBatchChildRow, GenerationBatchDetail, GenerationBatchMediaInsertOutcome,
+    GenerationBatchRow,
 };
-use mold_db::generation_queue::{self, GenerationQueueRow, QueueRowState};
+use mold_db::generation_queue::{
+    self, GenerationQueueProjectionPage, GenerationQueueRow, QueueProjectionCursor, QueueRowState,
+};
 use mold_db::MetadataDb;
 
 use crate::state::SseCompletionPayload;
@@ -47,6 +53,9 @@ pub const DEFAULT_MAX_DISPATCH_ATTEMPTS: u32 = 2;
 /// Sized for a 5 s `RestartSec` crash loop, which is the only way a queued row
 /// loops without ever being claimed. Ordinary deploys never approach it.
 pub const DEFAULT_MAX_REPLAY_SEEN: u32 = 10;
+
+const PRIVATE_H3_BATCH_DURABILITY_ERROR: &str =
+    "heterogeneous batches cannot persist private MiniMax H3 requests";
 
 fn env_usize(name: &str, default: usize) -> usize {
     match std::env::var(name) {
@@ -101,6 +110,9 @@ pub struct JournalAdmission<'a> {
     /// survive the restart.
     pub output_dir: Option<&'a Path>,
     pub target_gpu: Option<usize>,
+    /// Stable identity corresponding to `target_gpu` in the admitting
+    /// worker inventory. `None` means the ordinal is not durable authority.
+    pub target_device_id: Option<&'a str>,
     pub completion_payload: SseCompletionPayload,
     /// True when the job is a server-owned adaptive-batch child; those are
     /// owned by the batch transaction's own durable recovery.
@@ -117,6 +129,30 @@ pub struct BatchJournalAdmission<'a> {
     pub children: &'a [JournalAdmission<'a>],
 }
 
+/// Payload-free child row for the encrypted-media batch transaction.
+pub(crate) struct MediaJournalAdmission<'a> {
+    pub id: &'a str,
+    pub model: &'a str,
+    pub request_json: &'a str,
+    pub media_set: Option<&'a crate::queue_media_store::MediaSetRef>,
+    pub output_dir: &'a Path,
+    pub target_gpu: Option<usize>,
+    pub target_device_id: Option<&'a str>,
+    pub completion_payload: SseCompletionPayload,
+    pub seed_pinned: bool,
+}
+
+pub(crate) struct MediaBatchJournalAdmission<'a> {
+    pub id: &'a str,
+    pub client_batch_id: &'a str,
+    /// Randomized authenticated receipt, never a plaintext media fingerprint.
+    pub operation_receipt: &'a str,
+    pub children: &'a [MediaJournalAdmission<'a>],
+    /// Present only for a direct attached observer. Publication occurs after
+    /// the immediate transaction commits and before the feeder wake.
+    pub observer_job_id: Option<&'a str>,
+}
+
 /// Whether this request carries a face photograph.
 ///
 /// Derived from the request rather than passed in beside it, deliberately: a
@@ -128,6 +164,15 @@ fn carries_identity_photograph(request: &mold_core::GenerateRequest) -> bool {
     // multi-photograph request's faces into `mold.db`, which is the exact
     // outcome this predicate exists to prevent.
     mold_core::identity::request_carries_identity_photo(request)
+}
+
+/// Whether replay would require authenticated MiniMax H3 ingress authority.
+///
+/// The model capability contract is the existing authority for this
+/// partition. Do not infer it from family-shaped strings or reference
+/// presence: FL2VA has no references, and replay restores no private grant.
+fn requires_h3_replay_authority(request: &mold_core::GenerateRequest) -> bool {
+    mold_core::minimax_h3::capability_contract_for_model(&request.model).is_some()
 }
 
 /// Directory of per-identity claim records, one file per queue owner.
@@ -421,8 +466,23 @@ fn owner_row_counts(db: Option<&MetadataDb>, owner_uuid: &str) -> (usize, usize)
 pub struct QueueJournal {
     db: Arc<Option<MetadataDb>>,
     owner_uuid: Option<String>,
+    /// Becomes true only after the claimed owner's key, store, and DB/file
+    /// obligations have passed the startup coordinator. It is deliberately
+    /// independent from `owner_uuid`: a broken media store must not disable
+    /// ordinary media-free queue durability.
+    durable_media_ready: AtomicBool,
+    /// One concrete DB/store authority shared by startup, terminal cleanup,
+    /// and the later admission/feeder integration. Default-empty keeps the
+    /// existing media-free journal behavior unchanged.
+    queue_media_lifecycle: OnceLock<Arc<crate::queue_media_lifecycle::QueueMediaLifecycle>>,
+    queue_media_admission: OnceLock<Arc<crate::queue_media_admission::DurableMediaAdmission>>,
+    /// Post-commit lifecycle hints for durable clients. Installed after the
+    /// app state creates its one server-wide broadcaster.
+    events: OnceLock<Arc<crate::events::EventBroadcaster>>,
     #[cfg(test)]
     fail_completion_lookup: AtomicBool,
+    #[cfg(test)]
+    fail_claim_release: AtomicBool,
     /// Held for the process's lifetime so a peer sharing this `MOLD_HOME`
     /// cannot adopt the same identity.
     _owner_claim: Option<QueueOwnerClaim>,
@@ -430,6 +490,18 @@ pub struct QueueJournal {
     max_bytes: usize,
     max_dispatch_attempts: u32,
     max_replay_seen: u32,
+    feeder_notify: tokio::sync::Notify,
+    /// Serializes durable queue transitions whose SQLite result is later
+    /// projected into the bounded runtime registry.
+    ///
+    /// This gate is always acquired before either authority. A caller may use
+    /// the scheduler fence for a bounded pre-DB lifecycle mark, but must drop
+    /// it before blocking SQLite work; the final projection may take the
+    /// scheduler fence only after SQLite completes. Keeping this gate separate
+    /// means a slow database cannot freeze unrelated grants or in-memory
+    /// cancellation, while PATCH, feeder publication, and durable cancellation
+    /// still agree on one claim/order transition.
+    durable_transition_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl QueueJournal {
@@ -466,9 +538,15 @@ impl QueueJournal {
         Self {
             db,
             owner_uuid: claim.as_ref().map(|claim| claim.owner_uuid.clone()),
+            durable_media_ready: AtomicBool::new(false),
+            queue_media_lifecycle: OnceLock::new(),
+            queue_media_admission: OnceLock::new(),
+            events: OnceLock::new(),
             _owner_claim: claim,
             #[cfg(test)]
             fail_completion_lookup: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_claim_release: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: env_usize(JOURNAL_MAX_BYTES_ENV, DEFAULT_JOURNAL_MAX_BYTES),
             max_dispatch_attempts: env_u32(
@@ -476,6 +554,8 @@ impl QueueJournal {
                 DEFAULT_MAX_DISPATCH_ATTEMPTS,
             ),
             max_replay_seen: env_u32(MAX_REPLAY_SEEN_ENV, DEFAULT_MAX_REPLAY_SEEN),
+            feeder_notify: tokio::sync::Notify::new(),
+            durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -485,14 +565,36 @@ impl QueueJournal {
         Self {
             db: Arc::new(None),
             owner_uuid: None,
+            durable_media_ready: AtomicBool::new(false),
+            queue_media_lifecycle: OnceLock::new(),
+            queue_media_admission: OnceLock::new(),
+            events: OnceLock::new(),
             _owner_claim: None,
             #[cfg(test)]
             fail_completion_lookup: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_claim_release: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
+            feeder_notify: tokio::sync::Notify::new(),
+            durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Enter the durable-transition protocol without touching the scheduler
+    /// mutation fence. Callers may await SQLite while holding this guard, but
+    /// must finish that work before acquiring the scheduler fence.
+    pub(crate) async fn lock_durable_transition(
+        self: &Arc<Self>,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.durable_transition_gate.clone().lock_owned().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn durable_transition_is_locked(&self) -> bool {
+        self.durable_transition_gate.try_lock().is_err()
     }
 
     /// Whether this server can promise that a queued job survives a restart.
@@ -503,6 +605,78 @@ impl QueueJournal {
 
     pub fn owner_uuid(&self) -> Option<&str> {
         self.owner_uuid.as_deref()
+    }
+
+    /// Advertise encrypted queue-media durability only after the claimed
+    /// owner's startup reconciliation reached a clean fixed point. Absence is
+    /// intentionally independent from [`Self::is_enabled`], so key/store
+    /// failures do not turn off media-free durable generations.
+    pub fn durable_media_capabilities(&self) -> Option<mold_core::DurableMediaCapabilities> {
+        (self.durable_media_ready.load(Ordering::Acquire)
+            && self.queue_media_lifecycle.get().is_some()
+            && self.queue_media_admission.get().is_some())
+        .then_some(mold_core::DurableMediaCapabilities::v1())
+    }
+
+    pub(crate) fn install_queue_media_lifecycle(
+        &self,
+        lifecycle: Arc<crate::queue_media_lifecycle::QueueMediaLifecycle>,
+    ) -> Result<(), &'static str> {
+        self.queue_media_lifecycle
+            .set(lifecycle)
+            .map_err(|_| "queue-media lifecycle was already installed")
+    }
+
+    // Consumed by the admission/runtime slices only after their independent
+    // activation review; this lifecycle slice deliberately leaves them dark.
+    #[allow(dead_code)]
+    pub(crate) fn queue_media_lifecycle(
+        &self,
+    ) -> Option<Arc<crate::queue_media_lifecycle::QueueMediaLifecycle>> {
+        self.queue_media_lifecycle.get().cloned()
+    }
+
+    pub(crate) fn install_queue_media_admission(
+        &self,
+        admission: Arc<crate::queue_media_admission::DurableMediaAdmission>,
+    ) -> Result<(), &'static str> {
+        self.queue_media_admission
+            .set(admission)
+            .map_err(|_| "durable-media admission was already installed")
+    }
+
+    pub(crate) fn install_event_broadcaster(
+        &self,
+        events: Arc<crate::events::EventBroadcaster>,
+    ) -> Result<(), &'static str> {
+        self.events
+            .set(events)
+            .map_err(|_| "queue journal event broadcaster was already installed")
+    }
+
+    fn publish_state_committed(&self, id: &str) {
+        if let Some(events) = self.events.get() {
+            events.publish(mold_core::ServerEvent::JobStateCommitted { id: id.to_string() });
+        }
+    }
+
+    fn publish_states_committed(&self) {
+        if let Some(events) = self.events.get() {
+            events.publish(mold_core::ServerEvent::GenerationStatesCommitted);
+        }
+    }
+
+    pub(crate) fn queue_media_admission(
+        &self,
+    ) -> Option<Arc<crate::queue_media_admission::DurableMediaAdmission>> {
+        self.queue_media_admission.get().cloned()
+    }
+
+    // Called by the default-dark startup coordinator once its independently
+    // reviewed concrete DB/store adapter is integrated.
+    #[allow(dead_code)]
+    pub(crate) fn set_durable_media_ready(&self, ready: bool) {
+        self.durable_media_ready.store(ready, Ordering::Release);
     }
 
     pub fn max_dispatch_attempts(&self) -> u32 {
@@ -534,8 +708,9 @@ impl QueueJournal {
     ///
     /// `None` means the job is not durable. Every reason is deliberate:
     /// no gallery target, reference-upload authority (bearer secrets), a face
-    /// photograph (biometric data), a batch child (owned by the batch
-    /// transaction's own recovery), an oversized payload, or no journal at all.
+    /// photograph (biometric data), MiniMax H3 replay authority, a batch child
+    /// (owned by the batch transaction's own recovery), an oversized payload,
+    /// or no journal at all.
     pub fn record(self: &Arc<Self>, admission: JournalAdmission<'_>) -> Option<QueueTicket> {
         let owner_uuid = self.owner_uuid.as_deref()?;
         let db = self.db()?;
@@ -561,6 +736,15 @@ impl QueueJournal {
                 job = %admission.id,
                 "generation is not durable: it conditions on a reference photograph, \
                  which is never written to the database"
+            );
+            return None;
+        }
+        if requires_h3_replay_authority(admission.request) {
+            tracing::info!(
+                job = %admission.id,
+                model = %admission.request.model,
+                "generation is not durable: MiniMax H3 replay cannot reconstruct its \
+                 authenticated ingress authority"
             );
             return None;
         }
@@ -592,11 +776,10 @@ impl QueueJournal {
             state: QueueRowState::Queued,
             model: admission.request.model.clone(),
             request_json,
+            media_set_id: None,
             output_dir: output_dir.to_path_buf(),
             target_gpu: admission.target_gpu,
-            // Admission records the ordinal a client asked for; a stable pin
-            // only ever arrives later, through PATCH /api/queue/:id.
-            target_device_id: None,
+            target_device_id: admission.target_device_id.map(ToOwned::to_owned),
             completion_payload: completion_payload_as_str(admission.completion_payload).to_string(),
             seed_pinned: admission.request.seed.is_some(),
             dispatch_attempts: 0,
@@ -606,7 +789,8 @@ impl QueueJournal {
             updated_at_ms: now,
             started_at_ms: None,
         };
-        if let Err(error) = generation_queue::insert(db, &row) {
+        let claim_token = uuid::Uuid::new_v4().to_string();
+        if let Err(error) = generation_queue::insert_claimed(db, &row, &claim_token) {
             tracing::warn!(
                 job = %admission.id,
                 error = %format!("{error:#}"),
@@ -617,17 +801,18 @@ impl QueueJournal {
         Some(QueueTicket {
             journal: Arc::clone(self),
             id: admission.id.to_string(),
+            claim_token: Some(claim_token),
             settled: false,
         })
     }
 
     /// Persist one heterogeneous parent index and all ordinary queue children
-    /// in a single SQLite transaction. `None` tickets means this was an
-    /// idempotent retry of an already-admitted parent.
+    /// in a single SQLite transaction. The boolean reports whether this call
+    /// inserted the batch rather than returning an idempotent retry.
     pub fn record_batch(
         self: &Arc<Self>,
         admission: BatchJournalAdmission<'_>,
-    ) -> Result<(GenerationBatchDetail, Option<Vec<QueueTicket>>), String> {
+    ) -> Result<(GenerationBatchDetail, bool), String> {
         let owner_uuid = self
             .owner_uuid
             .as_deref()
@@ -652,6 +837,9 @@ impl QueueJournal {
             if carries_identity_photograph(child.request) {
                 return Err("heterogeneous batches cannot persist identity photographs".to_string());
             }
+            if requires_h3_replay_authority(child.request) {
+                return Err(PRIVATE_H3_BATCH_DURABILITY_ERROR.to_string());
+            }
             let request_json = serde_json::to_string(child.request)
                 .map_err(|error| format!("could not serialize batch child: {error}"))?;
             if request_json.len() > self.max_bytes {
@@ -666,9 +854,10 @@ impl QueueJournal {
                 state: QueueRowState::Queued,
                 model: child.request.model.clone(),
                 request_json,
+                media_set_id: None,
                 output_dir: output_dir.to_path_buf(),
                 target_gpu: child.target_gpu,
-                target_device_id: None,
+                target_device_id: child.target_device_id.map(ToOwned::to_owned),
                 completion_payload: completion_payload_as_str(child.completion_payload).to_string(),
                 seed_pinned: child.request.seed.is_some(),
                 dispatch_attempts: 0,
@@ -697,16 +886,109 @@ impl QueueJournal {
         };
         let (detail, inserted) = generation_batches::insert_or_get(db, &batch, &rows)
             .map_err(|error| format!("could not persist generation batch: {error:#}"))?;
-        let tickets = inserted.then(|| {
-            rows.iter()
-                .map(|(_, row)| QueueTicket {
-                    journal: Arc::clone(self),
-                    id: row.id.clone(),
-                    settled: false,
-                })
-                .collect()
-        });
-        Ok((detail, tickets))
+        if inserted {
+            self.feeder_notify.notify_one();
+        }
+        Ok((detail, inserted))
+    }
+
+    /// Persist one media-bearing operation in the same immediate transaction
+    /// as all child rows and active media obligations. Existing media-free
+    /// `record_batch` remains byte-for-byte on its legacy equality path.
+    pub(crate) fn record_batch_with_media(
+        self: &Arc<Self>,
+        admission: MediaBatchJournalAdmission<'_>,
+    ) -> Result<GenerationBatchMediaInsertOutcome, String> {
+        let owner_uuid = self
+            .owner_uuid
+            .as_deref()
+            .ok_or_else(|| "durable generation queue is unavailable".to_string())?;
+        let db = self
+            .db()
+            .ok_or_else(|| "metadata DB is unavailable".to_string())?;
+        if admission.children.is_empty() {
+            return Err("batch must contain at least one child".to_string());
+        }
+        let now = now_ms();
+        let mut rows = Vec::with_capacity(admission.children.len());
+        let mut obligations = Vec::new();
+        for (offset, child) in admission.children.iter().enumerate() {
+            if child.request_json.len() > self.max_bytes {
+                return Err(format!(
+                    "batch child {} exceeds the durable queue payload ceiling",
+                    offset + 1
+                ));
+            }
+            let media_set_id = match child.media_set {
+                Some(media_set)
+                    if media_set.owner_id == owner_uuid && media_set.job_id == child.id =>
+                {
+                    obligations.push(mold_db::generation_queue_media::QueueMediaObligation {
+                        media_set_id: media_set.set_id.clone(),
+                        owner_uuid: owner_uuid.to_string(),
+                        state: mold_db::generation_queue_media::QueueMediaObligationState::Active,
+                        created_at_ms: now,
+                        updated_at_ms: now,
+                    });
+                    Some(media_set.set_id.clone())
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "batch child {} media authority does not match its owner and job",
+                        offset + 1
+                    ));
+                }
+                None => None,
+            };
+            rows.push((
+                GenerationBatchChildRow {
+                    batch_id: admission.id.to_string(),
+                    job_id: child.id.to_string(),
+                    batch_index: (offset + 1) as u32,
+                    state: "accepted".to_string(),
+                    error: None,
+                    updated_at_ms: now,
+                },
+                GenerationQueueRow {
+                    id: child.id.to_string(),
+                    owner_uuid: owner_uuid.to_string(),
+                    state: QueueRowState::Queued,
+                    model: child.model.to_string(),
+                    request_json: child.request_json.to_string(),
+                    media_set_id,
+                    output_dir: child.output_dir.to_path_buf(),
+                    target_gpu: child.target_gpu,
+                    target_device_id: child.target_device_id.map(ToOwned::to_owned),
+                    completion_payload: completion_payload_as_str(child.completion_payload)
+                        .to_string(),
+                    seed_pinned: child.seed_pinned,
+                    dispatch_attempts: 0,
+                    replay_seen: 0,
+                    held_reason: None,
+                    created_at_ms: now,
+                    updated_at_ms: now,
+                    started_at_ms: None,
+                },
+            ));
+        }
+        let batch = GenerationBatchRow {
+            id: admission.id.to_string(),
+            client_batch_id: admission.client_batch_id.to_string(),
+            owner_uuid: owner_uuid.to_string(),
+            request_sha256: admission.operation_receipt.to_string(),
+            created_at_ms: now,
+        };
+        let outcome = generation_batches::insert_or_get_with_media(db, &batch, &rows, &obligations)
+            .map_err(|error| format!("could not persist media generation batch: {error:#}"))?;
+        if matches!(outcome, GenerationBatchMediaInsertOutcome::Inserted(_)) {
+            if let (Some(job_id), Some(service)) =
+                (admission.observer_job_id, self.queue_media_admission.get())
+            {
+                service.publish_observer(job_id);
+            }
+            self.feeder_notify.notify_one();
+        }
+        Ok(outcome)
     }
 
     pub fn generation_batch(&self, id: &str) -> Option<GenerationBatchDetail> {
@@ -728,10 +1010,63 @@ impl QueueJournal {
             .flatten()
     }
 
+    pub fn durable_generation_batch(
+        &self,
+        id: &str,
+    ) -> Result<Option<mold_db::generation_batches::DurableGenerationBatchDetail>, String> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(None);
+        };
+        generation_batches::get_durable(db, owner, id).map_err(|error| format!("{error:#}"))
+    }
+
+    pub fn durable_generation_batch_by_client(
+        &self,
+        client_batch_id: &str,
+    ) -> Result<Option<mold_db::generation_batches::DurableGenerationBatchDetail>, String> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(None);
+        };
+        generation_batches::get_durable_by_client(db, owner, client_batch_id)
+            .map_err(|error| format!("{error:#}"))
+    }
+
+    pub fn durable_generation_batches(
+        &self,
+        client_batch_ids: &[String],
+        batch_ids: &[String],
+    ) -> Result<mold_db::generation_batches::DurableGenerationBatchLookup, String> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            let unique = |values: &[String]| {
+                let mut seen = HashSet::new();
+                values
+                    .iter()
+                    .filter(|value| seen.insert(value.as_str()))
+                    .cloned()
+                    .collect()
+            };
+            return Ok(mold_db::generation_batches::DurableGenerationBatchLookup {
+                batches: Vec::new(),
+                missing_client_batch_ids: unique(client_batch_ids),
+                missing_batch_ids: unique(batch_ids),
+            });
+        };
+        generation_batches::lookup_durable(db, owner, client_batch_ids, batch_ids)
+            .map_err(|error| format!("{error:#}"))
+    }
+
     fn set_batch_child_state(&self, id: &str, state: &str, error: Option<&str>) {
         let Some(db) = self.db() else { return };
-        if let Err(error) = generation_batches::set_child_state(db, id, state, error, now_ms()) {
-            tracing::warn!(job = %id, %error, "could not update generation batch child state");
+        match generation_batches::set_child_state(db, id, state, error, now_ms()) {
+            // `job_started` already invalidates clients after the running
+            // transition. Reserve the host-wide post-commit hint for states
+            // that otherwise race the earlier `job_ended`/gallery events.
+            Ok(true) if state != "running" => self.publish_state_committed(id),
+            Ok(true) => {}
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(job = %id, %error, "could not update generation batch child state");
+            }
         }
     }
 
@@ -741,7 +1076,178 @@ impl QueueJournal {
         QueueTicket {
             journal: Arc::clone(self),
             id: id.to_string(),
+            claim_token: None,
             settled: false,
+        }
+    }
+
+    /// Claim exactly one oldest row not owned by a live direct submitter.
+    /// Payload hydration starts only after this returns, so the deep backlog
+    /// never enters memory. Startup recovery clears tokens from the prior
+    /// runtime, making interrupted legacy rows eligible here too.
+    pub(crate) fn claim_next_feeder(
+        self: &Arc<Self>,
+    ) -> anyhow::Result<Option<mold_db::generation_queue::QueueClaim>> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(None);
+        };
+        let token = uuid::Uuid::new_v4().to_string();
+        generation_queue::claim_next(db, owner, &token, now_ms())
+    }
+
+    /// Claim one exact queued row through the same owner/token fence as the
+    /// FIFO feeder. Admission can wake and hand off a newly committed id
+    /// without acquiring direct runtime authority or bypassing the journal.
+    #[allow(dead_code)] // activated by the separately reviewed admission feeder slice
+    pub(crate) fn claim_feeder_by_id(
+        self: &Arc<Self>,
+        id: &str,
+    ) -> anyhow::Result<Option<mold_db::generation_queue::QueueClaim>> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(None);
+        };
+        let token = uuid::Uuid::new_v4().to_string();
+        generation_queue::claim_by_id(db, owner, id, &token, now_ms())
+    }
+
+    /// Locate an exact live feeder claim in SQLite's payload-free runtime
+    /// order window. See [`generation_queue::claimed_runtime_position`].
+    pub(crate) fn claimed_runtime_position(
+        &self,
+        id: &str,
+        claim_token: &str,
+        limit: usize,
+    ) -> anyhow::Result<Option<generation_queue::ClaimedQueueRuntimePosition>> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(None);
+        };
+        generation_queue::claimed_runtime_position(db, owner, id, claim_token, limit)
+    }
+
+    pub(crate) fn attach_claimed(self: &Arc<Self>, id: &str, claim_token: String) -> QueueTicket {
+        QueueTicket {
+            journal: Arc::clone(self),
+            id: id.to_string(),
+            claim_token: Some(claim_token),
+            settled: false,
+        }
+    }
+
+    pub(crate) fn feeder_notified(&self) -> impl std::future::Future<Output = ()> + '_ {
+        self.feeder_notify.notified()
+    }
+
+    pub(crate) fn wake_feeder(&self) {
+        self.feeder_notify.notify_one();
+    }
+
+    pub(crate) fn recover_feeder_runtime(
+        &self,
+    ) -> anyhow::Result<generation_queue::RuntimeClaimRecovery> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(generation_queue::RuntimeClaimRecovery::default());
+        };
+        generation_queue::recover_runtime_claims_and_charge_replays(
+            db,
+            owner,
+            now_ms(),
+            self.max_replay_seen,
+        )
+    }
+
+    pub(crate) fn completed_output(
+        &self,
+        id: &str,
+    ) -> Result<
+        Option<generation_queue::CompletedGenerationOutput>,
+        generation_queue::CompletedOutputLookupError,
+    > {
+        #[cfg(test)]
+        if self
+            .fail_completion_lookup
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(
+                generation_queue::CompletedOutputLookupError::Infrastructure(anyhow::anyhow!(
+                    "injected completion-lookup failure"
+                )),
+            );
+        }
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(None);
+        };
+        generation_queue::find_completed_output(db, owner, id)
+    }
+
+    pub(crate) fn repoint_output(&self, id: &str, output_dir: &Path) -> anyhow::Result<()> {
+        let Some(db) = self.db() else { return Ok(()) };
+        generation_queue::set_output_dir(db, id, &output_dir.to_string_lossy(), now_ms())?;
+        Ok(())
+    }
+
+    pub(crate) fn feeder_cancel_requested(&self, id: &str) -> anyhow::Result<bool> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(false);
+        };
+        generation_batches::child_cancel_requested(db, owner, id)
+    }
+
+    fn media_candidate(
+        &self,
+        id: &str,
+    ) -> Option<crate::queue_media_lifecycle::QueueMediaGcCandidate> {
+        let lifecycle = self.queue_media_lifecycle.get()?;
+        match lifecycle.candidate_for_job(id) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                tracing::warn!(
+                    job = %id,
+                    %error,
+                    "could not snapshot queue-media cleanup authority; the DB trigger will retain GC work"
+                );
+                None
+            }
+        }
+    }
+
+    fn active_media_candidates(&self) -> Vec<crate::queue_media_lifecycle::QueueMediaGcCandidate> {
+        let Some(lifecycle) = self.queue_media_lifecycle.get() else {
+            return Vec::new();
+        };
+        match lifecycle.active_candidates() {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "could not snapshot bulk queue-media cleanup authority; the DB trigger will retain GC work"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    fn cleanup_media_candidate(
+        &self,
+        candidate: Option<crate::queue_media_lifecycle::QueueMediaGcCandidate>,
+    ) {
+        let (Some(lifecycle), Some(candidate)) = (self.queue_media_lifecycle.get(), candidate)
+        else {
+            return;
+        };
+        if let Err(error) = lifecycle.cleanup_after_committed_delete(&candidate) {
+            tracing::warn!(
+                %error,
+                "queue-media cleanup remains GC-pending after terminal queue deletion"
+            );
+        }
+    }
+
+    fn cleanup_media_candidates(
+        &self,
+        candidates: Vec<crate::queue_media_lifecycle::QueueMediaGcCandidate>,
+    ) {
+        for candidate in candidates {
+            self.cleanup_media_candidate(Some(candidate));
         }
     }
 
@@ -752,13 +1258,47 @@ impl QueueJournal {
         let Some(db) = self.db() else {
             return;
         };
-        if let Err(error) = generation_queue::delete(db, id) {
-            tracing::warn!(
-                job = %id,
-                error = %format!("{error:#}"),
-                "could not remove a cancelled job from the durable queue"
-            );
+        let candidate = self.media_candidate(id);
+        match generation_queue::delete(db, id) {
+            Ok(true) => self.cleanup_media_candidate(candidate),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    job = %id,
+                    error = %format!("{error:#}"),
+                    "could not remove a cancelled job from the durable queue"
+                );
+            }
         }
+    }
+
+    /// Cancel an API-visible queue id without stealing a feeder claim.
+    /// Unhydrated batch children settle atomically; claimed children are left
+    /// for their token-bearing ticket, and legacy rows keep direct deletion.
+    pub fn cancel_id(&self, id: &str) -> anyhow::Result<bool> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(false);
+        };
+        let terminal_error_json = serde_json::json!({ "message": "Cancelled" }).to_string();
+        let terminal = generation_batches::GenerationBatchTerminal {
+            state: generation_batches::GenerationBatchTerminalState::Cancelled,
+            error: Some("Cancelled"),
+            terminal_error_json: Some(&terminal_error_json),
+            result_json: None,
+            completed_at_ms: now_ms(),
+        };
+        let candidate = self.media_candidate(id);
+        let outcome = generation_batches::cancel_owned(db, owner, id, terminal)?;
+        if outcome == generation_batches::OwnedCancellation::Settled {
+            self.cleanup_media_candidate(candidate);
+            if let Some(service) = self.queue_media_admission.get() {
+                service.ingress().discard_hint(id);
+            }
+            self.publish_state_committed(id);
+        }
+        let cancelled = outcome != generation_batches::OwnedCancellation::NotOwned;
+        self.wake_feeder();
+        Ok(cancelled)
     }
 
     /// Drop every still-queued row this server owns. Backs `DELETE /api/queue`.
@@ -766,12 +1306,39 @@ impl QueueJournal {
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
             return;
         };
-        if let Err(error) = generation_queue::delete_all_queued(db, owner) {
-            tracing::warn!(
-                error = %format!("{error:#}"),
-                "could not clear the durable queue after a bulk cancel"
-            );
+        let candidates = self.active_media_candidates();
+        match generation_queue::delete_all_queued(db, owner) {
+            Ok(_) => self.cleanup_media_candidates(candidates),
+            Err(error) => {
+                tracing::warn!(
+                    error = %format!("{error:#}"),
+                    "could not clear the durable queue after a bulk cancel"
+                );
+            }
         }
+    }
+
+    pub fn cancel_all_queued(&self, already_counted_live: &[String]) -> anyhow::Result<usize> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(0);
+        };
+        let terminal_error_json = serde_json::json!({ "message": "Cancelled" }).to_string();
+        let terminal = generation_batches::GenerationBatchTerminal {
+            state: generation_batches::GenerationBatchTerminalState::Cancelled,
+            error: Some("Cancelled"),
+            terminal_error_json: Some(&terminal_error_json),
+            result_json: None,
+            completed_at_ms: now_ms(),
+        };
+        let candidates = self.active_media_candidates();
+        let additional =
+            generation_batches::cancel_all_queued(db, owner, already_counted_live, terminal)?;
+        self.cleanup_media_candidates(candidates);
+        if additional > 0 || !already_counted_live.is_empty() {
+            self.publish_states_committed();
+        }
+        self.wake_feeder();
+        Ok(additional)
     }
 
     /// Reconcile the journal against reality before anything is replayed.
@@ -868,6 +1435,21 @@ impl QueueJournal {
     pub(crate) fn fail_completion_lookup_for_tests(&self) {
         self.fail_completion_lookup
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam: make the next feeder claim release fail after the database
+    /// has accepted the claim, preserving the exact token for an in-process
+    /// retry.
+    #[cfg(test)]
+    pub(crate) fn fail_claim_release_for_tests(&self) {
+        self.fail_claim_release
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn claim_release_failure_pending_for_tests(&self) -> bool {
+        self.fail_claim_release
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Drop every row whose output already exists.
@@ -986,23 +1568,17 @@ impl QueueJournal {
         }
     }
 
-    /// Whether this id names a retained row that is cancellable but has no
-    /// registry entry.
+    /// Whether this id names any nonterminal durable row owned by this server.
     ///
-    /// Two kinds qualify: a held row, which exists only in the journal; and a
-    /// queued row on a boot with no dispatch owner, which replay deliberately
-    /// never registered. `DELETE /api/queue/:id` is the documented way to
-    /// clear either, and listing work an operator cannot then act on would be
-    /// half an answer. A `running` row is excluded — the endpoint refuses
-    /// running work, and the registry is the authority on that.
-    pub fn owns_cancellable_row(&self, id: &str) -> bool {
-        let Some(db) = self.db() else {
-            return false;
+    /// The cancellation route performs this blocking lookup before taking the
+    /// scheduler mutation fence. Including a feeder-claimed `running` row is
+    /// load-bearing: it may not have reached the registry yet, but cancellation
+    /// must still record intent for the token-bearing feeder handoff.
+    pub fn owns_cancellable_row(&self, id: &str) -> anyhow::Result<bool> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(false);
         };
-        generation_queue::get(db, id)
-            .ok()
-            .flatten()
-            .is_some_and(|row| matches!(row.state, QueueRowState::Held | QueueRowState::Queued))
+        Ok(generation_queue::get(db, id)?.is_some_and(|row| row.owner_uuid == owner))
     }
 
     /// Park a row by id, for a caller that has no ticket.
@@ -1031,6 +1607,139 @@ impl QueueJournal {
             );
             Vec::new()
         })
+    }
+
+    /// Read one payload-free durable page. This method is synchronous because
+    /// SQLite is synchronous; async callers must run it on a blocking worker.
+    pub fn projection_page(
+        &self,
+        cursor: Option<QueueProjectionCursor>,
+        limit: usize,
+    ) -> anyhow::Result<GenerationQueueProjectionPage> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(GenerationQueueProjectionPage {
+                rows: Vec::new(),
+                next_cursor: None,
+            });
+        };
+        generation_queue::list_projection_page(db, owner, cursor, limit)
+    }
+
+    /// Identify active registry rows that are durable without reading their
+    /// payload columns or scanning the deep journal. Synchronous for the same
+    /// reason as [`Self::projection_page`].
+    pub fn owned_row_ids(&self, ids: &[String]) -> anyhow::Result<HashSet<String>> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(HashSet::new());
+        };
+        generation_queue::find_owned_ids(db, owner, ids)
+    }
+
+    /// Exact total waiting load without materializing the durable backlog.
+    ///
+    /// SQLite owns unclaimed durable rows; the bounded registry list supplies
+    /// live waiting jobs that have no durable row. The overlap probe is scoped
+    /// to that bounded list so hydrated durable jobs contribute exactly once.
+    pub fn total_waiting(&self, live_waiting_ids: &[String]) -> anyhow::Result<usize> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(live_waiting_ids.len());
+        };
+        let load = generation_queue::owned_queued_load(db, owner, live_waiting_ids)?;
+        let live_only = live_waiting_ids
+            .len()
+            .checked_sub(load.live_overlap)
+            .ok_or_else(|| anyhow::anyhow!("durable waiting overlap exceeds live waiting rows"))?;
+        load.queued_count
+            .checked_add(live_only)
+            .ok_or_else(|| anyhow::anyhow!("total waiting generation load exceeds usize"))
+    }
+
+    /// Atomically patch an owner-fenced durable queued row. This includes rows
+    /// deeper than the hydrated registry window and never reads request or
+    /// completion payload columns.
+    pub fn patch_owned_queued(
+        &self,
+        id: &str,
+        target_gpu: Option<Option<usize>>,
+        target_device_id: Option<Option<String>>,
+        position: Option<usize>,
+    ) -> anyhow::Result<generation_queue::OwnedQueuedPatchOutcome> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(generation_queue::OwnedQueuedPatchOutcome::NotOwned);
+        };
+        let target = target_gpu.map(|target_gpu| generation_queue::QueueTargetPatch {
+            target_gpu,
+            target_device_id: target_device_id.flatten(),
+        });
+        generation_queue::patch_owned_queued(
+            db,
+            owner,
+            id,
+            &generation_queue::OwnedQueuedPatch {
+                target,
+                position,
+                updated_at_ms: now_ms(),
+            },
+        )
+    }
+
+    /// Atomically patch the durable counterpart of a queued live-registry
+    /// handoff. The DB primitive requires an owner-matching non-NULL claim, so
+    /// this path cannot accidentally acquire an unhydrated deep-tail row.
+    pub fn patch_owned_claimed_queued(
+        &self,
+        id: &str,
+        target_gpu: Option<Option<usize>>,
+        target_device_id: Option<Option<String>>,
+        position: Option<usize>,
+    ) -> anyhow::Result<generation_queue::OwnedQueuedPatchOutcome> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(generation_queue::OwnedQueuedPatchOutcome::NotOwned);
+        };
+        let target = target_gpu.map(|target_gpu| generation_queue::QueueTargetPatch {
+            target_gpu,
+            target_device_id: target_device_id.flatten(),
+        });
+        generation_queue::patch_owned_claimed_queued(
+            db,
+            owner,
+            id,
+            &generation_queue::OwnedQueuedPatch {
+                target,
+                position,
+                updated_at_ms: now_ms(),
+            },
+        )
+    }
+
+    /// Patch an owned queued row while fencing every write to the exact claim
+    /// token (including NULL) observed by the DB transaction. The caller must
+    /// own [`Self::lock_durable_transition`] across this call and the bounded
+    /// runtime projection.
+    pub(crate) fn patch_owned_any_queued(
+        &self,
+        id: &str,
+        target_gpu: Option<Option<usize>>,
+        target_device_id: Option<Option<String>>,
+        position: Option<usize>,
+    ) -> anyhow::Result<generation_queue::OwnedQueuedPatchOutcome> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(generation_queue::OwnedQueuedPatchOutcome::NotOwned);
+        };
+        let target = target_gpu.map(|target_gpu| generation_queue::QueueTargetPatch {
+            target_gpu,
+            target_device_id: target_device_id.flatten(),
+        });
+        generation_queue::patch_owned_any_queued(
+            db,
+            owner,
+            id,
+            &generation_queue::OwnedQueuedPatch {
+                target,
+                position,
+                updated_at_ms: now_ms(),
+            },
+        )
     }
 }
 
@@ -1125,7 +1834,8 @@ pub async fn replay(state: &crate::state::AppState, dispatch_available: bool) ->
             report.held += 1;
             continue;
         }
-        let request: mold_core::GenerateRequest = match serde_json::from_str(&row.request_json) {
+        let mut request: mold_core::GenerateRequest = match serde_json::from_str(&row.request_json)
+        {
             Ok(request) => request,
             Err(error) => {
                 // Fail closed: a request this build cannot read must not be
@@ -1141,30 +1851,25 @@ pub async fn replay(state: &crate::state::AppState, dispatch_available: bool) ->
             }
         };
 
+        let target_gpu = resolve_replay_affinity(
+            &mut request,
+            row.target_gpu,
+            row.target_device_id.as_deref(),
+            |device_id| resolve_pinned_ordinal(state, device_id),
+        );
+        if row.target_gpu.is_some() && target_gpu.is_none() {
+            tracing::warn!(
+                job = %row.id,
+                device = ?row.target_device_id,
+                "durable GPU identity is absent or unavailable; resuming on Auto"
+            );
+        }
         let metadata = Box::new(mold_core::OutputMetadata::from_generate_request(
             &request,
             request.seed.unwrap_or(0),
             request.scheduler,
             mold_core::build_info::version_string(),
         ));
-        // Re-resolve a stable pin against THIS boot's device inventory. The
-        // recorded ordinal is only a fallback, and only when no stable pin was
-        // taken — replaying a renumbered ordinal runs the job on a device the
-        // user did not choose.
-        let target_gpu = match row.target_device_id.as_deref() {
-            Some(device_id) => match resolve_pinned_ordinal(state, device_id) {
-                Some(ordinal) => Some(ordinal),
-                None => {
-                    tracing::warn!(
-                        job = %row.id,
-                        device = %device_id,
-                        "the device this job was pinned to is not present; resuming on Auto"
-                    );
-                    None
-                }
-            },
-            None => row.target_gpu,
-        };
         let cancel = state.job_registry.register_job(
             &row.id,
             &row.model,
@@ -1198,6 +1903,7 @@ pub async fn replay(state: &crate::state::AppState, dispatch_available: bool) ->
         let job = crate::state::GenerationJob {
             id: row.id.clone(),
             request,
+            deferred_media: None,
             resolved_references: None,
             completion_payload: completion_payload_from_str(&row.completion_payload),
             // No client to stream to. The output still lands in the gallery,
@@ -1248,6 +1954,91 @@ fn resolve_pinned_ordinal(state: &crate::state::AppState, device_id: &str) -> Op
         .map(|worker| worker.gpu.ordinal)
 }
 
+/// Capture durable affinity only when the active worker exposes a true stable
+/// identity. The scheduler's `runtime:gpu:N` fallback is deliberately not
+/// persisted: it is process-local and would merely disguise an ordinal as a
+/// durable pin.
+pub(crate) fn stable_device_id_for_ordinal(
+    state: &crate::state::AppState,
+    target_gpu: Option<usize>,
+) -> Option<String> {
+    target_gpu
+        .and_then(|ordinal| state.gpu_pool.worker_by_ordinal(ordinal))
+        .and_then(|worker| worker.gpu.stable_id.clone())
+}
+
+/// Rebuild one durable row's affinity against the current worker inventory.
+///
+/// A recorded ordinal is never restart authority by itself. The journal's
+/// `(recorded_ordinal, target_device_id)` pair is authoritative only for that
+/// exact legacy ordinal, so matching `Gpu` component pins are upgraded to the
+/// stable identity and every other legacy ordinal becomes `Auto`.
+///
+/// Existing `Device` component pins are durable identities in their own right.
+/// Preserve each independently when that exact device exists on this boot;
+/// otherwise return only that missing component to `Auto`. This keeps a valid
+/// heterogeneous placement intact without letting a removed device strand the
+/// replayed job.
+pub(crate) fn resolve_replay_affinity(
+    request: &mut mold_core::GenerateRequest,
+    recorded_ordinal: Option<usize>,
+    target_device_id: Option<&str>,
+    resolve: impl Fn(&str) -> Option<usize>,
+) -> Option<usize> {
+    rebind_replay_accelerator_pins(request, recorded_ordinal.zip(target_device_id), &resolve);
+    target_device_id.and_then(resolve)
+}
+
+fn rebind_replay_accelerator_pins(
+    request: &mut mold_core::GenerateRequest,
+    authoritative_mapping: Option<(usize, &str)>,
+    resolve: &impl Fn(&str) -> Option<usize>,
+) {
+    fn rebind(
+        device: &mut mold_core::DeviceRef,
+        mapping: Option<(usize, &str)>,
+        resolve: &impl Fn(&str) -> Option<usize>,
+    ) {
+        match device {
+            mold_core::DeviceRef::Gpu { ordinal } => {
+                *device = match mapping {
+                    Some((recorded_ordinal, stable_id))
+                        if *ordinal == recorded_ordinal && resolve(stable_id).is_some() =>
+                    {
+                        mold_core::DeviceRef::device(stable_id.to_string())
+                    }
+                    _ => mold_core::DeviceRef::Auto,
+                };
+            }
+            mold_core::DeviceRef::Device { id } if resolve(id).is_none() => {
+                *device = mold_core::DeviceRef::Auto;
+            }
+            _ => {}
+        }
+    }
+
+    let Some(placement) = request.placement.as_mut() else {
+        return;
+    };
+    rebind(&mut placement.text_encoders, authoritative_mapping, resolve);
+    let Some(advanced) = placement.advanced.as_mut() else {
+        return;
+    };
+    rebind(&mut advanced.transformer, authoritative_mapping, resolve);
+    rebind(&mut advanced.vae, authoritative_mapping, resolve);
+    for device in [
+        advanced.clip_l.as_mut(),
+        advanced.clip_g.as_mut(),
+        advanced.t5.as_mut(),
+        advanced.qwen.as_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        rebind(device, authoritative_mapping, resolve);
+    }
+}
+
 fn completion_payload_as_str(payload: SseCompletionPayload) -> &'static str {
     match payload {
         SseCompletionPayload::Full => "full",
@@ -1272,6 +2063,23 @@ pub enum DispatchClaim {
     /// There is no row (journal disabled, or the job was cancelled). The job
     /// still runs — durability is additive, never a gate on execution.
     Untracked,
+    /// A feeder token no longer owns the row. The stale runtime must not run.
+    Fenced,
+}
+
+/// Result of returning one token-owned row to the feeder backlog.
+///
+/// `Retry` retains the exact token-bearing ticket. Its drop is inert, so a
+/// caller that cannot retry in this runtime leaves the row safely owned for
+/// startup recovery rather than terminalizing or deleting it.
+#[derive(Debug)]
+pub enum RetainOutcome {
+    Released,
+    Stale,
+    Retry {
+        ticket: QueueTicket,
+        error: anyhow::Error,
+    },
 }
 
 /// RAII owner of one journal row.
@@ -1284,6 +2092,7 @@ pub enum DispatchClaim {
 pub struct QueueTicket {
     journal: Arc<QueueJournal>,
     id: String,
+    claim_token: Option<String>,
     settled: bool,
 }
 
@@ -1294,11 +2103,53 @@ impl QueueTicket {
 
     /// The job produced its output. Delete the row unconditionally — a
     /// completed job must never be replayed, fence or no fence.
-    pub fn complete(mut self) {
+    pub fn complete(self) {
+        self.complete_with_result(None);
+    }
+
+    pub fn complete_with_result(mut self, result_json: Option<&str>) {
         self.settled = true;
+        if let Some(token) = self.claim_token.as_deref() {
+            self.finish_claimed(
+                token,
+                QueueRowState::Running,
+                mold_db::generation_batches::GenerationBatchTerminal {
+                    state: mold_db::generation_batches::GenerationBatchTerminalState::Complete,
+                    error: None,
+                    terminal_error_json: None,
+                    result_json,
+                    completed_at_ms: now_ms(),
+                },
+            );
+            return;
+        }
         self.journal
             .set_batch_child_state(&self.id, "complete", None);
         self.journal.discard_id(&self.id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn complete_before_dispatch(self) {
+        self.complete_before_dispatch_with_result(None);
+    }
+
+    pub(crate) fn complete_before_dispatch_with_result(mut self, result_json: Option<&str>) {
+        self.settled = true;
+        let Some(token) = self.claim_token.as_deref() else {
+            self.journal.discard_id(&self.id);
+            return;
+        };
+        self.finish_claimed(
+            token,
+            QueueRowState::Queued,
+            mold_db::generation_batches::GenerationBatchTerminal {
+                state: mold_db::generation_batches::GenerationBatchTerminalState::Complete,
+                error: None,
+                terminal_error_json: None,
+                result_json,
+                completed_at_ms: now_ms(),
+            },
+        );
     }
 
     /// The job was explicitly cancelled. Same unconditional delete as
@@ -1306,8 +2157,36 @@ impl QueueTicket {
     /// fence.
     pub fn discard(mut self) {
         self.settled = true;
+        if let Some(token) = self.claim_token.as_deref() {
+            let terminal = mold_db::generation_batches::GenerationBatchTerminal {
+                state: mold_db::generation_batches::GenerationBatchTerminalState::Cancelled,
+                error: Some("Cancelled"),
+                terminal_error_json: Some(r#"{"message":"Cancelled"}"#),
+                result_json: None,
+                completed_at_ms: now_ms(),
+            };
+            if !self.finish_claimed(token, QueueRowState::Running, terminal) {
+                self.finish_claimed(token, QueueRowState::Queued, terminal);
+            }
+            return;
+        }
         self.journal
             .set_batch_child_state(&self.id, "cancelled", Some("Cancelled"));
+        self.journal.discard_id(&self.id);
+    }
+
+    pub fn fail(mut self, message: &str) {
+        if self.journal.is_retaining() {
+            self.settled = true;
+            return;
+        }
+        self.settled = true;
+        if self.claim_token.is_some() {
+            self.fail_claimed(message);
+            return;
+        }
+        self.journal
+            .set_batch_child_state(&self.id, "failed", Some(message));
         self.journal.discard_id(&self.id);
     }
 
@@ -1316,8 +2195,72 @@ impl QueueTicket {
     /// Distinct from `hold`: nothing is wrong with the job and the next boot
     /// should replay it normally. The `replay_seen` budget is what stops a row
     /// retrying forever if the condition persists.
-    pub fn retain(mut self) {
+    pub fn retain(mut self) -> RetainOutcome {
+        if let Some(token) = self.claim_token.as_deref() {
+            let Some(db) = self.journal.db() else {
+                self.settled = true;
+                return RetainOutcome::Released;
+            };
+            let now = now_ms();
+            #[cfg(test)]
+            let released = if self
+                .journal
+                .fail_claim_release
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                Err(anyhow::anyhow!("injected claim-release failure"))
+            } else {
+                generation_queue::release_claim(db, &self.id, token, now)
+            };
+            #[cfg(not(test))]
+            let released = generation_queue::release_claim(db, &self.id, token, now);
+            let retained = match released {
+                Ok(true) => Ok(true),
+                Ok(false) => generation_queue::requeue_running_claimed(db, &self.id, token, now),
+                Err(error) => Err(error),
+            };
+            match retained {
+                Ok(true) => {
+                    if let (Some(db), Some(owner)) =
+                        (self.journal.db(), self.journal.owner_uuid.as_deref())
+                    {
+                        if let Err(error) =
+                            generation_batches::restore_child_after_retain(db, owner, &self.id, now)
+                        {
+                            tracing::warn!(
+                                job = %self.id,
+                                %error,
+                                "could not restore a retained batch child"
+                            );
+                        }
+                    }
+                    self.journal.wake_feeder();
+                    self.settled = true;
+                    return RetainOutcome::Released;
+                }
+                Ok(false) => {
+                    tracing::warn!(
+                        job = %self.id,
+                        "could not retain a feeder claim because its token was stale"
+                    );
+                    self.settled = true;
+                    return RetainOutcome::Stale;
+                }
+                Err(error) => {
+                    tracing::warn!(job = %self.id, %error, "could not release a retained feeder claim");
+                    // The database still carries this exact claim. Make Drop
+                    // inert while returning the ticket so an in-process
+                    // retry can present the same token again.
+                    self.settled = true;
+                    return RetainOutcome::Retry {
+                        ticket: self,
+                        error,
+                    };
+                }
+            }
+        }
         self.settled = true;
+        RetainOutcome::Released
     }
 
     /// Charge a dispatch attempt on the GPU owner thread, immediately before
@@ -1327,20 +2270,33 @@ impl QueueTicket {
             return DispatchClaim::Untracked;
         };
         let now = now_ms();
-        match generation_queue::mark_dispatched(db, &self.id, now) {
+        let claimed = match self.claim_token.as_deref() {
+            Some(token) => generation_queue::mark_dispatched_claimed(db, &self.id, token, now),
+            None => generation_queue::mark_dispatched(db, &self.id, now),
+        };
+        match claimed {
             Ok(Some(attempts)) if attempts > self.journal.max_dispatch_attempts => {
                 let cap = self.journal.max_dispatch_attempts;
                 let reason =
                     format!("dispatch attempts exhausted ({attempts} > {cap}); held for review");
-                if let Err(error) = generation_queue::hold(db, &self.id, &reason, now) {
-                    tracing::warn!(
+                match self.hold_owned(&reason, now) {
+                    Ok(generation_batches::OwnedHold::Held) => {}
+                    Ok(generation_batches::OwnedHold::Cancelled) => {
+                        return DispatchClaim::Fenced;
+                    }
+                    Ok(generation_batches::OwnedHold::Fenced) => {
+                        return if self.claim_token.is_some() {
+                            DispatchClaim::Fenced
+                        } else {
+                            DispatchClaim::Exhausted { attempts, cap }
+                        };
+                    }
+                    Err(error) => tracing::warn!(
                         job = %self.id,
                         error = %format!("{error:#}"),
                         "could not hold an exhausted durable queue row"
-                    );
+                    ),
                 }
-                self.journal
-                    .set_batch_child_state(&self.id, "held", Some(&reason));
                 DispatchClaim::Exhausted { attempts, cap }
             }
             Ok(Some(_)) => {
@@ -1348,6 +2304,7 @@ impl QueueTicket {
                     .set_batch_child_state(&self.id, "running", None);
                 DispatchClaim::Granted
             }
+            Ok(None) if self.claim_token.is_some() => DispatchClaim::Fenced,
             Ok(None) => DispatchClaim::Untracked,
             Err(error) => {
                 tracing::warn!(
@@ -1355,7 +2312,11 @@ impl QueueTicket {
                     error = %format!("{error:#}"),
                     "could not claim a durable queue row; running the job anyway"
                 );
-                DispatchClaim::Untracked
+                if self.claim_token.is_some() {
+                    DispatchClaim::Fenced
+                } else {
+                    DispatchClaim::Untracked
+                }
             }
         }
     }
@@ -1363,17 +2324,95 @@ impl QueueTicket {
     /// Park the row: listed, never auto-run, and no longer owned by a ticket.
     pub fn hold(mut self, reason: &str) {
         self.settled = true;
-        self.journal
-            .set_batch_child_state(&self.id, "held", Some(reason));
-        let Some(db) = self.journal.db() else {
-            return;
-        };
-        if let Err(error) = generation_queue::hold(db, &self.id, reason, now_ms()) {
+        if let Err(error) = self.hold_owned(reason, now_ms()) {
             tracing::warn!(
                 job = %self.id,
                 error = %format!("{error:#}"),
                 "could not hold a durable queue row"
             );
+        }
+    }
+
+    fn hold_owned(&self, reason: &str, now: i64) -> anyhow::Result<generation_batches::OwnedHold> {
+        let (Some(db), Some(owner)) = (self.journal.db(), self.journal.owner_uuid.as_deref())
+        else {
+            return Ok(generation_batches::OwnedHold::Fenced);
+        };
+        let candidate = self.journal.media_candidate(&self.id);
+        let outcome = generation_batches::hold_owned(
+            db,
+            owner,
+            &self.id,
+            self.claim_token.as_deref(),
+            reason,
+            now,
+        )?;
+        if outcome == generation_batches::OwnedHold::Cancelled {
+            self.journal.cleanup_media_candidate(candidate);
+        }
+        if matches!(
+            outcome,
+            generation_batches::OwnedHold::Held | generation_batches::OwnedHold::Cancelled
+        ) {
+            self.journal.publish_state_committed(&self.id);
+        }
+        Ok(outcome)
+    }
+
+    fn finish_claimed(
+        &self,
+        token: &str,
+        expected: QueueRowState,
+        terminal: mold_db::generation_batches::GenerationBatchTerminal<'_>,
+    ) -> bool {
+        let Some(db) = self.journal.db() else {
+            return false;
+        };
+        let candidate = self.journal.media_candidate(&self.id);
+        match generation_batches::finish_claimed(db, &self.id, token, expected, terminal) {
+            Ok(commit) => {
+                if commit.queue_deleted {
+                    self.journal.cleanup_media_candidate(candidate);
+                }
+                if commit.batch_child_updated {
+                    self.journal.publish_state_committed(&self.id);
+                }
+                commit.queue_deleted
+            }
+            Err(error) => {
+                tracing::warn!(job = %self.id, %error, "could not atomically settle a claimed generation");
+                false
+            }
+        }
+    }
+
+    fn fail_claimed(&self, message: &str) {
+        let Some(token) = self.claim_token.as_deref() else {
+            return;
+        };
+        let cancelled = self
+            .journal
+            .db()
+            .zip(self.journal.owner_uuid.as_deref())
+            .and_then(|(db, owner)| {
+                generation_batches::child_cancel_requested(db, owner, &self.id).ok()
+            })
+            .unwrap_or(false);
+        let terminal_message = if cancelled { "Cancelled" } else { message };
+        let terminal_error_json = serde_json::json!({ "message": terminal_message }).to_string();
+        let terminal = mold_db::generation_batches::GenerationBatchTerminal {
+            state: if cancelled {
+                mold_db::generation_batches::GenerationBatchTerminalState::Cancelled
+            } else {
+                mold_db::generation_batches::GenerationBatchTerminalState::Failed
+            },
+            error: Some(terminal_message),
+            terminal_error_json: Some(&terminal_error_json),
+            result_json: None,
+            completed_at_ms: now_ms(),
+        };
+        if !self.finish_claimed(token, QueueRowState::Running, terminal) {
+            self.finish_claimed(token, QueueRowState::Queued, terminal);
         }
     }
 }
@@ -1388,6 +2427,10 @@ impl Drop for QueueTicket {
                 job = %self.id,
                 "retaining an interrupted generation; it will be replayed after restart"
             );
+            return;
+        }
+        if self.claim_token.is_some() {
+            self.fail_claimed("generation ended before publishing an output");
             return;
         }
         self.journal.set_batch_child_state(
@@ -1415,12 +2458,19 @@ mod tests {
         Arc::new(QueueJournal {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
+            durable_media_ready: AtomicBool::new(false),
+            queue_media_lifecycle: OnceLock::new(),
+            queue_media_admission: OnceLock::new(),
+            events: OnceLock::new(),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
+            fail_claim_release: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
+            feeder_notify: tokio::sync::Notify::new(),
+            durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -1436,6 +2486,12 @@ mod tests {
         .expect("minimal generate request")
     }
 
+    fn request_for_model(model: &str) -> mold_core::GenerateRequest {
+        let mut request = request();
+        request.model = model.to_string();
+        request
+    }
+
     fn admission<'a>(
         id: &'a str,
         request: &'a mold_core::GenerateRequest,
@@ -1446,6 +2502,7 @@ mod tests {
             request,
             output_dir: Some(output_dir),
             target_gpu: None,
+            target_device_id: None,
             completion_payload: SseCompletionPayload::Full,
             batch_child: false,
             carries_reference_authority: false,
@@ -1469,6 +2526,7 @@ mod tests {
                 state: QueueRowState::Queued,
                 model: "flux-dev:q4".to_string(),
                 request_json: "{}".to_string(),
+                media_set_id: None,
                 output_dir: std::path::PathBuf::from("/gallery"),
                 target_gpu: None,
                 target_device_id: None,
@@ -1668,6 +2726,33 @@ mod tests {
         assert!(rows(&journal).is_empty());
     }
 
+    #[test]
+    fn direct_record_is_feeder_invisible_until_runtime_recovery() {
+        let journal = journal_with_db();
+        let request = request();
+        let ticket = journal
+            .record(admission("live-direct", &request, Path::new("/gallery")))
+            .expect("an ordinary gallery-bound generation is durable");
+
+        assert!(
+            journal.claim_next_feeder().unwrap().is_none(),
+            "the direct submitter owns this row while its runtime is alive"
+        );
+
+        let recovered = journal.recover_feeder_runtime().unwrap();
+        assert_eq!(recovered.claims_cleared, 1);
+        let replay = journal
+            .claim_next_feeder()
+            .unwrap()
+            .expect("startup recovery makes the retained direct row replayable");
+        assert_eq!(replay.row.id, "live-direct");
+
+        drop(ticket);
+        journal
+            .attach_claimed(&replay.row.id, replay.claim_token)
+            .discard();
+    }
+
     /// The core invariant. Everything the scheduler discards on the way out is
     /// retained, without a single discard site knowing about durability.
     #[test]
@@ -1702,6 +2787,78 @@ mod tests {
     }
 
     #[test]
+    fn shared_mold_home_cannot_cancel_another_live_queue_owner() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let first = QueueJournal::new(db.clone(), Some(home.path()), "instance-a");
+        let second = QueueJournal::new(db.clone(), Some(home.path()), "instance-b");
+        assert_ne!(first.owner_uuid(), second.owner_uuid());
+
+        let second_owner = second.owner_uuid().unwrap();
+        seed_row(db.as_ref().as_ref().unwrap(), second_owner, "foreign-job");
+
+        assert!(!first.owns_cancellable_row("foreign-job").unwrap());
+        assert!(!first.cancel_id("foreign-job").unwrap());
+        assert_eq!(second.list_all().len(), 1);
+        assert!(second.cancel_id("foreign-job").unwrap());
+        assert!(second.list_all().is_empty());
+    }
+
+    #[test]
+    fn cancelling_a_held_batch_child_is_not_a_false_acknowledgement() {
+        let journal = journal_with_db();
+        let request = request();
+        journal
+            .record_batch(BatchJournalAdmission {
+                id: "held-batch",
+                client_batch_id: "held-client",
+                request_sha256: "held-sha",
+                children: &[admission("held-child", &request, Path::new("/gallery"))],
+            })
+            .unwrap();
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        journal
+            .attach_claimed(&claim.row.id, claim.claim_token)
+            .hold("operator review");
+
+        assert_eq!(journal.list_all()[0].state, QueueRowState::Held);
+        assert!(journal.cancel_id("held-child").unwrap());
+        assert!(journal.list_all().is_empty());
+        let child = &journal.generation_batch("held-batch").unwrap().children[0];
+        assert_eq!(child.state, "cancelled");
+    }
+
+    #[test]
+    fn cancellation_cannot_be_erased_by_a_late_feeder_hold() {
+        let journal = journal_with_db();
+        let request = request();
+        journal
+            .record_batch(BatchJournalAdmission {
+                id: "racing-hold-batch",
+                client_batch_id: "racing-hold-client",
+                request_sha256: "racing-hold-sha",
+                children: &[admission(
+                    "racing-hold-child",
+                    &request,
+                    Path::new("/gallery"),
+                )],
+            })
+            .unwrap();
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+
+        assert!(journal.cancel_id("racing-hold-child").unwrap());
+        ticket.hold("server gallery output is disabled");
+
+        assert!(journal.list_all().is_empty());
+        let child = &journal
+            .generation_batch("racing-hold-batch")
+            .unwrap()
+            .children[0];
+        assert_eq!(child.state, "cancelled");
+    }
+
+    #[test]
     fn completion_removes_the_row_even_behind_the_fence() {
         let journal = journal_with_db();
         let request = request();
@@ -1710,9 +2867,91 @@ mod tests {
             .unwrap();
 
         journal.retain_all();
+        assert_eq!(ticket.claim_dispatch(), DispatchClaim::Granted);
         ticket.complete();
 
         assert!(rows(&journal).is_empty());
+    }
+
+    #[test]
+    fn durable_state_event_is_published_after_terminal_commit() {
+        let journal = journal_with_db();
+        let events = crate::events::EventBroadcaster::new();
+        journal.install_event_broadcaster(events.clone()).unwrap();
+        let request = request();
+        journal
+            .record_batch(BatchJournalAdmission {
+                id: "event-batch",
+                client_batch_id: "event-client",
+                request_sha256: "event-sha",
+                children: &[admission("event-child", &request, Path::new("/gallery"))],
+            })
+            .unwrap();
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+        assert_eq!(ticket.claim_dispatch(), DispatchClaim::Granted);
+        let mut receiver = events.subscribe();
+
+        ticket.complete_with_result(Some(r#"{"filename":"event.png"}"#));
+
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            mold_core::ServerEvent::JobStateCommitted { id } if id == "event-child"
+        ));
+        let detail = journal
+            .durable_generation_batch("event-batch")
+            .unwrap()
+            .unwrap();
+        let child = &detail.children[0];
+        assert_eq!(child.state, "complete");
+        assert_eq!(
+            child.result_json.as_deref(),
+            Some(r#"{"filename":"event.png"}"#)
+        );
+    }
+
+    #[test]
+    fn bulk_cancel_publishes_one_post_commit_host_invalidation() {
+        let journal = journal_with_db();
+        let events = crate::events::EventBroadcaster::new();
+        journal.install_event_broadcaster(events.clone()).unwrap();
+        let request = request();
+        journal
+            .record_batch(BatchJournalAdmission {
+                id: "bulk-event-batch",
+                client_batch_id: "bulk-event-client",
+                request_sha256: "bulk-event-sha",
+                children: &[
+                    admission("bulk-event-claimed", &request, Path::new("/gallery")),
+                    admission("bulk-event-deep", &request, Path::new("/gallery")),
+                ],
+            })
+            .unwrap();
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        assert_eq!(claim.row.id, "bulk-event-claimed");
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+        let mut receiver = events.subscribe();
+
+        assert_eq!(
+            journal
+                .cancel_all_queued(&["bulk-event-claimed".to_string()])
+                .unwrap(),
+            1
+        );
+
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            mold_core::ServerEvent::GenerationStatesCommitted
+        ));
+        assert!(receiver.try_recv().is_err(), "bulk cancel emits one hint");
+        let detail = journal
+            .durable_generation_batch("bulk-event-batch")
+            .unwrap()
+            .unwrap();
+        assert_eq!(detail.children[0].state, "cancelling");
+        assert_eq!(detail.children[1].state, "cancelled");
+
+        ticket.discard();
     }
 
     #[test]
@@ -1737,18 +2976,91 @@ mod tests {
     }
 
     #[test]
+    fn private_h3_fl2va_without_references_is_non_durable() {
+        let journal = journal_with_db();
+        let request = request_for_model(mold_core::minimax_h3::FL2VA_COMFY);
+
+        assert!(journal
+            .record(admission("private-fl2va", &request, Path::new("/gallery")))
+            .is_none());
+        assert!(rows(&journal).is_empty());
+    }
+
+    #[test]
+    fn record_batch_rejects_every_h3_capability_contract_by_name() {
+        let journal = journal_with_db();
+        let models = [
+            mold_core::minimax_h3::FL2VA_OFFICIAL,
+            mold_core::minimax_h3::REF2VA_OFFICIAL,
+            mold_core::minimax_h3::FL2VA_COMFY,
+            mold_core::minimax_h3::REF2VA_COMFY,
+            mold_core::minimax_h3::FL2VA_COMFY_TURBO_8STEP,
+            mold_core::minimax_h3::FL2VA_COMFY_TURBO_4STEP_768P,
+            mold_core::minimax_h3::FL2VA_COMFY_NVFP4,
+            mold_core::minimax_h3::REF2VA_COMFY_NVFP4,
+        ];
+
+        for (index, model) in models.into_iter().enumerate() {
+            assert!(
+                mold_core::minimax_h3::capability_contract_for_model(model).is_some(),
+                "test model must remain inside the authoritative H3 capability contract: {model}"
+            );
+            let request = request_for_model(model);
+            let child_id = format!("private-h3-{index}");
+            let child = admission(&child_id, &request, Path::new("/gallery"));
+            let error = journal
+                .record_batch(BatchJournalAdmission {
+                    id: "private-h3-batch",
+                    client_batch_id: "private-h3-client-batch",
+                    request_sha256: "private-h3-request",
+                    children: &[child],
+                })
+                .expect_err("private H3 must never enter the durable batch journal");
+
+            assert_eq!(
+                error,
+                "heterogeneous batches cannot persist private MiniMax H3 requests"
+            );
+            assert!(rows(&journal).is_empty());
+        }
+    }
+
+    #[test]
+    fn public_non_h3_generation_remains_durable() {
+        let journal = journal_with_db();
+        let request = request();
+        assert!(
+            mold_core::minimax_h3::capability_contract_for_model(&request.model).is_none(),
+            "the ordinary public control must remain outside H3 authority"
+        );
+
+        let ticket = journal
+            .record(admission("public-non-h3", &request, Path::new("/gallery")))
+            .expect("ordinary public generation remains durable");
+        assert_eq!(rows(&journal), vec!["public-non-h3"]);
+        ticket.discard();
+    }
+
+    #[test]
     fn an_oversized_request_runs_without_being_journaled() {
         let db = MetadataDb::open_in_memory().unwrap();
         let owner = "test-owner".to_string();
         let journal = Arc::new(QueueJournal {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
+            durable_media_ready: AtomicBool::new(false),
+            queue_media_lifecycle: OnceLock::new(),
+            queue_media_admission: OnceLock::new(),
+            events: OnceLock::new(),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
+            fail_claim_release: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: 64,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
+            feeder_notify: tokio::sync::Notify::new(),
+            durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
         });
         let mut request = request();
         request.prompt = "x".repeat(4096);
@@ -1766,33 +3078,79 @@ mod tests {
         let journal = Arc::new(QueueJournal {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
+            durable_media_ready: AtomicBool::new(false),
+            queue_media_lifecycle: OnceLock::new(),
+            queue_media_admission: OnceLock::new(),
+            events: OnceLock::new(),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
+            fail_claim_release: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: 2,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
+            feeder_notify: tokio::sync::Notify::new(),
+            durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
         });
         let request = request();
-        let ticket = journal
+        let first = journal
             .record(admission("job-1", &request, Path::new("/gallery")))
             .unwrap();
 
-        assert_eq!(ticket.claim_dispatch(), DispatchClaim::Granted);
-        assert_eq!(ticket.claim_dispatch(), DispatchClaim::Granted);
+        assert_eq!(first.claim_dispatch(), DispatchClaim::Granted);
+        journal.recover_feeder_runtime().unwrap();
+        let second_claim = journal.claim_next_feeder().unwrap().unwrap();
+        let second = journal.attach_claimed("job-1", second_claim.claim_token);
+        assert_eq!(second.claim_dispatch(), DispatchClaim::Granted);
+        journal.recover_feeder_runtime().unwrap();
+        let third_claim = journal.claim_next_feeder().unwrap().unwrap();
+        let third = journal.attach_claimed("job-1", third_claim.claim_token);
         assert_eq!(
-            ticket.claim_dispatch(),
+            third.claim_dispatch(),
             DispatchClaim::Exhausted {
                 attempts: 3,
                 cap: 2
             }
         );
+        drop(first);
+        drop(second);
+        drop(third);
 
         // Held rows stay listed and are no longer replayable.
         assert_eq!(rows(&journal), vec!["job-1"]);
         let held = journal.list_all().pop().unwrap();
         assert_eq!(held.state, QueueRowState::Held);
         assert!(held.held_reason.is_some());
+    }
+
+    #[test]
+    fn transient_retain_failure_returns_the_same_token_for_an_in_process_retry() {
+        let journal = journal_with_db();
+        let request = request();
+        let ticket = journal
+            .record(admission("retry-release", &request, Path::new("/gallery")))
+            .unwrap();
+        journal
+            .fail_claim_release
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let retry = match ticket.retain() {
+            RetainOutcome::Retry { ticket, error } => {
+                assert!(error.to_string().contains("injected claim-release failure"));
+                ticket
+            }
+            other => panic!("transient release must preserve its ticket, got {other:?}"),
+        };
+        assert!(
+            journal.claim_next_feeder().unwrap().is_none(),
+            "the failed release must leave the exact token as database authority"
+        );
+
+        assert!(matches!(retry.retain(), RetainOutcome::Released));
+        assert_eq!(
+            journal.claim_next_feeder().unwrap().unwrap().row.id,
+            "retry-release"
+        );
     }
 
     #[test]
@@ -1844,6 +3202,190 @@ mod tests {
         for ticket in tickets {
             ticket.discard();
         }
+    }
+
+    #[test]
+    fn direct_and_batch_admission_persist_the_authoritative_stable_device_id() {
+        let journal = journal_with_db();
+        let request = request();
+        let direct = JournalAdmission {
+            id: "direct-stable",
+            request: &request,
+            output_dir: Some(Path::new("/gallery")),
+            target_gpu: Some(2),
+            target_device_id: Some("cuda:stable-direct"),
+            completion_payload: SseCompletionPayload::Full,
+            batch_child: false,
+            carries_reference_authority: false,
+        };
+        let direct_ticket = journal.record(direct).expect("direct durable row");
+
+        let batch_child = JournalAdmission {
+            id: "batch-stable",
+            request: &request,
+            output_dir: Some(Path::new("/gallery")),
+            target_gpu: Some(5),
+            target_device_id: Some("cuda:stable-batch"),
+            completion_payload: SseCompletionPayload::MetadataOnly,
+            batch_child: false,
+            carries_reference_authority: false,
+        };
+        let (_, inserted) = journal
+            .record_batch(BatchJournalAdmission {
+                id: "stable-batch",
+                client_batch_id: "stable-client",
+                request_sha256: "stable-sha",
+                children: &[batch_child],
+            })
+            .expect("batch durable row");
+        assert!(inserted);
+
+        let rows = journal.list_all();
+        let direct = rows.iter().find(|row| row.id == "direct-stable").unwrap();
+        assert_eq!(direct.target_gpu, Some(2));
+        assert_eq!(
+            direct.target_device_id.as_deref(),
+            Some("cuda:stable-direct")
+        );
+        let batch = rows.iter().find(|row| row.id == "batch-stable").unwrap();
+        assert_eq!(batch.target_gpu, Some(5));
+        assert_eq!(batch.target_device_id.as_deref(), Some("cuda:stable-batch"));
+
+        direct_ticket.discard();
+    }
+
+    #[test]
+    fn replay_affinity_renumbers_legacy_pins_without_flattening_component_identities() {
+        let mut request = request();
+        request.placement = Some(mold_core::DevicePlacement {
+            text_encoders: mold_core::DeviceRef::device("cuda:text"),
+            advanced: Some(mold_core::AdvancedPlacement {
+                transformer: mold_core::DeviceRef::gpu(2),
+                vae: mold_core::DeviceRef::device("cuda:vae"),
+                clip_l: Some(mold_core::DeviceRef::device("cuda:clip")),
+                clip_g: Some(mold_core::DeviceRef::Cpu),
+                ..mold_core::AdvancedPlacement::default()
+            }),
+        });
+
+        // The journal payload crosses a serialization boundary before a
+        // later process hydrates it during restart replay.
+        let json = serde_json::to_string(&request).unwrap();
+        let mut request: mold_core::GenerateRequest = serde_json::from_str(&json).unwrap();
+
+        let target = super::resolve_replay_affinity(
+            &mut request,
+            Some(2),
+            Some("cuda:stable"),
+            |id| match id {
+                "cuda:stable" => Some(7),
+                "cuda:text" => Some(3),
+                "cuda:vae" => Some(4),
+                "cuda:clip" => Some(5),
+                _ => None,
+            },
+        );
+
+        assert_eq!(target, Some(7));
+        let placement = request.placement.unwrap();
+        assert_eq!(
+            placement.text_encoders,
+            mold_core::DeviceRef::device("cuda:text")
+        );
+        let advanced = placement.advanced.unwrap();
+        assert_eq!(
+            advanced.transformer,
+            mold_core::DeviceRef::device("cuda:stable")
+        );
+        assert_eq!(advanced.vae, mold_core::DeviceRef::device("cuda:vae"));
+        assert_eq!(
+            advanced.clip_l,
+            Some(mold_core::DeviceRef::device("cuda:clip"))
+        );
+        assert_eq!(advanced.clip_g, Some(mold_core::DeviceRef::Cpu));
+    }
+
+    #[test]
+    fn replay_without_top_level_affinity_preserves_stable_component_identities() {
+        let mut request = request();
+        request.placement = Some(mold_core::DevicePlacement {
+            text_encoders: mold_core::DeviceRef::device("cuda:text"),
+            advanced: Some(mold_core::AdvancedPlacement {
+                transformer: mold_core::DeviceRef::gpu(2),
+                vae: mold_core::DeviceRef::device("cuda:vae"),
+                ..mold_core::AdvancedPlacement::default()
+            }),
+        });
+
+        let target = super::resolve_replay_affinity(&mut request, Some(2), None, |id| {
+            matches!(id, "cuda:text" | "cuda:vae").then_some(1)
+        });
+
+        assert_eq!(target, None);
+        let placement = request.placement.unwrap();
+        assert_eq!(
+            placement.text_encoders,
+            mold_core::DeviceRef::device("cuda:text")
+        );
+        let advanced = placement.advanced.unwrap();
+        assert_eq!(advanced.transformer, mold_core::DeviceRef::Auto);
+        assert_eq!(advanced.vae, mold_core::DeviceRef::device("cuda:vae"));
+    }
+
+    #[test]
+    fn replay_with_unresolved_top_level_affinity_preserves_component_identity() {
+        let mut request = request();
+        request.placement = Some(mold_core::DevicePlacement {
+            text_encoders: mold_core::DeviceRef::Auto,
+            advanced: Some(mold_core::AdvancedPlacement {
+                transformer: mold_core::DeviceRef::gpu(4),
+                vae: mold_core::DeviceRef::device("cuda:vae"),
+                qwen: Some(mold_core::DeviceRef::device("cuda:qwen")),
+                ..mold_core::AdvancedPlacement::default()
+            }),
+        });
+
+        let target =
+            super::resolve_replay_affinity(&mut request, Some(4), Some("cuda:dispatch"), |id| {
+                matches!(id, "cuda:vae" | "cuda:qwen").then_some(1)
+            });
+
+        assert_eq!(target, None);
+        let advanced = request.placement.unwrap().advanced.unwrap();
+        assert_eq!(advanced.transformer, mold_core::DeviceRef::Auto);
+        assert_eq!(advanced.vae, mold_core::DeviceRef::device("cuda:vae"));
+        assert_eq!(
+            advanced.qwen,
+            Some(mold_core::DeviceRef::device("cuda:qwen"))
+        );
+    }
+
+    #[test]
+    fn replay_never_reuses_a_legacy_component_ordinal_without_an_exact_mapping() {
+        let mut request = request();
+        request.placement = Some(mold_core::DevicePlacement {
+            text_encoders: mold_core::DeviceRef::gpu(3),
+            advanced: Some(mold_core::AdvancedPlacement {
+                transformer: mold_core::DeviceRef::gpu(2),
+                vae: mold_core::DeviceRef::gpu(3),
+                ..mold_core::AdvancedPlacement::default()
+            }),
+        });
+
+        let target =
+            super::resolve_replay_affinity(&mut request, Some(2), Some("cuda:recorded"), |_| {
+                Some(9)
+            });
+
+        assert_eq!(target, Some(9));
+        let placement = request.placement.unwrap();
+        assert_eq!(placement.text_encoders, mold_core::DeviceRef::Auto);
+        let advanced = placement.advanced.unwrap();
+        assert_eq!(
+            advanced.transformer,
+            mold_core::DeviceRef::device("cuda:recorded")
+        );
+        assert_eq!(advanced.vae, mold_core::DeviceRef::Auto);
     }
 
     /// The point of persisting the stable pin: if the device is gone at replay
