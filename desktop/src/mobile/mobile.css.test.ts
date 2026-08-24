@@ -9,6 +9,15 @@ const composerComponent = readFileSync("src/mobile/MobileSequenceComposer.vue", 
 const sharedParamsComponent = readFileSync("src/mobile/MobileSharedParams.vue", "utf8");
 const seamPillComponent = readFileSync("../ui/components/SeamPill.vue", "utf8");
 
+describe("mobile theme bootstrap", () => {
+  it("paints fresh installs as Safelight Dark before Vue mounts", () => {
+    expect(mobileHtml).toMatch(/<html[^>]*data-theme-family="safelight"[^>]*data-theme="dark"/);
+    expect(mobileHtml).toContain('var family = "safelight"');
+    expect(mobileHtml).toContain('var theme = "dark"');
+    expect(mobileHtml).toContain('localStorage.getItem("mold.mobile.settings.v1")');
+  });
+});
+
 describe("mobile viewport scaling", () => {
   it("disables iPhone page and double-tap zoom without document gesture handlers", () => {
     expect(mobileHtml).toMatch(/maximum-scale=1/);

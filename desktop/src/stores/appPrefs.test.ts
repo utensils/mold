@@ -59,10 +59,10 @@ describe("appPrefs store", () => {
     delete document.documentElement.dataset.themeFamily;
   });
 
-  it("defaults a fresh store to Mold with system appearance", () => {
+  it("defaults a fresh store to Safelight Dark", () => {
     const prefs = useAppPrefsStore();
-    expect(prefs.themeFamily).toBe("mold");
-    expect(prefs.theme).toBe("system");
+    expect(prefs.themeFamily).toBe("safelight");
+    expect(prefs.theme).toBe("dark");
     expect(prefs.updateChannel).toBe("stable");
   });
 

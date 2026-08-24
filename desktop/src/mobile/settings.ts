@@ -15,7 +15,7 @@ export interface MobileSettings {
 }
 
 export const DEFAULT_MOBILE_SETTINGS: Readonly<MobileSettings> = {
-  theme: "system",
+  theme: "dark",
   themeFamily: "safelight",
   autoSavePhotos: true,
   autoTagTitle: true,

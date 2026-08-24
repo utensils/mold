@@ -14,10 +14,10 @@ beforeEach(() => {
 });
 
 describe("web theme defaults", () => {
-  it("defaults fresh visitors to the Safelight family, like every other surface", async () => {
+  it("defaults fresh visitors to Safelight Dark, like every other surface", async () => {
     const { themeFamily, theme } = await importTheme();
     expect(themeFamily.value).toBe("safelight");
-    expect(theme.value).toBe("system");
+    expect(theme.value).toBe("dark");
   });
 
   it("preserves a valid saved Mold choice", async () => {
@@ -38,5 +38,15 @@ describe("web theme defaults", () => {
     const { themeFamily, theme } = await importTheme();
     expect(themeFamily.value).toBe("safelight");
     expect(theme.value).toBe("light");
+  });
+
+  it("falls back to Dark when the stored appearance is unrecognized", async () => {
+    localStorage.setItem(
+      "mold.web.theme.v1",
+      JSON.stringify({ family: "mold", theme: "sepia" }),
+    );
+    const { themeFamily, theme } = await importTheme();
+    expect(themeFamily.value).toBe("mold");
+    expect(theme.value).toBe("dark");
   });
 });

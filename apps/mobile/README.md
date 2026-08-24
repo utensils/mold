@@ -297,7 +297,7 @@ pushed screen opened from the header.
   and shows the draining state until completion.
 - **Settings** persists the Mold Studio theme families (Mold or Safelight) and
   System, Dark, or Light appearance. Fresh installs start with Safelight +
-  System; valid saved choices remain authoritative. Its default-on Photos
+  Dark; valid saved choices remain authoritative. Its default-on Photos
   preference automatically fetches each completed still from its authenticated
   host gallery and saves it through UIKit; post-generation upscales save both
   images, while videos and audio-only prints remain in Mold Library. A

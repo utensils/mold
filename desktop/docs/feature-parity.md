@@ -309,7 +309,7 @@ the `POST /api/chain-jobs` body, so multi-host routing is unaffected.
 
 **iPhone app settings:** `mold.mobile.settings.v1` stores only validated
 `theme` (`system|dark|light`) and `themeFamily` (`mold|safelight`), defaulting
-fresh installs to System + Safelight while preserving valid saved choices.
+fresh installs to Dark + Safelight while preserving valid saved choices.
 `src/lib/theme.ts` is the shared desktop/mobile contract. Mobile
 applies it before Vue mounts, serializes/coalesces native appearance calls, and
 maps the final value to UIKit plus a status-bar refresh. Host metadata and the

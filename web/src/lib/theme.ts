@@ -11,8 +11,8 @@ import {
 /*
  * Web-surface theme state on the shared Mold Studio contract (@ui/theme).
  * Fresh visitors default to the Safelight family — the same default as
- * desktop and iPhone — and appearance follows the system until the user
- * picks Dark or Light explicitly. A valid saved choice always wins.
+ * desktop and iPhone — with Dark appearance until the user picks another
+ * appearance explicitly. A valid saved choice always wins.
  */
 
 const STORAGE_KEY = "mold.web.theme.v1";
@@ -33,14 +33,14 @@ function load(): PersistedTheme {
           family: isThemeFamily(candidate.family)
             ? candidate.family
             : "safelight",
-          theme: isTheme(candidate.theme) ? candidate.theme : "system",
+          theme: isTheme(candidate.theme) ? candidate.theme : "dark",
         };
       }
     }
   } catch {
     // Ignore storage failures — fall through to defaults.
   }
-  return { family: "safelight", theme: "system" };
+  return { family: "safelight", theme: "dark" };
 }
 
 const initial = load();
