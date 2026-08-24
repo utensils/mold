@@ -2727,6 +2727,11 @@ impl Coordinator {
                     .find(|worker| worker_device_id(worker) == device.id);
                 let ready = self.ready.get(&device.id);
                 let active_lease = self.leases.get(&device.id);
+                // The public registry spans the hand-off between coordinator
+                // lease bookkeeping and the owner thread. During that window
+                // a generation is already running even if the local lease or
+                // in-flight counter is temporarily absent.
+                let has_active_work = active_lease.is_some() || device.active_work;
                 let measured_cache_bytes = worker
                     .map(|worker| {
                         worker
@@ -2773,7 +2778,7 @@ impl Coordinator {
                     },
                     activity: if device.schedulable
                         && ready.is_some()
-                        && active_lease.is_none()
+                        && !has_active_work
                         && worker.is_some_and(|worker| worker.in_flight.load(Ordering::SeqCst) == 0)
                     {
                         DeviceActivity::Idle
@@ -2786,7 +2791,7 @@ impl Coordinator {
                         device.sampled_free_vram_bytes,
                         reclaimable_cache_bytes,
                         device.sampled_mold_vram_bytes,
-                        active_lease.is_some(),
+                        has_active_work,
                         worker.map_or(0, |worker| worker.gpu.total_vram_bytes),
                     ),
                     warm_execution_fingerprints: warm,
@@ -3345,9 +3350,12 @@ impl Coordinator {
         // "Idle" has to mean every way mold itself can be holding the resource,
         // not just the lease table: a preparation can be staging weights, and a
         // legacy chain claims a worker without taking a coordinator lease.
+        // The job registry spans coordinator/worker hand-offs and is the
+        // authoritative final check for an accepted running generation.
         // Over-counting busy only makes the job wait longer, which is the safe
         // direction.
         let idle = self.leases.is_empty()
+            && !self.state.job_registry.has_running()
             && !self
                 .pending
                 .values()
@@ -6957,15 +6965,15 @@ pub(crate) fn reclaimable_model_cache_bytes(
     })
 }
 
-/// Effective capacity for serialized work on a device. While a lease is
-/// active, the sampler's Mold-owned bytes belong to work that must finish
-/// before the next lease can start, so those bytes are future-reclaimable.
+/// Effective capacity for serialized work on a device. While work is active,
+/// the sampler's Mold-owned bytes belong to work that must finish before the
+/// next lease can start, so those bytes are future-reclaimable.
 /// Unknown attribution and memory owned by other processes remain excluded.
 pub(crate) fn schedulable_available_vram_bytes(
     sampled_free_bytes: u64,
     reclaimable_cache_bytes: u64,
     sampled_mold_bytes: Option<u64>,
-    has_active_lease: bool,
+    has_active_work: bool,
     total_vram_bytes: u64,
 ) -> u64 {
     let immediate = effective_available_vram_bytes(
@@ -6973,7 +6981,7 @@ pub(crate) fn schedulable_available_vram_bytes(
         reclaimable_cache_bytes,
         total_vram_bytes,
     );
-    if !has_active_lease {
+    if !has_active_work {
         return immediate;
     }
     sampled_mold_bytes.map_or(immediate, |mold_bytes| {
@@ -8798,6 +8806,87 @@ mod tests {
         assert!(
             result_rx.try_recv().is_err(),
             "the running job is untouched"
+        );
+    }
+
+    /// The registry is the lifecycle authority across the non-atomic boundary
+    /// between coordinator bookkeeping and owner-thread counters. A following
+    /// job must remain queued if that authority still says another generation
+    /// is running, even when the transport-local signals are momentarily clear.
+    #[tokio::test]
+    async fn a_generation_waiting_behind_registry_running_work_is_not_treated_as_idle() {
+        let (mut coordinator, worker_rx, mut result_rx) =
+            unschedulable_test_coordinator(2 << 30).await;
+        coordinator
+            .state
+            .job_registry
+            .register("active", "minimax-h3-fl2va:comfy-pruned-int8");
+        coordinator
+            .state
+            .job_registry
+            .mark_running("active", Some(0));
+        coordinator
+            .state
+            .resources
+            .publish(mold_core::ResourceSnapshot {
+                hostname: "test".into(),
+                timestamp: 2,
+                gpus: vec![mold_core::GpuSnapshot {
+                    ordinal: 0,
+                    name: "gpu-0".into(),
+                    backend: mold_core::GpuBackend::Cuda,
+                    vram_total: 24 << 30,
+                    vram_used: 22 << 30,
+                    vram_used_by_mold: Some(22 << 30),
+                    vram_used_by_other: Some(0),
+                    gpu_utilization: Some(100),
+                }],
+                system_ram: mold_core::RamSnapshot {
+                    total: 128 << 30,
+                    used: 1 << 30,
+                    available: None,
+                    used_by_mold: 1 << 30,
+                    used_by_other: 0,
+                },
+                cpu: None,
+            });
+        assert!(coordinator.leases.is_empty());
+        assert!(coordinator
+            .state
+            .gpu_pool
+            .workers
+            .iter()
+            .all(|worker| worker.in_flight.load(Ordering::SeqCst) == 0));
+        let device = &coordinator.device_snapshots()[0];
+        assert_eq!(device.activity, DeviceActivity::Busy);
+        assert_eq!(device.available_vram_bytes, 24 << 30);
+
+        // Even without a usable attribution sample, the authoritative running
+        // row still prevents a terminal idle classification.
+        publish_free_vram(&coordinator.state, 2 << 30);
+        coordinator.unschedulable_idle_grace_ms = 0;
+        for _ in 0..2 {
+            let _ = coordinator.dispatch_ready().await;
+        }
+
+        assert!(
+            coordinator.pending.contains_key("stranded"),
+            "authoritatively running work must keep its follower queued"
+        );
+        assert!(
+            coordinator.pending["stranded"]
+                .unschedulable_since_ms
+                .is_none(),
+            "a running registry row must prevent the idle refusal timer"
+        );
+        assert!(worker_rx.try_recv().is_err());
+        assert!(result_rx.try_recv().is_err());
+
+        coordinator.state.job_registry.remove("active");
+        assert_eq!(
+            coordinator.device_snapshots()[0].activity,
+            DeviceActivity::Idle,
+            "removing the running row must release the fail-safe busy state"
         );
     }
 

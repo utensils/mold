@@ -1,0 +1,1 @@
+- **Queue generations behind running work during scheduler hand-offs.** A request that arrives while another generation still owns the GPU now waits for that work to finish instead of being refused because its VRAM is temporarily unavailable.
