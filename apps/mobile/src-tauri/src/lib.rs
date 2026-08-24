@@ -3,6 +3,7 @@
 //! Mold servers.
 
 mod appearance;
+mod background_task;
 mod context_menu;
 mod discovery;
 mod identity;
@@ -31,7 +32,9 @@ pub fn run() {
     #[cfg(target_os = "ios")]
     install_network_crypto_provider();
 
-    let builder = tauri::Builder::default().plugin(tauri_plugin_deep_link::init());
+    let builder = tauri::Builder::default()
+        .manage(background_task::MobileBackgroundTaskState::default())
+        .plugin(tauri_plugin_deep_link::init());
     #[cfg(target_os = "android")]
     let builder = builder.plugin(mobile_native::init());
 
@@ -47,6 +50,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             appearance::set_mobile_appearance,
+            background_task::begin_mobile_background_task,
+            background_task::end_mobile_background_task,
             context_menu::extend_gallery_context_menu,
             discovery::discover_mold_hosts,
             keychain::keychain_set_api_key,

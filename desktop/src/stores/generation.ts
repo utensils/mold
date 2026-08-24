@@ -1080,7 +1080,7 @@ export const useGenerationStore = defineStore("generation", {
       route: JobRoute | null = null,
       chainRouting: ChainRoutingDecision | null = null,
       requestOptions: BatchRequestOptions = {},
-    ): { jobs: Job[]; settled: Promise<Job[]> } {
+    ): { jobs: Job[]; admitted?: Promise<Job[]>; settled: Promise<Job[]> } {
       this.selectedClientId = null;
       if (chainRouting?.kind === "reject") throw new Error(chainRouting.reason);
       const size = Math.max(1, Math.floor(batchSize));
@@ -1188,7 +1188,7 @@ export const useGenerationStore = defineStore("generation", {
         // a client-side quota/privacy failure cannot veto valid host work or
         // redirect it into the legacy endpoint.
         persistDurableRecords();
-        void this.admitDurableRecord(record, plans);
+        const admitted = this.admitDurableRecord(record, plans).then(() => jobs);
         const settled = settlement.promise.then((settledJobs) => {
           this.pendingConsumerBatchIds = this.pendingConsumerBatchIds.filter(
             (pendingBatchId) => pendingBatchId !== batchId,
@@ -1201,12 +1201,24 @@ export const useGenerationStore = defineStore("generation", {
           );
           return settledJobs;
         });
-        return { jobs, settled };
+        return { jobs, admitted, settled };
       }
+      const admissionResolvers: Array<() => void> = [];
+      const admitted = Promise.all(
+        jobs.map(
+          () =>
+            new Promise<void>((resolve) => {
+              admissionResolvers.push(resolve);
+            }),
+        ),
+      ).then(() => jobs);
       const tasks = jobs.map((job, i) => () => {
         // A sibling cancelled while it waited its turn never opens a stream.
-        if (job.status === "error") return Promise.resolve();
-        return this.streamJob(job, plans[i]!);
+        if (job.status === "error") {
+          admissionResolvers[i]?.();
+          return Promise.resolve();
+        }
+        return this.streamJob(job, plans[i]!, admissionResolvers[i]);
       });
       const legacyServerAdmission =
         size > 1 &&
@@ -1257,7 +1269,9 @@ export const useGenerationStore = defineStore("generation", {
               job.retainedByHost = true;
             }
             await this.reconcileInterrupted(jobs);
-          })()
+          })().finally(() => {
+            for (const resolve of admissionResolvers) resolve();
+          })
         : runWithConcurrency(tasks, MAX_STREAMS_PER_TARGET);
       const settled = submit
         .catch((error) => {
@@ -1302,7 +1316,7 @@ export const useGenerationStore = defineStore("generation", {
           }, 0);
           return jobs;
         });
-      return { jobs, settled };
+      return { jobs, admitted, settled };
     },
     /**
      * Settle every job whose stream died while the host kept going, by asking
@@ -1615,7 +1629,11 @@ export const useGenerationStore = defineStore("generation", {
       this.jobs.push(job);
       return job;
     },
-    async streamJob(job: Job, req: GenerateRequest): Promise<void> {
+    async streamJob(
+      job: Job,
+      req: GenerateRequest,
+      onAdmitted: () => void = () => {},
+    ): Promise<void> {
       const abort = new AbortController();
       aborts.set(job.clientId, abort);
       const target = targets.get(job.clientId);
@@ -1624,6 +1642,7 @@ export const useGenerationStore = defineStore("generation", {
         abort.signal,
       );
       if (!releaseStreamSlot || abort.signal.aborted || job.status === "error") {
+        onAdmitted();
         releaseStreamSlot?.();
         aborts.delete(job.clientId);
         return;
@@ -1657,6 +1676,7 @@ export const useGenerationStore = defineStore("generation", {
           lease = prepared;
           transportRequest = prepared.request;
         } catch (error) {
+          onAdmitted();
           if (!abort.signal.aborted && !jobHasSettled(job)) {
             settleJob(job, "error");
             job.interrupted = false;
@@ -1689,6 +1709,7 @@ export const useGenerationStore = defineStore("generation", {
           : {}),
         ...(streamTarget ? { target: streamTarget } : {}),
         onOpen: (response) => {
+          onAdmitted();
           job.requestWarnings = requestWarningsFromHeaders(response.headers);
         },
         onEvent: (event, data) => {
@@ -1862,6 +1883,7 @@ export const useGenerationStore = defineStore("generation", {
       }).catch((error: unknown) => {
         streamError = error;
       });
+      onAdmitted();
       if (lease) void lease.cancel().catch(() => undefined);
       if (!abort.signal.aborted && !jobHasSettled(job)) {
         settleJob(job, "error");

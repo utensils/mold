@@ -364,6 +364,16 @@ reviewed prompt together with any separate unconfirmed-cancellation warning
 while successful prints remain. Library shows the sibling
 position and source prompt when those optional metadata fields are present.
 
+iOS begins a finite `UIApplication` background task after Create validates a
+one-shot or sequence submission. That assertion covers source preprocessing,
+automatic placement fan-out, reference upload, and the request reaching the
+remote host even if the user switches apps. One-shot batches release it after
+every sibling either opens its generation response or fails admission;
+sequences release it as soon as `POST /api/chain-jobs` returns. UIKit's
+expiration handler always ends an exhausted assertion. Mold does not declare a
+continuous background mode: after acceptance, the remote host owns the work,
+and the existing foreground recovery path reconnects to its queue/result.
+
 iOS suspension marks interrupted generation streams structurally instead of
 depending on localized WebKit error text. On resume, pre-ID queue and durable
 chain joins are bounded to the original submission window, so a later

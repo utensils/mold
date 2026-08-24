@@ -221,7 +221,7 @@ const openStreams: Array<{
     body: Record<string, unknown>;
     headers?: Record<string, string>;
     signal: AbortSignal;
-    onOpen?: () => void;
+    onOpen?: (response?: Response) => void;
     onClose?: (error: Error | null) => void;
     onEvent: (event: string, data: string) => void;
     target?: { baseUrl: string; apiKey: string | null };
@@ -329,7 +329,7 @@ beforeEach(() => {
         body: Record<string, unknown>;
         headers?: Record<string, string>;
         signal: AbortSignal;
-        onOpen?: () => void;
+        onOpen?: (response?: Response) => void;
         onClose?: (error: Error | null) => void;
         onEvent: (event: string, data: string) => void;
       },
@@ -492,6 +492,65 @@ describe("MobileApp sequence generation", () => {
     await flushPromises();
     expect(openStreams).toHaveLength(0);
     expect(button.text()).toContain("Develop print");
+  });
+
+  it("holds iOS background execution through placement and server admission", async () => {
+    isNativeIOSRuntime.mockReturnValue(true);
+    invoke.mockImplementation((command: string) => {
+      if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
+      if (command === "begin_mobile_background_task") {
+        return Promise.resolve("mobile-background-generation");
+      }
+      return Promise.resolve(null);
+    });
+    const preview = deferred<ReturnType<typeof plannedPlacement>>();
+    previewGenerationPlacement.mockReturnValueOnce(preview.promise);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("a background-safe placement check");
+
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("begin_mobile_background_task", {
+        name: "Preparing remote generation",
+      }),
+    );
+    expect(invoke).not.toHaveBeenCalledWith("end_mobile_background_task", expect.anything());
+
+    preview.resolve(plannedPlacement());
+    await vi.waitFor(() => expect(openStreams).toHaveLength(1));
+    expect(invoke).not.toHaveBeenCalledWith("end_mobile_background_task", expect.anything());
+
+    openStreams[0]!.options.onOpen?.(new Response());
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("end_mobile_background_task", {
+        token: "mobile-background-generation",
+      }),
+    );
+  });
+
+  it("releases iOS background execution when placement fails", async () => {
+    isNativeIOSRuntime.mockReturnValue(true);
+    invoke.mockImplementation((command: string) => {
+      if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
+      if (command === "begin_mobile_background_task") {
+        return Promise.resolve("mobile-background-placement-failure");
+      }
+      return Promise.resolve(null);
+    });
+    previewGenerationPlacement.mockRejectedValueOnce(new Error("placement unavailable"));
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("a placement failure cleanup check");
+
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("end_mobile_background_task", {
+        token: "mobile-background-placement-failure",
+      }),
+    );
+    expect(openStreams).toHaveLength(0);
   });
 
   it("cancels a placement-pending submission when prompt work takes authority", async () => {
@@ -883,6 +942,14 @@ describe("MobileApp sequence generation", () => {
       default_steps: 7,
       default_guidance: 1,
     };
+    isNativeIOSRuntime.mockReturnValue(true);
+    invoke.mockImplementation((command: string) => {
+      if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
+      if (command === "begin_mobile_background_task") {
+        return Promise.resolve("mobile-background-sequence");
+      }
+      return Promise.resolve(null);
+    });
     localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
     apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
@@ -941,6 +1008,10 @@ describe("MobileApp sequence generation", () => {
     const tappedStrength = sequenceForm.strength;
     await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
     await flushPromises();
+    expect(invoke).toHaveBeenCalledWith("begin_mobile_background_task", {
+      name: "Preparing remote sequence",
+    });
+    expect(invoke).not.toHaveBeenCalledWith("end_mobile_background_task", expect.anything());
     sequenceForm.strength = 0.12;
     await prompts[0]!.setValue("A later edit that belongs to the next submission");
     finishPreview({
@@ -950,6 +1021,9 @@ describe("MobileApp sequence generation", () => {
       candidate: null,
     });
     await flushPromises();
+    expect(invoke).toHaveBeenCalledWith("end_mobile_background_task", {
+      token: "mobile-background-sequence",
+    });
 
     expect(previewChainPlacement).toHaveBeenCalledWith(
       target,
@@ -1065,6 +1139,14 @@ describe("MobileApp sequence generation", () => {
       default_steps: 7,
       default_guidance: 1,
     };
+    isNativeIOSRuntime.mockReturnValue(true);
+    invoke.mockImplementation((command: string) => {
+      if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
+      if (command === "begin_mobile_background_task") {
+        return Promise.resolve("mobile-background-sequence-cancel");
+      }
+      return Promise.resolve(null);
+    });
     localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
     let finishCreate!: (value: { job_id: string }) => void;
     apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
@@ -1126,6 +1208,9 @@ describe("MobileApp sequence generation", () => {
 
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/chain-jobs/late-sequence/cancel", {
       method: "POST",
+    });
+    expect(invoke).toHaveBeenCalledWith("end_mobile_background_task", {
+      token: "mobile-background-sequence-cancel",
     });
     expect(localStorage.getItem("mold.mobile.sequence-job.v1")).toBeNull();
   });
