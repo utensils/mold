@@ -1518,6 +1518,40 @@ async fn materialize_local_builtin_control(
     request: &mut GenerateRequest,
     config: &Config,
 ) -> Result<()> {
+    let models_dir = config.resolved_models_dir();
+    materialize_local_builtin_control_with(
+        request,
+        config,
+        &models_dir,
+        |download_model| async move {
+            mold_core::download::pull_and_configure(
+                download_model,
+                &mold_core::download::PullOptions::default(),
+            )
+            .await
+            .map(|_| ())
+        },
+    )
+    .await
+}
+
+/// Materialize a built-in control with an injected acquisition boundary.
+///
+/// Keeping the network-capable operation behind this boundary lets the
+/// ordering regression test prove that a marker-verified fixture never asks
+/// for acquisition. That makes the default test suite hermetic even when
+/// Hugging Face is unavailable.
+async fn materialize_local_builtin_control_with<F, Fut, E>(
+    request: &mut GenerateRequest,
+    config: &Config,
+    models_dir: &std::path::Path,
+    download: F,
+) -> Result<()>
+where
+    F: FnOnce(&'static str) -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<(), E>>,
+    E: std::fmt::Display,
+{
     require_local_request_model_activation(request, config)?;
     let Some(control) = request.ic_lora_control.as_deref() else {
         return Ok(());
@@ -1536,16 +1570,9 @@ async fn materialize_local_builtin_control(
         .iter()
         .find(|file| file.hf_filename == adapter.hf_filename)
         .expect("control registry and hidden manifests must stay in sync");
-    let path = config
-        .resolved_models_dir()
-        .join(mold_core::manifest::storage_path(manifest, file));
+    let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
     if !local_control_artifact_is_complete(adapter, &path) {
-        mold_core::download::pull_and_configure(
-            adapter.download_model,
-            &mold_core::download::PullOptions::default(),
-        )
-        .await
-        .map_err(|error| {
+        download(adapter.download_model).await.map_err(|error| {
             anyhow::anyhow!(
                 "failed to download IC-LoRA control '{}': {error}",
                 adapter.id
@@ -4486,6 +4513,8 @@ mod tests {
 
     #[tokio::test]
     async fn local_control_materialization_preserves_built_in_first_ordering() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
         let temp = tempfile::tempdir().unwrap();
         let config = Config {
             models_dir: temp.path().display().to_string(),
@@ -4521,10 +4550,15 @@ mod tests {
         }))
         .unwrap();
 
-        materialize_local_builtin_control(&mut request, &config)
-            .await
-            .unwrap();
+        let download_calls = AtomicUsize::new(0);
+        materialize_local_builtin_control_with(&mut request, &config, temp.path(), |_| async {
+            download_calls.fetch_add(1, Ordering::Relaxed);
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .await
+        .unwrap();
 
+        assert_eq!(download_calls.load(Ordering::Relaxed), 0);
         assert!(request.lora.is_none());
         let loras = request.loras.unwrap();
         assert_eq!(loras[0].path, adapter_path.to_string_lossy());
