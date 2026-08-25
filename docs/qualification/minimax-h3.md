@@ -734,9 +734,66 @@ admitted and refused. `DELETE /api/models/unload` on the production server, and
 dropping the page cache, is the whole preparation; do not lower a charge to
 make a render fit.
 
-REF2VA_MATRIX_PLACEHOLDER
+Every row below ran on hal9000 — RTX 4090 24 GB, 62 GB host RAM, CUDA SM89 —
+at 1344x768 x 124 frames / 24 fps, guidance 0, strength 1.0, through
+`POST /api/generate` on a scratch server beside an unloaded production one.
+Wall clock is POST to MP4 bytes on a cold process; VRAM high water is a 1 Hz
+`nvidia-smi` sample and therefore an under-read, as it always is; peak host RSS
+is the server's own `VmHWM`, which counts the file-backed pages of the ~37 GB
+artifact pass and so overstates the anonymous working set.
 
-REF2VA_BOUNDS_PLACEHOLDER
+| Case | References (in order) | Steps | Wall | VRAM peak | Result |
+| --- | --- | --- | --- | --- | --- |
+| a | image | 21 | 124 s | — | **Refused at admission**: 34,330,890,090 host bytes needed against a 34,294,289,818 byte sample |
+| b | video (with soundtrack) | 8 | 1,604 s | 15,024 MiB | H.264 1344x768 x124 + AAC |
+| c | image, audio | 8 | 3,100 s | 12,594 MiB | H.264 1344x768 x124 + AAC |
+| g | video (with soundtrack), audio, audio | 8 | 1,575 s | 15,138 MiB | H.264 + AAC, seed 825825 |
+| h | g with references 1 and 2 swapped | 8 | 1,660 s | 15,210 MiB | H.264 + AAC, seed 825825, **different bytes** (md5 `c9966c29…` vs g's `e3337c9b…`) |
+
+Peak host RSS was 58,612,688 kB on the b/c/g/h process — file-backed artifact
+pages included.
+
+`g` and `h` are the order-sensitivity pair: identical seed, identical prompt,
+identical reference files, differing only in the order two of them are listed.
+The outputs differ, which is the property the packed sequence's per-block
+rotary origins and one-based `<Video k>` / `<Audio j>` labels exist to produce.
+
+Two things this table says that the FL2VA campaigns could not.
+
+**An image reference is the expensive one, and it has no cheaper form.**
+`reference_image_dimensions` normalizes every image reference onto its own
+2048-SHORT-edge canvas, so the smallest image the contract can produce is a
+2048 square — 16,384 Qwen ViT tokens against FL2VA's 4,032 for a 1344x768
+boundary endpoint. A video reference normalizes onto the 768-short-edge
+reference canvas instead and packs one temporal block per two 2 fps cursor
+frames, so a 2.5 s clip is 12,096 tokens across three blocks. That ratio is the
+whole difference between the rows.
+
+**The host, not the card, is the binding constraint.** The compact stack places
+its Qwen3-VL conditioner on the CPU for a CUDA route, so the host demand is its
+15.687 GB of parameters plus a request-derived activation workspace that scales
+with the conditioner sequence. One 2048-square image reference asks for
+34,330,890,090 bytes of host headroom; the card never exceeded 15.2 GB in any
+row. A shortfall is refused with both numbers before the artifact pass, which
+is the behaviour to expect rather than an OOM — case `a` is that refusal, 36 MB
+short on a 62 GB host, and it is recorded as a result rather than worked around.
+
+Not yet measured: an image + video + audio set (case `d`/`e` of the planned
+matrix) estimates ~46 GB of host headroom and cannot run on a 62 GB host at
+all. It is refused by admission with numbers, and belongs on a larger-memory
+host before its bounds are transcribed.
+
+The public Ref2VA bounds in `public_ref2va_runtime_bounds_for_shape`
+(`crates/mold-inference/src/minimax_h3/private_server.rs`) remain DERIVED, not
+transcribed: they scale the FL2VA observations term by term by the driving
+quantity — packed rows for attention and FFN, canvas area for the condition
+VAE, frames for audio decode — exactly as `capture_runtime_bounds` does. The
+rows above admit and render inside them on this host, and the device side has
+7-9 GB of margin against the 24 GB card at every measured row. Transcribing
+measured Ref2VA ceilings needs the per-phase device high-water figures from a
+run instrumented as the FL2VA campaigns were, plus the image + video + audio
+row that this host cannot supply; until then the derived bounds stand and the
+refusal path above is what protects them.
 
 ### The 768x768 campaign (#1033, 2026-08-23)
 
