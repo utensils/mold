@@ -1233,7 +1233,7 @@ fn recipe(
     // AND the landed runtime adapter, never a bare `cfg!(feature = "pulid")`,
     // which would advertise a control the worker cannot honour.
     let identity_supported = crate::identity::identity_runtime_available()
-        && crate::identity::identity_qualified_model(input.model);
+        && crate::identity::identity_qualified_model_with_family(input.model, Some(family));
     let output = if audio_only {
         OutputCapabilitiesProfile {
             default_format: OutputFormat::Wav,
@@ -1677,8 +1677,11 @@ mod tests {
         if crate::identity::IDENTITY_RUNTIME_READY {
             return;
         }
-        for model in ["flux-dev", "flux-dev:q4", "flux-dev:q8", "flux-dev-q4"] {
-            let profile = resolve_generation_profile(input(model, "flux"));
+        for model in crate::identity::identity_qualified_models() {
+            let family = crate::identity::identity_family(model)
+                .expect("qualified model has an identity family")
+                .family();
+            let profile = resolve_generation_profile(input(model, family));
             assert!(
                 !profile.supports_identity(),
                 "{model} must not advertise identity while the adapter is pending \
@@ -1697,17 +1700,10 @@ mod tests {
     }
 
     #[test]
-    fn identity_capability_is_never_advertised_for_an_unqualified_checkpoint() {
+    fn identity_capability_is_never_advertised_outside_supported_families_or_for_turbo() {
         for (model, family) in [
-            ("flux-dev:bf16", "flux"),
-            ("flux-schnell:q8", "flux"),
             ("flux2-klein", "flux2"),
-            // Being an SDXL checkpoint is necessary and never sufficient:
-            // these four are the family's recorded refusals.
             ("sdxl-turbo:fp16", "sdxl"),
-            ("playground-v2.5:fp16", "sdxl"),
-            ("pony-v6:fp16", "sdxl"),
-            ("cyberrealistic-pony:fp16", "sdxl"),
             ("z-image-turbo:q4", "z-image"),
         ] {
             let profile = resolve_generation_profile(input(model, family));
@@ -1726,18 +1722,21 @@ mod tests {
             // until #1221 flips the constant.
             return;
         }
-        for model in ["flux-dev", "flux-dev:q4", "flux-dev:q8", "flux-dev-q4"] {
-            let profile = resolve_generation_profile(input(model, "flux"));
+        for model in crate::identity::identity_qualified_models() {
+            let family = crate::identity::identity_family(model)
+                .expect("qualified model has an identity family")
+                .family();
+            let profile = resolve_generation_profile(input(model, family));
             assert!(
                 profile.supports_identity(),
                 "{model} must advertise identity conditioning"
             );
         }
-        for model in crate::identity::IDENTITY_QUALIFIED_SDXL_MODELS {
-            let profile = resolve_generation_profile(input(model, "sdxl"));
+        for (model, family) in [("cv:123", "flux"), ("hf:owner/sdxl-finetune", "sdxl")] {
+            let profile = resolve_generation_profile(input(model, family));
             assert!(
                 profile.supports_identity(),
-                "{model} must advertise identity conditioning"
+                "opaque catalog model {model} must inherit {family} identity support"
             );
         }
     }

@@ -4430,7 +4430,10 @@ async fn placement_preview_for_request_authenticated(
     // `id_image` — or a build without the `pulid` feature, or a LoRA beside
     // the photograph — would have its preview plan the PuLID bundle and
     // answer `planned` for a request generation then refuses.
-    if let Err(error) = mold_core::identity::validate_identity_conditioning(&request) {
+    if let Err(error) = mold_core::identity::validate_identity_conditioning_with_family(
+        &request,
+        resolved_family.as_deref(),
+    ) {
         let mut response = unavailable("infeasible", error);
         response.authoritative = true;
         return Ok(response);

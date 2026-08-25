@@ -317,7 +317,11 @@ pub fn resolve_identity_for_lease(
     // — FLUX's true-CFG opt-in versus SDXL's always-on classifier-free
     // negative pass — and `mold_core::identity` owns it so this and the
     // engine's own requirement cannot disagree.
-    let want_uncond = mold_core::identity::request_needs_unconditional_identity(request);
+    let resolved_family = paths.map(|paths| paths.family);
+    let want_uncond = mold_core::identity::request_needs_unconditional_identity_for_family(
+        request,
+        resolved_family,
+    );
     let Some(paths) = paths.cloned() else {
         // A missing bundle is a machine that has not been provisioned, not a
         // photograph the caller can fix — but it is equally not a fault the
@@ -327,7 +331,8 @@ pub fn resolve_identity_for_lease(
             "this request asks for face-identity conditioning but no PuLID bundle resolved \
                  on any eligible device; run `mold pull {bundle} --accept-license \
                  insightface-antelopev2`",
-            bundle = mold_core::identity::identity_family(&request.model)
+            bundle = resolved_family
+                .or_else(|| mold_core::identity::identity_family(&request.model))
                 .map(mold_core::identity::IdentityFamily::manifest)
                 .unwrap_or(mold_core::manifest::PULID_FLUX_MANIFEST),
         )));
@@ -661,6 +666,24 @@ mod tests {
         assert_eq!(
             frozen.source_sha256(),
             mold_core::identity::id_image_sha256(b"pretend-png")
+        );
+    }
+
+    #[test]
+    fn an_opaque_catalog_sdxl_request_uses_the_planned_family_for_unconditional_identity() {
+        let _stubbed = StubbedExtractor::install(stub);
+        let mut request = request(None);
+        request.model = "hf:owner/sdxl-finetune".to_string();
+        let mut sdxl_paths = paths();
+        sdxl_paths.family = mold_core::identity::IdentityFamily::Sdxl;
+        let frozen =
+            resolve_identity_for_lease(&request, Some(&sdxl_paths), LEASED_BACKEND, LEASED_ORDINAL)
+                .expect("the catalog SDXL request extracts")
+                .embedding
+                .expect("the request is conditioned");
+        assert!(
+            frozen.has_uncond(),
+            "SDXL's ordinary classifier-free branch needs the unconditional identity"
         );
     }
 

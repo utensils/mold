@@ -411,8 +411,10 @@ pub fn create_engine_with_pool(
     // prefix does not exist. `identity_family` is the same authority admission
     // uses, so the forced-local and served paths choose identically.
     if frozen.identity_assets.is_none() {
-        frozen.identity_assets = mold_core::identity::identity_family(&model_name)
-            .and_then(|family| mold_core::pulid_assets::pulid_paths_for(config, family));
+        let family_hint = config.resolved_model_config(&model_name).family;
+        frozen.identity_assets =
+            mold_core::identity::identity_family_with_hint(&model_name, family_hint.as_deref())
+                .and_then(|family| mold_core::pulid_assets::pulid_paths_for(config, family));
     }
     create_engine_with_frozen_config(
         model_name,

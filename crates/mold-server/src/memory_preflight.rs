@@ -753,12 +753,26 @@ pub(crate) fn identity_overhead_family(
     identity_overhead_family_with_projection(req, None)
 }
 
+#[cfg(test)]
 pub(crate) fn identity_overhead_family_with_projection(
     req: &GenerateRequest,
     projection: Option<&crate::queue_media_store::QueueMediaProjection>,
 ) -> Option<mold_core::identity::IdentityFamily> {
+    identity_overhead_family_with_projection_and_hint(req, projection, None)
+}
+
+fn identity_overhead_family_with_projection_and_hint(
+    req: &GenerateRequest,
+    projection: Option<&crate::queue_media_store::QueueMediaProjection>,
+    hint: Option<ActivationHint>,
+) -> Option<mold_core::identity::IdentityFamily> {
+    let family_hint = hint.and_then(|hint| match hint.family {
+        ActivationFamily::FluxDit => Some("flux"),
+        ActivationFamily::SdxlUnet => Some("sdxl"),
+        _ => None,
+    });
     request_charges_identity_overhead_with_projection(req, projection)
-        .then(|| mold_core::identity::identity_family(&req.model))
+        .then(|| mold_core::identity::identity_family_with_hint(&req.model, family_hint))
         .flatten()
 }
 
@@ -1590,7 +1604,7 @@ pub(crate) fn estimate_generation_memory_for_request_with_projection(
     // The adapter term follows the FAMILY, because the adapter does. The
     // extraction term does not: the detector, recognizer, parser, and tower are
     // shared, and only the IDFormer's prefix differs.
-    let peak = match identity_overhead_family_with_projection(req, projection) {
+    let peak = match identity_overhead_family_with_projection_and_hint(req, projection, hint) {
         Some(family) => peak
             .saturating_add(identity_adapter_overhead_bytes(family))
             .saturating_add(IDENTITY_EXTRACTION_VRAM_OVERHEAD_BYTES),
@@ -2975,6 +2989,26 @@ mod fail_closed_tests {
         assert_eq!(
             identity_overhead_family(&flux),
             Some(mold_core::identity::IdentityFamily::Flux)
+        );
+
+        let mut catalog = flux.clone();
+        catalog.model = "cv:123".to_string();
+        assert_eq!(identity_overhead_family(&catalog), None);
+        assert_eq!(
+            identity_overhead_family_with_projection_and_hint(
+                &catalog,
+                None,
+                Some(hint(ActivationFamily::FluxDit))
+            ),
+            Some(mold_core::identity::IdentityFamily::Flux)
+        );
+        assert_eq!(
+            identity_overhead_family_with_projection_and_hint(
+                &catalog,
+                None,
+                Some(hint(ActivationFamily::SdxlUnet))
+            ),
+            Some(mold_core::identity::IdentityFamily::Sdxl)
         );
 
         let mut turbo = sdxl.clone();

@@ -10175,8 +10175,7 @@ mod tests {
             }
         };
 
-        // A refused SDXL tier: qualification is enumerated, not inherited
-        // from the family.
+        // The sole refused SDXL tier remains an explicit family exception.
         let body = preview("sdxl-turbo:fp16").await;
         assert_eq!(body["outcome"], "infeasible");
         assert_eq!(body["authoritative"], true);

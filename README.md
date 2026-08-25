@@ -76,10 +76,9 @@ with prompt, model, seed, and generation metadata.
 - **Images**: text-to-image, img2img, multimodal editing, inpainting,
   ControlNet, LoRA, prompt expansion, and Real-ESRGAN upscaling
 - **Face identity (PuLID)**: keep one person's face across arbitrary prompts
-  with `--id-image` (repeatable up to 4, averaged into one identity), on FLUX
-  (`flux-dev:q4`, `flux-dev:q8`, the `pulid-flux` bundle) and SDXL
-  (`sdxl-base:fp16`, `juggernaut-xl:fp16`, `realvis-xl:fp16`,
-  `dreamshaper-xl:fp16`, the `pulid-sdxl` bundle) — pure Rust SCRFD, ArcFace, a
+  with `--id-image` (repeatable up to 4, averaged into one identity), across all
+  FLUX.1 models (the `pulid-flux` bundle) and all SDXL models except SDXL Turbo
+  (the `pulid-sdxl` bundle) — pure Rust SCRFD, ArcFace, a
   BiSeNet face mask, EVA02-CLIP, and IDFormer shared by both adapters, feeding
   twenty cross-attention modules inside the FLUX transformer or seventy inside
   the SDXL UNet, plus `--true-cfg` on FLUX for a real negative branch on an

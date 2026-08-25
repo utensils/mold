@@ -1120,10 +1120,9 @@ Examples:
 
         /// Reference photograph to preserve the face of (PuLID). Repeat up to
         /// 4 times to average several references of the same person.
-        /// Qualified for flux-dev:q4 / flux-dev:q8 (`mold pull pulid-flux`)
-        /// and for sdxl-base:fp16, juggernaut-xl:fp16, realvis-xl:fp16,
-        /// dreamshaper-xl:fp16 (`mold pull pulid-sdxl`), on a server built
-        /// with the `pulid` feature. Either bundle needs
+        /// Supported across FLUX.1 (`mold pull pulid-flux`) and SDXL except
+        /// SDXL Turbo (`mold pull pulid-sdxl`), on a server built with the
+        /// `pulid` feature. Either bundle needs
         /// `--accept-license insightface-antelopev2`; a machine that already
         /// has one pulls only the other's adapter.
         #[arg(

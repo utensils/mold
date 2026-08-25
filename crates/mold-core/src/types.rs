@@ -1240,10 +1240,9 @@ pub struct GenerateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_fit: Option<serde_json::Value>,
     /// Face-identity reference image for identity conditioning (raw PNG/JPEG
-    /// bytes, base64-encoded in JSON). Milestone 1 accepts this only on the
-    /// identity-qualified checkpoints named by
-    /// `mold_core::identity::identity_qualified_models()`, and never alongside
-    /// a LoRA or an img2img `source_image`. The payload is bounds-checked
+    /// bytes, base64-encoded in JSON). Accepted family-wide on FLUX.1 and SDXL
+    /// except for SDXL Turbo, and never alongside a LoRA or an img2img
+    /// `source_image`. The payload is bounds-checked
     /// from its header alone before any decode
     /// (`identity::validate_id_image_bytes`).
     #[serde(default, skip_serializing_if = "Option::is_none", with = "base64_opt")]
