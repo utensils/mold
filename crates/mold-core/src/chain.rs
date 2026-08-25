@@ -46,6 +46,7 @@ pub enum TransitionMode {
 /// per-stage seeds, encoded as decimal strings (full-range u64).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChainStageMetadata {
+    #[serde(deserialize_with = "crate::prompt_text::deserialize_prompt")]
     pub prompt: String,
     pub frames: u32,
     pub transition: TransitionMode,
@@ -107,6 +108,7 @@ pub struct ChainStage {
     /// (auto-expand form replicates it); the movie-maker UI in v2 will let
     /// users author per-stage prompts.
     #[schema(example = "a cat walking through autumn leaves")]
+    #[serde(deserialize_with = "crate::prompt_text::deserialize_prompt")]
     pub prompt: String,
 
     /// Frame count for this stage. Must be `8k+1` (LTX-2 pipeline constraint:
@@ -127,7 +129,11 @@ pub struct ChainStage {
     /// Optional negative prompt for CFG-based stages. v1 LTX-2 ignores this
     /// (the distilled family doesn't use CFG); the field is reserved so the
     /// movie-maker can round-trip it without re-migrating the wire format.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::prompt_text::deserialize_optional_prompt"
+    )]
     pub negative_prompt: Option<String>,
 
     /// Optional per-stage seed offset. `None` in v1 — the orchestrator
@@ -250,7 +256,11 @@ pub struct ChainRequest {
     pub collection: Option<crate::CollectionRef>,
 
     /// Original source prompt shared by a client-prepared sibling batch.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::prompt_text::deserialize_optional_prompt"
+    )]
     pub original_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_transform: Option<crate::PromptTransformProvenance>,
@@ -271,7 +281,11 @@ pub struct ChainRequest {
     // These are only read when `stages` is empty; `normalise` clears them
     // after expansion so the canonical form only ever carries `stages`.
     /// Auto-expand: single prompt replicated across all stages.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::prompt_text::deserialize_optional_prompt"
+    )]
     pub prompt: Option<String>,
 
     /// Auto-expand: total pixel frames the stitched output should cover.

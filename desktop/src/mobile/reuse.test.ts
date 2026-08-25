@@ -48,6 +48,29 @@ const metadata: OutputMetadata = {
 };
 
 describe("applyMobileGalleryMetadata", () => {
+  it("preserves canonical multiline prompts through mobile Library reuse", () => {
+    const form = newGenerateForm();
+    applyMobileGalleryMetadata(
+      form,
+      {
+        ...metadata,
+        prompt: "first line\n\nsecond line",
+        negative_prompt: "blur\nwatermark",
+        original_prompt: "source\nidea",
+      },
+      [model],
+    );
+
+    expect(form.prompt).toBe("first line\n\nsecond line");
+    expect(form.negativePrompt).toBe("blur\nwatermark");
+    expect(form.originalPrompt).toBe("source\nidea");
+    expect(buildRequest(form)).toMatchObject({
+      prompt: "first line\n\nsecond line",
+      negative_prompt: "blur\nwatermark",
+      original_prompt: "source\nidea",
+    });
+  });
+
   it("keeps an auto-chained One shot out of the sequence editor", () => {
     const form = newGenerateForm();
     const result = applyMobileGalleryMetadata(

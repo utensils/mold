@@ -1708,6 +1708,29 @@ function richImageMetadata(): OutputMetadata {
 }
 
 describe("applyMetadataToForm", () => {
+  it("preserves canonical multiline prompts through desktop Library reuse", () => {
+    const form = newGenerateForm();
+    applyMetadataToForm(
+      form,
+      {
+        ...richImageMetadata(),
+        prompt: "first line\n\nsecond line",
+        negative_prompt: "blur\nwatermark",
+        original_prompt: "source\nidea",
+      },
+      [sd15Model()],
+    );
+
+    expect(form.prompt).toBe("first line\n\nsecond line");
+    expect(form.negativePrompt).toBe("blur\nwatermark");
+    expect(form.originalPrompt).toBe("source\nidea");
+    expect(buildRequest(form)).toMatchObject({
+      prompt: "first line\n\nsecond line",
+      negative_prompt: "blur\nwatermark",
+      original_prompt: "source\nidea",
+    });
+  });
+
   it("keeps automatic-chain reuse eligible for the same generation count and notches", () => {
     const form = newGenerateForm();
     applyMetadataToForm(
