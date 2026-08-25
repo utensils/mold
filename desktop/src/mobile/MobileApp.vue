@@ -49,7 +49,6 @@ import {
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
   resolveDefaultSourceResolution,
-  resolveSourceConditioningTarget,
   resolveSourceCanvasTransition,
   resolveSourceResolution,
   type SourceDimensions,
@@ -102,7 +101,6 @@ import { promptPlaceholder, promptRequired } from "@studio/lib/promptRequirement
 import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
 import {
   appendMinimaxH3GalleryImageReference,
-  emptyMinimaxH3AuthoringState,
   isMinimaxH3Identity,
   minimaxH3AuthoringError,
   minimaxH3TaskForModel,
@@ -294,7 +292,7 @@ import { sequenceParams } from "../lib/sequenceParams";
 import { isGenerationModel } from "../stores/models";
 import type { HostRoute } from "../stores/hosts";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
-import { applyH3BoundaryFit, applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
+import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
 import { coerceSourceFitForMaskless, parseSourceFitPolicy } from "@studio/lib/sourceFit";
 import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
 import {
@@ -457,6 +455,7 @@ import {
 import { watchMobileGenerationHost, type MobileGenerationHostWatch } from "./mobileGenerationWatch";
 import { beginMobileBackgroundTask } from "./backgroundTask";
 import { mobilePlacementFailure, routeAutomaticMobileGeneration } from "./mobileGenerationRouting";
+import { prepareMobileGenerationRequest } from "./mobileGenerationPreparation";
 
 type Tab = "generate" | "gallery" | "catalog" | "hosts";
 
@@ -5410,125 +5409,28 @@ async function prepareGenerationRequest(
   isCurrent: () => boolean = () => true,
   signal?: AbortSignal,
 ) {
-  // Fixed recipe controls are not user choices: a stale draft value (restored
-  // before the recipe landed, model swapped under it) snaps to what the
-  // disabled control displays instead of queueing a shape the host refuses.
-  // It runs before the source fits below so their target is the canvas that
-  // actually renders. Shared with desktop and web.
-  Object.assign(
-    draft,
-    fixedRecipeControlOverrides(
-      effectiveGenerationRecipe(selectedGenerationModel.value, draft.pipeline),
-    ),
+  return prepareMobileGenerationRequest(
+    {
+      target,
+      draft,
+      selectedModel: selectedGenerationModel.value,
+      isCurrent,
+      ...(signal ? { signal } : {}),
+    },
+    {
+      cache: sourceFitCache,
+      ops: domCanvasOps,
+      upscale: (image, model, upscaleTarget, upscaleSignal, onProgress) =>
+        upscaleImage({
+          image,
+          model,
+          target: upscaleTarget,
+          ...(upscaleSignal ? { signal: upscaleSignal } : {}),
+          onProgress,
+        }),
+      onStatus: setGenerationStatus,
+    },
   );
-  const draftCaps = generationCapabilitiesForFamily(
-    draft.family,
-    draft.model,
-    draft.pipeline,
-    draft.guidanceCapabilities,
-    draft.sourceImageCapability,
-  );
-  if (draftCaps.sourceImageMode === "h3-boundaries") {
-    // H3 FL2VA boundaries take the same client-side fit, coerced maskless.
-    draft.h3Authoring =
-      (await applyH3BoundaryFit(
-        draft.h3Authoring,
-        draft.sourceFit,
-        { width: draft.width, height: draft.height },
-        {
-          ops: domCanvasOps,
-          cache: sourceFitCache,
-          upscale: (image, model) =>
-            upscaleImage({
-              image,
-              model,
-              target,
-              ...(signal ? { signal } : {}),
-              onProgress: (message) => {
-                if (isCurrent()) setGenerationStatus(message);
-              },
-            }),
-          onStatus: (message) => {
-            if (isCurrent()) setGenerationStatus(message);
-          },
-        },
-      )) ?? emptyMinimaxH3AuthoringState();
-  } else if (draftCaps.sourceImageMode === "qwen-edit" && draft.imageAttachments[0]) {
-    const sourceTarget = resolveSourceConditioningTarget(
-      { width: draft.width, height: draft.height },
-      selectedGenerationModel.value ?? draft.family,
-      draft.pipeline,
-    );
-    const result = await applySourceFitPreprocess(
-      {
-        source: draft.imageAttachments[0],
-        mask: null,
-        policy: coerceSourceFitForMaskless(draft.sourceFit),
-        target: sourceTarget,
-      },
-      {
-        ops: domCanvasOps,
-        cache: sourceFitCache,
-        upscale: (image, model) =>
-          upscaleImage({
-            image,
-            model,
-            target,
-            ...(signal ? { signal } : {}),
-            onProgress: (message) => {
-              if (isCurrent()) setGenerationStatus(message);
-            },
-          }),
-        onStatus: (message) => {
-          if (isCurrent()) setGenerationStatus(message);
-        },
-      },
-    );
-    if (result.source) draft.imageAttachments[0] = result.source;
-  } else if (
-    draftCaps.supportsImg2img &&
-    draftCaps.sourceImageMode === "single" &&
-    draft.sourceImage
-  ) {
-    const result = await applySourceFitPreprocess(
-      {
-        source: draft.sourceImage,
-        mask: draftCaps.supportsMask ? draft.maskImage : null,
-        policy: draftCaps.supportsMask
-          ? draft.sourceFit
-          : coerceSourceFitForMaskless(draft.sourceFit),
-        target: { width: draft.width, height: draft.height },
-      },
-      {
-        ops: domCanvasOps,
-        cache: sourceFitCache,
-        upscale: (image, model) =>
-          upscaleImage({
-            image,
-            model,
-            target,
-            ...(signal ? { signal } : {}),
-            onProgress: (message) => {
-              if (isCurrent()) setGenerationStatus(message);
-            },
-          }),
-        onStatus: (message) => {
-          if (isCurrent()) setGenerationStatus(message);
-        },
-      },
-    );
-    draft.sourceImage = result.source;
-    draft.maskImage = result.mask;
-  }
-  const mediaBudgetError = mobileMediaBudgetValidationError(draft);
-  if (mediaBudgetError) throw new Error(mediaBudgetError);
-  // `buildRequest` stamps the additive `title` and the File under fields from
-  // the FROZEN draft. Nothing may re-read the live title here: source fitting
-  // and the placement fan-out can take minutes, and a title edited inside that
-  // window would ship a name whose own ghost tag and collection match were
-  // derived from the previous one. The title is validated at the tap boundary
-  // instead (`generate()`, `submitMobileSequence`).
-  return buildRequest(draft);
 }
 
 async function generate(): Promise<void> {
