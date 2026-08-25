@@ -38,6 +38,21 @@ grep -Fq 'Mold-windows-x64-self-signed.exe' "$release"
 grep -Fq 'sign-windows-binary.ps1' "$release"
 grep -Fq 'Import-PfxCertificate' "$importer"
 grep -Fq 'Get-AuthenticodeSignature' "$verifier"
+
+# The verifier must never write a certificate store. Importing the self-signed
+# certificate into Cert:\CurrentUser\Root to force a `Valid` status needs
+# interactive trust confirmation: under -NonInteractive it fails outright, and
+# GitHub runs pwsh WITHOUT -NonInteractive, so CryptoAPI instead raises a modal
+# dialog on a desktop nobody can see and the step blocks until the job's
+# six-hour ceiling. That stalled every Windows artifact, and because `publish`
+# needs `build-windows`, the Linux, container, and AUR assets with them.
+# Pin the thumbprint against the signature instead of trusting the chain.
+if grep -Eq 'Import-Certificate|CertStoreLocation' "$verifier"; then
+  echo "verify-windows-signatures.ps1 must not write a certificate store:" >&2
+  echo "  importing into Cert:\CurrentUser\Root blocks on a trust dialog in CI" >&2
+  exit 1
+fi
+grep -Fq 'ExpectedThumbprint' "$verifier"
 grep -Fq 'TrustedPublisher' "$docs"
 grep -Fq '/icons/windows.svg' "$home"
 grep -Fq 'Windows CLI instructions' "$home"
