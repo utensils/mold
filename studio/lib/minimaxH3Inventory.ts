@@ -1,3 +1,4 @@
+import { minimaxH3TaskForModel } from "./minimaxH3Identity";
 import { modelKindLabel } from "./modelMetadata";
 
 export type MiniMaxH3Task = "fl2va" | "ref2va";
@@ -579,9 +580,17 @@ export function reviewedMiniMaxH3ModelAccess(
     label: "model access",
     capabilities,
   });
+  // The partition is the model's OWN task. Reading `fl2va` for every model
+  // would match a Ref2VA identity against an FL2VA request contract, whose
+  // `required_endpoint: "first"` is a conditioning promise Ref2VA does not
+  // make. No host advertises a Ref2VA partition yet — the private bridge
+  // builds the FL2VA one alone — so a Ref2VA model answers `null` here,
+  // which is the honest answer rather than a borrowed one.
+  const expectedTask = minimaxH3TaskForModel(model);
+  if (expectedTask === null) return null;
   const task = presented?.tasks.find(
     (candidate) =>
-      candidate.task === "fl2va" && candidate.readiness === "installed",
+      candidate.task === expectedTask && candidate.readiness === "installed",
   );
   if (!task) return null;
   const request =

@@ -42,7 +42,7 @@ speed one.
 | `minimax-h3-fl2va:comfy-pruned-int8`                  | First/last-frame conditioning with audio          |  42.482 GB | CUDA generation; first-frame profile |
 | `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`      | FL2VA + reviewed Turbo 8-step LoRA (9 steps)      |  44.438 GB | CUDA generation; first-frame profile |
 | `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p` | FL2VA + reviewed Turbo 4-step 768p LoRA (5 steps) |  44.438 GB | CUDA generation; first-frame profile |
-| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`     | Ref2VA + reviewed Turbo 4-step LoRA (5 steps)     |  44.438 GB | CUDA generation; reference profile    |
+| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`     | Ref2VA + reviewed Turbo 4-step LoRA (5 steps)     |  44.438 GB | CUDA generation; reference profile   |
 | `minimax-h3-ref2va:comfy-pruned-int8`                 | Reference media to video with audio               |  42.482 GB | CUDA generation; ordered references  |
 | `minimax-h3-fl2va:comfy-pruned-nvfp4`                 | First/last-frame conditioning with audio          |  34.040 GB | Downloadable; execution unavailable  |
 | `minimax-h3-ref2va:comfy-pruned-nvfp4`                | Reference media to video with audio               |  34.040 GB | Downloadable; execution unavailable  |
