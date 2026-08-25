@@ -162,6 +162,20 @@ describe("Lightbox (desktop two-pane)", () => {
     ).toBe("print.png");
   });
 
+  it("opens the Library action menu when the media is right-clicked", async () => {
+    const wrapper = mountWide();
+    await wrapper.get(".lb__stage").trigger("contextmenu", {
+      clientX: 120,
+      clientY: 240,
+    });
+
+    expect(wrapper.emitted("context-menu")?.[0]?.[0]).toEqual({
+      item,
+      x: 120,
+      y: 240,
+    });
+  });
+
   it("makes cached editing primary and keeps duplication explicit for sequence prints", async () => {
     const wrapper = mountWide({ isSequence: true, canEditSequence: true });
     expect(

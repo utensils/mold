@@ -1112,6 +1112,7 @@ describe("HostDetailPage — library", () => {
   it("hides the Library card when the host has no trash", async () => {
     const w = await mountDetail();
     expect(w.find('[data-test="library-card"]').exists()).toBe(false);
+    expect(w.get(".md-grid").attributes("data-has-library")).toBeUndefined();
   });
 
   it("shows the host's retention and trash count, writes retention with the host key, and empties with a plain confirm", async () => {
@@ -1130,6 +1131,7 @@ describe("HostDetailPage — library", () => {
     ]);
     const w = await mountDetail();
     const card = w.get('[data-test="library-card"]');
+    expect(w.get(".md-grid").attributes("data-has-library")).toBe("true");
     const select = card.get<HTMLSelectElement>(
       '[data-test="library-retention"]',
     );
