@@ -626,7 +626,7 @@ mod tests {
                 ModelActivation::Available
             } else {
                 ModelActivation::RuntimeUnavailable(
-                    minimax_h3::RuntimeUnavailableReason::EngineNotBuilt
+                    minimax_h3::RuntimeUnavailableReason::EngineNotBuilt,
                 )
             }
         );

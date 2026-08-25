@@ -1430,14 +1430,11 @@ fn validate_prepared_overlap_binding(
         || request.rows.condition_visual_rows != admitted.condition_visual_rows
         || overlap.condition_visual_rows != request.rows.condition_visual_rows
         || overlap.condition_backing_host_bytes != budget.condition_backing_host_bytes
-        || overlap.condition_backing_device_bytes
-            != budget.condition_latent_backing_device_bytes
+        || overlap.condition_backing_device_bytes != budget.condition_latent_backing_device_bytes
         || overlap.target_audio_latent_device_bytes != budget.target_audio_latent_device_bytes
-        || overlap.visual_vae_resident_device_bytes
-            != budget.visual_vae_resident_device_bytes
+        || overlap.visual_vae_resident_device_bytes != budget.visual_vae_resident_device_bytes
         || overlap.audio_vae_resident_device_bytes != budget.audio_vae_resident_device_bytes
-        || overlap.attempt_resident_vae_device_bytes
-            != budget.attempt_resident_vae_device_bytes
+        || overlap.attempt_resident_vae_device_bytes != budget.attempt_resident_vae_device_bytes
         || overlap.visual_decode_peak_device_bytes != budget.visual_decode_phase_device_bytes
         || overlap.normalized_endpoint_host_bytes != budget.normalized_endpoint_host_bytes
         || overlap.reference_normalized_media_host_bytes
@@ -1950,10 +1947,7 @@ where
     fn into_backend(
         self,
         progress: &ProgressReporter,
-    ) -> Result<(
-        H3PrivatePreparedTaskRequest,
-        H3PrivatePhaseBackend<C, E, A>,
-    )> {
+    ) -> Result<(H3PrivatePreparedTaskRequest, H3PrivatePhaseBackend<C, E, A>)> {
         let Self {
             authority,
             activation_evidence,

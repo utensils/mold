@@ -5487,8 +5487,7 @@ const PUBLIC_REF2VA_RUNTIME_PROFILE_SCHEMA: &str =
 /// capability every client reads. Both tasks share one Metal correctness tier
 /// and one CUDA SM89 qualification.
 #[cfg(feature = "h3")]
-const PUBLIC_REF2VA_RUNTIME_PROFILE_DECISION: &str =
-    "supported-compact-ref2va-cuda-sm89-or-metal";
+const PUBLIC_REF2VA_RUNTIME_PROFILE_DECISION: &str = "supported-compact-ref2va-cuda-sm89-or-metal";
 
 /// The prompt, per-reference label, and vision-delimiter budget the Ref2VA
 /// conditioner sequence gets ON TOP of its references' own merged vision pads.
@@ -7548,7 +7547,8 @@ mod tests {
             contract::DEFAULT_COMPACT_FRAMES,
         )
         .unwrap();
-        let generated_audio = contract::target_audio_rows(contract::DEFAULT_COMPACT_FRAMES).unwrap();
+        let generated_audio =
+            contract::target_audio_rows(contract::DEFAULT_COMPACT_FRAMES).unwrap();
         let packed = H3FactoryPreparedRowsInput {
             // The presentation is the pads plus labels plus the prompt; the
             // cap budgets `REVIEWED_REF2VA_PROMPT_AND_LABEL_ROWS` above them.
@@ -7583,20 +7583,13 @@ mod tests {
             contract::DEFAULT_COMPACT_FRAMES,
         )
         .unwrap();
-        let all =
-            ref2va_reference_rows(&ref2va_reference_set(), contract::DEFAULT_COMPACT_FRAMES)
-                .unwrap();
+        let all = ref2va_reference_rows(&ref2va_reference_set(), contract::DEFAULT_COMPACT_FRAMES)
+            .unwrap();
         let canvas = (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT);
-        let small = public_ref2va_runtime_bounds_for_shape(
-            canvas,
-            contract::DEFAULT_COMPACT_FRAMES,
-            &one,
-        );
-        let large = public_ref2va_runtime_bounds_for_shape(
-            canvas,
-            contract::DEFAULT_COMPACT_FRAMES,
-            &all,
-        );
+        let small =
+            public_ref2va_runtime_bounds_for_shape(canvas, contract::DEFAULT_COMPACT_FRAMES, &one);
+        let large =
+            public_ref2va_runtime_bounds_for_shape(canvas, contract::DEFAULT_COMPACT_FRAMES, &all);
         small.validate().unwrap();
         large.validate().unwrap();
         assert!(large.attention_workspace_device_bytes >= small.attention_workspace_device_bytes);
@@ -7625,11 +7618,12 @@ mod tests {
             &all,
         );
         let mut request = ref2va_envelope_request(&envelope);
-        let demand = crate::minimax_h3::private_opened_evidence::qwen_activation_workspace_demand_bytes(
-            &request,
-            large.qwen_activation_workspace_bytes,
-        )
-        .unwrap();
+        let demand =
+            crate::minimax_h3::private_opened_evidence::qwen_activation_workspace_demand_bytes(
+                &request,
+                large.qwen_activation_workspace_bytes,
+            )
+            .unwrap();
         assert!(demand <= large.qwen_activation_workspace_bytes);
         // One row past the envelope's own ceiling is a named refusal, never
         // an undercharged admit.
@@ -7717,7 +7711,10 @@ mod tests {
         authority.revalidate().unwrap();
         assert_eq!(authority.record.task, "ref2va");
         assert_eq!(authority.record.canonical_model, contract::REF2VA_COMFY);
-        assert_eq!(authority.record.schema, PUBLIC_REF2VA_RUNTIME_PROFILE_SCHEMA);
+        assert_eq!(
+            authority.record.schema,
+            PUBLIC_REF2VA_RUNTIME_PROFILE_SCHEMA
+        );
         assert_eq!(
             authority.record.decision,
             PUBLIC_REF2VA_RUNTIME_PROFILE_DECISION
@@ -9959,7 +9956,12 @@ mod tests {
             .unwrap();
         assert!(fl2va_bind < execute && execute < ref2va_bind);
         assert!(ref2va_bind < ref2va_execute);
-        assert!(runner.find("let admitted_task = authority.task();").unwrap() < fl2va_bind);
+        assert!(
+            runner
+                .find("let admitted_task = authority.task();")
+                .unwrap()
+                < fl2va_bind
+        );
         let completion_sync = runner[ref2va_execute..]
             .find(".synchronize()")
             .map(|offset| ref2va_execute + offset)
