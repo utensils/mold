@@ -593,9 +593,28 @@ async function performVideoExport(options: VideoExportOptions) {
             </template>
             <template v-else>In the trash · kept until you empty it</template>
           </p>
-          <p data-selectable class="mt-3 text-body text-ink" :title="meta.prompt">
-            {{ meta.prompt }}
-          </p>
+          <div class="mt-3 flex items-start gap-2">
+            <p
+              data-selectable
+              data-test="lightbox-prompt"
+              class="min-w-0 flex-1 whitespace-pre-wrap text-body text-ink"
+              :title="meta.prompt"
+            >
+              {{ meta.prompt }}
+            </p>
+            <button
+              v-if="meta.prompt"
+              type="button"
+              data-test="copy-prompt"
+              class="flex h-[30px] shrink-0 items-center gap-1.5 rounded-chrome border border-edge px-2 font-utility text-[11px] text-ink-2 transition-colors hover:text-ink"
+              aria-label="Copy prompt"
+              title="Copy prompt"
+              @click="copy(meta.prompt)"
+            >
+              <Icon name="copy" :size="14" />
+              Copy
+            </button>
+          </div>
           <template v-if="showOrganization">
             <p class="lightbox-kicker mt-4 mb-1.5">Tags</p>
             <TagEditor

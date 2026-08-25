@@ -624,10 +624,12 @@ async function performVideoExport(options: VideoExportOptions) {
           </p>
 
           <div v-if="prompt" class="lb__prompt-wrap">
-            <p class="lb__prompt">{{ prompt }}</p>
+            <p class="lb__prompt" data-selectable>{{ prompt }}</p>
             <button
+              type="button"
               data-test="copy-prompt"
               class="lb__copy"
+              aria-label="Copy prompt"
               @click="copyText(prompt)"
             >
               Copy prompt
@@ -954,10 +956,12 @@ async function performVideoExport(options: VideoExportOptions) {
             {{ purgeLabel }}
           </p>
           <div v-if="prompt" class="lb__prompt-wrap">
-            <p class="lb__prompt">{{ prompt }}</p>
+            <p class="lb__prompt" data-selectable>{{ prompt }}</p>
             <button
+              type="button"
               data-test="copy-prompt"
               class="lb__copy"
+              aria-label="Copy prompt"
               @click="copyText(prompt)"
             >
               Copy prompt
@@ -1337,6 +1341,11 @@ async function performVideoExport(options: VideoExportOptions) {
   color: var(--rebate);
   margin: 0 0 20px;
   white-space: pre-wrap;
+}
+.lb__prompt[data-selectable] {
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
 }
 .lb__prompt-wrap {
   margin-bottom: 20px;

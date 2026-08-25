@@ -161,6 +161,23 @@ describe("Lightbox metadata panel", () => {
     },
   };
 
+  it("makes the prompt selectable and copies it from the visible control", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    const wrapper = mountLightbox();
+
+    expect(wrapper.get("[data-test='lightbox-prompt']").attributes()).toHaveProperty(
+      "data-selectable",
+    );
+    await wrapper.get("[data-test='copy-prompt']").trigger("click");
+
+    expect(writeText).toHaveBeenCalledWith("a lighthouse at dusk");
+    expect(useToastStore().items.at(-1)?.message).toBe("Copied");
+  });
+
   it("renders the full embedded field set when present", () => {
     const wrapper = mountLightbox(richItem, true);
     const text = wrapper.get("aside").text();
