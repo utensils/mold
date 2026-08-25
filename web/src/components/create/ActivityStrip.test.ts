@@ -151,6 +151,20 @@ describe("ActivityStrip", () => {
     expect(wrapper.text()).toContain("50%");
   });
 
+  it("names finalization instead of presenting a bare 100%", () => {
+    const job = makeJob({
+      progress: {
+        ...makeJob().progress,
+        stage: "Decoding video",
+        step: 28,
+        totalSteps: 28,
+      },
+    });
+    const wrapper = mount(ActivityStrip, { props: { jobs: [job] } });
+    expect(wrapper.text()).toContain("Finalizing");
+    expect(wrapper.text()).not.toContain("100%");
+  });
+
   it("prefers the print title over the prompt, and falls back to Untitled print", () => {
     const titled = makeJob({
       request: {

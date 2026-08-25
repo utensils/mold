@@ -82,6 +82,14 @@ describe("ActivityStrip", () => {
     expect(wrapper.text()).toContain("50%");
   });
 
+  it("names finalization instead of presenting a bare 100%", () => {
+    const generation = useGenerationStore();
+    generation.jobs = [{ ...baseJob(), status: "finishing", step: 10, total: 10 }];
+    const wrapper = mount(ActivityStrip);
+    expect(wrapper.get("[data-test='activity-strip']").text()).toContain("Finalizing");
+    expect(wrapper.get("[data-test='activity-strip']").text()).not.toContain("100%");
+  });
+
   it("cancels the running print once and acknowledges the pending request", async () => {
     const generation = useGenerationStore();
     const cancel = vi.spyOn(generation, "cancel").mockResolvedValue(false);

@@ -175,6 +175,17 @@ function percentFor(job: Job): number | null {
   return null;
 }
 
+function isFinalizing(job: Job): boolean {
+  const { stage, step, totalSteps } = job.progress;
+  return (
+    step !== null &&
+    totalSteps !== null &&
+    step >= totalSteps &&
+    stage !== "Denoising" &&
+    stage !== "Developing"
+  );
+}
+
 /** `title ?? prompt ?? "Untitled print"` — a chain request carries no title
  * slot, so the `in` check keeps the union honest. */
 function promptFor(job: Job): string {
@@ -283,10 +294,19 @@ const active = computed(
             :value="percentFor(job) ?? 0"
             tone="accent"
             :height="3"
-            :label="`${promptFor(job)} progress`"
+            :label="
+              isFinalizing(job)
+                ? `${promptFor(job)} finalizing`
+                : `${promptFor(job)} progress`
+            "
           />
         </span>
-        <span v-if="percentFor(job) !== null" class="activity__pct"
+        <span
+          v-if="isFinalizing(job)"
+          class="activity__pct activity__pct--stage"
+          >Finalizing</span
+        >
+        <span v-else-if="percentFor(job) !== null" class="activity__pct"
           >{{ percentFor(job) }}%</span
         >
         <span v-else class="activity__pct activity__pct--stage">{{

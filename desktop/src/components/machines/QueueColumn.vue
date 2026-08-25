@@ -35,7 +35,7 @@ function promptFor(row: QueueSurfaceRow): string {
   return ownJob(row)?.prompt ?? row.entry.model;
 }
 
-/** developing 18/28 · This Mac (own denoising) → developing/queued/held · host.
+/** developing 18/28 · This Mac (own denoising) → developing/finalizing/queued/held · host.
  *  Held is not waiting for a turn — the host parked it and will not start it —
  *  so it must never borrow the word that means "your turn is coming". */
 function statusLine(row: QueueSurfaceRow): string {
@@ -46,9 +46,11 @@ function statusLine(row: QueueSurfaceRow): string {
   }
   const state =
     row.entry.state === "running"
-      ? job && job.total > 0 && job.status === "denoising"
-        ? `developing ${job.step}/${job.total}`
-        : "developing"
+      ? job?.status === "finishing"
+        ? "finalizing"
+        : job && job.total > 0 && job.status === "denoising"
+          ? `developing ${job.step}/${job.total}`
+          : "developing"
       : "queued";
   return `${state} · ${row.hostLabel}`;
 }

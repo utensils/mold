@@ -118,6 +118,7 @@ const hiddenQueuedCount = computed(() =>
 const runningPct = computed(() =>
   running.value ? Math.round(jobProgress(running.value) * 100) : 0,
 );
+const runningFinalizing = computed(() => running.value?.status === "finishing");
 const runningHost = computed(() =>
   running.value?.hostId
     ? (hosts.all.find((host) => host.id === running.value?.hostId) ?? null)
@@ -326,9 +327,15 @@ function deleteConfirmed() {
               :cost-per-hr="runningPod.costPerHr"
               :uptime-seconds="runningPod.uptimeSeconds"
             />
-            <span class="ms-activity__pct data-mono">{{ runningPct }}%</span>
+            <span class="ms-activity__pct data-mono">
+              {{ runningFinalizing ? "Finalizing" : `${runningPct}%` }}
+            </span>
           </div>
-          <ProgressBar :value="runningPct" :height="4" label="Print progress" />
+          <ProgressBar
+            :value="runningPct"
+            :height="4"
+            :label="runningFinalizing ? 'Finalizing print' : 'Print progress'"
+          />
         </button>
         <button
           type="button"

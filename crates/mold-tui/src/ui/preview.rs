@@ -217,14 +217,20 @@ fn render_generating(frame: &mut Frame, app: &App, inner: Rect) {
     let theme = &app.theme;
     let progress = &app.generate.progress;
 
-    // The stage line: denoise progress once it starts, the download text
-    // during a pull, else the current pipeline stage.
-    let (stage_line, bar, stats) = if progress.denoise_total > 0 {
-        let (line, bar, stats) = preview_progress(
+    // Keep nested pipeline work (for example MiniMax H3's streamed blocks)
+    // attached to the truthful denoise counter. Once N/N is complete, switch
+    // to the actual final-output stage instead of leaving a stale full bar.
+    let denoising = progress.denoise_total > 0 && progress.denoise_step < progress.denoise_total;
+    let (stage_line, bar, stats) = if denoising {
+        let (mut line, bar, stats) = preview_progress(
             progress.denoise_step,
             progress.denoise_total,
             progress.denoise_elapsed_ms,
         );
+        if let Some(stage) = &progress.current_stage {
+            line.push_str(" · ");
+            line.push_str(stage);
+        }
         (line, Some(bar), Some(stats))
     } else if progress.is_downloading() {
         (progress.download_status_text().to_string(), None, None)

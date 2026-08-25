@@ -242,6 +242,12 @@ pub(crate) async fn render_progress(
                 pb.tick();
             }
             SseProgressEvent::StageStart { name } => {
+                if let Some(db) = denoise_bar.as_ref() {
+                    if db.position() < db.length().unwrap_or_default() {
+                        db.set_message(name);
+                        continue;
+                    }
+                }
                 if let Some(db) = denoise_bar.take() {
                     db.finish_and_clear();
                 }
@@ -252,6 +258,12 @@ pub(crate) async fn render_progress(
                 pb.tick();
             }
             SseProgressEvent::StageDone { name, elapsed_ms } => {
+                if let Some(db) = denoise_bar.as_ref() {
+                    if db.position() < db.length().unwrap_or_default() {
+                        db.set_message("");
+                        continue;
+                    }
+                }
                 if let Some(db) = denoise_bar.take() {
                     db.finish_and_clear();
                 }

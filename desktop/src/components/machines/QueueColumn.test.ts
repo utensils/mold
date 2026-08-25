@@ -14,6 +14,7 @@ vi.mock("../../lib/ipc", () => ({ inTauri: () => false, ipc: {} }));
 
 import QueueColumn from "./QueueColumn.vue";
 import { useConnectionStore } from "../../stores/connection";
+import { useGenerationStore, type Job } from "../../stores/generation";
 import { useJobsStore, type HostQueueCaps, type QueueEntry } from "../../stores/jobs";
 
 function entry(over: Partial<QueueEntry> = {}): QueueEntry {
@@ -62,6 +63,41 @@ describe("QueueColumn", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.text()).toContain("flux2-klein");
     expect(rows[0]!.text()).toContain("queued · This device");
+  });
+
+  it("labels a running print as finalizing after denoising completes", async () => {
+    setActivePinia(createPinia());
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    conn.status = "ready";
+    const jobs = useJobsStore();
+    jobs.queues.local = {
+      hostId: "local",
+      entries: [entry({ state: "running", position: 0 })],
+      paused: null,
+      caps: { canPause: true, canCancelAll: true, canReorder: false },
+      gpuOrdinals: [],
+      error: null,
+    };
+    useGenerationStore().jobs = [
+      {
+        id: "srv-1",
+        clientId: 7,
+        prompt: "a lighthouse",
+        status: "finishing",
+        step: 10,
+        total: 10,
+        error: null,
+        submittedAtUnixMs: Date.now(),
+        settledAtMs: null,
+      } as Job,
+    ];
+    const wrapper = mount(QueueColumn);
+    await flushPromises();
+
+    const text = wrapper.get("[data-test='queue-surface-row']").text();
+    expect(text).toContain("finalizing · This device");
+    expect(text).not.toContain("developing · This device");
   });
 
   it("keeps deeper host work reachable through an explicit continuation", async () => {

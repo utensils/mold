@@ -321,6 +321,7 @@ import {
   isCancelledError,
   jobPhase,
   jobProgress,
+  jobProgressCopy,
   jobStatusCode,
   planBatchRequests,
   railOrder,
@@ -2620,9 +2621,9 @@ const generationStatus = computed(() => {
     case "loading":
       return active.stage ?? "Loading model";
     case "denoising":
-      return `Developing ${active.step} / ${active.total}`;
+      return jobProgressCopy(active);
     case "finishing":
-      return active.stage ?? "Finalizing";
+      return jobProgressCopy(active);
     default:
       return jobStatusCode(active);
   }

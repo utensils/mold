@@ -4,6 +4,7 @@ import {
   applyProgress,
   jobPhase,
   jobProgress,
+  jobProgressCopy,
   jobStatusCode,
   newJob,
   planBatchRequests,
@@ -89,6 +90,19 @@ describe("generation SSE reducer", () => {
       component: "vae",
     });
     expect(job.status).toBe("finishing");
+  });
+
+  it("keeps MiniMax transformer blocks in the active denoise step", () => {
+    const job = newJob({ ...req, steps: 20 });
+    applyProgress(job, { type: "denoise_step", step: 4, total: 20, elapsed_ms: 1 });
+    applyProgress(job, {
+      type: "stage_start",
+      name: "Streaming MiniMax H3 transformer blocks",
+    });
+
+    expect(job.status).toBe("denoising");
+    expect(jobProgress(job)).toBe(0.2);
+    expect(jobProgressCopy(job)).toBe("Developing 4/20 — Streaming MiniMax H3 transformer blocks");
   });
 
   it("uses the requested seed for the grain, or a stable stand-in", () => {
