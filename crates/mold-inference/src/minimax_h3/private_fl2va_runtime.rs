@@ -1468,7 +1468,7 @@ where
         || artifacts.factory_identity_sha256() != admitted.factory_identity_sha256
         || artifacts.component_set_identity() != admitted.component_set_identity_sha256
         || artifacts.memory_overlap_identity_sha256() != overlap.identity_sha256()
-        || artifacts.transformer_task() != H3TransformerTask::T2VaFl2Va
+        || artifacts.transformer_task() != expected_transformer_task(admitted.task)
         || artifacts.transformer_policy_identity_sha256() != expected_transformer_policy
         || artifacts.attention_runtime_identity_sha256()
             != admitted.attention.runtime_identity_sha256
@@ -1661,7 +1661,7 @@ fn validate_private_artifact_facts(
         || facts.audio_vae_component_validation_sha256
             != admitted.audio_vae_component_validation_sha256
         || facts.vae_artifact_plan_identity_sha256 != admitted.vae_artifact_plan_identity_sha256
-        || stream.task != H3TransformerTask::T2VaFl2Va
+        || stream.task != expected_transformer_task(admitted.task)
         || facts.transformer_task != stream.task
         || facts.transformer_checkpoint_content_sha256 != stream.transformer_content_sha256
         || facts.transformer_checkpoint_layout_identity_sha256
@@ -2995,7 +2995,7 @@ where
     storage.validate()?;
     memory_overlap.validate()?;
     authority.validate_engine_seam(
-        contract::FL2VA_COMFY,
+        contract::base_compact_model_for_task(admitted.task),
         admitted.device_ordinal,
         authority.block_offload(),
     )?;
