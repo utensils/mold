@@ -25,7 +25,7 @@ while [ "$waited" -lt 7200 ]; do
   sleep 20
   waited=$((waited + 20))
 done
-echo "waited_for_gpu=${waited}s"
+echo "waited_for_gpu=${waited}s steps=${MOLD_UAT_STEPS:-21}"
 
 # The compact Ref2VA stack asks for ~24.6 GB of host headroom, so an idle
 # production server still holding its own H3 model is the difference between
@@ -52,7 +52,7 @@ start=$(date +%s.%N)
 set +e
 "$root/target/release/mold" run minimax-h3-ref2va:comfy-pruned-int8 "$prompt" \
   --width 1344 --height 768 --frames 124 --fps 24 \
-  --steps 21 --guidance 0 --strength 1.0 --format mp4 \
+  --steps "${MOLD_UAT_STEPS:-21}" --guidance 0 --strength 1.0 --format mp4 \
   --output "$out/output/$case_id.mp4" \
   "$@" >"$out/logs/$case_id.stdout" 2>"$out/logs/$case_id.stderr"
 rc=$?

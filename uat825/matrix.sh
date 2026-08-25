@@ -14,6 +14,13 @@ note "== a: image only =="
 bash "$run" a-image-only "a slow cinematic dolly through a misty pine forest at dawn" \
   --reference "image=$fix/ref-image-sq.png" 2>&1 | tee -a "$summary"
 
+# Case a is the MEASURED shape and keeps the reviewed 21-step count so it is
+# directly comparable with #827/#1033. Cases b-e exist to exercise the
+# conditioning paths and the order sensitivity, neither of which is a function
+# of the step count, so they run the shortest schedule the base tier admits
+# that still produces a real print.
+export MOLD_UAT_STEPS=8
+
 note "== b: video with soundtrack =="
 bash "$run" b-video-audio "the same scene continues, camera drifting to the right" \
   --reference "video=$fix/ref-video-audio-short.mp4" 2>&1 | tee -a "$summary"
