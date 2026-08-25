@@ -496,6 +496,38 @@ describe("MobileApp sequence generation", () => {
     expect(button.text()).toContain("Develop print");
   });
 
+  it("releases iOS background execution exactly once after placement cancellation settles", async () => {
+    isNativeIOSRuntime.mockReturnValue(true);
+    invoke.mockImplementation((command: string) => {
+      if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
+      if (command === "begin_mobile_background_task") {
+        return Promise.resolve("mobile-background-placement-cancel");
+      }
+      return Promise.resolve(null);
+    });
+    const preview = deferred<ReturnType<typeof plannedPlacement>>();
+    previewGenerationPlacement.mockReturnValueOnce(preview.promise);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("a placement cancellation cleanup check");
+
+    const button = wrapper.get("[data-test='mobile-develop-button']");
+    await button.trigger("click");
+    await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(1));
+    await button.trigger("click");
+    preview.resolve(plannedPlacement());
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("end_mobile_background_task", {
+        token: "mobile-background-placement-cancel",
+      }),
+    );
+    expect(
+      invoke.mock.calls.filter(([command]) => command === "end_mobile_background_task"),
+    ).toHaveLength(1);
+    expect(openStreams).toHaveLength(0);
+  });
+
   it("holds iOS background execution through placement and server admission", async () => {
     isNativeIOSRuntime.mockReturnValue(true);
     invoke.mockImplementation((command: string) => {
@@ -606,6 +638,14 @@ describe("MobileApp sequence generation", () => {
   });
 
   it("releases Generate when invalidated source preparation rejects", async () => {
+    isNativeIOSRuntime.mockReturnValue(true);
+    invoke.mockImplementation((command: string) => {
+      if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
+      if (command === "begin_mobile_background_task") {
+        return Promise.resolve("mobile-background-stale-source");
+      }
+      return Promise.resolve(null);
+    });
     const imageModel: ModelEntry = { ...model, name: "flux:image", family: "flux" };
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
       if (path === "/api/status") return Promise.resolve(status);
@@ -634,6 +674,14 @@ describe("MobileApp sequence generation", () => {
     expect(
       wrapper.get("[data-test='mobile-develop-button']").attributes("disabled"),
     ).toBeUndefined();
+    expect(
+      invoke.mock.calls.filter(([command]) => command === "end_mobile_background_task"),
+    ).toEqual([
+      [
+        "end_mobile_background_task",
+        { token: "mobile-background-stale-source" },
+      ],
+    ]);
   });
 
   it("removes capability-restricted models from the picker before submission", async () => {
