@@ -210,7 +210,6 @@ import type {
   Ltx2CameraControlInfo,
   ModelEntry,
   OutputMetadata,
-  PromptTransformProvenance,
   RemixDimension,
   RemixSourceKind,
   ServerCapabilities,
@@ -456,6 +455,12 @@ import { watchMobileGenerationHost, type MobileGenerationHostWatch } from "./mob
 import { beginMobileBackgroundTask } from "./backgroundTask";
 import { mobilePlacementFailure, routeAutomaticMobileGeneration } from "./mobileGenerationRouting";
 import { prepareMobileGenerationRequest } from "./mobileGenerationPreparation";
+import {
+  capturePreparedSubmission,
+  captureQuickSubmission,
+  preparedSubmissionIsCurrent,
+  quickSubmissionIsCurrent,
+} from "./mobileGenerationSnapshot";
 import { MobileSubmissionAttempts } from "./mobileSubmissionAttempt";
 
 type Tab = "generate" | "gallery" | "catalog" | "hosts";
@@ -5203,18 +5208,6 @@ function discardPreparedBatch(): void {
   }
 }
 
-function preparedRemixDimensions(
-  batch: PreparedExpansionBatchState,
-  index: number,
-): RemixDimension[] {
-  const perVariant = (
-    batch as PreparedExpansionBatchState & {
-      remixVariantDimensions?: readonly (readonly RemixDimension[])[];
-    }
-  ).remixVariantDimensions;
-  return [...(perVariant?.[index] ?? batch.dimensions ?? [])];
-}
-
 async function pullExpansionModel(): Promise<void> {
   const recovery = expansionRecovery.value;
   if (!recovery || expansionRunning.value) return;
@@ -5454,40 +5447,13 @@ async function generate(): Promise<void> {
     return;
   }
 
-  const preparedSubmission = prepared
-    ? {
-        batchId: prepared.batchId,
-        promptIds: prepared.prompts.map((prompt) => prompt.id),
-        prompts: prepared.prompts.map((prompt) => prompt.text.trim()),
-        originalPrompt: prepared.rootPrompt ?? prepared.sourcePrompt,
-        promptTransforms:
-          prepared.kind === "remix"
-            ? prepared.prompts.map((_, index): PromptTransformProvenance => ({
-                operation: "remix",
-                ...(prepared.rootPrompt ? { root_prompt: prepared.rootPrompt } : {}),
-                source_prompt: prepared.sourcePrompt,
-                source_kind: prepared.sourceKind ?? "current",
-                task: prepared.task,
-                dimensions: preparedRemixDimensions(prepared, index),
-              }))
-            : undefined,
-        route: { ...prepared.route, target: { ...prepared.route.target } },
-      }
-    : null;
+  const preparedSubmission = capturePreparedSubmission(prepared);
   const preparedSection = preparedSubmission
     ? document.querySelector<HTMLElement>("[data-test='mobile-prepared-expansion']")
     : null;
   const preparedSubmissionOwnedFocus = !!preparedSection?.contains(document.activeElement);
   const quickSubmission = !preparedSubmission
-    ? quickExpansionSnapshot.value
-      ? {
-          requestToken: quickExpansionSnapshot.value.requestToken,
-          route: {
-            ...quickExpansionSnapshot.value.route,
-            target: { ...quickExpansionSnapshot.value.route.target },
-          },
-        }
-      : null
+    ? captureQuickSubmission(quickExpansionSnapshot.value)
     : null;
   // Prepared and quick work keeps the machine it was frozen on. An ordinary
   // submission under Auto / Most capable starts on a provisional machine — the
@@ -5689,23 +5655,23 @@ async function generate(): Promise<void> {
     return;
   }
   if (preparedSubmission) {
-    const current = preparedBatch.value;
-    const unchanged =
-      current?.batchId === preparedSubmission.batchId &&
-      current.prompts.length === preparedSubmission.prompts.length &&
-      current.prompts.every(
-        (prompt, index) =>
-          prompt.id === preparedSubmission.promptIds[index] &&
-          prompt.text.trim() === preparedSubmission.prompts[index],
-      );
-    if (!unchanged || preparedStaleReasons.value.length > 0) {
+    if (
+      !preparedSubmissionIsCurrent(
+        preparedSubmission,
+        preparedBatch.value,
+        preparedStaleReasons.value,
+      )
+    ) {
       releasePreparedSubmission();
       return;
     }
   } else if (quickSubmission) {
     if (
-      quickExpansionSnapshot.value?.requestToken !== quickSubmission.requestToken ||
-      quickStaleReasons.value.length > 0
+      !quickSubmissionIsCurrent(
+        quickSubmission,
+        quickExpansionSnapshot.value,
+        quickStaleReasons.value,
+      )
     ) {
       releasePreparedSubmission();
       return;
