@@ -52,6 +52,7 @@ pub const REF2VA_COMFY: &str = "minimax-h3-ref2va:comfy-pruned-int8";
 pub const FL2VA_COMFY_TURBO_8STEP: &str = "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step";
 pub const FL2VA_COMFY_TURBO_4STEP_768P: &str =
     "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p";
+pub const REF2VA_COMFY_TURBO_4STEP: &str = "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step";
 /// Pruned NVFP4 compact transformers. Deliberately absent from
 /// [`REVIEWED_COMPACT_MODELS`]: they download, verify, inventory, and remove
 /// like any other pinned model, but mold has no engine arm for the weight
@@ -60,13 +61,14 @@ pub const FL2VA_COMFY_NVFP4: &str = "minimax-h3-fl2va:comfy-pruned-nvfp4";
 pub const REF2VA_COMFY_NVFP4: &str = "minimax-h3-ref2va:comfy-pruned-nvfp4";
 
 /// Every reviewed compact identity admissible on the H3 runtime route: the
-/// two base task partitions plus the reviewed FL2VA Turbo LoRA tags. Aliases
+/// two base task partitions plus the reviewed Turbo LoRA tags of both. Aliases
 /// are deliberately excluded — policy and validation match exact identities.
 pub const REVIEWED_COMPACT_MODELS: &[&str] = &[
     FL2VA_COMFY,
     REF2VA_COMFY,
     FL2VA_COMFY_TURBO_8STEP,
     FL2VA_COMFY_TURBO_4STEP_768P,
+    REF2VA_COMFY_TURBO_4STEP,
 ];
 
 /// Exact-identity membership test for [`REVIEWED_COMPACT_MODELS`]. This is
@@ -108,8 +110,10 @@ pub struct TurboManifestTier {
     pub steps: u32,
 }
 
-/// Reviewed FL2VA Turbo tiers shipped as first-class manifest tags. Ref2VA's
-/// reviewed 4-step tier is deliberately absent until Ref2VA execution exists.
+/// Reviewed Turbo tiers shipped as first-class manifest tags, for both task
+/// partitions. Ref2VA's 4-step tier joined the list once Ref2VA execution
+/// landed; its adapter is the one `H3TurboLoraTier::Ref2v4StepV10` already
+/// pins, and selection stays by model identity.
 pub const REVIEWED_TURBO_MANIFEST_TIERS: &[TurboManifestTier] = &[
     TurboManifestTier {
         model: FL2VA_COMFY_TURBO_8STEP,
@@ -127,6 +131,15 @@ pub const REVIEWED_TURBO_MANIFEST_TIERS: &[TurboManifestTier] = &[
         adapter_hf_filename: "loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
         adapter_size_bytes: 1_956_192_992,
         adapter_sha256: "c396a9a06f58399e9df9754b18299818d84a2ddd371724ba48fe4a41221437dc",
+        steps: 5,
+    },
+    TurboManifestTier {
+        model: REF2VA_COMFY_TURBO_4STEP,
+        tier_stable_id: "minimax-h3.turbo-lora.ref2v-4step-v0.1.comfyui-bf16.v1",
+        display_label: "Turbo 4-step",
+        adapter_hf_filename: "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+        adapter_size_bytes: 1_956_193_000,
+        adapter_sha256: "5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c",
         steps: 5,
     },
 ];
@@ -188,7 +201,12 @@ pub fn storage_identity(name: &str) -> &str {
         .iter()
         .any(|tier| tier.model == name)
     {
-        FL2VA_COMFY
+        // Each task partition owns its own ~41 GB base stack, so a Turbo tag
+        // collapses onto the base of the task it renders, never onto FL2VA's.
+        match task_for_model(name) {
+            Some(task) => base_compact_model_for_task(task),
+            None => name,
+        }
     } else {
         name
     }
@@ -1001,6 +1019,7 @@ pub fn resolve_model_name(input: &str) -> Option<&'static str> {
         value if value == REF2VA_COMFY_NVFP4 => Some(REF2VA_COMFY_NVFP4),
         value if value == FL2VA_COMFY_TURBO_8STEP => Some(FL2VA_COMFY_TURBO_8STEP),
         value if value == FL2VA_COMFY_TURBO_4STEP_768P => Some(FL2VA_COMFY_TURBO_4STEP_768P),
+        value if value == REF2VA_COMFY_TURBO_4STEP => Some(REF2VA_COMFY_TURBO_4STEP),
         _ => None,
     }
 }
@@ -3203,11 +3222,13 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
         hidden: false,
     })
     .collect();
-    // The reviewed FL2VA Turbo tiers are the compact FL2VA stack plus one
-    // pinned LoRA adapter each; the tag selects the tier's reviewed step
-    // count and the adapter artifact.
+    // A reviewed Turbo tier is its own task's compact stack plus one pinned
+    // LoRA adapter; the tag selects the tier's reviewed step count and the
+    // adapter artifact. The task comes from the tag's own identity, so a
+    // `ref2v` adapter never lands beside the FL2VA transformer.
     manifests.extend(REVIEWED_TURBO_MANIFEST_TIERS.iter().map(|tier| {
-        let mut files = comfy_files(Task::Fl2va);
+        let task = task_for_model(tier.model).expect("reviewed turbo tag resolves to a task");
+        let mut files = comfy_files(task);
         files.push(file(
             COMFY_REPO,
             tier.adapter_hf_filename,
@@ -3219,7 +3240,11 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
             name: tier.model.to_string(),
             family: FAMILY.to_string(),
             description: format!(
-                "MiniMax H3 FL2VA Comfy pruned INT8-convrot + NVFP4-AWQ with the reviewed {} LoRA (downloadable; CUDA or Apple Metal)",
+                "MiniMax H3 {} Comfy pruned INT8-convrot + NVFP4-AWQ with the reviewed {} LoRA (downloadable; CUDA or Apple Metal)",
+                match task {
+                    Task::Fl2va => "FL2VA",
+                    Task::Ref2va => "Ref2VA",
+                },
                 tier.display_label
             ),
             files,
@@ -3374,6 +3399,7 @@ mod tests {
             REF2VA_COMFY,
             FL2VA_COMFY_TURBO_8STEP,
             FL2VA_COMFY_TURBO_4STEP_768P,
+            REF2VA_COMFY_TURBO_4STEP,
         ] {
             assert_eq!(
                 source_fit_dimensions(model, 1024, 1024),
@@ -4352,6 +4378,7 @@ mod tests {
             REF2VA_COMFY,
             FL2VA_COMFY_TURBO_8STEP,
             FL2VA_COMFY_TURBO_4STEP_768P,
+            REF2VA_COMFY_TURBO_4STEP,
         ] {
             for &(width, height) in REVIEWED_COMPACT_CANVASES {
                 assert!(
@@ -4635,6 +4662,12 @@ mod tests {
                 Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
                 FL2VA_MODES,
             ),
+            (
+                REF2VA_COMFY_TURBO_4STEP,
+                Task::Ref2va,
+                Layout::ComfyPrunedInt8ConvrotNvfp4Awq,
+                REF2VA_MODES,
+            ),
         ];
         let mut observed_modes = Vec::new();
         for (model, task, layout, modes) in cases {
@@ -4699,6 +4732,7 @@ mod tests {
                 REF2VA_COMFY_NVFP4,
                 FL2VA_COMFY_TURBO_8STEP,
                 FL2VA_COMFY_TURBO_4STEP_768P,
+                REF2VA_COMFY_TURBO_4STEP,
             ])
         );
         assert!(advertised
@@ -4821,6 +4855,7 @@ mod tests {
                 REF2VA_COMFY_NVFP4,
                 FL2VA_COMFY_TURBO_8STEP,
                 FL2VA_COMFY_TURBO_4STEP_768P,
+                REF2VA_COMFY_TURBO_4STEP,
             ])
         );
 
@@ -4833,14 +4868,19 @@ mod tests {
     }
 
     #[test]
-    fn turbo_tags_are_first_class_compact_fl2va_identities() {
+    fn turbo_tags_are_first_class_compact_identities_of_their_own_task() {
         for tier in REVIEWED_TURBO_MANIFEST_TIERS {
             assert_eq!(resolve_model_name(tier.model), Some(tier.model));
             assert_eq!(
                 resolve_model_name(&tier.model.to_ascii_uppercase()),
                 Some(tier.model)
             );
-            assert_eq!(task_for_model(tier.model), Some(Task::Fl2va));
+            let expected_task = if tier.model.starts_with("minimax-h3-ref2va:") {
+                Task::Ref2va
+            } else {
+                Task::Fl2va
+            };
+            assert_eq!(task_for_model(tier.model), Some(expected_task));
             assert_eq!(
                 layout_for_model(tier.model),
                 Some(Layout::ComfyPrunedInt8ConvrotNvfp4Awq)
@@ -4854,7 +4894,7 @@ mod tests {
         assert_eq!(turbo_tier_for_model(REF2VA_COMFY), None);
         for lookalike in [
             "minimax-h3-fl2va:comfy-pruned-int8-turbo-2step",
-            "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step",
+            "minimax-h3-ref2va:comfy-pruned-int8-turbo-8step",
             "minimax-h3",
         ] {
             assert_eq!(turbo_tier_for_model(lookalike), None, "{lookalike}");
@@ -4883,9 +4923,12 @@ mod tests {
 
     #[test]
     fn turbo_manifests_pin_the_adapter_beside_the_exact_base_stack() {
-        let base = find_manifest(FL2VA_COMFY).unwrap();
         for tier in REVIEWED_TURBO_MANIFEST_TIERS {
             let manifest = find_manifest(tier.model).unwrap();
+            let expected_task = task_for_model(tier.model).unwrap();
+            // A Turbo tag is its OWN task's base stack plus one adapter, so
+            // the base it must match byte-for-byte is that task's partition.
+            let base = find_manifest(base_compact_model_for_task(expected_task)).unwrap();
             assert_eq!(manifest.family, FAMILY);
             assert!(!manifest.hidden);
             // The tier moves exactly one manifest default: the reviewed
@@ -4945,10 +4988,18 @@ mod tests {
                     .join(tier.adapter_hf_filename)
             );
 
-            // The adapter is an FL2VA-only reviewed artifact.
+            // The adapter is reviewed for exactly its own task partition, so
+            // a `ref2v` adapter can never mint an FL2VA qualification.
             let contract = artifact_contract(manifest, adapter).unwrap();
             assert_eq!(contract.role, ArtifactRole::TurboLoraAdapter);
-            assert_eq!(contract.compatible_tasks, FL2VA_ONLY);
+            assert_eq!(
+                contract.compatible_tasks,
+                if expected_task == Task::Ref2va {
+                    REF2VA_ONLY
+                } else {
+                    FL2VA_ONLY
+                }
+            );
             assert_eq!(contract.identity.source_revision, COMFY_TURBO_LORA_REVISION);
             assert_eq!(contract.identity.sha256, tier.adapter_sha256);
         }
@@ -4961,9 +5012,10 @@ mod tests {
     /// ref-counting stops protecting the shared bytes.
     #[test]
     fn turbo_manifests_store_the_base_stack_in_the_base_models_directory() {
-        let base = find_manifest(FL2VA_COMFY).unwrap();
         for tier in REVIEWED_TURBO_MANIFEST_TIERS {
             let manifest = find_manifest(tier.model).unwrap();
+            // The base a Turbo tag collapses onto is its OWN task's stack.
+            let base = find_manifest(base_compact_model(tier.model).unwrap()).unwrap();
             for file in &manifest.files {
                 if file.component == ModelComponent::DistilledLora {
                     continue;

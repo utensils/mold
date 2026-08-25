@@ -1501,6 +1501,30 @@ Models: `minimax-h3-ref2va:comfy-pruned-int8`, `minimax-h3-ref2va:comfy-pruned-n
 
 Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cdaaa03fa4497e89ac64ff169219acf`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
+### `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`
+
+Schema 1 · hash `2383b8ad7c55440a29b7a3344717adffdb54dd11fd5a8e64b0fd11a46ecf6bb1` · default recipe `default`
+
+Models: `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`.
+
+#### Default (`default`)
+
+- Resolution: dynamic; alignment `32`; minimum `256x256`; maximum `1032192` pixels; axis limit `2016`; aspect range `0.25–4`.
+- Defaults: `1344x768`, 5 steps, guidance 0.
+- Steps: 5–5 by 1; guidance: 0–0 by 0.1 (Fixed).
+- Temporal: frames 107–345 on `17n+5` (default 124); FPS fixed 24; duration limit 15s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `7:4` | `1344x768` (recommended) |
+| `20:11` | `1280x704` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `1:1` | `768x768` (recommended), `960x960` (recommended) |
+| `4:7` | `768x1344` (recommended) |
+| `11:20` | `704x1280` (recommended) |
+
+Provenance: [Upstream](https://github.com/MiniMax-AI/MiniMax-H3) at `fa6891ff7cdaaa03fa4497e89ac64ff169219acf`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
 ### `minimax-h3-ref2va:official-bf16`
 
 Schema 1 · hash `2db91a6dc4de7238f59c5ce035f6bb053ad4c4d5f9012016d9a866fde959043a` · default recipe `default`

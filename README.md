@@ -104,10 +104,11 @@ MiniMax H3 weights use the
 not Mold's MIT license. H3 may be used through Mold in every territory and
 workflow — local, remote, shared, hosted, output distribution, and
 redistribution — with no separate acceptance step; review the linked terms for
-your use. The reviewed FL2VA Turbo distillations are ordinary model tags
-(`minimax-h3-fl2va:comfy-pruned-int8-turbo-8step` and
-`…-turbo-4step-768p`) that pull the same compact stack plus one pinned LoRA
-adapter and render at their tier's fixed step count. The compact tags render
+your use. The reviewed Turbo distillations are ordinary model tags
+(`minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`, `…-turbo-4step-768p`, and
+`minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`) that pull their own task's
+compact stack plus one pinned LoRA adapter and render at their tier's fixed
+step count. The compact tags render
 any 32-aligned canvas up to `1344x768`'s pixel count, 107-345 frames at 24 fps,
 and 2-50 sampler steps; the memory estimate — not a pinned list of shapes —
 decides what a given card can hold. The compact NVFP4

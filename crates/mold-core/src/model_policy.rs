@@ -536,7 +536,7 @@ mod tests {
             "hf:Comfy-Org/MiniMax-H3",
             "minimax-h3:custom",
             "minimax-h3-fl2va:comfy-pruned-int8-turbo-2step",
-            "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step",
+            "minimax-h3-ref2va:comfy-pruned-int8-turbo-8step",
             "transformer/high_noise.safetensors",
         ] {
             assert_eq!(

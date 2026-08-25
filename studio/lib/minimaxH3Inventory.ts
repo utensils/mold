@@ -214,12 +214,15 @@ function roleValue(value: unknown): value is MiniMaxH3ComponentRole {
  * own schedule length, so the advertised envelope must agree. For the base
  * identity it is the default within
  * `MINIMAX_H3_COMPACT_MIN_STEPS..=MINIMAX_H3_COMPACT_MAX_STEPS`, not a pin. */
-export const MINIMAX_H3_REVIEWED_FL2VA_STEPS: Readonly<Record<string, number>> =
-  {
-    "minimax-h3-fl2va:comfy-pruned-int8": 21,
-    "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step": 9,
-    "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p": 5,
-  };
+export const MINIMAX_H3_REVIEWED_COMPACT_STEPS: Readonly<
+  Record<string, number>
+> = {
+  "minimax-h3-fl2va:comfy-pruned-int8": 21,
+  "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step": 9,
+  "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p": 5,
+  "minimax-h3-ref2va:comfy-pruned-int8": 21,
+  "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step": 5,
+};
 
 /** Canvases the ADVERTISED reference request may name.
  *
@@ -558,7 +561,7 @@ export function presentMiniMaxH3Host(
  * compact FL2VA identities — the base partition and its reviewed Turbo
  * variants — are eligible. Every axis but steps is pinned to the reviewed
  * canvas; the expected step count is the selected model's own reviewed
- * authority from `MINIMAX_H3_REVIEWED_FL2VA_STEPS`, so a Turbo model passes
+ * authority from `MINIMAX_H3_REVIEWED_COMPACT_STEPS`, so a Turbo model passes
  * its tier's steps while a widened envelope still fails closed. Malformed or
  * older capability payloads stay read-only inventory and cannot become
  * generation authority.
@@ -569,7 +572,7 @@ export function reviewedMiniMaxH3ModelAccess(
   generationProfileSha256: string | null | undefined,
 ): MiniMaxH3RequestCapability | null {
   if (typeof model !== "string") return null;
-  const expectedSteps = MINIMAX_H3_REVIEWED_FL2VA_STEPS[model];
+  const expectedSteps = MINIMAX_H3_REVIEWED_COMPACT_STEPS[model];
   if (expectedSteps === undefined) return null;
   const presented = presentMiniMaxH3Host({
     id: "model-access",
