@@ -150,6 +150,7 @@ const originalPrompt = computed(() =>
 );
 const upscaled = computed(() => isUpscaledImage(props.item));
 const actionStatus = ref("");
+const promptCopyStatus = ref("");
 const actionBusy = ref<"copy" | "save" | "save-video" | null>(null);
 const exportOpen = ref(false);
 const exportBusy = ref(false);
@@ -226,7 +227,23 @@ function openInfo(): void {
   infoCollectionDraft.value = "";
   infoCollectionError.value = "";
   deleteForeverArmed.value = false;
+  promptCopyStatus.value = "";
   infoOpen.value = true;
+}
+
+function closeInfo(): void {
+  promptCopyStatus.value = "";
+  infoOpen.value = false;
+}
+
+async function copyPrompt(): Promise<void> {
+  promptCopyStatus.value = "";
+  try {
+    await navigator.clipboard.writeText(props.item.metadata.prompt);
+    promptCopyStatus.value = "Prompt copied";
+  } catch {
+    promptCopyStatus.value = "Couldn’t copy prompt.";
+  }
 }
 
 /** Done commits the title through PATCH; blank clears it. */
@@ -465,6 +482,7 @@ watch(
   ],
   () => {
     if (mounted) reloadMedia();
+    promptCopyStatus.value = "";
   },
 );
 
@@ -733,8 +751,28 @@ onBeforeUnmount(() => {
     <footer class="gallery-viewer-details">
       <div class="gallery-viewer-prompt">
         <span v-if="preparedPosition" data-test="gallery-viewer-batch">{{ preparedPosition }}</span>
-        <span>Prompt</span>
+        <div class="gallery-viewer-prompt-heading">
+          <span>Prompt</span>
+          <button
+            v-if="item.metadata.prompt"
+            class="gallery-viewer-copy-prompt"
+            type="button"
+            data-test="gallery-viewer-copy-prompt"
+            aria-label="Copy prompt"
+            @click="copyPrompt"
+          >
+            Copy
+          </button>
+        </div>
         <p data-selectable>{{ item.metadata.prompt || "No prompt was used for this print." }}</p>
+        <p
+          v-if="promptCopyStatus && !infoOpen"
+          class="gallery-viewer-copy-status"
+          role="status"
+          data-test="gallery-viewer-copy-status"
+        >
+          {{ promptCopyStatus }}
+        </p>
         <p v-if="pipeline" data-test="gallery-viewer-pipeline" data-selectable>
           <span>Pipeline</span> {{ pipeline }}
         </p>
@@ -840,7 +878,7 @@ onBeforeUnmount(() => {
       :title="viewerTitle"
       :focus-first-control="false"
       test-id="gallery-viewer-info-sheet"
-      @close="infoOpen = false"
+      @close="closeInfo"
     >
       <p
         v-if="organizationError"
@@ -1003,8 +1041,33 @@ onBeforeUnmount(() => {
       <section class="gallery-viewer-print-details" data-test="gallery-viewer-print-details">
         <p class="mobile-library-sheet-label">Print details</p>
         <p class="gallery-viewer-info-filename" :title="item.filename">{{ item.filename }}</p>
-        <p class="gallery-viewer-info-prompt" :title="item.metadata.prompt">
-          {{ item.metadata.prompt }}
+        <div class="gallery-viewer-info-prompt-row">
+          <p
+            class="gallery-viewer-info-prompt"
+            data-selectable
+            data-test="gallery-viewer-info-prompt"
+            :title="item.metadata.prompt"
+          >
+            {{ item.metadata.prompt }}
+          </p>
+          <button
+            v-if="item.metadata.prompt"
+            class="secondary-button gallery-viewer-copy-prompt"
+            type="button"
+            data-test="gallery-viewer-info-copy-prompt"
+            aria-label="Copy prompt"
+            @click="copyPrompt"
+          >
+            Copy
+          </button>
+        </div>
+        <p
+          v-if="promptCopyStatus"
+          class="gallery-viewer-copy-status"
+          role="status"
+          data-test="gallery-viewer-info-copy-status"
+        >
+          {{ promptCopyStatus }}
         </p>
         <p
           v-if="item.metadata.prompt.trim() && item.metadata.original_prompt"
@@ -1166,9 +1229,48 @@ onBeforeUnmount(() => {
 }
 
 .gallery-viewer-info-prompt {
+  min-width: 0;
   color: var(--rebate);
   font-size: var(--text-body);
   overflow-wrap: anywhere;
+}
+
+.gallery-viewer-info-prompt-row,
+.gallery-viewer-prompt-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.gallery-viewer-copy-prompt {
+  min-width: 44px;
+  min-height: 44px;
+  flex: 0 0 auto;
+}
+
+.gallery-viewer-prompt-heading .gallery-viewer-copy-prompt {
+  border: 0;
+  background: transparent;
+  color: var(--safelight);
+  font: inherit;
+}
+
+.gallery-viewer-prompt-heading > span {
+  color: rgba(245, 239, 255, 0.62);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.gallery-viewer-copy-status {
+  display: block;
+  overflow: visible;
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 13px;
+  -webkit-line-clamp: unset;
 }
 
 .gallery-viewer-info-secondary {

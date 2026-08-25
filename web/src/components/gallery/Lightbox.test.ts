@@ -106,6 +106,9 @@ describe("Lightbox (desktop two-pane)", () => {
 
     await wrapper.get('[data-test="copy-prompt"]').trigger("click");
     await wrapper.get('[data-test="copy-seed"]').trigger("click");
+    expect(wrapper.get(".lb__prompt").attributes()).toHaveProperty(
+      "data-selectable",
+    );
     expect(writeText).toHaveBeenNthCalledWith(1, "a lighthouse at dusk");
     expect(writeText).toHaveBeenNthCalledWith(2, "4242");
   });

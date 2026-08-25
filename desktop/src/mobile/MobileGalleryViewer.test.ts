@@ -100,6 +100,32 @@ afterEach(() => {
 });
 
 describe("MobileGalleryViewer", () => {
+  it("makes the prompt selectable and copies it in the viewer and Info sheet", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    const view = mountViewer();
+    await flushPromises();
+
+    const viewerPrompt = view.get(".gallery-viewer-prompt > p[data-selectable]");
+    expect(viewerPrompt.text()).toBe("a lighthouse at dusk");
+    await view.get("[data-test='gallery-viewer-copy-prompt']").trigger("click");
+    await flushPromises();
+    expect(view.get("[data-test='gallery-viewer-copy-status']").text()).toBe("Prompt copied");
+
+    await view.get("[data-test='gallery-viewer-info']").trigger("click");
+    const infoPrompt = view.get("[data-test='gallery-viewer-info-prompt']");
+    expect(infoPrompt.attributes()).toHaveProperty("data-selectable");
+    await view.get("[data-test='gallery-viewer-info-copy-prompt']").trigger("click");
+    await flushPromises();
+
+    expect(writeText).toHaveBeenNthCalledWith(1, "a lighthouse at dusk");
+    expect(writeText).toHaveBeenNthCalledWith(2, "a lighthouse at dusk");
+    expect(view.get("[data-test='gallery-viewer-info-copy-status']").text()).toBe("Prompt copied");
+  });
+
   it("leaves the native iOS image context menu available", async () => {
     const view = mountViewer();
     await flushPromises();
