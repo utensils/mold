@@ -2321,8 +2321,6 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             let _ = job.result_tx.send(Ok(GenerationJobResult {
                 image: img,
                 response,
-                filename: saved_names.output,
-                original_filename: saved_names.original,
             }));
         }
         Ok(Ok(Err(e))) => {

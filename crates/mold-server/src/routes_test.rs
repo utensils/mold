@@ -4751,13 +4751,6 @@ mod tests {
 
     #[tokio::test]
     async fn capabilities_reports_queue_controls_available() {
-        // `server_batch` is intentionally gated by the process-global
-        // `MOLD_OUTPUT_DIR` override. Serialize this positive assertion with
-        // tests that temporarily disable output through that environment
-        // variable.
-        let _env = env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
         let mut state = AppState::for_tests();
         state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
@@ -4778,15 +4771,12 @@ mod tests {
         assert_eq!(body["queue"]["can_pause"], true);
         assert_eq!(body["queue"]["can_cancel_all"], true);
         assert_eq!(body["queue"]["can_reorder"], true);
-        assert_eq!(body["queue"]["server_batch"], true);
+        assert_eq!(body["queue"]["server_batch"], false);
         assert!(
             body.get("durable_media").is_none(),
             "the server must keep durable request-media capability dark until activation is complete"
         );
-        assert_eq!(
-            body["queue"]["server_batch_max_outputs"],
-            crate::batch_runtime::MAX_LIVE_SERVER_BATCH_OUTPUTS
-        );
+        assert!(body["queue"]["server_batch_max_outputs"].is_null());
         assert_eq!(body["devices"]["available"], true);
         assert_eq!(body["devices"]["lifecycle"], true);
         assert_eq!(body["devices"]["restart_enable"], false);
@@ -4999,10 +4989,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = json_body(response).await;
-        assert!(body["error"]
-            .as_str()
-            .unwrap()
-            .contains("authoritative scheduler V2"));
+        assert_eq!(body["code"], "DIRECT_BATCH_UNSUPPORTED");
     }
 
     /// The durable row is written before `submit()`, so a crash between
@@ -5639,67 +5626,75 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn direct_raw_batch_commits_every_child_before_model_resolution() {
+    async fn direct_routes_reject_multi_output_requests_before_admission() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let (mut state, _rx) = durable_state(db, root.path());
         install_authoritative_v2(&mut state);
         let journal = state.queue_journal.clone();
-        let mut body = serde_json::from_str::<serde_json::Value>(&generate_body_for_model(
-            "queue both before resolving",
-            "not-installed-at-admission",
-            512,
-            512,
-        ))
-        .unwrap();
-        body["batch_size"] = serde_json::json!(2);
-        let request = tokio::spawn(app_with_state(state).oneshot(json_request(
-            "POST",
-            "/api/generate",
-            body,
-        )));
+        let app = app_with_state(state);
+        let mut body: serde_json::Value =
+            serde_json::from_str(&durable_direct_media_body("one media authority")).unwrap();
+        body["batch_size"] = serde_json::json!(64);
 
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while journal.list_all().len() != 2 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("both direct batch children must commit before attachment waits");
-        assert!(journal
-            .list_all()
-            .iter()
-            .all(|row| row.model == "not-installed-at-admission"));
-        request.abort();
+        for path in ["/api/generate", "/api/generate/stream"] {
+            let response = app
+                .clone()
+                .oneshot(json_request("POST", path, body.clone()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(
+                json_body(response).await["code"],
+                "DIRECT_BATCH_UNSUPPORTED"
+            );
+        }
+        assert!(journal.list_all().is_empty());
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn direct_stream_batch_commits_every_child_before_model_resolution() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn output_disabled_hosts_keep_singleton_raw_and_sse_response_contracts() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let (mut state, _rx) = durable_state(db, root.path());
+        let (mut state, rx) = durable_state(db, root.path());
         install_authoritative_v2(&mut state);
+        state.output_disabled_override = true;
         let journal = state.queue_journal.clone();
-        let mut body = serde_json::from_str::<serde_json::Value>(&generate_body_for_model(
-            "queue stream siblings before resolving",
-            "not-installed-at-admission",
-            512,
-            512,
-        ))
-        .unwrap();
-        body["batch_size"] = serde_json::json!(3);
+        let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
+        let app = app_with_state(state);
 
-        let response = app_with_state(state)
-            .oneshot(json_request("POST", "/api/generate/stream", body))
+        let raw = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generate",
+                serde_json::from_str(&generate_body("raw without gallery", 64, 64)).unwrap(),
+            ))
             .await
             .unwrap();
+        assert_eq!(raw.status(), StatusCode::OK);
+        assert_eq!(raw.headers()["content-type"], "image/png");
 
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(journal.list_all().len(), 3);
-        assert!(journal
-            .list_all()
-            .iter()
-            .all(|row| row.model == "not-installed-at-admission"));
+        let sse = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generate/stream",
+                serde_json::from_str(&generate_body("SSE without gallery", 64, 64)).unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(sse.status(), StatusCode::OK);
+        let body = tokio::time::timeout(
+            Duration::from_secs(5),
+            axum::body::to_bytes(sse.into_body(), 1024 * 1024),
+        )
+        .await
+        .expect("attached SSE generation must finish")
+        .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("event: complete"), "{body}");
+        assert!(journal.list_all().is_empty());
+        worker.abort();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6356,52 +6351,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn durable_direct_raw_batch_preserves_ordered_json_completion() {
-        let root = tempfile::tempdir().unwrap();
-        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let (mut state, rx) = durable_state(db, root.path());
-        install_authoritative_v2(&mut state);
-        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
-        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
-        let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
-        let mut body = serde_json::from_str::<serde_json::Value>(&durable_direct_media_body(
-            "durable raw batch",
-        ))
-        .unwrap();
-        body["batch_size"] = serde_json::json!(2);
-        let response = tokio::time::timeout(
-            Duration::from_secs(10),
-            app_with_state(state).oneshot(
-                Request::post("/api/generate")
-                    .header("content-type", "application/json")
-                    .header("x-mold-operation-id", uuid::Uuid::new_v4().to_string())
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            ),
-        )
-        .await
-        .expect("durable raw batch must settle")
-        .unwrap();
-
-        let status = response.status();
-        let content_type = response.headers().get("content-type").cloned();
-        let body = json_body(response).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(content_type.unwrap(), "application/json");
-        let outputs = body["outputs"].as_array().unwrap();
-        assert_eq!(outputs.len(), 2);
-        assert_eq!(outputs[0]["batch_index"], 1);
-        assert_eq!(outputs[1]["batch_index"], 2);
-        assert_ne!(
-            outputs[0]["response"]["seed_used"],
-            outputs[1]["response"]["seed_used"]
-        );
-        feeder_shutdown.cancel();
-        feeder.await.unwrap();
-        worker.abort();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn durable_direct_sse_observer_preserves_queued_and_complete_events() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
@@ -6434,45 +6383,6 @@ mod tests {
         let body = String::from_utf8_lossy(&body);
         assert!(body.contains("\"type\":\"queued\""), "{body}");
         assert!(body.contains("event: complete"), "{body}");
-        feeder_shutdown.cancel();
-        feeder.await.unwrap();
-        worker.abort();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn durable_direct_sse_batch_emits_one_ordered_batch_complete() {
-        let root = tempfile::tempdir().unwrap();
-        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let (mut state, rx) = durable_state(db, root.path());
-        install_authoritative_v2(&mut state);
-        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
-        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
-        let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
-        let mut body = serde_json::from_str::<serde_json::Value>(&durable_direct_media_body(
-            "durable SSE batch",
-        ))
-        .unwrap();
-        body["batch_size"] = serde_json::json!(2);
-        let response = app_with_state(state)
-            .oneshot(
-                Request::post("/api/generate/stream")
-                    .header("content-type", "application/json")
-                    .header("x-mold-operation-id", uuid::Uuid::new_v4().to_string())
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let body = tokio::time::timeout(
-            Duration::from_secs(10),
-            axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024),
-        )
-        .await
-        .expect("durable SSE batch must terminate")
-        .unwrap();
-        let body = String::from_utf8_lossy(&body);
-        assert_eq!(body.matches("event: batch_complete").count(), 1, "{body}");
-        assert_eq!(body.matches("\"type\":\"queued\"").count(), 2, "{body}");
         feeder_shutdown.cancel();
         feeder.await.unwrap();
         worker.abort();
@@ -6557,7 +6467,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn full_observer_registry_degrades_to_committed_202_status() {
+    async fn full_observer_registry_refuses_before_durable_admission() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let (mut state, _rx) = durable_state(db, root.path());
@@ -6589,9 +6499,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        assert_eq!(json_body(response).await["durable"], true);
-        assert_eq!(journal.list_all().len(), 1);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json_body(response).await["code"],
+            "DIRECT_OBSERVER_CAPACITY_EXCEEDED"
+        );
+        assert!(journal.list_all().is_empty());
         drop(registrations);
     }
 
@@ -8077,7 +7990,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_raw_batch_is_rejected_before_preparation_or_reservation() {
+    async fn any_direct_batch_is_rejected_before_preparation_or_reservation() {
         let output_dir = tempfile::tempdir().unwrap();
         let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
         state.config.write().await.output_dir =
@@ -8111,14 +8024,10 @@ mod tests {
             .unwrap();
             assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
             let body = json_body(response).await;
-            assert_eq!(body["code"], "BATCH_OUTPUT_LIMIT_EXCEEDED");
+            assert_eq!(body["code"], "DIRECT_BATCH_UNSUPPORTED");
             assert_eq!(
                 body["error"],
-                format!(
-                    "batch_size ({}) exceeds the live server batch output limit ({})",
-                    u32::MAX,
-                    crate::batch_runtime::MAX_LIVE_SERVER_BATCH_OUTPUTS
-                )
+                "direct generation accepts one output; submit durable singleton siblings through /api/generation-batches"
             );
         }
 
@@ -9580,6 +9489,7 @@ mod tests {
                     .extensions_mut()
                     .insert(crate::auth::ApiKeyAuthenticated {
                         identity: "unrunnable-h3-row-test".to_string(),
+                        durable_identity: "unrunnable-h3-row-test-stable".to_string(),
                     });
                 let resp = app.clone().oneshot(authenticated).await.unwrap();
                 assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{name}");
@@ -10306,26 +10216,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn batch_generate_response_uses_json_content_type() {
-        let response = crate::routes::batch_generate_response(mold_core::BatchGenerateResponse {
-            batch_id: "parent-1".to_string(),
-            outputs: Vec::new(),
-        });
-        assert_eq!(
-            response
-                .headers()
-                .get("content-type")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "application/json"
-        );
-        let body = json_body(response).await;
-        assert_eq!(body["batch_id"], "parent-1");
-        assert_eq!(body["outputs"], serde_json::json!([]));
-    }
-
     // ── /api/generate — engine error ─────────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10605,6 +10495,7 @@ mod tests {
             .extensions_mut()
             .insert(crate::auth::ApiKeyAuthenticated {
                 identity: "private-route-test".to_string(),
+                durable_identity: "private-route-test-stable".to_string(),
             });
         let response = app_with_state(state.clone())
             .oneshot(request)
@@ -10763,6 +10654,7 @@ mod tests {
             .extensions_mut()
             .insert(crate::auth::ApiKeyAuthenticated {
                 identity: "test-key".to_string(),
+                durable_identity: "test-key-stable".to_string(),
             });
         let created = app.oneshot(request).await.unwrap();
         // Authentication is the gate this test owns, and it is checked

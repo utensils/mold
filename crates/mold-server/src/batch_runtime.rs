@@ -32,17 +32,16 @@ const LIVE_BATCH_RECOVERY_VERSION: u32 = 1;
 /// filename, and ordered completion entry per output. Capping that O(N)
 /// delivery/materialization surface at 64 keeps admission bounded while
 /// remaining well above the product's ordinary interactive batch sizes.
-pub(crate) const MAX_LIVE_SERVER_BATCH_OUTPUTS: u32 = 64;
-pub(crate) const BATCH_OUTPUT_LIMIT_EXCEEDED_CODE: &str = "BATCH_OUTPUT_LIMIT_EXCEEDED";
+const MAX_LIVE_SERVER_BATCH_OUTPUTS: u32 = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("batch_size ({requested}) exceeds the live server batch output limit ({limit})")]
-pub(crate) struct LiveBatchAdmissionError {
+struct LiveBatchAdmissionError {
     pub requested: u32,
     pub limit: u32,
 }
 
-pub(crate) fn validate_live_server_batch_size(
+fn validate_live_server_batch_size(
     request: &GenerateRequest,
 ) -> Result<(), LiveBatchAdmissionError> {
     if request.batch_size > MAX_LIVE_SERVER_BATCH_OUTPUTS {
@@ -311,15 +310,6 @@ async fn freeze_batch_plan(
     })
 }
 
-fn frozen_seed(parent_id: &str, requested: Option<u64>) -> u64 {
-    requested.unwrap_or_else(|| {
-        let id = uuid::Uuid::parse_str(parent_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
-        let mut bytes = [0_u8; 8];
-        bytes.copy_from_slice(&id.as_bytes()[..8]);
-        u64::from_le_bytes(bytes)
-    })
-}
-
 /// Conservative encoded-output bound used by the atomic staging preflight.
 ///
 /// Lossless images are bounded from the final RGBA raster. Video is bounded
@@ -407,19 +397,6 @@ fn normalized_child(
     child.batch_index = Some(index + 1);
     child.batch_count = Some(request.batch_size);
     child
-}
-
-/// Normalize the legacy direct `batch_size` shape into the same durable
-/// singleton siblings used by every first-party client. The operation id
-/// freezes a deterministic seed when the caller requested Random.
-pub(crate) fn expand_direct_children(
-    operation_id: &str,
-    request: &GenerateRequest,
-) -> Vec<GenerateRequest> {
-    let base_seed = frozen_seed(operation_id, request.seed);
-    (0..request.batch_size)
-        .map(|index| normalized_child(operation_id, request, base_seed, index))
-        .collect()
 }
 
 #[cfg(test)]
@@ -798,8 +775,6 @@ fn hydrate_batch_result(
         return Ok(GenerationJobResult {
             response: compact.response,
             image: compact.image,
-            filename: Some(filename.to_string()),
-            original_filename: None,
         });
     }
     let media = std::fs::read(output_dir.join(filename))
@@ -814,8 +789,6 @@ fn hydrate_batch_result(
         return Ok(GenerationJobResult {
             response: compact.response,
             image: compact.image,
-            filename: Some(filename.to_string()),
-            original_filename: None,
         });
     }
     if let Some(video) = compact.response.video.as_mut() {
@@ -839,8 +812,6 @@ fn hydrate_batch_result(
     Ok(GenerationJobResult {
         response: compact.response,
         image: compact.image,
-        filename: Some(filename.to_string()),
-        original_filename: None,
     })
 }
 
@@ -1485,8 +1456,6 @@ mod tests {
                 height: 64,
                 index: 0,
             },
-            filename: None,
-            original_filename: None,
         };
 
         let (filename, bytes) =
@@ -1525,8 +1494,6 @@ mod tests {
                 height: 360,
                 index: 0,
             },
-            filename: None,
-            original_filename: None,
         }
     }
 

@@ -18,6 +18,7 @@ use mold_core::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::convert::Infallible;
+use std::sync::Arc;
 use tokio_stream::StreamExt as _;
 use utoipa::OpenApi;
 
@@ -1096,12 +1097,11 @@ pub(crate) enum GenerationPreparationDelivery {
     /// admission. Slow preparation is replayable, but it must not invent an
     /// untracked first-party download or rely on the original HTTP caller.
     DeferredDurable,
-    DurableBatch,
 }
 
 impl GenerationPreparationDelivery {
     fn is_durable(self) -> bool {
-        matches!(self, Self::DeferredDurable | Self::DurableBatch)
+        matches!(self, Self::DeferredDurable)
     }
 }
 
@@ -2352,16 +2352,30 @@ fn requested_operation_id(headers: &HeaderMap) -> Result<Option<String>, ApiErro
     Ok(Some(operation_id.to_string()))
 }
 
-fn validate_live_server_batch_admission(
+fn validate_direct_generation_request(
     request: &mold_core::GenerateRequest,
 ) -> Result<(), ApiError> {
-    crate::batch_runtime::validate_live_server_batch_size(request).map_err(|error| {
-        ApiError::with_code(
-            error.to_string(),
-            crate::batch_runtime::BATCH_OUTPUT_LIMIT_EXCEEDED_CODE,
+    if request.batch_size != 1 {
+        return Err(ApiError::with_code(
+            "direct generation accepts one output; submit durable singleton siblings through /api/generation-batches",
+            "DIRECT_BATCH_UNSUPPORTED",
             StatusCode::UNPROCESSABLE_ENTITY,
-        )
-    })
+        ));
+    }
+    Ok(())
+}
+
+async fn direct_durable_admission(
+    state: &AppState,
+) -> Option<Arc<crate::queue_media_admission::DurableMediaAdmission>> {
+    let config = state.config.read().await;
+    if state.is_output_disabled(&config)
+        || state.queue_journal.durable_media_capabilities().is_none()
+    {
+        None
+    } else {
+        state.queue_journal.queue_media_admission()
+    }
 }
 
 const MAX_HETEROGENEOUS_BATCH_OUTPUTS: usize = 64;
@@ -2441,9 +2455,12 @@ async fn admit_generation_batch(
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     Json(mut body): Json<mold_core::GenerationBatchAdmissionRequest>,
 ) -> Result<(StatusCode, Json<mold_core::GenerationBatchStatus>), ApiError> {
-    if !state.scheduled_work.v2_authoritative() || !state.queue_journal.is_enabled() {
+    if !state.scheduled_work.v2_authoritative()
+        || !state.queue_journal.is_enabled()
+        || state.queue_journal.durable_media_capabilities().is_none()
+    {
         return Err(ApiError::with_code(
-            "heterogeneous batch admission requires Scheduler V2 and the durable queue",
+            "batch admission requires Scheduler V2 and the encrypted durable queue",
             "HETEROGENEOUS_BATCH_UNAVAILABLE",
             StatusCode::SERVICE_UNAVAILABLE,
         ));
@@ -2454,192 +2471,20 @@ async fn admit_generation_batch(
             "requests must contain 1..={MAX_HETEROGENEOUS_BATCH_OUTPUTS} children"
         )));
     }
-    if let Some(admission) = state.queue_journal.queue_media_admission() {
-        if body
-            .requests
-            .iter()
-            .any(crate::queue_media_admission::request_has_durable_media)
-            && state.queue_journal.durable_media_capabilities().is_none()
-        {
-            return Err(ApiError::with_code(
-                "encrypted durable request media is unavailable",
-                "DURABLE_MEDIA_UNAVAILABLE",
-                StatusCode::SERVICE_UNAVAILABLE,
-            ));
-        }
-        let outcome = admission
-            .admit_batch(
-                &state,
-                authenticated.as_ref().map(|Extension(auth)| auth),
-                body,
-                None,
-                SseCompletionPayload::MetadataOnly,
-            )
-            .await?;
-        return Ok((outcome.status_code, Json(outcome.status)));
-    }
-    // Capture the request as received before canonicalization and default
-    // materialization mutate it. History is a user-input recall surface, not
-    // a record of the scheduler's durable execution payload.
-    let typed_history = body
-        .requests
-        .iter()
-        .map(|request| {
-            (
-                request.prompt.clone(),
-                request.negative_prompt.clone(),
-                request.model.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let count = body.requests.len() as u32;
-    for (offset, request) in body.requests.iter_mut().enumerate() {
-        mold_core::minimax_h3::canonicalize_request_model(request);
-        if request.batch_size != 1 {
-            return Err(ApiError::validation(format!(
-                "requests[{}].batch_size must be 1",
-                offset
-            )));
-        }
-        request.batch_id = Some(body.client_batch_id.clone());
-        request.batch_index = Some(offset as u32 + 1);
-        request.batch_count = Some(count);
-    }
-    let fingerprint_bytes = serde_json::to_vec(&body.requests)
-        .map_err(|error| ApiError::internal(format!("batch serialization failed: {error}")))?;
-    let request_sha256 = format!("{:x}", Sha256::digest(&fingerprint_bytes));
-
-    // A replay of the exact wire payload is already complete at the admission
-    // boundary. Return it before repeating prompt expansion, catalog lookup,
-    // media policy, or any other preparation whose surrounding host state may
-    // have changed since the first durable commit. The later insert remains
-    // the atomic authority for concurrent first admissions.
-    let existing = {
-        let journal = state.queue_journal.clone();
-        let client_batch_id = body.client_batch_id.clone();
-        tokio::task::spawn_blocking(move || {
-            journal.durable_generation_batch_by_client(&client_batch_id)
-        })
-        .await
-        .map_err(|error| ApiError::internal(format!("generation batch DB task failed: {error}")))?
-        .map_err(|error| {
-            ApiError::internal(format!("generation batch DB lookup failed: {error}"))
-        })?
-    };
-    if let Some(detail) = existing {
-        if detail.batch.request_sha256 != request_sha256 {
-            return Err(ApiError::with_code(
-                "client_batch_id was already used for a different request",
-                "GENERATION_BATCH_IDEMPOTENCY_CONFLICT",
-                StatusCode::CONFLICT,
-            ));
-        }
-        return Ok((
-            StatusCode::OK,
-            Json(generation_batch_status(&state.instance_id, detail)),
-        ));
-    }
-
-    let mut admitted_children = Vec::with_capacity(body.requests.len());
-    for (offset, mut request) in body.requests.into_iter().enumerate() {
-        let prepared = prepare_generation_for_delivery(
+    let admission = state
+        .queue_journal
+        .queue_media_admission()
+        .ok_or_else(|| ApiError::internal("durable admission service is unavailable"))?;
+    let outcome = admission
+        .admit_batch(
             &state,
-            &mut request,
             authenticated.as_ref().map(|Extension(auth)| auth),
-            GenerationPreparationDelivery::DurableBatch,
+            body,
+            None,
+            SseCompletionPayload::MetadataOnly,
         )
-        .await
-        .map_err(|mut error| {
-            error.error = format!("requests[{}]: {}", offset + 1, error.error);
-            error
-        })?;
-        let output_dir = prepared.output_dir.ok_or_else(|| {
-            ApiError::validation(format!(
-                "requests[{}]: heterogeneous batches require server gallery output",
-                offset + 1
-            ))
-        })?;
-        let preferred_gpu = prepared.preferred_gpu;
-        let target_device_id =
-            crate::queue_journal::stable_device_id_for_ordinal(&state, preferred_gpu);
-        admitted_children.push((request, preferred_gpu, target_device_id, output_dir));
-    }
-
-    let batch_id = uuid::Uuid::new_v4().to_string();
-    let job_ids: Vec<String> = (0..admitted_children.len())
-        .map(|_| uuid::Uuid::new_v4().to_string())
-        .collect();
-    let journal = state.queue_journal.clone();
-    let batch_id_for_db = batch_id.clone();
-    let client_batch_id = body.client_batch_id.clone();
-    let metadata_db = state.metadata_db.clone();
-    let _durable_transition = state.queue_journal.lock_durable_transition().await;
-    let (detail, inserted) = tokio::task::spawn_blocking(move || {
-        let admissions = admitted_children
-            .iter()
-            .zip(&job_ids)
-            .map(
-                |((request, preferred_gpu, target_device_id, output_dir), job_id)| {
-                    crate::queue_journal::JournalAdmission {
-                        id: job_id,
-                        request,
-                        output_dir: Some(output_dir.as_path()),
-                        target_gpu: *preferred_gpu,
-                        target_device_id: target_device_id.as_deref(),
-                        completion_payload: SseCompletionPayload::MetadataOnly,
-                        batch_child: false,
-                        carries_reference_authority: false,
-                    }
-                },
-            )
-            .collect::<Vec<_>>();
-        let (recorded, inserted) =
-            journal.record_batch(crate::queue_journal::BatchJournalAdmission {
-                id: &batch_id_for_db,
-                client_batch_id: &client_batch_id,
-                request_sha256: &request_sha256,
-                children: &admissions,
-            })?;
-        if inserted {
-            if let Some(db) = metadata_db.as_ref().as_ref() {
-                for (prompt, negative, model) in &typed_history {
-                    record_prompt_history_in_db(db, prompt, negative.as_deref(), model);
-                }
-            }
-        }
-        let durable = journal
-            .durable_generation_batch(&recorded.batch.id)?
-            .ok_or_else(|| "generation batch disappeared after durable admission".to_string())?;
-        Ok::<_, String>((durable, inserted))
-    })
-    .await
-    .map_err(|error| ApiError::internal(format!("generation batch DB task failed: {error}")))?
-    .map_err(|message| {
-        if message == "client_batch_id was already used for a different request" {
-            ApiError::with_code(
-                message,
-                "GENERATION_BATCH_IDEMPOTENCY_CONFLICT",
-                StatusCode::CONFLICT,
-            )
-        } else {
-            ApiError::with_code(
-                message,
-                "GENERATION_BATCH_NOT_DURABLE",
-                StatusCode::UNPROCESSABLE_ENTITY,
-            )
-        }
-    })?;
-    drop(_durable_transition);
-    if !inserted {
-        return Ok((
-            StatusCode::OK,
-            Json(generation_batch_status(&state.instance_id, detail)),
-        ));
-    }
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(generation_batch_status(&state.instance_id, detail)),
-    ))
+        .await?;
+    Ok((outcome.status_code, Json(outcome.status)))
 }
 
 #[utoipa::path(
@@ -2766,15 +2611,15 @@ async fn reconcile_generation_batches(
         description = "UUID idempotency key for encrypted durable request media"
     )),
     responses(
-        (status = 200, description = "Singleton requests return generated media bytes with the matching image/video Content-Type; direct batches return an ordered application/json BatchGenerateResponse"),
+        (status = 200, description = "Generated media bytes with the matching image/video Content-Type"),
         (status = 404, description = "Model not downloaded"),
         (status = 422, description = "Invalid request parameters"),
         (status = 500, description = "Inference error"),
         (status = 503, description = "Generation queue full"),
     )
 )]
-// Singleton requests preserve the raw-media response. Raw batch_size>1
-// requests become durable queue siblings and return one ordered JSON response.
+// Direct generation is singleton-only. Multi-output clients submit durable
+// singleton siblings through `/api/generation-batches`.
 async fn generate(
     State(state): State<AppState>,
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
@@ -2782,9 +2627,9 @@ async fn generate(
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Response, ApiError> {
     mold_core::minimax_h3::canonicalize_request_model(&mut req);
-    validate_live_server_batch_admission(&req)?;
+    validate_direct_generation_request(&req)?;
     let operation_id = requested_operation_id(&headers)?;
-    let canonical_admission = state.queue_journal.queue_media_admission();
+    let canonical_admission = direct_durable_admission(&state).await;
     if let Some(admission) = canonical_admission {
         let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         if crate::queue_media_admission::request_has_durable_media(&req)
@@ -2796,84 +2641,53 @@ async fn generate(
                 StatusCode::SERVICE_UNAVAILABLE,
             ));
         }
-        let direct_batch = req.batch_size > 1;
-        let requests = if direct_batch {
-            crate::batch_runtime::expand_direct_children(&operation_id, &req)
-        } else {
-            vec![req]
-        };
         let outcome = admission
             .admit_batch(
                 &state,
                 authenticated.as_ref().map(|Extension(auth)| auth),
                 mold_core::GenerationBatchAdmissionRequest {
                     client_batch_id: operation_id,
-                    requests,
+                    requests: vec![req],
                 },
                 Some(crate::queue_media_ingress::ObserverMode::Raw),
                 SseCompletionPayload::Full,
             )
             .await?;
-        let status_code = outcome.status_code;
         let status = outcome.status;
         let warnings = outcome.warnings.unwrap_or_default();
         if outcome.observers.len() != status.children.len()
             || outcome.observers.iter().any(Option::is_none)
         {
-            return Ok((status_code, Json(status)).into_response());
+            return Err(ApiError::internal(
+                "durable admission returned without its direct observer",
+            ));
         }
-        let mut results = Vec::with_capacity(status.children.len());
-        for (observer, child) in outcome.observers.into_iter().zip(&status.children) {
-            let attached = match observer.expect("checked above").attached().await {
-                Ok(attached) => attached,
-                Err(_) => return Ok((StatusCode::ACCEPTED, Json(status)).into_response()),
-            };
-            let crate::queue_media_ingress::AttachedObserver::Raw { outcome } = attached else {
-                return Err(ApiError::internal(
-                    "durable raw observer received an SSE delivery",
-                ));
-            };
-            let result = match outcome.await {
-                Ok(crate::job_supervisor::SupervisedOutcome::Finished(result)) => *result,
-                Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) => {
-                    return Err(ApiError::cancelled(format!(
-                        "generation job {} was cancelled while queued",
-                        child.job_id
-                    )));
-                }
-                Err(_) => return Ok((StatusCode::ACCEPTED, Json(status)).into_response()),
-            };
-            results.push((child.job_id.clone(), result));
-        }
-        if !direct_batch {
-            return generation_result_response(
-                results.pop().expect("singleton result").1,
-                warnings,
-            );
-        }
-        let mut outputs = Vec::with_capacity(results.len());
-        for (index, (_job_id, result)) in results.into_iter().enumerate() {
-            let result = result.map_err(ApiError::inference)?;
-            let filename = result
-                .filename
-                .ok_or_else(|| ApiError::internal("durable batch output identity is missing"))?;
-            outputs.push(mold_core::BatchGenerateOutput {
-                batch_index: index as u32 + 1,
-                filename,
-                response: result.response,
-            });
-        }
-        return Ok(batch_generate_response(mold_core::BatchGenerateResponse {
-            batch_id: status.id,
-            outputs,
-        }));
-    }
-    if req.batch_size > 1 {
-        return Err(ApiError::with_code(
-            "direct batches require durable queue admission",
-            "DURABLE_QUEUE_UNAVAILABLE",
-            StatusCode::SERVICE_UNAVAILABLE,
-        ));
+        let observer = outcome
+            .observers
+            .into_iter()
+            .next()
+            .flatten()
+            .expect("checked above");
+        let attached = match observer.attached().await {
+            Ok(attached) => attached,
+            Err(_) => return Err(ApiError::internal("durable raw observer detached")),
+        };
+        let crate::queue_media_ingress::AttachedObserver::Raw { outcome } = attached else {
+            return Err(ApiError::internal(
+                "durable raw observer received an SSE delivery",
+            ));
+        };
+        let result = match outcome.await {
+            Ok(crate::job_supervisor::SupervisedOutcome::Finished(result)) => *result,
+            Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) => {
+                return Err(ApiError::cancelled(format!(
+                    "generation job {} was cancelled while queued",
+                    status.children[0].job_id
+                )));
+            }
+            Err(_) => return Err(ApiError::internal("durable raw observer dropped")),
+        };
+        return generation_result_response(result, warnings);
     }
     // Capture before prepare_generation: prompt expansion mutates req.prompt,
     // and history should hold what the user typed.
@@ -3185,10 +2999,6 @@ pub(crate) fn apply_media_headers(
     }
 
     img.data
-}
-
-pub(crate) fn batch_generate_response(response: mold_core::BatchGenerateResponse) -> Response {
-    Json(response).into_response()
 }
 
 pub(crate) fn validate_generate_request(
@@ -3988,9 +3798,9 @@ async fn generate_stream(
 ) -> Result<Response, ApiError> {
     mold_core::minimax_h3::canonicalize_request_model(&mut req);
     let completion_payload = requested_sse_completion_payload(&headers)?;
-    validate_live_server_batch_admission(&req)?;
+    validate_direct_generation_request(&req)?;
     let operation_id = requested_operation_id(&headers)?;
-    let canonical_admission = state.queue_journal.queue_media_admission();
+    let canonical_admission = direct_durable_admission(&state).await;
     if let Some(admission) = canonical_admission {
         let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         if crate::queue_media_admission::request_has_durable_media(&req)
@@ -4002,27 +3812,17 @@ async fn generate_stream(
                 StatusCode::SERVICE_UNAVAILABLE,
             ));
         }
-        let direct_batch = req.batch_size > 1;
-        let requests = if direct_batch {
-            crate::batch_runtime::expand_direct_children(&operation_id, &req)
-        } else {
-            vec![req]
-        };
-        let requests_for_completion = requests.clone();
-        let observer_mode = if direct_batch {
-            crate::queue_media_ingress::ObserverMode::Raw
-        } else {
-            crate::queue_media_ingress::ObserverMode::Sse(completion_payload)
-        };
         let outcome = admission
             .admit_batch(
                 &state,
                 authenticated.as_ref().map(|Extension(auth)| auth),
                 mold_core::GenerationBatchAdmissionRequest {
                     client_batch_id: operation_id,
-                    requests,
+                    requests: vec![req],
                 },
-                Some(observer_mode),
+                Some(crate::queue_media_ingress::ObserverMode::Sse(
+                    completion_payload,
+                )),
                 completion_payload,
             )
             .await?;
@@ -4030,99 +3830,11 @@ async fn generate_stream(
         if outcome.observers.len() != status.children.len()
             || outcome.observers.iter().any(Option::is_none)
         {
-            return Ok((outcome.status_code, Json(status)).into_response());
+            return Err(ApiError::internal(
+                "durable admission returned without its direct observer",
+            ));
         }
         let warnings = outcome.warnings.unwrap_or_default();
-        if direct_batch {
-            let observers = outcome
-                .observers
-                .into_iter()
-                .map(|observer| observer.expect("checked above"))
-                .collect::<Vec<_>>();
-            let batch_id = status.id.clone();
-            let child_ids = status
-                .children
-                .iter()
-                .map(|child| child.job_id.clone())
-                .collect::<Vec<_>>();
-            let stream = async_stream::stream! {
-                for warning in warnings.all() {
-                    yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Progress(
-                        SseProgressEvent::Info { message: warning.to_string() }
-                    )));
-                }
-                for (position, job_id) in child_ids.iter().enumerate() {
-                    yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Progress(
-                        SseProgressEvent::Queued { position, id: job_id.clone() }
-                    )));
-                }
-                let mut outputs = Vec::with_capacity(observers.len());
-                for (index, ((observer, job_id), request)) in observers
-                    .into_iter()
-                    .zip(child_ids)
-                    .zip(requests_for_completion)
-                    .enumerate()
-                {
-                    let Ok(crate::queue_media_ingress::AttachedObserver::Raw { outcome }) = observer.attached().await else {
-                        yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Error(
-                            mold_core::SseErrorEvent::failed("durable batch observer detached")
-                        )));
-                        return;
-                    };
-                    let result = match outcome.await {
-                        Ok(crate::job_supervisor::SupervisedOutcome::Finished(result)) => match *result {
-                            Ok(result) => result,
-                            Err(error) => {
-                                yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Error(
-                                    mold_core::SseErrorEvent::failed(error)
-                                )));
-                                return;
-                            }
-                        },
-                        _ => {
-                            yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Error(
-                                mold_core::SseErrorEvent::failed(format!("generation job {job_id} was cancelled"))
-                            )));
-                            return;
-                        }
-                    };
-                    let Some(filename) = result.filename.clone() else {
-                        yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Error(
-                            mold_core::SseErrorEvent::failed("durable batch output identity is missing")
-                        )));
-                        return;
-                    };
-                    let metadata = mold_core::OutputMetadata::from_generate_request(
-                        &request,
-                        result.response.seed_used,
-                        request.scheduler,
-                        mold_core::build_info::version_string(),
-                    );
-                    outputs.push(crate::queue::build_sse_complete_event(
-                        &result.response,
-                        &result.image,
-                        None,
-                        Some(&metadata),
-                        &crate::queue::SavedOutputNames {
-                            output: Some(filename),
-                            original: result.original_filename,
-                        },
-                        completion_payload,
-                    ));
-                    debug_assert_eq!(index + 1, outputs.len());
-                }
-                yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::BatchComplete(
-                    Box::new(mold_core::SseBatchCompleteEvent { batch_id, outputs })
-                )));
-            };
-            return Ok(Sse::new(stream)
-                .keep_alive(
-                    KeepAlive::new()
-                        .interval(std::time::Duration::from_secs(15))
-                        .text("ping"),
-                )
-                .into_response());
-        }
         let observer = outcome
             .observers
             .into_iter()
@@ -4160,13 +3872,6 @@ async fn generate_stream(
                     .text("ping"),
             )
             .into_response());
-    }
-    if req.batch_size > 1 {
-        return Err(ApiError::with_code(
-            "direct batches require durable queue admission",
-            "DURABLE_QUEUE_UNAVAILABLE",
-            StatusCode::SERVICE_UNAVAILABLE,
-        ));
     }
     // Capture before prepare_generation: prompt expansion mutates req.prompt,
     // and history should hold what the user typed.
@@ -6884,7 +6589,6 @@ async fn server_capabilities(
     // makes it a systematic over-promise rather than an edge case, and clients
     // read this to decide whether to keep polling a job whose stream died.
     let durable_queue = state.queue_journal.is_enabled() && !state.is_output_disabled(&config);
-    let server_batch = durable_queue && state.scheduled_work.v2_authoritative();
     let heterogeneous_batch = durable_queue && durable_media_is_applicable(&state, &config);
     // Trash and organization both live in the metadata DB; trash additionally
     // needs somewhere to move bytes to. With the DB disabled, DELETE stays a
@@ -6929,9 +6633,8 @@ async fn server_capabilities(
             stable_device_pins: true,
             cooperative_cancellation: true,
             durable_queue,
-            server_batch,
-            server_batch_max_outputs: server_batch
-                .then_some(crate::batch_runtime::MAX_LIVE_SERVER_BATCH_OUTPUTS),
+            server_batch: false,
+            server_batch_max_outputs: None,
             heterogeneous_batch,
             heterogeneous_batch_max_outputs: heterogeneous_batch
                 .then_some(MAX_HETEROGENEOUS_BATCH_OUTPUTS as u32),

@@ -166,6 +166,14 @@ impl ApiKeySet {
         identity
     }
 
+    fn durable_identity(candidate: &str) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"mold-api-key-durable-subject-v1\0");
+        digest.update((candidate.len() as u64).to_le_bytes());
+        digest.update(candidate.as_bytes());
+        format!("{:x}", digest.finalize())
+    }
+
     fn validates_gallery_media_token(
         &self,
         token: &str,
@@ -406,6 +414,10 @@ pub(crate) struct ApiKeyAuthenticated {
     /// random signing secret, so neither the API key nor an offline-comparable
     /// digest enters logs.
     pub(crate) identity: String,
+    /// Restart-stable credential subject used only inside encrypted durable
+    /// admission authority. It is never logged or returned on the wire.
+    #[cfg_attr(not(any(feature = "h3", feature = "h3-private-uat")), allow(dead_code))]
+    pub(crate) durable_identity: String,
 }
 
 /// Present only when the request used an operator-configured credential.
@@ -516,9 +528,11 @@ pub async fn require_api_key(request: Request, next: Next) -> Response {
             let candidate = value.to_str().unwrap_or("").to_string();
             if let Some(kind) = key_set.authenticate(&candidate) {
                 let identity = key_set.audit_identity(&candidate);
-                request
-                    .extensions_mut()
-                    .insert(ApiKeyAuthenticated { identity });
+                let durable_identity = ApiKeySet::durable_identity(&candidate);
+                request.extensions_mut().insert(ApiKeyAuthenticated {
+                    identity,
+                    durable_identity,
+                });
                 if kind == AuthenticationKind::Operator {
                     request.extensions_mut().insert(PairingAuthority);
                 }

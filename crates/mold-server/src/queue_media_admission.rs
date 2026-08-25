@@ -1,9 +1,11 @@
 //! Canonical encrypted-media admission shared by batch and direct routes.
 
 use std::collections::HashSet;
+use std::io::Write as _;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
+use sha2::{Digest as _, Sha256};
 
 use crate::queue_journal::{MediaBatchJournalAdmission, MediaJournalAdmission};
 use crate::queue_media_ingress::{ObserverMode, ObserverRegistration, QueueMediaIngress};
@@ -36,6 +38,29 @@ struct PreparedChild {
     output_dir: std::path::PathBuf,
     preferred_gpu: Option<usize>,
     authority: Option<crate::durable_admission_authority::CapturedAuthority>,
+}
+
+struct FingerprintWriter(Sha256);
+
+impl FingerprintWriter {
+    fn new() -> Self {
+        Self(Sha256::new())
+    }
+
+    fn finish(self) -> QueueMediaOperationFingerprint {
+        QueueMediaOperationFingerprint::from_sha256_v1_digest(self.0.finalize().into())
+    }
+}
+
+impl std::io::Write for FingerprintWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 struct SealInput {
@@ -184,7 +209,11 @@ impl DurableMediaAdmission {
         // operation state. Resolve them before even a read-only SQLite lookup;
         // in particular an HDR output path must never cross the DB boundary.
         durable_media_batch_preflight(&body.requests)?;
-        let canonical_operation = serde_json::to_vec(&body.requests)
+        // Hash JSON directly into SHA-256. A batch may contain large source
+        // media, so materializing the full canonical JSON would multiply peak
+        // admission memory before the encrypted media store can stream it.
+        let mut fingerprint = FingerprintWriter::new();
+        serde_json::to_writer(&mut fingerprint, &body.requests)
             .map_err(|error| ApiError::internal(format!("batch serialization failed: {error}")))?;
         let output_dir = {
             let config = state.config.read().await;
@@ -241,18 +270,27 @@ impl DurableMediaAdmission {
         // H3 idempotency is identity-bound: the same client key and request
         // submitted under a different authenticated identity must conflict,
         // not inherit the first caller's durable authority.
-        let mut fingerprint_material = canonical_operation;
         for child in &prepared {
             if let Some(authority) = &child.authority {
-                fingerprint_material
-                    .extend_from_slice(authority.idempotency_subject_sha256.as_bytes());
+                fingerprint
+                    .write_all(authority.idempotency_subject_sha256.as_bytes())
+                    .map_err(|error| {
+                        ApiError::internal(format!("batch fingerprint failed: {error}"))
+                    })?;
             }
         }
-        let fingerprint = QueueMediaOperationFingerprint::sha256_v1(&fingerprint_material);
+        let fingerprint = fingerprint.finish();
 
         if let Some(existing) = existing_by_client(state, &body.client_batch_id).await? {
             self.verify_existing_async(&body.client_batch_id, &fingerprint, &existing)
                 .await?;
+            if observer_mode.is_some() {
+                return Err(ApiError::with_code(
+                    "this operation is already durable; reconcile it through the queue status endpoint",
+                    "DIRECT_OPERATION_ALREADY_ADMITTED",
+                    StatusCode::CONFLICT,
+                ));
+            }
             return Ok(DurableAdmissionOutcome {
                 status_code: StatusCode::OK,
                 status: crate::routes::generation_batch_status(&state.instance_id, existing),
@@ -300,6 +338,13 @@ impl DurableMediaAdmission {
             .iter()
             .map(|job_id| observer_mode.and_then(|mode| self.ingress.reserve(job_id, mode)))
             .collect::<Vec<_>>();
+        if observer_mode.is_some() && observers.iter().any(Option::is_none) {
+            return Err(ApiError::with_code(
+                "direct response capacity is full; retry before the request is admitted",
+                "DIRECT_OBSERVER_CAPACITY_EXCEEDED",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ));
+        }
         let observer_job_ids = observers
             .iter()
             .zip(&job_ids)
@@ -409,6 +454,13 @@ impl DurableMediaAdmission {
                     .ok_or_else(|| ApiError::internal("idempotent generation batch disappeared"))?;
                 self.verify_existing_async(&body.client_batch_id, &fingerprint, &detail)
                     .await?;
+                if observer_mode.is_some() {
+                    return Err(ApiError::with_code(
+                        "this operation is already durable; reconcile it through the queue status endpoint",
+                        "DIRECT_OPERATION_ALREADY_ADMITTED",
+                        StatusCode::CONFLICT,
+                    ));
+                }
                 Ok(DurableAdmissionOutcome {
                     status_code: StatusCode::OK,
                     status: crate::routes::generation_batch_status(&state.instance_id, detail),
