@@ -525,7 +525,7 @@ fn verify_file_integrity(
     if skip_verify {
         return Ok(());
     }
-    let actual = match compute_sha256(clean_path) {
+    let actual = match pinned_file_digest(clean_path) {
         Ok(d) => d,
         Err(e) => {
             // I/O failure during hashing — log and move on without a marker.
@@ -575,10 +575,10 @@ fn verify_file_integrity(
 /// models roots the model-storage invariant supports is not the owner alone.
 /// `ctime` updates on every inode change and cannot be set directly at all, so
 /// an in-place rewrite that restores size and mtime still misses the cache.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
 struct PinnedFileIdentity {
     len: u64,
-    platform: [u64; 6],
+    platform: [u64; 9],
 }
 
 fn pinned_file_identity(file: &std::fs::File) -> std::io::Result<PinnedFileIdentity> {
@@ -591,6 +591,9 @@ fn pinned_file_identity(file: &std::fs::File) -> std::io::Result<PinnedFileIdent
             platform: [
                 metadata.dev(),
                 metadata.ino(),
+                u64::from(metadata.mode()),
+                u64::from(metadata.uid()),
+                u64::from(metadata.gid()),
                 metadata.mtime() as u64,
                 metadata.mtime_nsec() as u64,
                 metadata.ctime() as u64,
@@ -620,25 +623,259 @@ fn pinned_file_identity(file: &std::fs::File) -> std::io::Result<PinnedFileIdent
                 0,
                 0,
                 0,
+                0,
+                0,
+                0,
             ],
         })
     }
 }
 
 type PinnedDigestCache = std::sync::Mutex<std::collections::HashMap<PinnedFileIdentity, String>>;
+type PinnedDigestFlights = std::sync::Mutex<
+    std::collections::HashMap<PinnedFileIdentity, std::sync::Arc<std::sync::Mutex<()>>>,
+>;
 
 fn pinned_digest_cache() -> &'static PinnedDigestCache {
     static CACHE: std::sync::OnceLock<PinnedDigestCache> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+fn pinned_digest_flights() -> &'static PinnedDigestFlights {
+    static FLIGHTS: std::sync::OnceLock<PinnedDigestFlights> = std::sync::OnceLock::new();
+    FLIGHTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+struct PinnedDigestFlightCleanup {
+    identity: PinnedFileIdentity,
+    flight: std::sync::Arc<std::sync::Mutex<()>>,
+}
+
+impl Drop for PinnedDigestFlightCleanup {
+    fn drop(&mut self) {
+        let mut flights = pinned_digest_flights()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let removable = flights.get(&self.identity).is_some_and(|held| {
+            std::sync::Arc::ptr_eq(held, &self.flight)
+                // map + caller-local `flight` + this cleanup guard
+                && std::sync::Arc::strong_count(held) == 3
+        });
+        if removable {
+            flights.remove(&self.identity);
+        }
+    }
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct DurablePinnedDigest {
+    schema: u32,
+    path: PathBuf,
+    identity: PinnedFileIdentity,
+    sha256: String,
+}
+
+const DURABLE_PINNED_DIGEST_SCHEMA: u32 = 1;
+const DURABLE_PINNED_DIGEST_DIR: &str = ".artifact-attestations-v1";
+const MAX_DURABLE_PINNED_DIGEST_BYTES: u64 = 16 * 1024;
+
+#[cfg(unix)]
+fn directory_protects_entries(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    let mode = metadata.mode();
+    if mode & 0o1000 != 0 {
+        metadata.uid() == euid || metadata.uid() == 0
+    } else {
+        metadata.uid() == euid && mode & 0o022 == 0
+    }
+}
+
+#[cfg(unix)]
+fn private_attestation_dir(create: bool) -> Option<PathBuf> {
+    private_attestation_dir_at(&crate::Config::mold_dir()?, create)
+}
+
+#[cfg(unix)]
+fn private_attestation_dir_at(mold_dir: &Path, create: bool) -> Option<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+
+    // The containing directory is the authority boundary. A 0700 child in a
+    // group-writable, non-sticky parent can be renamed away and replaced.
+    if !directory_protects_entries(mold_dir) {
+        return None;
+    }
+    let dir = mold_dir.join(DURABLE_PINNED_DIGEST_DIR);
+    if !dir.exists() && create {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        if builder.create(&dir).is_err() && !dir.is_dir() {
+            return None;
+        }
+    }
+    let metadata = std::fs::symlink_metadata(&dir).ok()?;
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    (metadata.is_dir()
+        && !metadata.file_type().is_symlink()
+        && metadata.uid() == euid
+        && metadata.mode() & 0o077 == 0)
+        .then_some(dir)
+}
+
+#[cfg(not(unix))]
+fn private_attestation_dir(_create: bool) -> Option<PathBuf> {
+    // A DACL proof equivalent to the Unix owner/mode policy is not implemented.
+    // Falling back to the process cache preserves authentication correctness.
+    None
+}
+
+fn absolute_pinned_path(path: &Path) -> anyhow::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+fn durable_pinned_digest_path(dir: &Path, path: &Path) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(path.as_os_str().as_encoded_bytes());
+    dir.join(format!("{:x}.json", hash.finalize()))
+}
+
+fn read_durable_pinned_digest(path: &Path, identity: PinnedFileIdentity) -> Option<String> {
+    let dir = private_attestation_dir(false)?;
+    read_durable_pinned_digest_from_dir(&dir, path, identity)
+}
+
+fn read_durable_pinned_digest_from_dir(
+    dir: &Path,
+    path: &Path,
+    identity: PinnedFileIdentity,
+) -> Option<String> {
+    let absolute = absolute_pinned_path(path).ok()?;
+    let record_path = durable_pinned_digest_path(dir, &absolute);
+    let file = crate::secure_file::open_regular_file_no_follow(&record_path).ok()?;
+    if file.metadata().ok()?.len() > MAX_DURABLE_PINNED_DIGEST_BYTES {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata().ok()?;
+        // SAFETY: geteuid takes no arguments and cannot fail.
+        let euid = unsafe { libc::geteuid() };
+        if metadata.uid() != euid || metadata.mode() & 0o077 != 0 || metadata.nlink() != 1 {
+            return None;
+        }
+    }
+    let record: DurablePinnedDigest = serde_json::from_reader(file).ok()?;
+    (record.schema == DURABLE_PINNED_DIGEST_SCHEMA
+        && record.path == absolute
+        && record.identity == identity
+        && record.sha256.len() == 64
+        && record.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    .then(|| record.sha256.to_ascii_lowercase())
+}
+
+#[cfg(unix)]
+fn write_durable_pinned_digest(
+    path: &Path,
+    identity: PinnedFileIdentity,
+    sha256: &str,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let Some(dir) = private_attestation_dir(true) else {
+        return Ok(());
+    };
+    let absolute = absolute_pinned_path(path).map_err(std::io::Error::other)?;
+    let target = durable_pinned_digest_path(&dir, &absolute);
+    let temp = dir.join(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)?;
+    let record = DurablePinnedDigest {
+        schema: DURABLE_PINNED_DIGEST_SCHEMA,
+        path: absolute,
+        identity,
+        sha256: sha256.to_ascii_lowercase(),
+    };
+    serde_json::to_writer(&mut file, &record).map_err(std::io::Error::other)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    drop(file);
+    let result = std::fs::rename(&temp, &target);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+#[cfg(not(unix))]
+fn write_durable_pinned_digest(
+    _path: &Path,
+    _identity: PinnedFileIdentity,
+    _sha256: &str,
+) -> std::io::Result<()> {
+    Ok(())
+}
+
 static PINNED_DIGEST_HASHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+fn pinned_digest_hashes_by_identity(
+) -> &'static std::sync::Mutex<std::collections::HashMap<PinnedFileIdentity, u64>> {
+    static HASHES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PinnedFileIdentity, u64>>,
+    > = std::sync::OnceLock::new();
+    HASHES.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+fn pinned_digest_hash_count_for(path: &Path) -> u64 {
+    let Ok(file) = crate::secure_file::open_regular_file_no_follow(path) else {
+        return 0;
+    };
+    let Ok(identity) = pinned_file_identity(&file) else {
+        return 0;
+    };
+    pinned_digest_hash_count_for_identity(identity)
+}
+
+#[cfg(test)]
+fn pinned_digest_hash_count_for_identity(identity: PinnedFileIdentity) -> u64 {
+    pinned_digest_hashes_by_identity()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&identity)
+        .copied()
+        .unwrap_or(0)
+}
 
 /// How many times this process has actually read a file end-to-end to answer a
 /// pinned-digest question.
 ///
-/// Exported so tests can prove the memo is doing its job: a 2.3 GB bundle must
-/// be hashed once per process per unchanged file, not once per admission.
+/// Exported so tests can prove the verifier is doing its job: a 2.3 GB bundle
+/// must be hashed at most once for one unchanged identity, not once per
+/// admission. A valid durable attestation can make the count zero after a
+/// process restart.
 pub fn pinned_digest_hash_count() -> u64 {
     PINNED_DIGEST_HASHES.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -652,8 +889,34 @@ pub fn pinned_digest_hash_count() -> u64 {
 /// replacement between the check and the read cannot substitute different
 /// content.
 pub fn pinned_file_digest(path: &Path) -> anyhow::Result<String> {
+    pinned_file_digest_with_progress(path, |_, _| Ok(()))
+}
+
+/// [`pinned_file_digest`] with bounded read progress. A callback receiving
+/// `(0, total)` is also used as a cancellable heartbeat while another thread
+/// owns the same file-identity flight.
+pub fn pinned_file_digest_with_progress(
+    path: &Path,
+    progress: impl FnMut(u64, u64) -> anyhow::Result<()>,
+) -> anyhow::Result<String> {
     let file = crate::secure_file::open_regular_file_no_follow(path)?;
-    let identity = pinned_file_identity(&file)?;
+    pinned_file_digest_from_open_file(path, &file, progress)
+}
+
+/// Digest the exact retained descriptor supplied by a caller and bind any
+/// cache or durable attestation to that descriptor's identity. `path` is used
+/// only to key the durable record and to prove the same identity still
+/// occupies the pathname after hashing.
+pub fn pinned_file_digest_from_open_file(
+    path: &Path,
+    file: &std::fs::File,
+    mut progress: impl FnMut(u64, u64) -> anyhow::Result<()>,
+) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        file.metadata()?.is_file(),
+        "pinned artifact is not a regular file"
+    );
+    let identity = pinned_file_identity(file)?;
     if let Some(digest) = pinned_digest_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -662,12 +925,93 @@ pub fn pinned_file_digest(path: &Path) -> anyhow::Result<String> {
     {
         return Ok(digest);
     }
-    let digest = crate::secure_file::sha256_open_file(&file)?;
+    let flight = {
+        let mut flights = pinned_digest_flights()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        flights.entry(identity).or_default().clone()
+    };
+    // Declared before the mutex guard so return/unwind drops the guard first;
+    // the last participant then removes this identity from the flight map.
+    let _flight_cleanup = PinnedDigestFlightCleanup {
+        identity,
+        flight: flight.clone(),
+    };
+    let _flight = loop {
+        match flight.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                progress(0, identity.len)?;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    };
+    if let Some(digest) = pinned_digest_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&identity)
+        .cloned()
+    {
+        return Ok(digest);
+    }
+    if let Some(digest) = read_durable_pinned_digest(path, identity) {
+        pinned_digest_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(identity, digest.clone());
+        progress(identity.len, identity.len)?;
+        return Ok(digest);
+    }
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Seek, SeekFrom};
+    let mut reader = file.try_clone()?;
+    reader.seek(SeekFrom::Start(0))?;
+    let mut hash = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut read_total = 0_u64;
+    progress(0, identity.len)?;
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hash.update(&buffer[..read]);
+        read_total = read_total
+            .checked_add(read as u64)
+            .ok_or_else(|| anyhow::anyhow!("pinned file byte count overflow"))?;
+        progress(read_total, identity.len)?;
+    }
+    anyhow::ensure!(
+        read_total == identity.len,
+        "pinned file changed length while hashing"
+    );
+    anyhow::ensure!(
+        pinned_file_identity(file)? == identity,
+        "pinned file changed while hashing"
+    );
+    let current = crate::secure_file::open_regular_file_no_follow(path)?;
+    anyhow::ensure!(
+        pinned_file_identity(&current)? == identity,
+        "pinned file path changed while hashing"
+    );
+    let digest = format!("{:x}", hash.finalize());
     PINNED_DIGEST_HASHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(test)]
+    {
+        *pinned_digest_hashes_by_identity()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(identity)
+            .or_default() += 1;
+    }
     pinned_digest_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(identity, digest.clone());
+    if let Err(error) = write_durable_pinned_digest(path, identity, &digest) {
+        tracing::warn!(path = %path.display(), %error, "failed to persist artifact digest attestation");
+    }
     Ok(digest)
 }
 
@@ -697,9 +1041,11 @@ pub fn pinned_file_matches(path: &Path, expected_sha256: &str) -> bool {
 /// root — which the model-storage invariant explicitly supports, `0664` and
 /// all — anyone who can write the weights can also write a sidecar naming the
 /// expected digest, and a stale marker can outlive a replace. A writable
-/// attestation is not content authentication. The bytes are hashed every time;
-/// the cost is paid once per process per unchanged file by
-/// [`pinned_file_digest`]'s memo. The marker is still WRITTEN, because
+/// attestation is not content authentication. Instead, the digest is cached by
+/// exact descriptor identity and persisted only in Mold's owner-only,
+/// parent-protected attestation directory. Changed identities hash again; an
+/// unchanged identity survives a process restart without rereading the model.
+/// The marker is still WRITTEN, because
 /// `Config::manifest_files_exist` and the partial-cleanup sweep read it as an
 /// "this file is fully written" signal.
 ///
@@ -2555,7 +2901,7 @@ async fn fetch_recipe_inner(
         // Skipped under `skip_verify` — the user has explicitly asked us
         // not to read the file, so we have nothing to attest.
         if !opts.skip_verify {
-            let actual = compute_sha256(dest_path).map_err(|e| {
+            let actual = pinned_file_digest(dest_path).map_err(|e| {
                 DownloadError::Other(format!(
                     "failed to compute SHA-256 for {}: {e}",
                     dest_path.display()
@@ -3353,9 +3699,9 @@ mod tests {
         std::fs::write(&path, b"the real pinned bytes").unwrap();
         let expected = compute_sha256(&path).unwrap();
 
-        let before = pinned_digest_hash_count();
+        let before = pinned_digest_hash_count_for(&path);
         verify_pinned_file(&path, &expected, "stable.bin", "pinned-bundle").unwrap();
-        let after_first = pinned_digest_hash_count();
+        let after_first = pinned_digest_hash_count_for(&path);
         assert_eq!(
             after_first,
             before + 1,
@@ -3367,7 +3713,7 @@ mod tests {
             assert!(pinned_file_matches(&path, &expected));
         }
         assert_eq!(
-            pinned_digest_hash_count(),
+            pinned_digest_hash_count_for(&path),
             after_first,
             "an unchanged file must not be re-read once it is memoized"
         );
@@ -3375,6 +3721,124 @@ mod tests {
         // partial-cleanup sweep read it as a "fully written" signal. It is
         // just never read back as proof of content.
         assert_eq!(recorded_sha256_marker(&path).as_deref(), Some(&*expected));
+    }
+
+    #[test]
+    fn concurrent_pinned_checks_share_one_physical_hash() {
+        let _serial = pinned_digest_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("single-flight.bin");
+        std::fs::write(&path, vec![0x5a; 4 * 1024 * 1024]).unwrap();
+        let expected = compute_sha256(&path).unwrap();
+        let before = pinned_digest_hash_count_for(&path);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(5));
+        let mut threads = Vec::new();
+        for _ in 0..4 {
+            let path = path.clone();
+            let expected = expected.clone();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                assert!(pinned_file_matches(&path, &expected));
+            }));
+        }
+        barrier.wait();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(
+            pinned_digest_hash_count_for(&path),
+            before + 1,
+            "concurrent misses for one file identity must share one body read"
+        );
+        let identity =
+            pinned_file_identity(&crate::secure_file::open_regular_file_no_follow(&path).unwrap())
+                .unwrap();
+        assert!(
+            !pinned_digest_flights()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(&identity),
+            "the last flight participant must evict the completed identity"
+        );
+    }
+
+    #[test]
+    fn opened_digest_never_authenticates_a_path_replacement() {
+        let _serial = pinned_digest_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("artifact.bin");
+        let original = dir.path().join("original.bin");
+        std::fs::write(&path, b"reviewed bytes").unwrap();
+        let file = crate::secure_file::open_regular_file_no_follow(&path).unwrap();
+        std::fs::rename(&path, &original).unwrap();
+        std::fs::write(&path, b"attacker bytes").unwrap();
+
+        let error = pinned_file_digest_from_open_file(&path, &file, |_, _| Ok(()))
+            .expect_err("the retained descriptor and current path must name one identity");
+        assert!(error.to_string().contains("path changed"), "{error:#}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_attestation_survives_process_cache_loss_and_rejects_mutation() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let _serial = pinned_digest_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = home.path().join("model.bin");
+        std::fs::write(&path, b"verified model bytes").unwrap();
+        let file = crate::secure_file::open_regular_file_no_follow(&path).unwrap();
+        let identity = pinned_file_identity(&file).unwrap();
+        let digest = crate::secure_file::sha256_open_file(&file).unwrap();
+        let attestation_dir = private_attestation_dir_at(home.path(), true).unwrap();
+        let absolute = absolute_pinned_path(&path).unwrap();
+        let target = durable_pinned_digest_path(&attestation_dir, &absolute);
+        let record = DurablePinnedDigest {
+            schema: DURABLE_PINNED_DIGEST_SCHEMA,
+            path: absolute,
+            identity,
+            sha256: digest.clone(),
+        };
+        let record_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&target)
+            .unwrap();
+        serde_json::to_writer(record_file, &record).unwrap();
+
+        pinned_digest_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&identity);
+        assert_eq!(
+            read_durable_pinned_digest_from_dir(&attestation_dir, &path, identity).as_deref(),
+            Some(digest.as_str()),
+            "a valid private attestation must replace the process-lifetime body read"
+        );
+
+        std::fs::write(&path, b"tampered model bytes").unwrap();
+        let changed = crate::secure_file::open_regular_file_no_follow(&path).unwrap();
+        let changed_identity = pinned_file_identity(&changed).unwrap();
+        assert_ne!(changed_identity, identity);
+        assert_eq!(
+            read_durable_pinned_digest_from_dir(&attestation_dir, &path, changed_identity),
+            None,
+            "a durable digest is valid only for the exact attested file identity"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_attestation_is_disabled_in_renamable_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o770)).unwrap();
+        assert!(private_attestation_dir_at(home.path(), true).is_none());
+        assert!(!home.path().join(DURABLE_PINNED_DIGEST_DIR).exists());
     }
 
     /// The memo must not become the hole the marker was: a file whose bytes
@@ -3388,11 +3852,13 @@ mod tests {
         std::fs::write(&path, b"the real pinned bytes").unwrap();
         let expected = compute_sha256(&path).unwrap();
         verify_pinned_file(&path, &expected, "swapped.bin", "pinned-bundle").unwrap();
-        let after_good = pinned_digest_hash_count();
-
         // Same path, same length, different content — the shape of an
         // in-place substitution in a shared models root.
         std::fs::write(&path, b"the fake pinned bytes").unwrap();
+        let changed_identity =
+            pinned_file_identity(&crate::secure_file::open_regular_file_no_follow(&path).unwrap())
+                .unwrap();
+        let before_changed = pinned_digest_hash_count_for_identity(changed_identity);
         let error = verify_pinned_file(&path, &expected, "swapped.bin", "pinned-bundle")
             .expect_err("replaced bytes must be caught, not served from the memo");
 
@@ -3401,8 +3867,8 @@ mod tests {
             "{error}"
         );
         assert_eq!(
-            pinned_digest_hash_count(),
-            after_good + 1,
+            pinned_digest_hash_count_for_identity(changed_identity),
+            before_changed + 1,
             "a changed file identity must force a fresh read"
         );
         assert!(!path.exists());

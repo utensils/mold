@@ -1786,6 +1786,28 @@ mod preparation_cancellation_tests {
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 type HostShortfall = mold_inference::H3PrivateHostHeadroomShortfall;
 
+/// Host headroom private preparation may use without mutating server state.
+///
+/// A real admission always uses the sampled value. A read-only preview may
+/// prove the immutable H3 execution shape against the host's physical ceiling
+/// when Mold has an idle, non-requested engine it can release at admission.
+/// The later live recheck still sees the sampled value and deliberately turns
+/// that conditional plan into a non-authoritative fallback; it can never be
+/// published as an exact placement while the cache remains resident.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+fn h3_preparation_host_headroom(
+    policy: DependencyMaterializationPolicy,
+    host: crate::h3_admission::H3HostMemory,
+    has_reclaimable_cached_model: bool,
+) -> u64 {
+    let sampled = host.headroom_bytes();
+    if policy == DependencyMaterializationPolicy::ExistingOnly && has_reclaimable_cached_model {
+        host.total_bytes.saturating_sub(host.safety_floor_bytes())
+    } else {
+        sampled
+    }
+}
+
 /// How much host headroom a reclaim has to reach for this attempt to be worth
 /// retrying, or `None` when it must not run at all.
 ///
@@ -1881,8 +1903,19 @@ async fn prepare_h3_private_inputs_for_devices(
     if devices.is_empty() {
         return Err("request placement has no eligible schedulable device".into());
     }
+    let host_memory = crate::h3_admission::current_h3_host_memory();
+    let has_reclaimable_cached_model = if policy == DependencyMaterializationPolicy::ExistingOnly {
+        match state {
+            Some(state) => {
+                crate::host_reclaim::has_reclaimable_cached_model(state, &request.model).await
+            }
+            None => false,
+        }
+    } else {
+        false
+    };
     let mut available_host_headroom_bytes =
-        crate::h3_admission::current_h3_host_memory().headroom_bytes();
+        h3_preparation_host_headroom(policy, host_memory, has_reclaimable_cached_model);
     let uat_paths =
         crate::h3_private_bridge::H3PrivateUatPathSet::resolve(config.resolved_models_dir());
     // The public runtime owns its MOLD_HOME-derived staging root; create it
@@ -2386,6 +2419,38 @@ mod tests {
             ),
             None,
             "a read-only placement preview must never evict a model cache"
+        );
+    }
+
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    #[test]
+    fn preview_can_prepare_against_only_cache_reclaimable_host_capacity() {
+        const GIB: u64 = 1 << 30;
+        let host = crate::h3_admission::H3HostMemory {
+            total_bytes: 64 * GIB,
+            available_bytes: 20 * GIB,
+        };
+        let sampled = host.headroom_bytes();
+        let physical_ceiling = host.total_bytes - host.safety_floor_bytes();
+
+        assert_eq!(
+            h3_preparation_host_headroom(DependencyMaterializationPolicy::Admission, host, true),
+            sampled,
+            "real admission must never spend memory an eviction has not returned"
+        );
+        assert_eq!(
+            h3_preparation_host_headroom(
+                DependencyMaterializationPolicy::ExistingOnly,
+                host,
+                false
+            ),
+            sampled,
+            "external pressure is not reclaimable"
+        );
+        assert_eq!(
+            h3_preparation_host_headroom(DependencyMaterializationPolicy::ExistingOnly, host, true),
+            physical_ceiling,
+            "preview may derive evidence conditionally when admission owns an idle cache victim"
         );
     }
 

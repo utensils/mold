@@ -4173,8 +4173,11 @@ impl Coordinator {
             Err(error) => {
                 let failure =
                     classify_generation_plan_failure(error, &self.total_vram_bytes_by_device_id());
-                let outcome = placement_preview_outcome_for_plan_failure(&failure);
-                return empty(outcome, failure.to_string());
+                let (authoritative, outcome) =
+                    placement_preview_disposition_for_plan_failure(&failure);
+                let mut response = empty(outcome, failure.to_string());
+                response.authoritative = authoritative;
+                return response;
             }
         };
         if cancelled() {
@@ -6626,12 +6629,18 @@ fn classify_generation_plan_failure(
     }
 }
 
-fn placement_preview_outcome_for_plan_failure(failure: &GenerationPlanFailure) -> &'static str {
+fn placement_preview_disposition_for_plan_failure(
+    failure: &GenerationPlanFailure,
+) -> (bool, &'static str) {
     match failure {
-        GenerationPlanFailure::Terminal(_) => "infeasible",
-        GenerationPlanFailure::Transient(_) | GenerationPlanFailure::StalePreparation(_) => {
-            "temporarily_unavailable"
-        }
+        GenerationPlanFailure::Terminal(_) => (true, "infeasible"),
+        GenerationPlanFailure::Transient(_) => (true, "temporarily_unavailable"),
+        // A queued generation already resets stale preparation and runs the
+        // admission preparer again. Publishing this as authoritative transient
+        // pressure prevents clients from reaching that recovery path. Decline
+        // preview authority instead: compatible requests may enter normal
+        // admission, where cache reclaim and fresh evidence are both owned.
+        GenerationPlanFailure::StalePreparation(_) => (false, "unsupported"),
     }
 }
 
@@ -9834,9 +9843,25 @@ mod tests {
             "a physically fitting job waits for the active lane instead of being refused"
         );
         assert_eq!(
-            placement_preview_outcome_for_plan_failure(&failure),
-            "temporarily_unavailable",
+            placement_preview_disposition_for_plan_failure(&failure),
+            (true, "temporarily_unavailable"),
             "placement preview must not turn current lane pressure into infeasibility"
+        );
+    }
+
+    #[test]
+    fn stale_preparation_declines_preview_authority_so_admission_can_reclaim() {
+        let failure = classify_generation_plan_failure(
+            crate::execution_plan::ExecutionPlanError::PreparedInputsStale(
+                "host capacity changed after private admission".to_string(),
+            ),
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(
+            placement_preview_disposition_for_plan_failure(&failure),
+            (false, "unsupported"),
+            "the mutating admission path must get the chance to refresh evidence and unload cache"
         );
     }
 
@@ -15601,8 +15626,8 @@ mod tests {
             &BTreeMap::from([("cuda:0".to_string(), RTX_4090_TOTAL)]),
         );
         assert_eq!(
-            placement_preview_outcome_for_plan_failure(&impossible),
-            "infeasible"
+            placement_preview_disposition_for_plan_failure(&impossible),
+            (true, "infeasible")
         );
         assert!(
             !insufficient_vram_is_terminal(20_000_000_000, RTX_4090_TOTAL),
