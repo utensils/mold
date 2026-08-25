@@ -797,6 +797,248 @@ describe("CreatePage layout and behavior", () => {
     globalThis.fetch = originalFetch;
   });
 
+  it("offers the gallery actions when a Recent tile is right-clicked", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      blob: async () => new Blob(["image"]),
+    })) as never;
+    const stubs: Record<string, Component> = pageStubs();
+    stubs.RecentGrid = defineComponent({
+      props: ["entries"],
+      template:
+        '<button data-test="context-recent" @contextmenu.prevent="$emit(\'context-menu\', { item: entries[0], x: 99999, y: 99999, trigger: $event.currentTarget })">context</button>',
+    });
+    const wrapper = mount(CreatePage, {
+      attachTo: document.body,
+      global: { stubs },
+    });
+    await flushPromises();
+
+    await wrapper.get('[data-test="context-recent"]').trigger("contextmenu");
+    const menu = wrapper.get('[data-test="recent-context-menu"]');
+    const style = menu.attributes("style") ?? "";
+    const left = Number(/left: (\d+(?:\.\d+)?)px/.exec(style)?.[1]);
+    const top = Number(/top: (\d+(?:\.\d+)?)px/.exec(style)?.[1]);
+    expect(left).toBeLessThan(window.innerWidth);
+    expect(top).toBeLessThan(window.innerHeight);
+    expect(menu.text()).toContain("Open");
+    expect(menu.text()).toContain("Reuse settings");
+    expect(menu.text()).toContain("Use as source");
+    expect(menu.text()).toContain("Delete");
+    expect((document.activeElement as HTMLElement).textContent?.trim()).toBe(
+      "Open",
+    );
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    );
+    expect((document.activeElement as HTMLElement).textContent?.trim()).toBe(
+      "Reuse settings",
+    );
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    );
+    expect((document.activeElement as HTMLElement).textContent?.trim()).toBe(
+      "Use as source",
+    );
+
+    await wrapper.get('[data-test="recent-context-source"]').trigger("click");
+    await flushPromises();
+    expect(useGenerateForm().state.value.imageAttachments[0]?.filename).toBe(
+      entry.filename,
+    );
+    expect(wrapper.find('[data-test="recent-context-menu"]').exists()).toBe(
+      false,
+    );
+
+    await wrapper.get('[data-test="context-recent"]').trigger("contextmenu");
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    await nextTick();
+    expect(document.activeElement).toBe(
+      wrapper.get('[data-test="context-recent"]').element,
+    );
+    wrapper.unmount();
+    globalThis.fetch = originalFetch;
+  });
+
+  it("routes Recent videos into the source-video field", async () => {
+    const video = { ...entry, filename: "clip.mp4", format: "mp4" as const };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      blob: async () => new Blob(["video"], { type: "video/mp4" }),
+    })) as never;
+    const stubs: Record<string, Component> = pageStubs();
+    stubs.RecentGrid = defineComponent({
+      props: ["entries"],
+      setup: () => ({ video }),
+      template:
+        '<button data-test="context-recent-video" @contextmenu.prevent="$emit(\'context-menu\', { item: video, x: 20, y: 20 })">context</button>',
+    });
+    const wrapper = mount(CreatePage, { global: { stubs } });
+    await flushPromises();
+
+    await wrapper
+      .get('[data-test="context-recent-video"]')
+      .trigger("contextmenu");
+    await wrapper.get('[data-test="recent-context-source"]').trigger("click");
+    await flushPromises();
+    expect(useGenerateForm().state.value.sourceVideo).toMatchObject({
+      filename: "clip.mp4",
+      mime: "video/mp4",
+    });
+    expect(useGenerateForm().state.value.imageAttachments).toHaveLength(0);
+    wrapper.unmount();
+    globalThis.fetch = originalFetch;
+  });
+
+  it("keeps animated Recent images in the image-source field", async () => {
+    const animated = {
+      ...entry,
+      filename: "loop.gif",
+      format: "gif" as const,
+    };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      blob: async () => new Blob(["image"], { type: "image/gif" }),
+    })) as never;
+    const stubs: Record<string, Component> = pageStubs();
+    stubs.RecentGrid = defineComponent({
+      props: ["entries"],
+      setup: () => ({ animated }),
+      template:
+        '<button data-test="context-recent-gif" @contextmenu.prevent="$emit(\'context-menu\', { item: animated, x: 20, y: 20 })">context</button>',
+    });
+    const wrapper = mount(CreatePage, { global: { stubs } });
+    await flushPromises();
+
+    await wrapper
+      .get('[data-test="context-recent-gif"]')
+      .trigger("contextmenu");
+    await wrapper.get('[data-test="recent-context-source"]').trigger("click");
+    await flushPromises();
+    expect(useGenerateForm().state.value.imageAttachments[0]).toMatchObject({
+      filename: "loop.gif",
+    });
+    expect(useGenerateForm().state.value.sourceVideo).toBeNull();
+    wrapper.unmount();
+    globalThis.fetch = originalFetch;
+  });
+
+  it("uses a Recent still as the Sequence opening image", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      blob: async () => new Blob(["image"], { type: "image/png" }),
+    })) as never;
+    const stubs: Record<string, Component> = pageStubs();
+    stubs.RecentGrid = defineComponent({
+      props: ["entries"],
+      template:
+        '<button data-test="context-recent-sequence" @contextmenu.prevent="$emit(\'context-menu\', { item: entries[0], x: 20, y: 20 })">context</button>',
+    });
+    const wrapper = mount(CreatePage, { global: { stubs } });
+    await flushPromises();
+    const draft = enterSequenceMode();
+
+    await wrapper
+      .get('[data-test="context-recent-sequence"]')
+      .trigger("contextmenu");
+    await wrapper.get('[data-test="recent-context-source"]').trigger("click");
+    await flushPromises();
+    expect(draft.openingImage).toMatchObject({ filename: entry.filename });
+    expect(useGenerateForm().state.value.imageAttachments).toHaveLength(0);
+    wrapper.unmount();
+    globalThis.fetch = originalFetch;
+  });
+
+  it("disables Recent video sources while Sequence is active", async () => {
+    const video = { ...entry, filename: "clip.mp4", format: "mp4" as const };
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as never;
+    const stubs: Record<string, Component> = pageStubs();
+    stubs.RecentGrid = defineComponent({
+      props: ["entries"],
+      setup: () => ({ video }),
+      template:
+        '<button data-test="context-recent-sequence-video" @contextmenu.prevent="$emit(\'context-menu\', { item: video, x: 20, y: 20 })">context</button>',
+    });
+    const wrapper = mount(CreatePage, {
+      attachTo: document.body,
+      global: { stubs },
+    });
+    await flushPromises();
+    enterSequenceMode();
+
+    await wrapper
+      .get('[data-test="context-recent-sequence-video"]')
+      .trigger("contextmenu");
+    const action = wrapper.get('[data-test="recent-context-source"]');
+    expect(action.attributes("disabled")).toBeDefined();
+    expect(action.attributes("title")).toContain("must be an image");
+    expect((document.activeElement as HTMLElement).textContent?.trim()).toBe(
+      "Open",
+    );
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    );
+    expect((document.activeElement as HTMLElement).textContent?.trim()).toBe(
+      "Reuse settings",
+    );
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    );
+    expect((document.activeElement as HTMLElement).textContent?.trim()).toBe(
+      "Delete",
+    );
+    await action.trigger("click");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(useGenerateForm().state.value.sourceVideo).toBeNull();
+    wrapper.unmount();
+    globalThis.fetch = originalFetch;
+  });
+
+  it("routes a Recent still into the active MiniMax H3 first frame", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      blob: async () => new Blob(["image"], { type: "image/png" }),
+    })) as never;
+    const stubs: Record<string, Component> = pageStubs();
+    stubs.RecentGrid = defineComponent({
+      props: ["entries"],
+      template:
+        '<button data-test="context-recent-h3" @contextmenu.prevent="$emit(\'context-menu\', { item: entries[0], x: 20, y: 20 })">context</button>',
+    });
+    const wrapper = mount(CreatePage, { global: { stubs } });
+    await flushPromises();
+    const form = useGenerateForm().state.value;
+    form.model = "minimax-h3-fl2va:comfy-pruned-int8";
+    form.modelFamily = "minimax-h3";
+    form.h3Authoring = {
+      firstFrame: null,
+      lastFrame: null,
+      references: [],
+    };
+
+    await wrapper.get('[data-test="context-recent-h3"]').trigger("contextmenu");
+    await wrapper.get('[data-test="recent-context-source"]').trigger("click");
+    await flushPromises();
+    expect(form.h3Authoring.firstFrame).toMatchObject({
+      filename: entry.filename,
+      mimeType: "image/png",
+      width: entry.metadata.width,
+      height: entry.metadata.height,
+    });
+    expect(form.imageAttachments).toHaveLength(0);
+    wrapper.unmount();
+    globalThis.fetch = originalFetch;
+  });
+
   it("restores a recent normal print into One shot while Sequence is active", async () => {
     const stubs: Record<string, Component> = pageStubs();
     stubs.RecentGrid = defineComponent({

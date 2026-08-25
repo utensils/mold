@@ -76,6 +76,21 @@ describe("RecentGrid", () => {
     expect(w.emitted("open")?.[0]?.[0]).toStrictEqual(item);
   });
 
+  it("emits a positioned context menu request for a right-clicked entry", async () => {
+    const item = entry("a.png");
+    const w = mountGrid([item]);
+    await w.get("[data-test='recent-tile']").trigger("contextmenu", {
+      clientX: 120,
+      clientY: 80,
+    });
+    expect(w.emitted("context-menu")?.[0]?.[0]).toStrictEqual({
+      item,
+      x: 120,
+      y: 80,
+      trigger: w.get("[data-test='recent-tile']").element,
+    });
+  });
+
   it("shows an empty hint when there are no prints", () => {
     const w = mountGrid([]);
     expect(w.find("[data-test='recent-empty']").exists()).toBe(true);

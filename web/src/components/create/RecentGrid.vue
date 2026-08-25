@@ -25,7 +25,17 @@ const props = withDefaults(
   { limit: 18 },
 );
 
-const emit = defineEmits<{ open: [item: GalleryImage] }>();
+const emit = defineEmits<{
+  open: [item: GalleryImage];
+  "context-menu": [
+    payload: {
+      item: GalleryImage;
+      x: number;
+      y: number;
+      trigger: HTMLElement | null;
+    },
+  ];
+}>();
 
 const shown = computed(() => props.entries.slice(0, props.limit));
 const overflow = computed(() =>
@@ -37,6 +47,14 @@ function isVideo(item: GalleryImage): boolean {
 }
 function tileAlt(item: GalleryImage): string {
   return item.metadata.prompt || item.filename;
+}
+function openContextMenu(item: GalleryImage, event: MouseEvent): void {
+  emit("context-menu", {
+    item,
+    x: event.clientX,
+    y: event.clientY,
+    trigger: event.currentTarget as HTMLElement | null,
+  });
 }
 </script>
 
@@ -57,6 +75,7 @@ function tileAlt(item: GalleryImage): string {
         :alt="tileAlt(item)"
         :data-test="`recent-tile`"
         @open="emit('open', item)"
+        @contextmenu.prevent.stop="openContextMenu(item, $event)"
       >
         <template v-if="isVideo(item)" #overlay>
           <span class="recent__badge" data-test="recent-video-badge">
