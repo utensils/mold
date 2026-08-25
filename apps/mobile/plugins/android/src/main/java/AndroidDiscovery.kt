@@ -133,6 +133,7 @@ internal class AndroidDiscovery(
                                 resolved.serviceName.ifBlank { address },
                                 address,
                                 port,
+                                resolved.attributes["auth"]?.toString(Charsets.UTF_8) == "1",
                             )
                         }
                         resolveNext()
@@ -157,6 +158,7 @@ internal class AndroidDiscovery(
                 put("name", host.name)
                 put("host", host.host)
                 put("port", host.port)
+                put("authRequired", host.authRequired)
             })
         }
         invoke.resolve(JSObject().apply { put("hosts", array) })
@@ -195,7 +197,12 @@ internal class AndroidDiscovery(
         multicastLock = null
     }
 
-    private data class DiscoveredService(val name: String, val host: String, val port: Int)
+    private data class DiscoveredService(
+        val name: String,
+        val host: String,
+        val port: Int,
+        val authRequired: Boolean,
+    )
 
     companion object {
         private const val SERVICE_TYPE = "_mold._tcp."

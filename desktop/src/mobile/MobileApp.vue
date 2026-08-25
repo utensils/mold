@@ -485,6 +485,7 @@ interface DiscoveredHost {
   name: string;
   host: string;
   port: number;
+  authRequired: boolean;
 }
 
 interface GalleryPrint extends MobileGalleryImage {
@@ -665,6 +666,8 @@ let catalogIntentToken = 0;
 const hostDetailId = ref("");
 const hostInput = reactive({ name: "", address: "", apiKey: "" });
 const discovered = ref<DiscoveredHost[]>([]);
+const selectedDiscovered = ref<DiscoveredHost | null>(null);
+const discoveredApiKeyInput = ref<HTMLInputElement | null>(null);
 const discovering = ref(false);
 const pairing = ref(false);
 const pairingScannerOpen = ref(false);
@@ -3218,11 +3221,34 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
     hostInput.name = "";
     hostInput.address = "";
     hostInput.apiKey = "";
+    selectedDiscovered.value = null;
     await refreshModels();
   } catch (error) {
     const label = hostInput.name.trim() || discoveredName || (address ?? hostInput.address).trim();
     hostError.value = describeTransportError(error, label);
   }
+}
+
+async function pickDiscoveredHost(host: DiscoveredHost): Promise<void> {
+  if (!host.authRequired) {
+    await connectHost(`${host.host}:${host.port}`, host.name);
+    return;
+  }
+  selectedDiscovered.value = host;
+  hostInput.name = host.name;
+  hostInput.address = `${host.host}:${host.port}`;
+  hostInput.apiKey = "";
+  hostError.value = "";
+  await nextTick();
+  discoveredApiKeyInput.value?.focus();
+}
+
+function clearDiscoveredHost() {
+  selectedDiscovered.value = null;
+  hostInput.name = "";
+  hostInput.address = "";
+  hostInput.apiKey = "";
+  hostError.value = "";
 }
 
 async function discoverHosts(): Promise<void> {
@@ -11579,16 +11605,44 @@ onBeforeUnmount(() => {
                 <div class="host-name">{{ host.name }}</div>
                 <div class="host-url">{{ host.host }}:{{ host.port }}</div>
               </div>
-              <button
-                class="secondary-button"
-                type="button"
-                @click="connectHost(`${host.host}:${host.port}`, host.name)"
-              >
+              <button class="secondary-button" type="button" @click="pickDiscoveredHost(host)">
                 Connect
               </button>
             </div>
           </div>
-          <form style="margin-top: 20px" @submit.prevent="connectHost()">
+          <form
+            v-if="selectedDiscovered"
+            style="margin-top: 20px"
+            data-test="mobile-discovered-key-prompt"
+            @submit.prevent="connectHost(hostInput.address, hostInput.name)"
+          >
+            <div class="host-row">
+              <div class="host-name">{{ selectedDiscovered.name }}</div>
+              <div class="host-url">
+                {{ selectedDiscovered.host }}:{{ selectedDiscovered.port }}
+              </div>
+            </div>
+            <label class="field"
+              ><span>API key</span
+              ><input
+                ref="discoveredApiKeyInput"
+                v-model="hostInput.apiKey"
+                class="control"
+                type="password"
+                placeholder="Required by this machine"
+                autocomplete="off"
+                data-test="mobile-discovered-api-key"
+                required
+            /></label>
+            <p class="section-note">This machine requires its own API key.</p>
+            <div class="mobile-inline-actions">
+              <button class="secondary-button" type="button" @click="clearDiscoveredHost">
+                Choose another
+              </button>
+              <button class="primary-button" type="submit">Test and save</button>
+            </div>
+          </form>
+          <form v-else style="margin-top: 20px" @submit.prevent="connectHost()">
             <label class="field"
               ><span>Name</span
               ><input

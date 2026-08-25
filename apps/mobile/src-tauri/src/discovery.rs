@@ -11,6 +11,24 @@ pub struct DiscoveredHost {
     pub name: String,
     pub host: String,
     pub port: u16,
+    pub auth_required: bool,
+}
+
+#[cfg(any(target_vendor = "apple", test))]
+fn auth_required_from_txt(txt: &[u8]) -> bool {
+    let mut cursor = 0;
+    while cursor < txt.len() {
+        let length = usize::from(txt[cursor]);
+        cursor += 1;
+        let Some(end) = cursor.checked_add(length).filter(|end| *end <= txt.len()) else {
+            break;
+        };
+        if txt[cursor..end] == *b"auth=1" {
+            return true;
+        }
+        cursor = end;
+    }
+    false
 }
 
 #[tauri::command]
@@ -39,6 +57,7 @@ async fn platform_discover(
                     name: host.name,
                     host: host.host,
                     port: host.port,
+                    auth_required: host.auth_required,
                 })
                 .collect()
         })
@@ -71,7 +90,7 @@ mod apple {
     use std::ffi::{c_char, c_void};
     use std::time::{Duration, Instant};
 
-    use super::DiscoveredHost;
+    use super::{DiscoveredHost, auth_required_from_txt};
 
     type ServiceRef = *mut c_void;
     type Flags = u32;
@@ -176,8 +195,8 @@ mod apple {
         fullname: *const c_char,
         hosttarget: *const c_char,
         port_be: u16,
-        _txt_len: u16,
-        _txt: *const u8,
+        txt_len: u16,
+        txt: *const u8,
         context: *mut c_void,
     ) {
         let state = unsafe { &mut *(context as *mut ResolveState) };
@@ -191,10 +210,16 @@ mod apple {
             .to_string();
         let full = unsafe { CStr::from_ptr(fullname) }.to_string_lossy();
         let name = full.split("._mold").next().unwrap_or(&host).to_string();
+        let auth_required = if txt.is_null() || txt_len == 0 {
+            false
+        } else {
+            auth_required_from_txt(unsafe { std::slice::from_raw_parts(txt, usize::from(txt_len)) })
+        };
         state.host = Some(DiscoveredHost {
             name,
             host,
             port: u16::from_be(port_be),
+            auth_required,
         });
     }
 
@@ -285,5 +310,23 @@ mod apple {
         }
         found.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(found)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::auth_required_from_txt;
+
+    #[test]
+    fn reads_auth_required_from_dns_sd_txt() {
+        let txt = [
+            6, b'a', b'u', b't', b'h', b'=', b'1', 9, b'v', b'e', b'r', b's', b'i', b'o', b'n',
+            b'=', b'1',
+        ];
+        assert!(auth_required_from_txt(&txt));
+        assert!(!auth_required_from_txt(&[
+            6, b'a', b'u', b't', b'h', b'=', b'0'
+        ]));
+        assert!(!auth_required_from_txt(&[8, b'a', b'u']));
     }
 }

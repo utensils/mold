@@ -4068,6 +4068,16 @@ button:disabled {
   border-bottom: 1px solid var(--edge);
 }
 
+.mobile-inline-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.mobile-inline-actions > button {
+  min-width: 0;
+  flex: 1;
+}
+
 .host-row-button {
   display: block;
   width: 100%;
