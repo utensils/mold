@@ -5426,6 +5426,75 @@ async function prepareGenerationRequest(
   );
 }
 
+function clearSubmittedExpansionWork(
+  preparedSubmission: ReturnType<typeof capturePreparedSubmission>,
+  quickSubmission: ReturnType<typeof captureQuickSubmission>,
+  preparedSection: HTMLElement | null,
+  preparedSubmissionOwnedFocus: boolean,
+): void {
+  if (preparedSubmission) {
+    const active = document.activeElement;
+    const restoreFocus =
+      preparedSubmissionOwnedFocus &&
+      (active === document.body || (!!active && !!preparedSection?.contains(active)));
+    preparedBatch.value = null;
+    if (restoreFocus) {
+      void nextTick(() => document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus());
+    }
+  }
+  if (
+    quickSubmission &&
+    quickExpansionSnapshot.value?.requestToken === quickSubmission.requestToken
+  ) {
+    quickExpansionSnapshot.value = null;
+  }
+}
+
+async function presentSettledGeneration(
+  jobs: Job[],
+  route: HostRoute,
+  chain: boolean,
+  prepared: boolean,
+): Promise<void> {
+  if (unmounted || jobs.length === 0) return;
+  // iOS suspension kills every held SSE socket: reconcile against the frozen
+  // route before composing any status or accessibility announcement.
+  await reconcileInterruptedGenerationJobs(jobs, {
+    target: { ...route.target },
+    hostLabel: route.label,
+    queueCapacity: hostTelemetry[route.hostId]?.queueCapacity,
+    chain,
+    refreshResultUrl: (clientId) =>
+      void generation.refreshRemoteResultUrl(clientId).catch(() => {
+        // The reactive job carries the directed, user-visible error.
+      }),
+    isActive: () => !unmounted,
+  });
+  if (unmounted) return;
+  const outcome = summarizeMobileGenerationOutcome(jobs, {
+    hostLabel: route.label,
+    prepared,
+  });
+  requestAdvisories.value = outcome.advisories;
+  for (const candidate of jobs) handledGenerationClientIds.add(candidate.clientId);
+  for (const candidate of outcome.completed) {
+    void saveCompletedStillToPhotos(candidate.result!, route.target);
+  }
+  if (outcome.latestCompleted) latestResultClientId.value = outcome.latestCompleted.clientId;
+  if (outcome.status) setGenerationStatus(outcome.status.message, outcome.status.isError);
+  if (outcome.announcement !== null) generationAnnouncement.value = outcome.announcement;
+  if (outcome.refreshGallery && tab.value === "gallery") void refreshGallery();
+  // Only terminal jobs whose callbacks have run are eligible: multiple
+  // completion microtasks cannot prune one another before they promote the
+  // correct latest result. The UI renders one result, so retain one Blob.
+  generation.prune(1, latestResultClientId.value, handledGenerationClientIds);
+  for (const clientId of handledGenerationClientIds) {
+    if (!generation.jobs.some((candidate) => candidate.clientId === clientId)) {
+      handledGenerationClientIds.delete(clientId);
+    }
+  }
+}
+
 async function generate(): Promise<void> {
   clearSelectedQueueRender();
   fileUnderDropNotice.value = "";
@@ -5833,22 +5902,12 @@ async function generate(): Promise<void> {
     const admissionBackgroundTask = submissionAttempt.handoffBackgroundTask();
     void admission.finally(() => admissionBackgroundTask.release());
     releasePreparedSubmission();
-    if (preparedSubmission) {
-      const active = document.activeElement;
-      const restoreFocus =
-        preparedSubmissionOwnedFocus &&
-        (active === document.body || (!!active && !!preparedSection?.contains(active)));
-      preparedBatch.value = null;
-      if (restoreFocus) {
-        void nextTick(() => document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus());
-      }
-    }
-    if (
-      quickSubmission &&
-      quickExpansionSnapshot.value?.requestToken === quickSubmission.requestToken
-    ) {
-      quickExpansionSnapshot.value = null;
-    }
+    clearSubmittedExpansionWork(
+      preparedSubmission,
+      quickSubmission,
+      preparedSection,
+      preparedSubmissionOwnedFocus,
+    );
     if (!progressIsError.value) setGenerationStatus("Queued");
     generationAnnouncement.value = "";
     void admission.catch((error) => {
@@ -5892,66 +5951,22 @@ async function generate(): Promise<void> {
   const admissionBackgroundTask = submissionAttempt.handoffBackgroundTask();
   void (admitted ?? settled).finally(() => admissionBackgroundTask.release());
   releasePreparedSubmission();
-  if (preparedSubmission) {
-    const active = document.activeElement;
-    const restoreFocus =
-      preparedSubmissionOwnedFocus &&
-      (active === document.body || (!!active && !!preparedSection?.contains(active)));
-    preparedBatch.value = null;
-    if (restoreFocus) {
-      void nextTick(() => document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus());
-    }
-  }
-  if (
-    quickSubmission &&
-    quickExpansionSnapshot.value?.requestToken === quickSubmission.requestToken
-  ) {
-    quickExpansionSnapshot.value = null;
-  }
+  clearSubmittedExpansionWork(
+    preparedSubmission,
+    quickSubmission,
+    preparedSection,
+    preparedSubmissionOwnedFocus,
+  );
   setGenerationStatus("Queued");
   generationAnnouncement.value = "";
-  void settled.then(async (jobs) => {
-    if (unmounted || jobs.length === 0) return;
-    // iOS suspension kills every held SSE socket: jobs that settled with a
-    // dead-transport error are re-queried against their frozen submission
-    // route (finished prints render, queued/running jobs re-attach without
-    // cancellation) BEFORE any summary copy is composed, so raw transport
-    // text never reaches the status line or the announcement channel.
-    await reconcileInterruptedGenerationJobs(jobs, {
-      target: { ...route.target },
-      hostLabel: route.label,
-      queueCapacity: hostTelemetry[route.hostId]?.queueCapacity,
-      chain: chainRouting.kind === "chain",
-      refreshResultUrl: (clientId) =>
-        void generation.refreshRemoteResultUrl(clientId).catch(() => {
-          // The reactive job carries the directed, user-visible error.
-        }),
-      isActive: () => !unmounted,
-    });
-    if (unmounted) return;
-    const outcome = summarizeMobileGenerationOutcome(jobs, {
-      hostLabel: route.label,
-      prepared: preparedSubmission !== null,
-    });
-    requestAdvisories.value = outcome.advisories;
-    for (const candidate of jobs) handledGenerationClientIds.add(candidate.clientId);
-    for (const candidate of outcome.completed) {
-      void saveCompletedStillToPhotos(candidate.result!, route.target);
-    }
-    if (outcome.latestCompleted) latestResultClientId.value = outcome.latestCompleted.clientId;
-    if (outcome.status) setGenerationStatus(outcome.status.message, outcome.status.isError);
-    if (outcome.announcement !== null) generationAnnouncement.value = outcome.announcement;
-    if (outcome.refreshGallery && tab.value === "gallery") void refreshGallery();
-    // Only terminal jobs whose callbacks have run are eligible: multiple
-    // completion microtasks cannot prune one another before they promote the
-    // correct latest result. The UI renders one result, so retain one Blob.
-    generation.prune(1, latestResultClientId.value, handledGenerationClientIds);
-    for (const clientId of handledGenerationClientIds) {
-      if (!generation.jobs.some((candidate) => candidate.clientId === clientId)) {
-        handledGenerationClientIds.delete(clientId);
-      }
-    }
-  });
+  void settled.then((jobs) =>
+    presentSettledGeneration(
+      jobs,
+      route,
+      chainRouting.kind === "chain",
+      preparedSubmission !== null,
+    ),
+  );
 }
 
 async function cancelGeneration(job: Job): Promise<void> {
