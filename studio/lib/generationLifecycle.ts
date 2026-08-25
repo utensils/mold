@@ -48,6 +48,7 @@ export interface GenerationLifecycleJob {
   clientBatchId: string;
   childIndex: number;
   phase: GenerationLifecyclePhase;
+  retryable: boolean | null;
   createdAtMs: number;
   completedAtMs: number | null;
   version: GenerationLifecycleVersion;
@@ -200,6 +201,7 @@ function lifecycleJob(
     clientBatchId: state.clientBatchId,
     childIndex: child.index,
     phase: child.state,
+    retryable: child.retryable ?? null,
     createdAtMs: child.created_at_ms,
     completedAtMs: child.completed_at_ms ?? null,
     version: { updatedAtMs: child.updated_at_ms, revision },

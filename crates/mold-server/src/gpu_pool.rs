@@ -429,6 +429,7 @@ pub struct GpuJob {
     /// to remove it when the job finishes), and surfaced to clients via
     /// `GET /api/queue` for zombie-card reconciliation.
     pub id: String,
+    pub durable_queue_rank: Option<u64>,
     pub model: String,
     pub request: mold_core::GenerateRequest,
     /// Opaque durable-media authority transferred without hydration by the
@@ -472,6 +473,15 @@ pub struct GpuJob {
     pub batch_child: Option<crate::state::BatchChildExecution>,
     /// Durable-queue row ownership, moved across from the `GenerationJob`.
     pub journal: Option<crate::queue_journal::QueueTicket>,
+}
+
+impl GpuJob {
+    pub(crate) fn should_cancel_for_observer_disconnect(&self) -> bool {
+        crate::state::should_cancel_for_observer_disconnect(
+            self.result_tx.is_closed(),
+            self.journal.is_some(),
+        )
+    }
 }
 
 pub struct PromptExpansionJob {
@@ -697,12 +707,12 @@ impl OwnerWork {
 
     pub(crate) fn is_cancelled(&self) -> bool {
         match self {
-            Self::Generation(job) => job.result_tx.is_closed(),
+            Self::Generation(job) => job.should_cancel_for_observer_disconnect(),
             Self::ChainStage(job) => {
                 job.result_tx.as_ref().is_none_or(|tx| tx.is_closed()) || (job.cancelled)()
             }
             Self::PromptExpansion(job) => job.result_tx.is_closed(),
-            Self::PostUpscale(job) => job.generation.result_tx.is_closed(),
+            Self::PostUpscale(job) => job.generation.should_cancel_for_observer_disconnect(),
             Self::StandaloneUpscale(job) => job.result_tx.is_closed(),
             Self::AdminModelLoad(job) => job.result_tx.is_closed(),
             Self::AdminModelUnload(job) => job.result_tx.is_closed(),

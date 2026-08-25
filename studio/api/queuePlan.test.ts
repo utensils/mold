@@ -9,6 +9,7 @@ import {
   predictedCompletionUnixMs,
   queuePageRequestForCapacity,
   reduceQueuePlanEvent,
+  retryQueueJob,
   setQueueDevicePin,
   type QueuePlan,
   type QueueListing,
@@ -373,6 +374,27 @@ describe("queue plan contract", () => {
     const [url, init] = captured!;
     expect(url).toBe("https://gpu.example/api/queue/job%2F1");
     expect(init?.method).toBe("DELETE");
+    expect((init?.headers as Headers).get("x-api-key")).toBe("secret");
+  });
+
+  it("retries a held job on the explicit authenticated target", async () => {
+    let captured: [RequestInfo | URL, RequestInit | undefined] | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        captured = [input, init];
+        return new Response(null, { status: 202 });
+      }),
+    );
+
+    await retryQueueJob(
+      { baseUrl: "https://gpu.example", apiKey: "secret" },
+      "job/1",
+    );
+
+    const [url, init] = captured!;
+    expect(url).toBe("https://gpu.example/api/queue/job%2F1/retry");
+    expect(init?.method).toBe("POST");
     expect((init?.headers as Headers).get("x-api-key")).toBe("secret");
   });
 });

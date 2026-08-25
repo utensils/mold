@@ -138,6 +138,21 @@ impl QueueMediaIngress {
         })
     }
 
+    /// Stop preferentially claiming an attached row that is still behind the
+    /// bounded runtime prefix, while preserving its observer for the eventual
+    /// authoritative FIFO claim.
+    ///
+    /// The row remains committed and attached. It is removed only from the
+    /// exact-ID hint deque, so `take_claimed` still transfers the observer when
+    /// the ordinary durable feeder reaches it.
+    pub(crate) fn defer_claimed_hint(&self, job_id: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.committed_ids.retain(|id| id != job_id);
+    }
+
     /// An exact claim that found no row means cancellation or another claim
     /// already won. Close only the observer; execution authority is untouched.
     pub(crate) fn discard_hint(&self, job_id: &str) {
@@ -225,5 +240,28 @@ mod tests {
         let _first = ingress.reserve("one", ObserverMode::Raw).unwrap();
         assert!(ingress.reserve("two", ObserverMode::Raw).is_none());
         assert_eq!(ingress.attached_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn deferred_exact_hint_keeps_observer_for_later_fifo_claim() {
+        let ingress = QueueMediaIngress::new(1);
+        let registration = ingress.reserve("job", ObserverMode::Raw).unwrap();
+        ingress.publish_committed("job");
+
+        ingress.defer_claimed_hint("job");
+
+        assert_eq!(ingress.next_committed_id(), None);
+        assert_eq!(ingress.attached_len(), 1);
+        let claimed = ingress
+            .take_claimed("job")
+            .expect("the eventual FIFO claim retains the observer");
+        let (_outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+        claimed.deliver(AttachedObserver::Raw {
+            outcome: outcome_rx,
+        });
+        assert!(matches!(
+            registration.attached().await.unwrap(),
+            AttachedObserver::Raw { .. }
+        ));
     }
 }

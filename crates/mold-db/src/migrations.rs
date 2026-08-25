@@ -628,6 +628,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 27,
         kind: MigrationKind::Sql(V27_GENERATION_QUEUE_OWNER_ORDER),
     },
+    Migration {
+        version: 28,
+        kind: MigrationKind::Sql(V28_GENERATION_QUEUE_RETRYABLE),
+    },
 ];
 
 /// #1227 phase 2 moved face-identity extraction from admission onto the
@@ -705,7 +709,7 @@ ALTER TABLE generation_batch_children ADD COLUMN completed_at_ms INTEGER;
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 27;
+pub const SCHEMA_VERSION: i64 = 28;
 
 /// Opaque staged-media ownership for durable queue rows.
 ///
@@ -794,6 +798,22 @@ END;
 const V27_GENERATION_QUEUE_OWNER_ORDER: &str = r#"
 CREATE INDEX generation_queue_owner_order
 ON generation_queue(owner_uuid, created_at);
+"#;
+
+/// Retry authority for parked durable generations.
+///
+/// Existing held rows remain operator-visible but cannot be requeued blindly:
+/// corrupt media and invalid publication authority need repair, not another
+/// automatic attempt. Deferred dependency preparation marks only its own
+/// recoverable holds retryable, and the retry endpoint is fenced by this bit.
+const V28_GENERATION_QUEUE_RETRYABLE: &str = r#"
+ALTER TABLE generation_queue ADD COLUMN retryable INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE generation_queue ADD COLUMN admission_authority TEXT
+    CHECK (
+        admission_authority IS NULL OR (
+            length(admission_authority) BETWEEN 56 AND 2048
+        )
+    );
 "#;
 
 /// Build a serde-compatible reverse lookup for durable publication recovery.
@@ -1252,7 +1272,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 27);
+        assert_eq!(SCHEMA_VERSION, 28);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1406,7 +1426,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 27);
+        assert_eq!(SCHEMA_VERSION, 28);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1422,6 +1442,8 @@ mod tests {
             "dispatch_attempts",
             "replay_seen",
             "held_reason",
+            "retryable",
+            "admission_authority",
             "created_at",
             "updated_at",
             "started_at",
@@ -1541,7 +1563,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 27);
+        assert_eq!(SCHEMA_VERSION, 28);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -1802,7 +1824,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 27);
+        assert_eq!(SCHEMA_VERSION, 28);
     }
 
     #[test]

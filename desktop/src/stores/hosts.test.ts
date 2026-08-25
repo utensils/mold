@@ -447,8 +447,13 @@ describe("hosts store", () => {
     hosts.telemetry[hal.id] = { queueDepth: 0, queueCapacity: 8, version: "0.25.0" };
     hosts.capabilities[hal.id] = {
       gallery: { can_delete: true },
+      queue: {
+        heterogeneous_batch: true,
+        durable_batch_outcomes: true,
+        admission_protocol_version: 2,
+      },
       durable_media: {
-        protocol_version: 1,
+        protocol_version: 2,
         encrypted_at_rest: true,
         generate_request_media: true,
         identity: true,
@@ -460,6 +465,44 @@ describe("hosts store", () => {
     expect(hosts.resolveRoute(hal.id)?.durableMedia).toEqual(
       hosts.capabilities[hal.id]?.durable_media,
     );
+    expect(hosts.resolveRoute(hal.id)?.admissionProtocolVersion).toBe(2);
+  });
+
+  it("skips placement preview for canonical v2 pinned and automatic routing", async () => {
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: "host-key",
+      status: "ready",
+      error: null,
+      instanceId: "hal-instance",
+    });
+    hosts.telemetry.local = { queueDepth: 4, queueCapacity: 8, version: "0.25.0" };
+    hosts.telemetry[hal.id] = { queueDepth: 0, queueCapacity: 8, version: "0.25.0" };
+    const canonical: ServerCapabilities = {
+      gallery: { can_delete: true },
+      queue: {
+        heterogeneous_batch: true,
+        durable_batch_outcomes: true,
+        admission_protocol_version: 2,
+      },
+    };
+    hosts.capabilities.local = canonical;
+    hosts.capabilities[hal.id] = canonical;
+
+    await expect(hosts.resolveFeasible("local", placementRequest)).resolves.toMatchObject({
+      kind: "route",
+      route: { hostId: "local" },
+      preview: null,
+    });
+    await expect(hosts.resolveFeasible(null, placementRequest)).resolves.toMatchObject({
+      kind: "route",
+      route: { hostId: hal.id },
+      preview: null,
+    });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
   });
 
   it("allows Auto across differing profiles on the same Mold major version", () => {

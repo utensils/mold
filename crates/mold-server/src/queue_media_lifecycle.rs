@@ -17,8 +17,8 @@ use crate::queue_media_startup::{
     UntouchedEntry,
 };
 use crate::queue_media_store::{
-    MediaSetRef, QueueMediaError, QueueMediaOperationFingerprint, QueueMediaOperationReceipt,
-    QueueMediaProjection, QueueMediaStore, SealMedia,
+    MediaSetRef, QueueMediaAdmissionAuthority, QueueMediaError, QueueMediaOperationFingerprint,
+    QueueMediaOperationReceipt, QueueMediaProjection, QueueMediaStore, SealMedia,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +109,24 @@ impl QueueMediaLifecycle {
     ) -> Result<QueueMediaOperationFingerprint, QueueMediaError> {
         self.runtime_store()?
             .open_operation_receipt_v1(&self.owner_uuid, operation_id, receipt)
+    }
+
+    pub(crate) fn seal_admission_authority(
+        &self,
+        job_id: &str,
+        payload: &[u8],
+    ) -> Result<QueueMediaAdmissionAuthority, QueueMediaError> {
+        self.runtime_store()?
+            .seal_admission_authority_v1(&self.owner_uuid, job_id, payload)
+    }
+
+    pub(crate) fn open_admission_authority(
+        &self,
+        job_id: &str,
+        authority: &QueueMediaAdmissionAuthority,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, QueueMediaError> {
+        self.runtime_store()?
+            .open_admission_authority_v1(&self.owner_uuid, job_id, authority)
     }
 
     pub(crate) fn seal_v2(
@@ -523,6 +541,7 @@ mod tests {
             updated_at_ms: 1,
             started_at_ms: None,
             media_set_id: Some(set_id.to_string()),
+            admission_authority: None,
         }
     }
 

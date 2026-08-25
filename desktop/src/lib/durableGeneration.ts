@@ -1,11 +1,10 @@
 import type { GenerateRequest, OutputFormat } from "./api/types";
 import type { GenerationBatchTracker } from "@studio/lib/generationLifecycle";
 import {
-  supportsDurableRequest,
   type DurableGenerationQueueCapabilities,
   type DurableMediaCapabilities,
 } from "@studio/api/generationAdmission";
-import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Identity";
+import { generationHostSubmissionPolicy } from "@studio/lib/generationSubmissionPolicy";
 
 export const DURABLE_GENERATION_STORAGE_KEY = "mold.desktop.durable-generations.v1";
 
@@ -40,16 +39,25 @@ export interface DurableGenerationRecoveryEnvelope {
   records: DurableGenerationRecoveryRecord[];
 }
 
-/** Decide against the exact frozen host capability. Media stays on the legacy
- * attached stream unless that server promises the encrypted v1 contract. */
+/** Decide against the exact frozen host capability through the same transport
+ * policy used by placement routing. */
 export function requestIsEligibleForDurableGeneration(
   request: GenerateRequest,
   queue: DurableGenerationQueueCapabilities | null | undefined,
   durableMedia: DurableMediaCapabilities | null | undefined,
   modelFamily?: string | null,
 ): boolean {
-  if (isMinimaxH3Identity(modelFamily, request.model)) return false;
-  return supportsDurableRequest(queue, durableMedia, request);
+  return (
+    generationHostSubmissionPolicy(
+      { kind: "pinned", hostId: "frozen" },
+      {
+        hostId: "frozen",
+        ...(queue === undefined ? {} : { queue }),
+        ...(durableMedia === undefined ? {} : { durableMedia }),
+      },
+      modelFamily ? { ...request, family: modelFamily } : request,
+    ).admission !== "legacy_attached"
+  );
 }
 
 export function durableChildSummary(

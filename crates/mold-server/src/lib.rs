@@ -9,6 +9,7 @@ pub(crate) mod chain_execution;
 pub mod chain_job_runner;
 pub mod chain_limits;
 pub(crate) mod dir_sync;
+mod durable_admission_authority;
 mod gallery_authority;
 #[allow(dead_code)]
 mod h3_admission;
@@ -86,6 +87,8 @@ pub mod variant_dependencies;
 mod wan_admission;
 pub mod web_ui;
 
+#[cfg(test)]
+mod admission_contract_test;
 #[cfg(all(test, feature = "metrics"))]
 mod metrics_test;
 #[cfg(test)]

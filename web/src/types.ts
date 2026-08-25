@@ -283,6 +283,8 @@ export interface ServerCapabilities {
     heterogeneous_batch_max_outputs?: number | null;
     /** Enriched durable outcomes, by-client recovery and bulk reconciliation. */
     durable_batch_outcomes?: boolean;
+    /** Queue-first durable admission; version 2 defers model preparation. */
+    admission_protocol_version?: number | null;
   };
   /** One server-wide, authenticated lifecycle stream. */
   events?: { available?: boolean };

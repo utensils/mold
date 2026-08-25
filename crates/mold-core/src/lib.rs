@@ -112,11 +112,11 @@ pub use validation::{
     materialize_request_organization, min_frames_for_family, prompt_required_for,
     prompt_required_with_conditioning, recommended_dimensions, recommended_dimensions_composed,
     require_generate_request_model_activation, validate_generate_request,
-    validate_generate_request_with_family, validate_generation_dimensions,
-    validate_generation_dimensions_composed, validate_generation_dimensions_for_model,
-    validate_request_organization, validate_upscale_request, wan_dimension_alignment,
-    Ltx2OutputRung, Ltx2SpatialComposition, RequestOrganization, LORA_CAPABLE_FAMILIES,
-    LTX2_OUTPUT_RUNGS,
+    validate_generate_request_fields, validate_generate_request_with_family,
+    validate_generation_dimensions, validate_generation_dimensions_composed,
+    validate_generation_dimensions_for_model, validate_request_organization,
+    validate_upscale_request, wan_dimension_alignment, Ltx2OutputRung, Ltx2SpatialComposition,
+    RequestOrganization, LORA_CAPABLE_FAMILIES, LTX2_OUTPUT_RUNGS,
 };
 
 pub use expand::{

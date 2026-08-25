@@ -5,6 +5,7 @@ import type {
   GenerationBatchStatusResponse,
 } from "@studio/api/generationAdmission";
 import { supportsDurableRequest } from "@studio/api/generationAdmission";
+import { generationHostSubmissionPolicy } from "@studio/lib/generationSubmissionPolicy";
 import {
   buildGenerationBatchStatusRequest,
   createGenerationBatchTracker,
@@ -229,6 +230,27 @@ export function useMobileDurableGenerationLifecycle(input: {
   chain: boolean;
   modelFamily?: string | null;
 }): boolean {
+  const canonicalV2 =
+    input.queue?.admission_protocol_version != null &&
+    input.queue.admission_protocol_version >= 2;
+  if (canonicalV2) {
+    return (
+      !input.chain &&
+      input.requests.length > 0 &&
+      input.requests.every(
+        (request) =>
+          generationHostSubmissionPolicy(
+            { kind: "pinned", hostId: "frozen" },
+            {
+              hostId: "frozen",
+              queue: input.queue ?? null,
+              durableMedia: input.durableMedia ?? null,
+            },
+            request,
+          ).admission === "canonical_durable",
+      )
+    );
+  }
   return (
     !input.chain &&
     input.requests.length > 0 &&

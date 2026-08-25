@@ -91,6 +91,13 @@ pub struct JobEntry {
     /// Why a held job is parked. Present only for `state: held`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_reason: Option<String>,
+    /// Durable preparation error for a held job. Additive alias with clearer
+    /// lifecycle semantics than the legacy `held_reason` field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Whether `POST /api/queue/{id}/retry` may safely resume this held job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
 }
 
 /// Whole-queue listing returned by `GET /api/queue`. Wrapped in a struct so
@@ -863,6 +870,8 @@ impl JobRegistry {
                 replayed: None,
                 dispatch_attempts: None,
                 held_reason: None,
+                error: None,
+                retryable: None,
             })
         })
     }
@@ -982,6 +991,8 @@ impl JobRegistry {
                 replayed: None,
                 dispatch_attempts: None,
                 held_reason: None,
+                error: None,
+                retryable: None,
             })
             .collect();
         QueueListing {

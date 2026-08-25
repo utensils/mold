@@ -321,6 +321,7 @@ use crate::queue::clean_error_message;
         get_queue_job_preview,
         patch_queue_job,
         cancel_queue_job,
+        retry_queue_job,
         pause_queue,
         resume_queue,
         cancel_all_queue,
@@ -756,6 +757,7 @@ pub fn create_router(state: AppState) -> Router {
             "/api/queue/:id",
             patch(patch_queue_job).delete(cancel_queue_job),
         )
+        .route("/api/queue/:id/retry", post(retry_queue_job))
         .route("/api/queue/:id/preview", get(get_queue_job_preview))
         .route("/api/history", get(list_history).delete(delete_history))
         .route("/api/capabilities", get(server_capabilities))
@@ -1090,12 +1092,16 @@ pub(crate) struct PreparedGenerationRoute {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GenerationPreparationDelivery {
     AttachedResponse,
+    /// Work that was already acknowledged and persisted by canonical
+    /// admission. Slow preparation is replayable, but it must not invent an
+    /// untracked first-party download or rely on the original HTTP caller.
+    DeferredDurable,
     DurableBatch,
 }
 
 impl GenerationPreparationDelivery {
-    fn is_durable_batch(self) -> bool {
-        self == Self::DurableBatch
+    fn is_durable(self) -> bool {
+        matches!(self, Self::DeferredDurable | Self::DurableBatch)
     }
 }
 
@@ -1131,6 +1137,33 @@ pub(crate) async fn prepare_generation_for_delivery(
     authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
     delivery: GenerationPreparationDelivery,
 ) -> Result<PreparedGenerationRoute, ApiError> {
+    prepare_generation_for_delivery_inner(state, request, authenticated, delivery, None).await
+}
+
+pub(crate) async fn prepare_generation_after_durable_ack(
+    state: &AppState,
+    request: &mut mold_core::GenerateRequest,
+    authority: crate::durable_admission_authority::RuntimeAuthority,
+) -> Result<PreparedGenerationRoute, ApiError> {
+    prepare_generation_for_delivery_inner(
+        state,
+        request,
+        None,
+        GenerationPreparationDelivery::DeferredDurable,
+        Some(authority),
+    )
+    .await
+}
+
+async fn prepare_generation_for_delivery_inner(
+    state: &AppState,
+    request: &mut mold_core::GenerateRequest,
+    authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
+    delivery: GenerationPreparationDelivery,
+    restored_authority: Option<crate::durable_admission_authority::RuntimeAuthority>,
+) -> Result<PreparedGenerationRoute, ApiError> {
+    #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
+    let _ = &restored_authority;
     // This seam deliberately does not load an inference engine, prepare model
     // weights, or reserve execution memory. Scheduler V2 owns those bounded
     // operations after durable acknowledgement. Local prompt expansion and
@@ -1142,7 +1175,7 @@ pub(crate) async fn prepare_generation_for_delivery(
     // Stop admitting once the retention fence is up. Anything accepted after
     // that point is queued into a process that is already tearing down, so the
     // honest answer is "not now" rather than a job that immediately retains.
-    if state.queue_journal.is_retaining() {
+    if restored_authority.is_none() && state.queue_journal.is_retaining() {
         return Err(ApiError::server_restarting(
             "the host is restarting; retry shortly",
         ));
@@ -1152,14 +1185,6 @@ pub(crate) async fn prepare_generation_for_delivery(
     // and retry state can observe the request. This is deliberately a no-op
     // for every non-H3 configured alias and catalog ID.
     mold_core::minimax_h3::canonicalize_request_model(request);
-
-    if delivery.is_durable_batch()
-        && mold_core::minimax_h3::capability_contract_for_model(&request.model).is_some()
-    {
-        return Err(durable_generation_unsupported(
-            "MiniMax H3 requests carry private replay authority and must use the attached generation lifecycle",
-        ));
-    }
 
     // `hdr_exr_dir` names an output directory on the machine doing inference.
     // An HTTP client must never choose that server-local path: unlike media
@@ -1177,11 +1202,18 @@ pub(crate) async fn prepare_generation_for_delivery(
         request.normalise_output_format(Some(mold_core::minimax_h3::FAMILY));
     }
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-    let h3_private_ingress_grant = crate::h3_private_bridge::classify_h3_private_ingress(
-        request,
-        authenticated,
-        state.instance_id.as_str(),
-    )?;
+    let h3_private_ingress_grant = match restored_authority.as_ref() {
+        Some(authority) => authority.h3_grant().cloned(),
+        None => crate::h3_private_bridge::classify_h3_private_ingress(
+            request,
+            authenticated,
+            state.instance_id.as_str(),
+        )?,
+    };
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    let authority_bound_request = restored_authority
+        .as_ref()
+        .and_then(|_| h3_private_ingress_grant.as_ref().map(|_| request.clone()));
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     let private_h3_ingress = h3_private_ingress_grant.is_some();
     #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
@@ -1407,7 +1439,7 @@ pub(crate) async fn prepare_generation_for_delivery(
         // Installed adapters are materialized cheaply and identically; absent
         // adapters are refused honestly instead of acknowledging a row whose
         // request cannot reproduce the legacy execution payload.
-        if delivery.is_durable_batch() && !control_artifact_is_complete(adapter, &path) {
+        if delivery.is_durable() && !control_artifact_is_complete(adapter, &path) {
             return Err(durable_generation_unsupported(format!(
                 "IC-LoRA control '{}' must be downloaded before durable batch admission",
                 adapter.id
@@ -1415,7 +1447,7 @@ pub(crate) async fn prepare_generation_for_delivery(
         }
         materialize_builtin_ltx2_control(state, request, adapter, path).await?;
     }
-    if delivery.is_durable_batch() {
+    if delivery.is_durable() {
         if let Some((preset, _)) = planned_camera_controls
             .iter()
             .find(|(preset, path)| !camera_control_artifact_is_complete(preset, path))
@@ -1452,7 +1484,16 @@ pub(crate) async fn prepare_generation_for_delivery(
 
     warnings.dimension = dim_warning;
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-    let h3_private_ingress_grant = if h3_private_ingress_grant.is_some() {
+    let h3_private_ingress_grant = if let (Some(grant), Some(submitted)) = (
+        h3_private_ingress_grant.as_ref(),
+        authority_bound_request.as_ref(),
+    ) {
+        Some(grant.rebind_server_prepared_request(
+            submitted,
+            request,
+            state.instance_id.as_str(),
+        )?)
+    } else if h3_private_ingress_grant.is_some() {
         crate::h3_private_bridge::classify_h3_private_ingress(
             request,
             authenticated,
@@ -2010,7 +2051,7 @@ fn control_pending_download_bytes(
         .sum()
 }
 
-async fn normalize_generation_placement(
+pub(crate) async fn normalize_generation_placement(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
 ) {
@@ -2121,7 +2162,7 @@ fn active_gpu_selection(state: &AppState) -> GpuSelection {
     }
 }
 
-fn validate_multi_gpu_placement(
+pub(crate) fn validate_multi_gpu_placement(
     state: &AppState,
     placement: Option<&mold_core::types::DevicePlacement>,
 ) -> Result<Option<usize>, ApiError> {
@@ -2367,6 +2408,7 @@ pub(crate) fn generation_batch_status(
                         _ => State::Accepted,
                     },
                     error: child.error,
+                    retryable: (child.state == "held").then_some(child.retryable),
                     created_at_ms,
                     updated_at_ms: child.updated_at_ms,
                     completed_at_ms: child.completed_at_ms,
@@ -2412,22 +2454,19 @@ async fn admit_generation_batch(
             "requests must contain 1..={MAX_HETEROGENEOUS_BATCH_OUTPUTS} children"
         )));
     }
-    if body
-        .requests
-        .iter()
-        .any(crate::queue_media_admission::request_requires_durable_media_admission)
-    {
-        if state.queue_journal.durable_media_capabilities().is_none() {
+    if let Some(admission) = state.queue_journal.queue_media_admission() {
+        if body
+            .requests
+            .iter()
+            .any(crate::queue_media_admission::request_has_durable_media)
+            && state.queue_journal.durable_media_capabilities().is_none()
+        {
             return Err(ApiError::with_code(
                 "encrypted durable request media is unavailable",
                 "DURABLE_MEDIA_UNAVAILABLE",
                 StatusCode::SERVICE_UNAVAILABLE,
             ));
         }
-        let admission = state
-            .queue_journal
-            .queue_media_admission()
-            .ok_or_else(|| ApiError::internal("durable media admission service is missing"))?;
         let outcome = admission
             .admit_batch(
                 &state,
@@ -2745,25 +2784,20 @@ async fn generate(
     mold_core::minimax_h3::canonicalize_request_model(&mut req);
     validate_live_server_batch_admission(&req)?;
     let operation_id = requested_operation_id(&headers)?;
-    if let Some(operation_id) = operation_id
-        .filter(|_| crate::queue_media_admission::request_requires_durable_media_admission(&req))
-    {
-        if req.batch_size != 1 {
-            return Err(ApiError::validation(
-                "X-Mold-Operation-Id durable media requests require batch_size=1",
-            ));
-        }
-        if state.queue_journal.durable_media_capabilities().is_none() {
+    let canonical_admission = (req.batch_size == 1)
+        .then(|| state.queue_journal.queue_media_admission())
+        .flatten();
+    if let Some(admission) = canonical_admission {
+        let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        if crate::queue_media_admission::request_has_durable_media(&req)
+            && state.queue_journal.durable_media_capabilities().is_none()
+        {
             return Err(ApiError::with_code(
                 "encrypted durable request media is unavailable",
                 "DURABLE_MEDIA_UNAVAILABLE",
                 StatusCode::SERVICE_UNAVAILABLE,
             ));
         }
-        let admission = state
-            .queue_journal
-            .queue_media_admission()
-            .ok_or_else(|| ApiError::internal("durable media admission service is missing"))?;
         let outcome = admission
             .admit_batch(
                 &state,
@@ -2933,6 +2967,7 @@ async fn generate(
     } = crate::job_supervisor::supervise_job(job_id.clone(), cancel);
     let job = GenerationJob {
         id: job_id.clone(),
+        durable_queue_rank: None,
         request: req,
         deferred_media: None,
         resolved_references,
@@ -3214,7 +3249,10 @@ async fn enforce_source_image_capability(
     }
 }
 
-async fn apply_default_metadata_setting(state: &AppState, req: &mut mold_core::GenerateRequest) {
+pub(crate) async fn apply_default_metadata_setting(
+    state: &AppState,
+    req: &mut mold_core::GenerateRequest,
+) {
     if req.embed_metadata.is_some() {
         return;
     }
@@ -3946,25 +3984,20 @@ async fn generate_stream(
     let completion_payload = requested_sse_completion_payload(&headers)?;
     validate_live_server_batch_admission(&req)?;
     let operation_id = requested_operation_id(&headers)?;
-    if let Some(operation_id) = operation_id
-        .filter(|_| crate::queue_media_admission::request_requires_durable_media_admission(&req))
-    {
-        if req.batch_size != 1 {
-            return Err(ApiError::validation(
-                "X-Mold-Operation-Id durable media requests require batch_size=1",
-            ));
-        }
-        if state.queue_journal.durable_media_capabilities().is_none() {
+    let canonical_admission = (req.batch_size == 1)
+        .then(|| state.queue_journal.queue_media_admission())
+        .flatten();
+    if let Some(admission) = canonical_admission {
+        let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        if crate::queue_media_admission::request_has_durable_media(&req)
+            && state.queue_journal.durable_media_capabilities().is_none()
+        {
             return Err(ApiError::with_code(
                 "encrypted durable request media is unavailable",
                 "DURABLE_MEDIA_UNAVAILABLE",
                 StatusCode::SERVICE_UNAVAILABLE,
             ));
         }
-        let admission = state
-            .queue_journal
-            .queue_media_admission()
-            .ok_or_else(|| ApiError::internal("durable media admission service is missing"))?;
         let outcome = admission
             .admit_batch(
                 &state,
@@ -4180,6 +4213,7 @@ async fn generate_stream(
     } = crate::job_supervisor::supervise_job(job_id.clone(), cancel);
     let job = GenerationJob {
         id: job_id.clone(),
+        durable_queue_rank: None,
         request: req,
         deferred_media: None,
         resolved_references,
@@ -6195,6 +6229,7 @@ fn job_entry_from_durable_projection(
         // work awaiting the next boot and therefore projects as queued.
         _ => crate::job_registry::JobLifecycle::Queued,
     };
+    let error = row.held_reason.clone();
     crate::job_registry::JobEntry {
         id: row.id,
         model: row.model,
@@ -6209,6 +6244,8 @@ fn job_entry_from_durable_projection(
         replayed: Some(row.replay_seen > 0),
         dispatch_attempts: Some(row.dispatch_attempts),
         held_reason: row.held_reason,
+        error,
+        retryable: (state == crate::job_registry::JobLifecycle::Held).then_some(row.retryable),
     }
 }
 
@@ -6477,6 +6514,46 @@ async fn cancel_queue_job(
     let journal = state.queue_journal.clone();
     spawn_queue_mutation(move || journal.cancel_id(&id)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Resume a durable dependency-preparation failure after the dependency or
+/// host condition has been corrected. Non-retryable operator holds remain
+/// fenced so corrupt media or invalid publication authority cannot be
+/// re-executed blindly.
+#[utoipa::path(
+    post,
+    path = "/api/queue/{id}/retry",
+    tag = "queue",
+    params(("id" = String, Path, description = "Held generation job id")),
+    responses(
+        (status = 202, description = "Held job returned to the durable queue"),
+        (status = 404, description = "Queue job not found"),
+        (status = 409, description = "Job is not a retryable hold"),
+    )
+)]
+async fn retry_queue_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let _durable_transition = state.queue_journal.lock_durable_transition().await;
+    let journal = state.queue_journal.clone();
+    let retry_id = id.clone();
+    match spawn_queue_mutation(move || journal.retry_held(&retry_id)).await? {
+        mold_db::generation_batches::OwnedRetry::Retried => Ok(StatusCode::ACCEPTED),
+        mold_db::generation_batches::OwnedRetry::NotOwned => Err(ApiError::queue_job_not_found(
+            format!("queue job {id} not found"),
+        )),
+        mold_db::generation_batches::OwnedRetry::NotHeld => Err(ApiError::with_code(
+            format!("queue job {id} is not held"),
+            "QUEUE_JOB_NOT_HELD",
+            StatusCode::CONFLICT,
+        )),
+        mold_db::generation_batches::OwnedRetry::NotRetryable => Err(ApiError::with_code(
+            format!("queue job {id} requires operator repair and cannot be retried"),
+            "QUEUE_JOB_NOT_RETRYABLE",
+            StatusCode::CONFLICT,
+        )),
+    }
 }
 
 /// Response of `POST /api/queue/pause` and `POST /api/queue/resume` — the
@@ -6810,6 +6887,11 @@ async fn server_capabilities(
             heterogeneous_batch_max_outputs: heterogeneous_batch
                 .then_some(MAX_HETEROGENEOUS_BATCH_OUTPUTS as u32),
             durable_batch_outcomes: heterogeneous_batch,
+            admission_protocol_version: state
+                .queue_journal
+                .queue_media_admission()
+                .is_some()
+                .then_some(2),
         },
         durable_media: heterogeneous_batch
             .then(|| state.queue_journal.durable_media_capabilities())

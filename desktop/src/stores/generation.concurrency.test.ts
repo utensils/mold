@@ -1283,6 +1283,46 @@ describe("submitBatch connection cap", () => {
     expect(mockSse).toHaveBeenCalledTimes(1);
   });
 
+  it("admits canonical v2 H3 through the durable batch transport", async () => {
+    durableApi.admit.mockImplementation(() => new Promise(() => {}));
+    const store = useGenerationStore();
+    store.submitBatch(
+      {
+        ...req,
+        model: "hf:opaque-h3-checkpoint",
+        source_image: "PRIVATE-H3-SOURCE",
+      },
+      1,
+      {
+        hostId: "hal9000",
+        label: "hal9000",
+        kind: "remote",
+        target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+        instanceId: "instance-1",
+        heterogeneousBatch: true,
+        durableBatchOutcomes: true,
+        admissionProtocolVersion: 2,
+        durableMedia: {
+          protocol_version: 3,
+          encrypted_at_rest: true,
+          generate_request_media: true,
+          identity: true,
+          h3_references: true,
+          private_h3: true,
+        },
+        modelFamily: "minimax-h3",
+      },
+    );
+    await flushPromises();
+
+    expect(durableApi.admit).toHaveBeenCalledTimes(1);
+    expect(durableApi.admit.mock.calls[0]![1].requests[0]).toMatchObject({
+      model: "hf:opaque-h3-checkpoint",
+      source_image: "PRIVATE-H3-SOURCE",
+    });
+    expect(mockSse).not.toHaveBeenCalled();
+  });
+
   it("holds at most four streams across separate Generate submissions", async () => {
     const store = useGenerationStore();
     const first = store.submitBatch({ ...req, seed: 200 }, 1);

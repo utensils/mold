@@ -62,6 +62,9 @@ pub struct GenerationJob {
     /// non-empty for jobs created through the public API; tests that
     /// construct `GenerationJob` directly may leave it empty.
     pub id: String,
+    /// Stable durable admission order. Bounded preparation workers may finish
+    /// out of order; the scheduler still ranks accepted work by this value.
+    pub durable_queue_rank: Option<u64>,
     pub request: mold_core::GenerateRequest,
     /// Authenticated durable media remains opaque until this job owns its
     /// execution slot or concrete device lease.
@@ -91,6 +94,22 @@ pub struct GenerationJob {
     /// revalidate this grant against the exact canonical request.
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) h3_private_ingress_grant: Option<crate::h3_private_bridge::H3PrivateIngressGrant>,
+}
+
+impl GenerationJob {
+    /// A response channel is observation, not execution authority, once the
+    /// durable journal owns the job. Explicit cancellation is carried by the
+    /// registry/token path and remains authoritative.
+    pub(crate) fn should_cancel_for_observer_disconnect(&self) -> bool {
+        should_cancel_for_observer_disconnect(self.result_tx.is_closed(), self.journal.is_some())
+    }
+}
+
+pub(crate) const fn should_cancel_for_observer_disconnect(
+    response_closed: bool,
+    durably_owned: bool,
+) -> bool {
+    response_closed && !durably_owned
 }
 
 #[derive(Clone, Debug)]
@@ -987,6 +1006,7 @@ mod tests {
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         GenerationJob {
             id: id.to_string(),
+            durable_queue_rank: None,
             request,
             deferred_media: None,
             resolved_references: None,
@@ -999,6 +1019,19 @@ mod tests {
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
         }
+    }
+
+    #[test]
+    fn observer_disconnect_cancels_only_non_durable_generation() {
+        let mut job = queue_job("observer-detached");
+        assert!(job.should_cancel_for_observer_disconnect());
+
+        let journal = Arc::new(crate::queue_journal::QueueJournal::disabled());
+        job.journal = Some(journal.attach(&job.id));
+        assert!(
+            !job.should_cancel_for_observer_disconnect(),
+            "durable ownership must outlive its response observer"
+        );
     }
 
     #[test]

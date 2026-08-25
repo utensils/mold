@@ -71,6 +71,16 @@ describe("mobile durable generation recovery", () => {
     h3_references: false,
     private_h3: false,
   };
+  const canonicalQueue = {
+    heterogeneous_batch: true,
+    durable_batch_outcomes: true,
+    admission_protocol_version: 2,
+  };
+  const durableMediaV2 = {
+    ...durableMedia,
+    protocol_version: 2,
+    private_h3: true,
+  };
 
   it("admits singleton and Batch N while repeated submissions add no client-side queue cap", () => {
     const queue = { heterogeneous_batch: true, durable_batch_outcomes: true };
@@ -152,6 +162,19 @@ describe("mobile durable generation recovery", () => {
         modelFamily: "minimax-h3",
       }),
     ).toBe(false);
+  });
+
+  it("admits H3 and ordinary media through the same canonical v2 decision", () => {
+    for (const model of ["flux-dev", "ltx-2", "minimax-h3-fl2va:official-bf16"]) {
+      expect(
+        useMobileDurableGenerationLifecycle({
+          queue: canonicalQueue,
+          durableMedia: durableMediaV2,
+          requests: [{ ...request(), model, source_image: "source" }],
+          chain: false,
+        }),
+      ).toBe(true);
+    }
   });
 
   it("persists only byte-free identity and restores an ambiguous admission after restart", () => {

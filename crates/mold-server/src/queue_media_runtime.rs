@@ -260,6 +260,29 @@ pub struct ZeroizingGenerateRequest {
     scrub_probe: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
+impl Clone for ZeroizingGenerateRequest {
+    fn clone(&self) -> Self {
+        Self::from_owned(self.request.clone())
+    }
+}
+
+impl ZeroizingGenerateRequest {
+    pub(crate) fn from_owned(request: mold_core::GenerateRequest) -> Self {
+        Self {
+            request,
+            #[cfg(test)]
+            scrub_probe: None,
+        }
+    }
+
+    /// Return a payload-free copy for durable runtime publication while this
+    /// owner continues to guarantee cleanup on cancellation or panic.
+    pub(crate) fn scrubbed_clone(&mut self) -> mold_core::GenerateRequest {
+        crate::queue_media::scrub_request_media(&mut self.request);
+        self.request.clone()
+    }
+}
+
 #[cfg(test)]
 impl ZeroizingGenerateRequest {
     fn with_scrub_probe(mut self, scrubbed: Arc<std::sync::atomic::AtomicBool>) -> Self {
@@ -423,6 +446,60 @@ mod tests {
             "source_video_path": path.to_string_lossy()
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn zeroizing_owned_clones_scrub_on_success_error_and_panic() {
+        let source = ZeroizingGenerateRequest::from_owned(request(std::path::Path::new(
+            "/private/source.mp4",
+        )));
+        let run = |mode: &str, scrubbed: Arc<std::sync::atomic::AtomicBool>| {
+            let clone = source.clone().with_scrub_probe(scrubbed);
+            match mode {
+                "success" => Ok::<(), ()>(drop(clone)),
+                "error" => Err(()),
+                "panic" => panic!("injected per-device admission panic"),
+                _ => unreachable!(),
+            }
+        };
+
+        for mode in ["success", "error"] {
+            let scrubbed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let _ = run(mode, Arc::clone(&scrubbed));
+            assert!(scrubbed.load(std::sync::atomic::Ordering::SeqCst));
+        }
+
+        let scrubbed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+            let scrubbed = Arc::clone(&scrubbed);
+            || {
+                let _ = run("panic", scrubbed);
+            }
+        }));
+        assert!(panicked.is_err());
+        assert!(scrubbed.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn zeroizing_owned_request_scrubs_when_deferred_preparation_is_aborted() {
+        let scrubbed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let request = ZeroizingGenerateRequest::from_owned(request(std::path::Path::new(
+            "/private/deferred.mp4",
+        )))
+        .with_scrub_probe(Arc::clone(&scrubbed));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn({
+            let started = Arc::clone(&started);
+            async move {
+                let _request = request;
+                started.notify_one();
+                std::future::pending::<()>().await;
+            }
+        });
+        started.notified().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(scrubbed.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]

@@ -163,6 +163,7 @@ import {
   listQueue,
   mergeQueueEntries,
   queuePageRequestForCapacity,
+  retryQueueJob,
   type QueueListing,
 } from "@studio/api/queuePlan";
 import { admitGenerationBatch, reconcileGenerationBatches } from "@studio/api/generationAdmission";
@@ -419,6 +420,7 @@ import {
   matchCollection,
   type FileUnderCollectionLike,
 } from "@studio/lib/fileUnder";
+import { truthfulGenerationPhase } from "@studio/lib/generationSubmissionPolicy";
 import {
   loadMobileSettings,
   updateMobileSettings as persistMobileSettings,
@@ -454,6 +456,7 @@ import {
 import { watchMobileGenerationHost, type MobileGenerationHostWatch } from "./mobileGenerationWatch";
 import { beginMobileBackgroundTask } from "./backgroundTask";
 import {
+  mobileGenerationSubmissionPolicy,
   mobilePlacementFailure,
   previewPinnedMobileGeneration,
   routeAutomaticMobileGeneration,
@@ -1052,6 +1055,7 @@ const durableGenerationReconciles = new Map<string, Promise<void>>();
 /** Missing = no follow-up; null = host-wide; Set = selected client batches. */
 const durableGenerationReconcilePending = new Map<string, Set<string> | null>();
 const durableGenerationCancelAttempts = new Map<string, Promise<boolean>>();
+const durableGenerationRetryAttempts = reactive(new Set<string>());
 let nextDurableGenerationClientId = -1;
 let selectedDurableGenerationClientId: number | null = null;
 const mobileDownloads = useMobileDownloadsStore();
@@ -1899,6 +1903,34 @@ function durableRecoveryForJob(job: Job): {
   return recovery ? { recovery, childIndex: identity.childIndex } : null;
 }
 
+function durableLifecycleForJob(job: Job) {
+  const durable = durableRecoveryForJob(job);
+  if (!durable) return null;
+  const lifecycle = mobileDurableJobs(durable.recovery).find(
+    (candidate) => candidate.childIndex === durable.childIndex,
+  );
+  return lifecycle ? { ...durable, lifecycle } : null;
+}
+
+function durableHeldError(job: Job): string | null {
+  const durable = durableLifecycleForJob(job);
+  if (!durable || truthfulGenerationPhase(durable.lifecycle) !== "held") return null;
+  return durable.lifecycle.error ?? null;
+}
+
+function durableHeldIsRetryable(job: Job): boolean {
+  const durable = durableLifecycleForJob(job);
+  return (
+    durable !== null &&
+    truthfulGenerationPhase(durable.lifecycle) === "held" &&
+    durable.lifecycle.retryable === true
+  );
+}
+
+function durableHeldIsRetrying(job: Job): boolean {
+  return durableGenerationRetryAttempts.has(job.id);
+}
+
 function presentationRequest(
   presentation: MobileDurableGenerationPresentation,
   prompt = "Recovered print",
@@ -2010,38 +2042,36 @@ function syncDurableGenerationJobs(): void {
         continue;
       }
       job.id = lifecycle.authority.jobId;
-      switch (lifecycle.phase) {
-        case "accepted":
-        case "queued":
-        case "held":
-          job.status = "queued";
-          job.cancelling = recovery.cancelRequestedChildIndexes.includes(presentation.index);
-          job.stage = lifecycle.phase === "held" ? "Held by host — action required" : null;
-          break;
-        case "running":
-          job.status = "loading";
-          job.cancelling = recovery.cancelRequestedChildIndexes.includes(presentation.index);
-          job.stage = "Rendering";
-          break;
-        case "complete":
-          job.status = "complete";
-          job.cancelling = false;
-          job.error = null;
-          job.result ??= durableCompleteEvent(presentation, lifecycle, job);
-          job.settledAtMs ??= lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs;
-          break;
-        case "failed":
-          job.status = "error";
-          job.cancelling = false;
-          job.error = lifecycle.error ?? "Generation failed";
-          job.settledAtMs ??= lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs;
-          break;
-        case "cancelled":
-          job.status = "error";
-          job.cancelling = false;
-          job.error = "Cancelled";
-          job.settledAtMs ??= lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs;
-          break;
+      const truthfulPhase = truthfulGenerationPhase(lifecycle);
+      if (truthfulPhase === "running") {
+        job.status = "loading";
+        job.cancelling = recovery.cancelRequestedChildIndexes.includes(presentation.index);
+        job.stage = "Rendering";
+      } else if (truthfulPhase !== "terminal") {
+        job.status = "queued";
+        job.cancelling = recovery.cancelRequestedChildIndexes.includes(presentation.index);
+        job.stage =
+          truthfulPhase === "accepted"
+            ? "Accepted"
+            : truthfulPhase === "held"
+              ? "Held by host — action required"
+              : null;
+      } else if (lifecycle.phase === "complete") {
+        job.status = "complete";
+        job.cancelling = false;
+        job.error = null;
+        job.result ??= durableCompleteEvent(presentation, lifecycle, job);
+        job.settledAtMs ??= lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs;
+      } else if (lifecycle.phase === "failed") {
+        job.status = "error";
+        job.cancelling = false;
+        job.error = lifecycle.error ?? "Generation failed";
+        job.settledAtMs ??= lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs;
+      } else if (lifecycle.phase === "cancelled") {
+        job.status = "error";
+        job.cancelling = false;
+        job.error = "Cancelled";
+        job.settledAtMs ??= lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs;
       }
     }
   }
@@ -2652,6 +2682,7 @@ function routeForMobileHost(host: MobileHost): HostRoute {
     heterogeneousBatch: queue?.heterogeneous_batch === true,
     heterogeneousBatchMaxOutputs: queue?.heterogeneous_batch_max_outputs ?? null,
     durableBatchOutcomes: queue?.durable_batch_outcomes === true,
+    admissionProtocolVersion: queue?.admission_protocol_version ?? null,
   };
 }
 
@@ -5785,11 +5816,15 @@ async function generate(): Promise<void> {
   const requireAuthoritativePlacement = requiresAuthoritativePlacement(
     request as unknown as Record<string, unknown>,
   );
-  const skipPinnedH3Placement =
-    !automaticOrdinary &&
-    !requireAuthoritativePlacement &&
-    isMinimaxH3Identity(draft.family, request.model);
-  if (!unmounted && uiId === submissionUiId && !skipPinnedH3Placement) {
+  const pinnedSubmissionPolicy = automaticOrdinary
+    ? null
+    : mobileGenerationSubmissionPolicy({
+        route,
+        request: request as unknown as Record<string, unknown>,
+        chain: chainRouting.kind === "chain",
+        target: { kind: "pinned", hostId: route.hostId },
+      });
+  if (!unmounted && uiId === submissionUiId && pinnedSubmissionPolicy?.routing !== "none") {
     generationSubmissionPhase.value = "placement";
   }
   let placement: GenerationPlacementPreview | null = null;
@@ -5920,6 +5955,7 @@ async function generate(): Promise<void> {
       queue: {
         heterogeneous_batch: route.heterogeneousBatch === true,
         durable_batch_outcomes: route.durableBatchOutcomes === true,
+        admission_protocol_version: route.admissionProtocolVersion ?? null,
       },
       durableMedia: route.durableMedia,
       requests: durablePlans,
@@ -6062,6 +6098,37 @@ async function cancelGeneration(job: Job): Promise<void> {
   } catch (error) {
     setGenerationStatus(describeTransportError(error, job.hostLabel), true);
     generationAnnouncement.value = `Cancellation failed. ${progress.value}`;
+  }
+}
+
+async function retryHeldGeneration(job: Job): Promise<void> {
+  const durable = durableLifecycleForJob(job);
+  if (
+    !durable ||
+    !job.id ||
+    truthfulGenerationPhase(durable.lifecycle) !== "held" ||
+    durable.lifecycle.retryable !== true ||
+    durableGenerationRetryAttempts.has(job.id)
+  ) {
+    return;
+  }
+  const host = resolveMobileDurableHost(durable.recovery, connectedHosts.value);
+  if (!host?.online) {
+    setGenerationStatus(`Reconnect ${job.hostLabel} before retrying this print.`, true);
+    return;
+  }
+  durableGenerationRetryAttempts.add(job.id);
+  try {
+    await retryQueueJob(mobileHostTarget(host), job.id);
+    await reconcileMobileDurableHost(durable.recovery.tracker.hostId);
+    setGenerationStatus(`Retry queued on ${job.hostLabel}.`);
+  } catch (error) {
+    setGenerationStatus(
+      `Could not retry this print on ${job.hostLabel}. ${describeTransportError(error, job.hostLabel)}`,
+      true,
+    );
+  } finally {
+    durableGenerationRetryAttempts.delete(job.id);
   }
 }
 
@@ -10271,9 +10338,26 @@ onBeforeUnmount(() => {
                   <div class="mobile-generation-job-copy">
                     <p>{{ row.print.prompt }}</p>
                     <span>{{ modelLabel(row.print.model) }} · {{ row.print.hostLabel }}</span>
+                    <p
+                      v-if="durableHeldError(row.print)"
+                      class="mobile-generation-held-error"
+                      data-test="mobile-generation-held-error"
+                    >
+                      {{ durableHeldError(row.print) }}
+                    </p>
                   </div>
                   <div class="mobile-generation-job-action">
                     <span data-test="mobile-generation-status">{{ activityRowStatus(row) }}</span>
+                    <button
+                      v-if="durableHeldIsRetryable(row.print)"
+                      class="mobile-generation-retry mobile-touch-action"
+                      type="button"
+                      data-test="mobile-generation-retry"
+                      :disabled="durableHeldIsRetrying(row.print)"
+                      @click.stop="retryHeldGeneration(row.print)"
+                    >
+                      {{ durableHeldIsRetrying(row.print) ? "Retrying…" : "Retry" }}
+                    </button>
                     <button
                       class="mobile-generation-cancel"
                       type="button"

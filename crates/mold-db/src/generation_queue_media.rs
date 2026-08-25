@@ -351,6 +351,7 @@ mod tests {
             updated_at_ms: 10,
             started_at_ms: None,
             media_set_id: media_set_id.map(str::to_string),
+            admission_authority: None,
         }
     }
 

@@ -11,9 +11,7 @@ use crate::queue_media_lifecycle::QueueMediaLifecycle;
 use crate::queue_media_store::{
     MediaSetRef, QueueMediaOperationFingerprint, QueueMediaOperationReceipt,
 };
-use crate::routes::{
-    ApiError, GenerationPreparationDelivery, PreparedGenerationRoute, RequestWarnings,
-};
+use crate::routes::{ApiError, RequestWarnings};
 use crate::state::{AppState, SseCompletionPayload};
 
 pub(crate) const DURABLE_MEDIA_IDENTITY_UNDECIDABLE: &str = "DURABLE_MEDIA_IDENTITY_UNDECIDABLE";
@@ -33,7 +31,9 @@ pub(crate) struct DurableAdmissionOutcome {
 
 struct PreparedChild {
     request: mold_core::GenerateRequest,
-    route: PreparedGenerationRoute,
+    output_dir: std::path::PathBuf,
+    preferred_gpu: Option<usize>,
+    authority: Option<crate::durable_admission_authority::CapturedAuthority>,
 }
 
 struct SealInput {
@@ -44,6 +44,8 @@ struct SealInput {
     target_gpu: Option<usize>,
     target_device_id: Option<String>,
     completion_payload: SseCompletionPayload,
+    admission_authority: Option<Vec<u8>>,
+    durable_replacement: Option<crate::queue_media::ProcessPrivateAuthority>,
 }
 
 struct SealedChild {
@@ -56,6 +58,7 @@ struct SealedChild {
     target_device_id: Option<String>,
     completion_payload: SseCompletionPayload,
     seed_pinned: bool,
+    admission_authority: Option<String>,
 }
 
 struct BlockingSealedBatch {
@@ -187,7 +190,69 @@ impl DurableMediaAdmission {
         durable_media_batch_preflight(&body.requests)?;
         let canonical_operation = serde_json::to_vec(&body.requests)
             .map_err(|error| ApiError::internal(format!("batch serialization failed: {error}")))?;
-        let fingerprint = QueueMediaOperationFingerprint::sha256_v1(&canonical_operation);
+        let output_dir = {
+            let config = state.config.read().await;
+            if state.is_output_disabled(&config) {
+                return Err(ApiError::validation(
+                    "durable admission requires server gallery output",
+                ));
+            }
+            config.effective_output_dir()
+        };
+        let mut prepared = Vec::with_capacity(body.requests.len());
+        for (offset, mut request) in body.requests.into_iter().enumerate() {
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+            if mold_core::minimax_h3::task_for_model(&request.model).is_some() {
+                request.normalise_output_format(Some(mold_core::minimax_h3::FAMILY));
+            }
+            crate::routes::apply_default_metadata_setting(state, &mut request).await;
+            crate::routes::normalize_generation_placement(state, &mut request).await;
+            let preferred_gpu =
+                crate::routes::validate_multi_gpu_placement(state, request.placement.as_ref())?;
+            // Authority binds the exact deterministic request persisted below.
+            let authority = crate::durable_admission_authority::capture(
+                &request,
+                authenticated,
+                state.instance_id.as_str(),
+            )
+            .map_err(|mut error| {
+                error.error = format!("requests[{}]: {}", offset + 1, error.error);
+                error
+            })?;
+            let validation = if authority.is_some() {
+                #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+                {
+                    mold_core::validation::validate_h3_private_uat_request(&request)
+                }
+                #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
+                {
+                    mold_core::validate_generate_request_fields(&request, None)
+                }
+            } else {
+                mold_core::validate_generate_request_fields(&request, None)
+            };
+            validation.map_err(|error| {
+                ApiError::validation(format!("requests[{}]: {error}", offset + 1))
+            })?;
+            prepared.push(PreparedChild {
+                request,
+                output_dir: output_dir.clone(),
+                preferred_gpu,
+                authority,
+            });
+        }
+
+        // H3 idempotency is identity-bound: the same client key and request
+        // submitted under a different authenticated identity must conflict,
+        // not inherit the first caller's durable authority.
+        let mut fingerprint_material = canonical_operation;
+        for child in &prepared {
+            if let Some(authority) = &child.authority {
+                fingerprint_material
+                    .extend_from_slice(authority.idempotency_subject_sha256.as_bytes());
+            }
+        }
+        let fingerprint = QueueMediaOperationFingerprint::sha256_v1(&fingerprint_material);
 
         if let Some(existing) = existing_by_client(state, &body.client_batch_id).await? {
             self.verify_existing_async(&body.client_batch_id, &fingerprint, &existing)
@@ -200,60 +265,22 @@ impl DurableMediaAdmission {
             });
         }
 
-        let mut prepared = Vec::with_capacity(body.requests.len());
-        for (offset, mut request) in body.requests.into_iter().enumerate() {
-            let route = crate::routes::prepare_generation_for_delivery(
-                state,
-                &mut request,
-                authenticated,
-                GenerationPreparationDelivery::DurableBatch,
-            )
-            .await
-            .map_err(|mut error| {
-                error.error = format!("requests[{}]: {}", offset + 1, error.error);
-                error
-            })?;
-            if route.resolved_references.is_some() || request.references.is_some() {
-                return Err(typed_refusal(
-                    "DURABLE_MEDIA_PRIVATE_AUTHORITY_UNSUPPORTED",
-                    "temporary reference authority cannot enter durable media admission",
-                ));
-            }
-            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-            if route.h3_private_ingress_grant.is_some() {
-                return Err(typed_refusal(
-                    "DURABLE_MEDIA_PRIVATE_AUTHORITY_UNSUPPORTED",
-                    "private MiniMax H3 authority cannot enter durable media admission",
-                ));
-            }
-            prepared.push(PreparedChild { request, route });
-        }
-
         let batch_id = uuid::Uuid::new_v4().to_string();
         let job_ids = (0..prepared.len())
             .map(|_| uuid::Uuid::new_v4().to_string())
             .collect::<Vec<_>>();
         let mut seal_inputs = Vec::with_capacity(prepared.len());
-        let mut direct_warnings = None;
+        let direct_warnings = observer_mode.map(|_| RequestWarnings::default());
         for (offset, (prepared, job_id)) in prepared.into_iter().zip(&job_ids).enumerate() {
-            let PreparedChild { request, route } = prepared;
-            let PreparedGenerationRoute {
+            let PreparedChild {
+                request,
                 output_dir,
-                warnings,
                 preferred_gpu,
-                resolved_references: _,
-                #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
-                    h3_private_ingress_grant: _,
-            } = route;
-            if observer_mode.is_some() {
-                direct_warnings = Some(warnings);
-            }
-            let output_dir = output_dir.ok_or_else(|| {
-                ApiError::validation(format!(
-                    "requests[{}]: durable media requires server gallery output",
-                    offset + 1
-                ))
-            })?;
+                authority,
+            } = prepared;
+            let (admission_authority, durable_replacement) = authority
+                .map(|authority| (Some(authority.envelope), Some(authority.replaces)))
+                .unwrap_or((None, None));
             let target_gpu = preferred_gpu;
             let target_device_id =
                 crate::queue_journal::stable_device_id_for_ordinal(state, target_gpu);
@@ -265,6 +292,8 @@ impl DurableMediaAdmission {
                 target_gpu,
                 target_device_id,
                 completion_payload,
+                admission_authority,
+                durable_replacement,
             });
         }
 
@@ -302,6 +331,7 @@ impl DurableMediaAdmission {
                         target_device_id: child.target_device_id.as_deref(),
                         completion_payload: child.completion_payload,
                         seed_pinned: child.seed_pinned,
+                        admission_authority: child.admission_authority.as_deref(),
                     })
                     .collect::<Vec<_>>();
                 match journal.record_batch_with_media(MediaBatchJournalAdmission {
@@ -416,34 +446,7 @@ impl DurableMediaAdmission {
 }
 
 pub(crate) fn request_has_durable_media(request: &mold_core::GenerateRequest) -> bool {
-    request.source_image.is_some()
-        || request.source_image_name.is_some()
-        || request.id_image.is_some()
-        || request.id_image_name.is_some()
-        || request.id_images.is_some()
-        || request.id_image_names.is_some()
-        || request.edit_images.is_some()
-        || request.mask_image.is_some()
-        || request.control_image.is_some()
-        || request.audio_file.is_some()
-        || request.audio_file_path.is_some()
-        || request.source_video.is_some()
-        || request.source_video_path.is_some()
-        || request.extend_video.is_some()
-        || request.extend_video_path.is_some()
-        || request.keyframes.is_some()
-}
-
-/// Requests that must enter the durable-media admission boundary, including
-/// forms that the protocol refuses before extraction because their authority
-/// cannot survive process restart.
-pub(crate) fn request_requires_durable_media_admission(
-    request: &mold_core::GenerateRequest,
-) -> bool {
-    request_has_durable_media(request)
-        || request.references.is_some()
-        || request.hdr_exr_dir.is_some()
-        || mold_core::minimax_h3::capability_contract_for_model(&request.model).is_some()
+    crate::queue_media::request_has_extractable_media(request)
 }
 
 fn durable_media_preflight(request: &mold_core::GenerateRequest) -> Result<(), ApiError> {
@@ -455,12 +458,6 @@ fn durable_media_preflight(request: &mold_core::GenerateRequest) -> Result<(), A
             "durable request media cannot be hydrated securely on this platform",
         ));
     }
-    if mold_core::minimax_h3::capability_contract_for_model(&request.model).is_some() {
-        return Err(typed_refusal(
-            "DURABLE_MEDIA_H3_UNSUPPORTED",
-            "MiniMax H3 requests require process-private replay authority",
-        ));
-    }
     if request.references.is_some() {
         return Err(typed_refusal(
             "DURABLE_MEDIA_REFERENCES_UNSUPPORTED",
@@ -470,13 +467,13 @@ fn durable_media_preflight(request: &mold_core::GenerateRequest) -> Result<(), A
     if request.hdr_exr_dir.is_some() {
         return Err(typed_refusal(
             "DURABLE_MEDIA_HDR_UNSUPPORTED",
-            "HDR output authority is not supported by durable media protocol v1",
+            "HDR output authority is not supported by the durable media protocol",
         ));
     }
     if request_has_durable_media(request) && (request.lora.is_some() || request.loras.is_some()) {
         return Err(typed_refusal(
             "DURABLE_MEDIA_LORA_UNSUPPORTED",
-            "media and LoRA inputs cannot share durable media protocol v1",
+            "media and LoRA inputs cannot share the durable media protocol",
         ));
     }
     Ok(())
@@ -525,16 +522,31 @@ fn seal_batch_blocking(
             target_gpu,
             target_device_id,
             completion_payload,
+            admission_authority,
+            durable_replacement,
         } = input;
         let model = request.model.clone();
         let seed_pinned = request.seed.is_some();
+        let admission_authority = admission_authority
+            .as_deref()
+            .map(|payload| {
+                batch
+                    .lifecycle
+                    .seal_admission_authority(&id, payload)
+                    .map(|authority| authority.as_str().to_owned())
+                    .map_err(|error| {
+                        ApiError::internal(format!(
+                            "requests[{}]: admission authority sealing failed: {error}",
+                            offset + 1
+                        ))
+                    })
+            })
+            .transpose()?;
         let (request_json, media_set) = if request_has_durable_media(&request) {
-            let extracted = crate::queue_media::extract_request_media(
-                &id,
-                request,
-                &crate::queue_media::ProcessPrivateAuthorities::none(),
-            )
-            .map_err(|error| extraction_error(offset, error))?;
+            let authorities = crate::queue_media::ProcessPrivateAuthorities::none()
+                .with_durable_replacement(durable_replacement);
+            let extracted = crate::queue_media::extract_request_media(&id, request, &authorities)
+                .map_err(|error| extraction_error(offset, error))?;
             let projection = crate::queue_media::project_request_media(extracted.media())
                 .map_err(|error| extraction_error(offset, error))?;
             let (request_json, media) = extracted.into_parts();
@@ -570,6 +582,7 @@ fn seal_batch_blocking(
             target_device_id,
             completion_payload,
             seed_pinned,
+            admission_authority,
         });
     }
     batch.receipt = Some(
@@ -749,13 +762,10 @@ mod tests {
     }
 
     #[test]
-    fn h3_references_and_hdr_have_stable_protocol_refusals() {
+    fn h3_is_admissible_while_references_and_hdr_keep_stable_refusals() {
         let mut h3 = request();
         h3.model = mold_core::minimax_h3::FL2VA_COMFY.to_string();
-        assert_eq!(
-            durable_media_preflight(&h3).unwrap_err().code,
-            "DURABLE_MEDIA_H3_UNSUPPORTED"
-        );
+        durable_media_preflight(&h3).expect("H3 uses sealed durable replay authority");
 
         let mut references = request();
         references.references = Some(vec![mold_core::GenerationReference::Image {

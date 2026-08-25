@@ -4828,7 +4828,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn capabilities_advertise_exact_v1_for_single_and_multi_lane_runtime_matrices() {
+    async fn capabilities_advertise_exact_v2_for_single_and_multi_lane_runtime_matrices() {
         for ordinals in [vec![0], vec![0, 1, 2]] {
             let root = tempfile::tempdir().unwrap();
             let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
@@ -4855,12 +4855,12 @@ mod tests {
             assert_eq!(
                 json_body(response).await["durable_media"],
                 serde_json::json!({
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "encrypted_at_rest": true,
                     "generate_request_media": true,
                     "identity": true,
                     "h3_references": false,
-                    "private_h3": false,
+                    "private_h3": cfg!(any(feature = "h3", feature = "h3-private-uat")),
                 }),
                 "lane count must not darken an otherwise complete runtime"
             );
@@ -5339,6 +5339,7 @@ mod tests {
                     "x".repeat(payload_bytes)
                 ),
                 media_set_id: None,
+                admission_authority: None,
                 output_dir: PathBuf::from(format!("/large-payload/{id}")),
                 target_gpu: (id == "live-running").then_some(2),
                 target_device_id: None,
@@ -5450,6 +5451,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retryable_dependency_hold_is_visible_and_resumes_through_the_retry_api() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        seed_durable_projection_row(
+            &db,
+            &owner,
+            "retryable-preparation",
+            mold_db::generation_queue::QueueRowState::Queued,
+            500,
+            0,
+        );
+        assert_eq!(
+            mold_db::generation_batches::hold_owned(
+                db.as_ref().as_ref().unwrap(),
+                &owner,
+                "retryable-preparation",
+                None,
+                "dependency download failed",
+                true,
+                600,
+            )
+            .unwrap(),
+            mold_db::generation_batches::OwnedHold::Held
+        );
+        let app = app_with_state(state.clone());
+
+        let listing = json_body(
+            app.clone()
+                .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let held = &listing["entries"][0];
+        assert_eq!(held["state"], "held");
+        assert_eq!(held["error"], "dependency download failed");
+        assert_eq!(held["retryable"], true);
+
+        let response = app
+            .oneshot(
+                Request::post("/api/queue/retryable-preparation/retry")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let response_body = json_body(response).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{response_body}");
+        let row = state.queue_journal.list_all().pop().unwrap();
+        assert_eq!(row.state, mold_db::generation_queue::QueueRowState::Queued);
+        assert_eq!(row.held_reason, None);
+    }
+
+    #[tokio::test]
     async fn queue_default_and_explicit_pages_are_bounded_by_the_runtime_window() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
@@ -5513,33 +5571,19 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn heterogeneous_batch_matches_attached_route_model_refusal_before_admission() {
+    async fn heterogeneous_batch_acknowledges_before_model_resolution_or_catalog_work() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let (mut state, _rx) = durable_state(db, root.path());
         install_authoritative_v2(&mut state);
         let journal = state.queue_journal.clone();
-        let app = app_with_state(state);
+        let app = app_with_state(state.clone());
         let unavailable = generate_body_for_model(
             "must not become a stranded durable row",
             "not-installed-at-admission",
             512,
             512,
         );
-        let attached = app
-            .clone()
-            .oneshot(
-                Request::post("/api/generate")
-                    .header("content-type", "application/json")
-                    .body(Body::from(unavailable.clone()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let attached_status = attached.status();
-        let attached = json_body(attached).await;
-        assert!(attached_status.is_client_error());
-
         let body = serde_json::json!({
             "client_batch_id": uuid::Uuid::new_v4().to_string(),
             "requests": [serde_json::from_str::<serde_json::Value>(
@@ -5552,14 +5596,50 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), attached_status);
-        let response = json_body(response).await;
-        assert_eq!(response["code"], attached["code"]);
-        assert!(journal.list_all().is_empty());
+        let status = response.status();
+        let response_body = json_body(response).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{response_body}");
+        assert_eq!(journal.list_all().len(), 1);
+        assert_eq!(journal.list_all()[0].model, "not-installed-at-admission");
+        assert_eq!(
+            state.job_registry.len(),
+            0,
+            "preparation starts only in the feeder"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn heterogeneous_batch_persists_the_attached_routes_prepared_filing() {
+    async fn direct_stream_uses_queue_first_admission_without_media_or_operation_header() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+
+        let response = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generate/stream",
+                serde_json::from_str::<serde_json::Value>(&generate_body_for_model(
+                    "queue before resolving",
+                    "not-installed-at-admission",
+                    512,
+                    512,
+                ))
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model, "not-installed-at-admission");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn heterogeneous_batch_persists_raw_filing_without_preack_db_resolution() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let collection = db
@@ -5594,23 +5674,27 @@ mod tests {
         let rows = journal.list_all();
         assert_eq!(rows.len(), 1);
         let persisted: GenerateRequest = serde_json::from_str(&rows[0].request_json).unwrap();
-        assert_eq!(persisted.output_format, Some(OutputFormat::Png));
+        assert_eq!(persisted.output_format, None);
         assert_eq!(persisted.embed_metadata, Some(true));
         assert_eq!(
             persisted.tags,
-            Some(vec!["Night Sky".into(), "Blue".into()])
+            Some(vec![
+                "  Night Sky  ".into(),
+                "night sky".into(),
+                "Blue".into()
+            ])
         );
         assert_eq!(
             persisted.collection,
             Some(mold_core::CollectionRef {
                 id: Some(collection.id),
-                name: Some("Durable Shelf".into()),
+                name: None,
             })
         );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn heterogeneous_batch_replay_ignores_later_host_unavailability() {
+    async fn heterogeneous_batch_replay_ignores_later_host_defaults_and_unavailability() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let (mut state, _rx) = durable_state(db, root.path());
@@ -5635,6 +5719,10 @@ mod tests {
         assert_eq!(admitted.status(), StatusCode::ACCEPTED);
         let admitted = json_body(admitted).await;
 
+        {
+            let mut config = state.config.write().await;
+            config.embed_metadata = !config.embed_metadata;
+        }
         state.set_generation_unavailable("test host is draining");
         let replay = app
             .oneshot(json_request("POST", "/api/generation-batches", body))
@@ -6074,7 +6162,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn durable_direct_authority_refusals_are_typed_and_never_reach_sqlite() {
+    async fn unreplayable_direct_authority_refusals_are_typed_and_never_reach_sqlite() {
         let root = tempfile::tempdir().unwrap();
         let db_path = root.path().join("mold.db");
         let db = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
@@ -6082,10 +6170,6 @@ mod tests {
         install_authoritative_v2(&mut state);
         let journal = state.queue_journal.clone();
         let app = app_with_state(state);
-
-        let mut h3: serde_json::Value =
-            serde_json::from_str(&generate_body("direct H3 authority", 64, 64)).unwrap();
-        h3["model"] = serde_json::json!(mold_core::minimax_h3::FL2VA_COMFY);
 
         let mut references: serde_json::Value =
             serde_json::from_str(&generate_body("direct reference authority", 64, 64)).unwrap();
@@ -6108,7 +6192,6 @@ mod tests {
 
         for path in ["/api/generate", "/api/generate/stream"] {
             for (request, expected_code) in [
-                (&h3, "DURABLE_MEDIA_H3_UNSUPPORTED"),
                 (&references, "DURABLE_MEDIA_REFERENCES_UNSUPPORTED"),
                 (&hdr, "DURABLE_MEDIA_HDR_UNSUPPORTED"),
             ] {
@@ -7584,6 +7667,7 @@ mod tests {
                 model: "mock-model".to_string(),
                 request_json: "{\"prompt\":".to_string(),
                 media_set_id: None,
+                admission_authority: None,
                 output_dir: output_dir.path().to_path_buf(),
                 target_gpu: None,
                 target_device_id: None,
@@ -7624,6 +7708,7 @@ mod tests {
                 request_json: r#"{"prompt":"a cat","model":"mock-model","width":512,"height":512,"steps":4,"guidance":3.5}"#
                     .to_string(),
                 media_set_id: None,
+                admission_authority: None,
                 output_dir: output_dir.path().to_path_buf(),
                 target_gpu: None,
                 target_device_id: None,

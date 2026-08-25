@@ -1889,6 +1889,17 @@ pub fn validate_generate_request_with_family(
     validate_generate_request_after_activation(req, family_hint)
 }
 
+/// Validate request-owned fields after authentication but before model-family
+/// resolution. Durable queue admission uses this bounded pass so unknown or
+/// temporarily unavailable model identities can be persisted and diagnosed
+/// by deferred preparation without skipping shape and filing safeguards.
+pub fn validate_generate_request_fields(
+    req: &GenerateRequest,
+    family_hint: Option<&str>,
+) -> Result<(), String> {
+    validate_generate_request_after_activation(req, family_hint)
+}
+
 /// Validate the exact MiniMax H3 private-UAT request partition after the
 /// server has issued its authenticated ingress grant.
 ///

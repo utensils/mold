@@ -737,6 +737,7 @@ mod tests {
             updated_at_ms: 1,
             started_at_ms: None,
             media_set_id: None,
+            admission_authority: None,
         }
     }
 

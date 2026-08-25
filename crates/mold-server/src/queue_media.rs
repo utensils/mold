@@ -50,6 +50,28 @@ pub const REQUEST_AUTHORITY_JSON_FIELDS: &[&str] = &[
     "loras",
 ];
 
+/// The authoritative predicate for request fields transported by the
+/// encrypted durable-media store. Process-private references and local-only
+/// HDR/LoRA authorities are intentionally classified separately.
+pub(crate) fn request_has_extractable_media(request: &mold_core::GenerateRequest) -> bool {
+    request.source_image.is_some()
+        || request.source_image_name.is_some()
+        || request.id_image.is_some()
+        || request.id_image_name.is_some()
+        || request.id_images.is_some()
+        || request.id_image_names.is_some()
+        || request.edit_images.is_some()
+        || request.mask_image.is_some()
+        || request.control_image.is_some()
+        || request.audio_file.is_some()
+        || request.audio_file_path.is_some()
+        || request.source_video.is_some()
+        || request.source_video_path.is_some()
+        || request.extend_video.is_some()
+        || request.extend_video_path.is_some()
+        || request.keyframes.is_some()
+}
+
 /// A process-private authority that media extraction cannot make durable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessPrivateAuthority {
@@ -67,6 +89,7 @@ pub enum ProcessPrivateAuthority {
 #[derive(Debug, Default)]
 pub struct ProcessPrivateAuthorities {
     authorities: Vec<ProcessPrivateAuthority>,
+    durable_replacements: Vec<ProcessPrivateAuthority>,
 }
 
 impl ProcessPrivateAuthorities {
@@ -77,7 +100,21 @@ impl ProcessPrivateAuthorities {
     pub fn from_authority(authority: ProcessPrivateAuthority) -> Self {
         Self {
             authorities: vec![authority],
+            durable_replacements: Vec::new(),
         }
+    }
+
+    /// Declare that admission replaced the live H3 grant with its validated,
+    /// one-way replay subject. Extraction remains fail-closed for H3 unless
+    /// this explicit durable authority is present.
+    pub(crate) fn with_durable_replacement(
+        mut self,
+        authority: Option<ProcessPrivateAuthority>,
+    ) -> Self {
+        if let Some(authority) = authority {
+            self.durable_replacements.push(authority);
+        }
+        self
     }
 
     pub fn from_present(resolved_reference_staging: bool, h3_private_ingress_grant: bool) -> Self {
@@ -88,7 +125,10 @@ impl ProcessPrivateAuthorities {
         if h3_private_ingress_grant {
             authorities.push(ProcessPrivateAuthority::H3PrivateIngressGrant);
         }
-        Self { authorities }
+        Self {
+            authorities,
+            durable_replacements: Vec::new(),
+        }
     }
 }
 
@@ -626,7 +666,11 @@ pub fn extract_request_media(
     // The private grant is not carried on GenerateRequest, but its necessity
     // is. Deriving this here prevents a new call site from making an H3 request
     // look durable merely by forgetting to inventory the live grant.
-    if mold_core::minimax_h3::capability_contract_for_model(&request.model).is_some() {
+    if mold_core::minimax_h3::capability_contract_for_model(&request.model).is_some()
+        && !process_private
+            .durable_replacements
+            .contains(&ProcessPrivateAuthority::H3PrivateIngressGrant)
+    {
         return Err(QueueMediaError::UnsupportedProcessPrivateAuthority(
             ProcessPrivateAuthority::H3PrivateIngressGrant,
         ));

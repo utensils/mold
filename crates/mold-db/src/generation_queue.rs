@@ -136,6 +136,10 @@ pub struct GenerationQueueRow {
     /// Opaque staged-media set owned by this queue row. The database never
     /// stores or interprets the set's members or filesystem layout.
     pub media_set_id: Option<String>,
+    /// Opaque authenticated ciphertext for reconstructing a server-owned
+    /// admission grant after restart. The media-store key binds it to this
+    /// owner + job; the server then revalidates request, instance, and policy.
+    pub admission_authority: Option<String>,
 }
 
 /// Payload-free row used by the hot queue-listing path.
@@ -154,6 +158,8 @@ pub struct GenerationQueueProjection {
     pub dispatch_attempts: u32,
     pub replay_seen: u32,
     pub held_reason: Option<String>,
+    /// Whether an explicit retry may safely return this held row to the queue.
+    pub retryable: bool,
     pub created_at_ms: i64,
 }
 
@@ -210,7 +216,7 @@ pub enum OwnedQueuedPatchOutcome {
 /// durable payload columns are selected.
 const QUEUE_PROJECTION_FIRST_PAGE_SQL: &str = "
     SELECT q.id, q.state, q.model, q.target_gpu, q.seed_pinned,
-           q.dispatch_attempts, q.replay_seen, q.held_reason, q.created_at,
+           q.dispatch_attempts, q.replay_seen, q.held_reason, q.retryable, q.created_at,
            q.rowid
       FROM generation_queue AS q
      WHERE q.owner_uuid = ?1
@@ -219,7 +225,7 @@ const QUEUE_PROJECTION_FIRST_PAGE_SQL: &str = "
 
 const QUEUE_PROJECTION_AFTER_SQL: &str = "
     SELECT q.id, q.state, q.model, q.target_gpu, q.seed_pinned,
-           q.dispatch_attempts, q.replay_seen, q.held_reason, q.created_at,
+           q.dispatch_attempts, q.replay_seen, q.held_reason, q.retryable, q.created_at,
            q.rowid
       FROM generation_queue AS q
      WHERE q.owner_uuid = ?1
@@ -255,6 +261,9 @@ const CLAIMED_QUEUE_RUNTIME_WINDOW_SQL: &str = "
 pub struct QueueClaim {
     pub row: GenerationQueueRow,
     pub claim_token: String,
+    /// Stable SQLite admission order, used when bounded preparation workers
+    /// finish out of order before scheduler publication.
+    pub queue_rank: u64,
 }
 
 /// Position of an exact feeder claim in SQLite's bounded live-order window.
@@ -368,8 +377,8 @@ fn insert_on_conn_with_claim(
                 id, owner_uuid, state, model, request_json, output_dir,
                 target_gpu, target_device_id, completion_payload, seed_pinned,
                 dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
-                started_at, claim_token, media_set_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                started_at, claim_token, media_set_id, admission_authority
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             &row.id,
             &row.owner_uuid,
@@ -389,6 +398,7 @@ fn insert_on_conn_with_claim(
             row.started_at_ms,
             claim_token,
             row.media_set_id.as_deref(),
+            row.admission_authority.as_deref(),
         ],
     )?;
     Ok(())
@@ -447,7 +457,7 @@ pub fn get(db: &MetadataDb, id: &str) -> Result<Option<GenerationQueueRow>> {
             "SELECT id, owner_uuid, state, model, request_json, output_dir,
                     target_gpu, target_device_id, completion_payload, seed_pinned,
                     dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
-                    started_at, media_set_id
+                    started_at, media_set_id, admission_authority
              FROM generation_queue WHERE id = ?1",
             params![id],
             row_to_queue_row,
@@ -467,7 +477,7 @@ pub fn list_all(db: &MetadataDb, owner_uuid: &str) -> Result<Vec<GenerationQueue
             "SELECT id, owner_uuid, state, model, request_json, output_dir,
                     target_gpu, target_device_id, completion_payload, seed_pinned,
                     dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
-                    started_at, media_set_id
+                    started_at, media_set_id, admission_authority
              FROM generation_queue
              WHERE owner_uuid = ?1
              ORDER BY created_at, rowid",
@@ -553,11 +563,12 @@ fn projection_page_row(
             dispatch_attempts: row.get::<_, i64>(5)? as u32,
             replay_seen: row.get::<_, i64>(6)? as u32,
             held_reason: row.get(7)?,
-            created_at_ms: row.get(8)?,
+            retryable: row.get::<_, i64>(8)? != 0,
+            created_at_ms: row.get(9)?,
         },
         QueueProjectionCursor {
-            created_at_ms: row.get(8)?,
-            rowid: row.get(9)?,
+            created_at_ms: row.get(9)?,
+            rowid: row.get(10)?,
         },
     ))
 }
@@ -647,7 +658,7 @@ pub fn list_replayable(db: &MetadataDb, owner_uuid: &str) -> Result<Vec<Generati
             "SELECT id, owner_uuid, state, model, request_json, output_dir,
                     target_gpu, target_device_id, completion_payload, seed_pinned,
                     dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
-                    started_at, media_set_id
+                    started_at, media_set_id, admission_authority
              FROM generation_queue
              WHERE owner_uuid = ?1 AND state IN ('queued', 'running')
              ORDER BY created_at, rowid",
@@ -717,12 +728,13 @@ pub fn claim_next(
           RETURNING id, owner_uuid, state, model, request_json, output_dir,
                     target_gpu, target_device_id, completion_payload, seed_pinned,
                     dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
-                    started_at, media_set_id",
+                    started_at, media_set_id, admission_authority, rowid",
             params![owner_uuid, claim_token, now_ms],
             |row| {
                 Ok(QueueClaim {
                     row: row_to_queue_row(row)?,
                     claim_token: claim_token.to_string(),
+                    queue_rank: row.get::<_, i64>(18)? as u64,
                 })
             },
         )
@@ -763,12 +775,13 @@ pub fn claim_by_id(
           RETURNING id, owner_uuid, state, model, request_json, output_dir,
                     target_gpu, target_device_id, completion_payload, seed_pinned,
                     dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
-                    started_at, media_set_id",
+                    started_at, media_set_id, admission_authority, rowid",
             params![owner_uuid, id, claim_token, now_ms],
             |row| {
                 Ok(QueueClaim {
                     row: row_to_queue_row(row)?,
                     claim_token: claim_token.to_string(),
+                    queue_rank: row.get::<_, i64>(18)? as u64,
                 })
             },
         )
@@ -936,7 +949,7 @@ pub fn hold_claimed(
     db.with_conn(|conn| {
         Ok(conn.execute(
             "UPDATE generation_queue
-                SET state = 'held', held_reason = ?4, updated_at = ?5
+                SET state = 'held', held_reason = ?4, retryable = 0, updated_at = ?5
               WHERE id = ?1 AND state = ?2 AND claim_token = ?3",
             params![id, expected_state.as_str(), claim_token, reason, now_ms],
         )? > 0)
@@ -965,7 +978,7 @@ pub fn hold(db: &MetadataDb, id: &str, reason: &str, now_ms: i64) -> Result<bool
     db.with_conn(|conn| {
         let updated = conn.execute(
             "UPDATE generation_queue
-                SET state = 'held', held_reason = ?2, updated_at = ?3
+                SET state = 'held', held_reason = ?2, retryable = 0, updated_at = ?3
               WHERE id = ?1",
             params![id, reason, now_ms],
         )?;
@@ -1006,7 +1019,7 @@ pub fn hold_media_jobs(
         )?;
         let mut stmt = conn.prepare(
             "UPDATE generation_queue
-                SET state = 'held', held_reason = ?3, claim_token = NULL,
+                SET state = 'held', held_reason = ?3, retryable = 0, claim_token = NULL,
                     started_at = NULL, updated_at = ?4
               WHERE id = ?1 AND owner_uuid = ?2
                 AND media_set_id IS NOT NULL
@@ -1355,21 +1368,21 @@ impl QueuePatchClaimFence {
         match self {
             Self::Unclaimed => {
                 "SELECT id, state, model, target_gpu, seed_pinned,
-                        dispatch_attempts, replay_seen, held_reason, created_at
+                        dispatch_attempts, replay_seen, held_reason, retryable, created_at
                    FROM generation_queue
                   WHERE id = ?1 AND owner_uuid = ?2
                     AND state = 'queued' AND claim_token IS NULL"
             }
             Self::Claimed => {
                 "SELECT id, state, model, target_gpu, seed_pinned,
-                        dispatch_attempts, replay_seen, held_reason, created_at
+                        dispatch_attempts, replay_seen, held_reason, retryable, created_at
                    FROM generation_queue
                   WHERE id = ?1 AND owner_uuid = ?2
                     AND state = 'queued' AND claim_token IS NOT NULL"
             }
             Self::AnyExact => {
                 "SELECT id, state, model, target_gpu, seed_pinned,
-                        dispatch_attempts, replay_seen, held_reason, created_at
+                        dispatch_attempts, replay_seen, held_reason, retryable, created_at
                    FROM generation_queue
                   WHERE id = ?1 AND owner_uuid = ?2
                     AND state = 'queued' AND claim_token IS ?3"
@@ -1511,7 +1524,8 @@ fn patch_owned_queued_with_claim_fence(
                 dispatch_attempts: row.get::<_, i64>(5)? as u32,
                 replay_seen: row.get::<_, i64>(6)? as u32,
                 held_reason: row.get(7)?,
-                created_at_ms: row.get(8)?,
+                retryable: row.get::<_, i64>(8)? != 0,
+                created_at_ms: row.get(9)?,
             })
         };
         let projection = if matches!(claim_fence, QueuePatchClaimFence::AnyExact) {
@@ -1875,6 +1889,7 @@ fn row_to_queue_row(row: &Row<'_>) -> rusqlite::Result<GenerationQueueRow> {
         updated_at_ms: row.get(14)?,
         started_at_ms: row.get(15)?,
         media_set_id: row.get(16)?,
+        admission_authority: row.get(17)?,
     })
 }
 
@@ -1903,6 +1918,7 @@ mod tests {
             updated_at_ms: created_at_ms,
             started_at_ms: None,
             media_set_id: None,
+            admission_authority: None,
         }
     }
 
@@ -2001,6 +2017,7 @@ mod tests {
             dispatch_attempts,
             replay_seen,
             held_reason: _,
+            retryable: _,
             created_at_ms: _,
         } = &first.rows[0];
         assert_eq!(id, "queued");
