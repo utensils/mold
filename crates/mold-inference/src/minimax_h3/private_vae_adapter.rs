@@ -350,8 +350,9 @@ where
         let inner_authority = self.inner.validate_private_vae_free_inner_authority()?;
         if self.inner.identity() != self.frozen_identity
             || !self.inner.device().same_device(self.vae.device())
-            || self.vae.task() != Task::Fl2va
-            || self.vae.canonical_model() != contract::FL2VA_COMFY
+            || self.vae.task() != self.admitted.task
+            || self.vae.canonical_model()
+                != contract::base_compact_model_for_task(self.admitted.task)
             || self.vae.artifact_plan_identity_sha256()
                 != self.admitted.vae_artifact_plan_identity_sha256
             || !inner_authority.matches(&self.admitted)
@@ -469,8 +470,7 @@ where
         || identity.device_id != admitted.device_id
         || identity.execution_fingerprint != admitted.execution_fingerprint
         || !inner.device().same_device(vae.device())
-        || admitted.task != Task::Fl2va
-        || admitted.canonical_model != contract::FL2VA_COMFY
+        || admitted.canonical_model != contract::base_compact_model_for_task(admitted.task)
         || vae.task() != admitted.task
         || vae.canonical_model() != admitted.canonical_model
         || vae.artifact_plan_identity_sha256() != admitted.vae_artifact_plan_identity_sha256
@@ -478,7 +478,10 @@ where
         || !valid_sha256(vae.plan_identity_sha256())
         || !valid_sha256(vae.authority_identity_sha256())
     {
-        bail!("private MiniMax H3 VAE runtime does not match the frozen FL2VA route");
+        bail!(
+            "private MiniMax H3 VAE runtime does not match the frozen {:?} route",
+            admitted.task
+        );
     }
     Ok(())
 }

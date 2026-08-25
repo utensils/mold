@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # One #825 UAT render. Usage: run-case.sh <case-id> <prompt> [--reference ...]
 #
-# The production mold.service on :7680 shares this card, so the case waits for
-# it to be idle before submitting and never stops or reconfigures it.
+# The production mold.service on :7680 shares this card and this host's RAM, so
+# the case waits for it to be idle and then asks it to unload — never stopping,
+# restarting, or reconfiguring it.
 set -euo pipefail
 root=/home/jamesbrink/Projects/utensils/mold/.claude/worktrees/agent-a81576867db752e34
 out=/storage-fast/mold/uat-825
@@ -14,10 +15,9 @@ export MOLD_API_KEY=uat825
 
 mkdir -p "$out/logs" "$out/output"
 
-# Wait for the production server to go idle and the card to drain.
 waited=0
-while [ "$waited" -lt 5400 ]; do
-  busy="$(curl -s http://localhost:7680/api/status | grep -o '"busy":[a-z]*' || echo '"busy":false')"
+while [ "$waited" -lt 7200 ]; do
+  busy="$(curl -s http://localhost:7680/api/status | grep -o '"busy":[a-z]*' || echo '"busy":true')"
   used="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits)"
   if [ "$busy" = '"busy":false' ] && [ "$used" -lt 2000 ]; then
     break
@@ -27,9 +27,11 @@ while [ "$waited" -lt 5400 ]; do
 done
 echo "waited_for_gpu=${waited}s"
 
-# Page cache steals from the host admission sample, and the sample is taken
-# after this server's own ~37 GB artifact pass. Drop it first so the run is
-# measured against real headroom rather than against the previous attempt's.
+# The compact Ref2VA stack asks for ~24.6 GB of host headroom, so an idle
+# production server still holding its own H3 model is the difference between
+# admitted and refused. Unloading is the one production mutation this UAT
+# performs, and it is the documented one.
+curl -s -X DELETE http://localhost:7680/api/models/unload >/dev/null || true
 sudo -n sync || true
 sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches' || true
 
