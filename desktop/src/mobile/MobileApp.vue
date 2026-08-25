@@ -461,6 +461,10 @@ import {
   preparedSubmissionIsCurrent,
   quickSubmissionIsCurrent,
 } from "./mobileGenerationSnapshot";
+import {
+  mobileCompletionSummary as completionSummary,
+  summarizeMobileGenerationOutcome,
+} from "./mobileGenerationOutcome";
 import { MobileSubmissionAttempts } from "./mobileSubmissionAttempt";
 
 type Tab = "generate" | "gallery" | "catalog" | "hosts";
@@ -2604,14 +2608,6 @@ const generationStatusIsError = computed(() => !activeGeneration.value && progre
 function setGenerationStatus(message: string, isError = false): void {
   progress.value = message;
   progressIsError.value = isError;
-}
-
-/** Seed/time line for a completed result; the time is omitted when a resumed
- * reconciliation lost the true duration with the stream. */
-function completionSummary(result: CompleteEvent): string {
-  const timing =
-    result.generation_time_ms > 0 ? `${(result.generation_time_ms / 1000).toFixed(1)}s · ` : "";
-  return `${timing}seed ${result.seed_used}`;
 }
 
 async function saveCompletedStillToPhotos(result: CompleteEvent, target: ApiTarget): Promise<void> {
@@ -5968,103 +5964,19 @@ async function generate(): Promise<void> {
       isActive: () => !unmounted,
     });
     if (unmounted) return;
-    requestAdvisories.value = [...new Set(jobs.flatMap((candidate) => candidate.requestWarnings))];
+    const outcome = summarizeMobileGenerationOutcome(jobs, {
+      hostLabel: route.label,
+      prepared: preparedSubmission !== null,
+    });
+    requestAdvisories.value = outcome.advisories;
     for (const candidate of jobs) handledGenerationClientIds.add(candidate.clientId);
-    const completed = jobs.filter(
-      (candidate) => candidate.status === "complete" && candidate.result,
-    );
-    for (const candidate of completed) {
+    for (const candidate of outcome.completed) {
       void saveCompletedStillToPhotos(candidate.result!, route.target);
     }
-    const latestCompleted = completed.at(-1);
-    const unconfirmedCancellation = jobs.find((candidate) =>
-      candidate.error?.includes("remote cancellation was not confirmed"),
-    );
-    const failed = jobs.find((candidate) => candidate.error && !isCancelledError(candidate.error));
-    const failedError = failed?.error ? describeTransportError(failed.error, route.label) : null;
-    const failedVariations = preparedSubmission
-      ? jobs.flatMap((candidate, index) => {
-          if (!candidate.error || isCancelledError(candidate.error)) return [];
-          const prompt =
-            candidate.prompt.length > 120 ? `${candidate.prompt.slice(0, 117)}…` : candidate.prompt;
-          return [
-            `Variation ${index + 1}, “${prompt}”, failed: ${describeTransportError(
-              candidate.error,
-              route.label,
-            )}`,
-          ];
-        })
-      : [];
-    const preparedFailureSummary = failedVariations.join(" ");
-    const failedCount = jobs.filter(
-      (candidate) => candidate.error && !isCancelledError(candidate.error),
-    ).length;
-    const cancelled = jobs.find((candidate) => isCancelledError(candidate.error));
-
-    if (latestCompleted?.result) {
-      latestResultClientId.value = latestCompleted.clientId;
-      if (latestCompleted.resultError) {
-        const previewDetail = describeTransportError(latestCompleted.resultError, route.label);
-        setGenerationStatus(previewDetail, true);
-        generationAnnouncement.value = `${completed.length} of ${jobs.length} generations completed, but the latest preview is unavailable. ${previewDetail}`;
-      } else {
-        setGenerationStatus(
-          `${completed.length > 1 ? `${completed.length} prints · ` : ""}${completionSummary(
-            latestCompleted.result,
-          )}`,
-        );
-        generationAnnouncement.value =
-          completed.length === 1 && jobs.length === 1
-            ? "Generation completed."
-            : `${completed.length} of ${jobs.length} generations completed.`;
-      }
-      if (unconfirmedCancellation?.error || failedError) {
-        setGenerationStatus(
-          [
-            `${completed.length} of ${jobs.length} completed`,
-            failedError,
-            unconfirmedCancellation?.error,
-          ]
-            .filter(Boolean)
-            .join(" · "),
-          true,
-        );
-        generationAnnouncement.value = [
-          `${completed.length} generations completed.`,
-          failedError
-            ? preparedSubmission
-              ? `${failedCount} failed. ${preparedFailureSummary}`
-              : `${failedCount} failed. ${failedError}`
-            : "",
-          unconfirmedCancellation?.error
-            ? `Cancellation failed. ${unconfirmedCancellation.error}`
-            : "",
-        ]
-          .filter(Boolean)
-          .join(" ");
-      }
-      if (tab.value === "gallery") void refreshGallery();
-    } else if (unconfirmedCancellation?.error || failedError) {
-      setGenerationStatus(
-        [failedError, unconfirmedCancellation?.error].filter(Boolean).join(" · "),
-        true,
-      );
-      generationAnnouncement.value = [
-        failedError
-          ? preparedSubmission
-            ? `Generation failed. ${preparedFailureSummary}`
-            : `Generation failed. ${failedError}`
-          : "",
-        unconfirmedCancellation?.error
-          ? `Cancellation failed. ${unconfirmedCancellation.error}`
-          : "",
-      ]
-        .filter(Boolean)
-        .join(" ");
-    } else if (cancelled) {
-      setGenerationStatus("Cancelled");
-      generationAnnouncement.value = `${jobs.length} generation${jobs.length === 1 ? "" : "s"} cancelled.`;
-    }
+    if (outcome.latestCompleted) latestResultClientId.value = outcome.latestCompleted.clientId;
+    if (outcome.status) setGenerationStatus(outcome.status.message, outcome.status.isError);
+    if (outcome.announcement !== null) generationAnnouncement.value = outcome.announcement;
+    if (outcome.refreshGallery && tab.value === "gallery") void refreshGallery();
     // Only terminal jobs whose callbacks have run are eligible: multiple
     // completion microtasks cannot prune one another before they promote the
     // correct latest result. The UI renders one result, so retain one Blob.
