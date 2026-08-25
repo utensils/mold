@@ -964,6 +964,7 @@
               pkgs.bun
               pkgs.bun2nix
               pkgs.cargo-tauri
+              pkgs.nodejs_22
               pkgs.nodePackages.prettier
               pkgs.tmux
               pkgs.runpodctl
@@ -1513,6 +1514,12 @@
                   bun install
                   bun2nix -o bun.nix
                 '';
+              }
+              {
+                category = "docs";
+                name = "understand-dashboard";
+                help = "open the Understand Anything knowledge-graph dashboard";
+                command = "./scripts/understand-dashboard.sh \"$@\"";
               }
               {
                 category = "docs";
