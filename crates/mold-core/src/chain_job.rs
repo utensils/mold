@@ -691,6 +691,15 @@ pub struct RetakeRequest {
     pub prompt: Option<String>,
 }
 
+impl RetakeRequest {
+    pub fn normalize_prompt_newlines(&mut self) {
+        self.prompt = self
+            .prompt
+            .take()
+            .map(|prompt| crate::normalize_prompt_newlines(&prompt).into_owned());
+    }
+}
+
 /// Body of `POST /api/chain-jobs/:id/amend`: the FULL edited stage list (in
 /// canonical order) replaces the job's stages, plus optional chain-level
 /// overlays (omitted = keep current). NOT amendable — the client must create
@@ -714,6 +723,18 @@ pub struct AmendRequest {
     pub strength: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable_audio: Option<bool>,
+}
+
+impl AmendRequest {
+    pub fn normalize_prompt_newlines(&mut self) {
+        for stage in &mut self.stages {
+            stage.prompt = crate::normalize_prompt_newlines(&stage.prompt).into_owned();
+            stage.negative_prompt = stage
+                .negative_prompt
+                .take()
+                .map(|prompt| crate::normalize_prompt_newlines(&prompt).into_owned());
+        }
+    }
 }
 
 /// 202 body of `POST /api/chain-jobs/:id/amend`.

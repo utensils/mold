@@ -136,11 +136,22 @@ pub(crate) fn protect_remix_request_for_wire(request: &crate::RemixRequest) -> c
     wire
 }
 
+pub(crate) fn protect_retake_request_for_wire(
+    request: &crate::chain_job::RetakeRequest,
+) -> crate::chain_job::RetakeRequest {
+    let mut wire = request.clone();
+    if let Some(prompt) = wire.prompt.as_mut() {
+        protect_prompt_for_wire(prompt);
+    }
+    wire
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         normalize_prompt_newlines, protect_chain_request_for_wire, protect_expand_request_for_wire,
         protect_generate_request_for_wire, protect_remix_request_for_wire,
+        protect_retake_request_for_wire,
     };
     use crate::{
         ChainRequest, ExpandRequest, GenerateRequest, OutputMetadata, RemixRequest, Scheduler,
@@ -339,5 +350,18 @@ mod tests {
             chain.stages[0].negative_prompt
         );
         assert_eq!(admitted.original_prompt, chain.original_prompt);
+
+        let retake = crate::chain_job::RetakeRequest {
+            stage_idx: 0,
+            mode: crate::chain_job::RetakeMode::Cascade,
+            seed_offset: None,
+            prompt: Some("retake\nidea\\n literal".to_string()),
+        };
+        let mut admitted: crate::chain_job::RetakeRequest = serde_json::from_slice(
+            &serde_json::to_vec(&protect_retake_request_for_wire(&retake)).unwrap(),
+        )
+        .unwrap();
+        admitted.normalize_prompt_newlines();
+        assert_eq!(admitted.prompt, retake.prompt);
     }
 }

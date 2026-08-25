@@ -457,8 +457,9 @@ pub async fn resume_chain_job(
 pub async fn retake_chain_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(req): Json<RetakeRequest>,
+    Json(mut req): Json<RetakeRequest>,
 ) -> Result<(StatusCode, Json<ChainJobSummary>), ApiError> {
+    req.normalize_prompt_newlines();
     crate::routes::ensure_generation_available(&state)?;
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
@@ -528,8 +529,9 @@ pub async fn amend_chain_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    Json(req): Json<AmendRequest>,
+    Json(mut req): Json<AmendRequest>,
 ) -> Result<(StatusCode, Json<AmendResponse>), ApiError> {
+    req.normalize_prompt_newlines();
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
     let root = jobs_root()?;
@@ -540,7 +542,6 @@ pub async fn amend_chain_job(
     // inside `apply_amend`). The gate may normalise chain-level fields (e.g.
     // ltx-video forces motion_tail_frames to 0); carry that back into the
     // amend overlays so the stored request matches what was validated.
-    let mut req = req;
     {
         let row = chain_jobs::get_job(db, &id)
             .map_err(|e| ApiError::internal(format!("failed to load chain job: {e:#}")))?
@@ -2082,10 +2083,10 @@ mod tests {
         let mut events_rx = state.events.subscribe();
         let mut stages = request.stages;
         stages.push(ChainStage {
-            prompt: "appended clip".into(),
+            prompt: r"appended\n\nclip\\n literal".into(),
             frames: 9,
             source_image: None,
-            negative_prompt: None,
+            negative_prompt: Some(r"jitter\r\nflicker".into()),
             seed_offset: None,
             transition: TransitionMode::Cut,
             fade_frames: None,
@@ -2110,6 +2111,17 @@ mod tests {
         );
         assert_eq!(body.summary.state, ChainJobState::Queued);
         assert_eq!(body.summary.stage_count, 2);
+
+        let row = chain_jobs::get_job(db.as_ref().as_ref().unwrap(), &created.job_id)
+            .unwrap()
+            .unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&row.job_dir).unwrap();
+        let effective = crate::chain_job_runner::effective_request(&manifest).unwrap();
+        assert_eq!(effective.stages[1].prompt, "appended\n\nclip\\n literal");
+        assert_eq!(
+            effective.stages[1].negative_prompt.as_deref(),
+            Some("jitter\nflicker")
+        );
 
         let event = events_rx.try_recv().expect("chain_job_queued published");
         let wire = serde_json::to_value(&event).unwrap();
@@ -2684,7 +2696,7 @@ mod tests {
                     stage_idx: 0,
                     mode: mold_core::chain_job::RetakeMode::Cascade,
                     seed_offset: Some(9),
-                    prompt: Some("ordinary retake".into()),
+                    prompt: Some(r"ordinary\n\nretake\\n literal".into()),
                 }),
             ))
         })
@@ -2696,7 +2708,7 @@ mod tests {
         assert_eq!(manifest.retakes.len(), 1);
         assert_eq!(
             manifest.retakes[0].new_prompt.as_deref(),
-            Some("ordinary retake")
+            Some("ordinary\n\nretake\\n literal")
         );
     }
 

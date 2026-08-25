@@ -1031,6 +1031,7 @@ impl MoldClient {
     }
 
     pub async fn retake_chain_job(&self, id: &str, req: &RetakeRequest) -> Result<ChainJobSummary> {
+        let wire_req = crate::prompt_text::protect_retake_request_for_wire(req);
         let resp = self
             .client
             .post(format!(
@@ -1038,7 +1039,7 @@ impl MoldClient {
                 self.base_url,
                 encode_path_segment(id)
             ))
-            .json(req)
+            .json(&wire_req)
             .send()
             .await?;
         Ok(error_for_status_with_body(resp)
