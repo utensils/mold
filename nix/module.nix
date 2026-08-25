@@ -370,6 +370,10 @@ in
         MOLD_HOME = cfg.homeDir;
         MOLD_PORT = toString cfg.port;
         MOLD_MODELS_DIR = cfg.modelsDir;
+        # MOLD_HOME is deliberately 0775 for CLI/service sharing. Artifact
+        # attestations replace multi-gigabyte hashes, so keep their trust root
+        # in owner-private systemd state instead of silently disabling them.
+        MOLD_ARTIFACT_ATTESTATIONS_DIR = "/var/lib/mold-artifact-attestations-v1";
         MOLD_LOG = cfg.logLevel;
       }
       // lib.optionalAttrs (cfg.corsOrigin != null) {
@@ -454,8 +458,10 @@ in
         TimeoutStopSec = cfg.shutdown.abortSeconds + 60;
 
         RuntimeDirectory = "mold";
-        # StateDirectory and CacheDirectory omitted — homeDir is created
-        # by tmpfiles.rules and may not be under /var/lib/.
+        StateDirectory = "mold-artifact-attestations-v1";
+        StateDirectoryMode = "0700";
+        # CacheDirectory remains omitted — homeDir is created by tmpfiles.rules
+        # and may not be under /var/lib/.
       }
       //
         lib.optionalAttrs

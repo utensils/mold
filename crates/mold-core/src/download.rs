@@ -690,6 +690,7 @@ struct DurablePinnedDigest {
 
 const DURABLE_PINNED_DIGEST_SCHEMA: u32 = 1;
 const DURABLE_PINNED_DIGEST_DIR: &str = ".artifact-attestations-v1";
+const DURABLE_PINNED_DIGEST_DIR_ENV: &str = "MOLD_ARTIFACT_ATTESTATIONS_DIR";
 const MAX_DURABLE_PINNED_DIGEST_BYTES: u64 = 16 * 1024;
 
 #[cfg(unix)]
@@ -707,40 +708,70 @@ fn directory_protects_entries(path: &Path) -> bool {
     if mode & 0o1000 != 0 {
         metadata.uid() == euid || metadata.uid() == 0
     } else {
-        metadata.uid() == euid && mode & 0o022 == 0
+        (metadata.uid() == euid || metadata.uid() == 0) && mode & 0o022 == 0
     }
 }
 
 #[cfg(unix)]
 fn private_attestation_dir(create: bool) -> Option<PathBuf> {
-    private_attestation_dir_at(&crate::Config::mold_dir()?, create)
+    let configured = std::env::var_os(DURABLE_PINNED_DIGEST_DIR_ENV)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    let dir = if let Some(dir) = configured.as_deref() {
+        private_attestation_dir_exact_at(dir, create)
+    } else {
+        private_attestation_dir_at(&crate::Config::mold_dir()?, create)
+    };
+    if create && dir.is_none() {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            let attempted = configured
+                .as_deref()
+                .map(Path::to_path_buf)
+                .or_else(|| {
+                    crate::Config::mold_dir().map(|home| home.join(DURABLE_PINNED_DIGEST_DIR))
+                });
+            tracing::warn!(
+                path = ?attempted,
+                env = DURABLE_PINNED_DIGEST_DIR_ENV,
+                "persistent artifact attestations are unavailable; unchanged pinned models will be rehashed after restart"
+            );
+        });
+    }
+    dir
 }
 
 #[cfg(unix)]
 fn private_attestation_dir_at(mold_dir: &Path, create: bool) -> Option<PathBuf> {
+    private_attestation_dir_exact_at(&mold_dir.join(DURABLE_PINNED_DIGEST_DIR), create)
+}
+
+#[cfg(unix)]
+fn private_attestation_dir_exact_at(dir: &Path, create: bool) -> Option<PathBuf> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 
-    // The containing directory is the authority boundary. A 0700 child in a
-    // group-writable, non-sticky parent can be renamed away and replaced.
-    if !directory_protects_entries(mold_dir) {
+    // The containing directory is the authority boundary. A 0700 attestation
+    // store in a group-writable, non-sticky parent can be renamed and replaced.
+    // The store itself need not live under MOLD_HOME: shared installations can
+    // point at service-private state with MOLD_ARTIFACT_ATTESTATIONS_DIR.
+    if !dir.parent().is_some_and(directory_protects_entries) {
         return None;
     }
-    let dir = mold_dir.join(DURABLE_PINNED_DIGEST_DIR);
     if !dir.exists() && create {
         let mut builder = std::fs::DirBuilder::new();
         builder.mode(0o700);
-        if builder.create(&dir).is_err() && !dir.is_dir() {
+        if builder.create(dir).is_err() && !dir.is_dir() {
             return None;
         }
     }
-    let metadata = std::fs::symlink_metadata(&dir).ok()?;
+    let metadata = std::fs::symlink_metadata(dir).ok()?;
     // SAFETY: geteuid takes no arguments and cannot fail.
     let euid = unsafe { libc::geteuid() };
     (metadata.is_dir()
         && !metadata.file_type().is_symlink()
         && metadata.uid() == euid
         && metadata.mode() & 0o077 == 0)
-        .then_some(dir)
+        .then(|| dir.to_path_buf())
 }
 
 #[cfg(not(unix))]
@@ -3984,6 +4015,26 @@ mod tests {
         std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o770)).unwrap();
         assert!(private_attestation_dir_at(home.path(), true).is_none());
         assert!(!home.path().join(DURABLE_PINNED_DIGEST_DIR).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dedicated_private_attestation_store_works_with_a_shared_mold_home() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let shared_home = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(shared_home.path(), std::fs::Permissions::from_mode(0o770))
+            .unwrap();
+        assert!(private_attestation_dir_at(shared_home.path(), true).is_none());
+
+        let private_state = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(private_state.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let configured = private_state.path().join("attestations");
+        let actual = private_attestation_dir_exact_at(&configured, true)
+            .expect("a dedicated owner-private store must not depend on MOLD_HOME permissions");
+        assert_eq!(actual, configured);
+        assert_eq!(std::fs::metadata(&actual).unwrap().mode() & 0o777, 0o700);
     }
 
     /// The memo must not become the hole the marker was: a file whose bytes
