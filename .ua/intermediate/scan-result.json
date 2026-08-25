@@ -8543,7 +8543,7 @@
     {
       "path": "flake.nix",
       "language": "nix",
-      "sizeLines": 1563,
+      "sizeLines": 1564,
       "fileCategory": "code"
     },
     {
@@ -9179,7 +9179,7 @@
     {
       "path": "scripts/understand-dashboard.sh",
       "language": "shell",
-      "sizeLines": 77,
+      "sizeLines": 89,
       "fileCategory": "script"
     },
     {

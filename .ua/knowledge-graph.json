@@ -57,8 +57,8 @@
       "Vue"
     ],
     "description": "Mold is a CLI-native local AI image and video generation system that runs on NVIDIA CUDA and Apple GPUs and exposes REST and SSE interfaces for local and remote workflows. Note: this project has over 100 source files; consider scoping analysis to a subdirectory for faster results.",
-    "analyzedAt": "2026-08-25T13:44:31.400Z",
-    "gitCommitHash": "d075edb63735a927a211c516074483b095f7d6a3"
+    "analyzedAt": "2026-08-25T13:46:30.419Z",
+    "gitCommitHash": "db395e223cb1390d95442413c00b5ff7a88d4e78"
   },
   "nodes": [
     {

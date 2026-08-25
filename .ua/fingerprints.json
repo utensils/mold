@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
-  "gitCommitHash": "d075edb63735a927a211c516074483b095f7d6a3",
-  "generatedAt": "2026-08-25T13:44:35.475Z",
+  "gitCommitHash": "db395e223cb1390d95442413c00b5ff7a88d4e78",
+  "generatedAt": "2026-08-25T13:46:34.556Z",
   "files": {
     ".cargo/config.toml": {
       "filePath": ".cargo/config.toml",
@@ -241347,12 +241347,12 @@
     },
     "flake.nix": {
       "filePath": "flake.nix",
-      "contentHash": "2d78411853fe2e06df88ee944035e548c907ba99a4ab7c715362d981e8917491",
+      "contentHash": "8835150cde98a2634f8911501a2ae55752e041813e79da3410f6fe824ffbb2b1",
       "functions": [],
       "classes": [],
       "imports": [],
       "exports": [],
-      "totalLines": 1564,
+      "totalLines": 1565,
       "hasStructuralAnalysis": false
     },
     "install.sh": {
@@ -251059,12 +251059,12 @@
     },
     "scripts/understand-dashboard.sh": {
       "filePath": "scripts/understand-dashboard.sh",
-      "contentHash": "7af50dfb1f5a48f574f028c44fab24ff8dc13900b3a0a0d6553a1fab9843bbe6",
+      "contentHash": "29b14648e69a0e88043a399a45bf92e09e65d242d5dbe718f2dac664692fc59b",
       "functions": [],
       "classes": [],
       "imports": [],
       "exports": [],
-      "totalLines": 78,
+      "totalLines": 90,
       "hasStructuralAnalysis": true
     },
     "scripts/validate-cuda-qualification-report.py": {
