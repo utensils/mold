@@ -4749,12 +4749,9 @@ fn finish_generation_success(
         );
         let _ = tx.send(message);
     }
-    let _ = job.result_tx.send(Ok(GenerationJobResult {
-        image,
-        response,
-        filename: saved_names.output,
-        original_filename: saved_names.original,
-    }));
+    let _ = job
+        .result_tx
+        .send(Ok(GenerationJobResult { image, response }));
 }
 
 fn finish_generation_cancelled(mut job: GpuJob, user_requested: bool) {

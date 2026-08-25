@@ -291,7 +291,7 @@ fn classify_h3_private_ingress_with_runtime(
         |authenticated| {
             Ok(ingress_digest(
                 b"mold.minimax-h3.private-authenticated-identity.v1\0",
-                &[authenticated.identity.as_bytes()],
+                &[authenticated.durable_identity.as_bytes()],
             ))
         },
     )?;
@@ -320,6 +320,21 @@ pub(crate) fn restore_durable_h3_private_ingress(
     request: &mold_core::GenerateRequest,
     envelope: &[u8],
     instance_id: &str,
+) -> Result<Option<H3PrivateIngressGrant>, crate::routes::ApiError> {
+    restore_durable_h3_private_ingress_with_runtime(
+        request,
+        envelope,
+        instance_id,
+        reviewed_h3_private_runtime_available,
+    )
+}
+
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
+fn restore_durable_h3_private_ingress_with_runtime(
+    request: &mold_core::GenerateRequest,
+    envelope: &[u8],
+    instance_id: &str,
+    runtime_available: impl FnOnce(mold_core::minimax_h3::Task) -> bool,
 ) -> Result<Option<H3PrivateIngressGrant>, crate::routes::ApiError> {
     use axum::http::StatusCode;
 
@@ -350,7 +365,7 @@ pub(crate) fn restore_durable_h3_private_ingress(
         request,
         instance_id,
         envelope.authenticated_identity_sha256,
-        reviewed_h3_private_runtime_available,
+        runtime_available,
     )?;
     let Some(grant) = restored else {
         return Err(crate::routes::ApiError::with_code(
@@ -1354,9 +1369,19 @@ fn private_ingress_partition_identity_sha256(task: mold_core::minimax_h3::Task) 
 
 #[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 fn request_authority_sha256(request: &mold_core::GenerateRequest) -> Result<String, String> {
-    let serialized = serde_json::to_vec(request).map_err(|error| {
+    let mut canonical = request.clone();
+    if canonical.audio_file_path.is_some() {
+        canonical.audio_file_path = Some("<durable-media:audio-file-path>".into());
+    }
+    if canonical.source_video_path.is_some() {
+        canonical.source_video_path = Some("<durable-media:source-video-path>".into());
+    }
+    if canonical.extend_video_path.is_some() {
+        canonical.extend_video_path = Some("<durable-media:extend-video-path>".into());
+    }
+    let serialized = zeroize::Zeroizing::new(serde_json::to_vec(&canonical).map_err(|error| {
         format!("MiniMax H3 request authority could not be serialized: {error}")
-    })?;
+    })?);
     Ok(ingress_digest(
         b"mold.minimax-h3.private-request-authority.v1\0",
         &[&serialized],
@@ -2962,6 +2987,7 @@ mod structural_tests {
     fn authenticated() -> crate::auth::ApiKeyAuthenticated {
         crate::auth::ApiKeyAuthenticated {
             identity: "process-local-auth-marker".to_string(),
+            durable_identity: "restart-stable-auth-marker".to_string(),
         }
     }
 
@@ -3390,9 +3416,13 @@ mod structural_tests {
         .unwrap()
         .unwrap();
 
+        let restarted_auth = crate::auth::ApiKeyAuthenticated {
+            identity: "new-process-local-auth-marker".to_string(),
+            durable_identity: auth.durable_identity.clone(),
+        };
         let same_client_other_instance = super::classify_h3_private_ingress_with_runtime(
             &request,
-            Some(&auth),
+            Some(&restarted_auth),
             "different-instance",
             |_| true,
         )
@@ -3411,6 +3441,7 @@ mod structural_tests {
 
         let other_auth = crate::auth::ApiKeyAuthenticated {
             identity: "different-process-local-auth-marker".to_string(),
+            durable_identity: "different-restart-stable-auth-marker".to_string(),
         };
         let other_client = super::classify_h3_private_ingress_with_runtime(
             &request,
@@ -3427,9 +3458,14 @@ mod structural_tests {
         );
 
         let envelope = admitted.durable_replay_envelope().unwrap();
-        let restored = super::restore_durable_h3_private_ingress(&request, &envelope, INSTANCE_ID)
-            .unwrap()
-            .unwrap();
+        let restored = super::restore_durable_h3_private_ingress_with_runtime(
+            &request,
+            &envelope,
+            INSTANCE_ID,
+            |_| true,
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(
             restored.authority_identity_sha256(),
@@ -3444,6 +3480,32 @@ mod structural_tests {
         assert!(restored
             .validate_for_request(&changed, INSTANCE_ID)
             .is_err());
+    }
+
+    #[test]
+    fn durable_path_staging_does_not_change_h3_request_authority() {
+        let auth = authenticated();
+        let mut submitted = request(mold_core::minimax_h3::FL2VA_COMFY);
+        submitted.source_video_path = Some("/submitted/source.mp4".into());
+        submitted.audio_file_path = Some("/submitted/audio.wav".into());
+        let grant = super::classify_h3_private_ingress_with_runtime(
+            &submitted,
+            Some(&auth),
+            INSTANCE_ID,
+            |_| true,
+        )
+        .unwrap()
+        .unwrap();
+
+        let mut hydrated = submitted.clone();
+        hydrated.source_video_path = Some("/private/runtime/source.mp4".into());
+        hydrated.audio_file_path = Some("/private/runtime/audio.wav".into());
+        grant
+            .validate_for_request(&hydrated, INSTANCE_ID)
+            .expect("AEAD-bound staging paths are not caller request authority");
+
+        hydrated.prompt.push_str(" changed");
+        assert!(grant.validate_for_request(&hydrated, INSTANCE_ID).is_err());
     }
 
     #[test]

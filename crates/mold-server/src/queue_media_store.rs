@@ -444,9 +444,13 @@ impl fmt::Debug for QueueMediaOperationFingerprint {
 
 impl QueueMediaOperationFingerprint {
     pub fn sha256_v1(canonical_operation: &[u8]) -> Self {
+        Self::from_sha256_v1_digest(Sha256::digest(canonical_operation).into())
+    }
+
+    pub(crate) fn from_sha256_v1_digest(digest: [u8; 32]) -> Self {
         Self {
             version: OPERATION_FINGERPRINT_VERSION_SHA256_V1,
-            sha256_hex: hex_encode(&Sha256::digest(canonical_operation)),
+            sha256_hex: hex_encode(&digest),
         }
     }
 
