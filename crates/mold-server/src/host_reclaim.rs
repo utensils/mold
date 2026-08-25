@@ -248,6 +248,17 @@ async fn reclaim_candidates(state: &AppState, requested_model: &str) -> Vec<Recl
     plan_reclaim(candidates, requested_model)
 }
 
+/// Whether a real admission could make host headroom by releasing Mold's own
+/// idle model cache.
+///
+/// Placement preview is a read-only authority boundary, so it may ask this
+/// question but must never call [`reclaim_host_headroom`]. The answer carries
+/// no byte estimate: only the completed teardown and a fresh OS sample can say
+/// how many host pages an engine actually returned.
+pub(crate) async fn has_reclaimable_cached_model(state: &AppState, requested_model: &str) -> bool {
+    !reclaim_candidates(state, requested_model).await.is_empty()
+}
+
 /// Why one eviction did not happen.
 ///
 /// The two arms differ in what they say about the NEXT target: a failure is
