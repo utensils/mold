@@ -587,13 +587,17 @@ impl H3PrivateQualifiedRuntimeBounds {
 
 /// The task-shaped concrete runtime request one prepared owner attempt
 /// retains. FL2VA keeps its endpoint-normalized tensor request unchanged;
-/// Ref2VA — constructible only in the developer campaign build — retains the
-/// resolved reference-conditioned preparation. There is deliberately no
-/// Ref2VA variant outside `h3-private-uat`, so a shipping build cannot even
-/// represent a Ref2VA prepared owner attempt.
+/// Ref2VA retains the resolved reference-conditioned preparation, which is
+/// what `pipeline::ref2va::execute_staged` consumes.
+///
+/// The Ref2VA variant is scoped to `mp4` alone, exactly like the pipeline it
+/// feeds: `reviewed_h3_private_runtime_available_for_task` is the gate that
+/// decides whether a build may CONSTRUCT one, and `prepare` asks it before
+/// this enum is ever built. Scoping the type as well would mean a shipping
+/// build could not represent the task it now executes.
 pub(crate) enum H3PrivatePreparedTaskRequest {
     Fl2va(H3PreparedFl2VaRequest),
-    #[cfg(all(feature = "mp4", feature = "h3-private-uat"))]
+    #[cfg(feature = "mp4")]
     Ref2va(super::pipeline::ref2va::H3PreparedRef2VaRequest),
 }
 
@@ -601,8 +605,20 @@ impl H3PrivatePreparedTaskRequest {
     fn seed(&self) -> u64 {
         match self {
             Self::Fl2va(prepared) => prepared.seed,
-            #[cfg(all(feature = "mp4", feature = "h3-private-uat"))]
+            #[cfg(feature = "mp4")]
             Self::Ref2va(prepared) => prepared.seed(),
+        }
+    }
+
+    /// The sampler grid this preparation renders on. Both tasks resolve it
+    /// from the request's own step count; the retained value is what the
+    /// frozen denoise-forward count is checked against.
+    #[cfg_attr(not(feature = "mp4"), allow(dead_code))]
+    pub(crate) fn grid_points(&self) -> usize {
+        match self {
+            Self::Fl2va(prepared) => prepared.grid_points,
+            #[cfg(feature = "mp4")]
+            Self::Ref2va(prepared) => prepared.grid_points(),
         }
     }
 }
@@ -694,7 +710,7 @@ impl H3PrivatePreparedFl2VaAttempt {
                     factory_request,
                 )
             }
-            #[cfg(all(feature = "mp4", feature = "h3-private-uat"))]
+            #[cfg(feature = "mp4")]
             Task::Ref2va => {
                 let (prepared, factory_request) = prepare_private_ref2va_request_input(
                     request, references, support, progress, observer,
@@ -704,9 +720,9 @@ impl H3PrivatePreparedFl2VaAttempt {
                     factory_request,
                 )
             }
-            #[cfg(not(all(feature = "mp4", feature = "h3-private-uat")))]
+            #[cfg(not(feature = "mp4"))]
             Task::Ref2va => {
-                bail!("private H3 Ref2VA prepared attempts require the campaign build")
+                bail!("private H3 Ref2VA prepared attempts require the mp4 mux")
             }
         };
         let raw_checkpoint = raw_checkpoint_input(factory_request.task, transformer)?;
@@ -1108,7 +1124,7 @@ impl H3PrivatePreparedFl2VaFactoryInputs {
             (H3PrivatePreparedTaskRequest::Fl2va(prepared), Task::Fl2va) => {
                 validate_prepared_runtime_request(prepared, &self.factory_attempt.request)?
             }
-            #[cfg(all(feature = "mp4", feature = "h3-private-uat"))]
+            #[cfg(feature = "mp4")]
             (H3PrivatePreparedTaskRequest::Ref2va(prepared), Task::Ref2va) => {
                 validate_prepared_ref2va_runtime_request(prepared, &self.factory_attempt.request)?
             }
@@ -1153,25 +1169,22 @@ impl H3PrivatePreparedFl2VaFactoryInputs {
         &self.budget_echo
     }
 
+    /// Split the consumed preparation into the concrete task-shaped runtime
+    /// request and the artifact-backed retention that outlives it.
+    ///
+    /// This deliberately hands back the TASK enum rather than FL2VA's
+    /// request: both partitions execute since #825, and each runner
+    /// destructures the variant its own pipeline consumes. Collapsing to one
+    /// task here is what made the Ref2VA runner dead code — it could be
+    /// bound but never fed.
     pub(crate) fn into_runtime_parts(
         self,
-    ) -> Result<(H3PreparedFl2VaRequest, H3PrivatePreparedFl2VaRetention)> {
-        // Execution is still the FL2VA runtime only: a Ref2VA prepared
-        // attempt is an admission/reopen authority, and the campaign's
-        // execution slice must extend this split rather than run the FL2VA
-        // pipeline against reference conditioning. The match is infallible
-        // only outside the campaign build, where the Ref2VA variant does not
-        // exist at all.
-        #[allow(clippy::infallible_destructuring_match)]
-        let prepared = match self.prepared {
-            H3PrivatePreparedTaskRequest::Fl2va(prepared) => prepared,
-            #[cfg(all(feature = "mp4", feature = "h3-private-uat"))]
-            H3PrivatePreparedTaskRequest::Ref2va(_) => {
-                bail!("private H3 Ref2VA prepared attempts have no runtime execution slice yet")
-            }
-        };
+    ) -> Result<(
+        H3PrivatePreparedTaskRequest,
+        H3PrivatePreparedFl2VaRetention,
+    )> {
         Ok((
-            prepared,
+            self.prepared,
             H3PrivatePreparedFl2VaRetention {
                 factory_attempt: self.factory_attempt,
                 budget_echo: self.budget_echo,
@@ -1331,7 +1344,7 @@ fn validate_prepared_attempt_task_authority(request: &H3FactoryPreparedRequestIn
 /// frozen request itself; what this re-derives is everything the prepared
 /// value carries — prompt, seed, schedule, geometry, and the ordered
 /// reference fingerprint.
-#[cfg(all(feature = "mp4", feature = "h3-private-uat"))]
+#[cfg(feature = "mp4")]
 fn validate_prepared_ref2va_runtime_request(
     prepared: &super::pipeline::ref2va::H3PreparedRef2VaRequest,
     frozen: &H3FactoryPreparedRequestInput,
@@ -1573,8 +1586,8 @@ fn validate_vae_contract(expected_task: Task, task: Task, canonical_model: &str)
 /// one, so it is the one kept.
 /// `public_runtime_bounds` applies its margin policy to the same observation;
 /// restated here because that function is compiled only under `h3`.
-const FL2VA_OBSERVED_QWEN_ACTIVATION_WORKSPACE_BYTES: u64 = 4_168_069_120;
-const FL2VA_OBSERVED_QWEN_SEQUENCE_ROWS: u64 = 2_033 + 4_032;
+pub(crate) const FL2VA_OBSERVED_QWEN_ACTIVATION_WORKSPACE_BYTES: u64 = 4_168_069_120;
+pub(crate) const FL2VA_OBSERVED_QWEN_SEQUENCE_ROWS: u64 = 2_033 + 4_032;
 
 /// The Qwen activation workspace one request charges into its exact budget
 /// and freezes into its factory authority.
@@ -1744,10 +1757,24 @@ fn build_canonical_private_fl2va_target_budget(
     // header, and the VAE authorities' two decoded config buffers.
     let qwen_retained_header_host_bytes = qwen_memory.retained_raw_header_bytes;
     let transformer_retained_header_host_bytes = checkpoint.retained_header_host_bytes;
-    let condition_latent_backing_device_bytes = request
+    // Conditioning latents are BOTH modalities. FL2VA pins
+    // `condition_audio_rows` to zero, so its arithmetic is byte-identical;
+    // Ref2VA's ordered set may carry soundtracks, and an audio-only set
+    // carries nothing else — charging the visual half alone left it with no
+    // conditioning backing at all, which the overlap authority then read as
+    // an invented charge and refused (#825).
+    let condition_visual_latent_device_bytes = request
         .rows
         .condition_visual_rows
         .checked_mul(96 * 4)
+        .ok_or_else(|| anyhow!("private H3 condition latent bytes overflow"))?;
+    let condition_audio_latent_device_bytes = request
+        .rows
+        .condition_audio_rows
+        .checked_mul(32 * 4)
+        .ok_or_else(|| anyhow!("private H3 condition audio latent bytes overflow"))?;
+    let condition_latent_backing_device_bytes = condition_visual_latent_device_bytes
+        .checked_add(condition_audio_latent_device_bytes)
         .ok_or_else(|| anyhow!("private H3 condition latent bytes overflow"))?;
     let target_video_latent_device_bytes = request
         .rows
@@ -1759,10 +1786,16 @@ fn build_canonical_private_fl2va_target_budget(
         .target_audio_rows
         .checked_mul(32 * 4)
         .ok_or_else(|| anyhow!("private H3 target audio bytes overflow"))?;
-    let packed_video_state_device_bytes = condition_latent_backing_device_bytes
+    // The packed video state carries the VISUAL conditioning prefix and the
+    // generated suffix; the audio state carries the soundtrack prefix and its
+    // own generated suffix. Folding the audio conditioning into the video
+    // state would count it at the video latent's 96-wide stride.
+    let packed_video_state_device_bytes = condition_visual_latent_device_bytes
         .checked_add(target_video_latent_device_bytes)
         .ok_or_else(|| anyhow!("private H3 packed video bytes overflow"))?;
-    let packed_audio_state_device_bytes = target_audio_latent_device_bytes;
+    let packed_audio_state_device_bytes = condition_audio_latent_device_bytes
+        .checked_add(target_audio_latent_device_bytes)
+        .ok_or_else(|| anyhow!("private H3 packed audio bytes overflow"))?;
     let packed_layout_device_bytes = request
         .rows
         .total_packed_rows
@@ -2595,11 +2628,10 @@ mod tests {
         assert!(demand <= CAPTURE_GRANT, "{demand}");
     }
 
-    /// The prepared owner attempt authority is task-shaped: FL2VA passes the
-    /// task pin on every build, a Ref2VA prepared attempt is admissible only
-    /// in the developer campaign build (mirroring
-    /// `reviewed_allowlist_is_scoped_to_fl2va`), and a crossed partition is
-    /// refused everywhere.
+    /// The prepared owner attempt authority is task-shaped: each task passes
+    /// the pin exactly where its own build carries a runtime qualification
+    /// (mirroring `reviewed_allowlist_is_scoped_to_a_qualified_task`), and a
+    /// crossed partition is refused everywhere.
     #[test]
     fn ref2va_prepared_attempt_task_authority_is_gated_per_build() {
         let (_, fl2va_frozen) = prepared_runtime_pair();
@@ -2610,8 +2642,10 @@ mod tests {
         ref2va_frozen.task = Task::Ref2va;
         assert_eq!(
             validate_prepared_attempt_task_authority(&ref2va_frozen).is_ok(),
-            cfg!(feature = "h3-private-uat"),
-            "a Ref2VA prepared owner attempt is constructible exactly in the campaign build"
+            super::super::private_server::reviewed_h3_private_runtime_available_for_task(
+                Task::Ref2va
+            ),
+            "a Ref2VA prepared owner attempt is constructible exactly where its runtime is"
         );
 
         // Either task carrying the other task's partition model is refused
@@ -2624,13 +2658,13 @@ mod tests {
         assert!(validate_prepared_attempt_task_authority(&crossed).is_err());
     }
 
-    /// A Ref2VA prepared owner attempt in the campaign build: the resolved
-    /// preparation and the frozen factory request it derives agree through
-    /// the task-aware runtime validator, and every retained axis — prompt,
-    /// seed, schedule, and the ordered reference fingerprint — is load-bearing.
-    #[cfg(all(feature = "mp4", feature = "h3-private-uat"))]
+    /// A Ref2VA prepared owner attempt: the resolved preparation and the
+    /// frozen factory request it derives agree through the task-aware runtime
+    /// validator, and every retained axis — prompt, seed, schedule, and the
+    /// ordered reference fingerprint — is load-bearing.
+    #[cfg(feature = "mp4")]
     #[test]
-    fn ref2va_prepared_owner_attempt_is_constructible_in_the_campaign_build() {
+    fn ref2va_prepared_owner_attempt_is_constructible() {
         let (prepared, frozen) = ref2va_prepared_runtime_pair();
         validate_prepared_attempt_task_authority(&frozen).unwrap();
         validate_prepared_ref2va_runtime_request(&prepared, &frozen).unwrap();
@@ -2656,7 +2690,7 @@ mod tests {
         assert!(validate_prepared_ref2va_runtime_request(&prepared, &fl2va_frozen).is_err());
     }
 
-    #[cfg(all(feature = "mp4", feature = "h3-private-uat"))]
+    #[cfg(feature = "mp4")]
     fn ref2va_prepared_runtime_pair() -> (
         super::super::pipeline::ref2va::H3PreparedRef2VaRequest,
         H3FactoryPreparedRequestInput,

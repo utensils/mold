@@ -640,13 +640,17 @@ mod tests {
             "  mold run \"your prompt\"".to_string()
         );
 
+        // A pinned layout no build has an engine arm for is unrunnable
+        // everywhere, so its hint is the same on every artifact. (Both
+        // compact task partitions execute since #825, so the task obstacle
+        // has no released identity to demonstrate it with.)
         for (model, reason) in [
             (
-                mold_core::minimax_h3::REF2VA_COMFY,
-                mold_core::minimax_h3::RuntimeUnavailableReason::UnsupportedTask,
+                mold_core::minimax_h3::FL2VA_COMFY_NVFP4,
+                mold_core::minimax_h3::RuntimeUnavailableReason::UnsupportedLayout,
             ),
             (
-                mold_core::minimax_h3::FL2VA_COMFY_NVFP4,
+                mold_core::minimax_h3::REF2VA_COMFY_NVFP4,
                 mold_core::minimax_h3::RuntimeUnavailableReason::UnsupportedLayout,
             ),
         ] {
@@ -662,8 +666,28 @@ mod tests {
             );
         }
 
-        // The reviewed compact FL2VA tier is runnable only where the engine
-        // was compiled in, which is exactly the trap this issue closed.
+        // The reviewed compact tiers are runnable only where the engine was
+        // compiled in, which is exactly the trap this issue closed — and
+        // since #825 that is true of the Ref2VA partition too.
+        for compact_model in [
+            mold_core::minimax_h3::FL2VA_COMFY,
+            mold_core::minimax_h3::REF2VA_COMFY,
+        ] {
+            let compact = super::post_pull_hint(mold_core::require_model_activation(
+                compact_model,
+                Some(mold_core::minimax_h3::FAMILY),
+            ));
+            if mold_core::minimax_h3::engine_is_built() {
+                assert!(compact.contains("mold run"), "{compact_model}: {compact}");
+            } else {
+                assert!(
+                    compact.contains(
+                        mold_core::minimax_h3::RuntimeUnavailableReason::EngineNotBuilt.message()
+                    ),
+                    "{compact_model}: {compact}"
+                );
+            }
+        }
         let compact = super::post_pull_hint(mold_core::require_model_activation(
             mold_core::minimax_h3::FL2VA_COMFY,
             Some(mold_core::minimax_h3::FAMILY),

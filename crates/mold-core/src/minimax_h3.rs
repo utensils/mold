@@ -773,28 +773,32 @@ pub const fn layout_runtime_available(layout: Layout) -> bool {
 /// Whether this binary links the MiniMax H3 engine at all.
 ///
 /// Split out of [`capabilities`] so a refusal can name *which* of the three
-/// obstacles applies. Only the sm89 Linux release recipe enables `h3`; macOS,
-/// sm86, sm100, and sm120 ship the catalog rows without the engine, which is
-/// the case #1276 exists for.
+/// obstacles applies. Only the sm89 Linux and macOS Metal release recipes
+/// enable `h3`; sm86, sm100, sm120, and Windows ship the catalog rows without
+/// the engine, which is the case #1276 exists for.
 pub const fn engine_is_built() -> bool {
     cfg!(feature = "h3")
 }
 
 /// Whether mold implements an execution path for this task partition.
 ///
-/// Ref2VA has no reviewed bounds and no qualified route on any released
-/// binary — `mold_inference`'s own gate says a shipping build must keep
-/// refusing it — so the answer is a property of the task, not of the host.
+/// Both released partitions execute since #825: FL2VA's boundary-endpoint
+/// route and Ref2VA's ordered-reference route each carry their own compiled
+/// runtime qualification in `mold_inference`, and `reviewed_h3_private_
+/// runtime_available_for_task` is the gate that pairs with this one. The
+/// variant survives because it is the axis a FUTURE task partition would be
+/// refused on; it is deliberately not deleted along with its last `false`.
 pub const fn task_runtime_available(task: Task) -> bool {
-    matches!(task, Task::Fl2va)
+    matches!(task, Task::Fl2va | Task::Ref2va)
 }
 
 /// Why this build cannot execute an H3 identity.
 ///
 /// Ordered from most to least permanent by [`runtime_availability_for`], so a
-/// reason never over-promises: telling a macOS user "this build has no H3
-/// engine" about Ref2VA would imply the sm89 artifact runs it, which it does
-/// not.
+/// reason never over-promises: a task partition mold has no route for is a
+/// property of every build, while "this binary was compiled without the H3
+/// engine" is a property of one artifact, and naming the second where the
+/// first applies would imply another artifact runs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeUnavailableReason {
     /// Mold has no engine arm that reads this checkpoint's weight layout.
@@ -815,9 +819,8 @@ impl RuntimeUnavailableReason {
                  checkpoint downloads and verifies normally; only generation is unavailable"
             }
             Self::UnsupportedTask => {
-                "MiniMax H3 reference-to-audio-video (Ref2VA) execution is not available in any \
-                 released build. The checkpoint downloads and verifies normally; only generation \
-                 is unavailable"
+                "MiniMax H3 has no runtime for this model's task partition in this build. The \
+                 checkpoint downloads and verifies normally; only generation is unavailable"
             }
             Self::EngineNotBuilt => {
                 "This mold build was compiled without the MiniMax H3 engine. The checkpoint \
@@ -5386,18 +5389,20 @@ mod tests {
             runtime_availability_for(Task::Ref2va, Layout::ComfyPrunedNvfp4ConvrotNvfp4Awq),
             RuntimeAvailability::Unavailable(RuntimeUnavailableReason::UnsupportedLayout)
         );
-        assert_eq!(
-            runtime_availability_for(Task::Ref2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq),
-            RuntimeAvailability::Unavailable(RuntimeUnavailableReason::UnsupportedTask)
-        );
-        assert_eq!(
-            runtime_availability_for(Task::Fl2va, Layout::ComfyPrunedInt8ConvrotNvfp4Awq),
-            if engine_is_built() {
-                RuntimeAvailability::Available
-            } else {
-                RuntimeAvailability::Unavailable(RuntimeUnavailableReason::EngineNotBuilt)
-            }
-        );
+        // Both released partitions execute since #825, so the task axis no
+        // longer refuses either of them; the layout answer above still
+        // outranks the build answer below.
+        for task in [Task::Fl2va, Task::Ref2va] {
+            assert_eq!(
+                runtime_availability_for(task, Layout::ComfyPrunedInt8ConvrotNvfp4Awq),
+                if engine_is_built() {
+                    RuntimeAvailability::Available
+                } else {
+                    RuntimeAvailability::Unavailable(RuntimeUnavailableReason::EngineNotBuilt)
+                },
+                "{task:?}"
+            );
+        }
     }
 
     #[test]
@@ -5419,17 +5424,21 @@ mod tests {
     }
 
     #[test]
-    fn every_reviewed_ref2va_identity_reports_the_task_obstacle() {
-        // Ref2VA is a reviewed *acquisition* identity with ordinary policy
-        // availability, so it downloads; execution is refused on every
-        // shipping build and the reason must say so rather than blaming the
-        // weight layout or the build recipe.
+    fn every_reviewed_ref2va_identity_runs_wherever_the_engine_is_built() {
+        // #825 qualified the ordered-reference route, so the reviewed compact
+        // Ref2VA identity is runnable on exactly the builds that link the
+        // engine — never refused for its task, and never for its layout,
+        // which it shares with the FL2VA compact checkpoint.
+        assert!(task_runtime_available(Task::Ref2va));
+        assert!(task_runtime_available(Task::Fl2va));
         assert_eq!(
             model_runtime_availability(REF2VA_COMFY).reason(),
-            Some(RuntimeUnavailableReason::UnsupportedTask)
+            if engine_is_built() {
+                None
+            } else {
+                Some(RuntimeUnavailableReason::EngineNotBuilt)
+            }
         );
-        assert!(!task_runtime_available(Task::Ref2va));
-        assert!(task_runtime_available(Task::Fl2va));
     }
 
     #[test]

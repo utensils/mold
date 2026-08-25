@@ -1,8 +1,10 @@
-//! Concrete, weight-free media preprocessing for the dormant H3 Ref2VA path.
+//! Concrete, weight-free media preprocessing for the H3 Ref2VA path.
 //!
 //! This module deliberately contains no checkpoint discovery and activates no
 //! model family. It turns server-bound, digest-verified file descriptors into
-//! the exact media tensors a future legally admitted backend must encode.
+//! the exact media tensors the admitted backend encodes — the same decoder
+//! admission runs to derive its row counts, so a preparation and its reopen
+//! can only agree by reproducing each other.
 
 use std::collections::{BTreeMap, BTreeSet};
 

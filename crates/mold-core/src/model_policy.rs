@@ -469,16 +469,20 @@ mod tests {
             );
         }
 
-        // Ref2VA downloads on every build and executes on none. The reason
-        // must name the task rather than the build recipe: an sm89 artifact
-        // refuses it too.
+        // Ref2VA downloads on every build and executes wherever the engine
+        // is linked (#825). The refusal a build without it gives names the
+        // build recipe, because that is the only obstacle left.
         assert_eq!(
             model_acquisition("minimax-h3-ref2va:comfy-pruned-int8", Some("minimax-h3")),
             ModelActivation::Available
         );
         assert_eq!(
             model_activation("minimax-h3-ref2va:comfy-pruned-int8", Some("minimax-h3")),
-            ModelActivation::RuntimeUnavailable(RuntimeUnavailableReason::UnsupportedTask)
+            if minimax_h3::engine_is_built() {
+                ModelActivation::Available
+            } else {
+                ModelActivation::RuntimeUnavailable(RuntimeUnavailableReason::EngineNotBuilt)
+            }
         );
 
         // An alias names the reviewed compact model, so it stays on the
@@ -612,15 +616,19 @@ mod tests {
                 "{identifier}"
             );
         }
-        // Ref2VA is a reviewed acquisition identity with no qualified route
-        // on any released build, so even a build that carries the engine
-        // refuses it — and says so as a missing implementation, never as a
-        // licensing problem (#1276).
+        // Ref2VA is a reviewed acquisition identity whose ordered-reference
+        // route was qualified in #825, so a build carrying the engine runs
+        // it and a build without one refuses as a missing implementation,
+        // never as a licensing problem (#1276).
         assert_eq!(
             model_activation(minimax_h3::REF2VA_COMFY, Some("minimax-h3")),
-            ModelActivation::RuntimeUnavailable(
-                minimax_h3::RuntimeUnavailableReason::UnsupportedTask
-            )
+            if minimax_h3::engine_is_built() {
+                ModelActivation::Available
+            } else {
+                ModelActivation::RuntimeUnavailable(
+                    minimax_h3::RuntimeUnavailableReason::EngineNotBuilt,
+                )
+            }
         );
         assert_eq!(
             model_acquisition(minimax_h3::REF2VA_COMFY, Some("minimax-h3")),

@@ -6,12 +6,12 @@ download, verify, repair, inventory, and remove two compact Comfy variants. The
 files are downloaded directly from their pinned Hugging Face repositories;
 Mold does not bundle or mirror the weights.
 
-::: warning CUDA FL2VA is the first supported runtime
+::: warning CUDA is the supported runtime
 Both compact variants can be downloaded on any Mold host. Mold's SM89 CUDA
-release can run the compact FL2VA model for the supported request profile below;
-the Apple Silicon Metal route below is admitted and shipped but not yet
-hardware-qualified.
-Ref2VA execution and the CPU backend remain unavailable. Broader request
+release can run the compact FL2VA **and** Ref2VA models for the supported
+request profiles below; the Apple Silicon Metal route below is admitted and
+shipped but not yet hardware-qualified.
+The CPU backend remains unavailable. Broader request
 shapes also remain unavailable until those paths are implemented and
 tested; Mold reports that limitation normally rather than treating it as a
 licensing or authorization failure.
@@ -42,7 +42,7 @@ speed one.
 | `minimax-h3-fl2va:comfy-pruned-int8`                  | First/last-frame conditioning with audio          |  42.482 GB | CUDA generation; first-frame profile |
 | `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`      | FL2VA + reviewed Turbo 8-step LoRA (9 steps)      |  44.438 GB | CUDA generation; first-frame profile |
 | `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p` | FL2VA + reviewed Turbo 4-step 768p LoRA (5 steps) |  44.438 GB | CUDA generation; first-frame profile |
-| `minimax-h3-ref2va:comfy-pruned-int8`                 | Reference media to video with audio               |  42.482 GB | Downloadable; execution unavailable  |
+| `minimax-h3-ref2va:comfy-pruned-int8`                 | Reference media to video with audio               |  42.482 GB | CUDA generation; ordered references  |
 | `minimax-h3-fl2va:comfy-pruned-nvfp4`                 | First/last-frame conditioning with audio          |  34.040 GB | Downloadable; execution unavailable  |
 | `minimax-h3-ref2va:comfy-pruned-nvfp4`                | Reference media to video with audio               |  34.040 GB | Downloadable; execution unavailable  |
 
@@ -59,9 +59,8 @@ have one installed the pull is only the 12.529 GB transformer.
 The H3 catalog rows ship on every release target; the H3 _engine_ does not.
 The macOS and Linux sm89 artifacts are built with it; on an RTX 3090/A40
 (sm86), a B200/B300 (sm100), an RTX 50-series card (sm120), or Windows, the H3
-models download and verify normally and generate nothing. Ref2VA is the same
-shape for a different reason: it has no qualified runtime on **any** released
-binary.
+models download and verify normally and generate nothing. Both compact task
+partitions — FL2VA and Ref2VA — run wherever the engine is built.
 
 Rather than let you discover that after a 21–42 GB pull, every H3 row carries
 its answer. `GET /api/models` reports:
@@ -74,8 +73,9 @@ its answer. `GET /api/models` reports:
   three different remedies:
   - **no engine arm for this weight layout** — the `official-bf16`
     qualification references and the pruned NVFP4 tags. No build runs these.
-  - **Ref2VA execution is not available in any released build** — the task,
-    not the machine. A different artifact will not help.
+  - **no runtime for this task partition** — the task, not the machine. A
+    different artifact will not help. No released identity reports this today:
+    both compact partitions execute, and the axis survives for a future task.
   - **this build was compiled without the H3 engine** — use the macOS or
     Linux sm89 release, or build with the `h3` feature.
 
@@ -92,9 +92,8 @@ Submitting one anyway returns HTTP `501` with code
 
 Every H3 render carries synchronized generated audio, and no request can turn
 it off. `GET /api/models` says so directly: each H3 entry reports
-`"supports_audio": true` — including the Ref2VA row and variants that are not
-downloaded yet — so a client reads the capability rather than inferring it from
-the family name.
+`"supports_audio": true` — including variants that are not downloaded yet — so
+a client reads the capability rather than inferring it from the family name.
 
 Pull a variant from the CLI, or install it from **Models → Discover** in Mold
 Studio:
@@ -258,6 +257,48 @@ can remain stored on an unsupported host; Create and request routing become
 available only when that host advertises the matching runtime capability.
 The public runtime uses a source-controlled conservative memory profile;
 it does not require private authorization or qualification-record files.
+
+## Supported Ref2VA request
+
+`minimax-h3-ref2va:comfy-pruned-int8` conditions on an **ordered set of
+references** instead of a boundary frame. Everything about the generated side
+is FL2VA's — the same canvas rule, the same `17n+5` frame grid at 24 fps, the
+same 2-50 sampler grid points, MP4 with synchronized audio — and the
+conditioning side is the set:
+
+- 1 to 12 references in total, at most 9 images, 3 videos, and 3 audio files
+- each reference between 1 and 15 seconds where it has a duration; video and
+  soundtrack references are truncated to the generated clip's own length
+- images are normalized onto their own 2048-short-edge canvas, videos onto the
+  reference canvas, and every soundtrack is resampled to 32 kHz stereo
+- **order is authority.** The set is presented to the conditioner as
+  `<Picture n>`, `<Video n>`, and `<Audio n>` in the order you supply, and the
+  frozen plan carries a reference fingerprint over that order — so the same
+  files in a different order are a different render, not the same one.
+
+There is no reviewed list of reference sets. The runtime qualification is
+minted per request from the set's own preprocessing shapes: the conditioner
+sequence, the conditioning latents, and every memory bound scale with what you
+actually attached, and a set the device cannot hold is refused with the numbers
+rather than by a rule. A prompt still gets roughly a thousand tokens on top of
+the references' own vision pads.
+
+From the CLI, each reference is a `KIND=PATH` pair and the kinds are `image`,
+`video`, and `audio`:
+
+```bash
+mold run minimax-h3-ref2va:comfy-pruned-int8 "a slow dolly through the scene" \
+  --reference image=hero.png \
+  --reference video=clip.mp4 \
+  --reference audio=score.wav \
+  --width 1344 --height 768 --frames 124 --fps 24 \
+  --steps 21 --guidance 0 --strength 1.0 --format mp4
+```
+
+References are uploaded through the authenticated streaming reference-upload
+endpoints, so `MOLD_API_KEY` must be configured; Mold never puts reference
+bytes in the request body, the queue journal, or saved metadata — only their
+redacted metadata and digests.
 
 ## License and support boundary
 

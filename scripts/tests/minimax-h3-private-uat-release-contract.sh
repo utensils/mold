@@ -918,15 +918,32 @@ require_text docs/qualification/minimax-h3-conformance.md \
   'capture-minimax-h3-transformer.py' \
   "the paired transformer capture producer has no operator runbook"
 
-# Ref2VA may share the one-shot owner protocol, but it must retain a distinct
+# Ref2VA shares the one-shot owner protocol, but it must retain a distinct
 # runtime qualification, ordered-reference authority, and publication fence.
-# Until a reviewed campaign lands, production ingress remains closed.
+# Since #825 the public build carries its own compiled Ref2VA profile — a
+# separate schema, decision string, envelope, and bounds record — so the pin is
+# that the gate stays TASK-scoped, that Ref2VA is gated on the public engine
+# feature rather than on the campaign feature alone, and that the runner
+# actually dispatches to the Ref2VA binder and pipeline.
 require_text crates/mold-inference/src/minimax_h3/private_server.rs \
   'pub const fn reviewed_h3_private_runtime_available_for_task(task: Task) -> bool {' \
   "private H3 runtime availability is not scoped to an exact task"
 require_text crates/mold-inference/src/minimax_h3/private_server.rs \
   'Task::Ref2va => false,' \
-  "Ref2VA can inherit authority without its own reviewed runtime qualification"
+  "Ref2VA is not refused on a build carrying neither runtime qualification"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  '#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+        Task::Ref2va => true,' \
+  "Ref2VA runtime availability is not gated on a compiled runtime qualification"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'const PUBLIC_REF2VA_RUNTIME_PROFILE_SCHEMA' \
+  "the public build has no Ref2VA runtime profile of its own"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'bind_private_comfy_ref2va_phase_owner(' \
+  "the prepared runner never reaches the Ref2VA phase binder"
+require_text crates/mold-inference/src/minimax_h3/private_server.rs \
+  'run_private_comfy_ref2va_attempt(' \
+  "the prepared runner never reaches the Ref2VA execution slice"
 require_text crates/mold-server/src/h3_private_bridge.rs \
   'b"ordered-heterogeneous-references"' \
   "the private ingress partition does not bind ordered Ref2VA conditioning"

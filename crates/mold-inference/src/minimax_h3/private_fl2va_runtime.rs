@@ -37,7 +37,7 @@ use super::pipeline::{
 };
 use super::private_opened_evidence::{
     H3PrivateComfyStorageAuthority, H3PrivatePreparedFl2VaFactoryInputs,
-    H3PrivatePreparedFl2VaRetention,
+    H3PrivatePreparedFl2VaRetention, H3PrivatePreparedTaskRequest,
 };
 use super::private_qwen::{
     H3PrivateQwenAdapter, H3PrivateQwenArtifactLease, H3PrivateQwenConditionerLease,
@@ -111,7 +111,16 @@ pub(crate) struct H3PrivateFl2VaMemoryOverlapAuthority {
     factory_identity_sha256: String,
     prepared_attempt_identity_sha256: String,
     target_budget_identity_sha256: String,
+    /// The partition this record was issued for. Both tasks retain
+    /// conditioning latents, but they back them with different media —
+    /// FL2VA's normalized boundary endpoint, Ref2VA's normalized ordered
+    /// reference set — and each must be nonzero exactly for its own task.
+    task: Task,
     condition_visual_rows: u64,
+    /// The soundtrack half of the same conditioning. FL2VA pins it to zero;
+    /// an audio-only Ref2VA set has this and nothing else, which is exactly
+    /// the case a visual-rows-only presence test refused.
+    condition_audio_rows: u64,
     condition_backing_host_bytes: u64,
     condition_backing_device_bytes: u64,
     target_audio_latent_device_bytes: u64,
@@ -120,6 +129,7 @@ pub(crate) struct H3PrivateFl2VaMemoryOverlapAuthority {
     attempt_resident_vae_device_bytes: u64,
     visual_decode_peak_device_bytes: u64,
     normalized_endpoint_host_bytes: u64,
+    reference_normalized_media_host_bytes: u64,
     scheduler_ledger_identity_sha256: String,
     identity_sha256: String,
     _activation: admitted_overlap_seal::Token,
@@ -137,7 +147,9 @@ impl H3PrivateFl2VaMemoryOverlapAuthority {
         factory_identity_sha256: impl Into<String>,
         prepared_attempt_identity_sha256: impl Into<String>,
         target_budget_identity_sha256: impl Into<String>,
+        task: Task,
         condition_visual_rows: u64,
+        condition_audio_rows: u64,
         condition_backing_host_bytes: u64,
         condition_backing_device_bytes: u64,
         target_audio_latent_device_bytes: u64,
@@ -146,12 +158,15 @@ impl H3PrivateFl2VaMemoryOverlapAuthority {
         attempt_resident_vae_device_bytes: u64,
         visual_decode_peak_device_bytes: u64,
         normalized_endpoint_host_bytes: u64,
+        reference_normalized_media_host_bytes: u64,
     ) -> Result<Self> {
         let mut authority = Self {
             factory_identity_sha256: factory_identity_sha256.into(),
             prepared_attempt_identity_sha256: prepared_attempt_identity_sha256.into(),
             target_budget_identity_sha256: target_budget_identity_sha256.into(),
+            task,
             condition_visual_rows,
+            condition_audio_rows,
             condition_backing_host_bytes,
             condition_backing_device_bytes,
             target_audio_latent_device_bytes,
@@ -160,6 +175,7 @@ impl H3PrivateFl2VaMemoryOverlapAuthority {
             attempt_resident_vae_device_bytes,
             visual_decode_peak_device_bytes,
             normalized_endpoint_host_bytes,
+            reference_normalized_media_host_bytes,
             scheduler_ledger_identity_sha256: std::iter::repeat_n('e', 64).collect(),
             identity_sha256: String::new(),
             _activation: admitted_overlap_seal::Token,
@@ -184,17 +200,47 @@ impl H3PrivateFl2VaMemoryOverlapAuthority {
         {
             bail!("private MiniMax H3 overlap authority lacks exact retained memory facts");
         }
+        // The media that BACKS the conditioning latents is task-shaped: FL2VA
+        // normalizes one boundary endpoint, Ref2VA normalizes its ordered
+        // reference set. Each must be nonzero exactly for its own task and
+        // zero for the other, so an overlap record cannot claim retention it
+        // never takes — the FL2VA-only rule refused every Ref2VA attempt for
+        // an endpoint the partition does not have.
+        let (backing_host_bytes, cross_task_host_bytes) = match self.task {
+            Task::Fl2va => (
+                self.normalized_endpoint_host_bytes,
+                self.reference_normalized_media_host_bytes,
+            ),
+            Task::Ref2va => (
+                self.reference_normalized_media_host_bytes,
+                self.normalized_endpoint_host_bytes,
+            ),
+        };
         let condition_bytes = (
             self.condition_backing_host_bytes,
             self.condition_backing_device_bytes,
-            self.normalized_endpoint_host_bytes,
+            backing_host_bytes,
         );
-        if self.condition_visual_rows == 0 {
+        if cross_task_host_bytes != 0 {
+            bail!(
+                "private MiniMax H3 {:?} overlap authority charges the other task's conditioning media",
+                self.task
+            );
+        }
+        // Presence is asked of BOTH conditioning modalities: a Ref2VA set of
+        // standalone audio references conditions on real retained media with
+        // zero visual rows, and reading only the visual half called that an
+        // invented charge.
+        let conditions_on_media = self.condition_visual_rows != 0 || self.condition_audio_rows != 0;
+        if !conditions_on_media {
             if condition_bytes != (0, 0, 0) {
                 bail!("private MiniMax H3 T2VA overlap authority invents condition backing");
             }
         } else if condition_bytes.0 == 0 || condition_bytes.1 == 0 || condition_bytes.2 == 0 {
-            bail!("private MiniMax H3 FL2VA overlap authority undercharges condition backing");
+            bail!(
+                "private MiniMax H3 {:?} overlap authority undercharges condition backing",
+                self.task
+            );
         }
         let both_vaes = self
             .visual_vae_resident_device_bytes
@@ -225,7 +271,12 @@ fn memory_overlap_identity(authority: &H3PrivateFl2VaMemoryOverlapAuthority) -> 
     hash.update(authority.factory_identity_sha256.as_bytes());
     hash.update(authority.prepared_attempt_identity_sha256.as_bytes());
     hash.update(authority.target_budget_identity_sha256.as_bytes());
+    hash.update(match authority.task {
+        Task::Fl2va => b"fl2va".as_slice(),
+        Task::Ref2va => b"ref2va".as_slice(),
+    });
     hash.update(authority.condition_visual_rows.to_le_bytes());
+    hash.update(authority.condition_audio_rows.to_le_bytes());
     for bytes in [
         authority.condition_backing_host_bytes,
         authority.condition_backing_device_bytes,
@@ -235,6 +286,7 @@ fn memory_overlap_identity(authority: &H3PrivateFl2VaMemoryOverlapAuthority) -> 
         authority.attempt_resident_vae_device_bytes,
         authority.visual_decode_peak_device_bytes,
         authority.normalized_endpoint_host_bytes,
+        authority.reference_normalized_media_host_bytes,
     ] {
         hash.update(bytes.to_le_bytes());
     }
@@ -270,7 +322,9 @@ pub(crate) fn issue_private_fl2va_memory_overlap(
         factory_identity_sha256: authority.identity_sha256().into(),
         prepared_attempt_identity_sha256: identities.0.into(),
         target_budget_identity_sha256: identities.1.into(),
+        task: request.task,
         condition_visual_rows: request.rows.condition_visual_rows,
+        condition_audio_rows: request.rows.condition_audio_rows,
         condition_backing_host_bytes: budget.condition_backing_host_bytes,
         condition_backing_device_bytes: budget.condition_latent_backing_device_bytes,
         target_audio_latent_device_bytes: budget.target_audio_latent_device_bytes,
@@ -279,6 +333,7 @@ pub(crate) fn issue_private_fl2va_memory_overlap(
         attempt_resident_vae_device_bytes: budget.attempt_resident_vae_device_bytes,
         visual_decode_peak_device_bytes: budget.visual_decode_phase_device_bytes,
         normalized_endpoint_host_bytes: budget.normalized_endpoint_host_bytes,
+        reference_normalized_media_host_bytes: budget.reference_normalized_media_host_bytes,
         scheduler_ledger_identity_sha256: ledger.identity_sha256().into(),
         identity_sha256: String::new(),
         _activation: admitted_overlap_seal::Token,
@@ -857,11 +912,11 @@ where
                 != self.admitted.attention.qualification_kernel_identity
             || artifacts.attention_qualification_sha256()
                 != self.admitted.attention.qualification_sha256
-            || self.stream_authority.task != H3TransformerTask::T2VaFl2Va
+            || self.stream_authority.task != expected_transformer_task(self.admitted.task)
             || self.conditioner.model() != self.admitted.canonical_model
             || self.conditioner.task() != self.admitted.task
-            || self.admitted.task != Task::Fl2va
-            || self.admitted.canonical_model != contract::FL2VA_COMFY
+            || self.admitted.canonical_model
+                != contract::base_compact_model_for_task(self.admitted.task)
             || self.denoiser.identity() != self.frozen_identity
         {
             bail!("private MiniMax H3 streamed runtime differs from frozen authority");
@@ -1201,8 +1256,9 @@ impl H3PrivateRetainedVaeReload {
             != self.artifact_validation_identity_sha256
             || self.authority.artifact_plan_identity_sha256() != self.artifact_plan_identity_sha256
             || self.artifact_plan_identity_sha256 != admitted.vae_artifact_plan_identity_sha256
-            || self.authority.task() != Task::Fl2va
-            || self.authority.canonical_model() != contract::FL2VA_COMFY
+            || self.authority.task() != admitted.task
+            || self.authority.canonical_model()
+                != contract::base_compact_model_for_task(admitted.task)
         {
             bail!("private H3 retained VAE reload authority differs from the admitted attempt")
         }
@@ -1349,6 +1405,18 @@ where
     })
 }
 
+/// The exact retained load/drop sequence each partition's budget was built
+/// for. Ref2VA adds the reference decode, preprocess, and two encode phases
+/// ahead of the shared conditioner/denoise/decode spine, so pinning FL2VA's
+/// policy for both tasks refused every Ref2VA attempt at the last gate before
+/// component allocation.
+const fn expected_load_drop_policy(task: Task) -> H3FactoryTargetLoadDropPolicy {
+    match task {
+        Task::Fl2va => H3FactoryTargetLoadDropPolicy::LoadQwenEncodeTransferDropQwenLoadVaesEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
+        Task::Ref2va => H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadQwenEncodeVisionTransferDropQwenLoadVaesEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
+    }
+}
+
 fn validate_prepared_overlap_binding(
     authority: &FrozenH3FactoryAuthority,
     admitted: &H3PrivateFl2VaFactoryAuthority,
@@ -1370,23 +1438,23 @@ fn validate_prepared_overlap_binding(
         || overlap.factory_identity_sha256 != admitted.factory_identity_sha256
         || overlap.prepared_attempt_identity_sha256 != identities.0
         || overlap.target_budget_identity_sha256 != identities.1
-        || request.canonical_model != contract::FL2VA_COMFY
-        || request.task != Task::Fl2va
+        || request.canonical_model != contract::base_compact_model_for_task(request.task)
+        || request.task != admitted.task
+        || overlap.task != request.task
         || request.rows.condition_visual_rows != admitted.condition_visual_rows
         || overlap.condition_visual_rows != request.rows.condition_visual_rows
+        || overlap.condition_audio_rows != request.rows.condition_audio_rows
         || overlap.condition_backing_host_bytes != budget.condition_backing_host_bytes
-        || overlap.condition_backing_device_bytes
-            != budget.condition_latent_backing_device_bytes
+        || overlap.condition_backing_device_bytes != budget.condition_latent_backing_device_bytes
         || overlap.target_audio_latent_device_bytes != budget.target_audio_latent_device_bytes
-        || overlap.visual_vae_resident_device_bytes
-            != budget.visual_vae_resident_device_bytes
+        || overlap.visual_vae_resident_device_bytes != budget.visual_vae_resident_device_bytes
         || overlap.audio_vae_resident_device_bytes != budget.audio_vae_resident_device_bytes
-        || overlap.attempt_resident_vae_device_bytes
-            != budget.attempt_resident_vae_device_bytes
+        || overlap.attempt_resident_vae_device_bytes != budget.attempt_resident_vae_device_bytes
         || overlap.visual_decode_peak_device_bytes != budget.visual_decode_phase_device_bytes
         || overlap.normalized_endpoint_host_bytes != budget.normalized_endpoint_host_bytes
-        || budget.load_drop_policy
-            != H3FactoryTargetLoadDropPolicy::LoadQwenEncodeTransferDropQwenLoadVaesEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+        || overlap.reference_normalized_media_host_bytes
+            != budget.reference_normalized_media_host_bytes
+        || budget.load_drop_policy != expected_load_drop_policy(request.task)
     {
         bail!("private H3 prepared attempt, target budget, and overlap authority differ before component allocation")
     }
@@ -1414,7 +1482,7 @@ where
         || artifacts.factory_identity_sha256() != admitted.factory_identity_sha256
         || artifacts.component_set_identity() != admitted.component_set_identity_sha256
         || artifacts.memory_overlap_identity_sha256() != overlap.identity_sha256()
-        || artifacts.transformer_task() != H3TransformerTask::T2VaFl2Va
+        || artifacts.transformer_task() != expected_transformer_task(admitted.task)
         || artifacts.transformer_policy_identity_sha256() != expected_transformer_policy
         || artifacts.attention_runtime_identity_sha256()
             != admitted.attention.runtime_identity_sha256
@@ -1440,7 +1508,11 @@ impl H3PrivateQwenArtifactAuthority {
         opened: &H3AuthenticatedQwenNvfp4Authority,
     ) -> Result<Self> {
         opened.revalidate()?;
-        if support.model() != contract::FL2VA_COMFY || support.task() != Task::Fl2va {
+        // The support's own model must be its own task's compact partition.
+        // A crossed pair is what this rejects; which task it is belongs to
+        // the admitted route, which `validate_private_artifact_facts` fences
+        // separately.
+        if support.model() != contract::base_compact_model_for_task(support.task()) {
             bail!("private H3 retained Qwen support has the wrong task partition")
         }
         let authority = Self {
@@ -1558,6 +1630,14 @@ impl H3PrivateArtifactAuthorityFacts {
     }
 }
 
+/// The transformer partition each task's admitted route must have opened.
+const fn expected_transformer_task(task: Task) -> H3TransformerTask {
+    match task {
+        Task::Fl2va => H3TransformerTask::T2VaFl2Va,
+        Task::Ref2va => H3TransformerTask::Ref2Va,
+    }
+}
+
 fn validate_private_artifact_facts(
     admitted: &H3PrivateFl2VaFactoryAuthority,
     stream: &H3PrivateComfyStreamAuthority,
@@ -1567,8 +1647,8 @@ fn validate_private_artifact_facts(
 ) -> Result<()> {
     admitted.block_streaming.validate()?;
     overlap.validate()?;
-    if admitted.task != Task::Fl2va
-        || admitted.canonical_model != contract::FL2VA_COMFY
+    if admitted.canonical_model != contract::base_compact_model_for_task(admitted.task)
+        || overlap.task != admitted.task
         || overlap.factory_identity_sha256 != admitted.factory_identity_sha256
         || overlap.condition_visual_rows != admitted.condition_visual_rows
         || facts.memory_overlap_identity_sha256 != overlap.identity_sha256()
@@ -1595,7 +1675,7 @@ fn validate_private_artifact_facts(
         || facts.audio_vae_component_validation_sha256
             != admitted.audio_vae_component_validation_sha256
         || facts.vae_artifact_plan_identity_sha256 != admitted.vae_artifact_plan_identity_sha256
-        || stream.task != H3TransformerTask::T2VaFl2Va
+        || stream.task != expected_transformer_task(admitted.task)
         || facts.transformer_task != stream.task
         || facts.transformer_checkpoint_content_sha256 != stream.transformer_content_sha256
         || facts.transformer_checkpoint_layout_identity_sha256
@@ -1884,13 +1964,17 @@ where
     E: H3BackendExecutionLease + Send + Sync,
     A: H3PrivateFl2VaArtifactLease + Send + Sync,
 {
+    /// Consume the owner into its concrete task-shaped runtime request and
+    /// the phase backend both pipelines drive.
+    ///
+    /// The request is the TASK enum, not FL2VA's: each runner below
+    /// destructures the variant its own pipeline consumes, and the schedule
+    /// check here reads the grid through the enum so a Ref2VA preparation is
+    /// checked against the same retained denoise-forward count.
     fn into_backend(
         self,
         progress: &ProgressReporter,
-    ) -> Result<(
-        super::pipeline::H3PreparedFl2VaRequest,
-        H3PrivatePhaseBackend<C, E, A>,
-    )> {
+    ) -> Result<(H3PrivatePreparedTaskRequest, H3PrivatePhaseBackend<C, E, A>)> {
         let Self {
             authority,
             activation_evidence,
@@ -1913,7 +1997,7 @@ where
         retention.revalidate()?;
         let expected_denoise_forwards =
             super::sampler::H3DualSchedule::new_for_sampler_with_video_shift(
-                prepared.grid_points,
+                prepared.grid_points(),
                 admitted.quantization.sampler_kind(),
                 admitted.quantization.video_shift(),
             )?
@@ -2001,8 +2085,9 @@ where
         )?;
         if let Some(vae) = self.vae.as_ref() {
             vae.validate_authority()?;
-            if vae.task() != Task::Fl2va
-                || vae.canonical_model() != contract::FL2VA_COMFY
+            if vae.task() != self.admitted.task
+                || vae.canonical_model()
+                    != contract::base_compact_model_for_task(self.admitted.task)
                 || vae.artifact_plan_identity_sha256()
                     != self.admitted.vae_artifact_plan_identity_sha256
                 || !vae.device().same_device(self.continuing_execution.device())
@@ -2924,7 +3009,7 @@ where
     storage.validate()?;
     memory_overlap.validate()?;
     authority.validate_engine_seam(
-        contract::FL2VA_COMFY,
+        contract::base_compact_model_for_task(admitted.task),
         admitted.device_ordinal,
         authority.block_offload(),
     )?;
@@ -3082,6 +3167,9 @@ where
     A: H3PrivateFl2VaArtifactLease + Send + Sync,
 {
     let (prepared, backend) = owner.into_backend(progress)?;
+    let H3PrivatePreparedTaskRequest::Fl2va(prepared) = prepared else {
+        bail!("private H3 FL2VA attempt was handed another task's prepared request")
+    };
     with_contained_private_cuda_resources(backend, |backend| {
         let staged = super::pipeline::execute_staged(&prepared, backend, progress, observer)?;
         let identity_echo = backend.terminal_identity_echo()?;
@@ -3100,19 +3188,14 @@ where
     })
 }
 
-/// Execute one instrumented Ref2VA attempt over the same phase owner FL2VA
-/// uses.
+/// Execute one Ref2VA attempt over the same phase owner FL2VA uses.
 ///
 /// The owner is built by `bind_private_comfy_ref2va_phase_owner`, which is the
 /// only constructor and which refuses anything but a Ref2VA-admitted route.
-/// This function is compiled only for the developer-only campaign feature: the
-/// public runtime has no reviewed Ref2VA bounds, so it must not be reachable
-/// from a shipping build.
-#[cfg(all(feature = "mp4", feature = "h3-private-uat"))]
+#[cfg(feature = "mp4")]
 pub(crate) fn run_private_comfy_ref2va_attempt<C, E, A>(
     owner: H3PrivatePhaseRuntimeOwner<C, E, A>,
     bindings: &[GenerationReferenceBinding],
-    request: &mold_core::GenerateRequest,
     progress: &ProgressReporter,
     observer: &mut dyn H3PipelineObserver,
 ) -> Result<H3PrivatePhaseRuntimeOutput>
@@ -3121,11 +3204,14 @@ where
     E: H3BackendExecutionLease + Send + Sync,
     A: H3PrivateFl2VaArtifactLease + Send + Sync,
 {
-    // The FL2VA owner's `into_backend` returns the prepared FL2VA request,
-    // which Ref2VA does not consume; the ordered reference preparation is
-    // re-derived from the same resolved request the retention froze.
-    let (_, backend) = owner.into_backend(progress)?;
-    let prepared = super::pipeline::ref2va::prepare_resolved_request(request, progress, observer)?;
+    // The RETAINED preparation, never a fresh one: the prepared request the
+    // owner carries is the one `validate_prepared_ref2va_runtime_request`
+    // checked against the frozen factory authority, so re-deriving it here
+    // from the request would put an unfenced value on the execution path.
+    let (prepared, backend) = owner.into_backend(progress)?;
+    let H3PrivatePreparedTaskRequest::Ref2va(prepared) = prepared else {
+        bail!("private H3 Ref2VA attempt was handed another task's prepared request")
+    };
     with_contained_private_cuda_resources(backend, |backend| {
         let staged = super::pipeline::ref2va::execute_staged(
             &prepared, bindings, backend, progress, observer,
@@ -3152,7 +3238,7 @@ where
 /// FL2VA binder and then adds the one check that binder cannot make: the
 /// admitted route must be the Ref2VA task and model, and the opened
 /// transformer must be the Ref2VA checkpoint rather than FL2VA's.
-#[cfg(feature = "h3-private-uat")]
+#[cfg(feature = "mp4")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn bind_private_comfy_ref2va_phase_owner<C, E, A>(
     authority: FrozenH3FactoryAuthority,
@@ -3496,7 +3582,9 @@ mod tests {
             admitted.factory_identity_sha256.clone(),
             sha('a'),
             sha('b'),
+            Task::Fl2va,
             admitted.condition_visual_rows,
+            0,
             condition_host,
             condition_device,
             30,
@@ -3505,6 +3593,7 @@ mod tests {
             90,
             120,
             normalized_endpoints,
+            0,
         )
         .unwrap()
     }
@@ -3952,6 +4041,8 @@ mod tests {
                     admitted.factory_identity_sha256.clone(),
                     sha('a'),
                     sha('b'),
+                    Task::Fl2va,
+                    0,
                     0,
                     0,
                     0,
@@ -3960,6 +4051,7 @@ mod tests {
                     50,
                     90,
                     120,
+                    0,
                     0,
                 )?;
                 artifact_overlap_identity = overlap.identity_sha256().into();
@@ -4343,6 +4435,72 @@ mod tests {
         assert!(fixture.forwarded.lock().unwrap().is_empty());
     }
 
+    /// An ordered Ref2VA set of standalone audio references conditions on
+    /// real retained media with ZERO visual rows.
+    ///
+    /// The presence rule reads both modalities: the visual-rows-only test
+    /// called that legitimate backing an invented charge and refused every
+    /// such attempt before execution (#825 review). The cross-task rule still
+    /// holds in both directions — Ref2VA never charges an endpoint, FL2VA
+    /// never charges normalized reference media.
+    #[test]
+    fn audio_only_ref2va_conditioning_is_a_real_charge_not_an_invented_one() {
+        let admitted = authority()
+            .private_fl2va_runtime_authority_for_schema_tests()
+            .unwrap();
+        let overlap = |visual_rows: u64, audio_rows: u64, endpoint: u64, reference: u64| {
+            H3PrivateFl2VaMemoryOverlapAuthority::new(
+                admitted.factory_identity_sha256.clone(),
+                sha('a'),
+                sha('b'),
+                Task::Ref2va,
+                visual_rows,
+                audio_rows,
+                10,
+                20,
+                30,
+                40,
+                50,
+                90,
+                120,
+                endpoint,
+                reference,
+            )
+        };
+        // Audio-only: no visual rows, real reference media, admitted.
+        overlap(0, 414, 0, 60).unwrap();
+        // Visual-only and mixed both still work.
+        overlap(1_008, 0, 0, 60).unwrap();
+        overlap(1_008, 414, 0, 60).unwrap();
+        // No conditioning at all must charge nothing.
+        assert!(overlap(0, 0, 0, 60).is_err());
+        // A Ref2VA record may never charge FL2VA's boundary endpoint.
+        assert!(overlap(0, 414, 70, 60).is_err());
+        // ... and an audio-only set that charges no retained media is an
+        // undercharge, not a T2VA record.
+        assert!(overlap(0, 414, 0, 0).is_err());
+
+        // The mirror: FL2VA may never charge normalized reference media.
+        assert!(H3PrivateFl2VaMemoryOverlapAuthority::new(
+            admitted.factory_identity_sha256.clone(),
+            sha('a'),
+            sha('b'),
+            Task::Fl2va,
+            admitted.condition_visual_rows,
+            0,
+            10,
+            20,
+            30,
+            40,
+            50,
+            90,
+            120,
+            60,
+            60,
+        )
+        .is_err());
+    }
+
     #[test]
     fn conservative_overlap_rejects_condition_vae_and_audio_latent_undercharge() {
         let admitted = authority()
@@ -4352,7 +4510,9 @@ mod tests {
             admitted.factory_identity_sha256.clone(),
             sha('a'),
             sha('b'),
+            Task::Fl2va,
             admitted.condition_visual_rows,
+            0,
             0,
             20,
             30,
@@ -4361,6 +4521,7 @@ mod tests {
             90,
             120,
             60,
+            0,
         )
         .unwrap_err();
         assert!(error.to_string().contains("undercharges condition backing"));
@@ -4369,7 +4530,9 @@ mod tests {
             admitted.factory_identity_sha256.clone(),
             sha('a'),
             sha('b'),
+            Task::Fl2va,
             admitted.condition_visual_rows,
+            0,
             10,
             20,
             30,
@@ -4378,6 +4541,7 @@ mod tests {
             89,
             120,
             60,
+            0,
         )
         .unwrap_err();
         assert!(error.to_string().contains("retain both VAEs"));
@@ -4386,7 +4550,9 @@ mod tests {
             admitted.factory_identity_sha256,
             sha('a'),
             sha('b'),
+            Task::Fl2va,
             admitted.condition_visual_rows,
+            0,
             10,
             20,
             30,
@@ -4395,6 +4561,7 @@ mod tests {
             90,
             119,
             60,
+            0,
         )
         .unwrap_err();
         assert!(error.to_string().contains("undercharges retained audio"));
@@ -4406,6 +4573,8 @@ mod tests {
             t2va.factory_identity_sha256.clone(),
             sha('a'),
             sha('b'),
+            Task::Fl2va,
+            0,
             0,
             0,
             0,
@@ -4415,12 +4584,15 @@ mod tests {
             90,
             120,
             0,
+            0,
         )
         .unwrap();
         let error = H3PrivateFl2VaMemoryOverlapAuthority::new(
             t2va.factory_identity_sha256,
             sha('a'),
             sha('b'),
+            Task::Fl2va,
+            0,
             0,
             1,
             0,
@@ -4429,6 +4601,7 @@ mod tests {
             50,
             90,
             120,
+            0,
             0,
         )
         .unwrap_err();

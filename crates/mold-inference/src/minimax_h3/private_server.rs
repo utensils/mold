@@ -49,8 +49,9 @@ use super::metal_memory_guard::H3MetalMemoryGuard;
 use super::pipeline::{H3PipelineCheckpoint, H3PipelineEvent};
 #[cfg(feature = "mp4")]
 use super::private_fl2va_runtime::{
-    bind_private_comfy_fl2va_phase_owner, issue_private_fl2va_memory_overlap,
-    run_private_comfy_fl2va_attempt, H3PrivateFl2VaArtifactLease,
+    bind_private_comfy_fl2va_phase_owner, bind_private_comfy_ref2va_phase_owner,
+    issue_private_fl2va_memory_overlap, run_private_comfy_fl2va_attempt,
+    run_private_comfy_ref2va_attempt, H3PrivateFl2VaArtifactLease,
     H3PrivateFl2VaMemoryOverlapAuthority, H3PrivatePhaseRuntimeOutput, H3PrivateRetainedVaeReload,
 };
 #[cfg(feature = "mp4")]
@@ -158,15 +159,21 @@ pub const fn reviewed_h3_private_runtime_available_for_task(task: Task) -> bool 
         Task::Fl2va => true,
         #[cfg(not(feature = "h3"))]
         Task::Fl2va => !REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256.is_empty(),
-        // Ref2VA has no reviewed bounds and no qualified public route. It is
-        // reachable only from the developer-only campaign build, whose whole
-        // purpose is to measure the bounds a future reviewed record would
-        // carry, and which admits under explicitly provisional ceilings.
-        // Do not infer authority from an FL2VA record, and do not widen this
-        // to `feature = "h3"`: a shipping build must keep refusing Ref2VA.
-        #[cfg(feature = "h3-private-uat")]
+        // Ref2VA carries its OWN compiled public qualification since #825 —
+        // `PUBLIC_REF2VA_RUNTIME_PROFILE_SCHEMA`, its own decision string, and
+        // the envelope and bounds `public_ref2va_runtime_envelope_for_shape` /
+        // `_bounds_for_shape` derive from the same measured observations
+        // FL2VA's do. Authority is still never inherited from an FL2VA record:
+        // `public_runtime_profile_identities` pins each task's schema,
+        // decision, canonical model, and task name together, so a record
+        // minted for one can never revalidate as the other.
+        //
+        // The campaign build keeps its own arm because it authenticates the
+        // capture-scope profile instead, which is a different storage variant
+        // and a different set of provisional ceilings.
+        #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         Task::Ref2va => true,
-        #[cfg(not(feature = "h3-private-uat"))]
+        #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
         Task::Ref2va => false,
     }
 }
@@ -1139,6 +1146,15 @@ pub struct H3PrivateFl2VaMediaContract {
     pub height: u32,
     pub frames: u32,
     pub fps: u32,
+    /// Fingerprint of the TARGET-DURATION prepared reference metadata in
+    /// exact request order — the value the frozen factory request carries.
+    /// Ref2VA requires it; FL2VA must leave it absent.
+    pub reference_fingerprint_sha256: Option<String>,
+    /// Fingerprint of the resolved descriptor set that owns the staged files.
+    /// It detects a byte or probe replacement even when the target-duration
+    /// prepared shapes are unchanged, which the value above cannot.
+    pub resolved_reference_fingerprint_sha256: Option<String>,
+    pub reference_count: u32,
 }
 
 impl H3PrivateFl2VaMediaContract {
@@ -1151,10 +1167,33 @@ impl H3PrivateFl2VaMediaContract {
             Task::Fl2va => self.mode != Mode::ReferenceToAudioVideo,
             Task::Ref2va => self.mode == Mode::ReferenceToAudioVideo,
         };
+        // The ordered-reference authority is the Ref2VA half of the same
+        // pairing: its two fingerprints and its count exist exactly for that
+        // task, and an FL2VA contract that carried them would let a
+        // reference set ride a boundary-endpoint route.
+        let references_match_task = match self.task {
+            Task::Fl2va => {
+                self.reference_fingerprint_sha256.is_none()
+                    && self.resolved_reference_fingerprint_sha256.is_none()
+                    && self.reference_count == 0
+            }
+            Task::Ref2va => {
+                self.reference_count > 0
+                    && self
+                        .reference_fingerprint_sha256
+                        .as_deref()
+                        .is_some_and(valid_sha256)
+                    && self
+                        .resolved_reference_fingerprint_sha256
+                        .as_deref()
+                        .is_some_and(valid_sha256)
+            }
+        };
         if contract::base_compact_model(&self.canonical_model)
             != Some(contract::base_compact_model_for_task(self.task))
             || !contract::is_reviewed_compact_model(&self.canonical_model)
             || !mode_matches_task
+            || !references_match_task
             || self.width == 0
             || self.height == 0
             || self.frames == 0
@@ -1243,7 +1282,12 @@ pub struct H3PrivateFl2VaPrepareInput<'a> {
     /// the same shape admission consumed, because the reopen re-derives the
     /// exact frozen factory request through the same decoder. Empty for
     /// FL2VA.
-    pub references: &'a [GenerationReferenceBinding],
+    ///
+    /// Owned rather than borrowed because the prepared runner RETAINS them:
+    /// a binding holds the opened staged descriptor and is deliberately not
+    /// `Clone`, so the execution slice can only reach the exact handles the
+    /// reopen verified by taking them.
+    pub references: Vec<GenerationReferenceBinding>,
 }
 
 /// Canonical private-UAT filesystem inputs. Preparation resolves every model
@@ -1755,11 +1799,31 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // than after ~37 GB of SHA-256. This stays a provable lower bound of the
     // exact per-attempt budget compared at the end of this function, because
     // it is the same scaling that budget's own grant is derived from.
+    // Task-keyed, because the conditioning half of the envelope and every
+    // workspace scaled from it are a function of the ordered reference set
+    // for Ref2VA and of the canvas alone for FL2VA. Asking FL2VA's question
+    // here refused every Ref2VA request for a text ceiling its references'
+    // own vision pads had already spent.
     #[cfg(feature = "h3")]
-    let precheck_bounds = public_runtime_bounds_for_shape(
-        (request.width, request.height),
-        request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
-    );
+    let precheck_reference_rows = match admitted_task {
+        Task::Fl2va => None,
+        Task::Ref2va => Some(ref2va_reference_rows(
+            request.references.as_deref().unwrap_or_default(),
+            request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
+        )?),
+    };
+    #[cfg(feature = "h3")]
+    let precheck_bounds = match precheck_reference_rows.as_ref() {
+        None => public_runtime_bounds_for_shape(
+            (request.width, request.height),
+            request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
+        ),
+        Some(rows) => public_ref2va_runtime_bounds_for_shape(
+            (request.width, request.height),
+            request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
+            rows,
+        ),
+    };
     #[cfg(not(feature = "h3"))]
     let precheck_bounds = runtime_qualification_source.precheck_bounds();
     precheck_private_h3_admission_capacity(
@@ -1814,11 +1878,19 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // ceilings. The authenticated backstop below still validates the step axis
     // against the tier's own minted envelope.
     #[cfg(feature = "h3")]
-    let precheck_envelope = public_runtime_envelope_for_shape(
-        (request.width, request.height),
-        request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
-        contract::COMFY_DEFAULT_STEPS,
-    );
+    let precheck_envelope = match precheck_reference_rows.as_ref() {
+        None => public_runtime_envelope_for_shape(
+            (request.width, request.height),
+            request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
+            contract::COMFY_DEFAULT_STEPS,
+        ),
+        Some(rows) => public_ref2va_runtime_envelope_for_shape(
+            (request.width, request.height),
+            request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
+            contract::COMFY_DEFAULT_STEPS,
+            rows,
+        ),
+    };
     #[cfg(not(feature = "h3"))]
     let precheck_envelope = runtime_qualification_source.precheck_envelope();
     precheck_private_h3_prepared_rows(
@@ -1922,6 +1994,11 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         attention.kernel().identity(),
         &attention_qualification_sha256,
         turbo_adapter.as_ref(),
+        admitted_task,
+        // The request's own ordered set, which the contract validation above
+        // already accepted. Ref2VA's conditioning envelope is a function of
+        // it; FL2VA carries none.
+        request.references.as_deref().unwrap_or_default(),
     )?;
     progress.checkpoint()?;
 
@@ -3030,6 +3107,12 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         &attention_qualification_sha256,
         // Whatever admission froze, not a fresh environment read.
         frozen_factory.quantization().turbo_adapter(),
+        // The FROZEN task, and the same ordered set admission derived its
+        // envelope from. The identity fence a few lines below compares the
+        // re-minted record against what admission froze, so a substituted
+        // reference set cannot reopen the plan.
+        frozen_route.task,
+        request.references.as_deref().unwrap_or_default(),
     )?;
     if runtime_qualification.identity_sha256() != owner_fence.runtime_qualification_identity_sha256
         || runtime_qualification.artifact_qualification_identity_sha256()
@@ -3132,7 +3215,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
     let frozen_turbo = frozen_factory.quantization().turbo_adapter();
     let prepared_attempt = H3PrivatePreparedFl2VaAttempt::prepare(
         request,
-        references,
+        &references,
         frozen_factory.execution_fingerprint(),
         &storage,
         &qwen_support,
@@ -3179,6 +3262,35 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
             request.model
         )
     }
+    // The reference authority the frozen owner comparison checks. Both
+    // fingerprints come from what this reopen ACTUALLY re-derived — the
+    // prepared factory request's own target-duration digest, and the
+    // resolved descriptor set the request carries — so a substituted set
+    // cannot reach the runtime by matching only one of them.
+    let (reference_fingerprint_sha256, resolved_reference_fingerprint_sha256, reference_count) =
+        match reopened_task {
+            Task::Fl2va => (None, None, 0),
+            Task::Ref2va => {
+                let ordered = request.references.as_deref().unwrap_or_default();
+                let resolved_metadata = ordered
+                    .iter()
+                    .enumerate()
+                    .map(|(index, reference)| reference.redacted_metadata_lossless(index))
+                    .collect::<Vec<_>>();
+                (
+                    Some(
+                        prepared
+                            .prepared_request_input()
+                            .reference_fingerprint
+                            .clone(),
+                    ),
+                    Some(mold_core::generation_reference_fingerprint(
+                        &resolved_metadata,
+                    )),
+                    u32::try_from(ordered.len())?,
+                )
+            }
+        };
     let media = H3PrivateFl2VaMediaContract {
         canonical_model: request.model.clone(),
         task: reopened_task,
@@ -3188,6 +3300,9 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         height: request.height,
         frames: request.frames.unwrap_or(contract::REVIEWED_COMPACT_FRAMES),
         fps: request.fps.unwrap_or(contract::FIXED_FPS),
+        reference_fingerprint_sha256,
+        resolved_reference_fingerprint_sha256,
+        reference_count,
     };
     media.validate()?;
     let memory_ledger_sequence = owner_fence.memory_ledger_sequence;
@@ -3262,6 +3377,7 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         authority: enriched_factory,
         activation,
         prepared,
+        references,
         storage,
         qwen_support,
         opened_transformer,
@@ -3623,6 +3739,11 @@ struct H3PrivateServerFl2VaArtifactLease {
     audio_vae_component_content_sha256: String,
     audio_vae_component_validation_sha256: String,
     vae_artifact_plan_identity_sha256: String,
+    /// The transformer partition the OPENED checkpoint declares, never a
+    /// task constant: `bind_private_comfy_ref2va_phase_owner` compares it
+    /// against the admitted route, which is the one check the shared FL2VA
+    /// binder cannot make.
+    transformer_task: H3TransformerTask,
     transformer_checkpoint_content_sha256: String,
     transformer_checkpoint_layout_identity_sha256: String,
     transformer_checkpoint_identity_sha256: String,
@@ -3704,6 +3825,7 @@ impl H3PrivateServerFl2VaArtifactLease {
             audio_vae_component_content_sha256: audio_vae.content_sha256.clone(),
             audio_vae_component_validation_sha256: audio_vae.validation_sha256.clone(),
             vae_artifact_plan_identity_sha256: vae.artifact_plan_identity_sha256().into(),
+            transformer_task: candidate.strategy.task,
             transformer_checkpoint_content_sha256: transformer.content_sha256().into(),
             transformer_checkpoint_layout_identity_sha256: candidate.header_identity_sha256.clone(),
             transformer_checkpoint_identity_sha256: transformer.checkpoint_identity_sha256().into(),
@@ -3798,7 +3920,7 @@ unsafe impl H3PrivateFl2VaArtifactLease for H3PrivateServerFl2VaArtifactLease {
     }
 
     fn transformer_task(&self) -> H3TransformerTask {
-        H3TransformerTask::T2VaFl2Va
+        self.transformer_task
     }
 
     fn transformer_checkpoint_content_sha256(&self) -> &str {
@@ -3957,6 +4079,18 @@ struct H3PrivateConcretePreparedRunner {
     authority: FrozenH3FactoryAuthority,
     activation: H3PrivateFactoryActivationEvidence,
     prepared: H3PrivatePreparedFl2VaFactoryInputs,
+    /// The ordered Ref2VA reference bindings this attempt executes against,
+    /// retained from preparation because the runner is dispatched on a
+    /// worker thread long after the caller's staged set has gone.
+    ///
+    /// It is fenced by `H3PrivateFl2VaPreparedAttempt::from_runner`'s caller
+    /// having already bound them to the frozen request: `prepare` re-derived
+    /// the prepared Ref2VA request through the same decoder and
+    /// `validate_prepared_ref2va_runtime_request` compared its
+    /// `reference_fingerprint` to the frozen one, so a substituted binding
+    /// set cannot reach here without changing that digest. Empty for FL2VA,
+    /// which conditions on boundary endpoints instead.
+    references: Vec<GenerationReferenceBinding>,
     storage: H3PrivateComfyStorageAuthority,
     qwen_support: H3PrivateQwenSupport,
     opened_transformer: H3ComfyOpenedInt8Checkpoint,
@@ -3971,17 +4105,41 @@ struct H3PrivateConcretePreparedRunner {
     consumption_binding: H3PrivateAttemptConsumptionBinding,
 }
 
+/// The conditioning shape one capture observation records, keyed on the task
+/// the request was admitted for.
+///
+/// FL2VA pins exactly one first-frame endpoint; Ref2VA carries none at all and
+/// conditions on its ordered references, so demanding an endpoint here refused
+/// every Ref2VA attempt before it reached a device.
+#[cfg(feature = "mp4")]
+fn runtime_envelope_conditioning(
+    request: &H3FactoryPreparedRequestInput,
+) -> Result<(u32, &'static str)> {
+    match request.task {
+        Task::Fl2va => {
+            let endpoint = request
+                .endpoints
+                .first()
+                .ok_or_else(|| anyhow!("private H3 runtime envelope has no endpoint"))?;
+            if request.endpoints.len() != 1 || endpoint.anchor != H3FactoryEndpointAnchor::First {
+                bail!("private H3 runtime envelope requires exactly one first-frame endpoint")
+            }
+            Ok((1, "first"))
+        }
+        Task::Ref2va => {
+            if !request.endpoints.is_empty() || request.references.is_empty() {
+                bail!("private H3 Ref2VA runtime envelope requires ordered references and no endpoint")
+            }
+            Ok((0, "none"))
+        }
+    }
+}
+
 #[cfg(feature = "mp4")]
 fn runtime_envelope_observation(
     request: &H3FactoryPreparedRequestInput,
 ) -> Result<H3PrivateRuntimeEnvelopeObservation> {
-    let endpoint = request
-        .endpoints
-        .first()
-        .ok_or_else(|| anyhow!("private H3 runtime envelope has no endpoint"))?;
-    if request.endpoints.len() != 1 || endpoint.anchor != H3FactoryEndpointAnchor::First {
-        bail!("private H3 runtime envelope requires exactly one first-frame endpoint")
-    }
+    let (endpoint_count, endpoint_anchor) = runtime_envelope_conditioning(request)?;
     Ok(H3PrivateRuntimeEnvelopeObservation {
         width: request.width,
         height: request.height,
@@ -3989,8 +4147,8 @@ fn runtime_envelope_observation(
         fps: request.fps,
         batch_size: request.batch_size,
         steps: request.grid_points,
-        endpoint_count: 1,
-        endpoint_anchor: "first".into(),
+        endpoint_count,
+        endpoint_anchor: endpoint_anchor.into(),
         qwen_output_text_rows: request.rows.qwen_output_text_rows,
         qwen_vision_rows: request.rows.qwen_vision_rows,
         condition_visual_rows: request.rows.condition_visual_rows,
@@ -4019,6 +4177,7 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
             authority,
             activation,
             prepared,
+            references,
             storage,
             qwen_support,
             opened_transformer,
@@ -4124,25 +4283,67 @@ impl H3PrivateFl2VaPreparedRunner for H3PrivateConcretePreparedRunner {
                 &owner.cancellation_scope_identity_sha256,
                 "runtime-execution",
             );
-            let phase_owner = bind_private_comfy_fl2va_phase_owner(
-                authority,
-                activation,
-                prepared,
-                storage,
-                qwen_support,
-                opened_transformer,
-                opened_qwen,
-                opened_vae,
-                reload_vae,
-                attention,
-                conditioner_lease,
-                execution_lease,
-                artifact_lease,
-                memory_overlap,
-                allocation_commit,
-            )?;
+            // The task the ATTEMPT was frozen for selects both the binder and
+            // the runner. `bind_private_comfy_ref2va_phase_owner` delegates to
+            // the FL2VA binder and adds the one check it cannot make — the
+            // admitted route, the opened transformer, and the artifact lease
+            // must all be the Ref2VA partition — so the two paths share every
+            // opened authority and diverge only in the pipeline they drive.
+            let admitted_task = authority.task();
             let mut observer = H3EngineProgressObserver::new(progress);
-            let output = run_private_comfy_fl2va_attempt(phase_owner, progress, &mut observer);
+            let output = match admitted_task {
+                Task::Fl2va => {
+                    if !references.is_empty() {
+                        bail!("private H3 FL2VA attempt retained Ref2VA reference bindings")
+                    }
+                    let phase_owner = bind_private_comfy_fl2va_phase_owner(
+                        authority,
+                        activation,
+                        prepared,
+                        storage,
+                        qwen_support,
+                        opened_transformer,
+                        opened_qwen,
+                        opened_vae,
+                        reload_vae,
+                        attention,
+                        conditioner_lease,
+                        execution_lease,
+                        artifact_lease,
+                        memory_overlap,
+                        allocation_commit,
+                    )?;
+                    run_private_comfy_fl2va_attempt(phase_owner, progress, &mut observer)
+                }
+                Task::Ref2va => {
+                    if references.is_empty() {
+                        bail!("private H3 Ref2VA attempt lost its ordered reference bindings")
+                    }
+                    let phase_owner = bind_private_comfy_ref2va_phase_owner(
+                        authority,
+                        activation,
+                        prepared,
+                        storage,
+                        qwen_support,
+                        opened_transformer,
+                        opened_qwen,
+                        opened_vae,
+                        reload_vae,
+                        attention,
+                        conditioner_lease,
+                        execution_lease,
+                        artifact_lease,
+                        memory_overlap,
+                        allocation_commit,
+                    )?;
+                    run_private_comfy_ref2va_attempt(
+                        phase_owner,
+                        &references,
+                        progress,
+                        &mut observer,
+                    )
+                }
+            };
             if let Some(violation) = metal_memory_guard.finish()? {
                 bail!(violation);
             }
@@ -4957,6 +5158,14 @@ const PUBLIC_RUNTIME_BOUND_MARGIN_PERCENT: u64 = 115;
 #[cfg(feature = "h3")]
 const PUBLIC_RUNTIME_BOUND_GRID_BYTES: u64 = 64 * 1024 * 1024;
 
+/// The VAE construction transient was observed at ZERO: it never rose above
+/// the weights themselves in the qualifying render. A zero bound is not
+/// admissible — the reload stages through it and the validator refuses zero —
+/// so the pre-measurement 64 MiB allowance is retained as a floor. Task
+/// independent: both partitions construct the same pair of VAEs.
+#[cfg(feature = "h3")]
+const VAE_CONSTRUCTION_DEVICE_WORKSPACE_FLOOR_BYTES: u64 = 67_108_864;
+
 /// `ceil_to_grid(observed * margin)`, the one policy every measured bound below
 /// is derived by. Always at or above `observed`.
 #[cfg(feature = "h3")]
@@ -5052,19 +5261,19 @@ fn public_runtime_bounds_for_shape(canvas: (u32, u32), frames: u32) -> H3Private
     let request_pixels = u64::from(canvas.0) * u64::from(canvas.1);
     let measured_pixels = u64::from(MEASURED_CANVAS.0) * u64::from(MEASURED_CANVAS.1);
     H3PrivateRuntimeBoundRecord {
-        // observed 659_701_760
-        fixed_runtime_host_bytes: public_runtime_bound(659_701_760),
-        // observed 477_298_688
-        fixed_runtime_device_bytes: public_runtime_bound(477_298_688),
+        fixed_runtime_host_bytes: public_runtime_bound(fl2va_observed::FIXED_RUNTIME_HOST_BYTES),
+        fixed_runtime_device_bytes: public_runtime_bound(
+            fl2va_observed::FIXED_RUNTIME_DEVICE_BYTES,
+        ),
         // observed 4_168_069_120 (#1245 re-measurement; 3_400_171_520 at the
         // old 1,058-row text ceiling — this is the one bound the raised
-        // prompt budget moves materially, +22.6%)
-        qwen_activation_workspace_bytes: public_runtime_bound(4_168_069_120),
-        // Observed 0: the VAE construction transient never rose above the
-        // weights themselves in the qualifying render. A zero bound is not
-        // admissible (the reload stages through it and the validator refuses
-        // zero), so the previous 64 MiB allowance is retained as a floor.
-        vae_construction_device_workspace_bytes: 67_108_864,
+        // prompt budget moves materially, +22.6%). FL2VA's envelope caps the
+        // Qwen sequence at the rows the grant was measured over, so the flat
+        // figure IS the request figure; Ref2VA's varies and is scaled.
+        qwen_activation_workspace_bytes: public_runtime_bound(
+            fl2va_observed::QWEN_ACTIVATION_WORKSPACE_DEVICE_BYTES,
+        ),
+        vae_construction_device_workspace_bytes: VAE_CONSTRUCTION_DEVICE_WORKSPACE_FLOOR_BYTES,
         // observed 366_027_840, on one boundary frame at the measured
         // canvas — the endpoint is normalized onto the request's canvas, so
         // this is a per-encode transient linear in canvas area.
@@ -5259,24 +5468,60 @@ fn validate_public_runtime_profile(
     validate_public_runtime_profile_with_turbo(record, profile_sha256, None)
 }
 
+/// The compiled public profile identities for one task partition: schema,
+/// decision string, canonical model, and the record's own `task` field.
+///
+/// Each partition mints its own, so a Ref2VA record can never revalidate
+/// against FL2VA's identities and vice versa — which is what keeps "authority
+/// is never inherited from another task's record" structural rather than a
+/// comment.
+#[cfg(feature = "h3")]
+const fn public_runtime_profile_identities(
+    task: Task,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    match task {
+        Task::Fl2va => (
+            PUBLIC_RUNTIME_PROFILE_SCHEMA,
+            PUBLIC_RUNTIME_PROFILE_DECISION,
+            contract::FL2VA_COMFY,
+            "fl2va",
+        ),
+        Task::Ref2va => (
+            PUBLIC_REF2VA_RUNTIME_PROFILE_SCHEMA,
+            PUBLIC_REF2VA_RUNTIME_PROFILE_DECISION,
+            contract::REF2VA_COMFY,
+            "ref2va",
+        ),
+    }
+}
+
 /// Validate the public profile, admitting a reviewed Turbo tier's step count
-/// when an authenticated adapter declares it. `None` keeps the 21-step pin.
+/// when an authenticated adapter declares it. `None` keeps the base range.
 #[cfg(feature = "h3")]
 fn validate_public_runtime_profile_with_turbo(
     record: &H3PrivateRuntimeQualificationRecord,
     profile_sha256: &str,
     turbo_steps: Option<u32>,
 ) -> Result<()> {
-    // The record's own task is pinned to fl2va a few lines below, which is
-    // what scopes this step count.
+    // The record's own serialized task selects the conditioning contract, and
+    // the identity tuple below pins that same task against the schema,
+    // decision, and canonical model. Reading the task from the record is
+    // exactly as strict as the old `fl2va` literal was, because a record
+    // whose task and schema disagree fails the tuple comparison.
+    let task = match record.task.as_str() {
+        "fl2va" => Task::Fl2va,
+        "ref2va" => Task::Ref2va,
+        other => bail!("public H3 runtime profile names an unknown task {other:?}"),
+    };
     record
         .envelope
-        .validate_for_task_with_reviewed_steps(Task::Fl2va, turbo_steps)?;
+        .validate_for_task_with_reviewed_steps(task, turbo_steps)?;
     record.bounds.validate()?;
-    if record.schema != PUBLIC_RUNTIME_PROFILE_SCHEMA
-        || record.decision != PUBLIC_RUNTIME_PROFILE_DECISION
-        || record.canonical_model != contract::FL2VA_COMFY
-        || record.task != "fl2va"
+    let (schema, decision, canonical_model, task_name) = public_runtime_profile_identities(task);
+    if record.schema != schema
+        || record.decision != decision
+        || record.canonical_model != canonical_model
+        || record.task != task_name
         || !matches!(record.compute_capability, [8, 9] | [0, 0])
         || record.identity_sha256 != runtime_qualification_identity(record)
         || profile_sha256 != record.identity_sha256
@@ -5284,6 +5529,296 @@ fn validate_public_runtime_profile_with_turbo(
         bail!("public H3 runtime profile changed or is not the supported CUDA/Metal profile")
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The reviewed compact Ref2VA profile.
+//
+// Ref2VA shares FL2VA's generated side exactly — same canvas rule, same frame
+// grid, same fixed fps, same synchronized audio — and differs on the
+// conditioning side alone: no boundary endpoint, and an ordered reference set
+// whose Qwen sequence and conditioning latents are a function of the request's
+// own references rather than of the canvas.
+//
+// So its envelope is DERIVED per request, exactly as #1348 made FL2VA's
+// generated rows derived: the conditioning caps come from
+// `mold_core::minimax_h3::reference_prepared_shapes_for_target`, the one
+// authority admission's own preparation packs its rows from, and a reference
+// set the derived grant cannot hold is refused with numbers instead of by a
+// list. Nothing here is a transcription of the capture-scope ceilings below,
+// which remain provisional and campaign-only.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "h3")]
+const PUBLIC_REF2VA_RUNTIME_PROFILE_SCHEMA: &str =
+    "mold.minimax-h3.public-ref2va-runtime-profile.v1";
+
+/// The device rule is FL2VA's, deliberately: `mold_core::minimax_h3`'s backend
+/// applicability is a FAMILY declaration (`cuda: Supported`, `metal:
+/// CorrectnessOnly`), so a Ref2VA-only Metal refusal would contradict the
+/// capability every client reads. Both tasks share one Metal correctness tier
+/// and one CUDA SM89 qualification.
+#[cfg(feature = "h3")]
+const PUBLIC_REF2VA_RUNTIME_PROFILE_DECISION: &str = "supported-compact-ref2va-cuda-sm89-or-metal";
+
+/// The prompt, per-reference label, and vision-delimiter budget the Ref2VA
+/// conditioner sequence gets ON TOP of its references' own merged vision pads.
+///
+/// FL2VA's ceiling is one number because its conditioning is one endpoint on
+/// the request canvas; Ref2VA's pads are a function of up to
+/// `contract::MAX_REFERENCE_FILES` normalized reference canvases, so the
+/// ceiling has to be pads-plus-budget or a plain 16:9 photograph — 2048 short
+/// edge, 3584 long, 7,168 merged pads on its own — would be refused before it
+/// reached a device.
+///
+/// 2,048 rows is twice FL2VA's own ~1,040-row headroom over its pads, which
+/// covers the twelve `<Picture n>: ` / `<Video n>: ` / `<Audio n>: ` labels,
+/// the `<t.t seconds>` stamp and two vision delimiters each temporal block
+/// carries, and a paragraph-scale prompt. The exact prompt budget is still
+/// never hard-coded: `precheck_private_h3_prepared_rows` derives it as this
+/// ceiling minus the overhead the tokenizer actually produced.
+#[cfg(feature = "h3")]
+const REVIEWED_REF2VA_PROMPT_AND_LABEL_ROWS: u64 = 2_048;
+
+/// The conditioning quantities one Ref2VA request's ordered reference set
+/// contributes, derived from the preprocessing shapes alone.
+#[cfg(feature = "h3")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct Ref2VaReferenceRows {
+    /// Conditioning latent rows the visual VAE produces for every reference.
+    visual: u64,
+    /// Conditioning latent rows the audio VAE produces for every soundtrack.
+    audio: u64,
+    /// Merged Qwen vision pads every reference contributes to the conditioner
+    /// sequence — the part of `qwen_output_text_rows` that is not the prompt.
+    qwen_vision: u64,
+    /// The largest single normalized reference canvas, in pixels. The
+    /// condition-VAE transient is a per-encode workspace, so the peak is the
+    /// biggest one encoded, never their sum.
+    largest_canvas_pixels: u64,
+}
+
+/// Merged Qwen vision pads for one prepared reference shape.
+///
+/// One packed row is a 32x32 cell for the visual VAE *and* one merged Qwen
+/// vision token for the conditioner (patch 16, spatial merge 2), which is why
+/// both counts read the same `(w / 32) * (h / 32)` grid. An image occupies one
+/// block; a video occupies one block per two 2 fps cursor frames; audio has no
+/// visual pads at all.
+///
+/// `ref2va_qwen_vision_rows_match_the_factory_charges` pins this against
+/// `expected_h3_factory_reference_charges`, the authority the frozen plan's
+/// own row counts come from.
+#[cfg(feature = "h3")]
+fn reference_qwen_vision_rows(shape: &contract::GenerationReferencePreparedShape) -> u64 {
+    let (Some(width), Some(height)) = (shape.normalized_width, shape.normalized_height) else {
+        return 0;
+    };
+    let rows_per_frame = u64::from(width / 32) * u64::from(height / 32);
+    match shape.qwen_video_frames {
+        Some(frames) => u64::from(frames).div_ceil(2) * rows_per_frame,
+        None => rows_per_frame,
+    }
+}
+
+/// Derive one request's reference conditioning quantities.
+///
+/// The shapes come from `mold_core`'s own preprocessing contract at the
+/// request's target clip length — the same call `pipeline::ref2va`'s
+/// preparation makes — so this cannot disagree with the rows admission packs.
+/// A reference set the contract refuses is an error here rather than a
+/// saturated ceiling: admission has not validated the set yet at the point the
+/// authority is minted, and minting an envelope from an invalid set would be
+/// minting authority from unvalidated input.
+#[cfg(feature = "h3")]
+fn ref2va_reference_rows(
+    references: &[mold_core::GenerationReference],
+    frames: u32,
+) -> Result<Ref2VaReferenceRows> {
+    if references.is_empty() {
+        bail!("public H3 Ref2VA runtime qualification requires at least one ordered reference")
+    }
+    let shapes = contract::reference_prepared_shapes_for_target(references, frames)
+        .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
+    let mut rows = Ref2VaReferenceRows::default();
+    for shape in &shapes {
+        rows.visual = rows
+            .visual
+            .checked_add(shape.visual_rows)
+            .ok_or_else(|| anyhow!("public H3 Ref2VA conditioning rows overflow"))?;
+        rows.audio = rows
+            .audio
+            .checked_add(shape.audio_rows)
+            .ok_or_else(|| anyhow!("public H3 Ref2VA conditioning rows overflow"))?;
+        rows.qwen_vision = rows
+            .qwen_vision
+            .checked_add(reference_qwen_vision_rows(shape))
+            .ok_or_else(|| anyhow!("public H3 Ref2VA conditioning rows overflow"))?;
+        if let (Some(width), Some(height)) = (shape.normalized_width, shape.normalized_height) {
+            rows.largest_canvas_pixels = rows
+                .largest_canvas_pixels
+                .max(u64::from(width) * u64::from(height));
+        }
+    }
+    Ok(rows)
+}
+
+/// The public Ref2VA envelope for one concrete request shape.
+///
+/// The generated side is FL2VA's, derived from the same canvas and clip
+/// length. The conditioning side is the request's own reference set, plus the
+/// prompt-and-label budget above. Every cap is therefore at or above what the
+/// prepared request packs, which is what `row_cap_mismatches` compares with
+/// `<=` — and the memory bounds below scale from the same numbers, so a bigger
+/// reference set buys a bigger grant rather than a silent undercharge.
+#[cfg(feature = "h3")]
+fn public_ref2va_runtime_envelope_for_shape(
+    canvas: (u32, u32),
+    frames: u32,
+    max_steps: u32,
+    references: &Ref2VaReferenceRows,
+) -> H3PrivateRuntimeEnvelopeRecord {
+    let generated = compact_envelope_rows(canvas, frames);
+    let text = references
+        .qwen_vision
+        .saturating_add(REVIEWED_REF2VA_PROMPT_AND_LABEL_ROWS);
+    // One audio ceiling covers both sides. A reference soundtrack and the
+    // generated track are 32 kHz stereo latents over the same duration, and
+    // `conditioning_mismatches` compares the request's condition-audio rows
+    // against this same field — so a request carrying several soundtracks
+    // needs the ceiling to be the larger of the two, not the generated one.
+    let audio = generated.audio.max(references.audio);
+    H3PrivateRuntimeEnvelopeRecord {
+        width: canvas.0,
+        height: canvas.1,
+        frames,
+        fps: contract::FIXED_FPS,
+        batch_size: 1,
+        max_steps,
+        // Ref2VA carries no boundary endpoint at all.
+        endpoint_count: 0,
+        endpoint_anchor: "none".into(),
+        max_qwen_output_text_rows: text,
+        max_qwen_vision_rows: references.qwen_vision.max(1),
+        max_condition_visual_rows: references.visual.max(1),
+        max_target_video_rows: generated.video,
+        max_target_audio_rows: audio,
+        max_total_packed_rows: text
+            .saturating_add(references.visual)
+            .saturating_add(references.audio)
+            .saturating_add(generated.video)
+            .saturating_add(generated.audio),
+    }
+}
+
+/// The public Ref2VA bounds for one concrete request shape.
+///
+/// Derived term by term from `fl2va_observed` — the same measured render the
+/// FL2VA ceilings apply their margin policy to — scaled by the quantity each
+/// term is a function of, exactly as `public_runtime_bounds_for_shape` does:
+///
+/// * `attention` / `ffn` — per-forward denoise workspaces over the packed
+///   sequence, linear in packed rows. The route is the same FlashAttention v2
+///   / per-row FFN projection pair; the transformer is a different checkpoint
+///   only in its conditioning cross-attention, whose activations ride the same
+///   sequence.
+/// * `qwen_activation` — linear in the conditioner sequence, which for Ref2VA
+///   is the ordered references' pads plus the prompt. This is the GRANT;
+///   `qwen_activation_workspace_demand_bytes` charges the request's own
+///   derived demand against it under the identical policy, so the grant is
+///   always at or above the charge and a set that exceeds it is a named
+///   refusal at budget build.
+/// * `condition_vae` — a per-encode transient, linear in the encoded canvas
+///   area. The visual VAE is chunked temporally at a fixed `tokens_per_chunk`
+///   and encodes the full canvas each chunk (the same property
+///   `decoder_tile`'s scaling rests on), so the peak follows the LARGEST
+///   reference canvas rather than the sum or the frame count. The audio
+///   reference encoder has no FL2VA analogue and the budget builder borrows
+///   `audio_decode_workspace_device_bytes` for it, which is duration-scaled
+///   below and covers a soundtrack truncated to the generated clip.
+/// * `decoder_tile` / `audio_decode` — the generated side, scaled by canvas
+///   area and clip length exactly as FL2VA's are.
+/// * The fixed runtime terms, the VAE construction floor, and the four
+///   pipeline host bounds are task-independent and keep FL2VA's values.
+///
+/// #825's UAT renders on SM89 confirmed every scaled term sits inside the
+/// bound it derives; `docs/qualification/minimax-h3.md` records the numbers.
+#[cfg(feature = "h3")]
+fn public_ref2va_runtime_bounds_for_shape(
+    canvas: (u32, u32),
+    frames: u32,
+    references: &Ref2VaReferenceRows,
+) -> H3PrivateRuntimeBoundRecord {
+    let envelope = public_ref2va_runtime_envelope_for_shape(
+        canvas,
+        frames,
+        contract::COMFY_DEFAULT_STEPS,
+        references,
+    );
+    let scale = |observed: u64, numerator: u64, denominator: u64| -> u64 {
+        let scaled = (u128::from(observed) * u128::from(numerator)
+            / u128::from(denominator.max(1)))
+        .try_into()
+        .unwrap_or(u64::MAX);
+        // Clamp before the margin policy: `public_runtime_bound` multiplies by
+        // 115, and an unclamped saturated product would overflow there. Any
+        // value this large is refused by the capacity precheck long before it
+        // is charged, so the clamp can only ever turn one refusal into
+        // another.
+        public_runtime_bound(scaled.min(u64::MAX / 256))
+    };
+    let request_pixels = u64::from(canvas.0) * u64::from(canvas.1);
+    let measured_pixels = u64::from(MEASURED_CANVAS.0) * u64::from(MEASURED_CANVAS.1);
+    let qwen_rows = envelope
+        .max_qwen_output_text_rows
+        .saturating_add(envelope.max_qwen_vision_rows);
+    H3PrivateRuntimeBoundRecord {
+        fixed_runtime_host_bytes: public_runtime_bound(fl2va_observed::FIXED_RUNTIME_HOST_BYTES),
+        fixed_runtime_device_bytes: public_runtime_bound(
+            fl2va_observed::FIXED_RUNTIME_DEVICE_BYTES,
+        ),
+        qwen_activation_workspace_bytes: scale(
+            fl2va_observed::QWEN_ACTIVATION_WORKSPACE_DEVICE_BYTES,
+            qwen_rows,
+            fl2va_observed::QWEN_SEQUENCE_ROWS,
+        ),
+        vae_construction_device_workspace_bytes: VAE_CONSTRUCTION_DEVICE_WORKSPACE_FLOOR_BYTES,
+        // Floored, not scaled to zero: an ordered set of standalone audio
+        // references has no visual canvas at all, and a zero bound is
+        // inadmissible (`H3PrivateRuntimeBoundRecord::validate` refuses it,
+        // and the encoder still constructs). The floor is the same 64 MiB the
+        // VAE construction transient keeps.
+        condition_vae_workspace_device_bytes: scale(
+            fl2va_observed::CONDITION_VAE_WORKSPACE_DEVICE_BYTES,
+            references.largest_canvas_pixels,
+            measured_pixels,
+        )
+        .max(VAE_CONSTRUCTION_DEVICE_WORKSPACE_FLOOR_BYTES),
+        attention_workspace_device_bytes: scale(
+            fl2va_observed::ATTENTION_WORKSPACE_DEVICE_BYTES,
+            envelope.max_total_packed_rows,
+            fl2va_observed::ENVELOPE_TOTAL_PACKED_ROWS,
+        ),
+        ffn_workspace_device_bytes: scale(
+            fl2va_observed::FFN_WORKSPACE_DEVICE_BYTES,
+            envelope.max_total_packed_rows,
+            fl2va_observed::ENVELOPE_TOTAL_PACKED_ROWS,
+        ),
+        decoder_tile_workspace_device_bytes: scale(
+            fl2va_observed::DECODER_TILE_WORKSPACE_DEVICE_BYTES,
+            request_pixels,
+            measured_pixels,
+        ),
+        audio_decode_workspace_device_bytes: scale(
+            fl2va_observed::AUDIO_DECODE_WORKSPACE_DEVICE_BYTES,
+            u64::from(frames),
+            u64::from(MEASURED_FRAMES),
+        ),
+        encoded_video_host_bytes_bound: super::pipeline::SMALL_ENCODED_VIDEO_HOST_BYTES_BOUND,
+        thumbnail_host_bytes_bound: super::pipeline::SMALL_THUMBNAIL_HOST_BYTES_BOUND,
+        mux_output_host_bytes_bound: super::pipeline::SMALL_MUX_OUTPUT_HOST_BYTES_BOUND,
+        aac_mux_staging_host_bytes: super::pipeline::SMALL_AAC_MUX_STAGING_HOST_BYTES,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5381,6 +5916,24 @@ mod fl2va_observed {
     pub(super) const DECODER_TILE_WORKSPACE_DEVICE_BYTES: u64 = 1_338_688_660;
     #[cfg(feature = "h3")]
     pub(super) const AUDIO_DECODE_WORKSPACE_DEVICE_BYTES: u64 = 204_867_120;
+    /// Sampled as `global_total - global_free` at attempt entry, so on a
+    /// shared card it measures the co-tenant too; #827's is kept for the
+    /// reason the profile doc gives.
+    #[cfg(feature = "h3")]
+    pub(super) const FIXED_RUNTIME_DEVICE_BYTES: u64 = 477_298_688;
+    #[cfg(feature = "h3")]
+    pub(super) const FIXED_RUNTIME_HOST_BYTES: u64 = 659_701_760;
+    /// The conditioner activation workspace and the Qwen sequence it was
+    /// measured over. These are `private_opened_evidence`'s own constants,
+    /// not a second copy: the exact per-request Ref2VA demand is charged
+    /// there from the same observation this grant is derived from, so a
+    /// transcription could put the grant below the charge.
+    #[cfg(feature = "h3")]
+    pub(super) const QWEN_ACTIVATION_WORKSPACE_DEVICE_BYTES: u64 =
+        super::super::private_opened_evidence::FL2VA_OBSERVED_QWEN_ACTIVATION_WORKSPACE_BYTES;
+    #[cfg(feature = "h3")]
+    pub(super) const QWEN_SEQUENCE_ROWS: u64 =
+        super::super::private_opened_evidence::FL2VA_OBSERVED_QWEN_SEQUENCE_ROWS;
     /// The packed-row count of the reviewed FL2VA envelope the two denoise
     /// transients above were measured under (`max_total_packed_rows`,
     /// `public_runtime_envelope_for_steps`); the qualifying render packed the
@@ -5656,34 +6209,63 @@ fn public_runtime_qualification(
     attention_kernel_identity: &str,
     attention_qualification_sha256: &str,
     turbo: Option<&H3FactoryTurboAdapterAuthority>,
+    // The partition this record authorizes, and — for Ref2VA — the ordered
+    // reference set its conditioning envelope is derived from. FL2VA carries
+    // none and its envelope is a pure function of the shape above.
+    task: Task,
+    references: &[mold_core::GenerationReference],
 ) -> Result<H3PrivateRuntimeQualificationAuthority> {
-    // This mints an FL2VA-shaped qualification, so a tier reviewed for another
-    // task may not set its step count — the FL2V 768p and Ref2V tiers share a
-    // 5-point schedule, so a bare count cannot tell them apart and the task
-    // identity would be stripped across this boundary.
+    // A tier reviewed for another task may not set this record's step count —
+    // the FL2V 768p and Ref2V tiers share a 5-point schedule, so a bare count
+    // cannot tell them apart and the task identity would be stripped across
+    // this boundary.
     if let Some(turbo) = turbo {
-        if turbo.reviewed_task() != Some(Task::Fl2va) {
+        if turbo.reviewed_task() != Some(task) {
             bail!(
-                "private H3 Turbo adapter {} was not reviewed for the fl2va runtime qualification",
+                "private H3 Turbo adapter {} was not reviewed for the {task:?} runtime qualification",
                 turbo.tier_stable_id()
             )
         }
     }
     let turbo_steps = turbo.map(H3FactoryTurboAdapterAuthority::grid_points);
+    let (schema, decision, canonical_model, task_name) = public_runtime_profile_identities(task);
     if !matches!(compute_capability, Some((8, 9)) | None)
-        || artifact.canonical_model != contract::FL2VA_COMFY
-        || artifact.task != "fl2va"
+        || artifact.canonical_model != canonical_model
+        || artifact.task != task_name
         || !valid_sha256(attention_runtime_identity_sha256)
         || !valid_sha256(attention_qualification_sha256)
         || attention_kernel_identity.is_empty()
     {
-        bail!("public H3 runtime requires the exact compact FL2VA CUDA SM89 or Metal authority")
+        bail!("public H3 runtime requires the exact compact {task:?} CUDA SM89 or Metal authority")
     }
+    let (envelope, bounds) = match task {
+        Task::Fl2va => {
+            if !references.is_empty() {
+                bail!("public H3 FL2VA runtime qualification was handed ordered references")
+            }
+            (
+                public_runtime_envelope_for_shape(canvas, frames, turbo_steps.unwrap_or(steps)),
+                public_runtime_bounds_for_shape(canvas, frames),
+            )
+        }
+        Task::Ref2va => {
+            let rows = ref2va_reference_rows(references, frames)?;
+            (
+                public_ref2va_runtime_envelope_for_shape(
+                    canvas,
+                    frames,
+                    turbo_steps.unwrap_or(steps),
+                    &rows,
+                ),
+                public_ref2va_runtime_bounds_for_shape(canvas, frames, &rows),
+            )
+        }
+    };
     let mut record = H3PrivateRuntimeQualificationRecord {
-        schema: PUBLIC_RUNTIME_PROFILE_SCHEMA.into(),
-        decision: PUBLIC_RUNTIME_PROFILE_DECISION.into(),
-        canonical_model: contract::FL2VA_COMFY.into(),
-        task: "fl2va".into(),
+        schema: schema.into(),
+        decision: decision.into(),
+        canonical_model: canonical_model.into(),
+        task: task_name.into(),
         campaign_source_sha: exact_h3_runtime_build_source_sha()?.into(),
         campaign_runtime_code_identity_sha256: super::PRIVATE_RUNTIME_CODE_IDENTITY_SHA256.into(),
         campaign_bootstrap_record_sha256: sha256_domain("public-profile-bootstrap"),
@@ -5715,8 +6297,8 @@ fn public_runtime_qualification(
             cuda_driver_version: 0,
             cuda_toolkit_version: 0,
         },
-        envelope: public_runtime_envelope_for_shape(canvas, frames, turbo_steps.unwrap_or(steps)),
-        bounds: public_runtime_bounds_for_shape(canvas, frames),
+        envelope,
+        bounds,
         evidence_artifacts: Vec::new(),
         identity_sha256: String::new(),
     };
@@ -6904,6 +7486,368 @@ mod tests {
         assert_eq!(capture.endpoint_anchor, "none");
     }
 
+    /// One ordered Ref2VA set covering all three modalities, as a client
+    /// would send it.
+    #[cfg(all(feature = "h3", feature = "mp4"))]
+    fn ref2va_reference_set() -> Vec<mold_core::GenerationReference> {
+        use mold_core::{
+            GenerationReference, GenerationReferenceAuthority, GenerationReferenceProvenance,
+        };
+
+        let provenance = |name: &str, seed: &[u8]| GenerationReferenceProvenance {
+            name: Some(name.to_string()),
+            sha256: Some(format!("{:x}", Sha256::digest(seed))),
+        };
+        vec![
+            // A plain 16:9 photograph. Its short edge is normalized to 2048,
+            // so it packs far more than a square still would — which is the
+            // case a fixed per-reference ceiling would have refused.
+            GenerationReference::Image {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance: provenance("hero.png", b"hero"),
+                mime_type: "image/png".into(),
+                width: 1_920,
+                height: 1_080,
+            },
+            GenerationReference::Video {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance: provenance("clip.mp4", b"clip"),
+                mime_type: "video/mp4".into(),
+                width: 1_280,
+                height: 720,
+                duration_ms: 5_000,
+                frame_count: Some(120),
+                fps: 24.0,
+                has_audio: true,
+                audio_duration_ms: Some(5_000),
+                audio_sample_count: Some(240_000),
+                audio_sample_rate: Some(48_000),
+                audio_channels: Some(2),
+            },
+            GenerationReference::Audio {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance: provenance("score.wav", b"score"),
+                mime_type: "audio/wav".into(),
+                duration_ms: 5_000,
+                sample_count: Some(220_500),
+                sample_rate: 44_100,
+                channels: 2,
+            },
+        ]
+    }
+
+    /// The envelope's conditioning caps are DERIVED from the ordered set, and
+    /// every one of them is at or above what the frozen request actually
+    /// packs.
+    ///
+    /// This is the property `row_cap_mismatches` reads with `<=`: an
+    /// underderived cap refuses a set the runtime would render, and an
+    /// overderived one silently undercharges the memory grant that scales
+    /// from the same numbers.
+    #[cfg(all(feature = "h3", feature = "mp4"))]
+    #[test]
+    fn the_public_ref2va_envelope_covers_every_row_the_request_packs() {
+        let references = ref2va_reference_set();
+        let rows = ref2va_reference_rows(&references, contract::DEFAULT_COMPACT_FRAMES).unwrap();
+        let envelope = public_ref2va_runtime_envelope_for_shape(
+            (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
+            contract::DEFAULT_COMPACT_FRAMES,
+            contract::COMFY_DEFAULT_STEPS,
+            &rows,
+        );
+        envelope.validate_for_task(Task::Ref2va).unwrap();
+        assert_eq!(envelope.endpoint_count, 0);
+        assert_eq!(envelope.endpoint_anchor, "none");
+
+        // The exact per-reference charges the frozen plan is built from.
+        let shapes = contract::reference_prepared_shapes_for_target(
+            &references,
+            contract::DEFAULT_COMPACT_FRAMES,
+        )
+        .unwrap();
+        let (mut visual, mut audio, mut qwen_vision) = (0_u64, 0_u64, 0_u64);
+        for (index, shape) in shapes.iter().enumerate() {
+            use crate::h3_factory::{H3FactoryReferenceInput, H3FactoryReferenceKind};
+            let kind = match &references[index] {
+                mold_core::GenerationReference::Image { .. } => H3FactoryReferenceKind::Image,
+                mold_core::GenerationReference::Video { .. } => H3FactoryReferenceKind::Video,
+                mold_core::GenerationReference::Audio { .. } => H3FactoryReferenceKind::Audio,
+            };
+            let charges = crate::h3_factory::expected_h3_factory_reference_charges(
+                &H3FactoryReferenceInput {
+                    index: index as u32 + 1,
+                    kind,
+                    content_sha256: format!("{:x}", Sha256::digest(b"x")),
+                    preprocess_version: shape.version,
+                    normalized_width: shape.normalized_width,
+                    normalized_height: shape.normalized_height,
+                    normalized_video_frames: shape.normalized_video_frames,
+                    video_frames: shape.video_frames,
+                    qwen_video_frames: shape.qwen_video_frames,
+                    audio_samples_per_channel: shape.audio_samples_per_channel,
+                    // Native geometry the decoder would report; only the
+                    // retained-byte terms read it, which this test ignores.
+                    native_width: shape.normalized_width.map(|_| 4_000),
+                    native_height: shape.normalized_height.map(|_| 3_000),
+                    native_audio_samples_per_channel: shape.audio_samples_per_channel,
+                    native_audio_channels: shape.audio_samples_per_channel.map(|_| 2),
+                    visual_rows: 0,
+                    audio_rows: 0,
+                    qwen_vision_rows: 0,
+                    normalized_host_bytes: 0,
+                    native_host_bytes: 0,
+                },
+            )
+            .unwrap();
+            // The one authority: the derived pads must equal the factory's.
+            assert_eq!(
+                reference_qwen_vision_rows(shape),
+                charges.qwen_vision_rows,
+                "reference {}",
+                index + 1
+            );
+            visual += charges.visual_rows;
+            audio += charges.audio_rows;
+            qwen_vision += charges.qwen_vision_rows;
+        }
+        assert_eq!(rows.visual, visual);
+        assert_eq!(rows.audio, audio);
+        assert_eq!(rows.qwen_vision, qwen_vision);
+
+        // A 1920x1080 still alone packs more than the 4,096 rows a fixed
+        // per-reference ceiling would have allowed, which is why the caps are
+        // derived rather than transcribed.
+        assert!(qwen_vision > 4_096, "{qwen_vision}");
+
+        let video = contract::target_video_rows(
+            contract::DEFAULT_WIDTH,
+            contract::DEFAULT_HEIGHT,
+            contract::DEFAULT_COMPACT_FRAMES,
+        )
+        .unwrap();
+        let generated_audio =
+            contract::target_audio_rows(contract::DEFAULT_COMPACT_FRAMES).unwrap();
+        let packed = H3FactoryPreparedRowsInput {
+            // The presentation is the pads plus labels plus the prompt; the
+            // cap budgets `REVIEWED_REF2VA_PROMPT_AND_LABEL_ROWS` above them.
+            qwen_output_text_rows: qwen_vision + 512,
+            qwen_vision_rows: qwen_vision,
+            condition_visual_rows: visual,
+            condition_audio_rows: audio,
+            target_video_rows: video,
+            target_audio_rows: generated_audio,
+            total_packed_rows: qwen_vision + 512 + visual + audio + video + generated_audio,
+        };
+        assert!(
+            envelope.row_cap_mismatches(&packed).is_empty(),
+            "{:?}",
+            envelope.row_cap_mismatches(&packed)
+        );
+        // The conditioning soundtracks alone exceed the generated track, so
+        // the audio ceiling has to be the larger of the two.
+        assert!(audio > generated_audio, "{audio} vs {generated_audio}");
+        assert_eq!(envelope.max_target_audio_rows, audio);
+    }
+
+    /// The Ref2VA bounds are derived from the SAME measured FL2VA
+    /// observations, scaled by the quantity each term is a function of — so a
+    /// bigger ordered set buys a bigger grant rather than an undercharge, and
+    /// the Qwen grant is never below the demand the exact budget charges.
+    #[cfg(all(feature = "h3", feature = "mp4"))]
+    #[test]
+    fn the_public_ref2va_bounds_scale_with_the_ordered_set() {
+        let one = ref2va_reference_rows(
+            &ref2va_reference_set()[..1],
+            contract::DEFAULT_COMPACT_FRAMES,
+        )
+        .unwrap();
+        let all = ref2va_reference_rows(&ref2va_reference_set(), contract::DEFAULT_COMPACT_FRAMES)
+            .unwrap();
+        let canvas = (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT);
+        let small =
+            public_ref2va_runtime_bounds_for_shape(canvas, contract::DEFAULT_COMPACT_FRAMES, &one);
+        let large =
+            public_ref2va_runtime_bounds_for_shape(canvas, contract::DEFAULT_COMPACT_FRAMES, &all);
+        small.validate().unwrap();
+        large.validate().unwrap();
+        assert!(large.attention_workspace_device_bytes >= small.attention_workspace_device_bytes);
+        assert!(large.ffn_workspace_device_bytes >= small.ffn_workspace_device_bytes);
+        // The generated side is identical: same canvas, same clip length.
+        let fl2va = public_runtime_bounds_for_shape(canvas, contract::DEFAULT_COMPACT_FRAMES);
+        assert_eq!(
+            large.decoder_tile_workspace_device_bytes,
+            fl2va.decoder_tile_workspace_device_bytes
+        );
+        assert_eq!(
+            large.audio_decode_workspace_device_bytes,
+            fl2va.audio_decode_workspace_device_bytes
+        );
+        assert_eq!(
+            large.fixed_runtime_device_bytes,
+            fl2va.fixed_runtime_device_bytes
+        );
+
+        // The grant must cover the demand the exact budget charges, which is
+        // derived from the request's own rows under the same policy.
+        let envelope = public_ref2va_runtime_envelope_for_shape(
+            canvas,
+            contract::DEFAULT_COMPACT_FRAMES,
+            contract::COMFY_DEFAULT_STEPS,
+            &all,
+        );
+        let mut request = ref2va_envelope_request(&envelope);
+        let demand =
+            crate::minimax_h3::private_opened_evidence::qwen_activation_workspace_demand_bytes(
+                &request,
+                large.qwen_activation_workspace_bytes,
+            )
+            .unwrap();
+        assert!(demand <= large.qwen_activation_workspace_bytes);
+        // One row past the envelope's own ceiling is a named refusal, never
+        // an undercharged admit.
+        request.rows.qwen_output_text_rows += envelope.max_qwen_output_text_rows;
+        assert!(
+            crate::minimax_h3::private_opened_evidence::qwen_activation_workspace_demand_bytes(
+                &request,
+                large.qwen_activation_workspace_bytes,
+            )
+            .is_err()
+        );
+    }
+
+    /// A frozen request packing exactly the envelope's own ceilings.
+    #[cfg(all(feature = "h3", feature = "mp4"))]
+    fn ref2va_envelope_request(
+        envelope: &H3PrivateRuntimeEnvelopeRecord,
+    ) -> H3FactoryPreparedRequestInput {
+        H3FactoryPreparedRequestInput {
+            identity_sha256: String::new(),
+            canonical_model: contract::REF2VA_COMFY.into(),
+            task: Task::Ref2va,
+            mode: Mode::ReferenceToAudioVideo,
+            prompt_sha256: format!("{:x}", Sha256::digest(b"prompt")),
+            seed: 1,
+            grid_points: envelope.max_steps,
+            denoise_forward_count: envelope.max_steps - 1,
+            guidance_f64_bits: 0_f64.to_bits(),
+            strength_f64_bits: 1_f64.to_bits(),
+            batch_size: 1,
+            width: envelope.width,
+            height: envelope.height,
+            frames: envelope.frames,
+            fps: envelope.fps,
+            synchronized_audio: true,
+            mp4_output: true,
+            video_latent_frames: 1,
+            audio_latents_per_channel: 1,
+            audio_samples_per_channel: 800,
+            conditioning_fingerprint: format!("{:x}", Sha256::digest(b"conditioning")),
+            reference_fingerprint: format!("{:x}", Sha256::digest(b"references")),
+            endpoints: Vec::new(),
+            references: Vec::new(),
+            rows: H3FactoryPreparedRowsInput {
+                qwen_output_text_rows: envelope.max_qwen_output_text_rows,
+                qwen_vision_rows: envelope.max_qwen_vision_rows,
+                condition_visual_rows: envelope.max_condition_visual_rows,
+                condition_audio_rows: 0,
+                target_video_rows: envelope.max_target_video_rows,
+                target_audio_rows: envelope.max_target_audio_rows,
+                total_packed_rows: envelope.max_total_packed_rows,
+            },
+        }
+    }
+
+    /// An ordered set of standalone audio references has no visual canvas,
+    /// no vision pads, and no conditioning latents — and every bound in the
+    /// record still has to be nonzero, because `validate` refuses a zero one.
+    #[cfg(all(feature = "h3", feature = "mp4"))]
+    #[test]
+    fn an_audio_only_ordered_set_still_mints_an_admissible_record() {
+        let references = vec![ref2va_reference_set()
+            .into_iter()
+            .last()
+            .expect("the ordered set ends with its standalone audio reference")];
+        assert!(matches!(
+            references[0],
+            mold_core::GenerationReference::Audio { .. }
+        ));
+        let rows = ref2va_reference_rows(&references, contract::DEFAULT_COMPACT_FRAMES).unwrap();
+        assert_eq!(rows.visual, 0);
+        assert_eq!(rows.qwen_vision, 0);
+        assert_eq!(rows.largest_canvas_pixels, 0);
+        assert!(rows.audio > 0);
+
+        let canvas = (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT);
+        let envelope = public_ref2va_runtime_envelope_for_shape(
+            canvas,
+            contract::DEFAULT_COMPACT_FRAMES,
+            contract::COMFY_DEFAULT_STEPS,
+            &rows,
+        );
+        envelope.validate_for_task(Task::Ref2va).unwrap();
+        let bounds =
+            public_ref2va_runtime_bounds_for_shape(canvas, contract::DEFAULT_COMPACT_FRAMES, &rows);
+        bounds.validate().unwrap();
+        assert_eq!(
+            bounds.condition_vae_workspace_device_bytes,
+            VAE_CONSTRUCTION_DEVICE_WORKSPACE_FLOOR_BYTES
+        );
+    }
+
+    /// The Ref2VA qualification is minted by the same function, keyed on the
+    /// task, and it never inherits FL2VA's identities.
+    #[cfg(all(feature = "h3", feature = "mp4"))]
+    #[test]
+    fn the_public_ref2va_qualification_is_its_own_record() {
+        let mut artifact = artifact_report();
+        artifact.canonical_model = contract::REF2VA_COMFY.into();
+        artifact.task = "ref2va";
+        let references = ref2va_reference_set();
+        let mint = |artifact: &H3PrivateArtifactQualificationReport,
+                    task: Task,
+                    references: &[mold_core::GenerationReference]| {
+            public_runtime_qualification(
+                artifact,
+                (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
+                contract::DEFAULT_COMPACT_FRAMES,
+                contract::COMFY_DEFAULT_STEPS,
+                "gpu-0",
+                0,
+                Some((8, 9)),
+                &sha('a'),
+                "synthetic-qualified-kernel",
+                &sha('b'),
+                None,
+                task,
+                references,
+            )
+        };
+        let authority = mint(&artifact, Task::Ref2va, &references).unwrap();
+        authority.revalidate().unwrap();
+        assert_eq!(authority.record.task, "ref2va");
+        assert_eq!(authority.record.canonical_model, contract::REF2VA_COMFY);
+        assert_eq!(
+            authority.record.schema,
+            PUBLIC_REF2VA_RUNTIME_PROFILE_SCHEMA
+        );
+        assert_eq!(
+            authority.record.decision,
+            PUBLIC_REF2VA_RUNTIME_PROFILE_DECISION
+        );
+        assert_ne!(authority.record.schema, PUBLIC_RUNTIME_PROFILE_SCHEMA);
+        assert_ne!(authority.record.decision, PUBLIC_RUNTIME_PROFILE_DECISION);
+
+        // Neither half of the pair may be crossed: an FL2VA artifact cannot
+        // mint a Ref2VA record, a Ref2VA artifact cannot mint an FL2VA one,
+        // and a Ref2VA mint with no ordered set has no conditioning to derive
+        // its envelope from.
+        assert!(mint(&artifact_report(), Task::Ref2va, &references).is_err());
+        assert!(mint(&artifact, Task::Fl2va, &[]).is_err());
+        assert!(mint(&artifact, Task::Ref2va, &[]).is_err());
+        // FL2VA must not be handed an ordered set either.
+        assert!(mint(&artifact_report(), Task::Fl2va, &references).is_err());
+    }
+
     /// The reviewed rows a maximum-length FL2VA request packs.
     #[cfg(feature = "mp4")]
     fn reviewed_rows(qwen_output_text_rows: u64) -> H3FactoryPreparedRowsInput {
@@ -7296,6 +8240,8 @@ mod tests {
                 "synthetic-qualified-kernel",
                 &sha('b'),
                 None,
+                Task::Fl2va,
+                &[],
             )
         };
         // The rows a REAL request at this shape packs, so the row caps are
@@ -7399,6 +8345,8 @@ mod tests {
                 "synthetic-qualified-kernel",
                 &sha('b'),
                 turbo,
+                Task::Fl2va,
+                &[],
             )
         };
         let error = mint(Some(&ref2v))
@@ -7541,6 +8489,9 @@ mod tests {
             height: 512,
             frames: 97,
             fps: contract::FIXED_FPS,
+            reference_fingerprint_sha256: None,
+            resolved_reference_fingerprint_sha256: None,
+            reference_count: 0,
         }
     }
 
@@ -8235,15 +9186,18 @@ mod tests {
     }
 
     #[test]
-    fn reviewed_allowlist_is_scoped_to_fl2va() {
+    fn reviewed_allowlist_is_scoped_to_a_qualified_task() {
         assert!(reviewed_h3_private_runtime_available());
         assert!(reviewed_h3_private_runtime_available_for_task(Task::Fl2va));
-        // Ref2VA has no reviewed bounds. It is reachable only from the
-        // developer-only campaign build that exists to measure them, and a
-        // shipping build — public `h3` or otherwise — must keep refusing it.
+        // Both partitions carry a compiled runtime qualification since #825:
+        // the public build mints one per task from its own schema, decision
+        // string, envelope, and bounds, and the campaign build authenticates
+        // the capture-scope profile instead. A build with neither still
+        // refuses Ref2VA, which is what keeps this a gate rather than a
+        // constant.
         assert_eq!(
             reviewed_h3_private_runtime_available_for_task(Task::Ref2va),
-            cfg!(feature = "h3-private-uat")
+            cfg!(any(feature = "h3", feature = "h3-private-uat"))
         );
     }
 
@@ -8416,18 +9370,24 @@ mod tests {
         assert!(validate_frozen_reopen_route(&ref2va_reopen_request(), &factory, &fence).is_err());
     }
 
-    /// Without the developer campaign build a frozen Ref2VA factory must stay
-    /// refused at the reopen's first gate: task availability is per task, and
-    /// an FL2VA qualification never authorizes Ref2VA.
-    #[cfg(all(feature = "mp4", not(feature = "h3-private-uat")))]
+    /// The reopen's first gate is task availability, and it is per task: a
+    /// build carrying a Ref2VA runtime qualification resolves the frozen
+    /// Ref2VA route, and one carrying neither refuses it there rather than
+    /// inheriting an FL2VA record's authority.
+    #[cfg(feature = "mp4")]
     #[test]
-    fn frozen_ref2va_attempt_stays_refused_without_the_campaign_build() {
+    fn frozen_ref2va_attempt_follows_this_builds_task_availability() {
         let factory = contract_factory(contract::REF2VA_COMFY);
         let fence = owner_fence_for(&factory);
-        let error = validate_frozen_reopen_route(&ref2va_reopen_request(), &factory, &fence)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("frozen owner route"), "{error}");
+        let outcome = validate_frozen_reopen_route(&ref2va_reopen_request(), &factory, &fence);
+        if reviewed_h3_private_runtime_available_for_task(Task::Ref2va) {
+            let route = outcome.unwrap();
+            assert_eq!(route.task, Task::Ref2va);
+            assert_eq!(route.partition_model, contract::REF2VA_COMFY);
+        } else {
+            let error = outcome.unwrap_err().to_string();
+            assert!(error.contains("frozen owner route"), "{error}");
+        }
     }
 
     /// The frozen media contract pairs mode and partition with its own task
@@ -8436,13 +9396,41 @@ mod tests {
     fn frozen_media_contract_is_task_paired() {
         media().validate().unwrap();
 
+        // A Ref2VA contract carries its ordered-reference authority; the same
+        // fields on an FL2VA contract, or their absence here, is a crossed
+        // partition.
         let ref2va = H3PrivateFl2VaMediaContract {
             canonical_model: contract::REF2VA_COMFY.into(),
             task: Task::Ref2va,
             mode: Mode::ReferenceToAudioVideo,
+            reference_fingerprint_sha256: Some(sha('7')),
+            resolved_reference_fingerprint_sha256: Some(sha('8')),
+            reference_count: 3,
             ..media()
         };
         ref2va.validate().unwrap();
+        for stripped in [
+            H3PrivateFl2VaMediaContract {
+                reference_fingerprint_sha256: None,
+                ..ref2va.clone()
+            },
+            H3PrivateFl2VaMediaContract {
+                resolved_reference_fingerprint_sha256: None,
+                ..ref2va.clone()
+            },
+            H3PrivateFl2VaMediaContract {
+                reference_count: 0,
+                ..ref2va.clone()
+            },
+        ] {
+            assert!(stripped.validate().is_err());
+        }
+        // FL2VA must never carry one.
+        let fl2va_with_references = H3PrivateFl2VaMediaContract {
+            reference_count: 1,
+            ..media()
+        };
+        assert!(fl2va_with_references.validate().is_err());
 
         // Each axis crossed against the task is refused: the FL2VA mode on a
         // Ref2VA contract, the Ref2VA mode on an FL2VA contract, and either
@@ -9098,12 +10086,34 @@ mod tests {
         let commit = runner.find("commit_private_h3_allocation_then").unwrap();
         let device = runner.find("Device::new_cuda").unwrap();
         let execute = runner.find("run_private_comfy_fl2va_attempt").unwrap();
-        let completion_sync = runner[execute..]
+        // Both partitions execute (#825), and the runner dispatches on the
+        // task the attempt was FROZEN for. Each task's binder must pair with
+        // its own runner: the Ref2VA binder is the only thing that checks the
+        // admitted route, the opened transformer, and the artifact lease are
+        // all the Ref2VA partition, so a route that reached the FL2VA binder
+        // and then the Ref2VA pipeline would run reference conditioning
+        // against an unchecked checkpoint.
+        let ref2va_bind = runner
+            .find("bind_private_comfy_ref2va_phase_owner(")
+            .unwrap();
+        let ref2va_execute = runner.find("run_private_comfy_ref2va_attempt(").unwrap();
+        let fl2va_bind = runner
+            .find("bind_private_comfy_fl2va_phase_owner(")
+            .unwrap();
+        assert!(fl2va_bind < execute && execute < ref2va_bind);
+        assert!(ref2va_bind < ref2va_execute);
+        assert!(
+            runner
+                .find("let admitted_task = authority.task();")
+                .unwrap()
+                < fl2va_bind
+        );
+        let completion_sync = runner[ref2va_execute..]
             .find(".synchronize()")
-            .map(|offset| execute + offset)
+            .map(|offset| ref2va_execute + offset)
             .unwrap();
         assert!(boundary < commit && commit < device && device < execute);
-        assert!(execute < completion_sync);
+        assert!(ref2va_execute < completion_sync);
 
         #[cfg(feature = "cuda")]
         {
@@ -9642,6 +10652,8 @@ mod tests {
             "flash-attention-v2-sm89",
             &sha('e'),
             None,
+            Task::Fl2va,
+            &[],
         )
         .unwrap();
         authority.revalidate().unwrap();
@@ -9730,6 +10742,8 @@ mod tests {
                 kernel,
                 &qualification,
                 None,
+                Task::Fl2va,
+                &[],
             )
             .is_err());
             crossed.task = "ref2va";
@@ -9745,6 +10759,8 @@ mod tests {
                 "flash-attention-v2-sm89",
                 &sha('e'),
                 None,
+                Task::Fl2va,
+                &[],
             )
             .is_err());
         }
@@ -9762,6 +10778,8 @@ mod tests {
             "flash-attention-v2-sm89",
             &sha('e'),
             None,
+            Task::Fl2va,
+            &[],
         )
         .is_err());
     }

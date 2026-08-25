@@ -565,10 +565,10 @@ fn validate_private_checkpoint_facts(
         &actual.opened_checkpoint_identity_sha256,
         &actual.quantization_policy_identity_sha256,
     ];
-    if exact_digests.into_iter().any(|value| !valid_sha256(value))
-        || expected.task != H3TransformerTask::T2VaFl2Va
-        || actual != expected
-    {
+    // The task is the CALLER's expectation, checked by equality below; both
+    // released partitions open their own compact INT8 checkpoint, so pinning
+    // one here refused every Ref2VA bind.
+    if exact_digests.into_iter().any(|value| !valid_sha256(value)) || actual != expected {
         bail!("private MiniMax H3 opened checkpoint differs from singular artifact authority");
     }
     Ok(())

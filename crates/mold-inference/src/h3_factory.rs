@@ -4403,8 +4403,19 @@ impl FrozenH3FactoryAuthority {
             .comfy_vae_artifact_plan_identity_sha256
             .as_deref()
             .ok_or_else(|| anyhow!("MiniMax H3 factory authority has no private Comfy VAE plan"))?;
-        if self.task() != Task::Fl2va {
-            bail!("private MiniMax H3 streamed runtime currently requires FL2VA authority");
+        // The streamed runtime serves both released partitions since #825, so
+        // the gate is "does THIS BUILD carry a runtime qualification for the
+        // frozen task" rather than a task literal. It is deliberately the
+        // same authority `validate_base_factory` and the prepared-attempt
+        // task check ask, so a record, a reopen, and an execution slice can
+        // never disagree about which partitions run here.
+        if !crate::minimax_h3::private_server::reviewed_h3_private_runtime_available_for_task(
+            self.task(),
+        ) {
+            bail!(
+                "private MiniMax H3 streamed runtime has no reviewed {:?} qualification in this build",
+                self.task()
+            );
         }
         let (conditioner_content, conditioner_validation) =
             self.component_authority(H3ComponentRole::Conditioner);

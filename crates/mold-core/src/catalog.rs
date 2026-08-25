@@ -750,11 +750,97 @@ mod tests {
                 "{} row min_frames disagrees with its profile",
                 row.info.name
             );
+            // The spatial half of the same rule. A family-blind fallback here
+            // would offer a compact row the official BF16 ladder's ceiling
+            // and no axis bound at all, which is exactly the row-vs-profile
+            // divergence the model-metadata presentation invariant forbids —
+            // and it would become an active lie the moment the row's task
+            // became runnable (#825).
+            let resolution = resolution_defaults_from_profile(&profile);
+            assert_eq!(
+                row.defaults.max_pixels, resolution.max_pixels,
+                "{} row max_pixels disagrees with its profile",
+                row.info.name
+            );
+            assert_eq!(
+                row.defaults.max_axis_pixels, resolution.max_axis_pixels,
+                "{} row max_axis_pixels disagrees with its profile",
+                row.info.name
+            );
+            assert_eq!(
+                row.defaults.max_pixels,
+                Some(crate::minimax_h3::reviewed_compact_max_pixels()),
+                "{} row must carry the compact area ceiling",
+                row.info.name
+            );
+            // Both compact task partitions execute wherever the engine is
+            // built (#825), and the row is the sentence a client reads before
+            // a 21-42 GB pull, so it must agree with the one authority
+            // generation itself asks.
+            assert_eq!(
+                row.runtime_available,
+                Some(crate::minimax_h3::model_runtime_availability(&row.info.name).is_available()),
+                "{} row runtime availability disagrees with the activation authority",
+                row.info.name
+            );
+            if crate::minimax_h3::layout_for_model(&row.info.name)
+                == Some(crate::minimax_h3::Layout::ComfyPrunedInt8ConvrotNvfp4Awq)
+            {
+                assert_eq!(
+                    row.runtime_available,
+                    Some(crate::minimax_h3::engine_is_built()),
+                    "{} is a runnable compact layout on every build that links the engine",
+                    row.info.name
+                );
+            }
             checked += 1;
         }
         assert!(
             checked >= 2,
             "expected both compact H3 task partitions in the catalog, saw {checked}"
+        );
+    }
+
+    /// The Ref2VA compact row specifically: it is the one whose runtime
+    /// answer flipped in #825, and the one whose row a client reads before
+    /// deciding whether an ordered reference set is worth uploading.
+    #[test]
+    fn the_compact_ref2va_row_is_runnable_wherever_the_engine_is_built() {
+        let config = crate::Config::default();
+        let catalog = super::build_model_catalog(&config, None, false);
+        let row = catalog
+            .iter()
+            .find(|row| row.info.name == crate::minimax_h3::REF2VA_COMFY)
+            .expect("the compact Ref2VA acquisition row is always listed");
+        assert_eq!(
+            row.runtime_available,
+            Some(crate::minimax_h3::engine_is_built())
+        );
+        assert_eq!(
+            row.runtime_unavailable_reason.is_some(),
+            !crate::minimax_h3::engine_is_built()
+        );
+        // Every H3 render carries synchronized audio, cold row included.
+        assert_eq!(row.supports_audio, Some(true));
+        // The compact envelope, never the official BF16 ladder.
+        assert_eq!(
+            row.defaults.max_pixels,
+            Some(crate::minimax_h3::reviewed_compact_max_pixels())
+        );
+        assert_eq!(
+            row.defaults.max_axis_pixels,
+            Some(crate::minimax_h3::reviewed_compact_max_axis_pixels())
+        );
+        assert_eq!(
+            row.defaults.default_frames,
+            Some(crate::minimax_h3::DEFAULT_COMPACT_FRAMES)
+        );
+        assert_eq!(
+            (row.defaults.default_width, row.defaults.default_height),
+            (
+                crate::minimax_h3::DEFAULT_WIDTH,
+                crate::minimax_h3::DEFAULT_HEIGHT
+            )
         );
     }
 

@@ -8997,8 +8997,9 @@ mod tests {
             FL2VA_COMFY_TURBO_4STEP_768P, FL2VA_COMFY_TURBO_8STEP, FL2VA_OFFICIAL, NVFP4_REPO,
             OFFICIAL_REPO, REF2VA_COMFY, REF2VA_COMFY_NVFP4, REF2VA_OFFICIAL,
         };
-        // The FL2VA compact tier is the only one whose answer depends on how
-        // this binary was compiled.
+        // Both compact task partitions execute since #825, so their answer
+        // depends only on how this binary was compiled; the pinned layouts
+        // below are unrunnable everywhere.
         let fl2va = if mold_core::minimax_h3::engine_is_built() {
             (true, None)
         } else {
@@ -9007,10 +9008,7 @@ mod tests {
                 Some(RuntimeUnavailableReason::EngineNotBuilt.message()),
             )
         };
-        let ref2va = (
-            false,
-            Some(RuntimeUnavailableReason::UnsupportedTask.message()),
-        );
+        let ref2va = fl2va;
         let no_loader = (
             false,
             Some(RuntimeUnavailableReason::UnsupportedLayout.message()),
@@ -10333,20 +10331,28 @@ mod tests {
                 identity: "test-key".to_string(),
             });
         let created = app.oneshot(request).await.unwrap();
-        // Authenticated, and still refused before anything is staged: Ref2VA
-        // has no qualified route on any released build, so uploading its
-        // reference media would only buy the user a refusal one step later
-        // (#1276). The refusal names the task, never a licence.
-        assert_eq!(created.status(), StatusCode::NOT_IMPLEMENTED);
-        let created = json_body(created).await;
-        assert_eq!(created["code"], mold_core::MINIMAX_H3_RUNTIME_UNAVAILABLE);
-        assert!(
-            created["error"].as_str().unwrap().contains(
-                mold_core::minimax_h3::RuntimeUnavailableReason::UnsupportedTask.message()
-            ),
-            "{created}"
-        );
-        assert!(!state.reference_uploads.staging_exists());
+        // Authentication is the gate this test owns, and it is checked
+        // before anything is staged. What happens next is this build's
+        // runtime answer for the compact Ref2VA partition: since #825 it
+        // executes wherever the engine is linked, and a build without one
+        // refuses with its own sentence rather than staging media it could
+        // never consume (#1276). Either way nothing is staged here, because
+        // the session body names no upload yet.
+        if mold_core::minimax_h3::engine_is_built() {
+            assert_ne!(created.status(), StatusCode::UNAUTHORIZED);
+            assert_ne!(created.status(), StatusCode::NOT_IMPLEMENTED);
+        } else {
+            assert_eq!(created.status(), StatusCode::NOT_IMPLEMENTED);
+            let created = json_body(created).await;
+            assert_eq!(created["code"], mold_core::MINIMAX_H3_RUNTIME_UNAVAILABLE);
+            assert!(
+                created["error"].as_str().unwrap().contains(
+                    mold_core::minimax_h3::RuntimeUnavailableReason::EngineNotBuilt.message()
+                ),
+                "{created}"
+            );
+            assert!(!state.reference_uploads.staging_exists());
+        }
     }
 
     #[tokio::test]
