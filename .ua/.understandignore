@@ -1,0 +1,128 @@
+# .understandignore — patterns for files/dirs to exclude from analysis
+# Syntax: same as .gitignore (globs, # comments, ! negation, trailing / for dirs)
+# Lines below are suggestions — uncomment to activate.
+# Use ! prefix to force-include something excluded by defaults.
+#
+# Built-in defaults (always excluded unless negated):
+#   node_modules/, .git/, dist/, build/, obj/, *.lock, *.min.js, etc.
+#
+
+# --- From .gitignore (uncomment to exclude) ---
+
+# *~
+# .agents/
+# .playwright-mcp/
+# .claude/worktrees/
+# .claude/scheduled_tasks.lock
+# .claude/issues/
+# tasks/
+# docs/superpowers/*
+# !docs/superpowers/specs/
+# docs/superpowers/specs/*
+# !docs/superpowers/specs/2026-07-03-durable-chain-jobs-design.md
+# .worktrees/
+# .playwright-mcp/
+# .direnv/
+# /node_modules/
+# /*/node_modules/
+# desktop/dist/
+# desktop/dist-mobile/
+# website/node_modules/
+# website/.vitepress/cache/
+# website/.vitepress/dist/
+# web/dist/
+# web/.vite/
+# web/*.tsbuildinfo
+# .DS_Store
+# .env
+# .secrets/
+# !docs/**/*.png
+# !website/public/**/*.png
+# !web/public/**/*.png
+# !desktop/src/assets/**/*.png
+# !docs/design/**/*.jpg
+# !docs/design/**/*.png
+# !apps/mobile/src-tauri/app-icon.png
+# !apps/mobile/src-tauri/gen/apple/Assets.xcassets/**/*.png
+# !apps/mobile/src-tauri/gen/android/app/src/main/res/mipmap-*/**/*.png
+# !crates/mold-inference/src/ltx2/testdata/preprocess/*.jpg
+# !crates/mold-inference/src/ltx2/testdata/preprocess/*.png
+# !crates/mold-inference/testdata/pulid/input_pattern.png
+# !crates/mold-inference/testdata/pulid/faces/*.jpg
+# !crates/mold-inference/testdata/pulid/faces/*.png
+# apps/mobile/src-tauri/gen/schemas/
+# result
+# result-*
+# *.swo
+# *.swp
+# mold-outputs/
+# **/target
+# /target
+# /target/coverage/
+# tmp/
+# uat-*
+# *.apng
+# *.webp
+# *.exr
+# .superpowers/
+# crates/*/cv-*/
+# crates/*/.hf-cache/
+# crates/mold-cli/ltx2-control-union-19b/
+# *.pyc
+
+# --- Detected directories (uncomment to exclude) ---
+
+# docs/
+# scripts/
+# tests/
+
+# --- Test file patterns (uncomment to exclude) ---
+
+# JS / TS
+# *.test.*
+# *.spec.*
+# *.snap
+# C# / .NET
+# **/*Tests.cs
+# **/*Test.cs
+# **/*Fixture.cs
+# **/*.Tests.csproj
+# Java / Kotlin
+# **/src/test/**
+# **/*Test.java
+# **/*IT.java
+# **/*Spec.kt
+# Go
+# **/*_test.go
+# C++
+# **/*_test.cc
+# **/*_test.cpp
+# **/*_test.cxx
+# **/*Test.cc
+# **/*Test.cpp
+# **/*_unittest.cc
+# **/*_unittest.cpp
+# **/*_browsertest.cc
+# **/*_benchmark.cc
+# **/*Benchmark.cpp
+# Python
+# **/test_*.py
+# **/*_test.py
+# **/tests.py
+# **/conftest.py
+# Rust
+# **/tests.rs
+# **/test_*.rs
+# **/*_test.rs
+# **/bench_*.rs
+# **/*_bench.rs
+# Ruby
+# **/*_spec.rb
+# **/*_test.rb
+# **/test_*.rb
+# **/spec_helper.rb
+# **/test_helper.rb
+# **/rails_helper.rb
+# Swift
+# **/Tests/**/*.swift
+# **/Specs/**/*.swift
