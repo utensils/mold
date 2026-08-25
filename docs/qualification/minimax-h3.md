@@ -700,7 +700,39 @@ and the only axis that moved is the conditioning.
 
 The conditioning axis is the point. Ref2VA's envelope is minted per request
 from the ordered set's own preprocessing shapes, so the campaign runs the six
-cases #827 scoped for it rather than one canvas:
+cases #827 scoped for it rather than one canvas.
+
+Operator recipe. The campaign runs against a scratch server beside the
+production one, sharing only the read-only model store; the production service
+is never stopped, restarted, or reconfigured:
+
+```bash
+MOLD_HOME=/storage-fast/mold/uat-825-home \
+MOLD_MODELS_DIR=/storage-fast/mold/models \
+MOLD_PORT=7681 MOLD_API_KEY=<key> \
+MOLD_OUTPUT_DIR=/storage-fast/mold/uat-825/output \
+  target/release/mold serve --bind 0.0.0.0
+```
+
+built with `cargo build --release -p mold-ai --features h3-cuda,preview`. Each
+case is one ordinary CLI submission — no compliance record and no
+authorization file are involved:
+
+```bash
+MOLD_HOST=http://localhost:7681 MOLD_API_KEY=<key> \
+  mold run minimax-h3-ref2va:comfy-pruned-int8 "<prompt>" \
+  --width 1344 --height 768 --frames 124 --fps 24 \
+  --steps 21 --guidance 0 --strength 1.0 --format mp4 \
+  --reference image=hero.png --reference video=clip.mp4 --reference audio=score.wav
+```
+
+The compact Ref2VA stack asks for roughly 24.6 GB of HOST headroom — the
+15.7 GB CPU-placed Qwen3-VL conditioner plus a request-derived activation
+workspace that grows with the reference set's own Qwen sequence — so an idle
+production server still holding its own H3 model is the difference between
+admitted and refused. `DELETE /api/models/unload` on the production server, and
+dropping the page cache, is the whole preparation; do not lower a charge to
+make a render fit.
 
 REF2VA_MATRIX_PLACEHOLDER
 
