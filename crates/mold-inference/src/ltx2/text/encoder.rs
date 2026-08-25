@@ -443,7 +443,11 @@ impl GemmaHiddenStateEncoder {
     }
 
     pub fn load_from_assets(assets: &GemmaAssets, device: &Device, dtype: DType) -> Result<Self> {
-        let weights = discover_weight_files(&assets.root)?;
+        let weights = if let Some(path) = assets.packed_weights.as_ref() {
+            vec![path.clone()]
+        } else {
+            discover_weight_files(&assets.root)?
+        };
         let vb: VarBuilder<'static> =
             unsafe { VarBuilder::from_mmaped_safetensors(&weights, dtype, device)? };
         let vb = vb.rename_f(map_gemma_weight_key);
@@ -561,7 +565,7 @@ impl GemmaHiddenStateEncoder {
     }
 }
 
-fn build_position_ids(attention_mask: &Tensor) -> Result<Tensor> {
+pub(crate) fn build_position_ids(attention_mask: &Tensor) -> Result<Tensor> {
     let device = attention_mask.device().clone();
     let mask_rows = attention_mask.to_device(&Device::Cpu)?.to_vec2::<u8>()?;
     let batch = mask_rows.len();
@@ -580,7 +584,7 @@ fn build_position_ids(attention_mask: &Tensor) -> Result<Tensor> {
     Tensor::from_vec(position_ids, (batch, seq), &device).map_err(Into::into)
 }
 
-fn build_attention_mask(
+pub(crate) fn build_attention_mask(
     attention_mask: &Tensor,
     sliding_window: Option<usize>,
     dtype: DType,

@@ -15,6 +15,12 @@ pub(crate) enum GemmaFeatureExtractorKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GemmaArchitecture {
+    Gemma3,
+    Gemma4Unified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GemmaProfile {
     pub(crate) hidden_size: usize,
     pub(crate) num_hidden_layers: usize,
@@ -55,6 +61,9 @@ pub(crate) struct TransformerProfile {
     pub(crate) audio_cross_attention_dim: usize,
     pub(crate) apply_gated_attention: bool,
     pub(crate) cross_attention_adaln: bool,
+    pub(crate) video_ff_bias: bool,
+    pub(crate) audio_ff_bias: bool,
+    pub(crate) use_keyframes_abs_pos_embedding: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -65,6 +74,9 @@ pub(crate) struct Ltx2ModelPreset {
     pub(crate) transformer: TransformerProfile,
     pub(crate) connectors: ConnectorProfile,
     pub(crate) gemma: GemmaProfile,
+    pub(crate) gemma_architecture: GemmaArchitecture,
+    pub(crate) prompt_max_length: usize,
+    pub(crate) uses_ltx2_22b_video_vae: bool,
     pub(crate) supports_spatial_upscale_x1_5: bool,
     pub(crate) supports_spatial_upscale_x2: bool,
     pub(crate) supports_temporal_upscale_x2: bool,
@@ -151,6 +163,9 @@ const TRANSFORMER_PROFILE_19B: TransformerProfile = TransformerProfile {
     audio_cross_attention_dim: 2048,
     apply_gated_attention: false,
     cross_attention_adaln: false,
+    video_ff_bias: true,
+    audio_ff_bias: true,
+    use_keyframes_abs_pos_embedding: false,
 };
 
 const TRANSFORMER_PROFILE_22B: TransformerProfile = TransformerProfile {
@@ -166,6 +181,9 @@ const PRESET_19B: Ltx2ModelPreset = Ltx2ModelPreset {
     transformer: TRANSFORMER_PROFILE_19B,
     connectors: CONNECTOR_PROFILE_19B,
     gemma: GEMMA_PROFILE,
+    gemma_architecture: GemmaArchitecture::Gemma3,
+    prompt_max_length: 256,
+    uses_ltx2_22b_video_vae: false,
     supports_spatial_upscale_x1_5: false,
     supports_spatial_upscale_x2: true,
     supports_temporal_upscale_x2: true,
@@ -179,6 +197,30 @@ const PRESET_22B: Ltx2ModelPreset = Ltx2ModelPreset {
     transformer: TRANSFORMER_PROFILE_22B,
     connectors: CONNECTOR_PROFILE_22B,
     gemma: GEMMA_PROFILE,
+    gemma_architecture: GemmaArchitecture::Gemma3,
+    prompt_max_length: 256,
+    uses_ltx2_22b_video_vae: true,
+    supports_spatial_upscale_x1_5: true,
+    supports_spatial_upscale_x2: true,
+    supports_temporal_upscale_x2: true,
+    streaming_prefetch_count: 2,
+};
+
+const PRESET_25_22B: Ltx2ModelPreset = Ltx2ModelPreset {
+    name: "ltx-2.5-22b",
+    caption_projection: CaptionProjectionPlacement::TextEncoderConnector,
+    feature_extractor: GemmaFeatureExtractorKind::V2DualAv,
+    transformer: TransformerProfile {
+        video_ff_bias: false,
+        audio_ff_bias: true,
+        use_keyframes_abs_pos_embedding: true,
+        ..TRANSFORMER_PROFILE_22B
+    },
+    connectors: CONNECTOR_PROFILE_22B,
+    gemma: GEMMA_PROFILE,
+    gemma_architecture: GemmaArchitecture::Gemma4Unified,
+    prompt_max_length: 1024,
+    uses_ltx2_22b_video_vae: true,
     supports_spatial_upscale_x1_5: true,
     supports_spatial_upscale_x2: true,
     supports_temporal_upscale_x2: true,
@@ -204,6 +246,13 @@ pub(crate) fn preset_for_model_with_hint(
     model_name: &str,
     hint: Option<&str>,
 ) -> Result<Ltx2ModelPreset> {
+    let normalized_name = model_name.to_ascii_lowercase();
+    if normalized_name.contains("ltx-2.5")
+        || normalized_name.contains("ltx2.5")
+        || normalized_name.contains("ltx25")
+    {
+        return Ok(PRESET_25_22B);
+    }
     // The 2.0-vs-2.3 generation split is owned by the shared
     // `mold_core::ltx2_preprocess` resolver so admission, preprocessing,
     // and this architecture pick can never disagree; the looser arms
@@ -216,13 +265,16 @@ pub(crate) fn preset_for_model_with_hint(
         Some(mold_core::ltx2_preprocess::Ltx2Generation::V2) => return Ok(PRESET_19B),
         None => {}
     }
-    if model_name.contains("ltx-2.3") {
+    if normalized_name.contains("ltx-2.3") {
         return Ok(PRESET_22B);
     }
-    if model_name.contains("ltx-2") {
+    if normalized_name.contains("ltx-2") {
         return Ok(PRESET_19B);
     }
     if let Some(version) = hint {
+        if version.starts_with("2.5") {
+            return Ok(PRESET_25_22B);
+        }
         // `model_version` strings observed in official Lightricks LTX-2
         // safetensors: `"2.3.0"` → 22B preset; `"2.0.x"` → 19B preset.
         // Be liberal in what we accept — match the major.minor prefix so
@@ -274,6 +326,8 @@ mod tests {
         // Name match is authoritative; hint is only consulted when the
         // name doesn't carry the family substring.
         let preset = preset_for_model_with_hint("ltx-2-19b-distilled:fp8", Some("2.3.0")).unwrap();
+        assert_eq!(preset.name, "ltx-2-19b");
+        let preset = preset_for_model_with_hint("ltx-2-19b-distilled:fp8", Some("2.5.0")).unwrap();
         assert_eq!(preset.name, "ltx-2-19b");
     }
 
@@ -333,6 +387,7 @@ mod tests {
             GemmaFeatureExtractorKind::V1SharedAv
         );
         assert!(!preset_19b.supports_spatial_upscale_x1_5);
+        assert!(!preset_19b.uses_ltx2_22b_video_vae);
         assert_eq!(preset_19b.transformer_inner_dim(), 4096);
         assert_eq!(preset_19b.audio_transformer_inner_dim(), 2048);
         assert_eq!(preset_19b.video_connector_inner_dim(), 3840);
@@ -360,6 +415,7 @@ mod tests {
             GemmaFeatureExtractorKind::V2DualAv
         );
         assert!(preset_22b.supports_spatial_upscale_x1_5);
+        assert!(preset_22b.uses_ltx2_22b_video_vae);
         assert_eq!(preset_22b.streaming_prefetch_count, 2);
         assert_eq!(preset_22b.video_connector_inner_dim(), 4096);
         assert_eq!(preset_22b.audio_connector_inner_dim(), 2048);
@@ -370,5 +426,29 @@ mod tests {
         assert!(preset_22b.transformer.cross_attention_adaln);
         assert_eq!(preset_22b.connectors.rope_type, LtxRopeType::Split);
         assert_eq!(preset_22b.connectors.positional_embedding_max_pos, &[4096]);
+    }
+
+    #[test]
+    fn ltx25_uses_gemma4_and_only_removes_video_ff_bias() {
+        use super::GemmaArchitecture;
+
+        let preset = preset_for_model("ltx-2.5-22b-distilled:bf16").unwrap();
+        assert_eq!(preset.name, "ltx-2.5-22b");
+        assert_eq!(preset.gemma_architecture, GemmaArchitecture::Gemma4Unified);
+        assert_eq!(preset.prompt_max_length, 1024);
+        assert!(!preset.transformer.video_ff_bias);
+        assert!(preset.transformer.audio_ff_bias);
+        assert!(preset.transformer.use_keyframes_abs_pos_embedding);
+        assert!(preset.uses_ltx2_22b_video_vae);
+        assert_eq!(
+            preset_for_model_with_hint("hf:Lightricks/LTX-2.5", Some("2.5.0")).unwrap(),
+            preset
+        );
+
+        let legacy = preset_for_model("ltx-2.3-22b-distilled:bf16").unwrap();
+        assert_eq!(legacy.gemma_architecture, GemmaArchitecture::Gemma3);
+        assert!(legacy.transformer.video_ff_bias);
+        assert!(legacy.transformer.audio_ff_bias);
+        assert!(!legacy.transformer.use_keyframes_abs_pos_embedding);
     }
 }

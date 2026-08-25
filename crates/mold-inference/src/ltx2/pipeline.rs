@@ -189,7 +189,10 @@ impl Ltx2Engine {
             .find(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.to_ascii_lowercase().contains("text_projection"))
+                    .is_some_and(|name| {
+                        let name = name.to_ascii_lowercase();
+                        name.contains("text_projection") || name.contains("gemma4")
+                    })
             })
             .cloned();
         Self {
@@ -494,8 +497,14 @@ impl Ltx2Engine {
         validate_audio_output_request(req, || super::audio_output_gap(&self.paths))?;
         let pipeline = self.select_pipeline(req)?;
         let gemma_root = self.gemma_root()?;
+        let preset =
+            preset::preset_for_model_with_hint(&self.model_name, self.preset_hint.as_deref())?;
         let prompt_tokens = GemmaAssets::discover(&gemma_root)?
-            .encode_prompt_pair(&req.prompt, req.negative_prompt.as_deref())?;
+            .encode_prompt_pair_with_max_length(
+                &req.prompt,
+                req.negative_prompt.as_deref(),
+                preset.prompt_max_length,
+            )?;
         let conditioning = conditioning::stage_conditioning(req, work_dir)?;
         // Still-image conditioning is re-compressed to match the
         // checkpoint generation's training distribution; an unknown
@@ -508,8 +517,6 @@ impl Ltx2Engine {
             Some(self.image_preprocessing_profile()?)
         };
         let loras = lora::resolve_loras(&self.paths, req)?;
-        let preset =
-            preset::preset_for_model_with_hint(&self.model_name, self.preset_hint.as_deref())?;
         let execution_graph =
             execution::build_execution_graph(req, pipeline, &conditioning, &preset, loras.len());
         let spatial_upsampler_path = assets::resolve_spatial_upscaler_path(
@@ -2156,6 +2163,36 @@ mod tests {
             engine_distilled.select_pipeline(&req_distilled).unwrap(),
             PipelineKind::OneStage,
             "distilled name + missing spatial upsampler → OneStage fallback"
+        );
+    }
+
+    #[test]
+    fn ltx25_dev_and_distilled_keep_the_existing_two_stage_recipes() {
+        let gemma = tempfile::tempdir().unwrap();
+        let paths = dummy_paths_with_gemma_root(gemma.path());
+
+        let dev = Ltx2Engine::new(
+            "ltx-2.5-22b-dev:bf16-conv".to_string(),
+            paths.clone(),
+            LoadStrategy::Sequential,
+            0,
+        );
+        let dev_request = bare_t2v_req("ltx-2.5-22b-dev:bf16-conv");
+        assert_eq!(
+            dev.select_pipeline(&dev_request).unwrap(),
+            PipelineKind::TwoStage
+        );
+
+        let distilled = Ltx2Engine::new(
+            "ltx-2.5-22b-distilled:bf16-conv".to_string(),
+            paths,
+            LoadStrategy::Sequential,
+            0,
+        );
+        let distilled_request = bare_t2v_req("ltx-2.5-22b-distilled:bf16-conv");
+        assert_eq!(
+            distilled.select_pipeline(&distilled_request).unwrap(),
+            PipelineKind::Distilled
         );
     }
 

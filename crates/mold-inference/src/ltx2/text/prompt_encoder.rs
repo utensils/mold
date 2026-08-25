@@ -14,8 +14,9 @@ use super::gemma::{
     PromptTokens,
 };
 use super::gemma3_gguf::GgufGemmaEncoder;
+use super::gemma4::Gemma4HiddenStateEncoder;
 use crate::ltx2::model::LtxRopeType;
-use crate::ltx2::preset::{GemmaFeatureExtractorKind, Ltx2ModelPreset};
+use crate::ltx2::preset::{GemmaArchitecture, GemmaFeatureExtractorKind, Ltx2ModelPreset};
 
 /// Backend for the Gemma 3 12B prompt encoder. The two variants both produce
 /// `Vec<Tensor>` of hidden states with `len() == num_hidden_layers + 1`, so
@@ -28,6 +29,8 @@ pub enum GemmaHiddenStateBackend {
     /// Q4 GGUF (`google/gemma-3-12b-it-qat-q4_0-gguf`). ~7 GB on GPU; fits
     /// alongside a streaming 22B LTX-2 transformer on a single 24 GB card.
     Gguf(GgufGemmaEncoder),
+    /// Packed Gemma 4 Unified 12B encoder shipped with LTX-2.5.
+    Gemma4(Gemma4HiddenStateEncoder),
 }
 
 impl GemmaHiddenStateBackend {
@@ -38,6 +41,7 @@ impl GemmaHiddenStateBackend {
         match self {
             Self::Safetensors(_) => GemmaVariant::Bf16Safetensors,
             Self::Gguf(_) => GemmaVariant::Q4Gguf,
+            Self::Gemma4(_) => GemmaVariant::Bf16Safetensors,
         }
     }
 
@@ -45,6 +49,7 @@ impl GemmaHiddenStateBackend {
         match self {
             Self::Safetensors(encoder) => encoder.device(),
             Self::Gguf(encoder) => encoder.device(),
+            Self::Gemma4(encoder) => encoder.device(),
         }
     }
 
@@ -52,6 +57,7 @@ impl GemmaHiddenStateBackend {
         match self {
             Self::Safetensors(encoder) => encoder.encode_prompt_tokens(tokens),
             Self::Gguf(encoder) => encoder.encode_prompt_tokens(tokens),
+            Self::Gemma4(encoder) => encoder.encode_prompt_tokens(tokens),
         }
     }
 }
@@ -103,25 +109,44 @@ impl NativePromptEncoder {
         gemma_variant: Option<&str>,
     ) -> Result<Self> {
         let assets = GemmaAssets::discover(gemma_root)?;
-        let variant = resolve_gemma_variant_with_preference(&assets, gemma_variant)?;
-        let gemma_backend = match variant {
-            GemmaVariant::Bf16Safetensors => GemmaHiddenStateBackend::Safetensors(
-                GemmaHiddenStateEncoder::load_from_assets(&assets, device, dtype)?,
-            ),
-            GemmaVariant::Q4Gguf => {
-                let gguf_path = assets.gguf_path.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "GemmaVariant::Q4Gguf resolved but assets.gguf_path is None — \
-                         resolve_gemma_variant invariant violated"
-                    )
-                })?;
-                GemmaHiddenStateBackend::Gguf(GgufGemmaEncoder::load(gguf_path, device)?)
+        let (variant, gemma_backend) = match preset.gemma_architecture {
+            GemmaArchitecture::Gemma4Unified => {
+                if gemma_variant.is_some_and(|variant| variant.contains("gguf")) {
+                    anyhow::bail!(
+                        "LTX-2.5 Gemma 4 Unified does not support a GGUF text encoder; use the matching packed BF16 encoder"
+                    );
+                }
+                (
+                    GemmaVariant::Bf16Safetensors,
+                    GemmaHiddenStateBackend::Gemma4(Gemma4HiddenStateEncoder::load_from_assets(
+                        &assets, device, dtype,
+                    )?),
+                )
+            }
+            GemmaArchitecture::Gemma3 => {
+                let variant = resolve_gemma_variant_with_preference(&assets, gemma_variant)?;
+                let backend = match variant {
+                    GemmaVariant::Bf16Safetensors => GemmaHiddenStateBackend::Safetensors(
+                        GemmaHiddenStateEncoder::load_from_assets(&assets, device, dtype)?,
+                    ),
+                    GemmaVariant::Q4Gguf => {
+                        let gguf_path = assets.gguf_path.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "GemmaVariant::Q4Gguf resolved but assets.gguf_path is None — \
+                                 resolve_gemma_variant invariant violated"
+                            )
+                        })?;
+                        GemmaHiddenStateBackend::Gguf(GgufGemmaEncoder::load(gguf_path, device)?)
+                    }
+                };
+                (variant, backend)
             }
         };
         tracing::info!(
             variant = ?variant,
             device = ?gemma_backend.device(),
-            "loaded LTX-2 Gemma 3 12B prompt encoder"
+            architecture = ?preset.gemma_architecture,
+            "loaded LTX-2 prompt encoder"
         );
         let (video_connector_prefix, audio_connector_prefix) = connector_prefixes(checkpoint_path)?;
         let mut connector_paths = vec![checkpoint_path];

@@ -7545,6 +7545,9 @@ fn ltx2_video_transformer_config(plan: &Ltx2GeneratePlan) -> Ltx2VideoTransforme
         // branch on the same sigma*1000 scale as the main timestep embedding.
         av_ca_timestep_scale_multiplier: 1000.0,
         cross_attention_adaln,
+        video_ff_bias: plan.preset.transformer.video_ff_bias,
+        audio_ff_bias: plan.preset.transformer.audio_ff_bias,
+        use_keyframes_abs_pos_embedding: plan.preset.transformer.use_keyframes_abs_pos_embedding,
         streaming_prefetch_count: plan.streaming_prefetch_count.unwrap_or(1) as usize,
     }
 }
@@ -7564,7 +7567,7 @@ fn ltx2_checkpoint_is_fp8(plan: &Ltx2GeneratePlan, header: Option<&Ltx2Checkpoin
 }
 
 fn ltx2_video_vae_config(plan: &Ltx2GeneratePlan) -> AutoencoderKLLtx2VideoConfig {
-    if plan.preset.name == "ltx-2.3-22b" {
+    if plan.preset.uses_ltx2_22b_video_vae {
         AutoencoderKLLtx2VideoConfig::ltx2_22b()
     } else {
         AutoencoderKLLtx2VideoConfig::default()

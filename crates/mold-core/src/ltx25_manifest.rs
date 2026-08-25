@@ -179,9 +179,13 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
         |(name, checkpoint, decoder, steps, guidance)| ModelManifest {
             name: name.to_string(),
             family: FAMILY.to_string(),
-            description: format!(
-            "LTX-2.5 22B {checkpoint} BF16 — download-only Phase 1 contract ({decoder} video VAE)"
-        ),
+            description: if decoder == "convolutional" {
+                format!("LTX-2.5 22B {checkpoint} BF16 — native Conv-VAE split pack")
+            } else {
+                format!(
+                    "LTX-2.5 22B {checkpoint} BF16 — downloadable diffusion-VAE Phase 3 contract"
+                )
+            },
             files: files_for(name),
             defaults: defaults(steps, guidance),
             hidden: true,

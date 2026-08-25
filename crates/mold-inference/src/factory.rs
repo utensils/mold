@@ -431,6 +431,33 @@ fn boxed_inference_engine(engine: impl InferenceEngine + 'static) -> Box<dyn Inf
     Box::new(engine)
 }
 
+fn validate_ltx25_runtime_paths(model_name: &str, paths: &ModelPaths) -> Result<()> {
+    match model_name {
+        mold_core::ltx25_manifest::DEV_CONV | mold_core::ltx25_manifest::DISTILLED_CONV => {}
+        mold_core::ltx25_manifest::DEV | mold_core::ltx25_manifest::DISTILLED => anyhow::bail!(
+            "LTX-2.5 Phase 2 supports the convolutional video VAE only; use '{model_name}-conv'. The diffusion decoder is tracked for Phase 3"
+        ),
+        _ => anyhow::bail!(
+            "unsupported LTX-2.5 Phase 2 checkpoint '{model_name}'; use '{}' or '{}'. Quantized LTX-2.5 transformer/text-encoder packs are not yet supported",
+            mold_core::ltx25_manifest::DEV_CONV,
+            mold_core::ltx25_manifest::DISTILLED_CONV,
+        ),
+    }
+    let gemma = paths.text_encoder_files.first().ok_or_else(|| {
+        anyhow::anyhow!("LTX-2.5 requires its matching packed Gemma 4 text encoder")
+    })?;
+    mold_core::ltx25_probe::validate_ltx25_transformer_gemma(&paths.transformer, gemma)
+        .map_err(anyhow::Error::from)?;
+    match mold_core::ltx25_probe::probe_ltx25_video_vae(&paths.vae)
+        .map_err(anyhow::Error::from)?
+    {
+        mold_core::ltx25_probe::Ltx25VideoVaeKind::Convolutional => Ok(()),
+        mold_core::ltx25_probe::Ltx25VideoVaeKind::Diffusion => anyhow::bail!(
+            "LTX-2.5 Phase 2 cannot use the diffusion video VAE; select the matching :bf16-conv model"
+        ),
+    }
+}
+
 /// Create an engine from scheduler-frozen construction inputs.
 ///
 /// Unlike [`create_engine_with_pool`], this path performs no live config or
@@ -750,9 +777,14 @@ where
             }
         }
         family if family == mold_core::ltx25_manifest::FAMILY => {
-            anyhow::bail!(
-                "LTX-2.5 assets are download-only until the native split-pack runtime is implemented"
-            )
+            validate_ltx25_runtime_paths(&model_name, &paths)?;
+            Ok(boxed_inference_engine(Ltx2Engine::new_with_gemma_variant(
+                model_name,
+                paths,
+                load_strategy,
+                gpu_ordinal,
+                frozen.ltx2_gemma_variant.clone(),
+            )))
         }
         "ltx2" | "ltx-2" | "ltx2.3" => {
             if is_ltx2_native_single_file(&paths) {
@@ -996,22 +1028,36 @@ mod tests {
     }
 
     #[test]
-    fn ltx25_contract_family_cannot_reach_the_ltx23_engine() {
-        let mut frozen =
-            FrozenEngineConfig::resolve(mold_core::ltx25_manifest::DISTILLED, &Config::default());
-        frozen.family = mold_core::ltx25_manifest::FAMILY.to_string();
-        let error = create_engine_with_frozen_config(
-            mold_core::ltx25_manifest::DISTILLED.into(),
-            dummy_paths(),
-            &frozen,
-            LoadStrategy::Sequential,
-            0,
-            false,
-            None,
-        )
-        .err()
-        .expect("Phase 1 LTX-2.5 assets must remain download-only");
-        assert!(error.to_string().contains("download-only"), "{error}");
+    fn ltx25_contract_family_requires_its_packed_gemma4_encoder() {
+        let error =
+            validate_ltx25_runtime_paths(mold_core::ltx25_manifest::DISTILLED_CONV, &dummy_paths())
+                .expect_err("incomplete LTX-2.5 split pack must fail before engine construction");
+        assert!(error.to_string().contains("packed Gemma 4"), "{error}");
+    }
+
+    #[test]
+    fn ltx25_diffusion_vae_variant_fails_with_phase3_direction() {
+        let error =
+            validate_ltx25_runtime_paths(mold_core::ltx25_manifest::DISTILLED, &dummy_paths())
+                .expect_err("the Phase 3 diffusion decoder must remain fail-closed");
+        assert!(
+            error
+                .to_string()
+                .contains("use 'ltx-2.5-22b-distilled:bf16-conv'"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn ltx25_unknown_quantization_fails_with_supported_model_names() {
+        let error = validate_ltx25_runtime_paths("ltx-2.5-22b-distilled:int8-conv", &dummy_paths())
+            .expect_err("an unsupported quantization must fail before probing its files");
+        let message = error.to_string();
+        assert!(message.contains("Quantized LTX-2.5"), "{message}");
+        assert!(
+            message.contains(mold_core::ltx25_manifest::DISTILLED_CONV),
+            "{message}"
+        );
     }
 
     #[test]

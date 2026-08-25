@@ -43,6 +43,21 @@ fn config_value<'a>(header: &'a SafetensorsHeader, path: &[&str]) -> Option<&'a 
     Some(value)
 }
 
+fn gemma_config_value<'a>(header: &'a SafetensorsHeader, path: &[&str]) -> Option<&'a Value> {
+    let mut value = header
+        .metadata
+        .get("gemma_config")
+        .or_else(|| header.metadata.get("config"))?;
+    for key in path {
+        value = value.get(*key)?;
+    }
+    Some(value)
+}
+
+fn transformer_config_value<'a>(header: &'a SafetensorsHeader, key: &str) -> Option<&'a Value> {
+    config_value(header, &["transformer", key]).or_else(|| config_value(header, &[key]))
+}
+
 fn is_ltx_2_5(version: &str) -> bool {
     let normalized = version.replace('-', ".");
     let mut parts = normalized.split('.');
@@ -68,13 +83,17 @@ pub fn probe_ltx25_transformer(path: &Path) -> std::io::Result<Ltx25TransformerP
         .and_then(Value::as_str)
         .filter(|version| !version.is_empty())
         .ok_or_else(|| invalid_data(path, "missing gemma_source_checkpoint.gemma_version"))?;
-    for key in ["ff_bias", "audio_ff_bias"] {
-        if config_value(&header, &[key]).and_then(Value::as_bool) != Some(false) {
-            return Err(invalid_data(
-                path,
-                format!("LTX-2.5 transformer config must set {key}=false"),
-            ));
-        }
+    if transformer_config_value(&header, "ff_bias").and_then(Value::as_bool) != Some(false) {
+        return Err(invalid_data(
+            path,
+            "LTX-2.5 transformer config must set ff_bias=false",
+        ));
+    }
+    if transformer_config_value(&header, "audio_ff_bias").and_then(Value::as_bool) == Some(false) {
+        return Err(invalid_data(
+            path,
+            "LTX-2.5 transformer config must keep audio_ff_bias=true",
+        ));
     }
     Ok(Ltx25TransformerProbe {
         model_version: model_version.to_string(),
@@ -103,12 +122,12 @@ pub fn probe_ltx25_gemma(path: &Path) -> std::io::Result<Ltx25GemmaProbe> {
             "expected Gemma 4 12B Unified tensors and LTX-2.5 projection",
         ));
     }
-    let model_type = config_value(&header, &["model_type"])
+    let model_type = gemma_config_value(&header, &["model_type"])
         .and_then(Value::as_str)
         .or_else(|| metadata_string(&header, "model_type"))
         .filter(|model_type| *model_type == "gemma4_unified")
         .ok_or_else(|| invalid_data(path, "expected config.model_type=gemma4_unified"))?;
-    let gemma_version = config_value(&header, &["gemma_version"])
+    let gemma_version = gemma_config_value(&header, &["gemma_version"])
         .and_then(Value::as_str)
         .or_else(|| metadata_string(&header, "gemma_version"))
         .filter(|version| !version.is_empty())
@@ -222,14 +241,16 @@ mod tests {
             ),
             (
                 "config".into(),
-                serde_json::json!({"ff_bias": ff_bias, "audio_ff_bias": false}),
+                serde_json::json!({
+                    "transformer": {"ff_bias": ff_bias, "audio_ff_bias": true}
+                }),
             ),
         ])
     }
 
     fn gemma_metadata(model_type: &str, gemma_version: &str) -> serde_json::Map<String, Value> {
         serde_json::Map::from_iter([(
-            "config".into(),
+            "gemma_config".into(),
             serde_json::json!({
                 "model_type": model_type,
                 "gemma_version": gemma_version
