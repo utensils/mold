@@ -140,10 +140,17 @@ function scheduleMeasure() {
   frame = requestAnimationFrame(measureWindow);
 }
 
+function resumeMeasure() {
+  if (document.visibilityState === "hidden") return;
+  void nextTick(measureWindow);
+}
+
 onMounted(() => {
   measureWindow();
   window.addEventListener("scroll", scheduleMeasure, { passive: true });
   window.addEventListener("resize", scheduleMeasure, { passive: true });
+  window.addEventListener("pageshow", resumeMeasure);
+  document.addEventListener("visibilitychange", resumeMeasure);
   if (gridRoot.value && typeof ResizeObserver !== "undefined") {
     resizeObserver = new ResizeObserver(scheduleMeasure);
     resizeObserver.observe(gridRoot.value);
@@ -310,6 +317,8 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointermove", onPointerMove);
   window.removeEventListener("scroll", scheduleMeasure);
   window.removeEventListener("resize", scheduleMeasure);
+  window.removeEventListener("pageshow", resumeMeasure);
+  document.removeEventListener("visibilitychange", resumeMeasure);
   resizeObserver?.disconnect();
   if (frame) cancelAnimationFrame(frame);
 });

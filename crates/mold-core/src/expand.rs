@@ -458,47 +458,83 @@ pub fn clean_expanded_prompt_public(text: &str) -> String {
 /// Parse multiple variations from LLM output.
 /// Tries JSON array first, then numbered list, then line-separated.
 fn parse_variations(text: &str, expected: usize) -> Vec<String> {
-    let trimmed = text.trim();
+    let trimmed = strip_thinking_preamble(text);
 
     // Try JSON array
     if let Ok(arr) = serde_json::from_str::<Vec<String>>(trimmed) {
         if !arr.is_empty() {
-            return arr.into_iter().map(|s| clean_expanded_prompt(&s)).collect();
+            return arr
+                .into_iter()
+                .take(expected)
+                .map(|s| clean_expanded_prompt(&s))
+                .collect();
         }
     }
 
-    // Try to find a JSON array embedded in the text (LLM may include preamble)
-    if let Some(start) = trimmed.find('[') {
-        if let Some(end) = trimmed.rfind(']') {
-            if start < end {
-                let json_slice = &trimmed[start..=end];
-                if let Ok(arr) = serde_json::from_str::<Vec<String>>(json_slice) {
-                    if !arr.is_empty() {
+    // Try every bracket-bounded slice so prose brackets cannot swallow a
+    // later JSON array. Prefer an exact candidate; a sole short candidate is
+    // retained for the exact-count retry. Multiple singleton arrays belong to
+    // the line-oriented compatibility fallback below.
+    let starts = trimmed.match_indices('[').map(|(index, _)| index);
+    let ends = trimmed
+        .match_indices(']')
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let mut embedded = Vec::new();
+    for start in starts {
+        for &end in ends.iter().filter(|&&end| end > start) {
+            if let Ok(arr) = serde_json::from_str::<Vec<String>>(&trimmed[start..=end]) {
+                if !arr.is_empty() {
+                    if arr.len() == expected {
                         return arr.into_iter().map(|s| clean_expanded_prompt(&s)).collect();
                     }
+                    embedded.push(arr);
                 }
             }
         }
     }
+    if embedded.len() == 1 {
+        return embedded
+            .pop()
+            .unwrap()
+            .into_iter()
+            .take(expected)
+            .map(|s| clean_expanded_prompt(&s))
+            .collect();
+    }
 
-    // Fall back to numbered list parsing (1. ... 2. ... etc.)
-    let lines: Vec<String> = trimmed
+    // Fall back to a genuine consecutive numbered list (1. ... 2. ... etc.).
+    // An oversize unnumbered response is ambiguous and must reach the exact
+    // count guard unchanged rather than turning reasoning into prompts.
+    let raw_lines = trimmed
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
-        .map(|l| {
-            // Strip numbered prefix: "1. ", "2) ", etc.
-            let stripped = l
-                .trim_start_matches(|c: char| c.is_ascii_digit())
-                .trim_start_matches(['.', ')', ':', '-'])
-                .trim_start_matches('"')
-                .trim_end_matches('"')
-                .trim();
-            clean_expanded_prompt(stripped)
-        })
-        .filter(|l| !l.is_empty())
-        .collect();
+        .collect::<Vec<_>>();
+    let numbered = raw_lines
+        .iter()
+        .map(|line| parse_numbered_variation(line))
+        .collect::<Option<Vec<_>>>();
+    if let Some(numbered) = numbered {
+        if numbered
+            .iter()
+            .enumerate()
+            .all(|(index, (number, _))| *number == index + 1)
+            && numbered.len() >= expected
+        {
+            return numbered
+                .into_iter()
+                .take(expected)
+                .map(|(_, prompt)| prompt)
+                .collect();
+        }
+    }
 
+    let lines = raw_lines
+        .iter()
+        .map(|line| clean_expanded_prompt(line))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
     if lines.len() >= expected {
         return lines;
     }
@@ -516,6 +552,31 @@ fn parse_variations(text: &str, expected: usize) -> Vec<String> {
 
     // Ultimate fallback: return the whole text as a single variation
     vec![clean_expanded_prompt(trimmed)]
+}
+
+/// Remove a complete Qwen-style reasoning preamble before structural parsing.
+/// Thinking may still appear even when disabled, and its prose can contain
+/// brackets or numbered lines that must never be mistaken for variations.
+fn strip_thinking_preamble(text: &str) -> &str {
+    let trimmed = text.trim();
+    if trimmed.starts_with("<think>") {
+        if let Some(end) = trimmed.rfind("</think>") {
+            return trimmed[end + "</think>".len()..].trim();
+        }
+    }
+    trimmed
+}
+
+fn parse_numbered_variation(line: &str) -> Option<(usize, String)> {
+    let digit_len = line.bytes().take_while(u8::is_ascii_digit).count();
+    if digit_len == 0 {
+        return None;
+    }
+    let number = line[..digit_len].parse().ok()?;
+    let rest = line[digit_len..].trim_start();
+    let rest = rest.strip_prefix(['.', ')', ':', '-'])?.trim();
+    let prompt = clean_expanded_prompt(rest);
+    (!prompt.is_empty()).then_some((number, prompt))
 }
 
 /// Clean up an expanded prompt: trim whitespace, remove quotes, collapse whitespace.
@@ -829,6 +890,57 @@ mod tests {
         // parse_variations should find the embedded JSON array.
         let result = parse_variations(input, 3);
         assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn parse_variations_ignores_brackets_and_lines_in_thinking() {
+        let input = r#"<think>
+I need four alternatives [composition, camera, lighting, setting].
+1. Preserve the subject.
+2. Keep the action.
+3. Return JSON.
+</think>
+["wide composition", "low camera", "rim lighting", "desert setting"]"#;
+        let result = parse_variations(input, 4);
+        assert_eq!(
+            result,
+            vec![
+                "wide composition",
+                "low camera",
+                "rim lighting",
+                "desert setting"
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_variations_caps_backend_overshoot_to_requested_count() {
+        let json = r#"["one", "two", "three", "four", "five"]"#;
+        assert_eq!(
+            parse_variations(json, 4),
+            vec!["one", "two", "three", "four"]
+        );
+
+        let numbered = "1. one\n2. two\n3. three\n4. four\n5. five";
+        assert_eq!(
+            parse_variations(numbered, 4),
+            vec!["one", "two", "three", "four"]
+        );
+    }
+
+    #[test]
+    fn parse_variations_does_not_truncate_ambiguous_overshoot() {
+        let input =
+            "First I will preserve the subject.\nThen vary the camera.\none\ntwo\nthree\nfour";
+        let result = parse_variations(input, 4);
+        assert_eq!(result.len(), 6);
+        assert_eq!(result[0], "First I will preserve the subject.");
+    }
+
+    #[test]
+    fn parse_variations_accepts_short_json_after_prose_brackets_for_retry() {
+        let input = "Consider [composition and lighting].\n[\"prompt one\", \"prompt two\"]";
+        assert_eq!(parse_variations(input, 4), vec!["prompt one", "prompt two"]);
     }
 
     #[test]

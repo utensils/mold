@@ -89,6 +89,14 @@ const loaded = ref(false);
 
 let observer: IntersectionObserver | null = null;
 
+function refreshVisibility() {
+  if (!root.value) return;
+  const rect = root.value.getBoundingClientRect();
+  const near = rect.bottom >= -600 && rect.top <= window.innerHeight + 600;
+  if (near) visible.value = true;
+  onScreen.value = rect.bottom >= 0 && rect.top <= window.innerHeight;
+}
+
 onMounted(() => {
   if (!root.value) return;
   observer = new IntersectionObserver(
@@ -115,10 +123,15 @@ onMounted(() => {
     { rootMargin: "600px 0px", threshold: 0.01 },
   );
   observer.observe(root.value);
+  refreshVisibility();
+  window.addEventListener("pageshow", refreshVisibility);
+  document.addEventListener("visibilitychange", refreshVisibility);
 });
 
 onBeforeUnmount(() => {
   observer?.disconnect();
+  window.removeEventListener("pageshow", refreshVisibility);
+  document.removeEventListener("visibilitychange", refreshVisibility);
 });
 
 const kind = computed(() => mediaKind(props.item.format, props.item.filename));

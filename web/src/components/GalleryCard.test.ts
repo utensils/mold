@@ -41,6 +41,17 @@ describe("GalleryCard", () => {
     expect(wrapper.text()).toContain("visible image");
   });
 
+  it("hydrates a card immediately when the observer is silent until scroll", async () => {
+    const wrapper = mount(GalleryCard, {
+      props: { item },
+      attachTo: document.body,
+    });
+
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find("img").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
   it("shows the title caption and favorite heart only when the print has them", () => {
     const plain = mount(GalleryCard, { props: { item, variant: "feed" } });
     expect(plain.find('[data-test="card-title"]').exists()).toBe(false);

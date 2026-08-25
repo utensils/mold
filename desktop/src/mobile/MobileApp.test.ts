@@ -7122,6 +7122,64 @@ describe("MobileApp primary navigation", () => {
 });
 
 describe("MobileApp gallery", () => {
+  it("hydrates a live gallery replacement when its cached keys are unchanged", async () => {
+    Object.defineProperty(globalThis, "indexedDB", {
+      configurable: true,
+      value: new IDBFactory(),
+    });
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "url-derived-id",
+          instanceId: "studio-instance",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          online: true,
+        },
+      ]),
+    );
+    await storeCachedGallery("studio-instance", [print]);
+    await storeCachedGalleryMedia(
+      "studio-instance",
+      print.filename,
+      "thumbnail",
+      new Blob(["cached thumbnail"], { type: "image/webp" }),
+    );
+    const liveGallery = deferred<GalleryImage[]>();
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status")
+        return Promise.resolve({ ...status, instance_id: "studio-instance" });
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/capabilities") return Promise.resolve(null);
+      if (path === "/api/gallery") return liveGallery.promise;
+      if (path === "/api/activity")
+        return Promise.resolve({
+          instance_id: "studio-instance",
+          observed_at_unix_ms: 1,
+          items: [],
+        });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    // Cached metadata hydrates behind the loading surface while the live host
+    // read is pending. Wait for those bytes to resolve before replacing the
+    // proxies with the same physical keys.
+    await vi.waitFor(() => expect(URL.createObjectURL).toHaveBeenCalled());
+
+    liveGallery.resolve([print]);
+    await flushPromises();
+
+    await vi.waitFor(() => {
+      const tile = wrapper!.get("[data-test='gallery-item']");
+      expect(tile.find(".mobile-media-placeholder").exists()).toBe(false);
+      expect(tile.get("img").attributes("src")).toContain("blob:");
+    });
+  });
+
   it("reuses a cached print immediately while its host is offline", async () => {
     Object.defineProperty(globalThis, "indexedDB", {
       configurable: true,
@@ -10431,6 +10489,28 @@ describe("MobileApp Library organization", () => {
     await wrapper?.get("[data-test='mobile-collection-back']").trigger("click");
     await flushPromises();
     expect(wrapper?.find("[data-test='mobile-collection-list']").exists()).toBe(true);
+  });
+
+  it("falls back to a readable collection member when its explicit cover is unavailable", async () => {
+    installLibraryApi();
+    apiFetchTo.mockImplementation((_target: unknown, path: string) => {
+      if (path.includes("cover.png")) return Promise.reject(new Error("cover host offline"));
+      return Promise.resolve({
+        status: 200,
+        blob: () => Promise.resolve(new Blob(["member thumbnail"], { type: "image/png" })),
+        text: () => Promise.resolve(""),
+      } as unknown as Response);
+    });
+    await openLibrary();
+
+    await wrapper?.get("[data-test='mobile-library-scope-collections']").trigger("click");
+    await flushPromises();
+
+    const card = wrapper!.get("[data-test='mobile-collection-portraits']");
+    await vi.waitFor(() => expect(card.find(".mobile-collection-cover img").exists()).toBe(true));
+    expect(
+      apiFetchTo.mock.calls.some(([, path]) => String(path).includes(favoritePrint.filename)),
+    ).toBe(true);
   });
 
   it("offers Hide from Library from a collection card on iPhone and Android", async () => {

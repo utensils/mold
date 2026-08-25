@@ -971,6 +971,7 @@ const collectionDeleteConfirmSlug = ref<string | null>(null);
 interface CollectionCoverState {
   hostId: string;
   filename: string;
+  candidatesKey: string;
   url: string;
   status: "loading" | "ready" | "error";
 }
@@ -6937,6 +6938,12 @@ async function loadMoreGalleryPage(): Promise<void> {
   }
   markMobileLibrarySeen(galleryCopies);
   if (pendingLibraryScrollRestore) restoreMobileLibraryScroll();
+  // A cached snapshot and its live replacement commonly contain the exact
+  // same physical keys. The visible-key watcher therefore does not fire for
+  // the replacement proxies, leaving every new row on its placeholder until
+  // scrolling changes the window. Hydrate the proxies we just installed.
+  await nextTick();
+  syncVisibleGalleryThumbnails();
 }
 
 async function reusePrint(print: GalleryPrint): Promise<void> {
@@ -7542,31 +7549,33 @@ watch(
   () => void nextTick(measureMobileGalleryWindow),
 );
 
+function syncVisibleGalleryThumbnails(): void {
+  const retained = new Set(visibleGallery.value.map(galleryThumbnailRetryKey));
+  if (selectedPrint.value) retained.add(galleryThumbnailRetryKey(selectedPrint.value));
+  visibleGalleryThumbnailKeys = retained;
+  for (const [key, handle] of galleryThumbnailHandles) {
+    if (retained.has(key)) continue;
+    handle.cancel();
+    galleryThumbnailHandles.delete(key);
+  }
+  for (const [key, timer] of galleryThumbnailRetryTimers) {
+    if (retained.has(key)) continue;
+    clearTimeout(timer);
+    galleryThumbnailRetryTimers.delete(key);
+  }
+  for (const print of gallery.value) {
+    const key = galleryThumbnailRetryKey(print);
+    if (retained.has(key) || print.thumbnailPending) continue;
+    revokeObjectUrl(print.thumbnailUrl);
+    print.thumbnailUrl = GALLERY_THUMBNAIL_PLACEHOLDER;
+    print.thumbnailPending = true;
+  }
+  for (const print of visibleGallery.value) loadGalleryThumbnail(print);
+}
+
 watch(
   () => visibleGallery.value.map(galleryThumbnailRetryKey).join("\u0000"),
-  () => {
-    const retained = new Set(visibleGallery.value.map(galleryThumbnailRetryKey));
-    if (selectedPrint.value) retained.add(galleryThumbnailRetryKey(selectedPrint.value));
-    visibleGalleryThumbnailKeys = retained;
-    for (const [key, handle] of galleryThumbnailHandles) {
-      if (retained.has(key)) continue;
-      handle.cancel();
-      galleryThumbnailHandles.delete(key);
-    }
-    for (const [key, timer] of galleryThumbnailRetryTimers) {
-      if (retained.has(key)) continue;
-      clearTimeout(timer);
-      galleryThumbnailRetryTimers.delete(key);
-    }
-    for (const print of gallery.value) {
-      const key = galleryThumbnailRetryKey(print);
-      if (retained.has(key) || print.thumbnailPending) continue;
-      revokeObjectUrl(print.thumbnailUrl);
-      print.thumbnailUrl = GALLERY_THUMBNAIL_PLACEHOLDER;
-      print.thumbnailPending = true;
-    }
-    for (const print of visibleGallery.value) loadGalleryThumbnail(print);
-  },
+  syncVisibleGalleryThumbnails,
   { immediate: true },
 );
 
@@ -7975,6 +7984,30 @@ function closeCollection(): void {
 /** Collection cards own their cover URL. Grid URLs are revoked whenever scope
  * paging resets, so borrowing one here produces a broken image after the user
  * switches from Prints to Collections. */
+function collectionCoverCandidates(
+  card: MobileCollectionCard,
+): Array<{ hostId: string; filename: string }> {
+  const candidates: Array<{ hostId: string; filename: string }> = [];
+  const seen = new Set<string>();
+  const add = (candidate: { hostId: string; filename: string } | null) => {
+    if (!candidate) return;
+    const key = `${candidate.hostId}\u0000${candidate.filename}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push(candidate);
+  };
+  add(card.cover);
+  // A merged collection can name its explicit cover on a sleeping machine.
+  // Every cached/live member is a valid visual fallback, matching the desktop
+  // and web mosaics instead of blanking the whole card for one unavailable host.
+  for (const print of galleryCopies) {
+    if (organizationOf(print)?.collections.includes(card.slug)) {
+      add({ hostId: print.hostId, filename: print.filename });
+    }
+  }
+  return candidates;
+}
+
 function syncCollectionCovers(cards: readonly MobileCollectionCard[]): void {
   if (!collectionShelfVisible.value) return;
   const liveSlugs = new Set(cards.map((card) => card.slug));
@@ -7990,9 +8023,12 @@ function syncCollectionCovers(cards: readonly MobileCollectionCard[]): void {
   }
 
   for (const card of cards) {
-    const cover = card.cover;
+    const candidates = collectionCoverCandidates(card);
+    const candidatesKey = candidates
+      .map((candidate) => `${candidate.hostId}\u0000${candidate.filename}`)
+      .join("\u0001");
     const prior = collectionCovers[card.slug];
-    if (!cover) {
+    if (candidates.length === 0) {
       if (prior) revokeObjectUrl(prior.url);
       const timer = collectionCoverRetryTimers.get(card.slug);
       if (timer) clearTimeout(timer);
@@ -8001,7 +8037,7 @@ function syncCollectionCovers(cards: readonly MobileCollectionCard[]): void {
       delete collectionCovers[card.slug];
       continue;
     }
-    if (prior?.hostId === cover.hostId && prior.filename === cover.filename) {
+    if (prior?.candidatesKey === candidatesKey) {
       if (prior.status !== "error" || collectionCoverRetryTimers.has(card.slug)) continue;
     } else if (prior) {
       revokeObjectUrl(prior.url);
@@ -8011,30 +8047,52 @@ function syncCollectionCovers(cards: readonly MobileCollectionCard[]): void {
       collectionCoverRetryAttempts.delete(card.slug);
     }
 
+    const first = candidates[0]!;
     const state: CollectionCoverState = {
-      hostId: cover.hostId,
-      filename: cover.filename,
+      hostId: first.hostId,
+      filename: first.filename,
+      candidatesKey,
       url: "",
       status: "loading",
     };
     collectionCovers[card.slug] = state;
-    const host = connectedHosts.value.find((candidate) => candidate.id === cover.hostId);
-    if (!host) {
-      state.status = "error";
-      continue;
-    }
-    void thumbnailUrl(mobileHostTarget(host), mobileGalleryCacheKey(host), cover.filename)
-      .then((url) => {
+    void (async () => {
+      for (const candidate of candidates) {
+        const host = connectedHosts.value.find((entry) => entry.id === candidate.hostId);
+        if (!host) continue;
+        // Do not wait through the network timeout for a host already known to
+        // be offline. Its Lightroom-style local thumbnail remains eligible;
+        // otherwise move immediately to a reachable physical copy.
+        if (host.online === false) {
+          const cached = await loadCachedGalleryMedia(
+            mobileGalleryCacheKey(host),
+            candidate.filename,
+            "thumbnail",
+          );
+          if (!cached) continue;
+        }
+        try {
+          const url = await thumbnailUrl(
+            mobileHostTarget(host),
+            mobileGalleryCacheKey(host),
+            candidate.filename,
+          );
+          return { ...candidate, url };
+        } catch {
+          // A collection is cross-host. Try its next physical member before
+          // turning the entire card into an error placeholder.
+        }
+      }
+      throw new Error("No collection cover is currently readable");
+    })()
+      .then(({ hostId, filename, url }) => {
         const current = collectionCovers[card.slug];
-        if (
-          !current ||
-          current.hostId !== cover.hostId ||
-          current.filename !== cover.filename ||
-          unmounted
-        ) {
+        if (!current || current.candidatesKey !== candidatesKey || unmounted) {
           revokeObjectUrl(url);
           return;
         }
+        current.hostId = hostId;
+        current.filename = filename;
         current.url = url;
         current.status = "ready";
         const timer = collectionCoverRetryTimers.get(card.slug);
@@ -8044,7 +8102,7 @@ function syncCollectionCovers(cards: readonly MobileCollectionCard[]): void {
       })
       .catch(() => {
         const current = collectionCovers[card.slug];
-        if (current?.hostId === cover.hostId && current.filename === cover.filename) {
+        if (current?.candidatesKey === candidatesKey) {
           current.status = "error";
           scheduleCollectionCoverRetry(card);
         }
@@ -8053,11 +8111,12 @@ function syncCollectionCovers(cards: readonly MobileCollectionCard[]): void {
 }
 
 function scheduleCollectionCoverRetry(card: MobileCollectionCard): void {
+  const candidates = collectionCoverCandidates(card);
   if (
     unmounted ||
     !collectionShelfVisible.value ||
     collectionCoverRetryTimers.has(card.slug) ||
-    !card.cover
+    candidates.length === 0
   )
     return;
   const attempt = collectionCoverRetryAttempts.get(card.slug) ?? 0;
@@ -8069,15 +8128,17 @@ function scheduleCollectionCoverRetry(card: MobileCollectionCard): void {
       if (
         !current ||
         current.status !== "error" ||
-        current.hostId !== card.cover?.hostId ||
-        current.filename !== card.cover.filename
+        current.candidatesKey !==
+          collectionCoverCandidates(card)
+            .map((candidate) => `${candidate.hostId}\u0000${candidate.filename}`)
+            .join("\u0001")
       ) {
         return;
       }
       delete collectionCovers[card.slug];
       syncCollectionCovers(libraryCollectionCards.value);
     },
-    galleryThumbnailRetryDelay(card.cover.filename, attempt),
+    galleryThumbnailRetryDelay(candidates[0]!.filename, attempt),
   );
   collectionCoverRetryTimers.set(card.slug, timer);
 }
@@ -9536,7 +9597,16 @@ function handleForegroundResume(): void {
   void refreshMobileActivity();
   if (modelLoadError.value && !loadingModels.value) void refreshModels();
   renewGeneratedResult(false);
-  if (tab.value === "gallery") void refreshGallery();
+  if (tab.value === "gallery") {
+    // WebKit can restore the old scroll tree without notifying ResizeObserver.
+    // Re-measure and rehydrate immediately; waiting for the first user scroll
+    // made a resumed Library look empty even though its metadata was present.
+    void nextTick(() => {
+      measureMobileGalleryWindow();
+      syncVisibleGalleryThumbnails();
+    });
+    void refreshGallery();
+  }
 }
 
 function usesSoftwareKeyboard(target: EventTarget | null): target is HTMLElement {
