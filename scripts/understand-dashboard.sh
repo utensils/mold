@@ -75,4 +75,15 @@ fi
 
 plugin_version="$(node -p "require('$plugin_root/package.json').version")"
 viewer_url="https://github.com/Egonex-AI/Understand-Anything/releases/download/v${plugin_version}/understand-anything-viewer.tgz"
-exec npx --yes "$viewer_url" "$project_dir" "$@"
+if curl --fail --silent --location --head "$viewer_url" >/dev/null; then
+    exec npx --yes "$viewer_url" "$project_dir" "$@"
+fi
+
+echo "understand-dashboard: release viewer unavailable; building the installed viewer locally" >&2
+(
+    cd "$plugin_root"
+    pnpm install --frozen-lockfile 2>/dev/null || pnpm install
+    pnpm --filter @understand-anything/core build
+    pnpm --filter understand-anything-viewer build
+)
+exec node "$viewer" "$project_dir" "$@"

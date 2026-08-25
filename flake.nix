@@ -966,6 +966,7 @@
               pkgs.cargo-tauri
               pkgs.nodejs_22
               pkgs.nodePackages.prettier
+              pkgs.pnpm
               pkgs.tmux
               pkgs.runpodctl
             ]
