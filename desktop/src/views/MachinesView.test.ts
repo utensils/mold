@@ -6,6 +6,13 @@ import { createMemoryHistory, createRouter, type Router } from "vue-router";
 const appSettingsGet = vi.fn();
 const discoverServers = vi.fn();
 const secretGet = vi.fn().mockResolvedValue(null);
+const testRemoteHost = vi.fn().mockResolvedValue({
+  ok: true,
+  version: "1",
+  error: null,
+  instanceId: null,
+  hostname: null,
+});
 vi.mock("../lib/ipc", () => ({
   inTauri: () => false,
   ipc: {
@@ -14,9 +21,7 @@ vi.mock("../lib/ipc", () => ({
     secretGet: (...a: unknown[]) => secretGet(...a),
     secretSet: vi.fn().mockResolvedValue(undefined),
     discoverServers: (...a: unknown[]) => discoverServers(...(a as [])),
-    testRemoteHost: vi
-      .fn()
-      .mockResolvedValue({ ok: true, version: "1", error: null, instanceId: null, hostname: null }),
+    testRemoteHost: (...a: unknown[]) => testRemoteHost(...a),
     forgetRemoteHost: vi.fn().mockResolvedValue([]),
   },
 }));
@@ -231,6 +236,34 @@ describe("MachinesView overview", () => {
     expect(discovered.find("[data-test='discovered-add']").exists()).toBe(true);
   });
 
+  it("prompts for a key before connecting an authenticated discovered host", async () => {
+    discoverServers.mockResolvedValue([
+      {
+        name: "locked-7680",
+        url: "http://192.168.1.30:7680",
+        host: "192.168.1.30",
+        port: 7680,
+        version: "1",
+        authRequired: true,
+        isThisMachine: false,
+      },
+    ]);
+    const wrapper = await mountView();
+
+    await wrapper.get("[data-test='discovered-add']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='connect-discovered-selected']").text()).toContain(
+      "locked-7680",
+    );
+    expect(wrapper.find("[data-test='connect-key']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='connect-error']").exists()).toBe(false);
+
+    await wrapper.get("[data-test='connect-key']").setValue("peer-secret");
+    await wrapper.get("[data-test='connect-continue']").trigger("click");
+    await flushPromises();
+    expect(testRemoteHost).toHaveBeenCalledWith("http://192.168.1.30:7680", "peer-secret");
+  });
+
   it("hides the app's own embedded server from On your network but keeps standalone same-machine servers", async () => {
     discoverServers.mockResolvedValue([
       {
@@ -321,5 +354,6 @@ describe("MachinesView overview", () => {
     await flushPromises();
     expect(secretGet).toHaveBeenCalledWith("remote-api-key.192-168-1-20-7680");
     expect(secretGet).toHaveBeenCalledWith("remote-api-key.studio-7680");
+    expect(testRemoteHost).toHaveBeenCalledWith("http://192.168.1.20:7680", "twin-key");
   });
 });

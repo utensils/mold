@@ -8864,7 +8864,14 @@ describe("MobileApp host and catalog coordination", () => {
     invoke.mockImplementation((command: string) => {
       if (command === "keychain_get_api_key") return Promise.resolve(target.apiKey);
       if (command === "discover_mold_hosts") {
-        return Promise.resolve([{ name: "Render Box", host: "192.168.1.50", port: 7680 }]);
+        return Promise.resolve([
+          {
+            name: "Render Box",
+            host: "192.168.1.50",
+            port: 7680,
+            authRequired: true,
+          },
+        ]);
       }
       return Promise.resolve(null);
     });
@@ -8881,7 +8888,21 @@ describe("MobileApp host and catalog coordination", () => {
     expect(wrapper.get("[data-test='mobile-discovered-host']").text()).toContain(
       "192.168.1.50:7680",
     );
-    expect(wrapper.text()).toContain("API key");
+    await wrapper.get("[data-test='mobile-discovered-host'] button").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-discovered-key-prompt']").exists()).toBe(true);
+    expect(apiJsonTo).not.toHaveBeenCalledWith(
+      expect.objectContaining({ baseUrl: "http://192.168.1.50:7680" }),
+      "/api/status",
+    );
+
+    await wrapper.get("[data-test='mobile-discovered-api-key']").setValue("peer-secret");
+    await wrapper.get("[data-test='mobile-discovered-key-prompt']").trigger("submit");
+    await flushPromises();
+    expect(apiJsonTo).toHaveBeenCalledWith(
+      { baseUrl: "http://192.168.1.50:7680", apiKey: "peer-secret" },
+      "/api/status",
+    );
   });
 
   it("names Google Play instead of TestFlight in Android settings", async () => {

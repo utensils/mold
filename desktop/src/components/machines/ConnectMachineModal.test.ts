@@ -139,4 +139,57 @@ describe("ConnectMachineModal", () => {
     expect(testRemoteHost).toHaveBeenCalledWith("http://192.168.1.20:7680", null);
     expect(wrapper.find("[data-test='connect-confirm']").exists()).toBe(true);
   });
+
+  it("prompts for a key before connecting an authenticated discovered host", async () => {
+    discoverServers.mockResolvedValue([
+      {
+        name: "locked-7680",
+        url: "http://192.168.1.30:7680",
+        host: "192.168.1.30",
+        port: 7680,
+        version: "1",
+        authRequired: true,
+        isThisMachine: false,
+      },
+    ]);
+    const wrapper = await mountModal();
+    await wrapper.get("[data-test='connect-type-lan']").trigger("click");
+    await wrapper.get("[data-test='connect-continue']").trigger("click");
+    await flushPromises();
+
+    await wrapper.get("[data-test='connect-discovered-add']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='connect-discovered-selected']").text()).toContain(
+      "locked-7680",
+    );
+    expect(testRemoteHost).not.toHaveBeenCalled();
+
+    await wrapper.get("[data-test='connect-key']").setValue("peer-secret");
+    await wrapper.get("[data-test='connect-continue']").trigger("click");
+    await flushPromises();
+    expect(testRemoteHost).toHaveBeenCalledWith("http://192.168.1.30:7680", "peer-secret");
+  });
+
+  it("clears a direct discovered-host prompt when navigating back to LAN discovery", async () => {
+    const initialHost = {
+      name: "locked-7680",
+      url: "http://192.168.1.30:7680",
+      host: "192.168.1.30",
+      port: 7680,
+      version: "1",
+      authRequired: true,
+      isThisMachine: false,
+    };
+    const wrapper = await mountModal();
+    await wrapper.setProps({ open: false, initialHost });
+    await wrapper.setProps({ open: true });
+    await flushPromises();
+    expect(wrapper.find("[data-test='connect-discovered-selected']").exists()).toBe(true);
+
+    await wrapper.get("[data-test='connect-back']").trigger("click");
+    await wrapper.get("[data-test='connect-type-lan']").trigger("click");
+    await wrapper.get("[data-test='connect-continue']").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='connect-discovered-selected']").exists()).toBe(false);
+  });
 });

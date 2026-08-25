@@ -58,6 +58,17 @@ async function stopPod(pod: RunPodPod) {
 }
 
 const connectOpen = ref(false);
+const connectPromptHost = ref<DiscoveredHost | null>(null);
+
+function openConnectModal(host: DiscoveredHost | null = null) {
+  connectPromptHost.value = host;
+  connectOpen.value = true;
+}
+
+function closeConnectModal() {
+  connectOpen.value = false;
+  connectPromptHost.value = null;
+}
 
 function openDetail(host: HostView) {
   void router.push(`/machines/${host.id}`);
@@ -308,6 +319,10 @@ async function addDiscovered(host: DiscoveredHost) {
         // Settings unreadable — connect proceeds without a key.
       }
     }
+    if (host.authRequired && !key) {
+      openConnectModal(host);
+      return;
+    }
     const view = await hosts.connect(host.url, key, host.name);
     toasts.push(`Connected to ${view.label}`);
     await refreshSaved();
@@ -335,7 +350,7 @@ async function onConnected() {
         type="button"
         data-test="add-machine"
         class="border-ce flex items-center gap-1.5 rounded-chrome border px-3.5 py-2 text-body font-semibold text-ink-2 transition-colors hover:text-ink active:translate-y-px"
-        @click="connectOpen = true"
+        @click="openConnectModal()"
       >
         <Icon name="plus" :size="14" :stroke-width="2" />
         Add machine
@@ -522,7 +537,8 @@ async function onConnected() {
 
     <ConnectMachineModal
       :open="connectOpen"
-      @close="connectOpen = false"
+      :initial-host="connectPromptHost"
+      @close="closeConnectModal"
       @connected="onConnected"
     />
     <ConfirmDialog

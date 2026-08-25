@@ -16,7 +16,7 @@ import { ipc, type DiscoveredHost } from "../../lib/ipc";
 import { addressLabel, prepareHosts, versionLabel } from "../../lib/discovery";
 import { useHostsStore } from "../../stores/hosts";
 
-const props = defineProps<{ open: boolean }>();
+const props = defineProps<{ open: boolean; initialHost?: DiscoveredHost | null }>();
 const emit = defineEmits<{ close: []; connected: [] }>();
 
 const router = useRouter();
@@ -34,9 +34,16 @@ const connecting = ref(false);
 const connectedName = ref("");
 
 const discovered = ref<DiscoveredHost[]>([]);
+const selectedDiscovered = ref<DiscoveredHost | null>(null);
 const scanning = ref(false);
 
 const addressInput = ref<HTMLInputElement | null>(null);
+const apiKeyInput = ref<HTMLInputElement | null>(null);
+
+async function focusApiKey() {
+  await nextTick();
+  window.requestAnimationFrame(() => apiKeyInput.value?.focus());
+}
 
 interface TypeOption {
   value: MachineType;
@@ -68,12 +75,21 @@ function reset() {
   connecting.value = false;
   connectedName.value = "";
   discovered.value = [];
+  selectedDiscovered.value = null;
 }
 
 watch(
   () => props.open,
-  (open) => {
-    if (open) reset();
+  async (open) => {
+    if (!open) return;
+    reset();
+    if (props.initialHost) {
+      type.value = "lan";
+      step.value = 2;
+      discovered.value = [props.initialHost];
+      selectedDiscovered.value = props.initialHost;
+      await focusApiKey();
+    }
   },
 );
 
@@ -128,7 +144,19 @@ function isThisMachine(host: DiscoveredHost): boolean {
 }
 
 async function pickDiscovered(host: DiscoveredHost) {
+  if (host.authRequired && !apiKey.value.trim()) {
+    selectedDiscovered.value = host;
+    error.value = null;
+    await focusApiKey();
+    return;
+  }
   await connect(host.url, apiKey.value || null, host.name);
+}
+
+function clearDiscoveredSelection() {
+  selectedDiscovered.value = null;
+  apiKey.value = "";
+  error.value = null;
 }
 
 async function onContinue() {
@@ -151,8 +179,9 @@ async function onContinue() {
   if (step.value === 2) {
     if (type.value === "remote") {
       await connect(address.value, apiKey.value || null, displayName.value || null);
+    } else if (selectedDiscovered.value) {
+      await pickDiscovered(selectedDiscovered.value);
     }
-    // Local network advances via pickDiscovered, not the primary button.
     return;
   }
   emit("close");
@@ -160,6 +189,8 @@ async function onContinue() {
 
 function onBack() {
   error.value = null;
+  selectedDiscovered.value = null;
+  apiKey.value = "";
   step.value = 1;
 }
 
@@ -167,7 +198,13 @@ const continueLabel = computed(() =>
   step.value === 1 ? "Continue" : step.value === 2 ? "Connect" : "Done",
 );
 const continueDisabled = computed(
-  () => connecting.value || (step.value === 2 && type.value === "remote" && !address.value.trim()),
+  () =>
+    connecting.value ||
+    (step.value === 2 && type.value === "remote" && !address.value.trim()) ||
+    (step.value === 2 &&
+      type.value === "lan" &&
+      selectedDiscovered.value?.authRequired === true &&
+      !apiKey.value.trim()),
 );
 </script>
 
@@ -291,7 +328,7 @@ const continueDisabled = computed(
             {{ scanning ? "Scanning…" : "Scan again" }}
           </button>
         </div>
-        <ul v-if="discovered.length" class="mt-2 flex flex-col gap-1.5">
+        <ul v-if="discovered.length && !selectedDiscovered" class="mt-2 flex flex-col gap-1.5">
           <li
             v-for="host in discovered"
             :key="host.url"
@@ -320,22 +357,48 @@ const continueDisabled = computed(
             </button>
           </li>
         </ul>
-        <p v-else-if="!scanning" class="mt-2 text-caption text-ink-3">
+        <p v-else-if="!scanning && !selectedDiscovered" class="mt-2 text-caption text-ink-3">
           No other mold servers found on your network.
         </p>
-        <label class="mt-4 block text-caption font-semibold text-ink-2" for="connect-lan-key">
-          API key
-        </label>
-        <input
-          id="connect-lan-key"
-          v-model="apiKey"
-          data-selectable
-          data-test="connect-key"
-          type="password"
-          autocomplete="off"
-          placeholder="Optional — used when a picked host needs one"
-          class="data-mono mt-1.5 w-full rounded-chrome border border-ce bg-bath px-3 py-2.5 text-body text-ink outline-none placeholder:text-ink-3"
-        />
+        <template v-if="selectedDiscovered">
+          <div
+            data-test="connect-discovered-selected"
+            class="border-edge mt-2 flex items-center gap-3 rounded-control border bg-bath px-3 py-2"
+          >
+            <div class="min-w-0 flex-1">
+              <div class="truncate text-body text-ink">{{ selectedDiscovered.name }}</div>
+              <div class="data-mono mt-0.5 truncate text-caption text-ink-3">
+                {{ addressLabel(selectedDiscovered) }} · {{ versionLabel(selectedDiscovered) }}
+              </div>
+            </div>
+            <button
+              v-if="!initialHost"
+              type="button"
+              class="text-caption text-ink-3 hover:text-ink"
+              @click="clearDiscoveredSelection"
+            >
+              Choose another
+            </button>
+          </div>
+          <label class="mt-4 block text-caption font-semibold text-ink-2" for="connect-lan-key">
+            API key
+          </label>
+          <input
+            id="connect-lan-key"
+            ref="apiKeyInput"
+            v-model="apiKey"
+            data-selectable
+            data-test="connect-key"
+            type="password"
+            autocomplete="off"
+            placeholder="Required by this machine"
+            class="data-mono mt-1.5 w-full rounded-chrome border border-ce bg-bath px-3 py-2.5 text-body text-ink outline-none placeholder:text-ink-3"
+            @keydown.enter="onContinue"
+          />
+          <p class="mt-2 text-caption text-ink-3">
+            This machine requires its own API key. The key is stored only on this device.
+          </p>
+        </template>
       </template>
 
       <p v-if="error" data-test="connect-error" class="mt-3 text-caption text-stop">{{ error }}</p>
@@ -380,6 +443,7 @@ const continueDisabled = computed(
       </button>
       <div class="flex-1" />
       <button
+        v-if="step !== 2 || type === 'remote' || selectedDiscovered"
         type="button"
         data-test="connect-continue"
         class="rounded-chrome bg-safelight px-6 py-2.5 text-body font-bold text-on-accent hover:brightness-105 active:translate-y-px disabled:opacity-50"
