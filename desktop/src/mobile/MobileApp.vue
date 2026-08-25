@@ -112,7 +112,6 @@ import {
 import { h3BoundariesNeedingMedia } from "@studio/lib/h3BoundaryRestore";
 import {
   classifyPlacementPreview,
-  comparePlacementPreviews,
   previewChainPlacement,
   previewGenerationPlacement,
   previewRequestForSiblingFanout,
@@ -122,7 +121,6 @@ import {
 import {
   AUTO_TARGET_ID,
   CAPABLE_TARGET_ID,
-  chooseRoutedHost,
   hostIdsForModel,
   isAutomaticTarget,
   pickAutoHost,
@@ -458,6 +456,7 @@ import {
 } from "./mobileGenerationRecovery";
 import { watchMobileGenerationHost, type MobileGenerationHostWatch } from "./mobileGenerationWatch";
 import { beginMobileBackgroundTask } from "./backgroundTask";
+import { mobilePlacementFailure, routeAutomaticMobileGeneration } from "./mobileGenerationRouting";
 
 type Tab = "generate" | "gallery" | "catalog" | "hosts";
 
@@ -561,36 +560,6 @@ interface MobileAppliedRemix {
   dimensions: RemixDimension[];
 }
 
-function sentence(text: string): string {
-  return /[.!?]$/.test(text) ? text : `${text}.`;
-}
-
-function mobilePlacementFailure(
-  preview: GenerationPlacementPreview | null,
-  hostLabel: string,
-  subject: "print" | "sequence",
-): string {
-  const classification = classifyPlacementPreview(preview);
-  if (classification === "infeasible" && preview) {
-    const missing = (preview.missing_components ?? [])
-      .filter((component) => !component.present)
-      .map((component) => component.name);
-    const reason =
-      typeof preview.reason === "string" && preview.reason.trim()
-        ? sentence(preview.reason.trim())
-        : sentence(`the server reported that this ${subject} is infeasible`);
-    return `${hostLabel} cannot run this ${subject}: ${reason}${missing.length ? ` Missing components: ${missing.join(", ")}.` : ""} Nothing was queued.`;
-  }
-  if (classification === "temporarily_unavailable") {
-    const reason =
-      typeof preview?.reason === "string" && preview.reason.trim()
-        ? ` Reason: ${sentence(preview.reason.trim())}`
-        : "";
-    return `${hostLabel} could not compute a placement plan right now.${reason} Try again. Nothing was queued.`;
-  }
-  return `${hostLabel} returned an invalid placement response. Nothing was queued.`;
-}
-
 const STORAGE_KEY = "mold.mobile.hosts.v1";
 const SELECTED_KEY = "mold.mobile.selected-host.v1";
 const LIBRARY_SEEN_AT_KEY = "mold.mobile.library-seen-at.v1";
@@ -600,10 +569,6 @@ const SEQUENCE_RECOVERY_KEY = "mold.mobile.sequence-job.v1";
 const LIVE_ACTIVITY_KEY = "mold.mobile.live-activity.v1";
 const GALLERY_CAPABILITIES_KEY = "mold.mobile.gallery-capabilities.v1";
 const HOST_PROBE_TIMEOUT_MS = 9_000;
-/** How long automatic routing keeps waiting for slower machines once one has
- *  answered `planned`. Nothing is abandoned before that first plan exists —
- *  a deadline that fires with no route would manufacture a dead end. */
-const MOBILE_PLACEMENT_SETTLE_MS = 1_500;
 const GALLERY_HOST_TIMEOUT_MS = 9_000;
 /** A broken WebView connection must not hold a thumbnail page forever. Five
  * seconds is long enough for a remote cache miss while keeping the next page
@@ -3887,29 +3852,6 @@ watch(
   },
 );
 
-/** One machine's answer to the automatic-routing fan-out. */
-interface MobilePlacementProbe {
-  host: MobileHost;
-  /** The machine's exact route as it stood when the probe was ISSUED. A slow
-   *  preview must never authorize one endpoint and then submit to another. */
-  route: HostRoute;
-  roundTripMs: number;
-  preview: GenerationPlacementPreview | null;
-  error: unknown;
-  legacyUnsupported: boolean;
-}
-
-type MobileAutomaticRoute =
-  | {
-      kind: "route";
-      host: MobileHost;
-      route: HostRoute;
-      placement: GenerationPlacementPreview | null;
-      legacyUnsupported: boolean;
-    }
-  | { kind: "error"; message: string }
-  | { kind: "abandoned" };
-
 /**
  * The machines an automatic policy may dispatch to: reachable, allowed to run
  * the model, and — when any of them already holds it — narrowed to the owners,
@@ -4005,26 +3947,6 @@ function provisionalAutomaticHost(
   return chosen?.host ?? null;
 }
 
-function mobileFleetPlacementFailure(
-  probes: readonly MobilePlacementProbe[],
-  subject: "print" | "sequence",
-): string {
-  if (probes.length === 1 && probes[0]!.preview) {
-    return mobilePlacementFailure(probes[0]!.preview, probes[0]!.host.name, subject);
-  }
-  const detail = probes
-    .map((probe) =>
-      probe.preview
-        ? mobilePlacementFailure(probe.preview, probe.host.name, subject).replace(
-            " Nothing was queued.",
-            "",
-          )
-        : `${probe.host.name} did not answer: ${describeTransportError(probe.error, probe.host.name)}`,
-    )
-    .join(" ");
-  return `No connected machine could run this ${subject}. ${detail} Nothing was queued.`;
-}
-
 /**
  * Ask every candidate machine for a placement plan and choose one.
  *
@@ -4044,144 +3966,19 @@ async function routeAutomaticGeneration(options: {
   requireAuthoritative: boolean;
   isCurrent?: () => boolean;
   signal?: AbortSignal;
-}): Promise<MobileAutomaticRoute> {
-  const isCurrent = options.isCurrent ?? (() => true);
-  // The frozen request is the authority on whether a face travels — never the
-  // live form, which may have moved while the fan-out ran.
-  const carriesIdentity = Boolean(options.request.id_image);
-  const { hosts: candidates, error } = automaticRoutingCandidates(options.model, options.family, {
-    requiresIdentity: carriesIdentity,
+}): ReturnType<typeof routeAutomaticMobileGeneration> {
+  const { model, family, isCurrent = () => true, ...routingOptions } = options;
+  const { hosts: candidates, error } = automaticRoutingCandidates(model, family, {
+    requiresIdentity: Boolean(options.request.id_image),
   });
   if (error) return { kind: "error", message: error };
-  const probes: MobilePlacementProbe[] = [];
-  const controllers = candidates.map(() => new AbortController());
-  let pending = candidates.length;
-  let resolveAllSettled!: () => void;
-  let resolveFirstPlanned!: () => void;
-  const allSettled = new Promise<void>((resolve) => (resolveAllSettled = resolve));
-  const firstPlanned = new Promise<void>((resolve) => (resolveFirstPlanned = resolve));
-  candidates.forEach((host, index) => {
-    void (async () => {
-      const controller = controllers[index]!;
-      const abortFromCaller = () => controller.abort(options.signal?.reason);
-      if (options.signal?.aborted) abortFromCaller();
-      else options.signal?.addEventListener("abort", abortFromCaller, { once: true });
-      const started = performance.now();
-      const elapsed = () => Math.max(0, performance.now() - started);
-      const probeOptions = { signal: controller.signal };
-      // Frozen before the request leaves: the winner carries this snapshot, so
-      // a URL, key, or instance that changed mid-flight is caught by the
-      // caller's connection fence instead of silently replacing the endpoint
-      // the plan was authorized for.
-      const route = routeForMobileHost(host);
-      const probeTarget = { ...route.target };
-      try {
-        const preview = options.chain
-          ? await previewChainPlacement(probeTarget, options.request, options.copies, probeOptions)
-          : await previewGenerationPlacement(
-              probeTarget,
-              options.request,
-              options.copies,
-              probeOptions,
-            );
-        probes.push({
-          host,
-          route,
-          roundTripMs: elapsed(),
-          preview,
-          error: null,
-          legacyUnsupported: false,
-        });
-        if (classifyPlacementPreview(preview) === "planned") resolveFirstPlanned();
-      } catch (probeError) {
-        probes.push({
-          host,
-          route,
-          roundTripMs: elapsed(),
-          preview: null,
-          error: probeError,
-          legacyUnsupported:
-            probeError instanceof ApiError &&
-            (probeError.status === 404 || probeError.status === 405),
-        });
-      } finally {
-        options.signal?.removeEventListener("abort", abortFromCaller);
-        pending -= 1;
-        if (pending === 0) resolveAllSettled();
-      }
-    })();
+  return routeAutomaticMobileGeneration({
+    ...routingOptions,
+    candidates: candidates.map((host) => ({ host, view: routingHostView(host) })),
+    routeForHost: routeForMobileHost,
+    policy: generateTarget.value,
+    isCurrent: () => !unmounted && isCurrent(),
   });
-  // Nothing to wait for: the settle promise is only ever resolved by a probe.
-  if (pending === 0) resolveAllSettled();
-  // A phone must not sit on a stalled machine once another one can run the
-  // print — but it must not manufacture a dead end either, so the settle
-  // window only starts once some machine has actually answered `planned`.
-  await Promise.race([
-    allSettled,
-    ...(candidates.length > 1
-      ? [
-          firstPlanned.then(
-            () => new Promise<void>((resolve) => setTimeout(resolve, MOBILE_PLACEMENT_SETTLE_MS)),
-          ),
-        ]
-      : []),
-  ]);
-  if (pending > 0) for (const controller of controllers) controller.abort();
-  if (unmounted || !isCurrent()) return { kind: "abandoned" };
-  // Route on the snapshot that met the settle window; a late cancellation row
-  // must not join the decision.
-  const settledProbes = probes.slice();
-  const planned = settledProbes.flatMap((probe) =>
-    probe.preview && classifyPlacementPreview(probe.preview) === "planned"
-      ? [{ host: routingHostView(probe.host), roundTripMs: probe.roundTripMs, probe }]
-      : [],
-  );
-  const chosen = chooseRoutedHost(
-    planned.map((entry) => ({
-      host: entry.host,
-      roundTripMs: entry.roundTripMs,
-      preview: entry.probe.preview!,
-    })),
-    generateTarget.value,
-    comparePlacementPreviews,
-    { lowestIdWins: true },
-  );
-  if (chosen) {
-    const winner = planned.find((entry) => entry.host.id === chosen.id)!;
-    return {
-      kind: "route",
-      host: winner.probe.host,
-      route: winner.probe.route,
-      placement: winner.probe.preview,
-      legacyUnsupported: false,
-    };
-  }
-  // Servers that predate the authoritative preview still route, unless the
-  // request itself requires that authority (reference media).
-  const legacy = settledProbes.filter(
-    (probe) => probe.legacyUnsupported || classifyPlacementPreview(probe.preview) === "unsupported",
-  );
-  // An older server answers the placement preview with 404/405 and would
-  // ignore the additive identity fields outright, so an identity request never
-  // takes this fallback — it is refused by the failure message below.
-  if (!options.requireAuthoritative && !carriesIdentity && legacy.length > 0) {
-    const views = legacy.map((probe) => routingHostView(probe.host));
-    const fallback =
-      generateTarget.value === CAPABLE_TARGET_ID
-        ? pickMostCapableHost(views, null, { lowestIdWins: true })
-        : pickAutoHost(views, { lowestIdWins: true });
-    if (fallback) {
-      const probe = legacy.find((entry) => entry.host.id === fallback.id)!;
-      return {
-        kind: "route",
-        host: probe.host,
-        route: probe.route,
-        placement: null,
-        legacyUnsupported: true,
-      };
-    }
-  }
-  return { kind: "error", message: mobileFleetPlacementFailure(settledProbes, options.subject) };
 }
 
 async function submitMobileSequence(): Promise<void> {
