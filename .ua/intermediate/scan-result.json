@@ -1,5 +1,5 @@
 {
-  "name": "mold-frontend-workspace",
+  "name": "Mold",
   "description": "Mold is a CLI-native local AI image and video generation system that runs on NVIDIA CUDA and Apple GPUs and exposes REST and SSE interfaces for local and remote workflows. Note: this project has over 100 source files; consider scoping analysis to a subdirectory for faster results.",
   "languages": [
     "0",

@@ -1,0 +1,1321 @@
+{
+  "version": "1.0.0",
+  "project": {
+    "name": "Mold",
+    "languages": [
+      "Rust",
+      "TypeScript",
+      "Vue",
+      "Kotlin",
+      "JavaScript"
+    ],
+    "frameworks": [
+      "Axum",
+      "Candle",
+      "Tauri",
+      "Vue",
+      "Vite"
+    ],
+    "description": "Mold is a local-first AI image and video generation product. It accepts generation work through CLI, HTTP, desktop, web, and remote mobile surfaces; manages models and media; and schedules inference across available compute.",
+    "analyzedAt": "2026-08-25T14:01:48.933Z",
+    "gitCommitHash": "e857f719ddfc48e61bb9f236b3e1c32a27e86ba7"
+  },
+  "nodes": [
+    {
+      "id": "domain:generation-orchestration",
+      "type": "domain",
+      "name": "Generation Orchestration",
+      "summary": "Coordinates a user's image or video request from API admission through durable job creation. It supports individual requests, transactional batches, and multi-stage sequence generation while retaining cancellation and completion state.",
+      "tags": [
+        "generation",
+        "jobs",
+        "orchestration"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entities": [
+          "generation request",
+          "job",
+          "batch",
+          "chain job",
+          "output"
+        ],
+        "businessRules": [
+          "Generation must be admitted before it is queued.",
+          "Batch outputs are committed atomically enough to preserve their authority record.",
+          "Chain jobs retain durable state and cancellation controls."
+        ],
+        "crossDomainInteractions": [
+          "Uses execution plans and scheduler capacity before work runs.",
+          "Creates gallery artifacts after successful execution.",
+          "Receives routing choices from connected client surfaces."
+        ]
+      }
+    },
+    {
+      "id": "domain:inference-execution",
+      "type": "domain",
+      "name": "Inference Execution",
+      "summary": "Turns admitted work into an executable plan and runs it on eligible CPU or GPU workers. It protects device and host-memory constraints while preserving observable queue and worker lifecycle state.",
+      "tags": [
+        "inference",
+        "scheduler",
+        "gpu"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entities": [
+          "execution plan",
+          "device",
+          "GPU worker",
+          "scheduler",
+          "placement"
+        ],
+        "businessRules": [
+          "Only eligible devices can receive an execution plan.",
+          "Workers validate grants before accepting scheduled work.",
+          "Placement decisions account for resource demand and device capability."
+        ],
+        "crossDomainInteractions": [
+          "Consumes admitted generation and chain stages.",
+          "Depends on installed model artifacts.",
+          "Reports lifecycle status to client surfaces."
+        ]
+      }
+    },
+    {
+      "id": "domain:model-lifecycle",
+      "type": "domain",
+      "name": "Model Lifecycle",
+      "summary": "Discovers model catalog entries, resolves supported acquisition recipes, and manages queued model downloads. It gives generation and routing logic an installed-model inventory while handling credentials, companion assets, and partial-download cleanup.",
+      "tags": [
+        "models",
+        "catalog",
+        "downloads"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entities": [
+          "catalog entry",
+          "model family",
+          "manifest",
+          "download job",
+          "LoRA"
+        ],
+        "businessRules": [
+          "Only supported catalog entries can be downloaded through the product flow.",
+          "Model acquisition activates required manifests and companion assets.",
+          "Interrupted download artifacts are cleaned up."
+        ],
+        "crossDomainInteractions": [
+          "Supplies model capability and availability data to generation and host routing.",
+          "Provides acquired artifacts required by inference execution."
+        ]
+      }
+    },
+    {
+      "id": "domain:library-stewardship",
+      "type": "domain",
+      "name": "Library Stewardship",
+      "summary": "Maintains completed prints as an organized media library with metadata, collections, tags, favorites, and retention-aware trash. It preserves recoverability before permanent removal and exposes gallery data across Mold surfaces.",
+      "tags": [
+        "gallery",
+        "media",
+        "organization"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entities": [
+          "print",
+          "gallery item",
+          "collection",
+          "tag",
+          "trash record"
+        ],
+        "businessRules": [
+          "Organization requires a metadata database.",
+          "Trash retention controls when a deleted print can be purged.",
+          "Permanent deletion and restore operate on cleaned gallery filenames."
+        ],
+        "crossDomainInteractions": [
+          "Receives completed generation outputs.",
+          "Exposes media and metadata to desktop, web, and mobile clients.",
+          "Uses persistence for live and trashed library records."
+        ]
+      }
+    },
+    {
+      "id": "domain:distributed-access",
+      "type": "domain",
+      "name": "Distributed Access",
+      "summary": "Connects desktop, web, and remote mobile clients to Mold servers while keeping work routed to an appropriate host. It supports one-use pairing, managed clients, host capability selection, and automatic or most-capable routing policies.",
+      "tags": [
+        "remote",
+        "pairing",
+        "routing"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entities": [
+          "host",
+          "paired client",
+          "pairing session",
+          "routing target",
+          "model union"
+        ],
+        "businessRules": [
+          "Pairing creates and claims a dedicated session.",
+          "Automatic routing chooses among hosts that can serve the selected model.",
+          "Most-capable routing ranks host backends and capabilities."
+        ],
+        "crossDomainInteractions": [
+          "Sends routed requests to generation orchestration.",
+          "Uses model inventory to determine eligible hosts.",
+          "Fetches library media through authenticated host targets."
+        ]
+      }
+    },
+    {
+      "id": "flow:single-generation",
+      "type": "flow",
+      "name": "Submit Single Generation",
+      "summary": "Accepts one user generation request, validates it against server and model requirements, creates a runnable job, and returns observable job state.",
+      "tags": [
+        "generation",
+        "http",
+        "queue"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entryPoint": "HTTP generation routes",
+        "entryType": "http"
+      }
+    },
+    {
+      "id": "flow:batch-generation",
+      "type": "flow",
+      "name": "Commit Batch Generation",
+      "summary": "Coordinates multiple related generation attempts as a batch, records authoritative outputs, and maintains the transaction archive for recovery and retirement handling.",
+      "tags": [
+        "generation",
+        "batch",
+        "transaction"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entryPoint": "HTTP batch generation routes",
+        "entryType": "http"
+      }
+    },
+    {
+      "id": "flow:sequence-generation",
+      "type": "flow",
+      "name": "Run Sequence Generation",
+      "summary": "Runs a durable, multi-stage chain job while publishing progress, managing locks, and honoring cancellation or shutdown requests.",
+      "tags": [
+        "generation",
+        "sequence",
+        "durable-jobs"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entryPoint": "HTTP chain-job routes",
+        "entryType": "http"
+      }
+    },
+    {
+      "id": "flow:execution-planning",
+      "type": "flow",
+      "name": "Resolve Execution Plan",
+      "summary": "Converts a generation request into device-eligible execution plans with explicit runtime identity, capability requirements, and resource demand.",
+      "tags": [
+        "inference",
+        "planning",
+        "admission"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entryPoint": "generation admission",
+        "entryType": "event"
+      }
+    },
+    {
+      "id": "flow:scheduled-device-execution",
+      "type": "flow",
+      "name": "Execute Scheduled Work",
+      "summary": "Schedules accepted plans and processes them on the assigned GPU or CPU utility worker, validating the grant before completion or failure is recorded.",
+      "tags": [
+        "inference",
+        "scheduler",
+        "workers"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entryPoint": "scheduler submission",
+        "entryType": "event"
+      }
+    },
+    {
+      "id": "flow:catalog-discovery",
+      "type": "flow",
+      "name": "Discover Models",
+      "summary": "Searches live catalog sources and installed inventory, exposes families and LoRAs, and converts source entries into product-facing catalog records.",
+      "tags": [
+        "catalog",
+        "models",
+        "discovery"
+      ],
+      "complexity": "moderate",
+      "domainMeta": {
+        "entryPoint": "catalog API",
+        "entryType": "http"
+      }
+    },
+    {
+      "id": "flow:model-acquisition",
+      "type": "flow",
+      "name": "Acquire Model",
+      "summary": "Validates a catalog download, enqueues the resolved model recipe, performs the pull, and reports the resulting download lifecycle.",
+      "tags": [
+        "models",
+        "downloads",
+        "queue"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entryPoint": "POST catalog download",
+        "entryType": "http"
+      }
+    },
+    {
+      "id": "flow:library-organization",
+      "type": "flow",
+      "name": "Organize Library",
+      "summary": "Enriches gallery listings with metadata and applies item, bulk, collection, and tag updates to completed prints.",
+      "tags": [
+        "gallery",
+        "collections",
+        "tags"
+      ],
+      "complexity": "moderate",
+      "domainMeta": {
+        "entryPoint": "gallery organization API",
+        "entryType": "http"
+      }
+    },
+    {
+      "id": "flow:print-retention",
+      "type": "flow",
+      "name": "Retain and Remove Prints",
+      "summary": "Moves prints through trash, restore, permanent-delete, and retention-sweep paths while preserving a recoverable interval where configured.",
+      "tags": [
+        "gallery",
+        "trash",
+        "retention"
+      ],
+      "complexity": "moderate",
+      "domainMeta": {
+        "entryPoint": "gallery delete and trash API",
+        "entryType": "http"
+      }
+    },
+    {
+      "id": "flow:host-routing",
+      "type": "flow",
+      "name": "Route Work to a Host",
+      "summary": "Normalizes a requested target and chooses either an automatic or most-capable host using model availability, backend rank, and host capability data.",
+      "tags": [
+        "routing",
+        "hosts",
+        "fleet"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entryPoint": "client generation target selection",
+        "entryType": "manual"
+      }
+    },
+    {
+      "id": "flow:mobile-pairing",
+      "type": "flow",
+      "name": "Pair Remote Mobile Client",
+      "summary": "Creates a mobile pairing payload, redeems its dedicated session, and manages the resulting paired-client list and revocation lifecycle.",
+      "tags": [
+        "pairing",
+        "mobile",
+        "security"
+      ],
+      "complexity": "moderate",
+      "domainMeta": {
+        "entryPoint": "pairing session API",
+        "entryType": "http"
+      }
+    },
+    {
+      "id": "step:single-generation:validate-request",
+      "type": "step",
+      "name": "Validate Request",
+      "filePath": "crates/mold-server/src/routes.rs",
+      "summary": "Applies route-level validation and turns invalid generation input into structured API errors before it can be queued.",
+      "tags": [
+        "validation",
+        "generation"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:single-generation:verify-server-availability",
+      "type": "step",
+      "name": "Verify Server Availability",
+      "filePath": "crates/mold-server/src/routes.rs",
+      "summary": "Checks that generation is available and returns explicit unavailable, capacity, or memory errors when the server cannot accept work.",
+      "tags": [
+        "admission",
+        "availability"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:single-generation:resolve-job-admission",
+      "type": "step",
+      "name": "Resolve Job Admission",
+      "filePath": "crates/mold-server/src/routes.rs",
+      "summary": "Builds the admitted generation work using route and execution-plan contracts before it enters the scheduler.",
+      "tags": [
+        "generation",
+        "admission"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:single-generation:publish-job-state",
+      "type": "step",
+      "name": "Publish Job State",
+      "filePath": "crates/mold-server/src/routes.rs",
+      "summary": "Exposes accepted generation progress through the server event and job APIs for connected clients.",
+      "tags": [
+        "events",
+        "jobs"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:batch-generation:open-transaction",
+      "type": "step",
+      "name": "Open Transaction",
+      "filePath": "crates/mold-server/src/batch_transaction.rs",
+      "summary": "Creates a batch transaction record and its authority context for the related generation attempts.",
+      "tags": [
+        "batch",
+        "transaction"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:batch-generation:preflight-output-space",
+      "type": "step",
+      "name": "Preflight Output Space",
+      "filePath": "crates/mold-server/src/batch_transaction.rs",
+      "summary": "Validates available disk capacity before committing a batch archive and its generated outputs.",
+      "tags": [
+        "batch",
+        "storage"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:batch-generation:record-committed-outputs",
+      "type": "step",
+      "name": "Record Committed Outputs",
+      "filePath": "crates/mold-server/src/batch_transaction.rs",
+      "summary": "Records the committed manifest and authoritative output entries for individual batch jobs.",
+      "tags": [
+        "batch",
+        "outputs"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:batch-generation:maintain-archive-index",
+      "type": "step",
+      "name": "Maintain Archive Index",
+      "filePath": "crates/mold-server/src/batch_transaction.rs",
+      "summary": "Installs and reads the committed archive index so retirement and recovery paths can find authoritative outputs.",
+      "tags": [
+        "batch",
+        "recovery"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:sequence-generation:claim-chain-job",
+      "type": "step",
+      "name": "Claim Chain Job",
+      "filePath": "crates/mold-server/src/chain_job_runner.rs",
+      "summary": "Claims the durable chain job so a runner has exclusive responsibility for its staged execution.",
+      "tags": [
+        "sequence",
+        "locking"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:sequence-generation:lock-job-state",
+      "type": "step",
+      "name": "Lock Job State",
+      "filePath": "crates/mold-server/src/chain_job_runner.rs",
+      "summary": "Acquires the per-job lock used to serialize mutations and protect chain progress.",
+      "tags": [
+        "sequence",
+        "state"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:sequence-generation:publish-stage-progress",
+      "type": "step",
+      "name": "Publish Stage Progress",
+      "filePath": "crates/mold-server/src/chain_job_runner.rs",
+      "summary": "Publishes persistent and subscriber-visible events as chain stages settle.",
+      "tags": [
+        "sequence",
+        "events"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:sequence-generation:honor-cancellation",
+      "type": "step",
+      "name": "Honor Cancellation",
+      "filePath": "crates/mold-server/src/chain_job_runner.rs",
+      "summary": "Registers, detects, and processes cancellation or shutdown requests without losing durable chain state.",
+      "tags": [
+        "sequence",
+        "cancellation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:execution-planning:derive-runtime-identity",
+      "type": "step",
+      "name": "Derive Runtime Identity",
+      "filePath": "crates/mold-server/src/execution_plan.rs",
+      "summary": "Computes execution and runtime fingerprints so planning can identify the code and model semantics that must run together.",
+      "tags": [
+        "planning",
+        "runtime"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:execution-planning:measure-resource-demand",
+      "type": "step",
+      "name": "Measure Resource Demand",
+      "filePath": "crates/mold-server/src/execution_plan.rs",
+      "summary": "Calculates GPU and host-memory demand used to decide whether an execution plan can be admitted.",
+      "tags": [
+        "planning",
+        "memory"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:execution-planning:select-eligible-devices",
+      "type": "step",
+      "name": "Select Eligible Devices",
+      "filePath": "crates/mold-server/src/execution_plan.rs",
+      "summary": "Filters devices by family capabilities and request requirements before a plan is resolved.",
+      "tags": [
+        "planning",
+        "devices"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:execution-planning:resolve-plans",
+      "type": "step",
+      "name": "Resolve Plans",
+      "filePath": "crates/mold-server/src/execution_plan.rs",
+      "summary": "Produces the prepared execution-plan set for a coordinator, including policy and projection variants.",
+      "tags": [
+        "planning",
+        "admission"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:scheduled-device-execution:submit-scheduled-work",
+      "type": "step",
+      "name": "Submit Scheduled Work",
+      "filePath": "crates/mold-server/src/scheduler/mod.rs",
+      "summary": "Places accepted work into the scheduler while retaining priority, preferred-device, and placement-preview context.",
+      "tags": [
+        "scheduler",
+        "queue"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:scheduled-device-execution:select-worker-placement",
+      "type": "step",
+      "name": "Select Worker Placement",
+      "filePath": "crates/mold-server/src/scheduler/mod.rs",
+      "summary": "Uses queue, capacity, and device facts to determine the target worker placement for the next generation.",
+      "tags": [
+        "scheduler",
+        "placement"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:scheduled-device-execution:validate-worker-grant",
+      "type": "step",
+      "name": "Validate Worker Grant",
+      "filePath": "crates/mold-server/src/gpu_worker.rs",
+      "summary": "Verifies a GPU or utility-work grant before the worker accepts scheduled execution.",
+      "tags": [
+        "workers",
+        "validation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:scheduled-device-execution:complete-or-fail-work",
+      "type": "step",
+      "name": "Complete or Fail Work",
+      "filePath": "crates/mold-server/src/gpu_worker.rs",
+      "summary": "Runs owner work and records its terminal completion or failure outcome for the scheduler and clients.",
+      "tags": [
+        "workers",
+        "completion"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:catalog-discovery:search-live-catalog",
+      "type": "step",
+      "name": "Search Live Catalog",
+      "filePath": "crates/mold-server/src/catalog_api.rs",
+      "summary": "Queries live catalog sources and replaces a failed search credential when a fallback is available.",
+      "tags": [
+        "catalog",
+        "search"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:catalog-discovery:resolve-source-entry",
+      "type": "step",
+      "name": "Resolve Source Entry",
+      "filePath": "crates/mold-server/src/catalog_api.rs",
+      "summary": "Fetches Hugging Face or Civitai entry details and transforms them into a catalog record.",
+      "tags": [
+        "catalog",
+        "sources"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:catalog-discovery:list-families-and-loras",
+      "type": "step",
+      "name": "List Families and LoRAs",
+      "filePath": "crates/mold-server/src/catalog_api.rs",
+      "summary": "Provides model-family and LoRA inventory views used by client model selectors.",
+      "tags": [
+        "catalog",
+        "inventory"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:catalog-discovery:merge-installed-inventory",
+      "type": "step",
+      "name": "Merge Installed Inventory",
+      "filePath": "crates/mold-server/src/catalog_api.rs",
+      "summary": "Lists installed catalog records beside discovered entries so clients can distinguish available models.",
+      "tags": [
+        "catalog",
+        "installed-models"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:model-acquisition:validate-download-support",
+      "type": "step",
+      "name": "Validate Download Support",
+      "filePath": "crates/mold-server/src/catalog_api.rs",
+      "summary": "Rejects catalog entries that cannot produce a supported acquisition recipe before the download queue is used.",
+      "tags": [
+        "downloads",
+        "validation"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:model-acquisition:enqueue-resolved-recipe",
+      "type": "step",
+      "name": "Enqueue Resolved Recipe",
+      "filePath": "crates/mold-server/src/downloads.rs",
+      "summary": "Enqueues a resolved manifest or recipe and associates the job with its catalog identity.",
+      "tags": [
+        "downloads",
+        "queue"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:model-acquisition:pull-model-artifacts",
+      "type": "step",
+      "name": "Pull Model Artifacts",
+      "filePath": "crates/mold-server/src/downloads.rs",
+      "summary": "Runs the active download pull with token-provider support when source credentials are required.",
+      "tags": [
+        "downloads",
+        "artifacts"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:model-acquisition:emit-download-lifecycle",
+      "type": "step",
+      "name": "Emit Download Lifecycle",
+      "filePath": "crates/mold-server/src/downloads.rs",
+      "summary": "Tracks active work, emits progress events, and clears or cleans partial state as a download settles.",
+      "tags": [
+        "downloads",
+        "events"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:library-organization:enrich-gallery-listing",
+      "type": "step",
+      "name": "Enrich Gallery Listing",
+      "filePath": "crates/mold-server/src/gallery_organization.rs",
+      "summary": "Combines gallery outputs with metadata so clients can render titles, organization state, and filtered views.",
+      "tags": [
+        "gallery",
+        "metadata"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:library-organization:patch-print-metadata",
+      "type": "step",
+      "name": "Patch Print Metadata",
+      "filePath": "crates/mold-server/src/gallery_organization.rs",
+      "summary": "Applies per-print organization changes after validating the target gallery filename and metadata database.",
+      "tags": [
+        "gallery",
+        "metadata"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:library-organization:mutate-library-in-bulk",
+      "type": "step",
+      "name": "Mutate Library in Bulk",
+      "filePath": "crates/mold-server/src/gallery_organization.rs",
+      "summary": "Applies organization updates to multiple prints as one gallery mutation operation.",
+      "tags": [
+        "gallery",
+        "bulk"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:library-organization:manage-collections-and-tags",
+      "type": "step",
+      "name": "Manage Collections and Tags",
+      "filePath": "crates/mold-server/src/gallery_organization.rs",
+      "summary": "Creates, updates, lists, renames, and deletes collections and tags associated with library items.",
+      "tags": [
+        "gallery",
+        "collections",
+        "tags"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:print-retention:move-print-to-trash",
+      "type": "step",
+      "name": "Move Print to Trash",
+      "filePath": "crates/mold-server/src/gallery_trash.rs",
+      "summary": "Moves selected gallery files into the recoverable trash path and records the deletion outcome.",
+      "tags": [
+        "gallery",
+        "trash"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:print-retention:restore-trashed-print",
+      "type": "step",
+      "name": "Restore Trashed Print",
+      "filePath": "crates/mold-server/src/gallery_trash.rs",
+      "summary": "Restores trash-managed gallery files back into the live library after resolving their media source.",
+      "tags": [
+        "gallery",
+        "restore"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:print-retention:delete-print-forever",
+      "type": "step",
+      "name": "Delete Print Forever",
+      "filePath": "crates/mold-server/src/gallery_trash.rs",
+      "summary": "Permanently removes selected trashed gallery files and their cached sidecars.",
+      "tags": [
+        "gallery",
+        "deletion"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:print-retention:sweep-expired-trash",
+      "type": "step",
+      "name": "Sweep Expired Trash",
+      "filePath": "crates/mold-server/src/gallery_trash.rs",
+      "summary": "Runs the configured trash sweeper to permanently purge prints whose retention interval has ended.",
+      "tags": [
+        "gallery",
+        "retention"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:host-routing:normalize-target-policy",
+      "type": "step",
+      "name": "Normalize Target Policy",
+      "filePath": "studio/lib/hostRouting.ts",
+      "summary": "Normalizes a requested host target and identifies whether it represents an automatic policy.",
+      "tags": [
+        "routing",
+        "policy"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "step:host-routing:build-model-union",
+      "type": "step",
+      "name": "Build Model Union",
+      "filePath": "studio/lib/hostRouting.ts",
+      "summary": "Builds a per-model union across reachable hosts and identifies hosts that can serve the selected model.",
+      "tags": [
+        "routing",
+        "models"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:host-routing:rank-host-capability",
+      "type": "step",
+      "name": "Rank Host Capability",
+      "filePath": "studio/lib/hostRouting.ts",
+      "summary": "Ranks backend capability using reported GPU data or GPU-name inference for most-capable routing.",
+      "tags": [
+        "routing",
+        "gpu"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:host-routing:choose-routed-host",
+      "type": "step",
+      "name": "Choose Routed Host",
+      "filePath": "studio/lib/hostRouting.ts",
+      "summary": "Selects the final automatic, capable, or pinned host for the request.",
+      "tags": [
+        "routing",
+        "hosts"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:mobile-pairing:create-pairing-session",
+      "type": "step",
+      "name": "Create Pairing Session",
+      "filePath": "studio/api/pairing.ts",
+      "summary": "Creates a pairing session and formats the mobile pairing URL carrying its redeemable payload.",
+      "tags": [
+        "pairing",
+        "mobile"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:mobile-pairing:parse-pairing-payload",
+      "type": "step",
+      "name": "Parse Pairing Payload",
+      "filePath": "studio/api/pairing.ts",
+      "summary": "Parses the mobile pairing payload before a client attempts to claim it.",
+      "tags": [
+        "pairing",
+        "validation"
+      ],
+      "complexity": "simple"
+    },
+    {
+      "id": "step:mobile-pairing:claim-pairing-session",
+      "type": "step",
+      "name": "Claim Pairing Session",
+      "filePath": "studio/api/pairing.ts",
+      "summary": "Redeems the dedicated pairing session so the remote client becomes connected to the host.",
+      "tags": [
+        "pairing",
+        "authentication"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:mobile-pairing:manage-paired-clients",
+      "type": "step",
+      "name": "Manage Paired Clients",
+      "filePath": "studio/api/pairing.ts",
+      "summary": "Lists established paired clients and allows an authorized user to revoke a client relationship.",
+      "tags": [
+        "pairing",
+        "clients"
+      ],
+      "complexity": "moderate"
+    }
+  ],
+  "edges": [
+    {
+      "source": "domain:generation-orchestration",
+      "target": "flow:single-generation",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:generation-orchestration",
+      "target": "flow:batch-generation",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:generation-orchestration",
+      "target": "flow:sequence-generation",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:inference-execution",
+      "target": "flow:execution-planning",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:inference-execution",
+      "target": "flow:scheduled-device-execution",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:model-lifecycle",
+      "target": "flow:catalog-discovery",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:model-lifecycle",
+      "target": "flow:model-acquisition",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:library-stewardship",
+      "target": "flow:library-organization",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:library-stewardship",
+      "target": "flow:print-retention",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:distributed-access",
+      "target": "flow:host-routing",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:distributed-access",
+      "target": "flow:mobile-pairing",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "flow:single-generation",
+      "target": "step:single-generation:validate-request",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:single-generation",
+      "target": "step:single-generation:verify-server-availability",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "flow:single-generation",
+      "target": "step:single-generation:resolve-job-admission",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "flow:single-generation",
+      "target": "step:single-generation:publish-job-state",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "flow:batch-generation",
+      "target": "step:batch-generation:open-transaction",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:batch-generation",
+      "target": "step:batch-generation:preflight-output-space",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "flow:batch-generation",
+      "target": "step:batch-generation:record-committed-outputs",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "flow:batch-generation",
+      "target": "step:batch-generation:maintain-archive-index",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "flow:sequence-generation",
+      "target": "step:sequence-generation:claim-chain-job",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:sequence-generation",
+      "target": "step:sequence-generation:lock-job-state",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "flow:sequence-generation",
+      "target": "step:sequence-generation:publish-stage-progress",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "flow:sequence-generation",
+      "target": "step:sequence-generation:honor-cancellation",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "flow:execution-planning",
+      "target": "step:execution-planning:derive-runtime-identity",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:execution-planning",
+      "target": "step:execution-planning:measure-resource-demand",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "flow:execution-planning",
+      "target": "step:execution-planning:select-eligible-devices",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "flow:execution-planning",
+      "target": "step:execution-planning:resolve-plans",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "flow:scheduled-device-execution",
+      "target": "step:scheduled-device-execution:submit-scheduled-work",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:scheduled-device-execution",
+      "target": "step:scheduled-device-execution:select-worker-placement",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "flow:scheduled-device-execution",
+      "target": "step:scheduled-device-execution:validate-worker-grant",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "flow:scheduled-device-execution",
+      "target": "step:scheduled-device-execution:complete-or-fail-work",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "flow:catalog-discovery",
+      "target": "step:catalog-discovery:search-live-catalog",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:catalog-discovery",
+      "target": "step:catalog-discovery:resolve-source-entry",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "flow:catalog-discovery",
+      "target": "step:catalog-discovery:list-families-and-loras",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "flow:catalog-discovery",
+      "target": "step:catalog-discovery:merge-installed-inventory",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "flow:model-acquisition",
+      "target": "step:model-acquisition:validate-download-support",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:model-acquisition",
+      "target": "step:model-acquisition:enqueue-resolved-recipe",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "flow:model-acquisition",
+      "target": "step:model-acquisition:pull-model-artifacts",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "flow:model-acquisition",
+      "target": "step:model-acquisition:emit-download-lifecycle",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "flow:library-organization",
+      "target": "step:library-organization:enrich-gallery-listing",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:library-organization",
+      "target": "step:library-organization:patch-print-metadata",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "flow:library-organization",
+      "target": "step:library-organization:mutate-library-in-bulk",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "flow:library-organization",
+      "target": "step:library-organization:manage-collections-and-tags",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "flow:print-retention",
+      "target": "step:print-retention:move-print-to-trash",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:print-retention",
+      "target": "step:print-retention:restore-trashed-print",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "flow:print-retention",
+      "target": "step:print-retention:delete-print-forever",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "flow:print-retention",
+      "target": "step:print-retention:sweep-expired-trash",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "flow:host-routing",
+      "target": "step:host-routing:normalize-target-policy",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:host-routing",
+      "target": "step:host-routing:build-model-union",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "flow:host-routing",
+      "target": "step:host-routing:rank-host-capability",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "flow:host-routing",
+      "target": "step:host-routing:choose-routed-host",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "flow:mobile-pairing",
+      "target": "step:mobile-pairing:create-pairing-session",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:mobile-pairing",
+      "target": "step:mobile-pairing:parse-pairing-payload",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.5
+    },
+    {
+      "source": "flow:mobile-pairing",
+      "target": "step:mobile-pairing:claim-pairing-session",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.8
+    },
+    {
+      "source": "flow:mobile-pairing",
+      "target": "step:mobile-pairing:manage-paired-clients",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:distributed-access",
+      "target": "domain:generation-orchestration",
+      "type": "cross_domain",
+      "direction": "forward",
+      "description": "Host routing chooses the server that receives an admitted generation or chain request.",
+      "weight": 0.8
+    },
+    {
+      "source": "domain:model-lifecycle",
+      "target": "domain:generation-orchestration",
+      "type": "cross_domain",
+      "direction": "forward",
+      "description": "Installed model availability controls whether a generation request can be admitted.",
+      "weight": 0.8
+    },
+    {
+      "source": "domain:model-lifecycle",
+      "target": "domain:inference-execution",
+      "type": "cross_domain",
+      "direction": "forward",
+      "description": "Acquired model artifacts and capabilities are required to resolve executable inference plans.",
+      "weight": 0.8
+    },
+    {
+      "source": "domain:generation-orchestration",
+      "target": "domain:inference-execution",
+      "type": "cross_domain",
+      "direction": "forward",
+      "description": "Accepted generation and chain stages are transformed into plans and submitted to device workers.",
+      "weight": 0.9
+    },
+    {
+      "source": "domain:generation-orchestration",
+      "target": "domain:library-stewardship",
+      "type": "cross_domain",
+      "direction": "forward",
+      "description": "Completed generation outputs become gallery prints that users can organize or retain.",
+      "weight": 0.9
+    },
+    {
+      "source": "domain:distributed-access",
+      "target": "domain:library-stewardship",
+      "type": "cross_domain",
+      "direction": "forward",
+      "description": "Connected clients access and mutate per-host gallery metadata and media.",
+      "weight": 0.7
+    }
+  ],
+  "layers": [],
+  "tour": []
+}
