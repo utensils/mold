@@ -13,16 +13,19 @@ if [ "$#" -gt 0 ]; then
     shift
 fi
 
-# Understand Anything keeps one durable graph in the main checkout. When this
-# helper is run from a worktree, follow the repository's common git directory
-# back to that checkout before looking for .ua/.
-common_dir="$(git -C "$project_dir" rev-parse --git-common-dir 2>/dev/null || true)"
-git_dir="$(git -C "$project_dir" rev-parse --git-dir 2>/dev/null || true)"
-if [ -n "$common_dir" ] && [ -n "$git_dir" ]; then
-    common_abs="$(cd "$project_dir" && cd "$common_dir" 2>/dev/null && pwd -P || true)"
-    git_abs="$(cd "$project_dir" && cd "$git_dir" 2>/dev/null && pwd -P || true)"
-    if [ -n "$common_abs" ] && [ "$common_abs" != "$git_abs" ]; then
-        project_dir="$(dirname "$common_abs")"
+# Prefer a graph committed in the current checkout. If an ephemeral worktree
+# has no graph of its own, follow the shared git directory back to the durable
+# graph in the main checkout.
+if [ ! -f "$project_dir/.understand-anything/knowledge-graph.json" ] \
+    && [ ! -f "$project_dir/.ua/knowledge-graph.json" ]; then
+    common_dir="$(git -C "$project_dir" rev-parse --git-common-dir 2>/dev/null || true)"
+    git_dir="$(git -C "$project_dir" rev-parse --git-dir 2>/dev/null || true)"
+    if [ -n "$common_dir" ] && [ -n "$git_dir" ]; then
+        common_abs="$(cd "$project_dir" && cd "$common_dir" 2>/dev/null && pwd -P || true)"
+        git_abs="$(cd "$project_dir" && cd "$git_dir" 2>/dev/null && pwd -P || true)"
+        if [ -n "$common_abs" ] && [ "$common_abs" != "$git_abs" ]; then
+            project_dir="$(dirname "$common_abs")"
+        fi
     fi
 fi
 
