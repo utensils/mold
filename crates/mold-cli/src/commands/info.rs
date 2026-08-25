@@ -52,6 +52,7 @@ fn resolve_file_path(
         ModelComponent::TransformerShard
         | ModelComponent::TextEncoder
         | ModelComponent::AudioVae
+        | ModelComponent::DurationHead
         | ModelComponent::Processor
         | ModelComponent::VideoScheduler
         | ModelComponent::AudioScheduler
@@ -97,6 +98,7 @@ fn resolve_verify_path(
             ModelComponent::TransformerShard
             | ModelComponent::TextEncoder
             | ModelComponent::AudioVae
+            | ModelComponent::DurationHead
             | ModelComponent::Processor
             | ModelComponent::VideoScheduler
             | ModelComponent::AudioScheduler
@@ -124,6 +126,7 @@ fn component_label(component: &ModelComponent) -> &'static str {
         ModelComponent::LowNoiseTransformer => "Low-Noise Transformer",
         ModelComponent::Vae => "VAE",
         ModelComponent::AudioVae => "Audio VAE",
+        ModelComponent::DurationHead => "Duration Head",
         ModelComponent::Processor => "Processor",
         ModelComponent::VideoScheduler => "Video Scheduler",
         ModelComponent::AudioScheduler => "Audio Scheduler",

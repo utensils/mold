@@ -113,6 +113,19 @@ pub enum DownloadError {
     #[error("Missing component after download — this is a bug")]
     MissingComponent,
 
+    #[error(
+        "Insufficient disk space for {model}: {required_bytes} bytes remain to download but only {available_bytes} bytes are available at {path}"
+    )]
+    InsufficientDiskSpace {
+        model: String,
+        required_bytes: u64,
+        available_bytes: u64,
+        path: PathBuf,
+    },
+
+    #[error("Downloaded {model}, but its LTX-2.5 asset contract failed qualification: {message}")]
+    QualificationFailed { model: String, message: String },
+
     /// A file in the manifest is published under terms mold cannot accept on
     /// the user's behalf. Carries the full actionable message so automatic and
     /// server-side pulls surface the same wording the CLI does.
@@ -1447,6 +1460,77 @@ fn require_manifest_acquisition(manifest: &ModelManifest) -> Result<(), Download
     require_manifest_licenses_accepted(manifest)
 }
 
+pub(crate) fn validate_available_download_space(
+    manifest: &ModelManifest,
+    required_bytes: u64,
+    available_bytes: u64,
+    path: &Path,
+) -> Result<(), DownloadError> {
+    if required_bytes <= available_bytes {
+        return Ok(());
+    }
+    Err(DownloadError::InsufficientDiskSpace {
+        model: manifest.name.clone(),
+        required_bytes,
+        available_bytes,
+        path: path.to_path_buf(),
+    })
+}
+
+/// Refuse before the first byte when the selected volume cannot hold every
+/// uncached file in the manifest. The closest existing ancestor keeps this
+/// useful for a fresh `models/` directory without creating it as a side effect.
+fn required_download_bytes_in(
+    manifest: &ModelManifest,
+    models_root: &Path,
+    skip_verify: bool,
+) -> Result<u64, DownloadError> {
+    let mut required = 0u64;
+    let managed_cache = Cache::new(models_root.join(".hf-cache"));
+    for file in &manifest.files {
+        if find_existing_placed_file(models_root, manifest, file, skip_verify)?.is_some() {
+            continue;
+        }
+        let cached = managed_cache
+            .repo(hf_file_repo(&file.hf_repo, &file.hf_filename))
+            .get(&file.hf_filename)
+            .and_then(|path| {
+                path.metadata()
+                    .ok()
+                    .filter(|metadata| metadata.len() == file.size_bytes)
+                    .map(|_| path)
+            })
+            .is_some();
+        if !cached {
+            required = required.saturating_add(file.size_bytes);
+        }
+    }
+    Ok(required)
+}
+
+fn require_download_space(
+    manifest: &ModelManifest,
+    skip_verify: bool,
+) -> Result<(), DownloadError> {
+    let target = models_dir();
+    let required_bytes = required_download_bytes_in(manifest, &target, skip_verify)?;
+    if required_bytes == 0 {
+        return Ok(());
+    }
+    let probe = target
+        .ancestors()
+        .find(|path| path.exists())
+        .unwrap_or_else(|| Path::new("."));
+    let available_bytes = fs2::available_space(probe).map_err(|error| {
+        DownloadError::Other(format!(
+            "failed to inspect free space at {} before pulling {}: {error}",
+            probe.display(),
+            manifest.name
+        ))
+    })?;
+    validate_available_download_space(manifest, required_bytes, available_bytes, probe)
+}
+
 /// Refuse to download any manifest carrying a file under a license the user
 /// has not explicitly accepted.
 ///
@@ -1515,6 +1599,7 @@ async fn pull_model_with_hf_token(
     hf_token: Option<&str>,
 ) -> Result<ModelPaths, DownloadError> {
     require_manifest_acquisition(manifest)?;
+    require_download_space(manifest, opts.skip_verify)?;
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
@@ -1586,6 +1671,7 @@ async fn pull_model_with_callback_and_hf_token(
     hf_token: Option<&str>,
 ) -> Result<ModelPaths, DownloadError> {
     require_manifest_acquisition(manifest)?;
+    require_download_space(manifest, opts.skip_verify)?;
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
@@ -1713,6 +1799,7 @@ async fn pull_model_files_only_with_hf_token(
     hf_token: Option<&str>,
 ) -> Result<(), DownloadError> {
     require_manifest_acquisition(manifest)?;
+    require_download_space(manifest, opts.skip_verify)?;
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
@@ -1753,7 +1840,6 @@ async fn pull_model_files_only_with_hf_token(
         .await?;
     }
 
-    remove_pulling_marker(&manifest.name);
     Ok(())
 }
 
@@ -1764,6 +1850,7 @@ async fn pull_model_files_only_with_callback_and_hf_token(
     hf_token: Option<&str>,
 ) -> Result<(), DownloadError> {
     require_manifest_acquisition(manifest)?;
+    require_download_space(manifest, opts.skip_verify)?;
     write_pulling_marker(&manifest.name)?;
 
     let mut builder = ApiBuilder::from_env().with_cache_dir(hf_cache_dir());
@@ -1860,7 +1947,6 @@ async fn pull_model_files_only_with_callback_and_hf_token(
         completed_bytes += file.size_bytes;
     }
 
-    remove_pulling_marker(&manifest.name);
     Ok(())
 }
 
@@ -2253,6 +2339,27 @@ fn manifest_uses_files_only_pull(manifest: &ModelManifest) -> bool {
     manifest.is_files_only_bundle()
 }
 
+fn qualify_downloaded_contract(manifest: &ModelManifest) -> Result<(), DownloadError> {
+    qualify_downloaded_contract_in(manifest, &models_dir())
+}
+
+fn qualify_downloaded_contract_in(
+    manifest: &ModelManifest,
+    models_root: &Path,
+) -> Result<(), DownloadError> {
+    if !crate::ltx25_manifest::is_contract_manifest(&manifest.name) {
+        return Ok(());
+    }
+    let paths = crate::ltx25_manifest::Ltx25ModelPaths::resolve_in(models_root, &manifest.name)
+        .ok_or(DownloadError::MissingComponent)?;
+    paths
+        .qualify()
+        .map_err(|error| DownloadError::QualificationFailed {
+            model: manifest.name.clone(),
+            message: error.to_string(),
+        })
+}
+
 /// Download a model and save its paths to config. Returns the updated config
 /// and resolved model paths. Used by both the CLI `pull` command and the
 /// server's auto-pull logic.
@@ -2274,7 +2381,9 @@ pub async fn pull_and_configure(
     // as a concrete LoRA path after this download completes.
     if manifest_uses_files_only_pull(manifest) {
         pull_model_files_only(manifest, opts).await?;
+        qualify_downloaded_contract(manifest)?;
         let config = Config::load_or_default();
+        remove_pulling_marker(&manifest.name);
         return Ok((config, None));
     }
 
@@ -2303,6 +2412,7 @@ pub async fn pull_and_configure(
             .save()
             .map_err(|e| DownloadError::ConfigSave(e.to_string()))?;
 
+        remove_pulling_marker(&manifest.name);
         return Ok((config, None));
     }
 
@@ -2358,7 +2468,9 @@ pub async fn pull_and_configure_with_callback_and_hf_token(
     if manifest_uses_files_only_pull(manifest) {
         pull_model_files_only_with_callback_and_hf_token(manifest, callback, opts, hf_token)
             .await?;
+        qualify_downloaded_contract(manifest)?;
         let config = Config::load_or_default();
+        remove_pulling_marker(&manifest.name);
         return Ok((config, None));
     }
 
@@ -2386,6 +2498,7 @@ pub async fn pull_and_configure_with_callback_and_hf_token(
             .save()
             .map_err(|e| DownloadError::ConfigSave(e.to_string()))?;
 
+        remove_pulling_marker(&manifest.name);
         return Ok((config, None));
     }
 
@@ -3240,6 +3353,38 @@ mod tests {
     fn h3_repo_identity_cannot_bypass_the_pinned_manifest() {
         let manifest = compliance_gated_manifest("renamed-model", "custom", "Comfy-Org/MiniMax-H3");
         assert!(require_manifest_acquisition(&manifest).is_err());
+    }
+
+    #[test]
+    fn disk_preflight_rejects_truncated_clean_files() {
+        let mut manifest = compliance_gated_manifest("space-test", "flux", "example/model");
+        manifest.files[0].size_bytes = 4;
+        let temp = tempfile::tempdir().unwrap();
+        let clean = temp
+            .path()
+            .join(crate::manifest::storage_path(&manifest, &manifest.files[0]));
+        std::fs::create_dir_all(clean.parent().unwrap()).unwrap();
+        std::fs::write(&clean, [0u8; 2]).unwrap();
+        assert_eq!(
+            required_download_bytes_in(&manifest, temp.path(), false).unwrap(),
+            4
+        );
+        std::fs::write(&clean, [0u8; 4]).unwrap();
+        assert_eq!(
+            required_download_bytes_in(&manifest, temp.path(), false).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn failed_ltx25_qualification_keeps_the_repair_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = pulling_marker_path_in(temp.path(), crate::ltx25_manifest::DISTILLED);
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, crate::ltx25_manifest::DISTILLED).unwrap();
+        let manifest = crate::manifest::find_manifest(crate::ltx25_manifest::DISTILLED).unwrap();
+        assert!(qualify_downloaded_contract_in(manifest, temp.path()).is_err());
+        assert!(marker.exists());
     }
 
     #[test]

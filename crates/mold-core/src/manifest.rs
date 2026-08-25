@@ -50,6 +50,8 @@ pub enum ModelComponent {
     TextTokenizer,  // Generic text encoder tokenizer
     /// MiniMax H3 synchronized-audio VAE. Kept distinct from the video VAE.
     AudioVae,
+    /// LTX-2.5's text-conditioned shot-duration predictor.
+    DurationHead,
     /// Tokenizer / multimodal processor data owned by a model family.
     Processor,
     /// Video-side scheduler configuration for a dual-modality model.
@@ -191,6 +193,7 @@ impl ModelManifest {
     /// downloaded by one rule and reported missing by another.
     pub fn is_files_only_bundle(&self) -> bool {
         self.is_utility()
+            || crate::ltx25_manifest::is_contract_manifest(&self.name)
             || matches!(
                 self.family.as_str(),
                 "ltx2-control" | "ltx2-camera-control" | PULID_FAMILY
@@ -376,7 +379,9 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
     // their model-specific files live in the base checkpoint's directory —
     // a machine holding the base pulls only the adapter, and removal
     // ref-counting protects the shared bytes in both directions.
-    let storage_name = if manifest.family == crate::minimax_h3::FAMILY {
+    let storage_name = if crate::ltx25_manifest::is_contract_manifest(&manifest.name) {
+        crate::ltx25_manifest::storage_identity(&manifest.name)
+    } else if manifest.family == crate::minimax_h3::FAMILY {
         crate::minimax_h3::storage_identity(&manifest.name)
     } else {
         manifest.name.as_str()
@@ -412,6 +417,12 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
     if is_model_specific_component(file.component) {
         PathBuf::from(&sanitized_name).join(&file.hf_filename)
     } else {
+        // Phase 1 registers LTX-2.5 as a download-only contract family so no
+        // existing LTX-2 runtime can claim it. Its shared assets still land in
+        // the durable LTX-2 bucket that the native split runtime will consume.
+        if crate::ltx25_manifest::is_contract_manifest(&manifest.name) {
+            return PathBuf::from("shared").join("ltx2").join(&file.hf_filename);
+        }
         // FLUX.2 [dev] publishes a different Mistral encoder, tokenizer, and
         // VAE under the same relative filenames used by the Klein repos. Do
         // not let installing one variant overwrite the other's shared assets.
@@ -1370,6 +1381,7 @@ fn build_known_manifests() -> Vec<ModelManifest> {
     manifests.extend(wuerstchen_manifests());
     manifests.extend(ltx_video_manifests());
     manifests.extend(ltx2_manifests());
+    manifests.extend(crate::ltx25_manifest::manifests());
     manifests.extend(wan_manifests());
     manifests.extend(crate::minimax_h3::manifests());
     manifests.extend(ltx2_control_manifests());
@@ -3855,6 +3867,40 @@ fn find_manifest_exact(name: &str) -> Option<&'static ModelManifest> {
 pub fn find_manifest(name: &str) -> Option<&'static ModelManifest> {
     let canonical = resolve_model_name(name);
     MANIFEST_INDEX.get(&canonical).map(|&i| &KNOWN_MANIFESTS[i])
+}
+
+/// One manifest file resolved to its authoritative local storage path.
+///
+/// Unlike [`crate::ModelPaths`], this representation is role-agnostic and
+/// lossless: repeated roles and components with no legacy engine slot remain
+/// present. Ownership, qualification, and split-pack inference should use it
+/// whenever they need the complete artifact graph.
+#[derive(Debug, Clone)]
+pub struct ResolvedManifestFile {
+    pub component: ModelComponent,
+    pub path: PathBuf,
+    pub file: &'static ModelFile,
+}
+
+/// Resolve every file owned by a known manifest without projecting it through
+/// [`crate::ModelPaths`].
+pub fn resolved_manifest_files(
+    config: &crate::Config,
+    model_name: &str,
+) -> Option<Vec<ResolvedManifestFile>> {
+    let manifest = find_manifest(model_name)?;
+    let models_dir = config.resolved_models_dir();
+    Some(
+        manifest
+            .files
+            .iter()
+            .map(|file| ResolvedManifestFile {
+                component: file.component,
+                path: models_dir.join(storage_path(manifest, file)),
+                file,
+            })
+            .collect(),
+    )
 }
 
 /// Find a manifest whose Transformer (or TransformerShard) file points
@@ -7830,7 +7876,9 @@ mod tests {
         // Ref2VA Turbo (#825): +minimax-h3-ref2va:comfy-pruned-int8-turbo-4step
         // — the reviewed 4-step adapter beside the Ref2VA base stack, added
         // once Ref2VA execution landed.
-        assert_eq!(known_manifests().len(), 164);
+        // LTX 2.5 contract bump (#1372): four hidden download-only contracts
+        // covering Dev/Distilled and diffusion/convolutional decoder variants.
+        assert_eq!(known_manifests().len(), 168);
     }
 
     #[test]

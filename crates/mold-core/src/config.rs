@@ -1939,6 +1939,7 @@ fn resolved_manifest_paths_exist(
         // components, so a manifest can never be mistaken for runnable merely
         // because the legacy transformer/VAE subset exists.
         ModelComponent::AudioVae
+        | ModelComponent::DurationHead
         | ModelComponent::Processor
         | ModelComponent::VideoScheduler
         | ModelComponent::AudioScheduler

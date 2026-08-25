@@ -24,6 +24,8 @@ pub use ltx2_camera::{Ltx2CameraControlAvailability, Ltx2CameraControlInfo};
 pub mod ltx2_control;
 pub mod ltx2_preprocess;
 pub use ltx2_control::Ltx2ControlAdapterInfo;
+pub mod ltx25_manifest;
+pub mod ltx25_probe;
 pub mod manifest;
 pub mod media_paths;
 pub mod minimax_h3;

@@ -749,6 +749,11 @@ where
                 )))
             }
         }
+        family if family == mold_core::ltx25_manifest::FAMILY => {
+            anyhow::bail!(
+                "LTX-2.5 assets are download-only until the native split-pack runtime is implemented"
+            )
+        }
         "ltx2" | "ltx-2" | "ltx2.3" => {
             if is_ltx2_native_single_file(&paths) {
                 // Civitai single-file dispatch. Combined checkpoints use
@@ -988,6 +993,25 @@ mod tests {
         assert!(error
             .to_string()
             .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
+    }
+
+    #[test]
+    fn ltx25_contract_family_cannot_reach_the_ltx23_engine() {
+        let mut frozen =
+            FrozenEngineConfig::resolve(mold_core::ltx25_manifest::DISTILLED, &Config::default());
+        frozen.family = mold_core::ltx25_manifest::FAMILY.to_string();
+        let error = create_engine_with_frozen_config(
+            mold_core::ltx25_manifest::DISTILLED.into(),
+            dummy_paths(),
+            &frozen,
+            LoadStrategy::Sequential,
+            0,
+            false,
+            None,
+        )
+        .err()
+        .expect("Phase 1 LTX-2.5 assets must remain download-only");
+        assert!(error.to_string().contains("download-only"), "{error}");
     }
 
     #[test]
