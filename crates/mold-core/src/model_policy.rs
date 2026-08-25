@@ -345,7 +345,14 @@ fn is_minimax_h3_identity(value: &str) -> bool {
 /// "no runtime" would be false. Requiring the normalized input to equal its
 /// own canonical form keeps aliases on the existing compliance path, which
 /// is the same not-alias-resolving rule `is_reviewed_compact_model` uses.
-fn is_pinned_unrunnable_minimax_h3_identity(value: &str) -> bool {
+///
+/// Public because it is also the one authority the server's private H3
+/// ingress boundary asks before it claims a request (#1354). That boundary
+/// runs ahead of [`model_activation`], so it has to know which identities
+/// this function routes here — otherwise it answers its own partition
+/// refusal for a checkpoint whose `/api/models` row promises a runtime
+/// sentence, which is #1276 re-appearing through the private path.
+pub fn is_pinned_unrunnable_minimax_h3_identity(value: &str) -> bool {
     let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
     minimax_h3::resolve_model_name(&normalized).is_some_and(|canonical| canonical == normalized)
         && !is_reviewed_minimax_h3_model(&normalized)

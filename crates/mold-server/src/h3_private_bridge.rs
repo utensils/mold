@@ -174,6 +174,33 @@ fn classify_h3_private_ingress_with_runtime(
     else {
         return Ok(None);
     };
+    // A pinned H3 identity mold has no engine arm for is not this boundary's
+    // to refuse (#1354). This classifier runs ahead of `model_activation`, and
+    // it used to claim every identity `capability_contract_for_model` resolves
+    // — which is every H3 row — so an `official-bf16` reference or a
+    // pruned-NVFP4 tag was answered `422 …PARTITION_REJECTED` while its own
+    // `/api/models` row promised `501 MINIMAX_H3_RUNTIME_UNAVAILABLE` and a
+    // sentence about a missing weight-layout loader. That is #1276 reappearing
+    // through the private path, so the layout-level case defers and the public
+    // authority answers.
+    //
+    // Layout-level ONLY, and both exclusions are load-bearing. Deferring on
+    // `UnsupportedTask` would hand the private Ref2VA ingress seam to public
+    // activation, and deferring on `EngineNotBuilt` would take the whole
+    // `h3-private-uat` runtime off its own path (mold-core's `h3` edge is off
+    // there, so every compact FL2VA row reports that obstacle). This asks
+    // `mold_core`'s own predicate rather than re-deriving the set from
+    // `contract.layout`, because it is the exact question `model_activation`
+    // asks before it answers `RuntimeUnavailable`; anything looser would defer
+    // an identity that then answers a licensing refusal instead.
+    //
+    // It sits ahead of the credential check on purpose. A build without public
+    // `h3` demands an API key before it classifies anything, and answering 401
+    // here would hide the row's own reason behind a gate protecting nothing —
+    // there is no runtime to protect.
+    if mold_core::is_pinned_unrunnable_minimax_h3_identity(&request.model) {
+        return Ok(None);
+    }
     #[cfg(not(feature = "h3"))]
     let authenticated_identity_sha256 = authenticated.map_or_else(
         || {
@@ -2835,6 +2862,60 @@ mod structural_tests {
         assert!(!runtime_checked.get());
     }
 
+    /// #1354: the private boundary claims only identities mold can RUN.
+    ///
+    /// Every pinned identity with no engine arm for its weight layout defers
+    /// to `model_activation`, which answers the same 501 sentence the model's
+    /// own `/api/models` row publishes. The deferral happens before the
+    /// credential check and before the runtime lookup, so it is the same
+    /// answer on a public `h3` build and on the private UAT build.
+    #[test]
+    fn pinned_unrunnable_h3_identities_defer_to_public_model_activation() {
+        for model in [
+            mold_core::minimax_h3::FL2VA_OFFICIAL,
+            mold_core::minimax_h3::REF2VA_OFFICIAL,
+            mold_core::minimax_h3::FL2VA_COMFY_NVFP4,
+            mold_core::minimax_h3::REF2VA_COMFY_NVFP4,
+        ] {
+            assert!(
+                mold_core::is_pinned_unrunnable_minimax_h3_identity(model),
+                "{model} must be a pinned unrunnable identity",
+            );
+            let runtime_checked = std::cell::Cell::new(false);
+            let grant = super::classify_h3_private_ingress_with_runtime(
+                &request(model),
+                None,
+                INSTANCE_ID,
+                |_| {
+                    runtime_checked.set(true);
+                    true
+                },
+            )
+            .unwrap_or_else(|error| {
+                panic!("{model} must defer rather than refuse: {}", error.code)
+            });
+
+            assert!(grant.is_none(), "{model}");
+            assert!(!runtime_checked.get(), "{model}");
+        }
+    }
+
+    /// The deferral is layout-level only: the reviewed compact task partition
+    /// — including Ref2VA, whose private ingress seam this boundary owns —
+    /// stays this classifier's to answer.
+    #[test]
+    fn the_reviewed_compact_partition_is_still_claimed_by_the_private_boundary() {
+        for model in [
+            mold_core::minimax_h3::FL2VA_COMFY,
+            mold_core::minimax_h3::REF2VA_COMFY,
+        ] {
+            assert!(
+                !mold_core::is_pinned_unrunnable_minimax_h3_identity(model),
+                "{model} must stay off the deferral path",
+            );
+        }
+    }
+
     #[test]
     #[cfg(not(feature = "h3"))]
     fn exact_h3_partition_requires_api_key_authentication_before_runtime_lookup() {
@@ -3035,12 +3116,18 @@ mod structural_tests {
         assert_eq!(replay_media, original_media);
     }
 
+    /// A REVIEWED identity submitted outside its partition still fails closed
+    /// here. The pinned identities mold has no loader for used to be in this
+    /// list too; since #1354 they defer to `model_activation` instead, which
+    /// is `pinned_unrunnable_h3_identities_defer_to_public_model_activation`.
     #[test]
     fn wrong_h3_partitions_are_rejected_before_runtime_or_artifact_work() {
         let auth = authenticated();
+        let mut wrong_conditioning = request(mold_core::minimax_h3::FL2VA_COMFY);
+        wrong_conditioning.references = Some(Vec::new());
         for mut invalid in [
             request(mold_core::minimax_h3::REF2VA_COMFY),
-            request(mold_core::minimax_h3::FL2VA_OFFICIAL),
+            wrong_conditioning,
         ] {
             let runtime_checked = std::cell::Cell::new(false);
             let error = super::classify_h3_private_ingress_with_runtime(
@@ -3057,6 +3144,7 @@ mod structural_tests {
             assert!(!runtime_checked.get());
 
             invalid.model = mold_core::minimax_h3::FL2VA_COMFY.to_string();
+            invalid.references = None;
             invalid.batch_size = 2;
             let error = super::classify_h3_private_ingress_with_runtime(
                 &invalid,

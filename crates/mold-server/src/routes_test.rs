@@ -9065,18 +9065,22 @@ mod tests {
     /// not available in any released build" on the model card must not then
     /// get a licensing refusal at submit.
     ///
-    /// A build that compiles private MiniMax H3 ingress is the exception, and
-    /// the exception is structural rather than incidental: `prepare_generation`
-    /// runs `classify_h3_private_ingress` BEFORE model activation, and that
-    /// classifier claims every identity `capability_contract_for_model`
-    /// resolves — which is every H3 row. So the private boundary, not
-    /// `model_runtime_availability`, is what answers there, and the public 501
-    /// is unreachable by construction. #1350 deliberately leaves that ordering
-    /// alone (it is an authorization boundary in a licensed-model path) and
-    /// asserts what such a build does promise: the private boundary refuses
-    /// before anything is admitted, with a credential to satisfy first on a
-    /// build without public `h3`. The 401 is therefore not the assertion —
-    /// the authenticated refusal below is.
+    /// `prepare_generation` runs `classify_h3_private_ingress` BEFORE model
+    /// activation, so on a build that compiles private H3 ingress the answer
+    /// depends on which obstacle the row names. #1354 made the classifier
+    /// defer for an identity whose obstacle is its weight LAYOUT — the pinned
+    /// `official-bf16` references and pruned-NVFP4 tags — so those rows reach
+    /// `model_runtime_availability` and answer 501 there exactly as they do on
+    /// a public build.
+    ///
+    /// The other two obstacles keep the private boundary's answer, and
+    /// deliberately: deferring on `UnsupportedTask` would open the private
+    /// Ref2VA ingress seam, and deferring on `EngineNotBuilt` would take the
+    /// whole `h3-private-uat` runtime off its own path. What such a build
+    /// promises for those is that the private boundary refuses before anything
+    /// is admitted, with a credential to satisfy first when public `h3` is
+    /// off. The 401 is therefore not the assertion — the authenticated refusal
+    /// below is.
     #[tokio::test]
     async fn every_unrunnable_h3_row_is_refused_at_generation_with_its_own_reason() {
         let app = app_with(MockEngine::ready());
@@ -9120,7 +9124,12 @@ mod tests {
                     .unwrap()
             };
 
-            if cfg!(any(feature = "h3", feature = "h3-private-uat")) {
+            // A layout with no engine arm anywhere is refused by the public
+            // authority on every build; only the task and engine obstacles
+            // stay behind the private boundary.
+            let layout_obstacle = reason
+                == mold_core::minimax_h3::RuntimeUnavailableReason::UnsupportedLayout.message();
+            if cfg!(any(feature = "h3", feature = "h3-private-uat")) && !layout_obstacle {
                 // The credential comes first on a build without public `h3`;
                 // a public H3 build derives the ingress identity from the
                 // server instance and goes straight to the partition.
@@ -9159,6 +9168,76 @@ mod tests {
             refused += 1;
         }
         assert!(refused > 0, "no unrunnable H3 row was listed");
+    }
+
+    /// #1354: a pinned H3 identity mold has no engine arm for answers with
+    /// its own `/api/models` sentence on EVERY build, private ingress
+    /// included.
+    ///
+    /// `prepare_generation` runs `classify_h3_private_ingress` before model
+    /// activation, and that classifier used to claim every identity
+    /// `capability_contract_for_model` resolves — which is every H3 row. So an
+    /// `official-bf16` reference or a pruned-NVFP4 tag was answered
+    /// `422 MINIMAX_H3_PRIVATE_PARTITION_REJECTED` ("accepts only its
+    /// supported compact task partition") on a build that compiles H3, while
+    /// its row promised `501 MINIMAX_H3_RUNTIME_UNAVAILABLE` and a sentence
+    /// about a missing weight-layout loader. The private boundary is an
+    /// authorization gate for identities mold can RUN; a layout with no
+    /// engine arm anywhere is not one of them, so it defers.
+    ///
+    /// The deferral sits ahead of the credential check on purpose: a build
+    /// without public `h3` demands an API key before it classifies anything,
+    /// and answering 401 here would still hide the row's own reason behind a
+    /// gate that protects nothing — there is no runtime to protect.
+    #[tokio::test]
+    async fn pinned_unrunnable_h3_identities_refuse_with_their_own_row_reason() {
+        use mold_core::minimax_h3::{
+            FL2VA_COMFY_NVFP4, FL2VA_OFFICIAL, REF2VA_COMFY_NVFP4, REF2VA_OFFICIAL,
+        };
+        let app = app_with(MockEngine::ready());
+        for name in [
+            FL2VA_OFFICIAL,
+            REF2VA_OFFICIAL,
+            FL2VA_COMFY_NVFP4,
+            REF2VA_COMFY_NVFP4,
+        ] {
+            let reason = mold_core::minimax_h3::model_runtime_availability(name)
+                .reason()
+                .unwrap_or_else(|| panic!("{name} must be pinned as unrunnable"))
+                .message();
+            let body = serde_json::json!({
+                "prompt": "a cat",
+                "model": name,
+                "width": mold_core::minimax_h3::DEFAULT_WIDTH,
+                "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
+                "steps": mold_core::minimax_h3::DEFAULT_STEPS,
+                "guidance": 0.0,
+                "batch_size": 1,
+                "frames": mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
+                "fps": mold_core::minimax_h3::FIXED_FPS,
+                "output_format": "mp4"
+            })
+            .to_string();
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::post("/api/generate")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED, "{name}");
+            let error = json_body(resp).await;
+            assert_eq!(
+                error["code"],
+                mold_core::MINIMAX_H3_RUNTIME_UNAVAILABLE,
+                "{name}"
+            );
+            let message = error["error"].as_str().unwrap();
+            assert!(message.contains(reason), "{name}: {message} != {reason}");
+        }
     }
 
     /// Sequence capability is advertised per model, so a picker never has to
