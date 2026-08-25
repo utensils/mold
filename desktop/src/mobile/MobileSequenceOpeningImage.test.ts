@@ -67,6 +67,26 @@ describe("MobileSequenceOpeningImage", () => {
     expect(draft.openingImage).toBeNull();
   });
 
+  it("forwards the fleet galleries independently of the sequence render target", async () => {
+    const gallerySources = [
+      {
+        id: "studio",
+        label: "Studio",
+        target: { baseUrl: "http://studio:7680", apiKey: "secret" },
+      },
+      {
+        id: "render",
+        label: "Render",
+        target: { baseUrl: "http://render:7680", apiKey: "render-secret" },
+      },
+    ];
+    mountOpeningImage({ gallerySources });
+    await wrapper!.get("[data-test='mobile-sequence-source-pick']").trigger("click");
+    expect(
+      wrapper!.getComponent({ name: "MobileImagePickerSheet" }).props("gallerySources"),
+    ).toEqual(gallerySources);
+  });
+
   it("writes strength and fit onto the host form", async () => {
     const form = newGenerateForm();
     const draft = useSequenceDraftStore();

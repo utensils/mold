@@ -1160,6 +1160,15 @@ const selectedHost = computed(() =>
 // at least two machines are reachable; with one machine the picker keeps
 // today's single-host behaviour exactly.
 const routingHosts = computed(() => mobileRoutingHosts(connectedHosts.value));
+/** Source conditioning can come from the whole reachable fleet, regardless
+ * of the machine selected to render the next print. */
+const sourceGalleryHosts = computed(() =>
+  routingHosts.value.map((host) => ({
+    id: host.id,
+    label: host.name,
+    target: mobileHostTarget(host),
+  })),
+);
 const autoRoutingAvailable = computed(() => mobileAutoRoutingAvailable(connectedHosts.value));
 const generateTarget = computed(() =>
   resolveMobileGenerateTarget(
@@ -10154,6 +10163,7 @@ onBeforeUnmount(() => {
               :upscalers="upscalers"
               :chain-limits="chainLimits"
               :target="generationTarget"
+              :gallery-sources="sourceGalleryHosts"
               :shared="sequenceParams(form, selectedGenerationModel)"
               :fps="form.fps"
               :submitting="sequenceStarting"
@@ -10397,6 +10407,7 @@ onBeforeUnmount(() => {
                 :form="form"
                 :model="selectedGenerationModel"
                 :target="generationTarget"
+                :gallery-sources="sourceGalleryHosts"
                 :control-models="controlModels"
                 :upscalers="upscalers"
                 @validity-change="sourceValid = $event"

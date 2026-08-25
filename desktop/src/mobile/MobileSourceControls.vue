@@ -24,7 +24,10 @@ import {
 } from "@studio/lib/sourceFit";
 import { strengthSemantics } from "@studio/lib/strengthSemantics";
 import { sourceConditioningLimitLabel } from "@studio/lib/sourceResolution";
-import MobileImagePickerSheet, { type MobilePickedImage } from "./MobileImagePickerSheet.vue";
+import MobileImagePickerSheet, {
+  type MobileGallerySource,
+  type MobilePickedImage,
+} from "./MobileImagePickerSheet.vue";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import SourceMediaWells, { type SourceMediaSlot } from "@studio/components/SourceMediaWells.vue";
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
@@ -41,12 +44,14 @@ const props = withDefaults(
   defineProps<{
     form: GenerateForm;
     target?: ApiTarget | null;
+    gallerySources?: MobileGallerySource[];
     controlModels?: ModelEntry[];
     upscalers?: ModelEntry[];
     model?: ModelEntry | null;
   }>(),
   {
     target: null,
+    gallerySources: () => [],
     controlModels: () => [],
     upscalers: () => [],
     model: null,
@@ -508,6 +513,7 @@ function applyMask(mask: string): void {
     <MobileImagePickerSheet
       :open="h3PickerTarget !== null"
       :target="target"
+      :gallery-sources="gallerySources"
       :title="h3PickerTarget === 'lastFrame' ? 'Last frame' : 'First frame'"
       :max-bytes="h3PickerMaxBytes"
       :oversize-message="MOBILE_MEDIA_BUDGET_ERROR"
@@ -968,6 +974,7 @@ function applyMask(mask: string): void {
       v-if="!isAttachmentMode || (plan.kind === 'attachments' && plan.primary === 'target')"
       :open="sourcePickerOpen"
       :target="target"
+      :gallery-sources="gallerySources"
       :title="isAttachmentMode ? 'Edit target' : 'Source image'"
       :max-bytes="sourcePickerMaxBytes"
       :oversize-message="MOBILE_MEDIA_BUDGET_ERROR"
@@ -978,6 +985,7 @@ function applyMask(mask: string): void {
       v-if="!isAttachmentMode && caps.supportsEndFrame"
       :open="endFramePickerOpen"
       :target="target"
+      :gallery-sources="gallerySources"
       title="End frame"
       :max-bytes="endFramePickerMaxBytes"
       :oversize-message="MOBILE_MEDIA_BUDGET_ERROR"

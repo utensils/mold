@@ -42,6 +42,7 @@ import type { Ltx2CameraControlInfo, ModelEntry } from "../lib/api/types";
 import type { GenerateForm } from "../lib/generateForm";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import MobileSequenceOpeningImage from "./MobileSequenceOpeningImage.vue";
+import type { MobileGallerySource } from "./MobileImagePickerSheet.vue";
 import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
 import MobileSeamSheet from "./MobileSeamSheet.vue";
 import { validateChain } from "@studio/api/chains";
@@ -53,6 +54,7 @@ const props = withDefaults(
     selectedModel: ModelEntry | null;
     chainLimits: ChainLimits | null;
     target: ApiTarget | null;
+    gallerySources?: MobileGallerySource[];
     /** Live shared generation parameters owned by MobileApp's form. */
     shared: SequenceSharedParams;
     /** The generate form's frame rate — shown, never stored here. */
@@ -71,6 +73,7 @@ const props = withDefaults(
   }>(),
   {
     target: null,
+    gallerySources: () => [],
     submitting: false,
     error: "",
     busy: false,
@@ -449,6 +452,7 @@ function removeClip(id: string): void {
         :form="form"
         :upscalers="upscalers"
         :target="target"
+        :gallery-sources="gallerySources"
         :locked="locked"
       />
     </details>

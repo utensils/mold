@@ -9934,6 +9934,27 @@ describe("MobileApp automatic generation routing", () => {
     expect(wrapper.get("[data-test='mobile-routing-hint']").text()).toContain("strongest GPU");
   });
 
+  it("offers every reachable gallery even when generation is pinned to one host", async () => {
+    twoHosts();
+    fleetApi({});
+    localStorage.setItem("mold.mobile.generate-target.v1", "studio-id");
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const sources = wrapper.getComponent(MobileSourceControls).props("gallerySources") as Array<{
+      id: string;
+      label: string;
+      target: { baseUrl: string };
+    }>;
+    expect(sources.map(({ id, label, target: route }) => [id, label, route.baseUrl])).toEqual([
+      ["studio-id", "Studio", target.baseUrl],
+      ["render-id", "Render", renderTarget.baseUrl],
+    ]);
+    expect(wrapper.getComponent(MobileSourceControls).props("target")).toMatchObject({
+      baseUrl: target.baseUrl,
+    });
+  });
+
   it("hides the automatic options again while only one machine answers", async () => {
     twoHosts();
     apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {

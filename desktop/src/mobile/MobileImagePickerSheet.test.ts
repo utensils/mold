@@ -10,6 +10,7 @@ const { apiJsonTo, apiFetchTo } = vi.hoisted(() => ({
 vi.mock("../lib/api/client", () => ({ apiJsonTo, apiFetchTo }));
 
 const target = { baseUrl: "http://remote-host:7680", apiKey: "secret" };
+const peerTarget = { baseUrl: "http://peer-host:7680", apiKey: "peer-secret" };
 const metadata = {
   prompt: "p",
   model: "m",
@@ -83,6 +84,134 @@ describe("MobileImagePickerSheet", () => {
     });
   });
 
+  it("merges every available host and fetches a peer print from its own authenticated origin", async () => {
+    apiJsonTo.mockImplementation((route: typeof target) =>
+      Promise.resolve(
+        route.baseUrl === peerTarget.baseUrl
+          ? [{ filename: "peer.png", metadata, timestamp: 4 }]
+          : [{ filename: "selected.png", metadata, timestamp: 3 }],
+      ),
+    );
+    const gallerySources = [
+      { id: "selected", label: "Studio", target },
+      { id: "peer", label: "Render", target: peerTarget },
+    ];
+    const wrapper = mount(MobileImagePickerSheet, {
+      props: { open: true, target, gallerySources },
+      global: { stubs: { AuthedMedia: true } },
+    });
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-image-picker-gallery-tab']").trigger("click");
+
+    expect(apiJsonTo).toHaveBeenCalledWith(target, "/api/gallery", {
+      signal: expect.any(AbortSignal),
+    });
+    expect(apiJsonTo).toHaveBeenCalledWith(peerTarget, "/api/gallery", {
+      signal: expect.any(AbortSignal),
+    });
+    const items = wrapper.findAll("[data-test='mobile-image-picker-gallery-item']");
+    expect(items.map((item) => item.attributes("aria-label"))).toEqual([
+      "Use peer.png from Render",
+      "Use selected.png from Studio",
+    ]);
+    expect(
+      wrapper.findAll("[data-test='mobile-image-picker-host']").map((chip) => chip.text()),
+    ).toEqual(["Render", "Studio"]);
+
+    await items[0]!.trigger("click");
+    await flushPromises();
+    expect(apiFetchTo).toHaveBeenCalledWith(peerTarget, "/api/gallery/image/peer.png");
+  });
+
+  it("renders a healthy host without waiting for a peer that never settles", async () => {
+    apiJsonTo.mockImplementation((route: typeof target) =>
+      route.baseUrl === peerTarget.baseUrl
+        ? new Promise(() => {})
+        : Promise.resolve([{ filename: "healthy.png", metadata, timestamp: 3 }]),
+    );
+    const wrapper = mount(MobileImagePickerSheet, {
+      props: {
+        open: true,
+        target,
+        gallerySources: [
+          { id: "healthy", label: "Studio", target },
+          { id: "hanging", label: "Render", target: peerTarget },
+        ],
+      },
+      global: { stubs: { AuthedMedia: true } },
+    });
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-image-picker-gallery-tab']").trigger("click");
+
+    expect(wrapper.findAll("[data-test='mobile-image-picker-gallery-item']")).toHaveLength(1);
+    expect(wrapper.text()).not.toContain("Loading gallery");
+    wrapper.unmount();
+  });
+
+  it("keeps healthy gallery results when a peer fails", async () => {
+    apiJsonTo.mockImplementation((route: typeof target) =>
+      route.baseUrl === peerTarget.baseUrl
+        ? Promise.reject(new Error("peer offline"))
+        : Promise.resolve([{ filename: "healthy.png", metadata, timestamp: 3 }]),
+    );
+    const wrapper = mount(MobileImagePickerSheet, {
+      props: {
+        open: true,
+        target,
+        gallerySources: [
+          { id: "healthy", label: "Studio", target },
+          { id: "failed", label: "Render", target: peerTarget },
+        ],
+      },
+      global: { stubs: { AuthedMedia: true } },
+    });
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-image-picker-gallery-tab']").trigger("click");
+
+    expect(wrapper.findAll("[data-test='mobile-image-picker-gallery-item']")).toHaveLength(1);
+    expect(wrapper.find("[role='alert']").exists()).toBe(false);
+  });
+
+  it("removes stale tiles immediately when a host credential changes", async () => {
+    const rotatedTarget = { ...target, apiKey: "rotated-secret" };
+    let resolveRotated!: (
+      entries: Array<{ filename: string; metadata: typeof metadata; timestamp: number }>,
+    ) => void;
+    apiJsonTo
+      .mockReset()
+      .mockResolvedValueOnce([{ filename: "old.png", metadata, timestamp: 1 }])
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRotated = resolve;
+          }),
+      );
+    const wrapper = mount(MobileImagePickerSheet, {
+      props: {
+        open: true,
+        target,
+        gallerySources: [{ id: "studio", label: "Studio", target }],
+      },
+      global: { stubs: { AuthedMedia: true } },
+    });
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-image-picker-gallery-tab']").trigger("click");
+    expect(wrapper.findAll("[data-test='mobile-image-picker-gallery-item']")).toHaveLength(1);
+
+    await wrapper.setProps({
+      gallerySources: [{ id: "studio", label: "Studio", target: rotatedTarget }],
+    });
+    expect(wrapper.findAll("[data-test='mobile-image-picker-gallery-item']")).toHaveLength(0);
+    resolveRotated([{ filename: "new.png", metadata, timestamp: 2 }]);
+    await flushPromises();
+    expect(apiJsonTo).toHaveBeenLastCalledWith(rotatedTarget, "/api/gallery", {
+      signal: expect.any(AbortSignal),
+    });
+    expect(
+      wrapper.get("[data-test='mobile-image-picker-gallery-item']").attributes("aria-label"),
+    ).toBe("Use new.png from Studio");
+  });
+
   it("honors a caller's combined-media budget before downloading gallery bytes", async () => {
     const wrapper = mount(MobileImagePickerSheet, {
       props: {
@@ -137,7 +266,9 @@ describe("MobileImagePickerSheet", () => {
     await wrapper.get("[data-test='mobile-image-picker-gallery-tab']").trigger("click");
     const items = wrapper.findAll("[data-test='mobile-image-picker-gallery-item']");
     expect(items).toHaveLength(1);
-    expect(items[0]!.attributes("aria-label")).toBe("Use next.png");
-    expect(apiJsonTo).toHaveBeenNthCalledWith(2, nextTarget, "/api/gallery");
+    expect(items[0]!.attributes("aria-label")).toBe("Use next.png from Selected machine");
+    expect(apiJsonTo).toHaveBeenNthCalledWith(2, nextTarget, "/api/gallery", {
+      signal: expect.any(AbortSignal),
+    });
   });
 });

@@ -217,12 +217,20 @@ describe("MobileSourceControls", () => {
     expect(form.sourceImageName).toBeNull();
   });
 
-  it("offers the selected machine's gallery for a single source image", async () => {
+  it("keeps the generation target separate from every available source gallery", async () => {
     const form = formFor("sd15");
     form.controlImage = btoa("control");
     const target = { baseUrl: "http://halcyon:7680", apiKey: "remote-key" };
+    const gallerySources = [
+      { id: "halcyon", label: "Halcyon", target },
+      {
+        id: "peer",
+        label: "Peer",
+        target: { baseUrl: "http://peer:7680", apiKey: "peer-key" },
+      },
+    ];
     const wrapper = mount(MobileSourceControls, {
-      props: { form, target },
+      props: { form, target, gallerySources },
       global: { stubs: { MobileImagePickerSheet: true } },
     });
 
@@ -236,6 +244,7 @@ describe("MobileSourceControls", () => {
     expect(picker.props()).toMatchObject({
       open: true,
       target,
+      gallerySources,
       title: "Source image",
       maxBytes: MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES - 7,
     });
