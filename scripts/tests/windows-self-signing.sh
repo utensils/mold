@@ -12,6 +12,15 @@ importer="$root/scripts/import-windows-signing-certificate.ps1"
 verifier="$root/scripts/verify-windows-signatures.ps1"
 verifier_test="$root/scripts/tests/windows-signature-verifier.ps1"
 
+nightly_job_text() {
+  local job="$1"
+  awk -v job="$job" '
+    $0 == "  " job ":" { in_job = 1 }
+    in_job && /^  [[:alnum:]_-]+:$/ && $0 != "  " job ":" { exit }
+    in_job { print }
+  ' "$nightly"
+}
+
 thumbprint=$(jq -r '.bundle.windows.certificateThumbprint' "$config")
 [[ "$thumbprint" =~ ^[A-F0-9]{40}$ ]] || {
   echo "self-signing thumbprint must be a 40-character uppercase SHA-1 hash" >&2
@@ -54,6 +63,53 @@ grep -Fq 'mold.windows-nightly.v1' "$nightly"
 grep -Fq 'Re-sign the final standalone desktop executable' "$nightly"
 grep -Fq 'Re-sign the final standalone desktop executable' "$workflow"
 grep -Fq 'Re-sign the final standalone desktop executable' "$release"
+
+build_job="$(nightly_job_text build-windows)"
+publish_job="$(nightly_job_text publish-windows)"
+[[ "$build_job" == *"if: github.ref == 'refs/heads/main'"* ]] || {
+  echo "Windows Nightly must not expose signing secrets to non-main dispatches" >&2
+  exit 1
+}
+[[ "$publish_job" == *"if: github.ref == 'refs/heads/main'"* ]] || {
+  echo "Windows Nightly must not publish non-main dispatches" >&2
+  exit 1
+}
+[[ "$publish_job" == *'needs: build-windows'* ]] || {
+  echo "Windows Nightly publication must depend on its exact build" >&2
+  exit 1
+}
+# shellcheck disable=SC2016
+[[ "$publish_job" == *'git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD'* ]] || {
+  echo "Windows Nightly must reject sources outside main history" >&2
+  exit 1
+}
+
+ancestry_line="$(
+  # shellcheck disable=SC2016
+  grep -nF 'git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD' "$nightly" |
+    cut -d: -f1
+)"
+release_create_line="$(
+  grep -n -m1 'gh release create latest' "$nightly" |
+    cut -d: -f1
+)"
+first_upload_line="$(
+  grep -n -m1 'gh release upload latest' "$nightly" |
+    cut -d: -f1
+)"
+checksum_upload_line="$(
+  grep -n 'gh release upload latest artifacts/SHA256SUMS' "$nightly" |
+    cut -d: -f1
+)"
+[[ "$ancestry_line" -lt "$release_create_line" \
+  && "$ancestry_line" -lt "$first_upload_line" ]] || {
+  echo "Windows Nightly ancestry guard must precede release mutation" >&2
+  exit 1
+}
+[[ "$checksum_upload_line" -gt "$first_upload_line" ]] || {
+  echo "Windows Nightly must publish SHA256SUMS after its Windows assets" >&2
+  exit 1
+}
 
 # The verifier must never write a certificate store. Importing the self-signed
 # certificate into Cert:\CurrentUser\Root to force a `Valid` status needs
