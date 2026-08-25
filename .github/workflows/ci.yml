@@ -205,6 +205,7 @@ jobs:
               - 'scripts/tests/desktop-candle-nix-source-hash.sh'
               - 'scripts/tests/desktop-dmg-packaging.sh'
               - 'scripts/tests/android-apk-distribution.sh'
+              - 'scripts/tests/windows-self-signing.sh'
               - 'scripts/tests/release-sync-pr.sh'
               - 'scripts/tests/changelog-fragments-contract.sh'
               - 'scripts/tests/crates-publish-contract.sh'
@@ -435,6 +436,7 @@ jobs:
           bash scripts/tests/desktop-candle-nix-source-hash.sh
           bash scripts/tests/desktop-dmg-packaging.sh
           bash scripts/tests/android-apk-distribution.sh
+          bash scripts/tests/windows-self-signing.sh
           bash scripts/tests/cuda-distribution-contract.sh
           python3 scripts/tests/cuda-ptx-parser-contract.py
           bash scripts/tests/install-cuda-arch.sh

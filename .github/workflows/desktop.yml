@@ -326,6 +326,13 @@ jobs:
         run: >-
           bunx tauri build --features pulid --bundles nsis --ci -v
           --config src-tauri/tauri.windows-self-signed.conf.json
+      - name: Re-sign the final standalone desktop executable
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          & ../scripts/sign-windows-binary.ps1 `
+            -ConfigPath src-tauri/tauri.windows-self-signed.conf.json `
+            -FilePath src-tauri/target/release/mold-desktop.exe
       - name: Verify Authenticode on the installer and standalone executable
         if: github.event_name == 'push'
         shell: pwsh

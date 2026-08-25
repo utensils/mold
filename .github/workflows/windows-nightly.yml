@@ -1,0 +1,212 @@
+name: Windows Nightly
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A Windows release build takes longer than the normal main-branch merge
+# cadence. Keep the running build alive; GitHub retains at most one pending run
+# in this group and replaces that pending run with the newest commit.
+concurrency:
+  group: windows-nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            desktop/src-tauri -> desktop/src-tauri/target
+          key: windows-nightly
+          cache-on-failure: true
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install protoc and nasm
+        shell: pwsh
+        env:
+          PROTOC_VERSION: "29.3"
+        run: |
+          $zip = "$env:RUNNER_TEMP\protoc.zip"
+          $dest = "$env:RUNNER_TEMP\protoc"
+          $url = "https://github.com/protocolbuffers/protobuf/releases/download/v$env:PROTOC_VERSION/protoc-$env:PROTOC_VERSION-win64.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          "$dest\bin" >> $env:GITHUB_PATH
+          "PROTOC=$dest\bin\protoc.exe" >> $env:GITHUB_ENV
+          choco install --no-progress -y nasm
+          "$env:ProgramFiles\NASM" >> $env:GITHUB_PATH
+          & "$dest\bin\protoc.exe" --version
+          if (-not (Test-Path "$env:ProgramFiles\NASM\nasm.exe")) {
+            throw 'nasm was not installed'
+          }
+
+      - name: Build embedded web SPA
+        shell: bash
+        run: ./scripts/ensure-web-dist.sh
+
+      - name: Import the self-signed Windows certificate
+        id: windows-signing
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $certificate = Join-Path $env:RUNNER_TEMP 'mold-windows-self-signing.cert.cer'
+          $thumbprint = & ./scripts/import-windows-signing-certificate.ps1 `
+            -ConfigPath desktop/src-tauri/tauri.windows-self-signed.conf.json `
+            -PublicCertificatePath $certificate
+          "thumbprint=$thumbprint" >> $env:GITHUB_OUTPUT
+          "WINDOWS_PUBLIC_CERTIFICATE=$certificate" >> $env:GITHUB_ENV
+
+      - name: Build and sign the Windows CLI
+        shell: pwsh
+        run: |
+          cargo build --release -p mold-ai `
+            --features preview,discord,expand,tui,webp,metrics,mdns,pulid
+          ./scripts/sign-windows-binary.ps1 `
+            -ConfigPath desktop/src-tauri/tauri.windows-self-signed.conf.json `
+            -FilePath target/release/mold.exe
+
+      - name: Build the self-signed Windows desktop installer
+        working-directory: desktop
+        run: >-
+          bunx tauri build --features pulid --bundles nsis --ci -v
+          --config src-tauri/tauri.windows-self-signed.conf.json
+
+      # Tauri signs while bundling, then may rewrite the standalone executable.
+      # Re-sign the final bytes that verification and publication consume.
+      - name: Re-sign the final standalone desktop executable
+        shell: pwsh
+        run: |
+          ./scripts/sign-windows-binary.ps1 `
+            -ConfigPath desktop/src-tauri/tauri.windows-self-signed.conf.json `
+            -FilePath desktop/src-tauri/target/release/mold-desktop.exe
+
+      - name: Verify and package Windows artifacts
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem `
+            desktop/src-tauri/target/release/bundle/nsis `
+            -Filter *.exe `
+            -ErrorAction Stop | Select-Object -First 1
+          if (-not $installer) { throw 'no NSIS installer was produced' }
+
+          ./scripts/verify-windows-signatures.ps1 `
+            -CertificatePath $env:WINDOWS_PUBLIC_CERTIFICATE `
+            -ExpectedThumbprint '${{ steps.windows-signing.outputs.thumbprint }}' `
+            -FilePath @(
+              'target/release/mold.exe',
+              'desktop/src-tauri/target/release/mold-desktop.exe',
+              $installer.FullName
+            )
+
+          Copy-Item $installer.FullName 'Mold-windows-x64-self-signed.exe'
+          Copy-Item $env:WINDOWS_PUBLIC_CERTIFICATE 'mold-windows-self-signing.cert.cer'
+          Compress-Archive `
+            -Path @('target/release/mold.exe', 'mold-windows-self-signing.cert.cer') `
+            -DestinationPath 'mold-x86_64-pc-windows-msvc-cpu.zip'
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mold-windows-nightly-${{ github.sha }}
+          path: |
+            Mold-windows-x64-self-signed.exe
+            mold-windows-self-signing.cert.cer
+            mold-x86_64-pc-windows-msvc-cpu.zip
+          retention-days: 14
+
+  publish-windows:
+    needs: build-windows
+    runs-on: ubuntu-latest
+    concurrency:
+      group: rolling-native-publication
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: mold-windows-nightly-${{ github.sha }}
+          path: artifacts
+
+      - name: Update rolling Windows artifacts and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create latest \
+              --repo "$GITHUB_REPOSITORY" \
+              --target main \
+              --title "Latest Build" \
+              --prerelease \
+              --notes "Rolling pre-release built from main."
+          fi
+
+          mkdir -p artifacts/current-checksums
+          if gh release download latest \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern SHA256SUMS \
+            --dir artifacts/current-checksums; then
+            cp artifacts/current-checksums/SHA256SUMS artifacts/SHA256SUMS
+          else
+            : > artifacts/SHA256SUMS
+          fi
+
+          awk '
+            $2 != "Mold-windows-x64-self-signed.exe" &&
+            $2 != "mold-windows-self-signing.cert.cer" &&
+            $2 != "mold-x86_64-pc-windows-msvc-cpu.zip"
+          ' artifacts/SHA256SUMS > artifacts/SHA256SUMS.next
+          mv artifacts/SHA256SUMS.next artifacts/SHA256SUMS
+          (
+            cd artifacts
+            sha256sum -- \
+              Mold-windows-x64-self-signed.exe \
+              mold-windows-self-signing.cert.cer \
+              mold-x86_64-pc-windows-msvc-cpu.zip >> SHA256SUMS
+            sort -k2,2 -o SHA256SUMS SHA256SUMS
+          )
+
+          jq -n \
+            --arg source_sha "$GITHUB_SHA" \
+            --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg installer_sha "$(sha256sum artifacts/Mold-windows-x64-self-signed.exe | cut -d' ' -f1)" \
+            --arg certificate_sha "$(sha256sum artifacts/mold-windows-self-signing.cert.cer | cut -d' ' -f1)" \
+            --arg cli_sha "$(sha256sum artifacts/mold-x86_64-pc-windows-msvc-cpu.zip | cut -d' ' -f1)" \
+            '{
+              schema_version: "mold.windows-nightly.v1",
+              source_sha: $source_sha,
+              built_at: $built_at,
+              assets: {
+                "Mold-windows-x64-self-signed.exe": $installer_sha,
+                "mold-windows-self-signing.cert.cer": $certificate_sha,
+                "mold-x86_64-pc-windows-msvc-cpu.zip": $cli_sha
+              }
+            }' > artifacts/mold-windows-nightly.json
+
+          gh release upload latest \
+            artifacts/Mold-windows-x64-self-signed.exe \
+            artifacts/mold-windows-self-signing.cert.cer \
+            artifacts/mold-x86_64-pc-windows-msvc-cpu.zip \
+            artifacts/mold-windows-nightly.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+          gh release upload latest artifacts/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
