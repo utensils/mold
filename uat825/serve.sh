@@ -9,5 +9,8 @@ export MOLD_MODELS_DIR=/storage-fast/mold/models
 export MOLD_PORT=7681
 export MOLD_API_KEY=uat825
 export MOLD_OUTPUT_DIR=/storage-fast/mold/uat-825/output
+# The private runtime-bound capture logs its observation at INFO on its own
+# target; that record is what the measured Ref2VA figures are transcribed from.
+export MOLD_LOG=${MOLD_LOG:-info}
 mkdir -p "$MOLD_HOME" "$MOLD_OUTPUT_DIR"
 exec "$root/target/release/mold" serve --bind 0.0.0.0

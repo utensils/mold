@@ -686,6 +686,26 @@ plainly:
   base 768x768 row, 9,392 MiB against 9.15 GiB for the Turbo one. The
   scheduler's figure is the one to plan against.
 
+### The Ref2VA campaign (#825, 2026-08-24)
+
+Host: hal9000 — RTX 4090 24 GB, 62 GB host RAM, CUDA SM89, mold 0.25.0 on the
+public `h3-cuda,preview` recipe with no compliance record, no authorization
+file, and no capture-scope profile: the compiled public Ref2VA profile
+(`PUBLIC_REF2VA_RUNTIME_PROFILE_SCHEMA`) is the only authority in play.
+
+Request: `minimax-h3-ref2va:comfy-pruned-int8`, 1344x768, 124 frames, 24 fps,
+21 steps, guidance 0.0, strength 1.0, MP4 with synchronized audio — the same
+generated shape both FL2VA campaigns used, so the two are directly comparable
+and the only axis that moved is the conditioning.
+
+The conditioning axis is the point. Ref2VA's envelope is minted per request
+from the ordered set's own preprocessing shapes, so the campaign runs the six
+cases #827 scoped for it rather than one canvas:
+
+REF2VA_MATRIX_PLACEHOLDER
+
+REF2VA_BOUNDS_PLACEHOLDER
+
 ### The 768x768 campaign (#1033, 2026-08-23)
 
 Host: hal9000 — RTX 4090 24 GB, 62 GB host RAM, CUDA SM89, mold 0.25.0 at
