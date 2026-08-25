@@ -1,0 +1,1 @@
+- **Fleet-wide mobile source gallery.** iPhone and Android source-image pickers now show stills from every reachable Mold host, while fetching each selection securely from its origin machine.
