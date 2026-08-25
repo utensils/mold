@@ -70,6 +70,23 @@ describe("desktop durable generation recovery", () => {
     ).toBe(false);
   });
 
+  it("uses canonical v2 transport for H3 and future durable-media protocols", () => {
+    const canonicalQueue = { ...queue, admission_protocol_version: 2 };
+    const futureMedia = {
+      ...durableMedia,
+      protocol_version: 3,
+      private_h3: true,
+    };
+    expect(
+      requestIsEligibleForDurableGeneration(
+        request({ model: "hf:opaque-h3-checkpoint", source_image: "bytes" }),
+        canonicalQueue,
+        futureMedia,
+        "minimax-h3",
+      ),
+    ).toBe(true);
+  });
+
   it("persists recovery authority without API secrets, prompts, or media", () => {
     let written = "";
     saveDurableGenerationRecovery(

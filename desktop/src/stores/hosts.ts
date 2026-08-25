@@ -39,6 +39,7 @@ import type {
 } from "../lib/api/types";
 import type { ReferenceUploadCapabilities } from "@studio/api/referenceUploads";
 import type { DurableMediaCapabilities } from "@studio/api/generationAdmission";
+import { generationHostSubmissionPolicy } from "@studio/lib/generationSubmissionPolicy";
 import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
 import { useDownloadsStore } from "./downloads";
@@ -195,6 +196,8 @@ export interface HostRoute {
   heterogeneousBatchMaxOutputs?: number | null;
   /** Exact host exposes idempotent admission plus durable terminal outcomes. */
   durableBatchOutcomes?: boolean;
+  /** Version 2 acknowledges durable work before model preparation. */
+  admissionProtocolVersion?: number | null;
   /** Exact host encrypts and durably replays supported request media. */
   durableMedia?: DurableMediaCapabilities | null;
   /** Authoritative family of the model frozen for this submission. */
@@ -255,6 +258,12 @@ function hostRoute(host: HostView, capabilities?: ServerCapabilities): HostRoute
     heterogeneousBatch: capabilities?.queue?.heterogeneous_batch === true,
     heterogeneousBatchMaxOutputs: capabilities?.queue?.heterogeneous_batch_max_outputs ?? null,
     ...(capabilities?.queue?.durable_batch_outcomes === true ? { durableBatchOutcomes: true } : {}),
+    ...(capabilities?.queue?.admission_protocol_version != null
+      ? {
+          admissionProtocolVersion:
+            capabilities.queue.admission_protocol_version,
+        }
+      : {}),
   };
 }
 
@@ -725,6 +734,12 @@ export const useHostsStore = defineStore("hosts", {
         ...(this.capabilities[chosen.id]?.queue?.durable_batch_outcomes === true
           ? { durableBatchOutcomes: true }
           : {}),
+        ...(this.capabilities[chosen.id]?.queue?.admission_protocol_version != null
+          ? {
+              admissionProtocolVersion:
+                this.capabilities[chosen.id]!.queue!.admission_protocol_version,
+            }
+          : {}),
       };
     },
     async resolveFeasible(
@@ -862,6 +877,7 @@ export const useHostsStore = defineStore("hosts", {
           preview: Awaited<ReturnType<typeof previewGenerationPlacement>> | null;
           error: unknown;
           legacyUnsupported: boolean;
+          telemetryOnly: boolean;
           roundTripMs: number;
         };
         const probes: PlacementProbe[] = [];
@@ -882,6 +898,39 @@ export const useHostsStore = defineStore("hosts", {
             const started = performance.now();
             try {
               const target = { baseUrl: host.baseUrl!, apiKey: host.apiKey };
+              const submission = generationHostSubmissionPolicy(
+                selection === null
+                  ? { kind: "auto" }
+                  : selection === "capable"
+                    ? { kind: "capable" }
+                    : { kind: "pinned", hostId: selection },
+                {
+                  hostId: host.id,
+                  ...(this.capabilities[host.id]?.queue
+                    ? { queue: this.capabilities[host.id]!.queue! }
+                    : {}),
+                  ...(this.capabilities[host.id]?.durable_media
+                    ? { durableMedia: this.capabilities[host.id]!.durable_media! }
+                    : {}),
+                },
+                request,
+                Array.isArray((request as ChainRequest).stages) || "total_frames" in request
+                  ? "sequence"
+                  : "generation",
+              );
+              if (submission.routing === "telemetry_only" || submission.routing === "none") {
+                probes.push({
+                  host,
+                  preview: null,
+                  error: null,
+                  legacyUnsupported: false,
+                  telemetryOnly: true,
+                  roundTripMs: Math.max(0, performance.now() - started),
+                });
+                anyPlanned = true;
+                resolveFirstPlanned();
+                return;
+              }
               const preview =
                 Array.isArray((request as ChainRequest).stages) || "total_frames" in request
                   ? await previewChainPlacement(
@@ -907,6 +956,7 @@ export const useHostsStore = defineStore("hosts", {
                 preview,
                 error: null,
                 legacyUnsupported: false,
+                telemetryOnly: false,
                 roundTripMs: Math.max(0, performance.now() - started),
               });
               if (classifyPlacementPreview(preview) === "planned") {
@@ -920,6 +970,7 @@ export const useHostsStore = defineStore("hosts", {
                 error,
                 legacyUnsupported:
                   error instanceof ApiError && (error.status === 404 || error.status === 405),
+                telemetryOnly: false,
                 roundTripMs: Math.max(0, performance.now() - started),
               });
             } finally {
@@ -975,6 +1026,7 @@ export const useHostsStore = defineStore("hosts", {
                 `Auto placement timed out after ${Math.round(autoDeadlineMs / 1000)} seconds; retry or select this machine explicitly for a longer cold check`,
               ),
               legacyUnsupported: false,
+              telemetryOnly: false,
               roundTripMs: autoDeadlineMs,
             });
           }
@@ -1021,6 +1073,38 @@ export const useHostsStore = defineStore("hosts", {
             preview: probe.preview,
           }))
           .sort(comparePlacementPreviews);
+        const telemetryOnly = settledProbes.filter((probe) => probe.telemetryOnly);
+        if (telemetryOnly.length > 0) {
+          const usable = [
+            ...telemetryOnly,
+            ...planned.flatMap((entry) => {
+              const probe = settledProbes.find((candidate) => candidate.host.id === entry.hostId);
+              return probe ? [probe] : [];
+            }),
+          ];
+          const modelHostIds = useHostModelsStore()
+            .hostsFor(request.model)
+            .filter((id) => usable.some((probe) => probe.host.id === id));
+          const routable = usable.map((probe) => ({
+            ...probe.host,
+            gpu: strongestRoutableGpu(this.telemetry[probe.host.id]),
+          }));
+          const chosen =
+            selection === "capable"
+              ? pickMostCapableHost(routable, modelHostIds.length > 0 ? modelHostIds : null)
+              : selection !== null
+                ? routable.find((host) => host.id === selection) ?? null
+                : pickAutoHost(
+                    modelHostIds.length > 0
+                      ? routable.filter((host) => modelHostIds.includes(host.id))
+                      : routable,
+                  );
+          const observation = chosen
+            ? usable.find((probe) => probe.host.id === chosen.id)
+            : null;
+          const route = chosen ? hostRoute(chosen, this.capabilities[chosen.id]) : null;
+          if (route) return { kind: "route", route, preview: observation?.preview ?? null };
+        }
         if (planned.length > 0) {
           const chosen = candidates.find((host) => host.id === planned[0]!.hostId);
           const route = chosen ? hostRoute(chosen, this.capabilities[chosen.id]) : null;

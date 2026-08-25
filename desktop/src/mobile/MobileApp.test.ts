@@ -1735,6 +1735,59 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
   }
 
+  it("submits a pinned canonical-v2 request without showing or calling placement", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          queue: {
+            heterogeneous_batch: true,
+            durable_batch_outcomes: true,
+            admission_protocol_version: 2,
+          },
+        });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        const clientBatchId = JSON.parse(String(init.body)).client_batch_id as string;
+        return Promise.resolve({
+          id: "canonical-batch",
+          client_batch_id: clientBatchId,
+          instance_id: "studio-id",
+          durable: true,
+          children: [
+            {
+              index: 1,
+              job_id: "canonical-job",
+              state: "accepted",
+              created_at_ms: 10,
+              updated_at_ms: 11,
+            },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("queue before preparation");
+
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+    expect(previewChainPlacement).not.toHaveBeenCalled();
+    expect(
+      apiJsonTo.mock.calls.filter(([, path]) => path === "/api/generation-batches"),
+    ).toHaveLength(1);
+    expect(openStreams.filter((stream) => stream.path === "/api/generate/stream")).toHaveLength(0);
+    expect(wrapper.text()).not.toContain("Checking placement");
+    expect(wrapper.text()).toContain("Accepted");
+  });
+
   it("keeps accepting durable prints while earlier admissions are still awaiting responses", async () => {
     const pendingAdmissions = new Map<
       string,
@@ -2171,7 +2224,7 @@ describe("MobileApp generation queue", () => {
               index: 1,
               job_id: "held-job",
               state: "held",
-              held_reason: "model access requires approval",
+              error: "model access requires approval",
               created_at_ms: 10,
               updated_at_ms: 11,
             },
@@ -2191,6 +2244,69 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.get("[data-test='mobile-generation-summary']").text()).not.toContain(
       "Waiting for resources",
     );
+    expect(wrapper.get("[data-test='mobile-generation-held-error']").text()).toBe(
+      "model access requires approval",
+    );
+    expect(wrapper.find("[data-test='mobile-generation-retry']").exists()).toBe(false);
+  });
+
+  it("retries only an explicitly retryable held child on its exact authenticated host", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          queue: {
+            heterogeneous_batch: true,
+            durable_batch_outcomes: true,
+            admission_protocol_version: 2,
+          },
+        });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        const clientBatchId = JSON.parse(String(init.body)).client_batch_id as string;
+        return Promise.resolve({
+          id: "retry-batch",
+          client_batch_id: clientBatchId,
+          instance_id: "studio-id",
+          durable: true,
+          children: [
+            {
+              index: 1,
+              job_id: "retry/job",
+              state: "held",
+              retryable: true,
+              error: "artifact digest mismatch",
+              created_at_ms: 10,
+              updated_at_ms: 11,
+            },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("retry held print");
+
+    const retry = wrapper.get("[data-test='mobile-generation-retry']");
+    expect(retry.text()).toBe("Retry");
+    expect(retry.classes()).toContain("mobile-touch-action");
+    expect(wrapper.get("[data-test='mobile-generation-held-error']").text()).toBe(
+      "artifact digest mismatch",
+    );
+    await retry.trigger("click");
+    await flushPromises();
+
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/retry%2Fjob/retry", {
+      method: "POST",
+    });
   });
 
   it("keeps a bulk-reconciled completion when the older admission response arrives later", async () => {
@@ -2257,6 +2373,79 @@ describe("MobileApp generation queue", () => {
     expect(
       invoke.mock.calls.filter(([command]) => command === "save_image_to_photos"),
     ).toHaveLength(photoCalls.length);
+  });
+
+  it("keeps an incapable telemetry-routed target failure visible after reconciliation", async () => {
+    let clientBatchId = "";
+    const child = (state: "accepted" | "failed") => ({
+      index: 1,
+      job_id: "incapable-job",
+      state,
+      created_at_ms: 10,
+      updated_at_ms: state === "accepted" ? 11 : 12,
+      ...(state === "failed"
+        ? {
+            completed_at_ms: 12,
+            error: "Studio cannot run this model on its available device",
+          }
+        : {}),
+    });
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          queue: {
+            heterogeneous_batch: true,
+            durable_batch_outcomes: true,
+            admission_protocol_version: 2,
+          },
+        });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        clientBatchId = JSON.parse(String(init.body)).client_batch_id as string;
+        return Promise.resolve({
+          id: "incapable-batch",
+          client_batch_id: clientBatchId,
+          instance_id: "studio-id",
+          durable: true,
+          children: [child("accepted")],
+        });
+      }
+      if (path === "/api/generation-batches/status") {
+        return Promise.resolve({
+          instance_id: "studio-id",
+          batches: [
+            {
+              id: "incapable-batch",
+              client_batch_id: clientBatchId,
+              instance_id: "studio-id",
+              durable: true,
+              children: [child("failed")],
+            },
+          ],
+          missing: { client_batch_ids: [], batch_ids: [] },
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("frozen target failure");
+    openStreams.find((stream) => stream.path === "/api/events")!.options.onOpen?.();
+
+    await vi.waitFor(() =>
+      expect(wrapper!.get("[data-test='mobile-generation-summary']").text()).toContain(
+        "Studio cannot run this model on its available device",
+      ),
+    );
+    expect(wrapper.find("[data-test='mobile-generation-queue']").exists()).toBe(false);
   });
 
   it("admits a prepared Batch N as sibling children in one durable POST", async () => {

@@ -43,6 +43,23 @@ function routeForHost(candidate: MobileHost): HostRoute {
   };
 }
 
+function canonicalRouteForHost(candidate: MobileHost): HostRoute {
+  return {
+    ...routeForHost(candidate),
+    heterogeneousBatch: true,
+    durableBatchOutcomes: true,
+    admissionProtocolVersion: 2,
+    durableMedia: {
+      protocol_version: 2,
+      encrypted_at_rest: true,
+      generate_request_media: true,
+      identity: true,
+      h3_references: false,
+      private_h3: true,
+    },
+  };
+}
+
 function planned(completion: number): GenerationPlacementPreview {
   return {
     version: 1,
@@ -148,6 +165,38 @@ describe("mobile automatic generation routing", () => {
     });
 
     expect(result).toMatchObject({ kind: "route", host: { id: "render" } });
+  });
+
+  it("routes Auto from cached v2 telemetry without opening placement probes", async () => {
+    const studio = host("studio");
+    const render = host("render");
+    const result = await routeAutomaticMobileGeneration({
+      ...options([
+        candidate(studio, { queueDepth: 4 }),
+        candidate(render, { queueDepth: 1 }),
+      ]),
+      routeForHost: canonicalRouteForHost,
+    });
+
+    expect(result).toMatchObject({ kind: "route", host: { id: "render" } });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+    expect(previewChainPlacement).not.toHaveBeenCalled();
+  });
+
+  it("routes Most capable from cached v2 GPU facts without opening probes", async () => {
+    const studio = host("studio");
+    const render = host("render");
+    const result = await routeAutomaticMobileGeneration({
+      ...options([
+        candidate(studio, { backend: "metal", vramTotalMb: 128_000 }),
+        candidate(render, { backend: "cuda", vramTotalMb: 24_000 }),
+      ]),
+      routeForHost: canonicalRouteForHost,
+      policy: "capable",
+    });
+
+    expect(result).toMatchObject({ kind: "route", host: { id: "render" } });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
   });
 
   it("falls back to a legacy server only for media-free non-authoritative work", async () => {
@@ -256,22 +305,42 @@ describe("mobile pinned generation placement", () => {
     });
   });
 
-  it("submits pinned H3 directly so cold verification happens after queueing", async () => {
+  it("submits every pinned family directly behind the canonical v2 contract", async () => {
+    for (const request of [
+      { model: "flux-dev" },
+      { model: "ltx-2", source_image: "frame" },
+      {
+        model: "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p",
+        source_image: "frame",
+      },
+    ]) {
+      await expect(
+        previewPinnedMobileGeneration({
+          ...pinnedOptions(),
+          route: canonicalRouteForHost(host("studio")),
+          request,
+        }),
+      ).resolves.toEqual({
+        kind: "placement",
+        placement: null,
+        legacyUnsupported: false,
+      });
+    }
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+    expect(previewChainPlacement).not.toHaveBeenCalled();
+  });
+
+  it("keeps pinned sequences on the legacy placement contract", async () => {
+    previewChainPlacement.mockResolvedValue(planned(100));
     await expect(
       previewPinnedMobileGeneration({
         ...pinnedOptions(),
-        request: {
-          model: "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p",
-          source_image: "frame",
-        },
+        route: canonicalRouteForHost(host("studio")),
+        request: { model: "ltx-2", stages: [] },
+        chain: true,
       }),
-    ).resolves.toEqual({
-      kind: "placement",
-      placement: null,
-      legacyUnsupported: false,
-    });
-    expect(previewGenerationPlacement).not.toHaveBeenCalled();
-    expect(previewChainPlacement).not.toHaveBeenCalled();
+    ).resolves.toMatchObject({ kind: "placement", placement: { outcome: "planned" } });
+    expect(previewChainPlacement).toHaveBeenCalledOnce();
   });
 
   it("refuses a legacy identity placement", async () => {

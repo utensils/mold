@@ -7512,6 +7512,7 @@ mod tests {
                 job_id: "job-1".into(),
                 state: super::GenerationBatchChildState::Complete,
                 error: None,
+                retryable: None,
                 created_at_ms: 10,
                 updated_at_ms: 20,
                 completed_at_ms: Some(20),
@@ -8113,6 +8114,10 @@ pub struct GenerationBatchChild {
     pub state: GenerationBatchChildState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// True only when an explicitly held durable child may be returned to the
+    /// queue through the retry endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
     /// Unix-epoch milliseconds when the durable child was admitted.
     #[serde(default)]
     pub created_at_ms: i64,
@@ -8345,6 +8350,21 @@ impl DurableMediaCapabilities {
             private_h3: false,
         }
     }
+
+    /// Queue-media V2 can add authenticated, owner/job/request-bound replay
+    /// for private H3 admission when that adapter is compiled into the serving
+    /// binary. Ordered H3 references remain excluded until their staged
+    /// authority has the same restart-safe ownership contract.
+    pub const fn v2(private_h3: bool) -> Self {
+        Self {
+            protocol_version: 2,
+            encrypted_at_rest: true,
+            generate_request_media: true,
+            identity: true,
+            h3_references: false,
+            private_h3,
+        }
+    }
 }
 
 /// Whether the server exposes queue-wide controls. `can_pause` covers
@@ -8387,6 +8407,10 @@ pub struct QueueCapabilities {
     /// reconciliation routes are available.
     #[serde(default)]
     pub durable_batch_outcomes: bool,
+    /// Version 2 durably admits work before deferred dependency preparation
+    /// and exposes retryable preparation holds through the queue lifecycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_protocol_version: Option<u32>,
 }
 
 /// Authenticated, stable-URL reference-media ingress advertised by current
@@ -10631,6 +10655,21 @@ mod queue_plan_wire_tests {
                 "private_h3": false,
             })
         );
+
+        for private_h3 in [false, true] {
+            assert_eq!(
+                serde_json::to_value(DurableMediaCapabilities::v2(private_h3)).unwrap(),
+                serde_json::json!({
+                    "protocol_version": 2,
+                    "encrypted_at_rest": true,
+                    "generate_request_media": true,
+                    "identity": true,
+                    "h3_references": false,
+                    "private_h3": private_h3,
+                }),
+                "protocol v2 must advertise private H3 exactly as supplied by the build"
+            );
+        }
 
         let legacy_server: ServerCapabilities = serde_json::from_value(serde_json::json!({
             "gallery": {"can_delete": true},

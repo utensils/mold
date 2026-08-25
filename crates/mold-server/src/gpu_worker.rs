@@ -3113,7 +3113,10 @@ fn run_claimed_h3_generation(
     if let Err(error) = ensure_worker_not_poisoned(worker, &model_name) {
         return reject_claimed_h3_generation_message(job, error.to_string());
     }
-    if job.result_tx.is_closed() {
+    if crate::state::should_cancel_for_observer_disconnect(
+        job.result_tx.is_closed(),
+        job.journal.is_some(),
+    ) {
         tracing::debug!(gpu = ordinal, model = %model_name, "skipping claimed H3 job — client disconnected");
         return false;
     }
@@ -3774,7 +3777,7 @@ fn process_job_with_sink(
         return false;
     }
 
-    if job.result_tx.is_closed() {
+    if job.should_cancel_for_observer_disconnect() {
         tracing::debug!(gpu = ordinal, model = %model_name, "skipping dispatched job — client disconnected");
         return false;
     }
@@ -4185,7 +4188,10 @@ fn process_job_with_sink(
         });
     }
 
-    if job.result_tx.is_closed() {
+    if crate::state::should_cancel_for_observer_disconnect(
+        job.result_tx.is_closed(),
+        job.journal.is_some(),
+    ) {
         tracing::debug!(
             gpu = ordinal,
             model = %model_name,
@@ -4728,7 +4734,7 @@ fn finish_generation_success(
                 "generation finished but its output could not be saved; \
                  holding the queue row for review"
             );
-            ticket.hold("the generated output could not be saved to the gallery");
+            ticket.hold_retryable("the generated output could not be saved to the gallery");
         }
     }
 
@@ -4782,7 +4788,7 @@ fn finish_generation_hydration_failure(
     if let Some(ticket) = job.journal.take() {
         match disposition {
             DeferredHydrationDisposition::Hold => {
-                ticket.hold("durable queue-media validation failed")
+                let _ = ticket.hold("durable queue-media validation failed");
             }
             DeferredHydrationDisposition::Retain => {
                 ticket.retain();
@@ -6381,6 +6387,7 @@ mod tests {
                 .submit(
                     GenerationJob {
                         id: format!("{id}-reserved-{index}"),
+                        durable_queue_rank: None,
                         request: request.clone(),
                         deferred_media: None,
                         resolved_references: None,
@@ -6404,6 +6411,7 @@ mod tests {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let job = GpuJob {
             id: id.to_string(),
+            durable_queue_rank: None,
             model: request.model.clone(),
             request,
             deferred_media: None,
@@ -8493,6 +8501,7 @@ mod tests {
         request.upscale_model = Some(upscale_model.to_string());
         GpuJob {
             id: "job-upscale-test".to_string(),
+            durable_queue_rank: None,
             model: request.model.clone(),
             request,
             deferred_media: None,
@@ -8792,6 +8801,7 @@ mod tests {
         worker
             .send_job(GpuJob {
                 id: "stale".to_string(),
+                durable_queue_rank: None,
                 model: request.model.clone(),
                 request,
                 deferred_media: None,
@@ -9658,6 +9668,7 @@ mod tests {
             let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
             let generation = GpuJob {
                 id: id.to_string(),
+                durable_queue_rank: None,
                 model: request.model.clone(),
                 request,
                 deferred_media: None,
@@ -9792,6 +9803,7 @@ mod tests {
                 },
                 work: OwnerWork::Generation(Box::new(GpuJob {
                     id: "barrier-generation".to_string(),
+                    durable_queue_rank: None,
                     model: request.model.clone(),
                     request,
                     deferred_media: None,
@@ -10429,6 +10441,7 @@ mod tests {
                 },
                 work: OwnerWork::Generation(Box::new(GpuJob {
                     id: "invalidated".to_string(),
+                    durable_queue_rank: None,
                     model: "test:q4".to_string(),
                     request,
                     deferred_media: None,
@@ -10976,6 +10989,7 @@ mod tests {
             .block_on(queue.submit(
                 GenerationJob {
                     id: "generate".to_string(),
+                    durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
                     resolved_references: None,
@@ -10998,6 +11012,7 @@ mod tests {
         worker
             .send_job(GpuJob {
                 id: "generate".to_string(),
+                durable_queue_rank: None,
                 model: "lifecycle".to_string(),
                 request,
                 deferred_media: None,
@@ -11275,6 +11290,7 @@ mod tests {
             .submit(
                 GenerationJob {
                     id: "placeholder".to_string(),
+                    durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
                     resolved_references: None,
@@ -11301,6 +11317,7 @@ mod tests {
             &worker,
             GpuJob {
                 id: "buffered-job".to_string(),
+                durable_queue_rank: None,
                 model: request.model.clone(),
                 request,
                 deferred_media: None,
@@ -11453,6 +11470,7 @@ mod tests {
         let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
         let job = GpuJob {
             id: "publish-fails".to_string(),
+            durable_queue_rank: None,
             model: "mock-model".to_string(),
             request,
             deferred_media: None,
@@ -11522,6 +11540,7 @@ mod tests {
         let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
         let job = GpuJob {
             id: "publishes".to_string(),
+            durable_queue_rank: None,
             model: "mock-model".to_string(),
             request,
             deferred_media: None,
@@ -11577,6 +11596,7 @@ mod tests {
                 &worker_for_job,
                 GpuJob {
                     id: "cancelled-job".to_string(),
+                    durable_queue_rank: None,
                     model: "cancel-model".to_string(),
                     request,
                     deferred_media: None,
@@ -11648,6 +11668,7 @@ mod tests {
             .submit(
                 GenerationJob {
                     id: "placeholder".to_string(),
+                    durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
                     resolved_references: None,
@@ -11674,6 +11695,7 @@ mod tests {
                 &worker_for_job,
                 GpuJob {
                     id: "panic-job".to_string(),
+                    durable_queue_rank: None,
                     model: "panic-model".to_string(),
                     request: panic_request,
                     deferred_media: None,
@@ -11723,6 +11745,7 @@ mod tests {
             .submit(
                 GenerationJob {
                     id: "placeholder-2".to_string(),
+                    durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
                     resolved_references: None,
@@ -11747,6 +11770,7 @@ mod tests {
                 &worker_for_job,
                 GpuJob {
                     id: "followup".to_string(),
+                    durable_queue_rank: None,
                     model: "panic-model".to_string(),
                     request,
                     deferred_media: None,
@@ -12171,6 +12195,7 @@ mod tests {
             .block_on(queue.submit(
                 GenerationJob {
                     id: "queue-slot".to_string(),
+                    durable_queue_rank: None,
                     request: job.request.clone(),
                     deferred_media: None,
                     resolved_references: None,

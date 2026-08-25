@@ -946,6 +946,7 @@ async fn submit_child(
     let admission_cancellation = granted.admission_cancellation.clone();
     let job = GenerationJob {
         id: id.clone(),
+        durable_queue_rank: None,
         request,
         deferred_media: None,
         resolved_references: None,

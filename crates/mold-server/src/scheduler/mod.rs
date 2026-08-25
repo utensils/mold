@@ -808,7 +808,7 @@ trait DependencyPreparer: Send + Sync {
         &self,
         state: AppState,
         work_id: String,
-        request: mold_core::GenerateRequest,
+        request: crate::queue_media_runtime::ZeroizingGenerateRequest,
         progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
         context: crate::variant_dependencies::DependencyPreparationContext,
     ) -> PreparationFuture;
@@ -821,7 +821,7 @@ impl DependencyPreparer for PostUpscalePreparer {
         &self,
         state: AppState,
         work_id: String,
-        request: mold_core::GenerateRequest,
+        request: crate::queue_media_runtime::ZeroizingGenerateRequest,
         progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
         context: crate::variant_dependencies::DependencyPreparationContext,
     ) -> PreparationFuture {
@@ -1614,8 +1614,11 @@ impl Coordinator {
         if job.id.is_empty() {
             job.id = format!("runtime-generation-{}", self.synthetic_id);
         }
-        let queue_rank = self.synthetic_id;
-        self.synthetic_id = self.synthetic_id.saturating_add(1);
+        let queue_rank = job.durable_queue_rank.unwrap_or(self.synthetic_id);
+        self.synthetic_id = self
+            .synthetic_id
+            .saturating_add(1)
+            .max(queue_rank.saturating_add(1));
         let id = job.id.clone();
         let shape_bucket = crate::gpu_pool::oom_shape_bucket_with_projection(
             &job.request,
@@ -1814,6 +1817,8 @@ impl Coordinator {
             pending.preparation = PreparationState::Preparing;
             let state = self.state.clone();
             let request = pending.job.request.clone();
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+            let deferred_media = pending.job.deferred_media.clone();
             let queue_media_projection = pending
                 .job
                 .deferred_media
@@ -1874,6 +1879,29 @@ impl Coordinator {
                 // waits here rather than in `Needed`, where the scheduler
                 // would keep re-spawning it.
                 let _slot = slots.acquire_owned().await;
+                let request =
+                    crate::queue_media_runtime::ZeroizingGenerateRequest::from_owned(request);
+                #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+                let mut request = request;
+                #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+                let h3_hydration = if context.h3_private_ingress_grant.is_some() {
+                    match deferred_media.as_ref() {
+                        Some(media) => match media.hydrate_into(&id, &mut request) {
+                            Ok(lease) => Some(lease),
+                            Err(error) => {
+                                let event = PreparationEvent::Failed {
+                                    work_id: id.clone(),
+                                    error: error.to_string(),
+                                };
+                                let _ = tx.send(event);
+                                return;
+                            }
+                        },
+                        None => None,
+                    }
+                } else {
+                    None
+                };
                 let event = match preparer
                     .prepare(state, id.clone(), request, progress, context)
                     .await
@@ -1884,6 +1912,8 @@ impl Coordinator {
                     },
                     Err(error) => PreparationEvent::Failed { work_id: id, error },
                 };
+                #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+                drop(h3_hydration);
                 let _ = tx.send(event);
             });
         }
@@ -1912,7 +1942,7 @@ impl Coordinator {
             }
             PreparationEvent::Failed { work_id, error } => {
                 if let Some(pending) = self.pending.remove(&work_id) {
-                    reject_generation(&self.state, pending.job, error);
+                    hold_preparation_failure(&self.state, pending.job, error);
                     self.mutate(immediate);
                 }
             }
@@ -2231,7 +2261,7 @@ impl Coordinator {
                             generation_and_prepared_from_gpu_job(*job);
                         if matches!(&reason, LeaseRejection::FatalCuda) {
                             self.plan_invalidations.remove(&generation_job.id);
-                            reject_generation(
+                            retain_generation(
                                 &self.state,
                                 generation_job,
                                 "CUDA context is fatally poisoned; server restart required"
@@ -2659,7 +2689,7 @@ impl Coordinator {
             .pending
             .iter()
             .filter(|(id, pending)| {
-                pending.job.result_tx.is_closed()
+                pending.job.should_cancel_for_observer_disconnect()
                     || (!id.starts_with("runtime-generation-")
                         && self.state.job_registry.scheduler_lifecycle(id).is_none())
             })
@@ -4817,7 +4847,7 @@ impl Coordinator {
                 let work_cancelled = if let Some(pending) = generation {
                     self.state.job_registry.scheduler_lifecycle(&work_id)
                         != Some(crate::job_registry::JobLifecycle::Queued)
-                        || pending.job.result_tx.is_closed()
+                        || pending.job.should_cancel_for_observer_disconnect()
                 } else {
                     utility.is_none_or(|pending| pending.work.is_cancelled())
                 };
@@ -5670,14 +5700,14 @@ impl Coordinator {
     }
 
     fn reject_all_unstarted_for_fatal_cuda(&mut self) {
-        self.reject_all_unstarted("CUDA context is fatally poisoned; server restart required");
+        self.retain_all_unstarted("CUDA context is fatally poisoned; server restart required");
     }
 
-    fn reject_all_unstarted(&mut self, message: &str) {
+    fn retain_all_unstarted(&mut self, message: &str) {
         let pending = std::mem::take(&mut self.pending);
         self.plan_invalidations.clear();
         for (_, pending) in pending {
-            reject_generation(&self.state, pending.job, message.to_string());
+            retain_generation(&self.state, pending.job, message.to_string());
         }
         let pending_owner_work = std::mem::take(&mut self.pending_owner_work);
         for (_, pending) in pending_owner_work {
@@ -5726,7 +5756,7 @@ pub async fn run_scheduler_coordinator(
                 job_rx.close();
                 owner_work_rx.close();
                 while let Ok(job) = job_rx.try_recv() {
-                    reject_generation(
+                    retain_generation(
                         &coordinator.state,
                         job,
                         "generation scheduler is shutting down".to_string(),
@@ -5736,7 +5766,7 @@ pub async fn run_scheduler_coordinator(
                     work.work
                         .reject("generation scheduler is shutting down".to_string());
                 }
-                coordinator.reject_all_unstarted("generation scheduler is shutting down");
+                coordinator.retain_all_unstarted("generation scheduler is shutting down");
                 break;
             }
             job = job_rx.recv(), if generation_ingress_open => {
@@ -5853,7 +5883,7 @@ pub async fn run_scheduler_coordinator(
             job_rx.close();
             owner_work_rx.close();
             while let Ok(job) = job_rx.try_recv() {
-                reject_generation(
+                retain_generation(
                     &coordinator.state,
                     job,
                     "CUDA context is fatally poisoned; server restart required".to_string(),
@@ -5911,6 +5941,7 @@ fn gpu_job_from_generation(
     }
     GpuJob {
         id: job.id,
+        durable_queue_rank: job.durable_queue_rank,
         model: job.request.model.clone(),
         request: job.request,
         deferred_media: job.deferred_media,
@@ -5949,6 +5980,7 @@ fn generation_and_prepared_from_gpu_job(
     (
         GenerationJob {
             id: job.id,
+            durable_queue_rank: job.durable_queue_rank,
             request: job.request,
             deferred_media: job.deferred_media,
             resolved_references: job.resolved_references,
@@ -6004,8 +6036,43 @@ fn reject_generation(state: &AppState, mut job: GenerationJob, error: String) {
     }
     let id = job.id.clone();
     if let Some(ticket) = job.journal.take() {
-        ticket.fail(&error);
+        // Deterministic planning and validation refusals remain visible but
+        // cannot be retried unchanged. Transient preparation failures use the
+        // explicit retryable path below; shutdown uses retention for replay.
+        ticket.hold(&error);
     }
+    let _ = job.result_tx.send(Err(error));
+    state.queue.decrement();
+    state.job_registry.remove(&id);
+}
+
+/// Deferred dependency failures happen after durable acknowledgement. Preserve
+/// that accepted request as an explicitly retryable hold instead of turning a
+/// transient download, probe, or preparation error into terminal data loss.
+/// Non-durable jobs retain their legacy terminal behavior.
+fn hold_preparation_failure(state: &AppState, job: GenerationJob, error: String) {
+    let mut job = job;
+    if let Some(progress) = job.progress_tx {
+        let _ = progress.send(SseMessage::Error(mold_core::SseErrorEvent::failed(
+            error.clone(),
+        )));
+    }
+    let id = job.id.clone();
+    if let Some(ticket) = job.journal.take() {
+        ticket.hold_retryable(&error);
+    }
+    let _ = job.result_tx.send(Err(error));
+    state.queue.decrement();
+    state.job_registry.remove(&id);
+}
+
+/// A process-level interruption is not a job failure. Release the durable
+/// claim so the next feeder pass or process boot replays it automatically.
+fn retain_generation(state: &AppState, mut job: GenerationJob, error: String) {
+    if let Some(ticket) = job.journal.take() {
+        let _ = ticket.retain();
+    }
+    let id = job.id.clone();
     let _ = job.result_tx.send(Err(error));
     state.queue.decrement();
     state.job_registry.remove(&id);
@@ -7413,7 +7480,7 @@ mod tests {
             &self,
             _state: AppState,
             _work_id: String,
-            _request: mold_core::GenerateRequest,
+            _request: crate::queue_media_runtime::ZeroizingGenerateRequest,
             _progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
             _context: crate::variant_dependencies::DependencyPreparationContext,
         ) -> PreparationFuture {
@@ -7827,6 +7894,7 @@ mod tests {
         (
             GenerationJob {
                 id: id.to_string(),
+                durable_queue_rank: None,
                 request,
                 deferred_media: None,
                 resolved_references: None,
@@ -7841,6 +7909,64 @@ mod tests {
             },
             result_rx,
         )
+    }
+
+    #[tokio::test]
+    async fn deferred_preparation_failure_parks_durable_work_for_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("gallery");
+        std::fs::create_dir_all(&output).unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(tx);
+        let mut state = AppState::for_tests();
+        state.queue = queue.clone();
+        state.queue_capacity = 1;
+        state.metadata_db = db.clone();
+        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            db,
+            Some(root.path()),
+            "preparation-hold-test",
+        ));
+
+        let (mut job, mut result) = fake_generation("preparation-failed");
+        job.output_dir = Some(output.clone());
+        job.journal = state
+            .queue_journal
+            .clone()
+            .record(crate::queue_journal::JournalAdmission {
+                id: &job.id,
+                request: &job.request,
+                output_dir: Some(&output),
+                target_gpu: None,
+                target_device_id: None,
+                completion_payload: SseCompletionPayload::Full,
+                batch_child: false,
+                carries_reference_authority: false,
+            });
+        state
+            .job_registry
+            .register(&job.id, job.request.model.clone());
+        queue.submit(job, 1).await.unwrap();
+        let job = rx.recv().await.unwrap();
+
+        hold_preparation_failure(&state, job, "dependency unavailable".to_string());
+
+        let outcome = result.try_recv().unwrap();
+        assert!(matches!(outcome, Err(ref error) if error == "dependency unavailable"));
+        assert_eq!(queue.pending(), 0);
+        assert!(state.job_registry.entry("preparation-failed").is_none());
+        let page = state.queue_journal.projection_page(None, 1).unwrap();
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(
+            page.rows[0].state,
+            mold_db::generation_queue::QueueRowState::Held
+        );
+        assert_eq!(
+            page.rows[0].held_reason.as_deref(),
+            Some("dependency unavailable")
+        );
+        assert!(page.rows[0].retryable);
     }
 
     #[test]
@@ -10153,6 +10279,7 @@ mod tests {
                 model: "flux-dev:q4".to_string(),
                 request_json: r#"{"prompt":"patch target","model":"flux-dev:q4"}"#.to_string(),
                 media_set_id: None,
+                admission_authority: None,
                 output_dir: root.path().join("gallery"),
                 target_gpu: Some(0),
                 target_device_id: None,
@@ -13917,7 +14044,7 @@ mod tests {
             &self,
             _state: AppState,
             _work_id: String,
-            request: mold_core::GenerateRequest,
+            request: crate::queue_media_runtime::ZeroizingGenerateRequest,
             _progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
             _context: crate::variant_dependencies::DependencyPreparationContext,
         ) -> PreparationFuture {
@@ -14000,7 +14127,7 @@ mod tests {
             &self,
             _state: AppState,
             _work_id: String,
-            _request: mold_core::GenerateRequest,
+            _request: crate::queue_media_runtime::ZeroizingGenerateRequest,
             _progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
             _context: crate::variant_dependencies::DependencyPreparationContext,
         ) -> PreparationFuture {

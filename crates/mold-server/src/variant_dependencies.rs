@@ -1960,7 +1960,8 @@ async fn prepare_h3_private_inputs_for_devices(
     // layout stays fail-closed — its hand-built scope must already exist.
     #[cfg(feature = "h3")]
     uat_paths.ensure_staging_root();
-    let mut resolved_request = request.clone();
+    let mut resolved_request =
+        crate::queue_media_runtime::ZeroizingGenerateRequest::from_owned(request.clone());
     // Dropped when this preparation returns or unwinds, which cancels every
     // spawned decode that is still running for it.
     let mut preparation_cancellation = PreparationCancellationGuard::new();
@@ -2019,7 +2020,11 @@ async fn prepare_h3_private_inputs_for_devices(
                         device.available_vram_bytes,
                     );
             }
-            let admission_request = resolved_request.clone();
+            // Clone the zeroizing wrapper itself. A deref clone here would
+            // leave hydrated private media in an ordinary GenerateRequest on
+            // success, error, or panic unwind.
+            let admission_request: crate::queue_media_runtime::ZeroizingGenerateRequest =
+                resolved_request.clone();
             let paths = uat_paths.clone();
             // Each device's admission mints its own descriptors rather than
             // sharing one set: a binding owns an open file, and re-opening per

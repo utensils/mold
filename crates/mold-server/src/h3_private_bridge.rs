@@ -50,6 +50,27 @@ impl H3PrivateIngressGrant {
         )
     }
 
+    /// Stable authenticated subject used only for client-operation
+    /// idempotency. Runtime policy, server instance, and the materialized
+    /// execution request belong to the sealed replay authority instead: a
+    /// later policy change must not make the same client operation conflict
+    /// with the batch it already admitted.
+    pub(crate) fn idempotency_subject_sha256(&self) -> &str {
+        &self.authenticated_identity_sha256
+    }
+
+    /// Payload sealed by the queue-media AEAD and bound to owner + job ID.
+    /// The subject is a one-way identity digest, while the authority digest
+    /// binds the exact request, instance, task, partition, and current policy.
+    pub(crate) fn durable_replay_envelope(&self) -> Result<Vec<u8>, String> {
+        serde_json::to_vec(&DurableH3ReplayEnvelope {
+            version: 1,
+            authenticated_identity_sha256: self.authenticated_identity_sha256.clone(),
+            authority_identity_sha256: self.authority_identity_sha256(),
+        })
+        .map_err(|error| format!("MiniMax H3 replay authority serialization failed: {error}"))
+    }
+
     pub(crate) fn validate_for_request(
         &self,
         request: &mold_core::GenerateRequest,
@@ -117,6 +138,41 @@ impl H3PrivateIngressGrant {
         Ok(rebound)
     }
 
+    /// Rebind authority after trusted, post-acknowledgement server preparation
+    /// materializes defaults, expansion results, and server-owned paths. The
+    /// original request must still match the authenticated envelope exactly;
+    /// the prepared value is then reclassified through the same partition and
+    /// current-runtime gates rather than accepting a caller-supplied mutation.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn rebind_server_prepared_request(
+        &self,
+        submitted: &mold_core::GenerateRequest,
+        prepared: &mold_core::GenerateRequest,
+        instance_id: &str,
+    ) -> Result<Self, crate::routes::ApiError> {
+        self.validate_for_request(submitted, instance_id)
+            .map_err(|error| {
+                crate::routes::ApiError::with_code(
+                    error,
+                    H3_PRIVATE_PARTITION_REJECTED,
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                )
+            })?;
+        build_h3_private_ingress_grant(
+            prepared,
+            instance_id,
+            self.authenticated_identity_sha256.clone(),
+            reviewed_h3_private_runtime_available,
+        )?
+        .ok_or_else(|| {
+            crate::routes::ApiError::with_code(
+                "prepared MiniMax H3 request left its authenticated partition",
+                H3_PRIVATE_PARTITION_REJECTED,
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            )
+        })
+    }
+
     #[cfg(test)]
     fn authenticated_identity_sha256(&self) -> &str {
         &self.authenticated_identity_sha256
@@ -143,6 +199,15 @@ impl H3PrivateIngressGrant {
     }
 }
 
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurableH3ReplayEnvelope {
+    version: u16,
+    authenticated_identity_sha256: String,
+    authority_identity_sha256: String,
+}
+
 /// Classify the only private H3 HTTP partition before activation, artifact
 /// discovery, path resolution, or scheduler mutation. Non-H3 requests return
 /// `None` and retain the existing public ingress gates unchanged.
@@ -161,6 +226,19 @@ pub(crate) fn classify_h3_private_ingress(
     )
 }
 
+/// Capture durable authenticated authority without requiring the inference
+/// runtime to be healthy yet. Runtime qualification is rechecked by restore
+/// before the feeder publishes the job to the scheduler.
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn capture_durable_h3_private_ingress(
+    request: &mold_core::GenerateRequest,
+    authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
+    instance_id: &str,
+) -> Result<Option<H3PrivateIngressGrant>, crate::routes::ApiError> {
+    classify_h3_private_ingress_with_runtime(request, authenticated, instance_id, |_| true)
+}
+
 #[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 fn classify_h3_private_ingress_with_runtime(
     request: &mold_core::GenerateRequest,
@@ -170,7 +248,7 @@ fn classify_h3_private_ingress_with_runtime(
 ) -> Result<Option<H3PrivateIngressGrant>, crate::routes::ApiError> {
     use axum::http::StatusCode;
 
-    let Some(contract) = mold_core::minimax_h3::capability_contract_for_model(&request.model)
+    let Some(_contract) = mold_core::minimax_h3::capability_contract_for_model(&request.model)
     else {
         return Ok(None);
     };
@@ -225,6 +303,88 @@ fn classify_h3_private_ingress_with_runtime(
     #[cfg(feature = "h3")]
     let _ = authenticated;
 
+    build_h3_private_ingress_grant(
+        request,
+        instance_id,
+        authenticated_identity_sha256,
+        runtime_available,
+    )
+}
+
+/// Reconstruct a payload-free private ingress grant for a durably admitted
+/// row. The caller supplies only the opaque authenticated-subject digest that
+/// was bound to the original admission row; every mutable security fact is
+/// rechecked against the current process before the grant is returned.
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
+pub(crate) fn restore_durable_h3_private_ingress(
+    request: &mold_core::GenerateRequest,
+    envelope: &[u8],
+    instance_id: &str,
+) -> Result<Option<H3PrivateIngressGrant>, crate::routes::ApiError> {
+    use axum::http::StatusCode;
+
+    let envelope: DurableH3ReplayEnvelope = serde_json::from_slice(envelope).map_err(|_| {
+        crate::routes::ApiError::with_code(
+            "durable MiniMax H3 admission authority is invalid",
+            H3_PRIVATE_PARTITION_REJECTED,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+    })?;
+    let valid_digest = |digest: &str| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    if envelope.version != 1
+        || !valid_digest(&envelope.authenticated_identity_sha256)
+        || !valid_digest(&envelope.authority_identity_sha256)
+    {
+        return Err(crate::routes::ApiError::with_code(
+            "durable MiniMax H3 admission authority is invalid",
+            H3_PRIVATE_PARTITION_REJECTED,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    }
+    let restored = build_h3_private_ingress_grant(
+        request,
+        instance_id,
+        envelope.authenticated_identity_sha256,
+        reviewed_h3_private_runtime_available,
+    )?;
+    let Some(grant) = restored else {
+        return Err(crate::routes::ApiError::with_code(
+            "durable MiniMax H3 admission authority no longer names an H3 request",
+            H3_PRIVATE_PARTITION_REJECTED,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    };
+    if grant.authority_identity_sha256() != envelope.authority_identity_sha256 {
+        return Err(crate::routes::ApiError::with_code(
+            "durable MiniMax H3 admission authority does not match this request",
+            H3_PRIVATE_PARTITION_REJECTED,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    }
+    Ok(Some(grant))
+}
+
+#[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
+fn build_h3_private_ingress_grant(
+    request: &mold_core::GenerateRequest,
+    instance_id: &str,
+    authenticated_identity_sha256: String,
+    runtime_available: impl FnOnce(mold_core::minimax_h3::Task) -> bool,
+) -> Result<Option<H3PrivateIngressGrant>, crate::routes::ApiError> {
+    use axum::http::StatusCode;
+
+    let Some(contract) = mold_core::minimax_h3::capability_contract_for_model(&request.model)
+    else {
+        return Ok(None);
+    };
+    if mold_core::is_pinned_unrunnable_minimax_h3_identity(&request.model) {
+        return Ok(None);
+    }
     let output_format = request
         .output_format
         .unwrap_or(mold_core::OutputFormat::Mp4);
@@ -3215,6 +3375,86 @@ mod structural_tests {
         let debug = format!("{cloned:?}");
         assert!(!debug.contains(&auth.identity));
         assert!(!debug.contains(&request.prompt));
+    }
+
+    #[test]
+    fn idempotency_subject_is_stable_but_replay_authority_is_exact() {
+        let auth = authenticated();
+        let request = request(mold_core::minimax_h3::FL2VA_COMFY);
+        let admitted = super::classify_h3_private_ingress_with_runtime(
+            &request,
+            Some(&auth),
+            INSTANCE_ID,
+            |_| true,
+        )
+        .unwrap()
+        .unwrap();
+
+        let same_client_other_instance = super::classify_h3_private_ingress_with_runtime(
+            &request,
+            Some(&auth),
+            "different-instance",
+            |_| true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            admitted.idempotency_subject_sha256(),
+            same_client_other_instance.idempotency_subject_sha256(),
+            "client-operation idempotency must not conflict after a server restart"
+        );
+        assert_ne!(
+            admitted.authority_identity_sha256(),
+            same_client_other_instance.authority_identity_sha256(),
+            "durable replay authority must remain bound to the admitting instance"
+        );
+
+        let other_auth = crate::auth::ApiKeyAuthenticated {
+            identity: "different-process-local-auth-marker".to_string(),
+        };
+        let other_client = super::classify_h3_private_ingress_with_runtime(
+            &request,
+            Some(&other_auth),
+            INSTANCE_ID,
+            |_| true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_ne!(
+            admitted.idempotency_subject_sha256(),
+            other_client.idempotency_subject_sha256(),
+            "different authenticated clients must never share idempotency authority"
+        );
+
+        let envelope = admitted.durable_replay_envelope().unwrap();
+        let restored = super::restore_durable_h3_private_ingress(&request, &envelope, INSTANCE_ID)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            restored.authority_identity_sha256(),
+            admitted.authority_identity_sha256()
+        );
+        restored
+            .validate_for_request(&request, INSTANCE_ID)
+            .expect("durable replay must revalidate the exact request");
+
+        let mut changed = request;
+        changed.prompt.push_str(" changed");
+        assert!(restored
+            .validate_for_request(&changed, INSTANCE_ID)
+            .is_err());
+    }
+
+    #[test]
+    fn durable_h3_envelope_rejects_non_digest_authority() {
+        let error = super::restore_durable_h3_private_ingress(
+            &request(mold_core::minimax_h3::FL2VA_COMFY),
+            br#"{"version":1,"authenticated_identity_sha256":"not-a-digest","authority_identity_sha256":"not-a-digest"}"#,
+            INSTANCE_ID,
+        )
+        .expect_err("malformed durable authority must fail closed");
+        assert_eq!(error.code, super::H3_PRIVATE_PARTITION_REJECTED);
     }
 
     #[test]

@@ -63,6 +63,7 @@ pub struct DurableGenerationBatchChildRow {
     pub batch_index: u32,
     pub state: String,
     pub error: Option<String>,
+    pub retryable: bool,
     pub updated_at_ms: i64,
     pub terminal_error_json: Option<String>,
     pub result_json: Option<String>,
@@ -133,6 +134,15 @@ pub enum OwnedHold {
     Held,
     Cancelled,
     Fenced,
+}
+
+/// Result of an explicit retry request for a parked durable generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnedRetry {
+    Retried,
+    NotOwned,
+    NotHeld,
+    NotRetryable,
 }
 
 /// Insert the grouping rows and every ordinary durable queue row atomically.
@@ -548,6 +558,7 @@ pub fn hold_owned(
     job_id: &str,
     claim_token: Option<&str>,
     reason: &str,
+    retryable: bool,
     now_ms: i64,
 ) -> Result<OwnedHold> {
     db.transact_immediate(|conn| {
@@ -599,9 +610,17 @@ pub fn hold_owned(
 
         let held = conn.execute(
             "UPDATE generation_queue
-                SET state = 'held', held_reason = ?4, updated_at = ?5
-              WHERE id = ?1 AND owner_uuid = ?2 AND claim_token IS ?3 AND state = ?6",
-            params![job_id, owner_uuid, claim_token, reason, now_ms, queue_state],
+                SET state = 'held', held_reason = ?4, retryable = ?5, updated_at = ?6
+              WHERE id = ?1 AND owner_uuid = ?2 AND claim_token IS ?3 AND state = ?7",
+            params![
+                job_id,
+                owner_uuid,
+                claim_token,
+                reason,
+                retryable,
+                now_ms,
+                queue_state
+            ],
         )?;
         if held != 1 {
             bail!("owned queue row changed during hold");
@@ -617,6 +636,77 @@ pub fn hold_owned(
             bail!("batch child changed during hold");
         }
         Ok(OwnedHold::Held)
+    })
+}
+
+/// Atomically return one explicitly retryable held row to the durable queue.
+///
+/// The owner and retryable bit are the public authority. Clearing the runtime
+/// claim and both crash-loop counters gives the operator-approved attempt a
+/// fresh budget. A heterogeneous child is restored in the same transaction so
+/// its status cannot remain held while the queue has resumed it.
+pub fn retry_held_owned(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    job_id: &str,
+    now_ms: i64,
+) -> Result<OwnedRetry> {
+    db.transact_immediate(|conn| {
+        let row = conn
+            .query_row(
+                "SELECT state, retryable,
+                        (SELECT child.state
+                           FROM generation_batch_children AS child
+                          WHERE child.job_id = generation_queue.id)
+                   FROM generation_queue
+                  WHERE id = ?1 AND owner_uuid = ?2",
+                params![job_id, owner_uuid],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)? != 0,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((state, retryable, child_state)) = row else {
+            return Ok(OwnedRetry::NotOwned);
+        };
+        if state != "held" {
+            return Ok(OwnedRetry::NotHeld);
+        }
+        if !retryable {
+            return Ok(OwnedRetry::NotRetryable);
+        }
+        if child_state.as_deref().is_some_and(|state| state != "held") {
+            bail!("retryable queue row has a non-held batch child");
+        }
+
+        let updated = conn.execute(
+            "UPDATE generation_queue
+                SET state = 'queued', held_reason = NULL, retryable = 0,
+                    claim_token = NULL, dispatch_attempts = 0, replay_seen = 0,
+                    started_at = NULL, updated_at = ?3
+              WHERE id = ?1 AND owner_uuid = ?2
+                AND state = 'held' AND retryable = 1",
+            params![job_id, owner_uuid, now_ms],
+        )?;
+        if updated != 1 {
+            bail!("retryable queue row changed during retry");
+        }
+        if child_state.is_some() {
+            let child_updated = conn.execute(
+                "UPDATE generation_batch_children
+                    SET state = 'accepted', error = NULL, updated_at_ms = ?2
+                  WHERE job_id = ?1 AND state = 'held'",
+                params![job_id, now_ms],
+            )?;
+            if child_updated != 1 {
+                bail!("held batch child changed during retry");
+            }
+        }
+        Ok(OwnedRetry::Retried)
     })
 }
 
@@ -1025,9 +1115,13 @@ fn durable_detail_on_conn(
     batch: GenerationBatchRow,
 ) -> Result<DurableGenerationBatchDetail> {
     let mut stmt = conn.prepare(
-        "SELECT batch_id, job_id, batch_index, state, error, updated_at_ms,
-                terminal_error_json, result_json, completed_at_ms
-           FROM generation_batch_children WHERE batch_id = ?1 ORDER BY batch_index",
+        "SELECT child.batch_id, child.job_id, child.batch_index, child.state,
+                child.error, child.updated_at_ms, child.terminal_error_json,
+                child.result_json, child.completed_at_ms,
+                COALESCE(queue.retryable, 0)
+           FROM generation_batch_children child
+           LEFT JOIN generation_queue queue ON queue.id = child.job_id
+          WHERE child.batch_id = ?1 ORDER BY child.batch_index",
     )?;
     let children = stmt
         .query_map(params![batch.id], |row| {
@@ -1041,6 +1135,7 @@ fn durable_detail_on_conn(
                 terminal_error_json: row.get(6)?,
                 result_json: row.get(7)?,
                 completed_at_ms: row.get(8)?,
+                retryable: row.get::<_, i64>(9)? != 0,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1133,6 +1228,7 @@ mod tests {
                         updated_at_ms: 1,
                         started_at_ms: None,
                         media_set_id: None,
+                        admission_authority: None,
                     },
                 )
             })
@@ -2007,6 +2103,7 @@ mod tests {
                 "job-0",
                 Some("worker"),
                 "unusable output",
+                false,
                 4,
             )
             .unwrap(),
@@ -2333,7 +2430,7 @@ mod tests {
         assert!(restore_child_after_retain(&db, "owner-1", "job-0", 5).unwrap());
         set_child_state(&db, "job-0", "running", None, 6).unwrap();
         assert_eq!(
-            hold_owned(&db, "owner-1", "job-0", None, "operator hold", 7).unwrap(),
+            hold_owned(&db, "owner-1", "job-0", None, "operator hold", false, 7).unwrap(),
             OwnedHold::Held
         );
         assert!(!restore_child_after_retain(&db, "owner-1", "job-0", 8).unwrap());
@@ -2343,5 +2440,36 @@ mod tests {
             .children[0];
         assert_eq!(child.state, "held");
         assert_eq!(child.error.as_deref(), Some("operator hold"));
+    }
+
+    #[test]
+    fn explicit_retry_restores_only_retryable_held_work_atomically() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(2)).unwrap();
+
+        assert_eq!(
+            hold_owned(&db, "owner-1", "job-0", None, "dependency failed", true, 2).unwrap(),
+            OwnedHold::Held
+        );
+        assert_eq!(
+            hold_owned(&db, "owner-1", "job-1", None, "corrupt media", false, 2).unwrap(),
+            OwnedHold::Held
+        );
+        assert_eq!(
+            retry_held_owned(&db, "owner-1", "job-1", 3).unwrap(),
+            OwnedRetry::NotRetryable
+        );
+        assert_eq!(
+            retry_held_owned(&db, "owner-1", "job-0", 3).unwrap(),
+            OwnedRetry::Retried
+        );
+
+        let queue = crate::generation_queue::get(&db, "job-0").unwrap().unwrap();
+        assert_eq!(queue.state, QueueRowState::Queued);
+        assert_eq!(queue.held_reason, None);
+        let detail = get_durable(&db, "owner-1", "batch-1").unwrap().unwrap();
+        assert_eq!(detail.children[0].state, "accepted");
+        assert_eq!(detail.children[0].error, None);
+        assert_eq!(detail.children[1].state, "held");
     }
 }

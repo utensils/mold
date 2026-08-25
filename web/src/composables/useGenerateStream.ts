@@ -41,8 +41,6 @@ import {
   admitGenerationBatch,
   lookupGenerationBatchByClientId,
   reconcileGenerationBatches,
-  supportsDurableRequest,
-  supportsDurableGenerationLifecycle,
   type GenerationBatchStatus,
 } from "@studio/api/generationAdmission";
 import {
@@ -53,7 +51,7 @@ import {
   type GenerationBatchTracker,
   type GenerationLifecycleJob,
 } from "@studio/lib/generationLifecycle";
-import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Identity";
+import { generationHostSubmissionPolicy } from "@studio/lib/generationSubmissionPolicy";
 
 function surfaceRequestWarnings(warnings: string[]): void {
   for (const warning of warnings) toast("warning", warning);
@@ -1190,21 +1188,21 @@ function durableRequestIneligibility(
   if (decision.kind === "chain" || isPrebuiltChainRequest(request)) {
     return "sequences use their dedicated durable lifecycle";
   }
-  if (!route || !supportsDurableGenerationLifecycle(route.durableGeneration)) {
-    return "the host does not advertise durable generation outcomes";
-  }
+  if (!route) return "the host does not advertise durable generation outcomes";
   if (!route.instanceId) return "the host instance is unknown";
   const generation = request as GenerateRequestWire;
-  if (isMinimaxH3Identity(route.modelFamily, generation.model)) {
-    return "MiniMax H3 replay authority is intentionally private";
-  }
-  if (
-    !supportsDurableRequest(
-      route.durableGeneration,
-      route.durableMedia,
-      generation,
-    )
-  ) {
+  const admission = generationHostSubmissionPolicy(
+    { kind: "pinned", hostId: route.hostId },
+    {
+      hostId: route.hostId,
+      queue: route.durableGeneration,
+      durableMedia: route.durableMedia,
+    },
+    route.modelFamily
+      ? { ...generation, family: route.modelFamily }
+      : generation,
+  ).admission;
+  if (admission === "legacy_attached") {
     return "the host does not advertise encrypted durable support for this request";
   }
   return null;

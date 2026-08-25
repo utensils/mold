@@ -20,6 +20,8 @@ export interface GenerationBatchChild {
   index: number;
   job_id: string;
   state: GenerationLifecyclePhase;
+  /** Server-owned fence for POST /api/queue/{job_id}/retry. */
+  retryable?: boolean | null;
   /** Legacy human-readable failure retained for mixed-version callers. */
   error?: string | null;
   created_at_ms: number;
@@ -63,6 +65,8 @@ export type GenerationBatchLookup =
 export interface DurableGenerationQueueCapabilities {
   heterogeneous_batch?: boolean;
   durable_batch_outcomes?: boolean;
+  /** Version 2 admits durably before model-family preparation begins. */
+  admission_protocol_version?: number | null;
 }
 
 /** Exact additive wire shape of `mold_core::DurableMediaCapabilities`. */
@@ -239,7 +243,10 @@ export function parseGenerationBatchStatus(
         !finiteNumber(raw.completed_at_ms)) ||
       (raw.error !== undefined &&
         raw.error !== null &&
-        typeof raw.error !== "string")
+        typeof raw.error !== "string") ||
+      (raw.retryable !== undefined &&
+        raw.retryable !== null &&
+        typeof raw.retryable !== "boolean")
     ) {
       throw new Error(`${childPath} is incompatible`);
     }
@@ -252,6 +259,9 @@ export function parseGenerationBatchStatus(
       index: raw.index as number,
       job_id: raw.job_id,
       state: raw.state,
+      ...(raw.retryable === undefined
+        ? {}
+        : { retryable: raw.retryable as boolean | null }),
       created_at_ms: raw.created_at_ms,
       updated_at_ms: raw.updated_at_ms,
       ...(raw.completed_at_ms === undefined

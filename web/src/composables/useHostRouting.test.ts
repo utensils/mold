@@ -222,6 +222,50 @@ describe("useHostRouting", () => {
     expect(routing.multiHost.value).toBe(false);
   });
 
+  it("skips placement preview for canonical v2 pinned and automatic routing", async () => {
+    const canonical: ServerCapabilities = {
+      gallery: { can_delete: true },
+      queue: {
+        heterogeneous_batch: true,
+        durable_batch_outcomes: true,
+        admission_protocol_version: 2,
+      },
+    };
+    statuses.set(ORIGIN_HOST_ID, status({ queue_depth: 4 }));
+    models.set(ORIGIN_HOST_ID, [model("flux-dev:q4")]);
+    capabilities.set(ORIGIN_HOST_ID, canonical);
+    const remote = addHost({ url: "http://studio.local:7680", name: "Studio" });
+    statuses.set(remote.id, status({ queue_depth: 0 }));
+    models.set(remote.id, [model("flux-dev:q4")]);
+    capabilities.set(remote.id, canonical);
+    const routing = useHostRouting();
+    await routing.refresh();
+    const request = {
+      prompt: "fast admission",
+      model: "flux-dev:q4",
+      width: 512,
+      height: 512,
+      steps: 4,
+      guidance: 3.5,
+      seed: null,
+      batch_size: 1,
+    };
+
+    setGenerateTargetId(ORIGIN_HOST_ID);
+    await expect(routing.resolveFeasible(request)).resolves.toMatchObject({
+      kind: "route",
+      route: { hostId: ORIGIN_HOST_ID },
+      preview: null,
+    });
+    setGenerateTargetId(AUTO_TARGET_ID);
+    await expect(routing.resolveFeasible(request)).resolves.toMatchObject({
+      kind: "route",
+      route: { hostId: remote.id },
+      preview: null,
+    });
+    expect(placementCall).not.toHaveBeenCalled();
+  });
+
   it("bounds the first queue read by current status capacity and merges live-only rows once", async () => {
     statuses.set(ORIGIN_HOST_ID, status({ queue_capacity: 17 }));
     models.set(ORIGIN_HOST_ID, []);

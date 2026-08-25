@@ -220,6 +220,25 @@ describe("canonical durable generation lifecycle", () => {
     });
   });
 
+  it("preserves an incapable frozen-target failure from reconciliation", () => {
+    const failed = reduceGenerationLifecycle(admitted(), {
+      type: "batch_snapshot",
+      batch: batch("failed", 40, {
+        children: [
+          child("failed", 40, {
+            error: "selected machine cannot run this model",
+            completed_at_ms: 40,
+          }),
+        ],
+      }),
+    });
+    expect(onlyJob(failed)).toMatchObject({
+      phase: "failed",
+      error: "selected machine cannot run this model",
+      completedAtMs: 40,
+    });
+  });
+
   it("fences instance mismatches without attaching foreign jobs", () => {
     const mismatch = reduceGenerationLifecycle(tracker(), {
       type: "batch_snapshot",

@@ -118,6 +118,8 @@ export interface JobRoute {
   heterogeneousBatch?: boolean;
   heterogeneousBatchMaxOutputs?: number | null;
   durableBatchOutcomes?: boolean;
+  /** Version 2 acknowledges durable work before model preparation. */
+  admissionProtocolVersion?: number | null;
   durableMedia?: DurableMediaCapabilities | null;
   modelFamily?: string | null;
 }
@@ -1153,6 +1155,9 @@ export const useGenerationStore = defineStore("generation", {
             {
               heterogeneous_batch: route.heterogeneousBatch === true,
               durable_batch_outcomes: route.durableBatchOutcomes === true,
+              ...(route.admissionProtocolVersion === undefined
+                ? {}
+                : { admission_protocol_version: route.admissionProtocolVersion }),
             },
             route.durableMedia,
             route.modelFamily,

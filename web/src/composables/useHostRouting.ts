@@ -39,6 +39,7 @@ import {
 import type { DeviceInfo } from "@studio/api/devices";
 import { ApiError, type ApiTarget } from "@studio/api/client";
 import { profileHashConflict } from "@studio/lib/profileFleet";
+import { generationHostSubmissionPolicy } from "@studio/lib/generationSubmissionPolicy";
 import {
   mergeQueueEntries,
   predictedCompletionUnixMs,
@@ -801,6 +802,8 @@ function resolve(model: string | null): HostRoute | null {
 
 async function resolveFeasibleWithPreview(
   model: string,
+  request: object,
+  outputKind: "generation" | "sequence",
   previewFor: (
     target: ApiTarget,
     options: PlacementPreviewOptions,
@@ -881,6 +884,7 @@ async function resolveFeasibleWithPreview(
           candidate,
           preview: null,
           legacyUnsupported: false,
+          telemetryOnly: false,
           error: "machine disappeared from the host registry",
           roundTripMs: 0,
         };
@@ -890,11 +894,40 @@ async function resolveFeasibleWithPreview(
           baseUrl: entry.url,
           apiKey: entry.apiKey ?? null,
         };
+        const submission = generationHostSubmissionPolicy(
+          selection === AUTO_TARGET_ID
+            ? { kind: "auto" }
+            : selection === CAPABLE_TARGET_ID
+              ? { kind: "capable" }
+              : { kind: "pinned", hostId: selection },
+          {
+            hostId: candidate.id,
+            queue: capabilitiesByHost.value[candidate.id]?.queue,
+            durableMedia:
+              capabilitiesByHost.value[candidate.id]?.durable_media,
+          },
+          request,
+          outputKind,
+        );
+        if (
+          submission.routing === "telemetry_only" ||
+          submission.routing === "none"
+        ) {
+          return {
+            candidate,
+            preview: null,
+            legacyUnsupported: false,
+            telemetryOnly: true,
+            error: null,
+            roundTripMs: Math.max(0, performance.now() - started),
+          };
+        }
         const preview = await previewFor(target, options);
         return {
           candidate,
           preview,
           legacyUnsupported: false,
+          telemetryOnly: false,
           error: null,
           roundTripMs: Math.max(0, performance.now() - started),
         };
@@ -911,6 +944,7 @@ async function resolveFeasibleWithPreview(
           legacyUnsupported:
             error instanceof ApiError &&
             (error.status === 404 || error.status === 405),
+          telemetryOnly: false,
           error: probeError,
           roundTripMs: Math.max(0, performance.now() - started),
         };
@@ -924,6 +958,8 @@ async function resolveFeasibleWithPreview(
     if (authorityRetry === 0) {
       return resolveFeasibleWithPreview(
         model,
+        request,
+        outputKind,
         previewFor,
         requireAuthoritative,
         options,
@@ -956,6 +992,25 @@ async function resolveFeasibleWithPreview(
       preview: probe.preview,
     }))
     .sort(comparePlacementPreviews);
+  const telemetryOnly = probes.filter(
+    (probe) => probe.telemetryOnly && currentById.has(probe.candidate.id),
+  );
+  if (telemetryOnly.length > 0) {
+    const usableIds = new Set([
+      ...telemetryOnly.map((probe) => probe.candidate.id),
+      ...planned.map((probe) => probe.hostId),
+    ]);
+    const usable = hosts.value.filter((host) => usableIds.has(host.id));
+    const route = resolveRoute(
+      usable,
+      selection,
+      hostsForModel(model).filter((id) => usableIds.has(id)),
+    );
+    if (route) {
+      const preview = planned.find((probe) => probe.hostId === route.hostId)?.preview ?? null;
+      return { kind: "route", route: withReferenceUploads(route)!, preview };
+    }
+  }
   if (planned.length > 0) {
     const chosen = currentById.get(planned[0].hostId);
     if (chosen) {
@@ -1117,6 +1172,8 @@ async function resolveFeasible(
 ): Promise<FeasibilityResult> {
   return resolveFeasibleWithPreview(
     request.model,
+    request,
+    "generation",
     (target, previewOptions) =>
       previewGenerationPlacement(
         target,
@@ -1141,6 +1198,8 @@ async function resolveFeasibleChain(
 ): Promise<FeasibilityResult> {
   return resolveFeasibleWithPreview(
     request.model,
+    request,
+    "sequence",
     (target, previewOptions) =>
       previewChainPlacement(
         target,
@@ -1159,6 +1218,8 @@ async function resolveFeasibleChain(
 async function revalidateFeasibleWithPreview(
   route: HostRoute,
   model: string,
+  request: object,
+  outputKind: "generation" | "sequence",
   previewFor: (
     target: ApiTarget,
     options: PlacementPreviewOptions,
@@ -1199,14 +1260,26 @@ async function revalidateFeasibleWithPreview(
   const capturedInstanceId = captured.instanceId ?? null;
   let preview: GenerationPlacementPreview | null = null;
   let legacyUnsupported = false;
+  const submission = generationHostSubmissionPolicy(
+    { kind: "pinned", hostId: route.hostId },
+    {
+      hostId: route.hostId,
+      queue: capabilitiesByHost.value[route.hostId]?.queue,
+      durableMedia: capabilitiesByHost.value[route.hostId]?.durable_media,
+    },
+    request,
+    outputKind,
+  );
   try {
-    preview = await previewFor(
-      {
-        baseUrl: route.target.baseUrl,
-        apiKey: route.target.apiKey ?? null,
-      },
-      options,
-    );
+    if (submission.routing === "legacy_placement") {
+      preview = await previewFor(
+        {
+          baseUrl: route.target.baseUrl,
+          apiKey: route.target.apiKey ?? null,
+        },
+        options,
+      );
+    }
   } catch (error) {
     if (
       error instanceof ApiError &&
@@ -1241,6 +1314,8 @@ async function revalidateFeasibleWithPreview(
       return revalidateFeasibleWithPreview(
         route,
         model,
+        request,
+        outputKind,
         previewFor,
         requireAuthoritative,
         options,
@@ -1258,9 +1333,12 @@ async function revalidateFeasibleWithPreview(
   ) {
     return { kind: "transient", perHost: [] };
   }
-  const classification = legacyUnsupported
-    ? "unsupported"
-    : classifyPlacementPreview(preview);
+  const classification =
+    submission.routing !== "legacy_placement"
+      ? "planned"
+      : legacyUnsupported
+        ? "unsupported"
+        : classifyPlacementPreview(preview);
   if (classification === "temporarily_unavailable") {
     return {
       kind: "transient",
@@ -1352,6 +1430,8 @@ async function revalidateFeasible(
   return revalidateFeasibleWithPreview(
     route,
     request.model,
+    request,
+    "generation",
     (target, previewOptions) =>
       previewGenerationPlacement(
         target,
@@ -1378,6 +1458,8 @@ async function revalidateFeasibleChain(
   return revalidateFeasibleWithPreview(
     route,
     request.model,
+    request,
+    "sequence",
     (target, previewOptions) =>
       previewChainPlacement(
         target,

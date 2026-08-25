@@ -140,6 +140,7 @@ pub(crate) struct MediaJournalAdmission<'a> {
     pub target_device_id: Option<&'a str>,
     pub completion_payload: SseCompletionPayload,
     pub seed_pinned: bool,
+    pub admission_authority: Option<&'a str>,
 }
 
 pub(crate) struct MediaBatchJournalAdmission<'a> {
@@ -490,6 +491,8 @@ pub struct QueueJournal {
     fail_completion_lookup: AtomicBool,
     #[cfg(test)]
     fail_claim_release: AtomicBool,
+    #[cfg(test)]
+    fail_hold_transition: AtomicBool,
     /// Held for the process's lifetime so a peer sharing this `MOLD_HOME`
     /// cannot adopt the same identity.
     _owner_claim: Option<QueueOwnerClaim>,
@@ -555,6 +558,8 @@ impl QueueJournal {
             fail_completion_lookup: AtomicBool::new(false),
             #[cfg(test)]
             fail_claim_release: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_hold_transition: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: env_usize(JOURNAL_MAX_BYTES_ENV, DEFAULT_JOURNAL_MAX_BYTES),
             max_dispatch_attempts: env_u32(
@@ -583,6 +588,8 @@ impl QueueJournal {
             fail_completion_lookup: AtomicBool::new(false),
             #[cfg(test)]
             fail_claim_release: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_hold_transition: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
@@ -624,7 +631,10 @@ impl QueueJournal {
         (self.durable_media_ready.load(Ordering::Acquire)
             && self.queue_media_lifecycle.get().is_some()
             && self.queue_media_admission.get().is_some())
-        .then_some(mold_core::DurableMediaCapabilities::v1())
+        .then_some(mold_core::DurableMediaCapabilities::v2(cfg!(any(
+            feature = "h3",
+            feature = "h3-private-uat"
+        ))))
     }
 
     /// The operator-facing counterpart of [`Self::durable_media_capabilities`].
@@ -850,6 +860,7 @@ impl QueueJournal {
             model: admission.request.model.clone(),
             request_json,
             media_set_id: None,
+            admission_authority: None,
             output_dir: output_dir.to_path_buf(),
             target_gpu: admission.target_gpu,
             target_device_id: admission.target_device_id.map(ToOwned::to_owned),
@@ -928,6 +939,7 @@ impl QueueJournal {
                 model: child.request.model.clone(),
                 request_json,
                 media_set_id: None,
+                admission_authority: None,
                 output_dir: output_dir.to_path_buf(),
                 target_gpu: child.target_gpu,
                 target_device_id: child.target_device_id.map(ToOwned::to_owned),
@@ -1029,6 +1041,7 @@ impl QueueJournal {
                     model: child.model.to_string(),
                     request_json: child.request_json.to_string(),
                     media_set_id,
+                    admission_authority: child.admission_authority.map(ToOwned::to_owned),
                     output_dir: child.output_dir.to_path_buf(),
                     target_gpu: child.target_gpu,
                     target_device_id: child.target_device_id.map(ToOwned::to_owned),
@@ -1197,6 +1210,7 @@ impl QueueJournal {
         generation_queue::claimed_runtime_position(db, owner, id, claim_token, limit)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn attach_claimed(self: &Arc<Self>, id: &str, claim_token: String) -> QueueTicket {
         QueueTicket {
             journal: Arc::clone(self),
@@ -1519,6 +1533,14 @@ impl QueueJournal {
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Test seam: fail the next claimed hold transaction before it changes
+    /// SQLite, proving the ticket falls back to claim release.
+    #[cfg(test)]
+    pub(crate) fn fail_hold_transition_for_tests(&self) {
+        self.fail_hold_transition
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     #[cfg(test)]
     pub(crate) fn claim_release_failure_pending_for_tests(&self) -> bool {
         self.fail_claim_release
@@ -1680,6 +1702,19 @@ impl QueueJournal {
             );
             Vec::new()
         })
+    }
+
+    /// Return one explicitly retryable held row to the feeder backlog.
+    pub fn retry_held(&self, id: &str) -> anyhow::Result<generation_batches::OwnedRetry> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(generation_batches::OwnedRetry::NotOwned);
+        };
+        let outcome = generation_batches::retry_held_owned(db, owner, id, now_ms())?;
+        if outcome == generation_batches::OwnedRetry::Retried {
+            self.publish_state_committed(id);
+            self.wake_feeder();
+        }
+        Ok(outcome)
     }
 
     /// Read one payload-free durable page. This method is synchronous because
@@ -1975,6 +2010,7 @@ pub async fn replay(state: &crate::state::AppState, dispatch_available: bool) ->
 
         let job = crate::state::GenerationJob {
             id: row.id.clone(),
+            durable_queue_rank: None,
             request,
             deferred_media: None,
             resolved_references: None,
@@ -2352,7 +2388,7 @@ impl QueueTicket {
                 let cap = self.journal.max_dispatch_attempts;
                 let reason =
                     format!("dispatch attempts exhausted ({attempts} > {cap}); held for review");
-                match self.hold_owned(&reason, now) {
+                match self.hold_owned(&reason, false, now) {
                     Ok(generation_batches::OwnedHold::Held) => {}
                     Ok(generation_batches::OwnedHold::Cancelled) => {
                         return DispatchClaim::Fenced;
@@ -2395,18 +2431,57 @@ impl QueueTicket {
     }
 
     /// Park the row: listed, never auto-run, and no longer owned by a ticket.
-    pub fn hold(mut self, reason: &str) {
-        self.settled = true;
-        if let Err(error) = self.hold_owned(reason, now_ms()) {
-            tracing::warn!(
-                job = %self.id,
-                error = %format!("{error:#}"),
-                "could not hold a durable queue row"
-            );
+    pub fn hold(mut self, reason: &str) -> RetainOutcome {
+        match self.hold_owned(reason, false, now_ms()) {
+            Ok(_) => {
+                self.settled = true;
+                RetainOutcome::Released
+            }
+            Err(error) => {
+                tracing::warn!(
+                    job = %self.id,
+                    error = %format!("{error:#}"),
+                    "could not hold a durable queue row; returning it to the replay backlog"
+                );
+                self.retain()
+            }
         }
     }
 
-    fn hold_owned(&self, reason: &str, now: i64) -> anyhow::Result<generation_batches::OwnedHold> {
+    /// Park a deferred-preparation failure without discarding its durable
+    /// request or media. Only these explicitly recoverable holds may be
+    /// returned to the queue through the retry API.
+    pub fn hold_retryable(mut self, reason: &str) -> RetainOutcome {
+        match self.hold_owned(reason, true, now_ms()) {
+            Ok(_) => {
+                self.settled = true;
+                RetainOutcome::Released
+            }
+            Err(error) => {
+                tracing::warn!(
+                    job = %self.id,
+                    error = %format!("{error:#}"),
+                    "could not hold a retryable durable queue row; returning it to the replay backlog"
+                );
+                self.retain()
+            }
+        }
+    }
+
+    fn hold_owned(
+        &self,
+        reason: &str,
+        retryable: bool,
+        now: i64,
+    ) -> anyhow::Result<generation_batches::OwnedHold> {
+        #[cfg(test)]
+        if self
+            .journal
+            .fail_hold_transition
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(anyhow::anyhow!("injected hold transition failure"));
+        }
         let (Some(db), Some(owner)) = (self.journal.db(), self.journal.owner_uuid.as_deref())
         else {
             return Ok(generation_batches::OwnedHold::Fenced);
@@ -2418,6 +2493,7 @@ impl QueueTicket {
             &self.id,
             self.claim_token.as_deref(),
             reason,
+            retryable,
             now,
         )?;
         if outcome == generation_batches::OwnedHold::Cancelled {
@@ -2539,6 +2615,7 @@ mod tests {
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
             fail_claim_release: AtomicBool::new(false),
+            fail_hold_transition: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
@@ -2601,6 +2678,7 @@ mod tests {
                 model: "flux-dev:q4".to_string(),
                 request_json: "{}".to_string(),
                 media_set_id: None,
+                admission_authority: None,
                 output_dir: std::path::PathBuf::from("/gallery"),
                 target_gpu: None,
                 target_device_id: None,
@@ -2933,6 +3011,42 @@ mod tests {
     }
 
     #[test]
+    fn failed_hold_transition_returns_the_exact_claim_to_replay() {
+        let journal = journal_with_db();
+        let request = request();
+        journal
+            .record_batch(BatchJournalAdmission {
+                id: "failed-hold-batch",
+                client_batch_id: "failed-hold-client",
+                request_sha256: "failed-hold-sha",
+                children: &[admission(
+                    "failed-hold-child",
+                    &request,
+                    Path::new("/gallery"),
+                )],
+            })
+            .unwrap();
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+        journal.fail_hold_transition_for_tests();
+
+        assert!(matches!(
+            ticket.hold_retryable("temporary preparation failure"),
+            RetainOutcome::Released
+        ));
+
+        let replay = journal
+            .claim_next_feeder()
+            .unwrap()
+            .expect("a failed hold must not strand or delete accepted work");
+        assert_eq!(replay.row.id, "failed-hold-child");
+        assert_eq!(replay.row.state, QueueRowState::Queued);
+        journal
+            .attach_claimed(&replay.row.id, replay.claim_token)
+            .discard();
+    }
+
+    #[test]
     fn completion_removes_the_row_even_behind_the_fence() {
         let journal = journal_with_db();
         let request = request();
@@ -3130,6 +3244,7 @@ mod tests {
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
             fail_claim_release: AtomicBool::new(false),
+            fail_hold_transition: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: 64,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
@@ -3161,6 +3276,7 @@ mod tests {
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
             fail_claim_release: AtomicBool::new(false),
+            fail_hold_transition: AtomicBool::new(false),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: 2,

@@ -80,6 +80,23 @@ const durableMediaRoute: HostRoute = {
   },
 };
 
+const canonicalH3Route: HostRoute = {
+  ...route,
+  modelFamily: "minimax-h3",
+  durableGeneration: {
+    ...route.durableGeneration,
+    admission_protocol_version: 2,
+  },
+  durableMedia: {
+    protocol_version: 3,
+    encrypted_at_rest: true,
+    generate_request_media: true,
+    identity: true,
+    h3_references: true,
+    private_h3: true,
+  },
+};
+
 function batch(
   clientBatchId: string,
   states: Array<
@@ -227,6 +244,23 @@ describe("web durable generation lifecycle", () => {
 
     expect(admitGenerationBatch).not.toHaveBeenCalled();
     expect(generateStream).toHaveBeenCalledTimes(1);
+  });
+
+  it("admits canonical v2 H3 through the durable batch transport", () => {
+    admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
+    const stream = useGenerateStream();
+    const submitted = request("canonical H3");
+    submitted.model = "hf:opaque-h3-checkpoint";
+    submitted.source_image = "PRIVATE-H3-SOURCE";
+
+    stream.submit(submitted, { kind: "single" }, canonicalH3Route);
+
+    expect(admitGenerationBatch).toHaveBeenCalledTimes(1);
+    expect(admitGenerationBatch.mock.calls[0]![1].requests[0]).toMatchObject({
+      model: "hf:opaque-h3-checkpoint",
+      source_image: "PRIVATE-H3-SOURCE",
+    });
+    expect(generateStream).not.toHaveBeenCalled();
   });
 
   it("has no browser submission-count cap and releases every POST immediately", () => {

@@ -23,6 +23,10 @@ export interface QueueEntry {
   seed_pinned?: boolean | null;
   durable?: boolean | null;
   held_reason?: string | null;
+  /** Durable preparation error. Present on held protocol-v2 rows. */
+  error?: string | null;
+  /** Exact opt-in fence for POST /api/queue/{id}/retry. */
+  retryable?: boolean | null;
 }
 
 export interface QueueWorkItem {
@@ -324,6 +328,18 @@ export async function cancelQueueJob(
   await apiFetchTo(target, `/api/queue/${encodeURIComponent(workId)}`, {
     method: "DELETE",
   });
+}
+
+/** Resume one explicitly retryable durable hold on the exact host. */
+export async function retryQueueJob(
+  target: ApiTarget,
+  workId: string,
+): Promise<void> {
+  await apiFetchTo(
+    target,
+    `/api/queue/${encodeURIComponent(workId)}/retry`,
+    { method: "POST" },
+  );
 }
 
 /** Set or clear a durable stable-device pin for queued work. */

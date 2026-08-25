@@ -1773,7 +1773,7 @@ pub(crate) fn resolve_max_deferrals() -> usize {
 
 async fn process_job(state: &AppState, mut job: GenerationJob) {
     // Check if client already disconnected before doing any work
-    if job.result_tx.is_closed() {
+    if job.should_cancel_for_observer_disconnect() {
         tracing::debug!("skipping queued job — client disconnected");
         return;
     }
@@ -2300,7 +2300,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                         "generation finished but its output could not be saved; \
                          holding the queue row for review"
                     );
-                    ticket.hold("the generated output could not be saved to the gallery");
+                    ticket.hold_retryable("the generated output could not be saved to the gallery");
                 }
             }
 
@@ -2432,7 +2432,7 @@ fn finish_single_worker_hydration_failure(
     if let Some(ticket) = job.journal.take() {
         match disposition {
             DeferredHydrationDisposition::Hold => {
-                ticket.hold("durable queue-media validation failed")
+                let _ = ticket.hold("durable queue-media validation failed");
             }
             DeferredHydrationDisposition::Retain => {
                 ticket.retain();
@@ -2974,7 +2974,7 @@ async fn run_queue_dispatcher_with_tuning_inner(
                 continue;
             }
         };
-        if job.result_tx.is_closed() {
+        if job.should_cancel_for_observer_disconnect() {
             tracing::debug!(model = %model_name, "skipping queued multi-GPU job — client disconnected");
             state.queue.decrement();
             state.job_registry.remove(&job_id);
@@ -3010,6 +3010,7 @@ async fn run_queue_dispatcher_with_tuning_inner(
         // Build the GpuJob once; the retry loop moves it between attempts.
         let mut gpu_job = Some(GpuJob {
             id: job.id.clone(),
+            durable_queue_rank: job.durable_queue_rank,
             model: model_name.clone(),
             request: job.request,
             deferred_media: job.deferred_media,
@@ -3068,7 +3069,7 @@ async fn run_queue_dispatcher_with_tuning_inner(
             }
             if gpu_job
                 .as_ref()
-                .is_some_and(|pending| pending.result_tx.is_closed())
+                .is_some_and(GpuJob::should_cancel_for_observer_disconnect)
             {
                 tracing::debug!(
                     model = %model_name,
@@ -3373,6 +3374,7 @@ fn generation_from_legacy_grant(grant: crate::gpu_pool::LeaseGrant) -> GpuJob {
 fn generation_from_legacy_gpu_job(job: GpuJob) -> GenerationJob {
     GenerationJob {
         id: job.id,
+        durable_queue_rank: job.durable_queue_rank,
         request: job.request,
         deferred_media: job.deferred_media,
         resolved_references: job.resolved_references,
@@ -3918,6 +3920,7 @@ mod tests {
                 model: request.model,
                 request_json,
                 media_set_id: None,
+                admission_authority: None,
                 output_dir: root,
                 target_gpu: None,
                 target_device_id: None,
@@ -4668,6 +4671,7 @@ mod tests {
         let original = fake_image();
         let generation = crate::gpu_pool::GpuJob {
             id: "legacy-sibling-post-upscale".to_string(),
+            durable_queue_rank: None,
             model: request.model.clone(),
             request,
             deferred_media: None,
@@ -6692,6 +6696,7 @@ mod tests {
         let (filler_result_tx, _filler_result_rx) = tokio::sync::oneshot::channel();
         let filler_job = crate::gpu_pool::GpuJob {
             id: String::new(),
+            durable_queue_rank: None,
             model: "busy-model".to_string(),
             request: fake_request("busy-model"),
             deferred_media: None,
@@ -6727,6 +6732,7 @@ mod tests {
         let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
         let job = crate::state::GenerationJob {
             id: String::new(),
+            durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
             resolved_references: None,
@@ -6780,6 +6786,7 @@ mod tests {
         let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
         let job = crate::state::GenerationJob {
             id: String::new(),
+            durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
             resolved_references: None,
@@ -6864,6 +6871,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         BufferedJob::new(crate::state::GenerationJob {
             id: String::new(),
+            durable_queue_rank: None,
             request: fake_request(model),
             deferred_media: None,
             resolved_references: None,
@@ -6882,6 +6890,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         BufferedJob::new(crate::state::GenerationJob {
             id: id.to_string(),
+            durable_queue_rank: None,
             request: fake_request(model),
             deferred_media: None,
             resolved_references: None,
@@ -7143,6 +7152,7 @@ mod tests {
             let (tx, rx) = tokio::sync::oneshot::channel();
             let job = crate::state::GenerationJob {
                 id: String::new(),
+                durable_queue_rank: None,
                 request: fake_request(model),
                 deferred_media: None,
                 resolved_references: None,
@@ -7219,6 +7229,7 @@ mod tests {
             let (tx, rx) = tokio::sync::oneshot::channel();
             let job = crate::state::GenerationJob {
                 id: id.to_string(),
+                durable_queue_rank: None,
                 request: fake_request(&format!("model-{id}")),
                 deferred_media: None,
                 resolved_references: None,
@@ -7280,6 +7291,7 @@ mod tests {
             let (tx, _rx) = tokio::sync::oneshot::channel();
             let job = GenerationJob {
                 id: String::new(),
+                durable_queue_rank: None,
                 request: fake_request(&format!("model-{i}")),
                 deferred_media: None,
                 resolved_references: None,
@@ -7388,6 +7400,7 @@ mod tests {
             held_rxs.push(rx);
             let job = crate::state::GenerationJob {
                 id: String::new(),
+                durable_queue_rank: None,
                 request: fake_request(&format!("model-{i}")),
                 deferred_media: None,
                 resolved_references: None,
@@ -7525,6 +7538,7 @@ mod tests {
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         let job = crate::state::GenerationJob {
             id: String::new(),
+            durable_queue_rank: None,
             request,
             deferred_media: None,
             resolved_references: None,
@@ -7569,6 +7583,7 @@ mod tests {
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         let job = crate::state::GenerationJob {
             id: "auto-job".to_string(),
+            durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
             resolved_references: None,
@@ -7652,6 +7667,7 @@ mod tests {
             .submit(
                 GenerationJob {
                     id: id.clone(),
+                    durable_queue_rank: None,
                     request,
                     deferred_media: None,
                     resolved_references: None,
@@ -7820,6 +7836,7 @@ mod tests {
                 .submit(
                     GenerationJob {
                         id: id.to_string(),
+                        durable_queue_rank: None,
                         request: fake_request("flux-dev:q4"),
                         deferred_media: None,
                         resolved_references: None,
@@ -7909,6 +7926,7 @@ mod tests {
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         let job = crate::state::GenerationJob {
             id: "paused-job".to_string(),
+            durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
             resolved_references: None,
@@ -7971,6 +7989,7 @@ mod tests {
                 .submit(
                     crate::state::GenerationJob {
                         id: id.to_string(),
+                        durable_queue_rank: None,
                         request: fake_request("flux-dev:q4"),
                         deferred_media: None,
                         resolved_references: None,
@@ -8035,6 +8054,7 @@ mod tests {
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         let job = crate::state::GenerationJob {
             id: "parked-job".to_string(),
+            durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
             resolved_references: None,

@@ -54,6 +54,27 @@ describe("durable generation admission API", () => {
     ).toBe(true);
   });
 
+  it("parses explicit retry authority without changing the child lifecycle", () => {
+    const parsed = parseGenerationBatchStatus(
+      batch({
+        children: [
+          {
+            index: 1,
+            job_id: "job-1",
+            state: "held",
+            retryable: true,
+            created_at_ms: 10,
+            updated_at_ms: 11,
+          },
+        ],
+      }),
+    );
+    expect(parsed.children[0]).toMatchObject({
+      state: "held",
+      retryable: true,
+    });
+  });
+
   it("admits request media only behind the exact encrypted v1 capability", () => {
     const queue = {
       heterogeneous_batch: true,
