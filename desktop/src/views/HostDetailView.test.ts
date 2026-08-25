@@ -1,13 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { createMemoryHistory, createRouter, type Router } from "vue-router";
 
-const { listDevices, setDeviceEnabled } = vi.hoisted(() => ({
+const { apiJsonTo, listDevices, setDeviceEnabled } = vi.hoisted(() => ({
+  apiJsonTo: vi.fn(),
   listDevices: vi.fn(),
   setDeviceEnabled: vi.fn(),
 }));
-const apiJsonTo = vi.fn();
 vi.mock("../lib/api/client", () => ({
   ApiError: class ApiError extends Error {},
   apiJsonTo: (...a: unknown[]) => apiJsonTo(...a),
@@ -176,6 +176,7 @@ function model(name: string, family: string): ModelEntry {
 
 let router: Router;
 let mountedHosts: ReturnType<typeof useHostsStore>;
+const mountedViews: Array<ReturnType<typeof mount>> = [];
 
 async function mountView(
   path = `/hosts/${REMOTE_ID}`,
@@ -252,6 +253,7 @@ async function mountView(
   const wrapper = mount(HostDetailView, {
     global: { plugins: [pinia, router] },
   });
+  mountedViews.push(wrapper);
   await flushPromises();
   return wrapper;
 }
@@ -283,6 +285,11 @@ beforeEach(() => {
     generateTargetHost: null,
   });
   installApi();
+});
+
+afterEach(() => {
+  for (const wrapper of mountedViews) wrapper.unmount();
+  mountedViews.length = 0;
 });
 
 describe("HostDetailView GPU lifecycle controls", () => {

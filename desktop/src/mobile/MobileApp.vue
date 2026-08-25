@@ -49,7 +49,6 @@ import {
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import {
   resolveDefaultSourceResolution,
-  resolveSourceConditioningTarget,
   resolveSourceCanvasTransition,
   resolveSourceResolution,
   type SourceDimensions,
@@ -102,7 +101,6 @@ import { promptPlaceholder, promptRequired } from "@studio/lib/promptRequirement
 import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
 import {
   appendMinimaxH3GalleryImageReference,
-  emptyMinimaxH3AuthoringState,
   isMinimaxH3Identity,
   minimaxH3AuthoringError,
   minimaxH3TaskForModel,
@@ -112,9 +110,7 @@ import {
 import { h3BoundariesNeedingMedia } from "@studio/lib/h3BoundaryRestore";
 import {
   classifyPlacementPreview,
-  comparePlacementPreviews,
   previewChainPlacement,
-  previewGenerationPlacement,
   previewRequestForSiblingFanout,
   requiresAuthoritativePlacement,
   type GenerationPlacementPreview,
@@ -122,7 +118,6 @@ import {
 import {
   AUTO_TARGET_ID,
   CAPABLE_TARGET_ID,
-  chooseRoutedHost,
   hostIdsForModel,
   isAutomaticTarget,
   pickAutoHost,
@@ -214,7 +209,6 @@ import type {
   Ltx2CameraControlInfo,
   ModelEntry,
   OutputMetadata,
-  PromptTransformProvenance,
   RemixDimension,
   RemixSourceKind,
   ServerCapabilities,
@@ -296,7 +290,7 @@ import { sequenceParams } from "../lib/sequenceParams";
 import { isGenerationModel } from "../stores/models";
 import type { HostRoute } from "../stores/hosts";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
-import { applyH3BoundaryFit, applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
+import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
 import { coerceSourceFitForMaskless, parseSourceFitPolicy } from "@studio/lib/sourceFit";
 import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
 import {
@@ -459,6 +453,23 @@ import {
 } from "./mobileGenerationRecovery";
 import { watchMobileGenerationHost, type MobileGenerationHostWatch } from "./mobileGenerationWatch";
 import { beginMobileBackgroundTask } from "./backgroundTask";
+import {
+  mobilePlacementFailure,
+  previewPinnedMobileGeneration,
+  routeAutomaticMobileGeneration,
+} from "./mobileGenerationRouting";
+import { prepareMobileGenerationRequest } from "./mobileGenerationPreparation";
+import {
+  capturePreparedSubmission,
+  captureQuickSubmission,
+  preparedSubmissionIsCurrent,
+  quickSubmissionIsCurrent,
+} from "./mobileGenerationSnapshot";
+import {
+  mobileCompletionSummary as completionSummary,
+  summarizeMobileGenerationOutcome,
+} from "./mobileGenerationOutcome";
+import { MobileSubmissionAttempts } from "./mobileSubmissionAttempt";
 
 type Tab = "generate" | "gallery" | "catalog" | "hosts";
 
@@ -563,36 +574,6 @@ interface MobileAppliedRemix {
   dimensions: RemixDimension[];
 }
 
-function sentence(text: string): string {
-  return /[.!?]$/.test(text) ? text : `${text}.`;
-}
-
-function mobilePlacementFailure(
-  preview: GenerationPlacementPreview | null,
-  hostLabel: string,
-  subject: "print" | "sequence",
-): string {
-  const classification = classifyPlacementPreview(preview);
-  if (classification === "infeasible" && preview) {
-    const missing = (preview.missing_components ?? [])
-      .filter((component) => !component.present)
-      .map((component) => component.name);
-    const reason =
-      typeof preview.reason === "string" && preview.reason.trim()
-        ? sentence(preview.reason.trim())
-        : sentence(`the server reported that this ${subject} is infeasible`);
-    return `${hostLabel} cannot run this ${subject}: ${reason}${missing.length ? ` Missing components: ${missing.join(", ")}.` : ""} Nothing was queued.`;
-  }
-  if (classification === "temporarily_unavailable") {
-    const reason =
-      typeof preview?.reason === "string" && preview.reason.trim()
-        ? ` Reason: ${sentence(preview.reason.trim())}`
-        : "";
-    return `${hostLabel} could not compute a placement plan right now.${reason} Try again. Nothing was queued.`;
-  }
-  return `${hostLabel} returned an invalid placement response. Nothing was queued.`;
-}
-
 const STORAGE_KEY = "mold.mobile.hosts.v1";
 const SELECTED_KEY = "mold.mobile.selected-host.v1";
 const LIBRARY_SEEN_AT_KEY = "mold.mobile.library-seen-at.v1";
@@ -602,10 +583,6 @@ const SEQUENCE_RECOVERY_KEY = "mold.mobile.sequence-job.v1";
 const LIVE_ACTIVITY_KEY = "mold.mobile.live-activity.v1";
 const GALLERY_CAPABILITIES_KEY = "mold.mobile.gallery-capabilities.v1";
 const HOST_PROBE_TIMEOUT_MS = 9_000;
-/** How long automatic routing keeps waiting for slower machines once one has
- *  answered `planned`. Nothing is abandoned before that first plan exists —
- *  a deadline that fires with no route would manufacture a dead end. */
-const MOBILE_PLACEMENT_SETTLE_MS = 1_500;
 const GALLERY_HOST_TIMEOUT_MS = 9_000;
 /** A broken WebView connection must not hold a thumbnail page forever. Five
  * seconds is long enough for a remote cache miss while keeping the next page
@@ -889,7 +866,7 @@ const appliedRemix = ref<MobileAppliedRemix | null>(null);
 const quickExpansionNegative = ref<{ before: string; baked: string } | null>(null);
 const preparedSubmitting = ref(false);
 const preparationGuard = new PreparationRequestGuard();
-const submissionGuard = new PreparationRequestGuard();
+const submissionAttempts = new MobileSubmissionAttempts();
 const sequenceSubmissionGuard = new PreparationRequestGuard();
 let expansionPullRequestId = 0;
 let expansionRecoveryId = 0;
@@ -2640,14 +2617,6 @@ function setGenerationStatus(message: string, isError = false): void {
   progressIsError.value = isError;
 }
 
-/** Seed/time line for a completed result; the time is omitted when a resumed
- * reconciliation lost the true duration with the stream. */
-function completionSummary(result: CompleteEvent): string {
-  const timing =
-    result.generation_time_ms > 0 ? `${(result.generation_time_ms / 1000).toFixed(1)}s · ` : "";
-  return `${timing}seed ${result.seed_used}`;
-}
-
 async function saveCompletedStillToPhotos(result: CompleteEvent, target: ApiTarget): Promise<void> {
   if (!mobileSettings.autoSavePhotos) return;
   const filenames = [result.original_filename, result.filename].filter(
@@ -3914,29 +3883,6 @@ watch(
   },
 );
 
-/** One machine's answer to the automatic-routing fan-out. */
-interface MobilePlacementProbe {
-  host: MobileHost;
-  /** The machine's exact route as it stood when the probe was ISSUED. A slow
-   *  preview must never authorize one endpoint and then submit to another. */
-  route: HostRoute;
-  roundTripMs: number;
-  preview: GenerationPlacementPreview | null;
-  error: unknown;
-  legacyUnsupported: boolean;
-}
-
-type MobileAutomaticRoute =
-  | {
-      kind: "route";
-      host: MobileHost;
-      route: HostRoute;
-      placement: GenerationPlacementPreview | null;
-      legacyUnsupported: boolean;
-    }
-  | { kind: "error"; message: string }
-  | { kind: "abandoned" };
-
 /**
  * The machines an automatic policy may dispatch to: reachable, allowed to run
  * the model, and — when any of them already holds it — narrowed to the owners,
@@ -4032,26 +3978,6 @@ function provisionalAutomaticHost(
   return chosen?.host ?? null;
 }
 
-function mobileFleetPlacementFailure(
-  probes: readonly MobilePlacementProbe[],
-  subject: "print" | "sequence",
-): string {
-  if (probes.length === 1 && probes[0]!.preview) {
-    return mobilePlacementFailure(probes[0]!.preview, probes[0]!.host.name, subject);
-  }
-  const detail = probes
-    .map((probe) =>
-      probe.preview
-        ? mobilePlacementFailure(probe.preview, probe.host.name, subject).replace(
-            " Nothing was queued.",
-            "",
-          )
-        : `${probe.host.name} did not answer: ${describeTransportError(probe.error, probe.host.name)}`,
-    )
-    .join(" ");
-  return `No connected machine could run this ${subject}. ${detail} Nothing was queued.`;
-}
-
 /**
  * Ask every candidate machine for a placement plan and choose one.
  *
@@ -4071,144 +3997,19 @@ async function routeAutomaticGeneration(options: {
   requireAuthoritative: boolean;
   isCurrent?: () => boolean;
   signal?: AbortSignal;
-}): Promise<MobileAutomaticRoute> {
-  const isCurrent = options.isCurrent ?? (() => true);
-  // The frozen request is the authority on whether a face travels — never the
-  // live form, which may have moved while the fan-out ran.
-  const carriesIdentity = Boolean(options.request.id_image);
-  const { hosts: candidates, error } = automaticRoutingCandidates(options.model, options.family, {
-    requiresIdentity: carriesIdentity,
+}): ReturnType<typeof routeAutomaticMobileGeneration> {
+  const { model, family, isCurrent = () => true, ...routingOptions } = options;
+  const { hosts: candidates, error } = automaticRoutingCandidates(model, family, {
+    requiresIdentity: Boolean(options.request.id_image),
   });
   if (error) return { kind: "error", message: error };
-  const probes: MobilePlacementProbe[] = [];
-  const controllers = candidates.map(() => new AbortController());
-  let pending = candidates.length;
-  let resolveAllSettled!: () => void;
-  let resolveFirstPlanned!: () => void;
-  const allSettled = new Promise<void>((resolve) => (resolveAllSettled = resolve));
-  const firstPlanned = new Promise<void>((resolve) => (resolveFirstPlanned = resolve));
-  candidates.forEach((host, index) => {
-    void (async () => {
-      const controller = controllers[index]!;
-      const abortFromCaller = () => controller.abort(options.signal?.reason);
-      if (options.signal?.aborted) abortFromCaller();
-      else options.signal?.addEventListener("abort", abortFromCaller, { once: true });
-      const started = performance.now();
-      const elapsed = () => Math.max(0, performance.now() - started);
-      const probeOptions = { signal: controller.signal };
-      // Frozen before the request leaves: the winner carries this snapshot, so
-      // a URL, key, or instance that changed mid-flight is caught by the
-      // caller's connection fence instead of silently replacing the endpoint
-      // the plan was authorized for.
-      const route = routeForMobileHost(host);
-      const probeTarget = { ...route.target };
-      try {
-        const preview = options.chain
-          ? await previewChainPlacement(probeTarget, options.request, options.copies, probeOptions)
-          : await previewGenerationPlacement(
-              probeTarget,
-              options.request,
-              options.copies,
-              probeOptions,
-            );
-        probes.push({
-          host,
-          route,
-          roundTripMs: elapsed(),
-          preview,
-          error: null,
-          legacyUnsupported: false,
-        });
-        if (classifyPlacementPreview(preview) === "planned") resolveFirstPlanned();
-      } catch (probeError) {
-        probes.push({
-          host,
-          route,
-          roundTripMs: elapsed(),
-          preview: null,
-          error: probeError,
-          legacyUnsupported:
-            probeError instanceof ApiError &&
-            (probeError.status === 404 || probeError.status === 405),
-        });
-      } finally {
-        options.signal?.removeEventListener("abort", abortFromCaller);
-        pending -= 1;
-        if (pending === 0) resolveAllSettled();
-      }
-    })();
+  return routeAutomaticMobileGeneration({
+    ...routingOptions,
+    candidates: candidates.map((host) => ({ host, view: routingHostView(host) })),
+    routeForHost: routeForMobileHost,
+    policy: generateTarget.value,
+    isCurrent: () => !unmounted && isCurrent(),
   });
-  // Nothing to wait for: the settle promise is only ever resolved by a probe.
-  if (pending === 0) resolveAllSettled();
-  // A phone must not sit on a stalled machine once another one can run the
-  // print — but it must not manufacture a dead end either, so the settle
-  // window only starts once some machine has actually answered `planned`.
-  await Promise.race([
-    allSettled,
-    ...(candidates.length > 1
-      ? [
-          firstPlanned.then(
-            () => new Promise<void>((resolve) => setTimeout(resolve, MOBILE_PLACEMENT_SETTLE_MS)),
-          ),
-        ]
-      : []),
-  ]);
-  if (pending > 0) for (const controller of controllers) controller.abort();
-  if (unmounted || !isCurrent()) return { kind: "abandoned" };
-  // Route on the snapshot that met the settle window; a late cancellation row
-  // must not join the decision.
-  const settledProbes = probes.slice();
-  const planned = settledProbes.flatMap((probe) =>
-    probe.preview && classifyPlacementPreview(probe.preview) === "planned"
-      ? [{ host: routingHostView(probe.host), roundTripMs: probe.roundTripMs, probe }]
-      : [],
-  );
-  const chosen = chooseRoutedHost(
-    planned.map((entry) => ({
-      host: entry.host,
-      roundTripMs: entry.roundTripMs,
-      preview: entry.probe.preview!,
-    })),
-    generateTarget.value,
-    comparePlacementPreviews,
-    { lowestIdWins: true },
-  );
-  if (chosen) {
-    const winner = planned.find((entry) => entry.host.id === chosen.id)!;
-    return {
-      kind: "route",
-      host: winner.probe.host,
-      route: winner.probe.route,
-      placement: winner.probe.preview,
-      legacyUnsupported: false,
-    };
-  }
-  // Servers that predate the authoritative preview still route, unless the
-  // request itself requires that authority (reference media).
-  const legacy = settledProbes.filter(
-    (probe) => probe.legacyUnsupported || classifyPlacementPreview(probe.preview) === "unsupported",
-  );
-  // An older server answers the placement preview with 404/405 and would
-  // ignore the additive identity fields outright, so an identity request never
-  // takes this fallback — it is refused by the failure message below.
-  if (!options.requireAuthoritative && !carriesIdentity && legacy.length > 0) {
-    const views = legacy.map((probe) => routingHostView(probe.host));
-    const fallback =
-      generateTarget.value === CAPABLE_TARGET_ID
-        ? pickMostCapableHost(views, null, { lowestIdWins: true })
-        : pickAutoHost(views, { lowestIdWins: true });
-    if (fallback) {
-      const probe = legacy.find((entry) => entry.host.id === fallback.id)!;
-      return {
-        kind: "route",
-        host: probe.host,
-        route: probe.route,
-        placement: null,
-        legacyUnsupported: true,
-      };
-    }
-  }
-  return { kind: "error", message: mobileFleetPlacementFailure(settledProbes, options.subject) };
 }
 
 async function submitMobileSequence(): Promise<void> {
@@ -4958,7 +4759,7 @@ async function expandForCurrentBatch(
   const expandOn = expansionRouteFor(route);
 
   clearExpansionRecovery();
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   const token = preparationGuard.begin();
   expansionRunning.value = true;
   expansionError.value = "";
@@ -5064,7 +4865,7 @@ async function remixCurrent(
   }
 
   clearExpansionRecovery();
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   const token = preparationGuard.begin();
   expansionRunning.value = true;
   expansionError.value = "";
@@ -5166,7 +4967,7 @@ function applyRemixSelection(): void {
   if (selected.length === 1) {
     rememberRemixUndo();
     preparationGuard.invalidate();
-    submissionGuard.invalidate();
+    submissionAttempts.invalidate();
     form.prompt = selected[0]!.prompt.trim();
     form.originalPrompt = review.rootPrompt ?? review.sourcePrompt;
     bakeStyleNegative(review.stylePreset ?? "", review.family);
@@ -5254,7 +5055,7 @@ function undoPromptPreparation(): void {
     restoreQuickExpansion();
     return;
   }
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   preparationGuard.invalidate();
   form.prompt = snapshot.prompt;
   form.originalPrompt = snapshot.originalPrompt;
@@ -5286,7 +5087,7 @@ function bakeStyleNegative(presetId: string, family: string): void {
 
 function restoreQuickExpansion(): void {
   if (quickExpansionOriginal.value === null) return;
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   preparationGuard.invalidate();
   // Undo re-arms the whole pre-expansion state, including the chip the
   // bake-and-clear apply removed and the negative fragments it merged in —
@@ -5313,7 +5114,7 @@ function restoreQuickExpansion(): void {
 
 async function developExpandedAnyway(): Promise<void> {
   if (!quickExpansionSnapshot.value) return;
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   quickExpansionSnapshot.value = null;
   expansionError.value = "";
   await generate();
@@ -5354,7 +5155,7 @@ async function copyMobileError(message: string): Promise<void> {
 function editPreparedPrompt(payload: { id: string; text: string }): void {
   if (preparedSubmitting.value || expansionRunning.value) return;
   supersedePreparedReplacement();
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   const prompt = preparedBatch.value?.prompts.find((candidate) => candidate.id === payload.id);
   if (prompt) prompt.text = payload.text;
 }
@@ -5364,7 +5165,7 @@ function removePreparedPrompt(id: string): void {
   if (!batch || batch.prompts.length <= 2 || preparedSubmitting.value || expansionRunning.value)
     return;
   supersedePreparedReplacement();
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   batch.prompts = batch.prompts.filter((prompt) => prompt.id !== id);
   batch.requestedCount = batch.prompts.length;
   form.batchSize = batch.prompts.length;
@@ -5389,7 +5190,7 @@ function collapsePreparedBatch(removedId: string): void {
   );
   const restoreFocus = !!preparedRoot?.contains(document.activeElement);
   preparationGuard.invalidate();
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   submissionUiId += 1;
   preparedBatch.value = null;
   expansionRunning.value = false;
@@ -5419,7 +5220,7 @@ function discardPreparedBatch(): void {
   );
   const restoreFocus = !!preparedRoot?.contains(document.activeElement);
   preparationGuard.invalidate();
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   submissionUiId += 1;
   preparedBatch.value = null;
   expansionRunning.value = false;
@@ -5431,18 +5232,6 @@ function discardPreparedBatch(): void {
   if (restoreFocus) {
     void nextTick(() => document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus());
   }
-}
-
-function preparedRemixDimensions(
-  batch: PreparedExpansionBatchState,
-  index: number,
-): RemixDimension[] {
-  const perVariant = (
-    batch as PreparedExpansionBatchState & {
-      remixVariantDimensions?: readonly (readonly RemixDimension[])[];
-    }
-  ).remixVariantDimensions;
-  return [...(perVariant?.[index] ?? batch.dimensions ?? [])];
 }
 
 async function pullExpansionModel(): Promise<void> {
@@ -5640,125 +5429,97 @@ async function prepareGenerationRequest(
   isCurrent: () => boolean = () => true,
   signal?: AbortSignal,
 ) {
-  // Fixed recipe controls are not user choices: a stale draft value (restored
-  // before the recipe landed, model swapped under it) snaps to what the
-  // disabled control displays instead of queueing a shape the host refuses.
-  // It runs before the source fits below so their target is the canvas that
-  // actually renders. Shared with desktop and web.
-  Object.assign(
-    draft,
-    fixedRecipeControlOverrides(
-      effectiveGenerationRecipe(selectedGenerationModel.value, draft.pipeline),
-    ),
+  return prepareMobileGenerationRequest(
+    {
+      target,
+      draft,
+      selectedModel: selectedGenerationModel.value,
+      isCurrent,
+      ...(signal ? { signal } : {}),
+    },
+    {
+      cache: sourceFitCache,
+      ops: domCanvasOps,
+      upscale: (image, model, upscaleTarget, upscaleSignal, onProgress) =>
+        upscaleImage({
+          image,
+          model,
+          target: upscaleTarget,
+          ...(upscaleSignal ? { signal: upscaleSignal } : {}),
+          onProgress,
+        }),
+      onStatus: setGenerationStatus,
+    },
   );
-  const draftCaps = generationCapabilitiesForFamily(
-    draft.family,
-    draft.model,
-    draft.pipeline,
-    draft.guidanceCapabilities,
-    draft.sourceImageCapability,
-  );
-  if (draftCaps.sourceImageMode === "h3-boundaries") {
-    // H3 FL2VA boundaries take the same client-side fit, coerced maskless.
-    draft.h3Authoring =
-      (await applyH3BoundaryFit(
-        draft.h3Authoring,
-        draft.sourceFit,
-        { width: draft.width, height: draft.height },
-        {
-          ops: domCanvasOps,
-          cache: sourceFitCache,
-          upscale: (image, model) =>
-            upscaleImage({
-              image,
-              model,
-              target,
-              ...(signal ? { signal } : {}),
-              onProgress: (message) => {
-                if (isCurrent()) setGenerationStatus(message);
-              },
-            }),
-          onStatus: (message) => {
-            if (isCurrent()) setGenerationStatus(message);
-          },
-        },
-      )) ?? emptyMinimaxH3AuthoringState();
-  } else if (draftCaps.sourceImageMode === "qwen-edit" && draft.imageAttachments[0]) {
-    const sourceTarget = resolveSourceConditioningTarget(
-      { width: draft.width, height: draft.height },
-      selectedGenerationModel.value ?? draft.family,
-      draft.pipeline,
-    );
-    const result = await applySourceFitPreprocess(
-      {
-        source: draft.imageAttachments[0],
-        mask: null,
-        policy: coerceSourceFitForMaskless(draft.sourceFit),
-        target: sourceTarget,
-      },
-      {
-        ops: domCanvasOps,
-        cache: sourceFitCache,
-        upscale: (image, model) =>
-          upscaleImage({
-            image,
-            model,
-            target,
-            ...(signal ? { signal } : {}),
-            onProgress: (message) => {
-              if (isCurrent()) setGenerationStatus(message);
-            },
-          }),
-        onStatus: (message) => {
-          if (isCurrent()) setGenerationStatus(message);
-        },
-      },
-    );
-    if (result.source) draft.imageAttachments[0] = result.source;
-  } else if (
-    draftCaps.supportsImg2img &&
-    draftCaps.sourceImageMode === "single" &&
-    draft.sourceImage
-  ) {
-    const result = await applySourceFitPreprocess(
-      {
-        source: draft.sourceImage,
-        mask: draftCaps.supportsMask ? draft.maskImage : null,
-        policy: draftCaps.supportsMask
-          ? draft.sourceFit
-          : coerceSourceFitForMaskless(draft.sourceFit),
-        target: { width: draft.width, height: draft.height },
-      },
-      {
-        ops: domCanvasOps,
-        cache: sourceFitCache,
-        upscale: (image, model) =>
-          upscaleImage({
-            image,
-            model,
-            target,
-            ...(signal ? { signal } : {}),
-            onProgress: (message) => {
-              if (isCurrent()) setGenerationStatus(message);
-            },
-          }),
-        onStatus: (message) => {
-          if (isCurrent()) setGenerationStatus(message);
-        },
-      },
-    );
-    draft.sourceImage = result.source;
-    draft.maskImage = result.mask;
+}
+
+function clearSubmittedExpansionWork(
+  preparedSubmission: ReturnType<typeof capturePreparedSubmission>,
+  quickSubmission: ReturnType<typeof captureQuickSubmission>,
+  preparedSection: HTMLElement | null,
+  preparedSubmissionOwnedFocus: boolean,
+): void {
+  if (preparedSubmission) {
+    const active = document.activeElement;
+    const restoreFocus =
+      preparedSubmissionOwnedFocus &&
+      (active === document.body || (!!active && !!preparedSection?.contains(active)));
+    preparedBatch.value = null;
+    if (restoreFocus) {
+      void nextTick(() => document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus());
+    }
   }
-  const mediaBudgetError = mobileMediaBudgetValidationError(draft);
-  if (mediaBudgetError) throw new Error(mediaBudgetError);
-  // `buildRequest` stamps the additive `title` and the File under fields from
-  // the FROZEN draft. Nothing may re-read the live title here: source fitting
-  // and the placement fan-out can take minutes, and a title edited inside that
-  // window would ship a name whose own ghost tag and collection match were
-  // derived from the previous one. The title is validated at the tap boundary
-  // instead (`generate()`, `submitMobileSequence`).
-  return buildRequest(draft);
+  if (
+    quickSubmission &&
+    quickExpansionSnapshot.value?.requestToken === quickSubmission.requestToken
+  ) {
+    quickExpansionSnapshot.value = null;
+  }
+}
+
+async function presentSettledGeneration(
+  jobs: Job[],
+  route: HostRoute,
+  chain: boolean,
+  prepared: boolean,
+): Promise<void> {
+  if (unmounted || jobs.length === 0) return;
+  // iOS suspension kills every held SSE socket: reconcile against the frozen
+  // route before composing any status or accessibility announcement.
+  await reconcileInterruptedGenerationJobs(jobs, {
+    target: { ...route.target },
+    hostLabel: route.label,
+    queueCapacity: hostTelemetry[route.hostId]?.queueCapacity,
+    chain,
+    refreshResultUrl: (clientId) =>
+      void generation.refreshRemoteResultUrl(clientId).catch(() => {
+        // The reactive job carries the directed, user-visible error.
+      }),
+    isActive: () => !unmounted,
+  });
+  if (unmounted) return;
+  const outcome = summarizeMobileGenerationOutcome(jobs, {
+    hostLabel: route.label,
+    prepared,
+  });
+  requestAdvisories.value = outcome.advisories;
+  for (const candidate of jobs) handledGenerationClientIds.add(candidate.clientId);
+  for (const candidate of outcome.completed) {
+    void saveCompletedStillToPhotos(candidate.result!, route.target);
+  }
+  if (outcome.latestCompleted) latestResultClientId.value = outcome.latestCompleted.clientId;
+  if (outcome.status) setGenerationStatus(outcome.status.message, outcome.status.isError);
+  if (outcome.announcement !== null) generationAnnouncement.value = outcome.announcement;
+  if (outcome.refreshGallery && tab.value === "gallery") void refreshGallery();
+  // Only terminal jobs whose callbacks have run are eligible: multiple
+  // completion microtasks cannot prune one another before they promote the
+  // correct latest result. The UI renders one result, so retain one Blob.
+  generation.prune(1, latestResultClientId.value, handledGenerationClientIds);
+  for (const clientId of handledGenerationClientIds) {
+    if (!generation.jobs.some((candidate) => candidate.clientId === clientId)) {
+      handledGenerationClientIds.delete(clientId);
+    }
+  }
 }
 
 async function generate(): Promise<void> {
@@ -5781,40 +5542,13 @@ async function generate(): Promise<void> {
     return;
   }
 
-  const preparedSubmission = prepared
-    ? {
-        batchId: prepared.batchId,
-        promptIds: prepared.prompts.map((prompt) => prompt.id),
-        prompts: prepared.prompts.map((prompt) => prompt.text.trim()),
-        originalPrompt: prepared.rootPrompt ?? prepared.sourcePrompt,
-        promptTransforms:
-          prepared.kind === "remix"
-            ? prepared.prompts.map((_, index): PromptTransformProvenance => ({
-                operation: "remix",
-                ...(prepared.rootPrompt ? { root_prompt: prepared.rootPrompt } : {}),
-                source_prompt: prepared.sourcePrompt,
-                source_kind: prepared.sourceKind ?? "current",
-                task: prepared.task,
-                dimensions: preparedRemixDimensions(prepared, index),
-              }))
-            : undefined,
-        route: { ...prepared.route, target: { ...prepared.route.target } },
-      }
-    : null;
+  const preparedSubmission = capturePreparedSubmission(prepared);
   const preparedSection = preparedSubmission
     ? document.querySelector<HTMLElement>("[data-test='mobile-prepared-expansion']")
     : null;
   const preparedSubmissionOwnedFocus = !!preparedSection?.contains(document.activeElement);
   const quickSubmission = !preparedSubmission
-    ? quickExpansionSnapshot.value
-      ? {
-          requestToken: quickExpansionSnapshot.value.requestToken,
-          route: {
-            ...quickExpansionSnapshot.value.route,
-            target: { ...quickExpansionSnapshot.value.route.target },
-          },
-        }
-      : null
+    ? captureQuickSubmission(quickExpansionSnapshot.value)
     : null;
   // Prepared and quick work keeps the machine it was frozen on. An ordinary
   // submission under Auto / Most capable starts on a provisional machine — the
@@ -5882,7 +5616,6 @@ async function generate(): Promise<void> {
     return;
 
   const backgroundTask = await beginMobileBackgroundTask("Preparing remote generation");
-  let backgroundTaskTransferred = false;
 
   // Replaced by the fan-out winner under Auto / Most capable; frozen from here
   // on for every other path.
@@ -5933,13 +5666,13 @@ async function generate(): Promise<void> {
       : draft.batchSize;
   const guardedSubmission = !!preparedSubmission || !!quickSubmission;
   const liveFormIdentity = guardedSubmission ? JSON.stringify(cloneGenerateForm(form)) : "";
-  const token = submissionGuard.begin();
-  const submitSignal = submissionGuard.signalFor(token);
+  const submissionAttempt = submissionAttempts.begin(backgroundTask);
+  const submitSignal = submissionAttempt.signal;
   const uiId = ++submissionUiId;
   const ownsPreparedSubmission = () =>
     !unmounted &&
     uiId === submissionUiId &&
-    submissionGuard.isCurrent(token) &&
+    submissionAttempt.isCurrent() &&
     (!preparedSubmission || preparedBatch.value?.batchId === preparedSubmission.batchId);
   const releasePreparedSubmission = () => {
     if (!unmounted && uiId === submissionUiId) {
@@ -5947,7 +5680,7 @@ async function generate(): Promise<void> {
       generationSubmissionPhase.value = null;
     }
     if (ownsPreparedSubmission()) preparedSubmitting.value = false;
-    if (!backgroundTaskTransferred) void backgroundTask.release();
+    void submissionAttempt.releaseOwnedResources();
   };
   let request: GenerateRequest;
   preparingGeneration.value = true;
@@ -5957,7 +5690,7 @@ async function generate(): Promise<void> {
     request = await prepareGenerationRequest(
       target,
       draft,
-      () => submissionGuard.isCurrent(token),
+      () => submissionAttempt.isCurrent(),
       submitSignal,
     );
     if (request.source_image && originalSource) {
@@ -5993,7 +5726,7 @@ async function generate(): Promise<void> {
     return;
   }
 
-  if (!submissionGuard.isCurrent(token)) {
+  if (!submissionAttempt.isCurrent()) {
     releasePreparedSubmission();
     return;
   }
@@ -6017,23 +5750,23 @@ async function generate(): Promise<void> {
     return;
   }
   if (preparedSubmission) {
-    const current = preparedBatch.value;
-    const unchanged =
-      current?.batchId === preparedSubmission.batchId &&
-      current.prompts.length === preparedSubmission.prompts.length &&
-      current.prompts.every(
-        (prompt, index) =>
-          prompt.id === preparedSubmission.promptIds[index] &&
-          prompt.text.trim() === preparedSubmission.prompts[index],
-      );
-    if (!unchanged || preparedStaleReasons.value.length > 0) {
+    if (
+      !preparedSubmissionIsCurrent(
+        preparedSubmission,
+        preparedBatch.value,
+        preparedStaleReasons.value,
+      )
+    ) {
       releasePreparedSubmission();
       return;
     }
   } else if (quickSubmission) {
     if (
-      quickExpansionSnapshot.value?.requestToken !== quickSubmission.requestToken ||
-      quickStaleReasons.value.length > 0
+      !quickSubmissionIsCurrent(
+        quickSubmission,
+        quickExpansionSnapshot.value,
+        quickStaleReasons.value,
+      )
     ) {
       releasePreparedSubmission();
       return;
@@ -6075,7 +5808,7 @@ async function generate(): Promise<void> {
       family: draft.family,
       subject: "print",
       requireAuthoritative: requireAuthoritativePlacement,
-      isCurrent: () => submissionGuard.isCurrent(token),
+      isCurrent: () => submissionAttempt.isCurrent(),
       signal: submitSignal,
     });
     if (routed.kind === "abandoned") {
@@ -6094,67 +5827,29 @@ async function generate(): Promise<void> {
     placement = routed.placement;
     legacyUnsupported = routed.legacyUnsupported;
   } else {
-    try {
-      placement =
-        chainRouting.kind === "chain"
-          ? await previewChainPlacement(target, previewRequest, batchSize, {
-              signal: submitSignal,
-            })
-          : await previewGenerationPlacement(target, previewRequest, batchSize, {
-              signal: submitSignal,
-            });
-    } catch (error) {
-      if (!submissionGuard.isCurrent(token)) {
-        releasePreparedSubmission();
-        return;
-      }
-      if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
-        if (requireAuthoritativePlacement) {
-          // An identity request lands here for its own reason — that server
-          // predates the partition and would ignore the face rather than
-          // refuse it — so it says that instead of talking about references.
-          setGenerationStatus(
-            mobileIdentityRouteRefusal({
-              carriesIdentity: Boolean(request.id_image),
-              hostLabel: route.label,
-              hostAdvertisesIdentity: true,
-              legacyPlacement: true,
-            }) ??
-              `${route.label} does not provide the authoritative placement preview required for reference media. Nothing was queued.`,
-            true,
-          );
-          releasePreparedSubmission();
-          return;
-        }
-        legacyUnsupported = true;
-      } else {
-        setGenerationStatus(describeTransportError(error, route.label), true);
-        releasePreparedSubmission();
-        return;
-      }
+    const preview = await previewPinnedMobileGeneration({
+      route,
+      request: previewRequest,
+      chain: chainRouting.kind === "chain",
+      copies: batchSize,
+      subject: "print",
+      requireAuthoritative: requireAuthoritativePlacement,
+      isCurrent: () => submissionAttempt.isCurrent(),
+      signal: submitSignal,
+    });
+    if (preview.kind === "abandoned") {
+      releasePreparedSubmission();
+      return;
     }
+    if (preview.kind === "error") {
+      setGenerationStatus(preview.message, true);
+      releasePreparedSubmission();
+      return;
+    }
+    placement = preview.placement;
+    legacyUnsupported = preview.legacyUnsupported;
   }
-  if (!submissionGuard.isCurrent(token)) {
-    releasePreparedSubmission();
-    return;
-  }
-  const classification: string = classifyPlacementPreview(placement);
-  if (requireAuthoritativePlacement && classification === "unsupported") {
-    setGenerationStatus(
-      mobileIdentityRouteRefusal({
-        carriesIdentity: Boolean(request.id_image),
-        hostLabel: route.label,
-        hostAdvertisesIdentity: true,
-        legacyPlacement: true,
-      }) ??
-        `${route.label} does not provide the authoritative placement preview required for reference media. Nothing was queued.`,
-      true,
-    );
-    releasePreparedSubmission();
-    return;
-  }
-  if (!legacyUnsupported && classification !== "unsupported" && classification !== "planned") {
-    setGenerationStatus(mobilePlacementFailure(placement, route.label, "print"), true);
+  if (!submissionAttempt.isCurrent()) {
     releasePreparedSubmission();
     return;
   }
@@ -6191,7 +5886,7 @@ async function generate(): Promise<void> {
     target: route.target,
     requirements: licenseRequirements(placement?.pending_downloads),
   });
-  if (!accepted || !submissionGuard.isCurrent(token)) {
+  if (!accepted || !submissionAttempt.isCurrent()) {
     releasePreparedSubmission();
     return;
   }
@@ -6231,25 +5926,15 @@ async function generate(): Promise<void> {
     });
   if (durableLifecycle) {
     const admission = submitMobileDurableGeneration({ route, requests: durablePlans });
-    backgroundTaskTransferred = true;
-    void admission.finally(() => backgroundTask.release());
+    const admissionBackgroundTask = submissionAttempt.handoffBackgroundTask();
+    void admission.finally(() => admissionBackgroundTask.release());
     releasePreparedSubmission();
-    if (preparedSubmission) {
-      const active = document.activeElement;
-      const restoreFocus =
-        preparedSubmissionOwnedFocus &&
-        (active === document.body || (!!active && !!preparedSection?.contains(active)));
-      preparedBatch.value = null;
-      if (restoreFocus) {
-        void nextTick(() => document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus());
-      }
-    }
-    if (
-      quickSubmission &&
-      quickExpansionSnapshot.value?.requestToken === quickSubmission.requestToken
-    ) {
-      quickExpansionSnapshot.value = null;
-    }
+    clearSubmittedExpansionWork(
+      preparedSubmission,
+      quickSubmission,
+      preparedSection,
+      preparedSubmissionOwnedFocus,
+    );
     if (!progressIsError.value) setGenerationStatus("Queued");
     generationAnnouncement.value = "";
     void admission.catch((error) => {
@@ -6290,153 +5975,25 @@ async function generate(): Promise<void> {
   // accepted (or refused), foreground recovery and the remote queue own the
   // remaining lifecycle; generation itself never depends on the phone staying
   // awake.
-  backgroundTaskTransferred = true;
-  void (admitted ?? settled).finally(() => backgroundTask.release());
+  const admissionBackgroundTask = submissionAttempt.handoffBackgroundTask();
+  void (admitted ?? settled).finally(() => admissionBackgroundTask.release());
   releasePreparedSubmission();
-  if (preparedSubmission) {
-    const active = document.activeElement;
-    const restoreFocus =
-      preparedSubmissionOwnedFocus &&
-      (active === document.body || (!!active && !!preparedSection?.contains(active)));
-    preparedBatch.value = null;
-    if (restoreFocus) {
-      void nextTick(() => document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus());
-    }
-  }
-  if (
-    quickSubmission &&
-    quickExpansionSnapshot.value?.requestToken === quickSubmission.requestToken
-  ) {
-    quickExpansionSnapshot.value = null;
-  }
+  clearSubmittedExpansionWork(
+    preparedSubmission,
+    quickSubmission,
+    preparedSection,
+    preparedSubmissionOwnedFocus,
+  );
   setGenerationStatus("Queued");
   generationAnnouncement.value = "";
-  void settled.then(async (jobs) => {
-    if (unmounted || jobs.length === 0) return;
-    // iOS suspension kills every held SSE socket: jobs that settled with a
-    // dead-transport error are re-queried against their frozen submission
-    // route (finished prints render, queued/running jobs re-attach without
-    // cancellation) BEFORE any summary copy is composed, so raw transport
-    // text never reaches the status line or the announcement channel.
-    await reconcileInterruptedGenerationJobs(jobs, {
-      target: { ...route.target },
-      hostLabel: route.label,
-      queueCapacity: hostTelemetry[route.hostId]?.queueCapacity,
-      chain: chainRouting.kind === "chain",
-      refreshResultUrl: (clientId) =>
-        void generation.refreshRemoteResultUrl(clientId).catch(() => {
-          // The reactive job carries the directed, user-visible error.
-        }),
-      isActive: () => !unmounted,
-    });
-    if (unmounted) return;
-    requestAdvisories.value = [...new Set(jobs.flatMap((candidate) => candidate.requestWarnings))];
-    for (const candidate of jobs) handledGenerationClientIds.add(candidate.clientId);
-    const completed = jobs.filter(
-      (candidate) => candidate.status === "complete" && candidate.result,
-    );
-    for (const candidate of completed) {
-      void saveCompletedStillToPhotos(candidate.result!, route.target);
-    }
-    const latestCompleted = completed.at(-1);
-    const unconfirmedCancellation = jobs.find((candidate) =>
-      candidate.error?.includes("remote cancellation was not confirmed"),
-    );
-    const failed = jobs.find((candidate) => candidate.error && !isCancelledError(candidate.error));
-    const failedError = failed?.error ? describeTransportError(failed.error, route.label) : null;
-    const failedVariations = preparedSubmission
-      ? jobs.flatMap((candidate, index) => {
-          if (!candidate.error || isCancelledError(candidate.error)) return [];
-          const prompt =
-            candidate.prompt.length > 120 ? `${candidate.prompt.slice(0, 117)}…` : candidate.prompt;
-          return [
-            `Variation ${index + 1}, “${prompt}”, failed: ${describeTransportError(
-              candidate.error,
-              route.label,
-            )}`,
-          ];
-        })
-      : [];
-    const preparedFailureSummary = failedVariations.join(" ");
-    const failedCount = jobs.filter(
-      (candidate) => candidate.error && !isCancelledError(candidate.error),
-    ).length;
-    const cancelled = jobs.find((candidate) => isCancelledError(candidate.error));
-
-    if (latestCompleted?.result) {
-      latestResultClientId.value = latestCompleted.clientId;
-      if (latestCompleted.resultError) {
-        const previewDetail = describeTransportError(latestCompleted.resultError, route.label);
-        setGenerationStatus(previewDetail, true);
-        generationAnnouncement.value = `${completed.length} of ${jobs.length} generations completed, but the latest preview is unavailable. ${previewDetail}`;
-      } else {
-        setGenerationStatus(
-          `${completed.length > 1 ? `${completed.length} prints · ` : ""}${completionSummary(
-            latestCompleted.result,
-          )}`,
-        );
-        generationAnnouncement.value =
-          completed.length === 1 && jobs.length === 1
-            ? "Generation completed."
-            : `${completed.length} of ${jobs.length} generations completed.`;
-      }
-      if (unconfirmedCancellation?.error || failedError) {
-        setGenerationStatus(
-          [
-            `${completed.length} of ${jobs.length} completed`,
-            failedError,
-            unconfirmedCancellation?.error,
-          ]
-            .filter(Boolean)
-            .join(" · "),
-          true,
-        );
-        generationAnnouncement.value = [
-          `${completed.length} generations completed.`,
-          failedError
-            ? preparedSubmission
-              ? `${failedCount} failed. ${preparedFailureSummary}`
-              : `${failedCount} failed. ${failedError}`
-            : "",
-          unconfirmedCancellation?.error
-            ? `Cancellation failed. ${unconfirmedCancellation.error}`
-            : "",
-        ]
-          .filter(Boolean)
-          .join(" ");
-      }
-      if (tab.value === "gallery") void refreshGallery();
-    } else if (unconfirmedCancellation?.error || failedError) {
-      setGenerationStatus(
-        [failedError, unconfirmedCancellation?.error].filter(Boolean).join(" · "),
-        true,
-      );
-      generationAnnouncement.value = [
-        failedError
-          ? preparedSubmission
-            ? `Generation failed. ${preparedFailureSummary}`
-            : `Generation failed. ${failedError}`
-          : "",
-        unconfirmedCancellation?.error
-          ? `Cancellation failed. ${unconfirmedCancellation.error}`
-          : "",
-      ]
-        .filter(Boolean)
-        .join(" ");
-    } else if (cancelled) {
-      setGenerationStatus("Cancelled");
-      generationAnnouncement.value = `${jobs.length} generation${jobs.length === 1 ? "" : "s"} cancelled.`;
-    }
-    // Only terminal jobs whose callbacks have run are eligible: multiple
-    // completion microtasks cannot prune one another before they promote the
-    // correct latest result. The UI renders one result, so retain one Blob.
-    generation.prune(1, latestResultClientId.value, handledGenerationClientIds);
-    for (const clientId of handledGenerationClientIds) {
-      if (!generation.jobs.some((candidate) => candidate.clientId === clientId)) {
-        handledGenerationClientIds.delete(clientId);
-      }
-    }
-  });
+  void settled.then((jobs) =>
+    presentSettledGeneration(
+      jobs,
+      route,
+      chainRouting.kind === "chain",
+      preparedSubmission !== null,
+    ),
+  );
 }
 
 async function cancelGeneration(job: Job): Promise<void> {
@@ -6516,7 +6073,7 @@ function durableGenerationCompletedResult(job: Job): CompleteEvent | null {
 
 function cancelGenerationSubmission(): void {
   if (!preparingGeneration.value) return;
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   submissionUiId += 1;
   preparingGeneration.value = false;
   preparedSubmitting.value = false;
@@ -9818,7 +9375,7 @@ onBeforeUnmount(() => {
     void cancelBarcodeScanner().catch(() => undefined);
   }
   preparationGuard.invalidate();
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   sequenceSubmissionGuard.invalidate();
   const sequenceCancellation = sequenceCancellationRequest;
   sequenceCancellationRequest = null;
