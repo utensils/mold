@@ -899,11 +899,11 @@ where
                 != self.admitted.attention.qualification_kernel_identity
             || artifacts.attention_qualification_sha256()
                 != self.admitted.attention.qualification_sha256
-            || self.stream_authority.task != H3TransformerTask::T2VaFl2Va
+            || self.stream_authority.task != expected_transformer_task(self.admitted.task)
             || self.conditioner.model() != self.admitted.canonical_model
             || self.conditioner.task() != self.admitted.task
-            || self.admitted.task != Task::Fl2va
-            || self.admitted.canonical_model != contract::FL2VA_COMFY
+            || self.admitted.canonical_model
+                != contract::base_compact_model_for_task(self.admitted.task)
             || self.denoiser.identity() != self.frozen_identity
         {
             bail!("private MiniMax H3 streamed runtime differs from frozen authority");
@@ -1243,8 +1243,9 @@ impl H3PrivateRetainedVaeReload {
             != self.artifact_validation_identity_sha256
             || self.authority.artifact_plan_identity_sha256() != self.artifact_plan_identity_sha256
             || self.artifact_plan_identity_sha256 != admitted.vae_artifact_plan_identity_sha256
-            || self.authority.task() != Task::Fl2va
-            || self.authority.canonical_model() != contract::FL2VA_COMFY
+            || self.authority.task() != admitted.task
+            || self.authority.canonical_model()
+                != contract::base_compact_model_for_task(admitted.task)
         {
             bail!("private H3 retained VAE reload authority differs from the admitted attempt")
         }
@@ -1493,7 +1494,11 @@ impl H3PrivateQwenArtifactAuthority {
         opened: &H3AuthenticatedQwenNvfp4Authority,
     ) -> Result<Self> {
         opened.revalidate()?;
-        if support.model() != contract::FL2VA_COMFY || support.task() != Task::Fl2va {
+        // The support's own model must be its own task's compact partition.
+        // A crossed pair is what this rejects; which task it is belongs to
+        // the admitted route, which `validate_private_artifact_facts` fences
+        // separately.
+        if support.model() != contract::base_compact_model_for_task(support.task()) {
             bail!("private H3 retained Qwen support has the wrong task partition")
         }
         let authority = Self {
@@ -1611,6 +1616,14 @@ impl H3PrivateArtifactAuthorityFacts {
     }
 }
 
+/// The transformer partition each task's admitted route must have opened.
+const fn expected_transformer_task(task: Task) -> H3TransformerTask {
+    match task {
+        Task::Fl2va => H3TransformerTask::T2VaFl2Va,
+        Task::Ref2va => H3TransformerTask::Ref2Va,
+    }
+}
+
 fn validate_private_artifact_facts(
     admitted: &H3PrivateFl2VaFactoryAuthority,
     stream: &H3PrivateComfyStreamAuthority,
@@ -1620,8 +1633,8 @@ fn validate_private_artifact_facts(
 ) -> Result<()> {
     admitted.block_streaming.validate()?;
     overlap.validate()?;
-    if admitted.task != Task::Fl2va
-        || admitted.canonical_model != contract::FL2VA_COMFY
+    if admitted.canonical_model != contract::base_compact_model_for_task(admitted.task)
+        || overlap.task != admitted.task
         || overlap.factory_identity_sha256 != admitted.factory_identity_sha256
         || overlap.condition_visual_rows != admitted.condition_visual_rows
         || facts.memory_overlap_identity_sha256 != overlap.identity_sha256()
@@ -2058,8 +2071,9 @@ where
         )?;
         if let Some(vae) = self.vae.as_ref() {
             vae.validate_authority()?;
-            if vae.task() != Task::Fl2va
-                || vae.canonical_model() != contract::FL2VA_COMFY
+            if vae.task() != self.admitted.task
+                || vae.canonical_model()
+                    != contract::base_compact_model_for_task(self.admitted.task)
                 || vae.artifact_plan_identity_sha256()
                     != self.admitted.vae_artifact_plan_identity_sha256
                 || !vae.device().same_device(self.continuing_execution.device())

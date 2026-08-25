@@ -1659,9 +1659,12 @@ fn inference_media(media: mold_inference::H3PrivateFl2VaMediaContract) -> H3Prep
         height: media.height,
         frames: media.frames,
         fps: media.fps,
-        reference_fingerprint_sha256: None,
-        resolved_reference_fingerprint_sha256: None,
-        reference_count: 0,
+        // Carried through from the prepared attempt, never restated here:
+        // the whole point of the frozen-owner comparison is that the two
+        // sides derived the same reference authority independently.
+        reference_fingerprint_sha256: media.reference_fingerprint_sha256,
+        resolved_reference_fingerprint_sha256: media.resolved_reference_fingerprint_sha256,
+        reference_count: media.reference_count,
     }
 }
 

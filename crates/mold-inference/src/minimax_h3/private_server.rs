@@ -1144,6 +1144,15 @@ pub struct H3PrivateFl2VaMediaContract {
     pub height: u32,
     pub frames: u32,
     pub fps: u32,
+    /// Fingerprint of the TARGET-DURATION prepared reference metadata in
+    /// exact request order — the value the frozen factory request carries.
+    /// Ref2VA requires it; FL2VA must leave it absent.
+    pub reference_fingerprint_sha256: Option<String>,
+    /// Fingerprint of the resolved descriptor set that owns the staged files.
+    /// It detects a byte or probe replacement even when the target-duration
+    /// prepared shapes are unchanged, which the value above cannot.
+    pub resolved_reference_fingerprint_sha256: Option<String>,
+    pub reference_count: u32,
 }
 
 impl H3PrivateFl2VaMediaContract {
@@ -1156,10 +1165,33 @@ impl H3PrivateFl2VaMediaContract {
             Task::Fl2va => self.mode != Mode::ReferenceToAudioVideo,
             Task::Ref2va => self.mode == Mode::ReferenceToAudioVideo,
         };
+        // The ordered-reference authority is the Ref2VA half of the same
+        // pairing: its two fingerprints and its count exist exactly for that
+        // task, and an FL2VA contract that carried them would let a
+        // reference set ride a boundary-endpoint route.
+        let references_match_task = match self.task {
+            Task::Fl2va => {
+                self.reference_fingerprint_sha256.is_none()
+                    && self.resolved_reference_fingerprint_sha256.is_none()
+                    && self.reference_count == 0
+            }
+            Task::Ref2va => {
+                self.reference_count > 0
+                    && self
+                        .reference_fingerprint_sha256
+                        .as_deref()
+                        .is_some_and(valid_sha256)
+                    && self
+                        .resolved_reference_fingerprint_sha256
+                        .as_deref()
+                        .is_some_and(valid_sha256)
+            }
+        };
         if contract::base_compact_model(&self.canonical_model)
             != Some(contract::base_compact_model_for_task(self.task))
             || !contract::is_reviewed_compact_model(&self.canonical_model)
             || !mode_matches_task
+            || !references_match_task
             || self.width == 0
             || self.height == 0
             || self.frames == 0
@@ -3228,6 +3260,30 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
             request.model
         )
     }
+    // The reference authority the frozen owner comparison checks. Both
+    // fingerprints come from what this reopen ACTUALLY re-derived — the
+    // prepared factory request's own target-duration digest, and the
+    // resolved descriptor set the request carries — so a substituted set
+    // cannot reach the runtime by matching only one of them.
+    let (reference_fingerprint_sha256, resolved_reference_fingerprint_sha256, reference_count) =
+        match reopened_task {
+            Task::Fl2va => (None, None, 0),
+            Task::Ref2va => {
+                let ordered = request.references.as_deref().unwrap_or_default();
+                let resolved_metadata = ordered
+                    .iter()
+                    .enumerate()
+                    .map(|(index, reference)| reference.redacted_metadata_lossless(index))
+                    .collect::<Vec<_>>();
+                (
+                    Some(prepared.prepared_request_input().reference_fingerprint.clone()),
+                    Some(mold_core::generation_reference_fingerprint(
+                        &resolved_metadata,
+                    )),
+                    u32::try_from(ordered.len())?,
+                )
+            }
+        };
     let media = H3PrivateFl2VaMediaContract {
         canonical_model: request.model.clone(),
         task: reopened_task,
@@ -3237,6 +3293,9 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         height: request.height,
         frames: request.frames.unwrap_or(contract::REVIEWED_COMPACT_FRAMES),
         fps: request.fps.unwrap_or(contract::FIXED_FPS),
+        reference_fingerprint_sha256,
+        resolved_reference_fingerprint_sha256,
+        reference_count,
     };
     media.validate()?;
     let memory_ledger_sequence = owner_fence.memory_ledger_sequence;
@@ -3673,6 +3732,11 @@ struct H3PrivateServerFl2VaArtifactLease {
     audio_vae_component_content_sha256: String,
     audio_vae_component_validation_sha256: String,
     vae_artifact_plan_identity_sha256: String,
+    /// The transformer partition the OPENED checkpoint declares, never a
+    /// task constant: `bind_private_comfy_ref2va_phase_owner` compares it
+    /// against the admitted route, which is the one check the shared FL2VA
+    /// binder cannot make.
+    transformer_task: H3TransformerTask,
     transformer_checkpoint_content_sha256: String,
     transformer_checkpoint_layout_identity_sha256: String,
     transformer_checkpoint_identity_sha256: String,
@@ -3754,6 +3818,7 @@ impl H3PrivateServerFl2VaArtifactLease {
             audio_vae_component_content_sha256: audio_vae.content_sha256.clone(),
             audio_vae_component_validation_sha256: audio_vae.validation_sha256.clone(),
             vae_artifact_plan_identity_sha256: vae.artifact_plan_identity_sha256().into(),
+            transformer_task: candidate.strategy.task,
             transformer_checkpoint_content_sha256: transformer.content_sha256().into(),
             transformer_checkpoint_layout_identity_sha256: candidate.header_identity_sha256.clone(),
             transformer_checkpoint_identity_sha256: transformer.checkpoint_identity_sha256().into(),
@@ -3848,7 +3913,7 @@ unsafe impl H3PrivateFl2VaArtifactLease for H3PrivateServerFl2VaArtifactLease {
     }
 
     fn transformer_task(&self) -> H3TransformerTask {
-        H3TransformerTask::T2VaFl2Va
+        self.transformer_task
     }
 
     fn transformer_checkpoint_content_sha256(&self) -> &str {
