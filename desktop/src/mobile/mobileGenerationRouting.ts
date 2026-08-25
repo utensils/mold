@@ -16,6 +16,7 @@ import {
   type CapableHostBase,
 } from "@studio/lib/hostRouting";
 import type { MobileHost } from "./hosts";
+import { mobileIdentityRouteRefusal } from "./identity";
 
 /** One immutable routing candidate assembled by the mobile surface. */
 export interface MobileGenerationRoutingCandidate {
@@ -40,6 +41,15 @@ export type MobileAutomaticRoute =
       kind: "route";
       host: MobileHost;
       route: HostRoute;
+      placement: GenerationPlacementPreview | null;
+      legacyUnsupported: boolean;
+    }
+  | { kind: "error"; message: string }
+  | { kind: "abandoned" };
+
+export type MobilePinnedPlacement =
+  | {
+      kind: "placement";
       placement: GenerationPlacementPreview | null;
       legacyUnsupported: boolean;
     }
@@ -111,6 +121,80 @@ export interface RouteAutomaticMobileGenerationOptions {
   isCurrent?: () => boolean;
   signal?: AbortSignal;
   settleMs?: number;
+}
+
+export interface PreviewPinnedMobileGenerationOptions {
+  route: HostRoute;
+  request: Record<string, unknown>;
+  chain: boolean;
+  copies: number;
+  subject: "print" | "sequence";
+  requireAuthoritative: boolean;
+  isCurrent?: () => boolean;
+  signal?: AbortSignal;
+}
+
+/** Validate one frozen machine's placement answer under the same legacy policy as Auto. */
+export async function previewPinnedMobileGeneration(
+  options: PreviewPinnedMobileGenerationOptions,
+): Promise<MobilePinnedPlacement> {
+  const isCurrent = options.isCurrent ?? (() => true);
+  let placement: GenerationPlacementPreview | null = null;
+  let legacyUnsupported = false;
+  try {
+    placement = options.chain
+      ? await previewChainPlacement(options.route.target, options.request, options.copies, {
+          ...(options.signal ? { signal: options.signal } : {}),
+        })
+      : await previewGenerationPlacement(options.route.target, options.request, options.copies, {
+          ...(options.signal ? { signal: options.signal } : {}),
+        });
+  } catch (error) {
+    if (!isCurrent()) return { kind: "abandoned" };
+    if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
+      if (options.requireAuthoritative) {
+        return {
+          kind: "error",
+          message:
+            mobileIdentityRouteRefusal({
+              carriesIdentity: Boolean(options.request.id_image),
+              hostLabel: options.route.label,
+              hostAdvertisesIdentity: true,
+              legacyPlacement: true,
+            }) ??
+            `${options.route.label} does not provide the authoritative placement preview required for reference media. Nothing was queued.`,
+        };
+      }
+      legacyUnsupported = true;
+    } else {
+      return {
+        kind: "error",
+        message: describeTransportError(error, options.route.label),
+      };
+    }
+  }
+  if (!isCurrent()) return { kind: "abandoned" };
+  const classification = classifyPlacementPreview(placement);
+  if (options.requireAuthoritative && classification === "unsupported") {
+    return {
+      kind: "error",
+      message:
+        mobileIdentityRouteRefusal({
+          carriesIdentity: Boolean(options.request.id_image),
+          hostLabel: options.route.label,
+          hostAdvertisesIdentity: true,
+          legacyPlacement: true,
+        }) ??
+        `${options.route.label} does not provide the authoritative placement preview required for reference media. Nothing was queued.`,
+    };
+  }
+  if (!legacyUnsupported && classification !== "unsupported" && classification !== "planned") {
+    return {
+      kind: "error",
+      message: mobilePlacementFailure(placement, options.route.label, options.subject),
+    };
+  }
+  return { kind: "placement", placement, legacyUnsupported };
 }
 
 /**

@@ -15,7 +15,10 @@ vi.mock("@studio/api/generationPlacement", async (importOriginal) => ({
   previewGenerationPlacement,
 }));
 
-import { routeAutomaticMobileGeneration } from "./mobileGenerationRouting";
+import {
+  previewPinnedMobileGeneration,
+  routeAutomaticMobileGeneration,
+} from "./mobileGenerationRouting";
 
 function host(id: string): MobileHost {
   return {
@@ -213,5 +216,64 @@ describe("mobile automatic generation routing", () => {
 
     await expect(routing).resolves.toMatchObject({ kind: "route", host: { id: "render" } });
     expect(stalled.signal?.aborted).toBe(true);
+  });
+});
+
+describe("mobile pinned generation placement", () => {
+  beforeEach(() => {
+    previewChainPlacement.mockReset();
+    previewGenerationPlacement.mockReset();
+  });
+
+  function pinnedOptions(machine = host("studio")) {
+    return {
+      route: routeForHost(machine),
+      request: { model: "test-model" },
+      chain: false,
+      copies: 1,
+      subject: "print" as const,
+      requireAuthoritative: false,
+    };
+  }
+
+  it("accepts a planned placement on the frozen route", async () => {
+    previewGenerationPlacement.mockResolvedValue(planned(100));
+
+    await expect(previewPinnedMobileGeneration(pinnedOptions())).resolves.toMatchObject({
+      kind: "placement",
+      legacyUnsupported: false,
+      placement: { outcome: "planned" },
+    });
+  });
+
+  it("permits the legacy fallback only when authoritative placement is unnecessary", async () => {
+    previewGenerationPlacement.mockRejectedValue(new ApiError("missing", 404));
+
+    await expect(previewPinnedMobileGeneration(pinnedOptions())).resolves.toEqual({
+      kind: "placement",
+      placement: null,
+      legacyUnsupported: true,
+    });
+  });
+
+  it("refuses a legacy identity placement", async () => {
+    previewGenerationPlacement.mockRejectedValue(new ApiError("missing", 404));
+
+    const result = await previewPinnedMobileGeneration({
+      ...pinnedOptions(),
+      request: { model: "test-model", id_image: "face" },
+      requireAuthoritative: true,
+    });
+
+    expect(result).toMatchObject({ kind: "error" });
+    if (result.kind === "error") expect(result.message).toContain("identity");
+  });
+
+  it("abandons a late answer after cancellation", async () => {
+    previewGenerationPlacement.mockResolvedValue(planned(100));
+
+    await expect(
+      previewPinnedMobileGeneration({ ...pinnedOptions(), isCurrent: () => false }),
+    ).resolves.toEqual({ kind: "abandoned" });
   });
 });

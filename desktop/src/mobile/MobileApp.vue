@@ -111,7 +111,6 @@ import { h3BoundariesNeedingMedia } from "@studio/lib/h3BoundaryRestore";
 import {
   classifyPlacementPreview,
   previewChainPlacement,
-  previewGenerationPlacement,
   previewRequestForSiblingFanout,
   requiresAuthoritativePlacement,
   type GenerationPlacementPreview,
@@ -453,7 +452,11 @@ import {
 } from "./mobileGenerationRecovery";
 import { watchMobileGenerationHost, type MobileGenerationHostWatch } from "./mobileGenerationWatch";
 import { beginMobileBackgroundTask } from "./backgroundTask";
-import { mobilePlacementFailure, routeAutomaticMobileGeneration } from "./mobileGenerationRouting";
+import {
+  mobilePlacementFailure,
+  previewPinnedMobileGeneration,
+  routeAutomaticMobileGeneration,
+} from "./mobileGenerationRouting";
 import { prepareMobileGenerationRequest } from "./mobileGenerationPreparation";
 import {
   capturePreparedSubmission,
@@ -5728,67 +5731,29 @@ async function generate(): Promise<void> {
     placement = routed.placement;
     legacyUnsupported = routed.legacyUnsupported;
   } else {
-    try {
-      placement =
-        chainRouting.kind === "chain"
-          ? await previewChainPlacement(target, previewRequest, batchSize, {
-              signal: submitSignal,
-            })
-          : await previewGenerationPlacement(target, previewRequest, batchSize, {
-              signal: submitSignal,
-            });
-    } catch (error) {
-      if (!submissionAttempt.isCurrent()) {
-        releasePreparedSubmission();
-        return;
-      }
-      if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
-        if (requireAuthoritativePlacement) {
-          // An identity request lands here for its own reason — that server
-          // predates the partition and would ignore the face rather than
-          // refuse it — so it says that instead of talking about references.
-          setGenerationStatus(
-            mobileIdentityRouteRefusal({
-              carriesIdentity: Boolean(request.id_image),
-              hostLabel: route.label,
-              hostAdvertisesIdentity: true,
-              legacyPlacement: true,
-            }) ??
-              `${route.label} does not provide the authoritative placement preview required for reference media. Nothing was queued.`,
-            true,
-          );
-          releasePreparedSubmission();
-          return;
-        }
-        legacyUnsupported = true;
-      } else {
-        setGenerationStatus(describeTransportError(error, route.label), true);
-        releasePreparedSubmission();
-        return;
-      }
+    const preview = await previewPinnedMobileGeneration({
+      route,
+      request: previewRequest,
+      chain: chainRouting.kind === "chain",
+      copies: batchSize,
+      subject: "print",
+      requireAuthoritative: requireAuthoritativePlacement,
+      isCurrent: () => submissionAttempt.isCurrent(),
+      signal: submitSignal,
+    });
+    if (preview.kind === "abandoned") {
+      releasePreparedSubmission();
+      return;
     }
+    if (preview.kind === "error") {
+      setGenerationStatus(preview.message, true);
+      releasePreparedSubmission();
+      return;
+    }
+    placement = preview.placement;
+    legacyUnsupported = preview.legacyUnsupported;
   }
   if (!submissionAttempt.isCurrent()) {
-    releasePreparedSubmission();
-    return;
-  }
-  const classification: string = classifyPlacementPreview(placement);
-  if (requireAuthoritativePlacement && classification === "unsupported") {
-    setGenerationStatus(
-      mobileIdentityRouteRefusal({
-        carriesIdentity: Boolean(request.id_image),
-        hostLabel: route.label,
-        hostAdvertisesIdentity: true,
-        legacyPlacement: true,
-      }) ??
-        `${route.label} does not provide the authoritative placement preview required for reference media. Nothing was queued.`,
-      true,
-    );
-    releasePreparedSubmission();
-    return;
-  }
-  if (!legacyUnsupported && classification !== "unsupported" && classification !== "planned") {
-    setGenerationStatus(mobilePlacementFailure(placement, route.label, "print"), true);
     releasePreparedSubmission();
     return;
   }
