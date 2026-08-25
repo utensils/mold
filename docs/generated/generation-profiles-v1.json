@@ -16739,6 +16739,237 @@
     {
       "models": [
         {
+          "model": "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step",
+          "family": "minimax-h3",
+          "hidden": false
+        }
+      ],
+      "profile": {
+        "schema_version": 1,
+        "profile_id": "minimax-h3.minimax-h3-ref2va",
+        "profile_hash": "2383b8ad7c55440a29b7a3344717adffdb54dd11fd5a8e64b0fd11a46ecf6bb1",
+        "default_recipe_id": "default",
+        "recipes": [
+          {
+            "id": "default",
+            "label": "Default",
+            "request_selector": {},
+            "defaults": {
+              "width": 1344,
+              "height": 768,
+              "steps": 5,
+              "guidance": 0.0,
+              "frames": 124,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 32,
+              "min_width": 256,
+              "min_height": 256,
+              "max_pixels": 1032192,
+              "max_axis_pixels": 2016,
+              "min_aspect_ratio": 0.25,
+              "max_aspect_ratio": 4.0,
+              "aspect_groups": [
+                {
+                  "id": "7:4",
+                  "label": "7:4",
+                  "presets": [
+                    {
+                      "id": "1344x768",
+                      "width": 1344,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "20:11",
+                  "label": "20:11",
+                  "presets": [
+                    {
+                      "id": "1280x704",
+                      "width": 1280,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "960x960",
+                      "width": 960,
+                      "height": 960,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "4:7",
+                  "label": "4:7",
+                  "presets": [
+                    {
+                      "id": "768x1344",
+                      "width": 768,
+                      "height": 1344,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:20",
+                  "label": "11:20",
+                  "presets": [
+                    {
+                      "id": "704x1280",
+                      "width": 704,
+                      "height": 1280,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 5,
+              "min": 5,
+              "max": 5,
+              "step": 1,
+              "recommended": [
+                5
+              ],
+              "mode": "fixed",
+              "note": "Fixed by the 4-step Turbo tier: 5 terminal-inclusive sampler grid points (4 denoise intervals)."
+            },
+            "guidance": {
+              "default": 0.0,
+              "min": 0.0,
+              "max": 0.0,
+              "step": 0.1,
+              "mode": "fixed",
+              "note": "MiniMax H3 does not use classifier-free guidance; guidance is fixed at 0."
+            },
+            "temporal": {
+              "frames": {
+                "default": 124,
+                "min": 107,
+                "max": 345,
+                "step": 17,
+                "recommended": [
+                  107,
+                  124,
+                  226,
+                  345
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 5,
+              "fps": {
+                "mode": "fixed",
+                "value": 24
+              },
+              "max_duration_seconds": 15
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": false,
+                "supports_negative_prompt": false,
+                "fixed_scale": 0.0
+              },
+              "negative_prompt": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not encode a negative prompt."
+              },
+              "supports_lora": false,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": false,
+              "supports_extend": false,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not accept a source video."
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept keyframes."
+              },
+              "audio": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not accept source audio."
+              },
+              "lora": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "This model does not accept LoRA adapters."
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Synchronized H3 audio/video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/MiniMax-AI/MiniMax-H3",
+                "revision": "fa6891ff7cdaaa03fa4497e89ac64ff169219acf",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "models": [
+        {
           "model": "minimax-h3-ref2va:official-bf16",
           "family": "minimax-h3",
           "hidden": false

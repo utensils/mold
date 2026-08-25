@@ -8045,12 +8045,12 @@ mod tests {
     fn turbo_admission_routes_on_the_compact_engine_partition() {
         for tier in contract::REVIEWED_TURBO_MANIFEST_TIERS {
             let route = admitted_h3_route(tier.model).unwrap();
+            let expected_task = contract::task_for_model(tier.model).unwrap();
             assert_eq!(route.admitted_model, tier.model);
-            assert_eq!(route.partition_model, contract::FL2VA_COMFY);
-            assert_eq!(route.task, Task::Fl2va);
+            assert_eq!(route.task, expected_task);
             // The partition is derived from the tier's own task, never a
-            // constant — a future reviewed Ref2VA tier must partition to
-            // REF2VA_COMFY through the same seam.
+            // constant — the reviewed Ref2VA tier partitions to REF2VA_COMFY
+            // through this same seam.
             assert_eq!(
                 route.partition_model,
                 contract::base_compact_model_for_task(route.task)

@@ -7,13 +7,14 @@ import {
   type ModelAccessCapabilityRecord,
 } from "./modelAccess";
 import { imageDimensionsFromBase64 } from "./imageDimensions";
-import { MINIMAX_H3_REVIEWED_FL2VA_STEPS } from "./minimaxH3Inventory";
+import { MINIMAX_H3_REVIEWED_COMPACT_STEPS } from "./minimaxH3Inventory";
 import { readFileBase64 } from "./fileBase64";
 import {
   canonicalMinimaxH3ModelName,
   isMinimaxH3Identity,
   minimaxH3TaskForModel,
   MINIMAX_H3_FL2VA_COMFY as FL2VA_COMFY_BASE,
+  MINIMAX_H3_REF2VA_COMFY as REF2VA_COMFY_BASE,
   type MinimaxH3Task,
 } from "./minimaxH3Identity";
 
@@ -53,7 +54,7 @@ export const MINIMAX_H3_FRAME_OFFSET = 5;
 // Mirrors `mold_core::minimax_h3::COMPACT_MIN_STEPS` /
 // `COMPACT_MAX_STEPS` — the base compact tag's step range. A reviewed Turbo
 // tier keeps its distilled adapter's exact count instead
-// (`MINIMAX_H3_REVIEWED_FL2VA_STEPS`).
+// (`MINIMAX_H3_REVIEWED_COMPACT_STEPS`).
 export const MINIMAX_H3_COMPACT_MIN_STEPS = 2;
 export const MINIMAX_H3_COMPACT_MAX_STEPS = 50;
 export const MINIMAX_H3_MAX_REFERENCES = 12;
@@ -365,9 +366,11 @@ export function minimaxH3AuthoringCapabilities(
   // A reviewed Turbo tier's count is its distilled adapter's schedule length,
   // so both bounds are that number; the base tag takes the compact range.
   const canonical = canonicalMinimaxH3ModelName(model.name) ?? model.name;
-  const reviewedSteps = MINIMAX_H3_REVIEWED_FL2VA_STEPS[canonical];
+  const reviewedSteps = MINIMAX_H3_REVIEWED_COMPACT_STEPS[canonical];
   const turboSteps =
-    reviewedSteps != null && canonical !== FL2VA_COMFY_BASE
+    reviewedSteps != null &&
+    canonical !== FL2VA_COMFY_BASE &&
+    canonical !== REF2VA_COMFY_BASE
       ? reviewedSteps
       : null;
   return {

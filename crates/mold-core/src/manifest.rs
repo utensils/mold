@@ -7827,7 +7827,10 @@ mod tests {
         // — the pruned NVFP4 transformers on the same shared compact graph.
         // Acquirable and storable; execution is refused because mold has no
         // engine arm for the layout.
-        assert_eq!(known_manifests().len(), 163);
+        // Ref2VA Turbo (#825): +minimax-h3-ref2va:comfy-pruned-int8-turbo-4step
+        // — the reviewed 4-step adapter beside the Ref2VA base stack, added
+        // once Ref2VA execution landed.
+        assert_eq!(known_manifests().len(), 164);
     }
 
     #[test]

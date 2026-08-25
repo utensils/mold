@@ -534,8 +534,18 @@ fn build_fl2va_capability(models_root: &std::path::Path) -> Option<mold_core::Mi
     // become a second `fl2va` entry. A variant advertises its adapter's own
     // install state and carries its reviewed request envelope only once the
     // base stack and the adapter are both landed.
+    //
+    // The filter is load-bearing, not tidiness: this builds the FL2VA
+    // partition, whose `required_endpoint` is "first". A Ref2VA Turbo tier
+    // listed here would be advertised with a first-frame conditioning
+    // contract, and `authenticated_h3_private_model_rows` would then replace
+    // that model's ordinary ordered-reference row with it.
     let turbo = mold_core::minimax_h3::REVIEWED_TURBO_MANIFEST_TIERS
         .iter()
+        .filter(|tier| {
+            mold_core::minimax_h3::task_for_model(tier.model)
+                == Some(mold_core::minimax_h3::Task::Fl2va)
+        })
         .map(|tier| {
             let manifest = find_manifest(tier.model)?;
             let adapter = manifest

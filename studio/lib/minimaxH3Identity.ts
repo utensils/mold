@@ -12,6 +12,8 @@ export const MINIMAX_H3_FL2VA_COMFY_TURBO_8STEP =
   "minimax-h3-fl2va:comfy-pruned-int8-turbo-8step";
 export const MINIMAX_H3_FL2VA_COMFY_TURBO_4STEP_768P =
   "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p";
+export const MINIMAX_H3_REF2VA_COMFY_TURBO_4STEP =
+  "minimax-h3-ref2va:comfy-pruned-int8-turbo-4step";
 
 function normalize(value: string): string {
   return value.trim().toLowerCase().replaceAll("_", "-");
@@ -40,7 +42,8 @@ export function canonicalMinimaxH3ModelName(
     value === MINIMAX_H3_FL2VA_COMFY_NVFP4 ||
     value === MINIMAX_H3_REF2VA_COMFY_NVFP4 ||
     value === MINIMAX_H3_FL2VA_COMFY_TURBO_8STEP ||
-    value === MINIMAX_H3_FL2VA_COMFY_TURBO_4STEP_768P
+    value === MINIMAX_H3_FL2VA_COMFY_TURBO_4STEP_768P ||
+    value === MINIMAX_H3_REF2VA_COMFY_TURBO_4STEP
   ) {
     return value;
   }

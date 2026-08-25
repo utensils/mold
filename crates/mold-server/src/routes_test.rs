@@ -8995,7 +8995,8 @@ mod tests {
         use mold_core::minimax_h3::{
             RuntimeUnavailableReason, COMFY_REPO, FL2VA_COMFY, FL2VA_COMFY_NVFP4,
             FL2VA_COMFY_TURBO_4STEP_768P, FL2VA_COMFY_TURBO_8STEP, FL2VA_OFFICIAL, NVFP4_REPO,
-            OFFICIAL_REPO, REF2VA_COMFY, REF2VA_COMFY_NVFP4, REF2VA_OFFICIAL,
+            OFFICIAL_REPO, REF2VA_COMFY, REF2VA_COMFY_NVFP4, REF2VA_COMFY_TURBO_4STEP,
+            REF2VA_OFFICIAL,
         };
         // Both compact task partitions execute since #825, so their answer
         // depends only on how this binary was compiled; the pinned layouts
@@ -9025,6 +9026,13 @@ mod tests {
                     COMFY_REPO,
                     fl2va.0,
                     fl2va.1
+                ),
+                (
+                    REF2VA_COMFY_TURBO_4STEP,
+                    false,
+                    COMFY_REPO,
+                    ref2va.0,
+                    ref2va.1
                 ),
                 (
                     FL2VA_OFFICIAL,

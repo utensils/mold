@@ -42,6 +42,7 @@ speed one.
 | `minimax-h3-fl2va:comfy-pruned-int8`                  | First/last-frame conditioning with audio          |  42.482 GB | CUDA generation; first-frame profile |
 | `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step`      | FL2VA + reviewed Turbo 8-step LoRA (9 steps)      |  44.438 GB | CUDA generation; first-frame profile |
 | `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p` | FL2VA + reviewed Turbo 4-step 768p LoRA (5 steps) |  44.438 GB | CUDA generation; first-frame profile |
+| `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step`     | Ref2VA + reviewed Turbo 4-step LoRA (5 steps)     |  44.438 GB | CUDA generation; reference profile   |
 | `minimax-h3-ref2va:comfy-pruned-int8`                 | Reference media to video with audio               |  42.482 GB | CUDA generation; ordered references  |
 | `minimax-h3-fl2va:comfy-pruned-nvfp4`                 | First/last-frame conditioning with audio          |  34.040 GB | Downloadable; execution unavailable  |
 | `minimax-h3-ref2va:comfy-pruned-nvfp4`                | Reference media to video with audio               |  34.040 GB | Downloadable; execution unavailable  |
@@ -112,20 +113,27 @@ catalog recipes cannot substitute for any registered graph.
 ## Reviewed Turbo tiers
 
 A Turbo tier is a reviewed LoRA adapter overlaid on the **same** compact INT8
-FL2VA checkpoint — nothing about the base artifact contract relaxes, and the
-only request axis a tier moves is its fixed step count. Each Turbo model tag
-pulls the complete base stack plus one pinned adapter
-(1,956,193,000 bytes for 8-step, 1,956,192,992 bytes for 4-step 768p, stored
-once under `shared/minimax-h3/loras/` and shared by both tags):
+checkpoint of its own task — nothing about the base artifact contract relaxes,
+and the only request axis a tier moves is its fixed step count. Each Turbo
+model tag pulls the complete base stack of its task plus one pinned adapter
+(1,956,193,000 bytes for FL2VA 8-step and Ref2VA 4-step, 1,956,192,992 bytes
+for FL2VA 4-step 768p, stored once under `shared/minimax-h3/loras/` and shared
+by every tag that names one):
 
 - `minimax-h3-fl2va:comfy-pruned-int8-turbo-8step` — 9 terminal-inclusive
   sampler grid points (8 model evaluations)
 - `minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p` — 5 terminal-inclusive
   sampler grid points (4 model evaluations)
+- `minimax-h3-ref2va:comfy-pruned-int8-turbo-4step` — 5 terminal-inclusive
+  sampler grid points (4 model evaluations)
 
-A Turbo tag stores its base stack in the base checkpoint's own directory
-(`minimax-h3-fl2va-comfy-pruned-int8/` plus the shared family bucket), so a
-machine that already has `minimax-h3-fl2va:comfy-pruned-int8` installed
+An adapter is reviewed for exactly one task partition, so a `ref2v` adapter
+can never mint an FL2VA qualification and vice versa.
+
+A Turbo tag stores its base stack in its own task's base checkpoint directory
+(`minimax-h3-fl2va-comfy-pruned-int8/` or `minimax-h3-ref2va-comfy-pruned-int8/`,
+plus the shared family bucket), so a machine that already has that base tag
+installed
 downloads only the ~1.96 GB adapter — and pulling a Turbo tag first means a
 later base pull downloads nothing. Because the shared bytes genuinely
 constitute a complete base install, a Turbo-only pull also makes the base tag
