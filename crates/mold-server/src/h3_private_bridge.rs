@@ -277,12 +277,19 @@ fn classify_h3_private_ingress_with_runtime(
     }))
 }
 
-/// Fail closed until the inference facade contains at least one exact reviewed
-/// private-runtime qualification record. This check performs no path access.
+/// Fail closed until the inference facade contains a compiled runtime
+/// qualification for this exact task partition. This check performs no path
+/// access.
+///
+/// The task literal that used to sit beside this call is gone (#825): the
+/// public build now carries a compiled qualification for BOTH the FL2VA
+/// boundary-endpoint route and the Ref2VA ordered-reference route, and
+/// `reviewed_h3_private_runtime_available_for_task` is the one authority that
+/// says which. Restating a task here would let this gate and the runtime
+/// disagree, which is exactly what it exists to prevent.
 #[cfg(feature = "h3")]
 fn reviewed_h3_private_runtime_available(task: mold_core::minimax_h3::Task) -> bool {
-    task == mold_core::minimax_h3::Task::Fl2va
-        && mold_inference::reviewed_h3_private_runtime_available_for_task(task)
+    mold_inference::reviewed_h3_private_runtime_available_for_task(task)
 }
 
 #[cfg(all(not(feature = "h3"), feature = "h3-private-uat"))]
@@ -1811,7 +1818,7 @@ pub(crate) fn prepare_for_owner(
             frozen_factory,
             admission_evidence,
             paths: paths.inference_paths(),
-            references: &reference_bindings,
+            references: reference_bindings,
             owner_fence: mold_inference::H3PrivateFl2VaOwnerFenceFacts {
                 work_identity_sha256: work_identity_sha256.clone(),
                 cancellation_scope_identity_sha256: cancellation_scope_identity_sha256.clone(),

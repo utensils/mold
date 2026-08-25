@@ -37,7 +37,7 @@ use super::pipeline::{
 };
 use super::private_opened_evidence::{
     H3PrivateComfyStorageAuthority, H3PrivatePreparedFl2VaFactoryInputs,
-    H3PrivatePreparedFl2VaRetention,
+    H3PrivatePreparedFl2VaRetention, H3PrivatePreparedTaskRequest,
 };
 use super::private_qwen::{
     H3PrivateQwenAdapter, H3PrivateQwenArtifactLease, H3PrivateQwenConditionerLease,
@@ -1884,11 +1884,18 @@ where
     E: H3BackendExecutionLease + Send + Sync,
     A: H3PrivateFl2VaArtifactLease + Send + Sync,
 {
+    /// Consume the owner into its concrete task-shaped runtime request and
+    /// the phase backend both pipelines drive.
+    ///
+    /// The request is the TASK enum, not FL2VA's: each runner below
+    /// destructures the variant its own pipeline consumes, and the schedule
+    /// check here reads the grid through the enum so a Ref2VA preparation is
+    /// checked against the same retained denoise-forward count.
     fn into_backend(
         self,
         progress: &ProgressReporter,
     ) -> Result<(
-        super::pipeline::H3PreparedFl2VaRequest,
+        H3PrivatePreparedTaskRequest,
         H3PrivatePhaseBackend<C, E, A>,
     )> {
         let Self {
@@ -1913,7 +1920,7 @@ where
         retention.revalidate()?;
         let expected_denoise_forwards =
             super::sampler::H3DualSchedule::new_for_sampler_with_video_shift(
-                prepared.grid_points,
+                prepared.grid_points(),
                 admitted.quantization.sampler_kind(),
                 admitted.quantization.video_shift(),
             )?
@@ -3082,6 +3089,9 @@ where
     A: H3PrivateFl2VaArtifactLease + Send + Sync,
 {
     let (prepared, backend) = owner.into_backend(progress)?;
+    let H3PrivatePreparedTaskRequest::Fl2va(prepared) = prepared else {
+        bail!("private H3 FL2VA attempt was handed another task's prepared request")
+    };
     with_contained_private_cuda_resources(backend, |backend| {
         let staged = super::pipeline::execute_staged(&prepared, backend, progress, observer)?;
         let identity_echo = backend.terminal_identity_echo()?;
@@ -3100,19 +3110,14 @@ where
     })
 }
 
-/// Execute one instrumented Ref2VA attempt over the same phase owner FL2VA
-/// uses.
+/// Execute one Ref2VA attempt over the same phase owner FL2VA uses.
 ///
 /// The owner is built by `bind_private_comfy_ref2va_phase_owner`, which is the
 /// only constructor and which refuses anything but a Ref2VA-admitted route.
-/// This function is compiled only for the developer-only campaign feature: the
-/// public runtime has no reviewed Ref2VA bounds, so it must not be reachable
-/// from a shipping build.
-#[cfg(all(feature = "mp4", feature = "h3-private-uat"))]
+#[cfg(feature = "mp4")]
 pub(crate) fn run_private_comfy_ref2va_attempt<C, E, A>(
     owner: H3PrivatePhaseRuntimeOwner<C, E, A>,
     bindings: &[GenerationReferenceBinding],
-    request: &mold_core::GenerateRequest,
     progress: &ProgressReporter,
     observer: &mut dyn H3PipelineObserver,
 ) -> Result<H3PrivatePhaseRuntimeOutput>
@@ -3121,11 +3126,14 @@ where
     E: H3BackendExecutionLease + Send + Sync,
     A: H3PrivateFl2VaArtifactLease + Send + Sync,
 {
-    // The FL2VA owner's `into_backend` returns the prepared FL2VA request,
-    // which Ref2VA does not consume; the ordered reference preparation is
-    // re-derived from the same resolved request the retention froze.
-    let (_, backend) = owner.into_backend(progress)?;
-    let prepared = super::pipeline::ref2va::prepare_resolved_request(request, progress, observer)?;
+    // The RETAINED preparation, never a fresh one: the prepared request the
+    // owner carries is the one `validate_prepared_ref2va_runtime_request`
+    // checked against the frozen factory authority, so re-deriving it here
+    // from the request would put an unfenced value on the execution path.
+    let (prepared, backend) = owner.into_backend(progress)?;
+    let H3PrivatePreparedTaskRequest::Ref2va(prepared) = prepared else {
+        bail!("private H3 Ref2VA attempt was handed another task's prepared request")
+    };
     with_contained_private_cuda_resources(backend, |backend| {
         let staged = super::pipeline::ref2va::execute_staged(
             &prepared, bindings, backend, progress, observer,
@@ -3152,7 +3160,7 @@ where
 /// FL2VA binder and then adds the one check that binder cannot make: the
 /// admitted route must be the Ref2VA task and model, and the opened
 /// transformer must be the Ref2VA checkpoint rather than FL2VA's.
-#[cfg(feature = "h3-private-uat")]
+#[cfg(feature = "mp4")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn bind_private_comfy_ref2va_phase_owner<C, E, A>(
     authority: FrozenH3FactoryAuthority,
