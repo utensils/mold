@@ -855,6 +855,31 @@
             '';
           }
           // lib.optionalAttrs isLinux {
+            artifact-attestation-private-state =
+              let
+                evaluated = inputs.nixpkgs.lib.nixosSystem {
+                  inherit system;
+                  modules = [
+                    ./nix/module.nix
+                    {
+                      services.mold = {
+                        enable = true;
+                        package = mold;
+                      };
+                    }
+                  ];
+                };
+                service = evaluated.config.systemd.services.mold;
+              in
+              assert
+                service.environment.MOLD_ARTIFACT_ATTESTATIONS_DIR == "/var/lib/mold-artifact-attestations-v1";
+              assert service.serviceConfig.StateDirectory == "mold-artifact-attestations-v1";
+              assert service.serviceConfig.StateDirectoryMode == "0700";
+              assert builtins.elem "d /var/lib/mold 0775 mold mold -" evaluated.config.systemd.tmpfiles.rules;
+              pkgs.runCommand "mold-artifact-attestation-private-state-check" { } ''
+                touch "$out"
+              '';
+
             cuda-package-consistency =
               let
                 moduleWarnings =
