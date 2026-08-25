@@ -5776,11 +5776,17 @@ fn public_ref2va_runtime_bounds_for_shape(
             fl2va_observed::QWEN_SEQUENCE_ROWS,
         ),
         vae_construction_device_workspace_bytes: VAE_CONSTRUCTION_DEVICE_WORKSPACE_FLOOR_BYTES,
+        // Floored, not scaled to zero: an ordered set of standalone audio
+        // references has no visual canvas at all, and a zero bound is
+        // inadmissible (`H3PrivateRuntimeBoundRecord::validate` refuses it,
+        // and the encoder still constructs). The floor is the same 64 MiB the
+        // VAE construction transient keeps.
         condition_vae_workspace_device_bytes: scale(
             fl2va_observed::CONDITION_VAE_WORKSPACE_DEVICE_BYTES,
-            references.largest_canvas_pixels.max(1),
+            references.largest_canvas_pixels,
             measured_pixels,
-        ),
+        )
+        .max(VAE_CONSTRUCTION_DEVICE_WORKSPACE_FLOOR_BYTES),
         attention_workspace_device_bytes: scale(
             fl2va_observed::ATTENTION_WORKSPACE_DEVICE_BYTES,
             envelope.max_total_packed_rows,
@@ -7744,6 +7750,44 @@ mod tests {
         }
     }
 
+    /// An ordered set of standalone audio references has no visual canvas,
+    /// no vision pads, and no conditioning latents — and every bound in the
+    /// record still has to be nonzero, because `validate` refuses a zero one.
+    #[cfg(all(feature = "h3", feature = "mp4"))]
+    #[test]
+    fn an_audio_only_ordered_set_still_mints_an_admissible_record() {
+        let references = vec![ref2va_reference_set()
+            .into_iter()
+            .last()
+            .expect("the ordered set ends with its standalone audio reference")];
+        assert!(matches!(
+            references[0],
+            mold_core::GenerationReference::Audio { .. }
+        ));
+        let rows =
+            ref2va_reference_rows(&references, contract::DEFAULT_COMPACT_FRAMES).unwrap();
+        assert_eq!(rows.visual, 0);
+        assert_eq!(rows.qwen_vision, 0);
+        assert_eq!(rows.largest_canvas_pixels, 0);
+        assert!(rows.audio > 0);
+
+        let canvas = (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT);
+        let envelope = public_ref2va_runtime_envelope_for_shape(
+            canvas,
+            contract::DEFAULT_COMPACT_FRAMES,
+            contract::COMFY_DEFAULT_STEPS,
+            &rows,
+        );
+        envelope.validate_for_task(Task::Ref2va).unwrap();
+        let bounds =
+            public_ref2va_runtime_bounds_for_shape(canvas, contract::DEFAULT_COMPACT_FRAMES, &rows);
+        bounds.validate().unwrap();
+        assert_eq!(
+            bounds.condition_vae_workspace_device_bytes,
+            VAE_CONSTRUCTION_DEVICE_WORKSPACE_FLOOR_BYTES
+        );
+    }
+
     /// The Ref2VA qualification is minted by the same function, keyed on the
     /// task, and it never inherits FL2VA's identities.
     #[cfg(all(feature = "h3", feature = "mp4"))]
@@ -8439,6 +8483,9 @@ mod tests {
             height: 512,
             frames: 97,
             fps: contract::FIXED_FPS,
+            reference_fingerprint_sha256: None,
+            resolved_reference_fingerprint_sha256: None,
+            reference_count: 0,
         }
     }
 
