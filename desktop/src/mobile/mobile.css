@@ -2678,6 +2678,7 @@ button:disabled {
 
 .gallery-item img,
 .gallery-item video {
+  display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -4701,6 +4702,7 @@ button:disabled {
 }
 
 .mobile-collection-cover img {
+  display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;

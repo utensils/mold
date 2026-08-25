@@ -1434,6 +1434,14 @@ async function deleteSelectedPrints() {
 let resizeObserver: ResizeObserver | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
+function remeasureLibraryAfterResume() {
+  if (document.visibilityState === "hidden") return;
+  void nextTick(() => {
+    if (scrollEl.value) containerWidth.value = scrollEl.value.clientWidth;
+    virtualizer.value?.measure?.();
+  });
+}
+
 /** Justified layout over the visible set; each laid tile keeps its merged
  *  entry so origin (badge, target, actions) travels with it. */
 const rows = computed(() => {
@@ -1917,6 +1925,9 @@ onMounted(() => {
   window.addEventListener("pointermove", moveSelectionDrag, { passive: false });
   window.addEventListener("pointerup", finishSelectionDrag);
   window.addEventListener("pointercancel", finishSelectionDrag);
+  window.addEventListener("pageshow", remeasureLibraryAfterResume);
+  window.addEventListener("focus", remeasureLibraryAfterResume);
+  document.addEventListener("visibilitychange", remeasureLibraryAfterResume);
   pollTimer = setInterval(() => void gallery.pollExtras(), EXTRA_POLL_MS);
   if (scrollEl.value) {
     containerWidth.value = scrollEl.value.clientWidth;
@@ -1946,6 +1957,9 @@ onUnmounted(() => {
   window.removeEventListener("pointermove", moveSelectionDrag);
   window.removeEventListener("pointerup", finishSelectionDrag);
   window.removeEventListener("pointercancel", finishSelectionDrag);
+  window.removeEventListener("pageshow", remeasureLibraryAfterResume);
+  window.removeEventListener("focus", remeasureLibraryAfterResume);
+  document.removeEventListener("visibilitychange", remeasureLibraryAfterResume);
   finishSelectionDrag();
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
