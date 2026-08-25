@@ -9,6 +9,7 @@ docs="$root/website/guide/desktop.md"
 home="$root/website/index.md"
 importer="$root/scripts/import-windows-signing-certificate.ps1"
 verifier="$root/scripts/verify-windows-signatures.ps1"
+verifier_test="$root/scripts/tests/windows-signature-verifier.ps1"
 
 thumbprint=$(jq -r '.bundle.windows.certificateThumbprint' "$config")
 [[ "$thumbprint" =~ ^[A-F0-9]{40}$ ]] || {
@@ -38,6 +39,8 @@ grep -Fq 'Mold-windows-x64-self-signed.exe' "$release"
 grep -Fq 'sign-windows-binary.ps1' "$release"
 grep -Fq 'Import-PfxCertificate' "$importer"
 grep -Fq 'Get-AuthenticodeSignature' "$verifier"
+grep -Fq 'windows-signature-verifier.ps1' "$workflow"
+grep -Fq 'New-SelfSignedCertificate' "$verifier_test"
 
 # The verifier must never write a certificate store. Importing the self-signed
 # certificate into Cert:\CurrentUser\Root to force a `Valid` status needs
@@ -53,6 +56,7 @@ if grep -Eq 'Import-Certificate|CertStoreLocation' "$verifier"; then
   exit 1
 fi
 grep -Fq 'ExpectedThumbprint' "$verifier"
+grep -Fq 'CERT_E_UNTRUSTEDROOT' "$verifier"
 grep -Fq 'TrustedPublisher' "$docs"
 grep -Fq '/icons/windows.svg' "$home"
 grep -Fq 'Windows CLI instructions' "$home"

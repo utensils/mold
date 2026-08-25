@@ -42,9 +42,16 @@ foreach ($path in $FilePath) {
 
   $signature = Get-AuthenticodeSignature $path
 
-  # HashMismatch, NotSigned and friends must still fail. UnknownError is the
-  # status an untrusted self-signed chain produces and is the expected one here.
-  if ($signature.Status -ne 'Valid' -and $signature.Status -ne 'UnknownError') {
+  # PowerShell collapses every WinVerifyTrust HRESULT it does not recognize
+  # into UnknownError. Accept only CERT_E_UNTRUSTEDROOT, which is the expected
+  # result for our pinned self-signed certificate; timestamp, provider, and
+  # every other unmapped failure must remain fatal. Constructing the message on
+  # this machine keeps the comparison correct under localized Windows runners.
+  $untrustedRootMessage = [ComponentModel.Win32Exception]::new(-2146762487).Message
+  $hasExpectedUntrustedRoot =
+    $signature.Status -eq 'UnknownError' -and
+    $signature.StatusMessage -eq $untrustedRootMessage
+  if ($signature.Status -ne 'Valid' -and -not $hasExpectedUntrustedRoot) {
     throw "$path has invalid Authenticode status $($signature.Status)"
   }
   if (-not $signature.SignerCertificate) {
