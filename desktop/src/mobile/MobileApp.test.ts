@@ -676,12 +676,7 @@ describe("MobileApp sequence generation", () => {
     ).toBeUndefined();
     expect(
       invoke.mock.calls.filter(([command]) => command === "end_mobile_background_task"),
-    ).toEqual([
-      [
-        "end_mobile_background_task",
-        { token: "mobile-background-stale-source" },
-      ],
-    ]);
+    ).toEqual([["end_mobile_background_task", { token: "mobile-background-stale-source" }]]);
   });
 
   it("removes capability-restricted models from the picker before submission", async () => {
