@@ -31,8 +31,8 @@ use crate::variant_dependencies::{
 /// engine and therefore what decides which adapter the checkpoint can accept:
 /// PuLID-FLUX injects between transformer blocks, PuLID v1.1 injects into the
 /// UNet's cross-attentions, and neither file loads in the other's engine.
-/// `mold_core::identity` already restricts identity conditioning to the
-/// enumerated qualified checkpoints at the request boundary, so reaching this
+/// `mold_core::identity` already restricts identity conditioning to supported
+/// FLUX.1/SDXL checkpoints at the request boundary, so reaching this
 /// with an unconditioning family means that gate was bypassed. Refusing is
 /// deliberate: an identity that is accepted and then silently ignored is the
 /// failure this slice exists to prevent.
@@ -59,7 +59,9 @@ fn identity_family_for(request: &GenerateRequest, family: &str) -> Result<Identi
     // `routes::placement_preview_for_request_authenticated` — the same seam the
     // source-image contract uses, and for the same reason, so a preview can
     // never plan a bundle for a request generation would refuse.
-    if let Some(from_model) = mold_core::identity::identity_family(&request.model) {
+    if let Some(from_model) =
+        mold_core::identity::identity_family_with_hint(&request.model, Some(family))
+    {
         if from_model != resolved {
             return Err(format!(
                 "identity conditioning for '{}' expects model family '{}', but this model \

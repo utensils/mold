@@ -5047,6 +5047,14 @@ pub const PULID_FLUX_MANIFEST: &str = "pulid-flux";
 pub fn auxiliary_manifests_for_request(
     request: &crate::types::GenerateRequest,
 ) -> Vec<&'static str> {
+    auxiliary_manifests_for_request_with_family(request, None)
+}
+
+/// Family-aware auxiliary bundle lookup for opaque live-catalog model ids.
+pub fn auxiliary_manifests_for_request_with_family(
+    request: &crate::types::GenerateRequest,
+    family_hint: Option<&str>,
+) -> Vec<&'static str> {
     let mut manifests = Vec::new();
     if crate::identity::request_mentions_identity(request)
         && crate::identity::effective_id_weight(request) > 0.0
@@ -5054,7 +5062,9 @@ pub fn auxiliary_manifests_for_request(
         // The bundle follows the checkpoint's family — `pulid-flux` or
         // `pulid-sdxl` — through the one identity authority; a model no family
         // qualifies needs no bundle because admission refuses it first.
-        if let Some(family) = crate::identity::identity_family(&request.model) {
+        if let Some(family) =
+            crate::identity::identity_family_with_hint(&request.model, family_hint)
+        {
             manifests.push(family.manifest());
         }
     }
@@ -6823,6 +6833,17 @@ mod tests {
         assert_eq!(
             auxiliary_manifests_for_request(&request_for("flux-dev")),
             vec![PULID_FLUX_MANIFEST]
+        );
+        assert_eq!(
+            auxiliary_manifests_for_request_with_family(&request_for("cv:123"), Some("flux")),
+            vec![PULID_FLUX_MANIFEST]
+        );
+        assert_eq!(
+            auxiliary_manifests_for_request_with_family(
+                &request_for("hf:owner/sdxl-finetune"),
+                Some("sdxl")
+            ),
+            vec![PULID_SDXL_MANIFEST]
         );
         assert!(
             auxiliary_manifests_for_request(&request_for("sdxl-turbo:fp16")).is_empty(),

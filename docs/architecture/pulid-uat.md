@@ -5,6 +5,10 @@ The record of what was actually run on real hardware to close the
 measured numbers. Everything below is reproducible; where a check could not be
 run, this says so rather than omitting it.
 
+> **Historical qualification snapshot:** the model lists below record what was
+> tested when PuLID first shipped. Current admission is family-wide for FLUX.1
+> and SDXL, with `sdxl-turbo:fp16` as the sole SDXL exception.
+
 ## Hosts
 
 | Host | Backend | GPU | Build | Mold home |

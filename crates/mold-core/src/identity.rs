@@ -227,10 +227,10 @@ pub fn identity_cache_key(image_sha256: &str, assets: &IdentityAssetDigests) -> 
 /// footprints, so every layer that has to behave differently asks this one
 /// question rather than re-deriving the answer from a model name.
 ///
-/// The variants are deliberately NOT the manifest `family` string: `"sdxl"`
-/// covers turbo and Playground checkpoints that are not qualified, so a family
-/// match is necessary and never sufficient. [`identity_family`] is the only
-/// authority.
+/// The variants map to the manifest architecture family. FLUX.1 is supported
+/// family-wide; SDXL is supported family-wide except for the explicitly
+/// excluded distilled Turbo checkpoint. [`identity_family`] is the only
+/// authority for that policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum IdentityFamily {
     /// PuLID-FLUX v0.9.1 — `pulid-flux`, `pulid_flux_v0.9.1.safetensors`.
@@ -256,11 +256,14 @@ impl IdentityFamily {
         }
     }
 
-    /// The resolved checkpoints qualified for this family.
-    pub fn qualified_models(self) -> &'static [&'static str] {
+    /// Whether a resolved manifest belongs to this identity-compatible family.
+    pub fn qualifies_manifest(self, manifest: &crate::manifest::ModelManifest) -> bool {
         match self {
-            Self::Flux => IDENTITY_QUALIFIED_FLUX_MODELS,
-            Self::Sdxl => IDENTITY_QUALIFIED_SDXL_MODELS,
+            Self::Flux => manifest.family == self.family(),
+            Self::Sdxl => {
+                manifest.family == self.family()
+                    && !IDENTITY_EXCLUDED_SDXL_MODELS.contains(&manifest.name.as_str())
+            }
         }
     }
 
@@ -268,52 +271,23 @@ impl IdentityFamily {
     pub const ALL: &'static [IdentityFamily] = &[IdentityFamily::Flux, IdentityFamily::Sdxl];
 }
 
-/// FLUX checkpoints qualified to accept identity conditioning.
+/// SDXL checkpoints excluded from family-wide identity conditioning.
 ///
-/// These are resolved manifest names. A request naming the bare `flux-dev`
-/// resolves to `flux-dev:q8` through [`crate::manifest::resolve_model_name`],
-/// and the legacy dash form `flux-dev-q4` resolves to `flux-dev:q4`, so both
-/// are accepted; `flux-dev:bf16` and every other checkpoint are not.
-pub const IDENTITY_QUALIFIED_FLUX_MODELS: &[&str] = &["flux-dev:q4", "flux-dev:q8"];
+/// PuLID v1.1's release note reports degraded behavior on the distilled Turbo
+/// base, so that checkpoint remains the sole exception. Every other model
+/// routed through mold's standard SDXL UNet can load the same adapter.
+pub const IDENTITY_EXCLUDED_SDXL_MODELS: &[&str] = &["sdxl-turbo:fp16"];
 
-/// SDXL checkpoints qualified to accept identity conditioning.
-///
-/// PuLID v1.1's own release note (`ToTheBeginning/PuLID`, `docs/pulid_v1.1.md`)
-/// is the authority for the list, and every `family: "sdxl"` manifest entry was
-/// decided against it explicitly rather than by pattern:
-///
-/// | manifest entry | qualified | why |
-/// | --- | --- | --- |
-/// | `sdxl-base:fp16` | yes | the architecture the adapter was trained against |
-/// | `juggernaut-xl:fp16` | yes | named by `docs/pulid_v1.1.md` ("Juggernaut-XL") and the demo's own `--base RunDiffusion/Juggernaut-XL-v9` |
-/// | `realvis-xl:fp16` | yes | named by `docs/pulid_v1.1.md` ("RealVisXL") |
-/// | `dreamshaper-xl:fp16` | yes | named by `docs/pulid_v1.1.md` ("DreamShaper-XL-Lightning") and the demo's `--base Lykon/dreamshaper-xl-lightning`; mold's entry is the sibling `Lykon/dreamshaper-xl-v2-turbo` |
-/// | `sdxl-turbo:fp16` | no | the distilled base upstream's own caveat covers — "does not perform as well as v1 on the SDXL-lightning-4step base model" |
-/// | `playground-v2.5:fp16` | no | EDM-parameterized, a different training objective the adapter never saw |
-/// | `pony-v6:fp16` | no | a retrained conditioning vocabulary upstream never evaluated, and mold carries it without a pinned SHA-256 |
-/// | `cyberrealistic-pony:fp16` | no | same, a Pony derivative |
-///
-/// The unqualified entries are refusals pending UAT, not architectural
-/// impossibilities: every one of them is a standard SDXL UNet the adapter would
-/// physically load. Qualification is about whether the render is one mold is
-/// willing to promise, which is why the list is enumerated rather than
-/// pattern-matched on the family.
-pub const IDENTITY_QUALIFIED_SDXL_MODELS: &[&str] = &[
-    "sdxl-base:fp16",
-    "juggernaut-xl:fp16",
-    "realvis-xl:fp16",
-    "dreamshaper-xl:fp16",
-];
-
-/// Every qualified checkpoint, across every family, in [`IdentityFamily::ALL`]
+/// Every registered checkpoint that supports identity conditioning, in manifest
 /// order.
 ///
-/// Composed rather than restated so a family added above cannot be missing
-/// from the refusal a client reads.
+/// Derived rather than restated so future FLUX.1 and SDXL manifests inherit the
+/// family-wide policy automatically.
 pub fn identity_qualified_models() -> Vec<&'static str> {
-    IdentityFamily::ALL
+    crate::manifest::known_manifests()
         .iter()
-        .flat_map(|family| family.qualified_models().iter().copied())
+        .filter(|manifest| identity_family(&manifest.name).is_some())
+        .map(|manifest| manifest.name.as_str())
         .collect()
 }
 
@@ -489,17 +463,32 @@ pub const TRUE_CFG_REQUIRES_IDENTITY: &str =
 /// The single authority. `supports_identity` on the generation profile,
 /// `/api/models[].supports_identity`, the dependency planner's bundle choice,
 /// the memory charge, and the engine's adapter all derive from this one
-/// answer; none of them re-derives it from the manifest family, which is
-/// necessary and never sufficient (`sdxl` also covers turbo and Playground).
+/// answer. Compatibility is architecture-wide for FLUX.1 and SDXL, with the
+/// explicitly documented SDXL Turbo exception.
 ///
 /// The name is resolved first, so callers may pass whatever the request
 /// carried — bare, tagged, or the legacy dash form.
 pub fn identity_family(model: &str) -> Option<IdentityFamily> {
-    let resolved = crate::manifest::resolve_model_name(model);
-    IdentityFamily::ALL
-        .iter()
-        .copied()
-        .find(|family| family.qualified_models().contains(&resolved.as_str()))
+    identity_family_with_hint(model, None)
+}
+
+/// The identity architecture for a model plus its resolved family.
+///
+/// Built-in manifests remain authoritative, including the SDXL Turbo
+/// exception. Live-catalog `cv:`/`hf:` ids have no built-in manifest, so their
+/// server-resolved family is the authority instead.
+pub fn identity_family_with_hint(model: &str, family_hint: Option<&str>) -> Option<IdentityFamily> {
+    if let Some(manifest) = crate::manifest::find_manifest(model) {
+        return IdentityFamily::ALL
+            .iter()
+            .copied()
+            .find(|family| family.qualifies_manifest(manifest));
+    }
+    match family_hint {
+        Some("flux") => Some(IdentityFamily::Flux),
+        Some("sdxl") => Some(IdentityFamily::Sdxl),
+        _ => None,
+    }
 }
 
 /// Whether `model` is qualified for identity conditioning.
@@ -508,6 +497,12 @@ pub fn identity_family(model: &str) -> Option<IdentityFamily> {
 /// carried — bare, tagged, or the legacy dash form.
 pub fn identity_qualified_model(resolved_model: &str) -> bool {
     identity_family(resolved_model).is_some()
+}
+
+/// Whether a model is identity-compatible using its resolved family when its
+/// id is an opaque live-catalog identifier.
+pub fn identity_qualified_model_with_family(model: &str, family_hint: Option<&str>) -> bool {
+    identity_family_with_hint(model, family_hint).is_some()
 }
 
 /// The refusal a surface shows for a checkpoint that cannot take an identity
@@ -519,8 +514,8 @@ pub fn identity_qualified_model(resolved_model: &str) -> bool {
 /// built-in fallback and the wording authority, not a second capability.
 pub fn identity_model_gate_message(model: &str) -> String {
     format!(
-        "{model} does not support face-identity conditioning; identity is qualified only for {}",
-        identity_qualified_models().join(", ")
+        "{model} does not support face-identity conditioning; identity is supported for FLUX.1 \
+         and SDXL checkpoints except sdxl-turbo:fp16"
     )
 }
 
@@ -651,10 +646,19 @@ pub fn request_identity_marker(req: &GenerateRequest) -> Option<String> {
 /// A render that needs one and does not have it is an error at the engine,
 /// never a silently unconditioned negative pass.
 pub fn request_needs_unconditional_identity(req: &GenerateRequest) -> bool {
+    request_needs_unconditional_identity_for_family(req, identity_family(&req.model))
+}
+
+/// Family-aware form used after server dependency planning has resolved an
+/// opaque catalog id to its concrete PuLID bundle.
+pub fn request_needs_unconditional_identity_for_family(
+    req: &GenerateRequest,
+    family: Option<IdentityFamily>,
+) -> bool {
     if !request_carries_identity_photo(req) || effective_id_weight(req) == 0.0 {
         return false;
     }
-    match identity_family(&req.model) {
+    match family {
         Some(IdentityFamily::Sdxl) => true,
         _ => request_uses_true_cfg(req),
     }
@@ -946,6 +950,14 @@ pub fn validate_id_image_bytes(bytes: &[u8]) -> Result<(), String> {
 /// A request that mentions no identity field at all is untouched, so this is
 /// safe to call unconditionally from the shared generate-request validator.
 pub fn validate_identity_conditioning(req: &GenerateRequest) -> Result<(), String> {
+    validate_identity_conditioning_with_family(req, None)
+}
+
+/// Validate identity conditioning with the model family resolved by admission.
+pub fn validate_identity_conditioning_with_family(
+    req: &GenerateRequest,
+    family_hint: Option<&str>,
+) -> Result<(), String> {
     if !request_mentions_identity(req) {
         // True CFG rides on the identity contract and nothing else in this
         // milestone, so a request that names it without a face is refused here
@@ -998,7 +1010,7 @@ pub fn validate_identity_conditioning(req: &GenerateRequest) -> Result<(), Strin
         return Err("id_image_name requires id_image".to_string());
     }
 
-    let Some(family) = identity_family(&req.model) else {
+    let Some(family) = identity_family_with_hint(&req.model, family_hint) else {
         return Err(identity_model_gate_message(&req.model));
     };
 
@@ -1420,8 +1432,16 @@ mod tests {
     }
 
     #[test]
-    fn qualified_models_accept_every_resolved_spelling() {
-        for name in ["flux-dev", "flux-dev:q4", "flux-dev:q8", "flux-dev-q4"] {
+    fn family_wide_models_accept_resolved_spellings_and_variants() {
+        for name in [
+            "flux-dev",
+            "flux-dev:q4",
+            "flux-dev:bf16",
+            "flux-dev-q4",
+            "flux-schnell:q8",
+            "flux-krea:fp8",
+            "jibmix-flux:q4",
+        ] {
             assert_eq!(
                 identity_family(name),
                 Some(IdentityFamily::Flux),
@@ -1436,6 +1456,9 @@ mod tests {
             "juggernaut-xl:fp16",
             "realvis-xl:fp16",
             "dreamshaper-xl:fp16",
+            "playground-v2.5:fp16",
+            "pony-v6:fp16",
+            "cyberrealistic-pony:fp16",
         ] {
             assert_eq!(
                 identity_family(name),
@@ -1446,13 +1469,12 @@ mod tests {
     }
 
     #[test]
-    fn unqualified_models_are_rejected() {
+    fn other_families_and_sdxl_turbo_are_rejected() {
         for name in [
-            "flux-dev:bf16",
             "flux-dev:fp8",
-            "flux-schnell",
-            "flux-schnell:q8",
             "flux2-klein",
+            "sdxl-turbo",
+            "sdxl-turbo:fp16",
             "sdxl",
             "qwen-image",
             "",
@@ -1464,51 +1486,51 @@ mod tests {
         }
     }
 
-    /// Every `family: "sdxl"` manifest entry is decided explicitly. A future
-    /// SDXL checkpoint therefore lands in this test as an unreviewed name
-    /// rather than silently inheriting qualification from its family — the
-    /// whole reason [`IDENTITY_QUALIFIED_SDXL_MODELS`] is enumerated.
     #[test]
-    fn every_sdxl_manifest_entry_has_a_recorded_identity_decision() {
-        let qualified = ["sdxl-base", "juggernaut-xl", "realvis-xl", "dreamshaper-xl"];
-        let refused = [
-            "sdxl-turbo",
-            "playground-v2.5",
-            "pony-v6",
-            "cyberrealistic-pony",
-        ];
-
-        let entries: Vec<String> = crate::manifest::known_manifests()
-            .iter()
-            .filter(|manifest| manifest.family == "sdxl")
-            .map(|manifest| manifest.name.clone())
-            .collect();
+    fn opaque_catalog_ids_use_the_resolved_family_without_overriding_known_models() {
         assert_eq!(
-            entries.len(),
-            qualified.len() + refused.len(),
-            "an SDXL manifest entry appeared or vanished without an identity \
-             decision: {entries:?}"
+            identity_family_with_hint("cv:123", Some("flux")),
+            Some(IdentityFamily::Flux)
         );
+        assert_eq!(
+            identity_family_with_hint("hf:owner/sdxl-finetune", Some("sdxl")),
+            Some(IdentityFamily::Sdxl)
+        );
+        assert_eq!(identity_family_with_hint("cv:123", None), None);
+        assert_eq!(
+            identity_family_with_hint("sdxl-turbo:fp16", Some("sdxl")),
+            None,
+            "a family hint must not override the canonical Turbo exception"
+        );
+        assert_eq!(
+            identity_family_with_hint("flux2-klein:q8", Some("flux")),
+            None,
+            "a family hint must not override a known manifest architecture"
+        );
+    }
 
-        for name in &entries {
-            let base = name.split(':').next().unwrap();
-            if qualified.contains(&base) {
-                assert_eq!(
-                    identity_family(name),
-                    Some(IdentityFamily::Sdxl),
-                    "{name} is on the qualified list"
-                );
+    /// Identity compatibility follows the engine architecture. New FLUX.1 and
+    /// SDXL manifests inherit support automatically, while Turbo remains an
+    /// explicit reviewed exception.
+    #[test]
+    fn every_flux_and_non_turbo_sdxl_manifest_supports_identity() {
+        for manifest in crate::manifest::known_manifests()
+            .iter()
+            .filter(|manifest| matches!(manifest.family.as_str(), "flux" | "sdxl"))
+        {
+            let expected = if manifest.family == "flux" {
+                Some(IdentityFamily::Flux)
+            } else if IDENTITY_EXCLUDED_SDXL_MODELS.contains(&manifest.name.as_str()) {
+                None
             } else {
-                assert!(
-                    refused.contains(&base),
-                    "{name} has no recorded identity decision"
-                );
-                assert_eq!(
-                    identity_family(name),
-                    None,
-                    "{name} is deliberately refused"
-                );
-            }
+                Some(IdentityFamily::Sdxl)
+            };
+            assert_eq!(
+                identity_family(&manifest.name),
+                expected,
+                "{}",
+                manifest.name
+            );
         }
     }
 
@@ -1532,21 +1554,18 @@ mod tests {
         assert_eq!(IdentityFamily::Sdxl.family(), "sdxl");
     }
 
-    /// The union a refusal names is composed from the per-family lists, so a
-    /// family added to [`IdentityFamily::ALL`] cannot be missing from it.
+    /// The public inventory is the exact family-derived set.
     #[test]
-    fn the_qualified_union_is_every_familys_list() {
+    fn the_qualified_union_is_every_supported_manifest() {
         let union = identity_qualified_models();
-        for family in IdentityFamily::ALL.iter().copied() {
-            for model in family.qualified_models() {
-                assert!(union.contains(model), "{model} missing from the union");
-                assert_eq!(identity_family(model), Some(family));
-            }
+        for manifest in crate::manifest::known_manifests() {
+            assert_eq!(
+                union.contains(&manifest.name.as_str()),
+                identity_family(&manifest.name).is_some(),
+                "{}",
+                manifest.name
+            );
         }
-        assert_eq!(
-            union.len(),
-            IDENTITY_QUALIFIED_FLUX_MODELS.len() + IDENTITY_QUALIFIED_SDXL_MODELS.len()
-        );
     }
 
     /// The three extracted helpers are what the TUI and the Discord bot call
@@ -1557,9 +1576,8 @@ mod tests {
     fn extracted_helpers_match_the_request_validator_wording() {
         assert_eq!(
             identity_model_gate_message("sdxl"),
-            "sdxl does not support face-identity conditioning; identity is qualified only for \
-             flux-dev:q4, flux-dev:q8, sdxl-base:fp16, juggernaut-xl:fp16, realvis-xl:fp16, \
-             dreamshaper-xl:fp16"
+            "sdxl does not support face-identity conditioning; identity is supported for FLUX.1 \
+             and SDXL checkpoints except sdxl-turbo:fp16"
         );
 
         assert!(validate_id_weight(0.0).is_ok());
@@ -1750,7 +1768,16 @@ mod tests {
     #[cfg(feature = "pulid")]
     #[test]
     fn identity_conditioning_accepts_a_qualified_request() {
-        for model in ["flux-dev", "flux-dev:q4", "flux-dev:q8", "flux-dev-q4"] {
+        for model in [
+            "flux-dev",
+            "flux-dev:q4",
+            "flux-dev:q8",
+            "flux-dev:bf16",
+            "flux-dev-q4",
+            "flux-schnell:q8",
+            "flux-krea:fp8",
+            "jibmix-flux:q4",
+        ] {
             let mut req = identity_request(model);
             req.id_weight = Some(ID_WEIGHT_MAX);
             req.id_start_step = Some(req.steps - 1);
@@ -1882,24 +1909,19 @@ mod tests {
 
         let cases = [
             Case {
-                name: "unqualified quantization",
-                mutate: |req| req.model = "flux-dev:bf16".to_string(),
-                expect: "flux-dev:q8",
-            },
-            Case {
-                name: "unqualified flux checkpoint",
-                mutate: |req| req.model = "flux-schnell".to_string(),
-                expect: "flux-dev:q8",
+                name: "excluded sdxl turbo checkpoint",
+                mutate: |req| req.model = "sdxl-turbo".to_string(),
+                expect: "except sdxl-turbo:fp16",
             },
             Case {
                 name: "unqualified family flux2",
                 mutate: |req| req.model = "flux2-klein".to_string(),
-                expect: "flux-dev:q8",
+                expect: "FLUX.1 and SDXL",
             },
             Case {
                 name: "unqualified family sdxl",
                 mutate: |req| req.model = "sdxl".to_string(),
-                expect: "flux-dev:q4",
+                expect: "FLUX.1 and SDXL",
             },
             Case {
                 name: "weight above the range",
@@ -2027,7 +2049,7 @@ mod tests {
     /// before it reaches any of them.
     #[cfg(feature = "pulid")]
     #[test]
-    fn the_model_refusal_names_every_supported_model() {
+    fn the_model_refusal_names_the_supported_families_and_exception() {
         let mut req = identity_request("sdxl");
         if !IDENTITY_RUNTIME_READY {
             assert_runtime_pending(validate_identity_conditioning(&req), "unqualified model");
@@ -2036,9 +2058,9 @@ mod tests {
             return;
         }
         let error = validate_identity_conditioning(&req).unwrap_err();
-        for model in identity_qualified_models() {
-            assert!(error.contains(model), "{model} must be named: {error}");
-        }
+        assert!(error.contains("FLUX.1"), "{error}");
+        assert!(error.contains("SDXL"), "{error}");
+        assert!(error.contains("sdxl-turbo:fp16"), "{error}");
         req.model = "flux-dev:q4".to_string();
         assert!(validate_identity_conditioning(&req).is_ok());
     }
@@ -2444,7 +2466,10 @@ mod tests {
         if !identity_runtime_available() {
             return;
         }
-        for model in IDENTITY_QUALIFIED_SDXL_MODELS {
+        for model in identity_qualified_models()
+            .into_iter()
+            .filter(|model| identity_family(model) == Some(IdentityFamily::Sdxl))
+        {
             let mut req = identity_request(model);
             req.true_cfg = Some(2.0);
             assert_eq!(
@@ -2481,7 +2506,10 @@ mod tests {
         if !identity_runtime_available() {
             return;
         }
-        for model in IDENTITY_QUALIFIED_SDXL_MODELS {
+        for model in identity_qualified_models()
+            .into_iter()
+            .filter(|model| identity_family(model) == Some(IdentityFamily::Sdxl))
+        {
             let mut plain = identity_request(model);
             validate_identity_conditioning(&plain)
                 .unwrap_or_else(|error| panic!("{model} must be accepted: {error}"));
@@ -2530,7 +2558,10 @@ mod tests {
     /// a plausible print with most of the identity cancelled out.
     #[test]
     fn the_unconditional_identity_is_needed_by_every_sdxl_render_and_only_true_cfg_flux() {
-        for model in IDENTITY_QUALIFIED_SDXL_MODELS {
+        for model in identity_qualified_models()
+            .into_iter()
+            .filter(|model| identity_family(model) == Some(IdentityFamily::Sdxl))
+        {
             let req = identity_request(model);
             assert!(
                 request_needs_unconditional_identity(&req),
@@ -2550,6 +2581,16 @@ mod tests {
         let mut true_cfg = identity_request("flux-dev:q8");
         true_cfg.true_cfg = Some(2.0);
         assert!(request_needs_unconditional_identity(&true_cfg));
+
+        let catalog_sdxl = identity_request("cv:123");
+        assert!(request_needs_unconditional_identity_for_family(
+            &catalog_sdxl,
+            Some(IdentityFamily::Sdxl)
+        ));
+        assert!(!request_needs_unconditional_identity_for_family(
+            &catalog_sdxl,
+            Some(IdentityFamily::Flux)
+        ));
 
         // No photograph, no extraction, nothing to compute.
         let mut bare = crate::test_support::minimal_generate_request("sdxl-base:fp16");

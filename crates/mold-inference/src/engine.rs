@@ -292,8 +292,8 @@ pub trait InferenceEngine: Send + Sync {
         if embedding.is_some() {
             anyhow::bail!(
                 "this engine does not support face-identity conditioning; \
-                 identity is qualified only for {}",
-                mold_core::identity::identity_qualified_models().join(", ")
+                 identity is supported for FLUX.1 and SDXL checkpoints except \
+                 sdxl-turbo:fp16"
             );
         }
         Ok(())

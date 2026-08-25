@@ -896,7 +896,10 @@ async fn prepare_local_licensed_dependencies(
     config: &mold_core::Config,
     tx: &mpsc::UnboundedSender<BackgroundEvent>,
 ) -> Result<(), String> {
-    for bundle in mold_core::manifest::auxiliary_manifests_for_request(request) {
+    let family = config.resolved_model_config(&request.model).family;
+    for bundle in
+        mold_core::manifest::auxiliary_manifests_for_request_with_family(request, family.as_deref())
+    {
         if config.manifest_model_needs_download(bundle) {
             pull_local_model_with_consent(bundle.to_string(), tx.clone()).await?;
         }

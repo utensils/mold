@@ -1971,7 +1971,7 @@ fn validate_generate_request_after_activation(
     }
     // Face-identity conditioning is its own contract; `crate::identity` owns
     // every rule so this validator does not grow a second authority.
-    crate::identity::validate_identity_conditioning(req)?;
+    crate::identity::validate_identity_conditioning_with_family(req, family)?;
     if req.batch_size == 0 {
         return Err("batch_size must be >= 1".to_string());
     }
@@ -6492,9 +6492,19 @@ mod tests {
             .expect("flux-dev resolves to the qualified flux-dev:q8");
 
         req.model = "flux-dev:bf16".to_string();
+        validate_generate_request_with_family(&req, None)
+            .expect("identity support applies to every FLUX.1 quantization");
+
+        req.model = "cv:123".to_string();
+        validate_generate_request_with_family(&req, Some("flux"))
+            .expect("a catalog-installed FLUX model uses its resolved family");
+        req.model = "hf:owner/sdxl-finetune".to_string();
+        validate_generate_request_with_family(&req, Some("sdxl"))
+            .expect("a catalog-installed SDXL model uses its resolved family");
+
+        req.model = "sdxl-turbo:fp16".to_string();
         let error = validate_generate_request_with_family(&req, None).unwrap_err();
-        assert!(error.contains("flux-dev:q4"), "{error}");
-        assert!(error.contains("flux-dev:q8"), "{error}");
+        assert!(error.contains("except sdxl-turbo:fp16"), "{error}");
 
         // A knob without the reference is refused, never silently ignored.
         let mut bare = valid_req();

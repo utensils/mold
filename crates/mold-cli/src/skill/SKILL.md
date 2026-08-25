@@ -746,11 +746,10 @@ mold run "a golden retriever" --image park.png --mask mask.png
 
 ### Face-identity conditioning (PuLID)
 
-Keep one person's face across arbitrary prompts. FLUX takes PuLID-FLUX v0.9.1
-(`flux-dev:q4`, `flux-dev:q8`); SDXL takes PuLID v1.1 (`sdxl-base:fp16`,
-`juggernaut-xl:fp16`, `realvis-xl:fp16`, `dreamshaper-xl:fp16`). On CUDA and
-Metal, in every official release build. Clients read the server's advertised
-`/api/models[].supports_identity` rather than this list.
+Keep one person's face across arbitrary prompts. Every FLUX.1 checkpoint takes
+PuLID-FLUX v0.9.1; every SDXL checkpoint except SDXL Turbo takes PuLID v1.1.
+Available on CUDA and Metal in every official release build. Clients read the
+server's advertised `/api/models[].supports_identity` capability.
 
 ```bash
 # FLUX — one-time setup: the bundle is licence-gated and will not download without this
@@ -828,12 +827,10 @@ Wire contract — additive `GenerateRequest` fields (read `supports_identity`, n
 
 Identity gate — every rule below is a 422 at admission, never a silent drop:
 
-- Only the identity-qualified checkpoints are accepted: FLUX's `flux-dev:q4`
-  and `flux-dev:q8` (bare `flux-dev` resolves to `:q8`, and the legacy dash
-  form `flux-dev-q4` resolves too), and SDXL's `sdxl-base:fp16`,
-  `juggernaut-xl:fp16`, `realvis-xl:fp16`, and `dreamshaper-xl:fp16`.
-  `flux-dev:bf16`, every SDXL checkpoint not on that list (turbo/lightning
-  tiers, Playground, the Pony derivatives), and every other model are refused.
+- Every FLUX.1 checkpoint is accepted, regardless of quantization or fine-tune.
+  Every SDXL checkpoint is accepted except `sdxl-turbo:fp16`, whose distilled
+  base remains an explicit compatibility exception. Flux.2 and every other
+  architecture are refused.
 - Identity may not be combined with a LoRA or with an img2img `source_image` —
   neither combination is qualified yet, on either family.
 - Any of `id_weight` / `id_start_step` / `id_image_name` without `id_image`
