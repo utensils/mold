@@ -248,13 +248,13 @@ fn verify_cached_dependency(
         return CachedDependencyVerdict::Usable;
     };
     if policy == DependencyMaterializationPolicy::ExistingOnly {
-        // Read-only: hash the current bytes through a retained descriptor and
-        // answer. Never the `.sha256-verified` marker — it is a writable
+        // Read-only planning may consume an existing trusted memo, but it must
+        // not create one by reading tens of gigabytes before the request can
+        // queue. Never the `.sha256-verified` marker — it is a writable
         // sidecar in a models root the model-storage invariant lets a group
-        // write, so it attests nothing about content. The hash is memoized per
-        // file identity, so a preview of an unchanged installed bundle costs
-        // one `fstat` per asset after the first.
-        return if mold_core::download::pinned_file_matches(path, pin.sha256) {
+        // write, so it attests nothing about content. A cold copy remains
+        // pending until admission authenticates it after queue ownership.
+        return if mold_core::download::pinned_file_matches_attested(path, pin.sha256) {
             CachedDependencyVerdict::Usable
         } else {
             CachedDependencyVerdict::Unproven
@@ -2941,11 +2941,24 @@ mod tests {
             "a read-only preview must not write an attestation either"
         );
 
-        // Proven bytes are reused by both policies without a download.
+        // A cold preview reports even the correct bytes as pending rather than
+        // hashing them synchronously. Admission proves the copy; subsequent
+        // previews may consume that trusted memo without reading the body.
         std::fs::write(&path, PINNED_CONTENT).unwrap();
-        for policy in [
+        let cold_preview = ensure_downloaded(
+            None,
+            "cold-preview",
+            pinned_spec(cache.path(), &repo, PINNED_CONTENT_SHA256),
+            None,
             DependencyMaterializationPolicy::ExistingOnly,
+        )
+        .await
+        .expect("a preview never refuses");
+        assert!(matches!(cold_preview, ResolvedDependency::Pending(_)));
+
+        for policy in [
             DependencyMaterializationPolicy::Admission,
+            DependencyMaterializationPolicy::ExistingOnly,
         ] {
             let resolved = ensure_downloaded(
                 None,
