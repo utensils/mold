@@ -111,6 +111,11 @@ pub(crate) struct H3PrivateFl2VaMemoryOverlapAuthority {
     factory_identity_sha256: String,
     prepared_attempt_identity_sha256: String,
     target_budget_identity_sha256: String,
+    /// The partition this record was issued for. Both tasks retain
+    /// conditioning latents, but they back them with different media —
+    /// FL2VA's normalized boundary endpoint, Ref2VA's normalized ordered
+    /// reference set — and each must be nonzero exactly for its own task.
+    task: Task,
     condition_visual_rows: u64,
     condition_backing_host_bytes: u64,
     condition_backing_device_bytes: u64,
@@ -120,6 +125,7 @@ pub(crate) struct H3PrivateFl2VaMemoryOverlapAuthority {
     attempt_resident_vae_device_bytes: u64,
     visual_decode_peak_device_bytes: u64,
     normalized_endpoint_host_bytes: u64,
+    reference_normalized_media_host_bytes: u64,
     scheduler_ledger_identity_sha256: String,
     identity_sha256: String,
     _activation: admitted_overlap_seal::Token,
@@ -137,6 +143,7 @@ impl H3PrivateFl2VaMemoryOverlapAuthority {
         factory_identity_sha256: impl Into<String>,
         prepared_attempt_identity_sha256: impl Into<String>,
         target_budget_identity_sha256: impl Into<String>,
+        task: Task,
         condition_visual_rows: u64,
         condition_backing_host_bytes: u64,
         condition_backing_device_bytes: u64,
@@ -146,11 +153,13 @@ impl H3PrivateFl2VaMemoryOverlapAuthority {
         attempt_resident_vae_device_bytes: u64,
         visual_decode_peak_device_bytes: u64,
         normalized_endpoint_host_bytes: u64,
+        reference_normalized_media_host_bytes: u64,
     ) -> Result<Self> {
         let mut authority = Self {
             factory_identity_sha256: factory_identity_sha256.into(),
             prepared_attempt_identity_sha256: prepared_attempt_identity_sha256.into(),
             target_budget_identity_sha256: target_budget_identity_sha256.into(),
+            task,
             condition_visual_rows,
             condition_backing_host_bytes,
             condition_backing_device_bytes,
@@ -160,6 +169,7 @@ impl H3PrivateFl2VaMemoryOverlapAuthority {
             attempt_resident_vae_device_bytes,
             visual_decode_peak_device_bytes,
             normalized_endpoint_host_bytes,
+            reference_normalized_media_host_bytes,
             scheduler_ledger_identity_sha256: std::iter::repeat_n('e', 64).collect(),
             identity_sha256: String::new(),
             _activation: admitted_overlap_seal::Token,
@@ -184,17 +194,42 @@ impl H3PrivateFl2VaMemoryOverlapAuthority {
         {
             bail!("private MiniMax H3 overlap authority lacks exact retained memory facts");
         }
+        // The media that BACKS the conditioning latents is task-shaped: FL2VA
+        // normalizes one boundary endpoint, Ref2VA normalizes its ordered
+        // reference set. Each must be nonzero exactly for its own task and
+        // zero for the other, so an overlap record cannot claim retention it
+        // never takes — the FL2VA-only rule refused every Ref2VA attempt for
+        // an endpoint the partition does not have.
+        let (backing_host_bytes, cross_task_host_bytes) = match self.task {
+            Task::Fl2va => (
+                self.normalized_endpoint_host_bytes,
+                self.reference_normalized_media_host_bytes,
+            ),
+            Task::Ref2va => (
+                self.reference_normalized_media_host_bytes,
+                self.normalized_endpoint_host_bytes,
+            ),
+        };
         let condition_bytes = (
             self.condition_backing_host_bytes,
             self.condition_backing_device_bytes,
-            self.normalized_endpoint_host_bytes,
+            backing_host_bytes,
         );
+        if cross_task_host_bytes != 0 {
+            bail!(
+                "private MiniMax H3 {:?} overlap authority charges the other task's conditioning media",
+                self.task
+            );
+        }
         if self.condition_visual_rows == 0 {
             if condition_bytes != (0, 0, 0) {
                 bail!("private MiniMax H3 T2VA overlap authority invents condition backing");
             }
         } else if condition_bytes.0 == 0 || condition_bytes.1 == 0 || condition_bytes.2 == 0 {
-            bail!("private MiniMax H3 FL2VA overlap authority undercharges condition backing");
+            bail!(
+                "private MiniMax H3 {:?} overlap authority undercharges condition backing",
+                self.task
+            );
         }
         let both_vaes = self
             .visual_vae_resident_device_bytes
@@ -225,6 +260,10 @@ fn memory_overlap_identity(authority: &H3PrivateFl2VaMemoryOverlapAuthority) -> 
     hash.update(authority.factory_identity_sha256.as_bytes());
     hash.update(authority.prepared_attempt_identity_sha256.as_bytes());
     hash.update(authority.target_budget_identity_sha256.as_bytes());
+    hash.update(match authority.task {
+        Task::Fl2va => b"fl2va".as_slice(),
+        Task::Ref2va => b"ref2va".as_slice(),
+    });
     hash.update(authority.condition_visual_rows.to_le_bytes());
     for bytes in [
         authority.condition_backing_host_bytes,
@@ -235,6 +274,7 @@ fn memory_overlap_identity(authority: &H3PrivateFl2VaMemoryOverlapAuthority) -> 
         authority.attempt_resident_vae_device_bytes,
         authority.visual_decode_peak_device_bytes,
         authority.normalized_endpoint_host_bytes,
+        authority.reference_normalized_media_host_bytes,
     ] {
         hash.update(bytes.to_le_bytes());
     }
@@ -270,6 +310,7 @@ pub(crate) fn issue_private_fl2va_memory_overlap(
         factory_identity_sha256: authority.identity_sha256().into(),
         prepared_attempt_identity_sha256: identities.0.into(),
         target_budget_identity_sha256: identities.1.into(),
+        task: request.task,
         condition_visual_rows: request.rows.condition_visual_rows,
         condition_backing_host_bytes: budget.condition_backing_host_bytes,
         condition_backing_device_bytes: budget.condition_latent_backing_device_bytes,
@@ -279,6 +320,7 @@ pub(crate) fn issue_private_fl2va_memory_overlap(
         attempt_resident_vae_device_bytes: budget.attempt_resident_vae_device_bytes,
         visual_decode_peak_device_bytes: budget.visual_decode_phase_device_bytes,
         normalized_endpoint_host_bytes: budget.normalized_endpoint_host_bytes,
+        reference_normalized_media_host_bytes: budget.reference_normalized_media_host_bytes,
         scheduler_ledger_identity_sha256: ledger.identity_sha256().into(),
         identity_sha256: String::new(),
         _activation: admitted_overlap_seal::Token,
@@ -1349,6 +1391,18 @@ where
     })
 }
 
+/// The exact retained load/drop sequence each partition's budget was built
+/// for. Ref2VA adds the reference decode, preprocess, and two encode phases
+/// ahead of the shared conditioner/denoise/decode spine, so pinning FL2VA's
+/// policy for both tasks refused every Ref2VA attempt at the last gate before
+/// component allocation.
+const fn expected_load_drop_policy(task: Task) -> H3FactoryTargetLoadDropPolicy {
+    match task {
+        Task::Fl2va => H3FactoryTargetLoadDropPolicy::LoadQwenEncodeTransferDropQwenLoadVaesEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
+        Task::Ref2va => H3FactoryTargetLoadDropPolicy::DecodeReferencesPreprocessReferencesLoadQwenEncodeVisionTransferDropQwenLoadVaesEncodeVisualReferencesEncodeAudioReferencesParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux,
+    }
+}
+
 fn validate_prepared_overlap_binding(
     authority: &FrozenH3FactoryAuthority,
     admitted: &H3PrivateFl2VaFactoryAuthority,
@@ -1370,8 +1424,9 @@ fn validate_prepared_overlap_binding(
         || overlap.factory_identity_sha256 != admitted.factory_identity_sha256
         || overlap.prepared_attempt_identity_sha256 != identities.0
         || overlap.target_budget_identity_sha256 != identities.1
-        || request.canonical_model != contract::FL2VA_COMFY
-        || request.task != Task::Fl2va
+        || request.canonical_model != contract::base_compact_model_for_task(request.task)
+        || request.task != admitted.task
+        || overlap.task != request.task
         || request.rows.condition_visual_rows != admitted.condition_visual_rows
         || overlap.condition_visual_rows != request.rows.condition_visual_rows
         || overlap.condition_backing_host_bytes != budget.condition_backing_host_bytes
@@ -1385,8 +1440,9 @@ fn validate_prepared_overlap_binding(
             != budget.attempt_resident_vae_device_bytes
         || overlap.visual_decode_peak_device_bytes != budget.visual_decode_phase_device_bytes
         || overlap.normalized_endpoint_host_bytes != budget.normalized_endpoint_host_bytes
-        || budget.load_drop_policy
-            != H3FactoryTargetLoadDropPolicy::LoadQwenEncodeTransferDropQwenLoadVaesEncodeConditionsParkVaesAllocateNoiseLoadTransformerDenoiseDropTransformerReloadVaesDecodeVisualAudioDropVaesMux
+        || overlap.reference_normalized_media_host_bytes
+            != budget.reference_normalized_media_host_bytes
+        || budget.load_drop_policy != expected_load_drop_policy(request.task)
     {
         bail!("private H3 prepared attempt, target budget, and overlap authority differ before component allocation")
     }
@@ -3504,6 +3560,7 @@ mod tests {
             admitted.factory_identity_sha256.clone(),
             sha('a'),
             sha('b'),
+            Task::Fl2va,
             admitted.condition_visual_rows,
             condition_host,
             condition_device,
@@ -3513,6 +3570,7 @@ mod tests {
             90,
             120,
             normalized_endpoints,
+            0,
         )
         .unwrap()
     }
@@ -3960,6 +4018,7 @@ mod tests {
                     admitted.factory_identity_sha256.clone(),
                     sha('a'),
                     sha('b'),
+                    Task::Fl2va,
                     0,
                     0,
                     0,
@@ -3968,6 +4027,7 @@ mod tests {
                     50,
                     90,
                     120,
+                    0,
                     0,
                 )?;
                 artifact_overlap_identity = overlap.identity_sha256().into();
@@ -4360,6 +4420,7 @@ mod tests {
             admitted.factory_identity_sha256.clone(),
             sha('a'),
             sha('b'),
+            Task::Fl2va,
             admitted.condition_visual_rows,
             0,
             20,
@@ -4369,6 +4430,7 @@ mod tests {
             90,
             120,
             60,
+            0,
         )
         .unwrap_err();
         assert!(error.to_string().contains("undercharges condition backing"));
@@ -4377,6 +4439,7 @@ mod tests {
             admitted.factory_identity_sha256.clone(),
             sha('a'),
             sha('b'),
+            Task::Fl2va,
             admitted.condition_visual_rows,
             10,
             20,
@@ -4386,6 +4449,7 @@ mod tests {
             89,
             120,
             60,
+            0,
         )
         .unwrap_err();
         assert!(error.to_string().contains("retain both VAEs"));
@@ -4394,6 +4458,7 @@ mod tests {
             admitted.factory_identity_sha256,
             sha('a'),
             sha('b'),
+            Task::Fl2va,
             admitted.condition_visual_rows,
             10,
             20,
@@ -4403,6 +4468,7 @@ mod tests {
             90,
             119,
             60,
+            0,
         )
         .unwrap_err();
         assert!(error.to_string().contains("undercharges retained audio"));
@@ -4414,6 +4480,7 @@ mod tests {
             t2va.factory_identity_sha256.clone(),
             sha('a'),
             sha('b'),
+            Task::Fl2va,
             0,
             0,
             0,
@@ -4423,12 +4490,14 @@ mod tests {
             90,
             120,
             0,
+            0,
         )
         .unwrap();
         let error = H3PrivateFl2VaMemoryOverlapAuthority::new(
             t2va.factory_identity_sha256,
             sha('a'),
             sha('b'),
+            Task::Fl2va,
             0,
             1,
             0,
@@ -4437,6 +4506,7 @@ mod tests {
             50,
             90,
             120,
+            0,
             0,
         )
         .unwrap_err();
