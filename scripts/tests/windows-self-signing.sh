@@ -4,6 +4,7 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 workflow="$root/.github/workflows/desktop.yml"
 release="$root/.github/workflows/release.yml"
+nightly="$root/.github/workflows/windows-nightly.yml"
 config="$root/desktop/src-tauri/tauri.windows-self-signed.conf.json"
 docs="$root/website/guide/desktop.md"
 home="$root/website/index.md"
@@ -30,7 +31,8 @@ grep -Fq 'tauri.windows-self-signed.conf.json' "$workflow"
 grep -Fq 'verify-windows-signatures.ps1' "$workflow"
 grep -Fq 'mold-desktop-windows-x64-self-signed' "$workflow"
 grep -Fq 'build-windows:' "$release"
-grep -Fq 'require_release_job_need "release-latest" "build-windows"' \
+grep -Fq "if: startsWith(github.ref, 'refs/tags/v')" "$release"
+grep -Fq 'reject_release_job_need "release-latest" "build-windows"' \
   "$root/scripts/tests/cuda-distribution-contract.sh"
 grep -Fq 'require_release_job_need "release-native" "build-windows"' \
   "$root/scripts/tests/cuda-distribution-contract.sh"
@@ -41,6 +43,17 @@ grep -Fq 'Import-PfxCertificate' "$importer"
 grep -Fq 'Get-AuthenticodeSignature' "$verifier"
 grep -Fq 'windows-signature-verifier.ps1' "$workflow"
 grep -Fq 'New-SelfSignedCertificate' "$verifier_test"
+grep -Fq 'group: windows-nightly' "$nightly"
+grep -Fq 'cancel-in-progress: false' "$nightly"
+grep -Fq 'workflow_dispatch:' "$nightly"
+grep -Fq 'group: rolling-native-publication' "$nightly"
+grep -Fq 'Mold-windows-x64-self-signed.exe' "$nightly"
+grep -Fq 'mold-x86_64-pc-windows-msvc-cpu.zip' "$nightly"
+grep -Fq 'mold-windows-nightly.json' "$nightly"
+grep -Fq 'mold.windows-nightly.v1' "$nightly"
+grep -Fq 'Re-sign the final standalone desktop executable' "$nightly"
+grep -Fq 'Re-sign the final standalone desktop executable' "$workflow"
+grep -Fq 'Re-sign the final standalone desktop executable' "$release"
 
 # The verifier must never write a certificate store. Importing the self-signed
 # certificate into Cert:\CurrentUser\Root to force a `Valid` status needs

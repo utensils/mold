@@ -182,7 +182,7 @@ for release_job in release-latest release-version release-native; do
 done
 require_release_job_need "release-version" "build-macos"
 require_release_job_need "release-version" "build-desktop-dmg"
-require_release_job_need "release-latest" "build-windows"
+reject_release_job_need "release-latest" "build-windows"
 for target in 86 89 100 120; do
   require_release_job_need "release-native" "build-linux-sm${target}"
 done
@@ -354,7 +354,11 @@ require_text "flake.nix" \
 require_release_job_need "publish" "release-version"
 require_release_job_need "publish-aur" "release-native"
 require_release_job_text "release-latest" \
-  'sha256sum -- *.tar.gz *.zip *.exe *.cer *.apk > SHA256SUMS'
+  'Include latest completed Windows artifacts'
+require_release_job_text "release-latest" \
+  "-printf '%f\\0'"
+require_release_job_text "release-latest" \
+  'xargs -0 sha256sum -- > SHA256SUMS'
 require_release_job_text "release-version" \
   'sha256sum -- *.tar.gz *.dmg *.zip > SHA256SUMS'
 for checksum_job in release-native release-containers; do

@@ -88,7 +88,9 @@ jobs:
   # every executable; its public half ships beside the artifacts so managed
   # machines can opt into trust without making the private key public.
   build-windows:
-    if: github.event_name != 'schedule'
+    # Rolling Windows artifacts have their own non-cancellable workflow. Keep
+    # this copy only for immutable tagged releases.
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
@@ -156,6 +158,13 @@ jobs:
         run: >-
           bunx tauri build --features pulid --bundles nsis --ci -v
           --config src-tauri/tauri.windows-self-signed.conf.json
+
+      - name: Re-sign the final standalone desktop executable
+        shell: pwsh
+        run: |
+          ./scripts/sign-windows-binary.ps1 `
+            -ConfigPath desktop/src-tauri/tauri.windows-self-signed.conf.json `
+            -FilePath desktop/src-tauri/target/release/mold-desktop.exe
 
       - name: Verify and package Windows artifacts
         shell: pwsh
@@ -823,7 +832,6 @@ jobs:
     needs:
       [
         build-macos,
-        build-windows,
         build-linux-sm86,
         build-linux-sm89,
         build-linux-sm100,
@@ -831,6 +839,9 @@ jobs:
         build-android-apk,
       ]
     runs-on: ubuntu-latest
+    concurrency:
+      group: rolling-native-publication
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -841,8 +852,32 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # Windows rolls independently so a 40+ minute Windows compile cannot be
+      # starved by frequent main pushes. Preserve its newest completed assets
+      # in the shared checksum manifest when they already exist.
+      - name: Include latest completed Windows artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for asset in \
+            Mold-windows-x64-self-signed.exe \
+            mold-windows-self-signing.cert.cer \
+            mold-x86_64-pc-windows-msvc-cpu.zip; do
+            gh release download latest \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "$asset" \
+              --dir artifacts \
+              || echo "::notice::No completed rolling $asset exists yet"
+          done
+
       - name: Generate checksums
-        run: cd artifacts && sha256sum -- *.tar.gz *.zip *.exe *.cer *.apk > SHA256SUMS
+        run: |
+          cd artifacts
+          find . -maxdepth 1 -type f \
+            \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' -o -name '*.cer' -o -name '*.apk' \) \
+            -printf '%f\0' \
+            | sort -z \
+            | xargs -0 sha256sum -- > SHA256SUMS
 
       - name: Verify rolling release source is current main
         run: scripts/check-desktop-nightly-main-head.sh "$GITHUB_SHA"
@@ -860,9 +895,6 @@ jobs:
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz
             artifacts/mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz
-            artifacts/mold-x86_64-pc-windows-msvc-cpu.zip
-            artifacts/Mold-windows-x64-self-signed.exe
-            artifacts/mold-windows-self-signing.cert.cer
             artifacts/Mold-android.apk
             artifacts/SHA256SUMS
           body: |
@@ -882,6 +914,11 @@ jobs:
             | Linux x86_64 | CUDA — RTX 40-series (Ada Lovelace) | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz` |
             | Linux x86_64 | CUDA — B200 / B300 (datacenter Blackwell; simulated, not hardware-qualified) | `mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz` |
             | Linux x86_64 | CUDA — RTX 50-series (consumer Blackwell) | `mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz` |
+
+            Windows artifacts are published independently from the newest
+            completed non-cancellable Windows build and may briefly lag the
+            aggregate commit above. `mold-windows-nightly.json` records their
+            exact source commit and hashes.
 
             GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
             Current Linux release archives and container images are linux/amd64 only.
