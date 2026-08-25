@@ -311,6 +311,7 @@ mod tests {
             );
             assert_eq!(manifest.family, FAMILY);
             assert!(manifest.is_files_only_bundle());
+            assert!(!manifest.is_generation_model());
             let components: Vec<_> = manifest.files.iter().map(|file| file.component).collect();
             for required in [
                 ModelComponent::Transformer,

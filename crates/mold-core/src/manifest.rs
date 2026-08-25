@@ -202,7 +202,7 @@ impl ModelManifest {
 
     /// True if this model can be used as a primary generation model.
     pub fn is_generation_model(&self) -> bool {
-        !self.is_upscaler() && !self.is_utility() && !self.is_auxiliary()
+        !self.is_upscaler() && !self.is_files_only_bundle() && !self.is_auxiliary()
     }
 
     /// True if any file in this model requires HuggingFace authentication.
