@@ -30,6 +30,7 @@ pub mod minimax_h3;
 pub mod model_policy;
 pub mod organization;
 pub mod print_title;
+pub mod prompt_text;
 pub mod pulid_assets;
 pub mod reference_upload;
 pub mod removal;
@@ -95,6 +96,7 @@ pub use print_title::{
     validate_print_title, DOWNLOAD_FALLBACK_STEM, DOWNLOAD_MODEL_SLUG_MAX_LEN,
     DOWNLOAD_NAME_SEPARATOR, PRINT_TITLE_MAX_CHARS, TITLE_SLUG_MAX_LEN, TITLE_SLUG_SEPARATOR,
 };
+pub use prompt_text::normalize_prompt_newlines;
 pub use reference_upload::{ReferenceUploadLease, ReferenceUploadSource};
 pub use types::GenerateRequest;
 pub use types::Scheduler;

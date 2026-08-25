@@ -483,6 +483,9 @@ describe("mobile gallery viewer", () => {
     const header = css.match(/\.gallery-viewer-header\s*\{([^}]*)\}/s);
     const origin = css.match(/\.gallery-viewer-origin\s*\{([^}]*)\}/s);
     const details = css.match(/\.gallery-viewer-details\s*\{([^}]*)\}/s);
+    const prompt = css.match(/\.gallery-viewer-prompt\s*\{([^}]*)\}/s);
+    const promptText = css.match(/\.gallery-viewer-prompt p\s*\{([^}]*)\}/s);
+    const actions = css.match(/\.gallery-viewer-actions\s*\{([^}]*)\}/s);
     expect(header?.[1]).toMatch(/width:\s*100%\s*;/);
     expect(header?.[1]).toMatch(/min-width:\s*0\s*;/);
     expect(header?.[1]).toMatch(/box-sizing:\s*border-box\s*;/);
@@ -491,6 +494,10 @@ describe("mobile gallery viewer", () => {
     expect(details?.[1]).toMatch(/width:\s*100%\s*;/);
     expect(details?.[1]).toMatch(/min-width:\s*0\s*;/);
     expect(details?.[1]).toMatch(/box-sizing:\s*border-box\s*;/);
+    expect(details?.[1]).toMatch(/grid-template-columns:\s*minmax\(0,\s*1fr\)\s*;/);
+    expect(prompt?.[1]).toMatch(/min-width:\s*0\s*;/);
+    expect(promptText?.[1]).toMatch(/overflow-wrap:\s*anywhere\s*;/);
+    expect(actions?.[1]).toMatch(/min-width:\s*0\s*;/);
   });
 });
 

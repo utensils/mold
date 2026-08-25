@@ -134,6 +134,15 @@ fn require_prompt(
     ))
 }
 
+fn require_normalized_prompt(
+    prompt: Option<String>,
+    family: &str,
+    has_visual_conditioning: bool,
+) -> Result<String> {
+    require_prompt(prompt, family, has_visual_conditioning)
+        .map(|prompt| mold_core::normalize_prompt_newlines(&prompt).into_owned())
+}
+
 #[derive(Default, Clone, Copy)]
 struct FileArgRefs<'a> {
     lora: Option<&'a str>,
@@ -1230,7 +1239,7 @@ pub async fn run(
         || keyframes.as_ref().is_some_and(|k| !k.is_empty())
         || source_video_bytes.is_some()
         || extend_video_bytes.is_some();
-    let prompt = require_prompt(prompt, &family, has_visual_conditioning)?;
+    let prompt = require_normalized_prompt(prompt, &family, has_visual_conditioning)?;
 
     // --- Prompt expansion ---
     // An unprompted conditioned video run has nothing to expand; handing "" to
@@ -1451,7 +1460,8 @@ pub async fn run(
             .resolved_model_config(&model)
             .effective_negative_prompt(&config),
         &family,
-    );
+    )
+    .map(|prompt| mold_core::normalize_prompt_newlines(&prompt).into_owned());
 
     // Resolve LoRA: explicit CLI values override config defaults.
     let model_cfg = config.resolved_model_config(&model);
@@ -2776,5 +2786,16 @@ mod tests {
             require_prompt(Some("a turtle".to_string()), "ltx2", true).unwrap(),
             "a turtle"
         );
+    }
+
+    #[test]
+    fn cli_prompt_arguments_decode_once_before_local_or_remote_generation() {
+        let prompt = require_normalized_prompt(
+            Some(r"first line\n\nsecond line\\n literal".to_string()),
+            "flux",
+            false,
+        )
+        .unwrap();
+        assert_eq!(prompt, "first line\n\nsecond line\\n literal");
     }
 }

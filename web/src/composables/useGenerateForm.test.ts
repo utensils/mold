@@ -2742,6 +2742,29 @@ describe("generate form serialization helpers", () => {
     ]);
   });
 
+  it("preserves canonical multiline prompts through web Library reuse", () => {
+    const next = applyMetadataToForm(
+      makeForm(),
+      {
+        prompt: "first line\n\nsecond line",
+        negative_prompt: "blur\nwatermark",
+        original_prompt: "source\nidea",
+        model: "sdxl:fp16",
+        seed: 42,
+        steps: 30,
+        guidance: 7.5,
+        width: 768,
+        height: 512,
+        version: "test",
+      },
+      { models: [makeModel({ name: "sdxl:fp16", family: "sdxl" })] },
+    );
+
+    expect(next.prompt).toBe("first line\n\nsecond line");
+    expect(next.negativePrompt).toBe("blur\nwatermark");
+    expect(next.originalPrompt).toBe("source\nidea");
+  });
+
   it("applyMetadataToForm restores the wan recipe a print was rendered with", () => {
     const next = applyMetadataToForm(
       makeForm(),

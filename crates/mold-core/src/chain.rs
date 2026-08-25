@@ -46,6 +46,7 @@ pub enum TransitionMode {
 /// per-stage seeds, encoded as decimal strings (full-range u64).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChainStageMetadata {
+    #[serde(deserialize_with = "crate::prompt_text::deserialize_prompt")]
     pub prompt: String,
     pub frames: u32,
     pub transition: TransitionMode,
@@ -703,6 +704,27 @@ pub fn routing_clip_frames(family: &str, model: &str) -> Option<u32> {
 }
 
 impl ChainRequest {
+    /// Canonicalize raw prompt text at one chain ingress. Callers that forward
+    /// an already-canonical request must protect backslashes on that wire hop
+    /// instead of applying this method twice.
+    pub fn normalize_prompt_newlines(&mut self) {
+        for stage in &mut self.stages {
+            stage.prompt = crate::normalize_prompt_newlines(&stage.prompt).into_owned();
+            stage.negative_prompt = stage
+                .negative_prompt
+                .take()
+                .map(|prompt| crate::normalize_prompt_newlines(&prompt).into_owned());
+        }
+        self.original_prompt = self
+            .original_prompt
+            .take()
+            .map(|prompt| crate::normalize_prompt_newlines(&prompt).into_owned());
+        self.prompt = self
+            .prompt
+            .take()
+            .map(|prompt| crate::normalize_prompt_newlines(&prompt).into_owned());
+    }
+
     /// Build a synthetic single-clip `GenerateRequest` describing the
     /// stitched output, so gallery rows and embedded metadata can reuse
     /// the existing single-clip schema. `stages[0]` supplies the prompt,

@@ -3020,6 +3020,7 @@ button:disabled {
 
 .gallery-viewer-details {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   width: 100%;
   min-width: 0;
   box-sizing: border-box;
@@ -3027,6 +3028,10 @@ button:disabled {
   padding: 14px max(16px, env(safe-area-inset-right)) 16px max(16px, env(safe-area-inset-left));
   border-top: 1px solid rgba(245, 239, 255, 0.12);
   background: #12101d;
+}
+
+.gallery-viewer-prompt {
+  min-width: 0;
 }
 
 .gallery-viewer-prompt > span {
@@ -3044,6 +3049,7 @@ button:disabled {
   color: #f5efff;
   font-size: var(--text-body-lg);
   line-height: 1.4;
+  overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
 }
@@ -3062,6 +3068,7 @@ button:disabled {
 
 .gallery-viewer-actions {
   display: grid;
+  min-width: 0;
   gap: 8px;
 }
 

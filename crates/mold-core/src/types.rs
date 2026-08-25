@@ -442,8 +442,13 @@ pub enum PromptTransformOperation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PromptTransformProvenance {
     pub operation: PromptTransformOperation,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::prompt_text::deserialize_optional_prompt"
+    )]
     pub root_prompt: Option<String>,
+    #[serde(deserialize_with = "crate::prompt_text::deserialize_prompt")]
     pub source_prompt: String,
     #[serde(default)]
     pub source_kind: RemixSourceKind,
@@ -457,6 +462,7 @@ pub struct PromptTransformProvenance {
 pub struct ExpandRequest {
     /// Short prompt to expand
     #[schema(example = "a cat")]
+    #[serde(deserialize_with = "crate::prompt_text::deserialize_prompt")]
     pub prompt: String,
     /// Model family for prompt style (flux, sdxl, sd15, sd3, etc.)
     #[serde(default = "default_expand_model_family")]
@@ -504,8 +510,13 @@ fn default_remix_variations() -> usize {
 /// silently ignoring a mode field and returning the wrong transform.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RemixRequest {
+    #[serde(deserialize_with = "crate::prompt_text::deserialize_prompt")]
     pub source_prompt: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::prompt_text::deserialize_optional_prompt"
+    )]
     pub root_prompt: Option<String>,
     #[serde(default)]
     pub source_kind: RemixSourceKind,
@@ -1175,11 +1186,16 @@ impl CollectionRef {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GenerateRequest {
     #[schema(example = "a cat sitting on a windowsill at sunset")]
+    #[serde(deserialize_with = "crate::prompt_text::deserialize_prompt")]
     pub prompt: String,
     /// Negative prompt — describes what to avoid generating.
     /// Effective for CFG-based models such as SD1.5, SDXL, SD3, and Wuerstchen.
     /// Ignored by distilled / non-CFG families such as FLUX schnell, Z-Image, etc.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::prompt_text::deserialize_optional_prompt"
+    )]
     #[schema(example = "blurry, low quality, watermark")]
     pub negative_prompt: Option<String>,
     #[schema(example = "flux-schnell:q8")]
@@ -1342,7 +1358,11 @@ pub struct GenerateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expand: Option<bool>,
     /// Original user prompt before expansion (set by client when expanding locally).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::prompt_text::deserialize_optional_prompt"
+    )]
     pub original_prompt: Option<String>,
     /// Structured prompt-transform provenance. New clients also populate
     /// `original_prompt` so older hosts retain the root/source prompt.
@@ -2138,6 +2158,7 @@ pub enum GenerationOutputMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OutputMetadata {
+    #[serde(deserialize_with = "crate::prompt_text::deserialize_prompt")]
     pub prompt: String,
     /// User-authored print title as it was at creation. Embedded so mirrors
     /// and imports carry it; the gallery row (`generations.title`) is the
@@ -2156,9 +2177,17 @@ pub struct OutputMetadata {
     /// actually resolve. Additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::prompt_text::deserialize_optional_prompt"
+    )]
     pub negative_prompt: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::prompt_text::deserialize_optional_prompt"
+    )]
     pub original_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_transform: Option<PromptTransformProvenance>,
