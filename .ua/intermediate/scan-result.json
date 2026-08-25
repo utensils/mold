@@ -9179,7 +9179,7 @@
     {
       "path": "scripts/understand-dashboard.sh",
       "language": "shell",
-      "sizeLines": 74,
+      "sizeLines": 77,
       "fileCategory": "script"
     },
     {

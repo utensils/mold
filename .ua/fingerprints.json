@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
-  "gitCommitHash": "f49406424c131b2da4ea33c24a863695f138ab48",
-  "generatedAt": "2026-08-25T13:43:34.091Z",
+  "gitCommitHash": "d075edb63735a927a211c516074483b095f7d6a3",
+  "generatedAt": "2026-08-25T13:44:35.475Z",
   "files": {
     ".cargo/config.toml": {
       "filePath": ".cargo/config.toml",
@@ -251059,12 +251059,12 @@
     },
     "scripts/understand-dashboard.sh": {
       "filePath": "scripts/understand-dashboard.sh",
-      "contentHash": "fc7d23d2be1df1331c2d024df378911c77cf4109896c967fbe4691f30b2a033c",
+      "contentHash": "7af50dfb1f5a48f574f028c44fab24ff8dc13900b3a0a0d6553a1fab9843bbe6",
       "functions": [],
       "classes": [],
       "imports": [],
       "exports": [],
-      "totalLines": 75,
+      "totalLines": 78,
       "hasStructuralAnalysis": true
     },
     "scripts/validate-cuda-qualification-report.py": {
