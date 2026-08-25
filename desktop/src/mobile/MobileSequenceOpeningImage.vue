@@ -27,7 +27,10 @@ import type { ApiTarget } from "../lib/api/client";
 import type { ModelEntry } from "../lib/api/types";
 import type { GenerateForm } from "../lib/generateForm";
 import { base64ToDataUrl } from "../lib/image";
-import MobileImagePickerSheet, { type MobilePickedImage } from "./MobileImagePickerSheet.vue";
+import MobileImagePickerSheet, {
+  type MobileGallerySource,
+  type MobilePickedImage,
+} from "./MobileImagePickerSheet.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -35,11 +38,12 @@ const props = withDefaults(
      *  them from the same form a one-shot does. */
     form: GenerateForm;
     target: ApiTarget | null;
+    gallerySources?: MobileGallerySource[];
     upscalers?: ModelEntry[];
     /** A submit or a durable job is in flight. */
     locked?: boolean;
   }>(),
-  { target: null, upscalers: () => [], locked: false },
+  { target: null, gallerySources: () => [], upscalers: () => [], locked: false },
 );
 
 const draft = useSequenceDraftStore();
@@ -151,6 +155,7 @@ function sourceImageMime(filename: string): string {
     <MobileImagePickerSheet
       :open="imagePickerOpen"
       :target="target"
+      :gallery-sources="gallerySources"
       @pick="setOpeningImage"
       @close="imagePickerOpen = false"
     />

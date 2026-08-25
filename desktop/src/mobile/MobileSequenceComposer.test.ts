@@ -553,6 +553,25 @@ describe("MobileSequenceComposer guardrails", () => {
     );
   });
 
+  it("forwards every source gallery to the sequence opening picker", () => {
+    const gallerySources = [
+      {
+        id: "studio",
+        label: "Studio",
+        target: { baseUrl: "http://studio:7680", apiKey: "secret" },
+      },
+      {
+        id: "render",
+        label: "Render",
+        target: { baseUrl: "http://render:7680", apiKey: "render-secret" },
+      },
+    ];
+    mountComposer({ gallerySources });
+    expect(
+      wrapper!.getComponent({ name: "MobileSequenceOpeningImage" }).props("gallerySources"),
+    ).toEqual(gallerySources);
+  });
+
   it("exposes strength and fit controls after an opening image is attached", async () => {
     const form = newGenerateForm();
     const draft = useSequenceDraftStore();
