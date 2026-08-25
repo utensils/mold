@@ -249,6 +249,58 @@ async fn retain_for_retry(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HoldClaimOutcome {
+    Held,
+    Retained,
+}
+
+/// Park one claimed row transactionally and resolve any attached HTTP
+/// observer. A failed hold returns the exact token to the replay backlog;
+/// attached callers receive a terminal error instead of hanging or seeing EOF.
+async fn hold_claimed(
+    ticket: crate::queue_journal::QueueTicket,
+    ingress: Option<&crate::queue_media_ingress::QueueMediaIngress>,
+    job_id: &str,
+    reason: String,
+    retryable: bool,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> HoldClaimOutcome {
+    let message = reason.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        if retryable {
+            ticket.hold_retryable(&reason)
+        } else {
+            ticket.hold(&reason)
+        }
+    })
+    .await;
+    match outcome {
+        Ok(crate::queue_journal::RetainOutcome::Released)
+        | Ok(crate::queue_journal::RetainOutcome::Stale) => {
+            if let Some(ingress) = ingress {
+                ingress.fail_claimed(job_id, message);
+            }
+            HoldClaimOutcome::Held
+        }
+        Ok(crate::queue_journal::RetainOutcome::Retry { ticket, error }) => {
+            tracing::warn!(job = %job_id, %error, "hold transition failed; returning durable row to replay");
+            retain_for_retry(ticket, shutdown).await;
+            HoldClaimOutcome::Retained
+        }
+        Err(error) => {
+            tracing::error!(job = %job_id, %error, "hold transition worker failed; startup recovery retains the claim");
+            if let Some(ingress) = ingress {
+                ingress.fail_claimed(
+                    job_id,
+                    "generation remains queued after a persistence error".into(),
+                );
+            }
+            HoldClaimOutcome::Retained
+        }
+    }
+}
+
 /// Make one best-effort release after the runtime queue transport has closed.
 /// There is no live feeder to resume, so a failed release deliberately drops
 /// the inert retry ticket and leaves the exact token for startup recovery.
@@ -601,10 +653,6 @@ async fn feed_available(
                 }
             }
         }
-        let observer = state
-            .queue_journal
-            .queue_media_admission()
-            .and_then(|admission| admission.ingress().take_claimed(&row.id));
         let journal = state.queue_journal.clone();
         let completion_id = row.id.clone();
         let db_completion =
@@ -649,8 +697,14 @@ async fn feed_available(
                 Ok(Ok(output)) => completed_output = output,
                 Ok(Err(error)) if error.is_invalid_authority() => {
                     let reason = format!("durable publication authority is invalid: {error}");
-                    let _ = tokio::task::spawn_blocking(move || ticket.hold(&reason)).await;
+                    let held =
+                        hold_claimed(ticket, ingress.as_deref(), &row.id, reason, false, shutdown)
+                            .await;
                     drop(reservation);
+                    if held == HoldClaimOutcome::Retained {
+                        report.stop = FeederStop::RecoverableFailure;
+                        return report;
+                    }
                     tracing::error!(job = %row.id, %error, "held durable generation with invalid publication authority");
                     report.held += 1;
                     continue;
@@ -674,8 +728,14 @@ async fn feed_available(
         if completed_output.is_none() {
             if let Some(error) = db_invalid_authority {
                 let reason = format!("durable publication metadata is invalid: {error}");
-                let _ = tokio::task::spawn_blocking(move || ticket.hold(&reason)).await;
+                let held =
+                    hold_claimed(ticket, ingress.as_deref(), &row.id, reason, false, shutdown)
+                        .await;
                 drop(reservation);
+                if held == HoldClaimOutcome::Retained {
+                    report.stop = FeederStop::RecoverableFailure;
+                    return report;
+                }
                 tracing::error!(job = %row.id, %error, "held durable generation with invalid publication metadata");
                 report.held += 1;
                 continue;
@@ -708,11 +768,20 @@ async fn feed_available(
                         .map_err(|error| anyhow::anyhow!(error))
                         .and_then(|result| result)
                     {
-                        let _ = tokio::task::spawn_blocking(move || {
-                            ticket.hold("the gallery directory could not be reconciled")
-                        })
+                        let held = hold_claimed(
+                            ticket,
+                            ingress.as_deref(),
+                            &row.id,
+                            "the gallery directory could not be reconciled".into(),
+                            false,
+                            shutdown,
+                        )
                         .await;
                         drop(reservation);
+                        if held == HoldClaimOutcome::Retained {
+                            report.stop = FeederStop::RecoverableFailure;
+                            return report;
+                        }
                         tracing::warn!(job = %row.id, %error, "held durable generation with an unusable output target");
                         report.held += 1;
                         continue;
@@ -728,22 +797,40 @@ async fn feed_available(
                         .map_err(|error| anyhow::anyhow!(error))
                         .and_then(|result| result.map_err(anyhow::Error::from))
                     {
-                        let _ = tokio::task::spawn_blocking(move || {
-                            ticket.hold("the gallery directory this job targets cannot be created")
-                        })
+                        let held = hold_claimed(
+                            ticket,
+                            ingress.as_deref(),
+                            &row.id,
+                            "the gallery directory this job targets cannot be created".into(),
+                            false,
+                            shutdown,
+                        )
                         .await;
                         drop(reservation);
+                        if held == HoldClaimOutcome::Retained {
+                            report.stop = FeederStop::RecoverableFailure;
+                            return report;
+                        }
                         tracing::warn!(job = %row.id, %error, "held durable generation with an unusable output target");
                         report.held += 1;
                         continue;
                     }
                 }
                 None => {
-                    let _ = tokio::task::spawn_blocking(move || {
-                        ticket.hold("server gallery output is disabled")
-                    })
+                    let held = hold_claimed(
+                        ticket,
+                        ingress.as_deref(),
+                        &row.id,
+                        "server gallery output is disabled".into(),
+                        false,
+                        shutdown,
+                    )
                     .await;
                     drop(reservation);
+                    if held == HoldClaimOutcome::Retained {
+                        report.stop = FeederStop::RecoverableFailure;
+                        return report;
+                    }
                     report.held += 1;
                     continue;
                 }
@@ -752,11 +839,20 @@ async fn feed_available(
         let request: mold_core::GenerateRequest = match serde_json::from_str(&row.request_json) {
             Ok(request) => request,
             Err(error) => {
-                let _ = tokio::task::spawn_blocking(move || {
-                    ticket.hold("the recorded request could not be deserialized")
-                })
+                let held = hold_claimed(
+                    ticket,
+                    ingress.as_deref(),
+                    &row.id,
+                    "the recorded request could not be deserialized".into(),
+                    false,
+                    shutdown,
+                )
                 .await;
                 drop(reservation);
+                if held == HoldClaimOutcome::Retained {
+                    report.stop = FeederStop::RecoverableFailure;
+                    return report;
+                }
                 tracing::warn!(job = %row.id, %error, "held unreadable durable generation");
                 report.held += 1;
                 continue;
@@ -779,8 +875,14 @@ async fn feed_available(
                 Ok(deferred) => Some(deferred),
                 Err(error) if projection_failure_holds(&error) => {
                     let reason = format!("durable media projection is invalid: {error}");
-                    let _ = tokio::task::spawn_blocking(move || ticket.hold(&reason)).await;
+                    let held =
+                        hold_claimed(ticket, ingress.as_deref(), &row.id, reason, false, shutdown)
+                            .await;
                     drop(reservation);
+                    if held == HoldClaimOutcome::Retained {
+                        report.stop = FeederStop::RecoverableFailure;
+                        return report;
+                    }
                     tracing::error!(job = %row.id, %error, "held durable generation with invalid media projection");
                     report.held += 1;
                     continue;
@@ -819,8 +921,14 @@ async fn feed_available(
                     message: reason,
                 })) => {
                     let logged_reason = reason.clone();
-                    let _ = tokio::task::spawn_blocking(move || ticket.hold(&reason)).await;
+                    let held =
+                        hold_claimed(ticket, ingress.as_deref(), &row.id, reason, false, shutdown)
+                            .await;
                     drop(reservation);
+                    if held == HoldClaimOutcome::Retained {
+                        report.stop = FeederStop::RecoverableFailure;
+                        return report;
+                    }
                     tracing::error!(job = %row.id, reason = %logged_reason, "held durable generation with invalid admission authority");
                     report.held += 1;
                     continue;
@@ -831,9 +939,14 @@ async fn feed_available(
                     message: reason,
                 })) => {
                     let logged_reason = reason.clone();
-                    let _ =
-                        tokio::task::spawn_blocking(move || ticket.hold_retryable(&reason)).await;
+                    let held =
+                        hold_claimed(ticket, ingress.as_deref(), &row.id, reason, true, shutdown)
+                            .await;
                     drop(reservation);
+                    if held == HoldClaimOutcome::Retained {
+                        report.stop = FeederStop::RecoverableFailure;
+                        return report;
+                    }
                     tracing::warn!(job = %row.id, reason = %logged_reason, "held durable generation until its admission runtime is available");
                     report.held += 1;
                     continue;
@@ -880,9 +993,21 @@ async fn feed_available(
                     let reason = error.to_string();
                     match error.disposition() {
                         crate::queue_media_runtime::DeferredHydrationDisposition::Hold => {
-                            let _ = tokio::task::spawn_blocking(move || ticket.hold(&reason)).await;
-                            report.held += 1;
+                            let held = hold_claimed(
+                                ticket,
+                                ingress.as_deref(),
+                                &row.id,
+                                reason,
+                                false,
+                                shutdown,
+                            )
+                            .await;
                             drop(reservation);
+                            if held == HoldClaimOutcome::Retained {
+                                report.stop = FeederStop::RecoverableFailure;
+                                return report;
+                            }
+                            report.held += 1;
                             continue;
                         }
                         crate::queue_media_runtime::DeferredHydrationDisposition::Retain => {
@@ -920,13 +1045,12 @@ async fn feed_available(
             Ok(route) => route,
             Err(error) => {
                 let reason = format!("deferred generation preparation failed: {}", error.error);
-                match crate::durable_admission_authority::preparation_disposition(&error) {
-                    crate::durable_admission_authority::PreparationDisposition::Hold => {
-                        let _ = tokio::task::spawn_blocking(move || ticket.hold(&reason)).await;
-                    }
+                let retryable = match crate::durable_admission_authority::preparation_disposition(
+                    &error,
+                ) {
+                    crate::durable_admission_authority::PreparationDisposition::Hold => false,
                     crate::durable_admission_authority::PreparationDisposition::HoldRetryable => {
-                        let _ = tokio::task::spawn_blocking(move || ticket.hold_retryable(&reason))
-                            .await;
+                        true
                     }
                     crate::durable_admission_authority::PreparationDisposition::Retain => {
                         drop(reservation);
@@ -934,8 +1058,21 @@ async fn feed_available(
                         report.stop = FeederStop::RecoverableFailure;
                         return report;
                     }
-                }
+                };
+                let held = hold_claimed(
+                    ticket,
+                    ingress.as_deref(),
+                    &row.id,
+                    reason,
+                    retryable,
+                    shutdown,
+                )
+                .await;
                 drop(reservation);
+                if held == HoldClaimOutcome::Retained {
+                    report.stop = FeederStop::RecoverableFailure;
+                    return report;
+                }
                 report.held += 1;
                 continue;
             }
@@ -999,6 +1136,12 @@ async fn feed_available(
                 return report;
             }
         }
+        // Transfer the observer only after every fallible preparation and the
+        // final durable-order/cancellation fence. Retains keep it attached;
+        // holds resolve it explicitly through `hold_claimed`.
+        let observer = ingress
+            .as_deref()
+            .and_then(|ingress| ingress.take_claimed(&row.id));
         let crate::job_supervisor::SupervisedJob {
             result_tx,
             outcome_rx,

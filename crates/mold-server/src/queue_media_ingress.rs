@@ -159,6 +159,27 @@ impl QueueMediaIngress {
         self.detach(job_id);
     }
 
+    /// Resolve an attached direct request when deferred preparation parks its
+    /// durable row. SQLite remains authoritative and the row stays visible;
+    /// this only prevents the HTTP observer from hanging or seeing silent EOF.
+    pub(crate) fn fail_claimed(&self, job_id: &str, message: String) {
+        let Some(claim) = self.take_claimed(job_id) else {
+            return;
+        };
+        match claim.mode() {
+            ObserverMode::Raw => {
+                let (send, receive) = tokio::sync::oneshot::channel();
+                let _ = send.send(SupervisedOutcome::Finished(Box::new(Err(message))));
+                claim.deliver(AttachedObserver::Raw { outcome: receive });
+            }
+            ObserverMode::Sse(_) => {
+                let (send, receive) = tokio::sync::mpsc::unbounded_channel();
+                let _ = send.send(SseMessage::Error(mold_core::SseErrorEvent::failed(message)));
+                claim.deliver(AttachedObserver::Sse { messages: receive });
+            }
+        }
+    }
+
     fn detach(&self, job_id: &str) {
         let mut state = self
             .state
@@ -263,5 +284,30 @@ mod tests {
             registration.attached().await.unwrap(),
             AttachedObserver::Raw { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn held_claim_delivers_a_typed_terminal_error() {
+        let ingress = QueueMediaIngress::new(2);
+        let raw = ingress.reserve("raw", ObserverMode::Raw).unwrap();
+        ingress.publish_committed("raw");
+        ingress.fail_claimed("raw", "model unavailable; retry from queue".into());
+        let AttachedObserver::Raw { outcome } = raw.attached().await.unwrap() else {
+            panic!("raw registration received the wrong observer type");
+        };
+        let SupervisedOutcome::Finished(result) = outcome.await.unwrap() else {
+            panic!("held work must report an error, not cancellation");
+        };
+        assert!(matches!(*result, Err(ref error) if error.contains("retry from queue")));
+
+        let sse = ingress
+            .reserve("sse", ObserverMode::Sse(SseCompletionPayload::Full))
+            .unwrap();
+        ingress.publish_committed("sse");
+        ingress.fail_claimed("sse", "dependency unavailable".into());
+        let AttachedObserver::Sse { mut messages } = sse.attached().await.unwrap() else {
+            panic!("SSE registration received the wrong observer type");
+        };
+        assert!(matches!(messages.recv().await, Some(SseMessage::Error(_))));
     }
 }
