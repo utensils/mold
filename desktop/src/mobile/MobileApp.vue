@@ -456,6 +456,7 @@ import { watchMobileGenerationHost, type MobileGenerationHostWatch } from "./mob
 import { beginMobileBackgroundTask } from "./backgroundTask";
 import { mobilePlacementFailure, routeAutomaticMobileGeneration } from "./mobileGenerationRouting";
 import { prepareMobileGenerationRequest } from "./mobileGenerationPreparation";
+import { MobileSubmissionAttempts } from "./mobileSubmissionAttempt";
 
 type Tab = "generate" | "gallery" | "catalog" | "hosts";
 
@@ -849,7 +850,7 @@ const appliedRemix = ref<MobileAppliedRemix | null>(null);
 const quickExpansionNegative = ref<{ before: string; baked: string } | null>(null);
 const preparedSubmitting = ref(false);
 const preparationGuard = new PreparationRequestGuard();
-const submissionGuard = new PreparationRequestGuard();
+const submissionAttempts = new MobileSubmissionAttempts();
 const sequenceSubmissionGuard = new PreparationRequestGuard();
 let expansionPullRequestId = 0;
 let expansionRecoveryId = 0;
@@ -4727,7 +4728,7 @@ async function expandForCurrentBatch(
   const expandOn = expansionRouteFor(route);
 
   clearExpansionRecovery();
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   const token = preparationGuard.begin();
   expansionRunning.value = true;
   expansionError.value = "";
@@ -4833,7 +4834,7 @@ async function remixCurrent(
   }
 
   clearExpansionRecovery();
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   const token = preparationGuard.begin();
   expansionRunning.value = true;
   expansionError.value = "";
@@ -4935,7 +4936,7 @@ function applyRemixSelection(): void {
   if (selected.length === 1) {
     rememberRemixUndo();
     preparationGuard.invalidate();
-    submissionGuard.invalidate();
+    submissionAttempts.invalidate();
     form.prompt = selected[0]!.prompt.trim();
     form.originalPrompt = review.rootPrompt ?? review.sourcePrompt;
     bakeStyleNegative(review.stylePreset ?? "", review.family);
@@ -5023,7 +5024,7 @@ function undoPromptPreparation(): void {
     restoreQuickExpansion();
     return;
   }
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   preparationGuard.invalidate();
   form.prompt = snapshot.prompt;
   form.originalPrompt = snapshot.originalPrompt;
@@ -5055,7 +5056,7 @@ function bakeStyleNegative(presetId: string, family: string): void {
 
 function restoreQuickExpansion(): void {
   if (quickExpansionOriginal.value === null) return;
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   preparationGuard.invalidate();
   // Undo re-arms the whole pre-expansion state, including the chip the
   // bake-and-clear apply removed and the negative fragments it merged in —
@@ -5082,7 +5083,7 @@ function restoreQuickExpansion(): void {
 
 async function developExpandedAnyway(): Promise<void> {
   if (!quickExpansionSnapshot.value) return;
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   quickExpansionSnapshot.value = null;
   expansionError.value = "";
   await generate();
@@ -5123,7 +5124,7 @@ async function copyMobileError(message: string): Promise<void> {
 function editPreparedPrompt(payload: { id: string; text: string }): void {
   if (preparedSubmitting.value || expansionRunning.value) return;
   supersedePreparedReplacement();
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   const prompt = preparedBatch.value?.prompts.find((candidate) => candidate.id === payload.id);
   if (prompt) prompt.text = payload.text;
 }
@@ -5133,7 +5134,7 @@ function removePreparedPrompt(id: string): void {
   if (!batch || batch.prompts.length <= 2 || preparedSubmitting.value || expansionRunning.value)
     return;
   supersedePreparedReplacement();
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   batch.prompts = batch.prompts.filter((prompt) => prompt.id !== id);
   batch.requestedCount = batch.prompts.length;
   form.batchSize = batch.prompts.length;
@@ -5158,7 +5159,7 @@ function collapsePreparedBatch(removedId: string): void {
   );
   const restoreFocus = !!preparedRoot?.contains(document.activeElement);
   preparationGuard.invalidate();
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   submissionUiId += 1;
   preparedBatch.value = null;
   expansionRunning.value = false;
@@ -5188,7 +5189,7 @@ function discardPreparedBatch(): void {
   );
   const restoreFocus = !!preparedRoot?.contains(document.activeElement);
   preparationGuard.invalidate();
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   submissionUiId += 1;
   preparedBatch.value = null;
   expansionRunning.value = false;
@@ -5554,7 +5555,6 @@ async function generate(): Promise<void> {
     return;
 
   const backgroundTask = await beginMobileBackgroundTask("Preparing remote generation");
-  let backgroundTaskTransferred = false;
 
   // Replaced by the fan-out winner under Auto / Most capable; frozen from here
   // on for every other path.
@@ -5605,13 +5605,13 @@ async function generate(): Promise<void> {
       : draft.batchSize;
   const guardedSubmission = !!preparedSubmission || !!quickSubmission;
   const liveFormIdentity = guardedSubmission ? JSON.stringify(cloneGenerateForm(form)) : "";
-  const token = submissionGuard.begin();
-  const submitSignal = submissionGuard.signalFor(token);
+  const submissionAttempt = submissionAttempts.begin(backgroundTask);
+  const submitSignal = submissionAttempt.signal;
   const uiId = ++submissionUiId;
   const ownsPreparedSubmission = () =>
     !unmounted &&
     uiId === submissionUiId &&
-    submissionGuard.isCurrent(token) &&
+    submissionAttempt.isCurrent() &&
     (!preparedSubmission || preparedBatch.value?.batchId === preparedSubmission.batchId);
   const releasePreparedSubmission = () => {
     if (!unmounted && uiId === submissionUiId) {
@@ -5619,7 +5619,7 @@ async function generate(): Promise<void> {
       generationSubmissionPhase.value = null;
     }
     if (ownsPreparedSubmission()) preparedSubmitting.value = false;
-    if (!backgroundTaskTransferred) void backgroundTask.release();
+    void submissionAttempt.releaseOwnedResources();
   };
   let request: GenerateRequest;
   preparingGeneration.value = true;
@@ -5629,7 +5629,7 @@ async function generate(): Promise<void> {
     request = await prepareGenerationRequest(
       target,
       draft,
-      () => submissionGuard.isCurrent(token),
+      () => submissionAttempt.isCurrent(),
       submitSignal,
     );
     if (request.source_image && originalSource) {
@@ -5665,7 +5665,7 @@ async function generate(): Promise<void> {
     return;
   }
 
-  if (!submissionGuard.isCurrent(token)) {
+  if (!submissionAttempt.isCurrent()) {
     releasePreparedSubmission();
     return;
   }
@@ -5747,7 +5747,7 @@ async function generate(): Promise<void> {
       family: draft.family,
       subject: "print",
       requireAuthoritative: requireAuthoritativePlacement,
-      isCurrent: () => submissionGuard.isCurrent(token),
+      isCurrent: () => submissionAttempt.isCurrent(),
       signal: submitSignal,
     });
     if (routed.kind === "abandoned") {
@@ -5776,7 +5776,7 @@ async function generate(): Promise<void> {
               signal: submitSignal,
             });
     } catch (error) {
-      if (!submissionGuard.isCurrent(token)) {
+      if (!submissionAttempt.isCurrent()) {
         releasePreparedSubmission();
         return;
       }
@@ -5806,7 +5806,7 @@ async function generate(): Promise<void> {
       }
     }
   }
-  if (!submissionGuard.isCurrent(token)) {
+  if (!submissionAttempt.isCurrent()) {
     releasePreparedSubmission();
     return;
   }
@@ -5863,7 +5863,7 @@ async function generate(): Promise<void> {
     target: route.target,
     requirements: licenseRequirements(placement?.pending_downloads),
   });
-  if (!accepted || !submissionGuard.isCurrent(token)) {
+  if (!accepted || !submissionAttempt.isCurrent()) {
     releasePreparedSubmission();
     return;
   }
@@ -5903,8 +5903,8 @@ async function generate(): Promise<void> {
     });
   if (durableLifecycle) {
     const admission = submitMobileDurableGeneration({ route, requests: durablePlans });
-    backgroundTaskTransferred = true;
-    void admission.finally(() => backgroundTask.release());
+    const admissionBackgroundTask = submissionAttempt.handoffBackgroundTask();
+    void admission.finally(() => admissionBackgroundTask.release());
     releasePreparedSubmission();
     if (preparedSubmission) {
       const active = document.activeElement;
@@ -5962,8 +5962,8 @@ async function generate(): Promise<void> {
   // accepted (or refused), foreground recovery and the remote queue own the
   // remaining lifecycle; generation itself never depends on the phone staying
   // awake.
-  backgroundTaskTransferred = true;
-  void (admitted ?? settled).finally(() => backgroundTask.release());
+  const admissionBackgroundTask = submissionAttempt.handoffBackgroundTask();
+  void (admitted ?? settled).finally(() => admissionBackgroundTask.release());
   releasePreparedSubmission();
   if (preparedSubmission) {
     const active = document.activeElement;
@@ -6188,7 +6188,7 @@ function durableGenerationCompletedResult(job: Job): CompleteEvent | null {
 
 function cancelGenerationSubmission(): void {
   if (!preparingGeneration.value) return;
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   submissionUiId += 1;
   preparingGeneration.value = false;
   preparedSubmitting.value = false;
@@ -9490,7 +9490,7 @@ onBeforeUnmount(() => {
     void cancelBarcodeScanner().catch(() => undefined);
   }
   preparationGuard.invalidate();
-  submissionGuard.invalidate();
+  submissionAttempts.invalidate();
   sequenceSubmissionGuard.invalidate();
   const sequenceCancellation = sequenceCancellationRequest;
   sequenceCancellationRequest = null;
