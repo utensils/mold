@@ -1059,14 +1059,43 @@ pub fn pinned_file_digest_from_open_file(
     Ok(digest)
 }
 
-/// Read-only pinned check: do this file's current bytes hash to `expected`?
+/// Non-destructive pinned check: do this file's current bytes hash to `expected`?
 ///
-/// Deletes nothing, writes nothing, and answers `false` for any file it cannot
-/// open or hash. This is the form a read-only placement preview may ask.
+/// Deletes nothing and answers `false` for any file it cannot open or hash. It
+/// may read the entire file and persist an owner-private digest attestation;
+/// use [`pinned_file_matches_attested`] for cheap planning.
 pub fn pinned_file_matches(path: &Path, expected_sha256: &str) -> bool {
     pinned_file_digest(path)
         .map(|digest| digest.eq_ignore_ascii_case(expected_sha256))
         .unwrap_or(false)
+}
+
+/// Does an existing process memo or owner-private durable attestation prove
+/// that this exact file identity has the expected digest?
+///
+/// Unlike [`pinned_file_matches`], this never reads the artifact body and
+/// never creates an attestation. Placement previews use it to stay a cheap,
+/// read-only planning operation; a cold file remains unproven until admission
+/// authenticates it after the request has entered the queue.
+pub fn pinned_file_matches_attested(path: &Path, expected_sha256: &str) -> bool {
+    let Ok(file) = crate::secure_file::open_regular_file_no_follow(path) else {
+        return false;
+    };
+    let Ok(identity) = pinned_file_identity(&file) else {
+        return false;
+    };
+    let memoized = pinned_digest_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&identity)
+        .cloned();
+    let digest = memoized
+        .or_else(|| read_durable_pinned_digest(path, identity))
+        .filter(|digest| digest.eq_ignore_ascii_case(expected_sha256));
+    let current_identity = crate::secure_file::open_regular_file_no_follow(path)
+        .ok()
+        .and_then(|current| pinned_file_identity(&current).ok());
+    digest.is_some() && current_identity == Some(identity)
 }
 
 /// Prove one already-placed file against a manifest-pinned SHA-256, writing
@@ -3897,6 +3926,26 @@ mod tests {
         // partial-cleanup sweep read it as a "fully written" signal. It is
         // just never read back as proof of content.
         assert_eq!(recorded_sha256_marker(&path).as_deref(), Some(&*expected));
+    }
+
+    #[test]
+    fn an_attested_only_check_never_hashes_a_cold_file() {
+        let _serial = pinned_digest_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cold-preview.bin");
+        std::fs::write(&path, b"the real pinned bytes").unwrap();
+        let expected = compute_sha256(&path).unwrap();
+        let before = pinned_digest_hash_count_for(&path);
+
+        assert!(!pinned_file_matches_attested(&path, &expected));
+        assert_eq!(
+            pinned_digest_hash_count_for(&path),
+            before,
+            "a read-only preview must not hash an unattested artifact"
+        );
+
+        assert!(pinned_file_matches(&path, &expected));
+        assert!(pinned_file_matches_attested(&path, &expected));
     }
 
     #[test]
