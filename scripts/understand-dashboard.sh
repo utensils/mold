@@ -3,14 +3,15 @@
 set -euo pipefail
 
 script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-project_arg="${1:-$script_root}"
+project_arg="$script_root"
+if [ "$#" -gt 0 ] && [[ "$1" != -* ]]; then
+    project_arg="$1"
+    shift
+fi
 
 if ! project_dir="$(cd "$project_arg" 2>/dev/null && pwd -P)"; then
     echo "understand-dashboard: project directory not found: $project_arg" >&2
     exit 1
-fi
-if [ "$#" -gt 0 ]; then
-    shift
 fi
 
 # Prefer a graph committed in the current checkout. If an ephemeral worktree
