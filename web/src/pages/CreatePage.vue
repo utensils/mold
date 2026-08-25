@@ -11,6 +11,7 @@ import { requestChoice, toast, undoableAction } from "../lib/toasts";
 import { useRoute, useRouter } from "vue-router";
 import ComposerCard from "../components/create/ComposerCard.vue";
 import ResultCanvas from "../components/create/ResultCanvas.vue";
+import { generationProgressCopy } from "@studio/lib/generationProgress";
 import ControlsAside from "../components/create/ControlsAside.vue";
 import CreateModelPicker from "../components/create/CreateModelPicker.vue";
 import AdvancedDrawer from "../components/create/AdvancedDrawer.vue";
@@ -2916,8 +2917,18 @@ const genStage = computed(() => {
   const j = runningJob.value;
   if (!j) return "";
   const p = j.progress;
-  if (p.step !== null && p.totalSteps)
-    return `Developing ${p.step} / ${p.totalSteps}`;
+  if (p.step !== null && p.totalSteps) {
+    const phase =
+      p.step >= p.totalSteps && p.stage !== "Denoising"
+        ? "finalizing"
+        : "denoising";
+    return generationProgressCopy({
+      phase,
+      step: p.step,
+      total: p.totalSteps,
+      stage: p.stage,
+    });
+  }
   return p.stage || "Loading model";
 });
 

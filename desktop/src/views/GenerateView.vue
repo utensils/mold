@@ -105,6 +105,7 @@ import {
   useGenerationStore,
   jobPhase,
   jobProgress,
+  jobProgressCopy,
   needsHostRoute,
   suggestOutputFilename,
   type BatchRequestOptions,
@@ -2124,8 +2125,8 @@ const liveGenerationStatus = computed(() => {
   if (!j || j.status === "complete" || j.status === "error") return "";
   if (j.status === "queued") return "Queued";
   if (j.status === "loading") return `${j.stage ?? "Preparing"}…`;
-  if (j.status === "finishing") return `Fixing — ${j.stage ?? "finishing"}…`;
-  return `Developing ${j.step}/${j.total}`;
+  const copy = jobProgressCopy(j);
+  return j.status === "finishing" ? `${copy}…` : copy;
 });
 
 const edgeCode = computed(() => {

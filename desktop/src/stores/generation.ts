@@ -87,6 +87,7 @@ export {
   isCancelledError,
   jobPhase,
   jobProgress,
+  jobProgressCopy,
   jobStatusCode,
   metadataOnlyResult,
   newJob,

@@ -8,6 +8,11 @@ import type {
 import type { DevelopPhase } from "@ui/lib/grain";
 import { queueWaitCode, resolveQueueWait } from "@studio/lib/queuePosition";
 import { requestWarningsFromCompleteEvent } from "@studio/lib/requestWarnings";
+import {
+  generationProgressCopy,
+  phaseForStageStart,
+  type GenerationWorkPhase,
+} from "@studio/lib/generationProgress";
 
 export type JobStatus = "queued" | "loading" | "denoising" | "finishing" | "complete" | "error";
 
@@ -206,11 +211,18 @@ export function applyProgress(job: Job, event: ProgressEvent): Job {
       break;
     case "weight_load":
     case "stage_start":
-      // Stages after the denoise loop (transformer drop, VAE decode, encode)
-      // are the fixer bath: the steps read N/N but the print isn't done.
+      // StageStart is also used for nested work inside a denoise evaluation.
+      // MiniMax H3, for example, starts a 50-block transformer stage before
+      // each DenoiseStep. Keep that work attached to its truthful N/N count;
+      // only a stage beginning after N/N is final output preparation.
       if (job.status === "denoising" || job.status === "finishing") {
         if (event.type === "stage_start") {
-          job.status = "finishing";
+          const current: GenerationWorkPhase =
+            job.status === "finishing" ? "finalizing" : "denoising";
+          job.status =
+            phaseForStageStart(current, job.step, job.total) === "finalizing"
+              ? "finishing"
+              : "denoising";
           job.stage = event.name;
         }
       } else {
@@ -349,6 +361,21 @@ export function jobProgress(job: Job): number {
   if (job.status === "complete" || job.status === "finishing") return 1;
   if (job.total <= 0) return 0;
   return job.step / job.total;
+}
+
+export function jobProgressCopy(job: Job): string {
+  const phase: GenerationWorkPhase =
+    job.status === "finishing"
+      ? "finalizing"
+      : job.status === "denoising"
+        ? "denoising"
+        : "preparing";
+  return generationProgressCopy({
+    phase,
+    step: job.step,
+    total: job.total,
+    stage: job.stage,
+  });
 }
 
 /** Normalize cancellation emitted by the server or initiated by this client. */
