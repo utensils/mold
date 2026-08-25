@@ -3324,6 +3324,7 @@ dependencies = [
  "base64 0.22.1",
  "console 0.15.11",
  "dirs 6.0.0",
+ "fs2",
  "hf-hub",
  "indicatif 0.17.11",
  "libc",

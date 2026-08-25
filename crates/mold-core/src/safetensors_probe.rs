@@ -13,6 +13,48 @@ use std::path::Path;
 
 use serde_json::Value;
 
+/// Header-only view of a safetensors file. Metadata values follow the
+/// Lightricks convention: JSON strings are decoded into JSON values while
+/// ordinary strings remain strings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SafetensorsHeader {
+    pub metadata: BTreeMap<String, Value>,
+    pub tensor_names: Vec<String>,
+}
+
+/// Read a safetensors header without touching tensor payload bytes.
+pub fn read_safetensors_header(path: &Path) -> std::io::Result<SafetensorsHeader> {
+    let mut file = File::open(path)?;
+    let mut len_buf = [0u8; 8];
+    file.read_exact(&mut len_buf)?;
+    let header_len = u64::from_le_bytes(len_buf) as usize;
+    let mut header_buf = vec![0u8; header_len];
+    file.read_exact(&mut header_buf)?;
+    let mut header: BTreeMap<String, Value> = serde_json::from_slice(&header_buf).map_err(|e| {
+        std::io::Error::other(format!(
+            "parse safetensors header at {}: {e}",
+            path.display()
+        ))
+    })?;
+    let metadata = match header.remove("__metadata__") {
+        Some(Value::Object(values)) => values
+            .into_iter()
+            .map(|(key, value)| {
+                let parsed = match value {
+                    Value::String(raw) => serde_json::from_str(&raw).unwrap_or(Value::String(raw)),
+                    other => other,
+                };
+                (key, parsed)
+            })
+            .collect(),
+        Some(_) | None => BTreeMap::new(),
+    };
+    Ok(SafetensorsHeader {
+        metadata,
+        tensor_names: header.into_keys().collect(),
+    })
+}
+
 /// Peek the safetensors header (8-byte length prefix + JSON, no tensor data
 /// read) to determine whether a single-file checkpoint bundles its VAE.
 /// Returns `true` when any VAE-encoder marker key is present.
@@ -32,23 +74,11 @@ use serde_json::Value;
 ///
 /// Returns `Err` only on bona fide I/O / parse failures — never panics.
 pub fn single_file_bundles_vae(path: &Path) -> std::io::Result<bool> {
-    let mut file = File::open(path)?;
-    let mut len_buf = [0u8; 8];
-    file.read_exact(&mut len_buf)?;
-    let header_len = u64::from_le_bytes(len_buf) as usize;
-    let mut header_buf = vec![0u8; header_len];
-    file.read_exact(&mut header_buf)?;
-    let header: BTreeMap<String, Value> = serde_json::from_slice(&header_buf).map_err(|e| {
-        std::io::Error::other(format!(
-            "parse safetensors header at {}: {e}",
-            path.display()
-        ))
-    })?;
-    Ok(header.keys().any(|k| {
-        k != "__metadata__"
-            && (k.starts_with("encoder.conv_in")
-                || k.starts_with("first_stage_model.encoder.")
-                || k.starts_with("vae.encoder."))
+    let header = read_safetensors_header(path)?;
+    Ok(header.tensor_names.iter().any(|key| {
+        key.starts_with("encoder.conv_in")
+            || key.starts_with("first_stage_model.encoder.")
+            || key.starts_with("vae.encoder.")
     }))
 }
 

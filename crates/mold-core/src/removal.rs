@@ -119,8 +119,9 @@ fn configured_owner_is_complete(
 /// config entry is a [`crate::ModelPaths`] projection: it has one field per
 /// component role, so it can name neither a role `ModelPaths` has no field
 /// for — `AudioVae`, `Processor`, `VideoScheduler`, `AudioScheduler`,
-/// `ModelConfig`, `TaskConfig`, the identity assets — nor the second file of
-/// a role a manifest declares twice (LTX-2.3 ships an x2 and an x1.5
+/// `ModelConfig`, `TaskConfig`, LTX-2.5's `DurationHead`, the identity assets
+/// — nor the second file of a role a
+/// manifest declares twice (LTX-2.3 ships an x2 and an x1.5
 /// `SpatialUpscaler`). Every path that projection dropped was invisible to
 /// ref-counting, so `mold rm`'s post-removal sweep read files that installed
 /// models still needed as orphans and deleted them: MiniMax H3's audio VAE
@@ -160,11 +161,10 @@ pub fn model_owned_paths(config: &Config, canonical: &str) -> Vec<String> {
     let mut paths = model_config.all_file_paths();
 
     if let Some(manifest) = crate::manifest::find_manifest(canonical) {
-        let models_dir = config.resolved_models_dir();
-        let manifest_files = manifest
-            .files
-            .iter()
-            .map(|file| models_dir.join(crate::manifest::storage_path(manifest, file)));
+        let manifest_files = crate::manifest::resolved_manifest_files(config, canonical)
+            .into_iter()
+            .flatten()
+            .map(|resolved| resolved.path);
         let derived: Vec<PathBuf> = if manifest.family == crate::manifest::PULID_FAMILY {
             crate::pulid_assets::derived_pulid_paths(config)
         } else {
@@ -916,6 +916,99 @@ mod tests {
             model_dir.display()
         );
         assert!(outcome.warnings.is_empty(), "got: {:?}", outcome.warnings);
+
+        std::env::remove_var("MOLD_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ltx25_split_components_follow_manifest_ownership() {
+        use crate::manifest::ModelComponent;
+
+        let _lock = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let tmp = tmp_dir("ltx25-split-ownership");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("MOLD_MODELS_DIR", &tmp);
+
+        let distilled = "ltx-2.5-22b-distilled:bf16";
+        let dev = "ltx-2.5-22b-dev:bf16";
+        let (distilled_paths, duration_head) =
+            install_manifest(&tmp, distilled, ModelComponent::DurationHead);
+        let (dev_paths, video_vae) = install_manifest(&tmp, dev, ModelComponent::Vae);
+        let mut config = Config {
+            models_dir: tmp.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        for model in [distilled, dev] {
+            let manifest = crate::manifest::find_manifest(model).unwrap();
+            let transformer = manifest
+                .files
+                .iter()
+                .find(|file| file.component == ModelComponent::Transformer)
+                .map(|file| tmp.join(crate::manifest::storage_path(manifest, file)))
+                .unwrap();
+            config.models.insert(
+                model.to_string(),
+                ModelConfig {
+                    transformer: Some(transformer.to_string_lossy().into_owned()),
+                    ..Default::default()
+                },
+            );
+        }
+
+        let owned: HashSet<_> = model_owned_paths(&config, distilled).into_iter().collect();
+        assert_eq!(owned.len(), distilled_paths.len());
+        for path in &distilled_paths {
+            assert!(owned.contains(&path.to_string_lossy().into_owned()));
+        }
+
+        let refs = build_ref_counts(&config);
+        for path in [&duration_head, &video_vae] {
+            let owners = refs
+                .get(&path.to_string_lossy().into_owned())
+                .expect("split component must be reference counted");
+            assert!(owners.contains(&distilled.to_string()));
+            assert!(owners.contains(&dev.to_string()));
+        }
+
+        let plan = plan_removal(&config, distilled);
+        for path in [&duration_head, &video_vae] {
+            let key = path.to_string_lossy().into_owned();
+            assert!(plan
+                .shared_files
+                .iter()
+                .any(|(candidate, owners)| candidate == &key && owners.contains(&dev.to_string())));
+        }
+
+        let distilled_transformer = crate::manifest::resolved_manifest_files(&config, distilled)
+            .unwrap()
+            .into_iter()
+            .find(|file| file.component == ModelComponent::Transformer)
+            .unwrap()
+            .path;
+        let outcome = execute_removal(&config, &plan);
+        assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+        assert!(!distilled_transformer.exists());
+        assert!(duration_head.exists());
+        assert!(video_vae.exists());
+
+        config.models.remove(distilled);
+        let dev_plan = plan_removal(&config, dev);
+        let dev_outcome = execute_removal(&config, &dev_plan);
+        assert!(
+            dev_outcome.warnings.is_empty(),
+            "{:?}",
+            dev_outcome.warnings
+        );
+        for path in dev_paths {
+            assert!(
+                !path.exists(),
+                "{} survived final owner removal",
+                path.display()
+            );
+        }
 
         std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
