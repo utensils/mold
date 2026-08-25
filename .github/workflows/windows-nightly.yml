@@ -17,6 +17,7 @@ permissions:
 
 jobs:
   build-windows:
+    if: github.ref == 'refs/heads/main'
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
@@ -130,6 +131,7 @@ jobs:
 
   publish-windows:
     needs: build-windows
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     concurrency:
       group: rolling-native-publication
@@ -149,6 +151,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          git fetch --quiet --no-tags origin refs/heads/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            echo "Windows Nightly source $GITHUB_SHA is not in main history." >&2
+            exit 1
+          fi
+
           if ! gh release view latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create latest \
               --repo "$GITHUB_REPOSITORY" \
