@@ -1059,6 +1059,7 @@ pub async fn validate_chain(
     State(state): State<AppState>,
     Json(mut req): Json<ChainRequest>,
 ) -> Result<Json<ChainValidationResponse>, ApiError> {
+    req.normalize_prompt_newlines();
     let opening_transition = req.stages.first().map(|stage| stage.transition);
     let requested_motion_tail = req.motion_tail_frames;
     let mut warnings = Vec::new();
@@ -1182,11 +1183,12 @@ async fn chain_vram_estimate(
 )]
 pub async fn generate_chain(
     State(state): State<AppState>,
-    Json(req): Json<ChainRequest>,
+    Json(mut req): Json<ChainRequest>,
 ) -> axum::response::Response {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
+    req.normalize_prompt_newlines();
     if let Some(reason) = state.generation_unavailable() {
         return ApiError::generation_unavailable(reason).into_response();
     }
@@ -1276,7 +1278,7 @@ pub async fn generate_chain(
 pub async fn generate_chain_stream(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<ChainRequest>,
+    Json(mut req): Json<ChainRequest>,
 ) -> Result<
     (
         HeaderMap,
@@ -1284,6 +1286,7 @@ pub async fn generate_chain_stream(
     ),
     ApiError,
 > {
+    req.normalize_prompt_newlines();
     if let Some(reason) = state.generation_unavailable() {
         return Err(ApiError::generation_unavailable(reason));
     }

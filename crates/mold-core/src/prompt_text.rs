@@ -6,6 +6,8 @@ use std::borrow::Cow;
 ///
 /// A doubled backslash preserves a literal escape (`\\\\n` -> `\\n`), so a
 /// prompt can still describe source text or paths containing those characters.
+/// This transformation is deliberately single-pass and must be applied at
+/// exactly one input boundary.
 pub fn normalize_prompt_newlines(input: &str) -> Cow<'_, str> {
     if !input.contains(['\\', '\r']) {
         return Cow::Borrowed(input);
@@ -68,9 +70,78 @@ where
         .map(|value| value.map(|prompt| normalize_prompt_newlines(&prompt).into_owned()))
 }
 
+fn protect_prompt_for_wire(prompt: &mut String) {
+    if prompt.contains('\\') {
+        *prompt = prompt.replace('\\', "\\\\");
+    }
+}
+
+pub(crate) fn protect_generate_request_for_wire(
+    request: &crate::GenerateRequest,
+) -> crate::GenerateRequest {
+    let mut wire = request.clone();
+    protect_prompt_for_wire(&mut wire.prompt);
+    if let Some(prompt) = wire.negative_prompt.as_mut() {
+        protect_prompt_for_wire(prompt);
+    }
+    if let Some(prompt) = wire.original_prompt.as_mut() {
+        protect_prompt_for_wire(prompt);
+    }
+    if let Some(transform) = wire.prompt_transform.as_mut() {
+        if let Some(prompt) = transform.root_prompt.as_mut() {
+            protect_prompt_for_wire(prompt);
+        }
+        protect_prompt_for_wire(&mut transform.source_prompt);
+    }
+    wire
+}
+
+pub(crate) fn protect_chain_request_for_wire(request: &crate::ChainRequest) -> crate::ChainRequest {
+    let mut wire = request.clone();
+    for stage in &mut wire.stages {
+        protect_prompt_for_wire(&mut stage.prompt);
+        if let Some(prompt) = stage.negative_prompt.as_mut() {
+            protect_prompt_for_wire(prompt);
+        }
+    }
+    if let Some(prompt) = wire.original_prompt.as_mut() {
+        protect_prompt_for_wire(prompt);
+    }
+    if let Some(prompt) = wire.prompt.as_mut() {
+        protect_prompt_for_wire(prompt);
+    }
+    if let Some(transform) = wire.prompt_transform.as_mut() {
+        if let Some(prompt) = transform.root_prompt.as_mut() {
+            protect_prompt_for_wire(prompt);
+        }
+        protect_prompt_for_wire(&mut transform.source_prompt);
+    }
+    wire
+}
+
+pub(crate) fn protect_expand_request_for_wire(
+    request: &crate::ExpandRequest,
+) -> crate::ExpandRequest {
+    let mut wire = request.clone();
+    protect_prompt_for_wire(&mut wire.prompt);
+    wire
+}
+
+pub(crate) fn protect_remix_request_for_wire(request: &crate::RemixRequest) -> crate::RemixRequest {
+    let mut wire = request.clone();
+    protect_prompt_for_wire(&mut wire.source_prompt);
+    if let Some(prompt) = wire.root_prompt.as_mut() {
+        protect_prompt_for_wire(prompt);
+    }
+    wire
+}
+
 #[cfg(test)]
 mod tests {
-    use super::normalize_prompt_newlines;
+    use super::{
+        normalize_prompt_newlines, protect_chain_request_for_wire, protect_expand_request_for_wire,
+        protect_generate_request_for_wire, protect_remix_request_for_wire,
+    };
     use crate::{
         ChainRequest, ExpandRequest, GenerateRequest, OutputMetadata, RemixRequest, Scheduler,
     };
@@ -152,7 +223,7 @@ mod tests {
 
     #[test]
     fn sequence_and_prompt_transform_api_shapes_share_normalization() {
-        let chain: ChainRequest = serde_json::from_value(serde_json::json!({
+        let mut chain: ChainRequest = serde_json::from_value(serde_json::json!({
             "model": "ltx-2-19b-distilled:fp8",
             "stages": [{
                 "prompt": r"opening\n\nshot",
@@ -167,6 +238,7 @@ mod tests {
             "prompt": r"automatic\r\nsequence"
         }))
         .unwrap();
+        chain.normalize_prompt_newlines();
         assert_eq!(chain.stages[0].prompt, "opening\n\nshot");
         assert_eq!(
             chain.stages[0].negative_prompt.as_deref(),
@@ -188,5 +260,84 @@ mod tests {
         .unwrap();
         assert_eq!(remix.source_prompt, "source\nprompt");
         assert_eq!(remix.root_prompt.as_deref(), Some("root\n\nprompt"));
+    }
+
+    #[test]
+    fn shared_rust_client_wire_hop_preserves_canonical_prompt_text() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "placeholder",
+            "model": "flux-schnell",
+            "width": 512,
+            "height": 512,
+            "steps": 4,
+            "batch_size": 1
+        }))
+        .unwrap();
+        let mut request = request;
+        request.prompt = r"canonical C:\new\render and \n token".to_string();
+        request.negative_prompt = Some("blur\nwatermark\\n literal".to_string());
+        request.original_prompt = Some("source\n\nidea\\n literal".to_string());
+        let admitted: GenerateRequest = serde_json::from_slice(
+            &serde_json::to_vec(&protect_generate_request_for_wire(&request)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(admitted.prompt, request.prompt);
+        assert_eq!(admitted.negative_prompt, request.negative_prompt);
+        assert_eq!(admitted.original_prompt, request.original_prompt);
+
+        let expand = ExpandRequest {
+            prompt: r"expand C:\new and \n token".to_string(),
+            model_family: "flux".to_string(),
+            variations: 1,
+            style: None,
+            task: None,
+        };
+        let admitted: ExpandRequest = serde_json::from_slice(
+            &serde_json::to_vec(&protect_expand_request_for_wire(&expand)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(admitted.prompt, expand.prompt);
+
+        let remix = RemixRequest {
+            source_prompt: r"remix C:\new and \n token".to_string(),
+            root_prompt: Some("root\nidea\\n literal".to_string()),
+            ..serde_json::from_value(serde_json::json!({
+                "source_prompt": "placeholder"
+            }))
+            .unwrap()
+        };
+        let admitted: RemixRequest = serde_json::from_slice(
+            &serde_json::to_vec(&protect_remix_request_for_wire(&remix)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(admitted.source_prompt, remix.source_prompt);
+        assert_eq!(admitted.root_prompt, remix.root_prompt);
+
+        let mut chain: ChainRequest = serde_json::from_value(serde_json::json!({
+            "model": "ltx-2-19b-distilled:fp8",
+            "stages": [{
+                "prompt": "placeholder",
+                "frames": 97
+            }],
+            "width": 768,
+            "height": 512,
+            "steps": 8,
+            "guidance": 3.0
+        }))
+        .unwrap();
+        chain.stages[0].prompt = r"sequence C:\new and \n token".to_string();
+        chain.stages[0].negative_prompt = Some("jitter\nflicker\\n literal".to_string());
+        chain.original_prompt = Some("source\nidea\\n literal".to_string());
+        let mut admitted: ChainRequest = serde_json::from_slice(
+            &serde_json::to_vec(&protect_chain_request_for_wire(&chain)).unwrap(),
+        )
+        .unwrap();
+        admitted.normalize_prompt_newlines();
+        assert_eq!(admitted.stages[0].prompt, chain.stages[0].prompt);
+        assert_eq!(
+            admitted.stages[0].negative_prompt,
+            chain.stages[0].negative_prompt
+        );
+        assert_eq!(admitted.original_prompt, chain.original_prompt);
     }
 }

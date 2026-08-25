@@ -1452,15 +1452,6 @@ pub async fn run(
         (prompt, None, None, None)
     };
 
-    let final_prompt = mold_core::normalize_prompt_newlines(&final_prompt).into_owned();
-    let original_prompt =
-        original_prompt.map(|prompt| mold_core::normalize_prompt_newlines(&prompt).into_owned());
-    let batch_prompts = batch_prompts.map(|prompts| {
-        prompts
-            .into_iter()
-            .map(|prompt| mold_core::normalize_prompt_newlines(&prompt).into_owned())
-            .collect()
-    });
     let effective_negative_prompt = resolve_effective_negative_prompt(
         is_h3,
         no_negative,
@@ -2798,15 +2789,13 @@ mod tests {
     }
 
     #[test]
-    fn cli_prompt_arguments_decode_literal_newlines_before_generation() {
-        assert_eq!(
-            require_normalized_prompt(
-                Some(r"first line\n\nsecond line\r\nthird line".to_string()),
-                "flux",
-                false,
-            )
-            .unwrap(),
-            "first line\n\nsecond line\nthird line"
-        );
+    fn cli_prompt_arguments_decode_once_before_local_or_remote_generation() {
+        let prompt = require_normalized_prompt(
+            Some(r"first line\n\nsecond line\\n literal".to_string()),
+            "flux",
+            false,
+        )
+        .unwrap();
+        assert_eq!(prompt, "first line\n\nsecond line\\n literal");
     }
 }

@@ -108,7 +108,6 @@ pub struct ChainStage {
     /// (auto-expand form replicates it); the movie-maker UI in v2 will let
     /// users author per-stage prompts.
     #[schema(example = "a cat walking through autumn leaves")]
-    #[serde(deserialize_with = "crate::prompt_text::deserialize_prompt")]
     pub prompt: String,
 
     /// Frame count for this stage. Must be `8k+1` (LTX-2 pipeline constraint:
@@ -129,11 +128,7 @@ pub struct ChainStage {
     /// Optional negative prompt for CFG-based stages. v1 LTX-2 ignores this
     /// (the distilled family doesn't use CFG); the field is reserved so the
     /// movie-maker can round-trip it without re-migrating the wire format.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::prompt_text::deserialize_optional_prompt"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub negative_prompt: Option<String>,
 
     /// Optional per-stage seed offset. `None` in v1 — the orchestrator
@@ -256,11 +251,7 @@ pub struct ChainRequest {
     pub collection: Option<crate::CollectionRef>,
 
     /// Original source prompt shared by a client-prepared sibling batch.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::prompt_text::deserialize_optional_prompt"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_transform: Option<crate::PromptTransformProvenance>,
@@ -281,11 +272,7 @@ pub struct ChainRequest {
     // These are only read when `stages` is empty; `normalise` clears them
     // after expansion so the canonical form only ever carries `stages`.
     /// Auto-expand: single prompt replicated across all stages.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::prompt_text::deserialize_optional_prompt"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
 
     /// Auto-expand: total pixel frames the stitched output should cover.
@@ -717,6 +704,27 @@ pub fn routing_clip_frames(family: &str, model: &str) -> Option<u32> {
 }
 
 impl ChainRequest {
+    /// Canonicalize raw prompt text at one chain ingress. Callers that forward
+    /// an already-canonical request must protect backslashes on that wire hop
+    /// instead of applying this method twice.
+    pub fn normalize_prompt_newlines(&mut self) {
+        for stage in &mut self.stages {
+            stage.prompt = crate::normalize_prompt_newlines(&stage.prompt).into_owned();
+            stage.negative_prompt = stage
+                .negative_prompt
+                .take()
+                .map(|prompt| crate::normalize_prompt_newlines(&prompt).into_owned());
+        }
+        self.original_prompt = self
+            .original_prompt
+            .take()
+            .map(|prompt| crate::normalize_prompt_newlines(&prompt).into_owned());
+        self.prompt = self
+            .prompt
+            .take()
+            .map(|prompt| crate::normalize_prompt_newlines(&prompt).into_owned());
+    }
+
     /// Build a synthetic single-clip `GenerateRequest` describing the
     /// stitched output, so gallery rows and embedded metadata can reuse
     /// the existing single-clip schema. `stages[0]` supplies the prompt,

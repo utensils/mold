@@ -406,6 +406,12 @@ pub async fn run_chain(
     // before the first stage renders, exactly as the single-clip path does
     // (#1050).
     let mut req = req;
+    // Script/repeated CLI prompts are raw here. Auto-expanded prompts carry
+    // `original_prompt` and are already canonical model output, so only the
+    // raw CLI shapes take the one normalization pass.
+    if req.original_prompt.is_none() {
+        req.normalize_prompt_newlines();
+    }
     req.output_format = super::generate::reconcile_video_format_with_output_extension(
         req.output_format,
         output.as_deref(),

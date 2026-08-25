@@ -105,6 +105,7 @@ pub async fn create_chain_job(
     ),
     ApiError,
 > {
+    req.normalize_prompt_newlines();
     crate::routes::ensure_generation_available(&state)?;
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;

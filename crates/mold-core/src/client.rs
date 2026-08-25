@@ -171,13 +171,16 @@ impl MoldClient {
         &self,
         request: &ReferenceUploadSessionRequest,
     ) -> Result<ReferenceUploadSessionResponse> {
+        let mut wire_request = request.clone();
+        wire_request.request =
+            crate::prompt_text::protect_generate_request_for_wire(&request.request);
         let response = self
             .client
             .post(format!(
                 "{}/api/generate/reference-upload-sessions",
                 self.base_url
             ))
-            .json(request)
+            .json(&wire_request)
             .send()
             .await?;
         Ok(error_for_status_with_body(response)
@@ -306,10 +309,11 @@ impl MoldClient {
     /// The server returns raw bytes, not JSON — callers are responsible for
     /// writing the bytes to disk or further processing.
     pub async fn generate_raw(&self, req: &GenerateRequest) -> Result<Vec<u8>> {
+        let wire_req = crate::prompt_text::protect_generate_request_for_wire(req);
         let bytes = self
             .client
             .post(format!("{}/api/generate", self.base_url))
-            .json(req)
+            .json(&wire_req)
             .send()
             .await?
             .error_for_status()?
@@ -329,12 +333,13 @@ impl MoldClient {
         let height = req.height;
         let model = req.model.clone();
         let format = req.resolved_output_format();
+        let wire_req = crate::prompt_text::protect_generate_request_for_wire(&req);
 
         let start = std::time::Instant::now();
         let resp = self
             .client
             .post(format!("{}/api/generate", self.base_url))
-            .json(&req)
+            .json(&wire_req)
             .send()
             .await?
             .error_for_status()?;
@@ -566,10 +571,11 @@ impl MoldClient {
         req: &GenerateRequest,
         progress_tx: tokio::sync::mpsc::UnboundedSender<SseProgressEvent>,
     ) -> Result<Option<GenerateResponse>> {
+        let wire_req = crate::prompt_text::protect_generate_request_for_wire(req);
         let mut resp = self
             .client
             .post(format!("{}/api/generate/stream", self.base_url))
-            .json(req)
+            .json(&wire_req)
             .send()
             .await?;
 
@@ -812,10 +818,11 @@ impl MoldClient {
     /// chains take minutes — prefer [`Self::generate_chain_stream`] for
     /// interactive clients that want progress updates.
     pub async fn generate_chain(&self, req: &ChainRequest) -> Result<ChainResponse> {
+        let wire_req = crate::prompt_text::protect_chain_request_for_wire(req);
         let resp = self
             .client
             .post(format!("{}/api/generate/chain", self.base_url))
-            .json(req)
+            .json(&wire_req)
             .send()
             .await?;
 
@@ -861,10 +868,11 @@ impl MoldClient {
         req: &ChainRequest,
         progress_tx: tokio::sync::mpsc::UnboundedSender<ChainProgressEvent>,
     ) -> Result<Option<ChainResponse>> {
+        let wire_req = crate::prompt_text::protect_chain_request_for_wire(req);
         let mut resp = self
             .client
             .post(format!("{}/api/generate/chain/stream", self.base_url))
-            .json(req)
+            .json(&wire_req)
             .send()
             .await?;
 
@@ -960,10 +968,11 @@ impl MoldClient {
     }
 
     pub async fn create_chain_job(&self, req: &ChainRequest) -> Result<CreateChainJobResponse> {
+        let wire_req = crate::prompt_text::protect_chain_request_for_wire(req);
         let resp = self
             .client
             .post(format!("{}/api/chain-jobs", self.base_url))
-            .json(req)
+            .json(&wire_req)
             .send()
             .await?;
         Ok(error_for_status_with_body(resp)
@@ -1131,6 +1140,7 @@ impl MoldClient {
         request: crate::types::GenerateRequest,
         copies: u32,
     ) -> Result<crate::types::GenerationPlacementPreview> {
+        let request = crate::prompt_text::protect_generate_request_for_wire(&request);
         let preview = self
             .client
             .post(format!("{}/api/generate/placement-preview", self.base_url))
@@ -1780,10 +1790,11 @@ impl MoldClient {
 
     /// Expand a prompt using the server's LLM prompt expansion endpoint.
     pub async fn expand_prompt(&self, req: &ExpandRequest) -> Result<ExpandResponse> {
+        let wire_req = crate::prompt_text::protect_expand_request_for_wire(req);
         let resp = self
             .client
             .post(format!("{}/api/expand", self.base_url))
-            .json(req)
+            .json(&wire_req)
             .send()
             .await?
             .error_for_status()?
@@ -1795,10 +1806,11 @@ impl MoldClient {
     /// Generate subject-preserving prompt alternatives. A distinct endpoint is
     /// intentional: older hosts return 404 instead of silently expanding.
     pub async fn remix_prompt(&self, req: &crate::RemixRequest) -> Result<crate::RemixResponse> {
+        let wire_req = crate::prompt_text::protect_remix_request_for_wire(req);
         let resp = self
             .client
             .post(format!("{}/api/remix", self.base_url))
-            .json(req)
+            .json(&wire_req)
             .send()
             .await?
             .error_for_status()?
