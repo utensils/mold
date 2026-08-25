@@ -237,11 +237,13 @@ import {
 } from "@studio/lib/extend";
 import { promptOptional, promptRequired } from "@studio/lib/promptRequirement";
 import {
+  appendMinimaxH3GalleryImageReference,
   MINIMAX_H3_PROMPT_PLACEHOLDER,
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Identity,
   minimaxH3AuthoringError,
   minimaxH3TaskForModel,
+  setMinimaxH3GalleryImageFirstFrame,
   setMinimaxH3PickedImageBoundary,
   type MinimaxH3BoundaryEndpoint,
 } from "@studio/lib/minimaxH3Authoring";
@@ -283,7 +285,7 @@ import type {
   SourceFitPolicy,
   SourceImageState,
 } from "../types";
-import { MAX_LORA_STACK } from "../types";
+import { MAX_LORA_STACK, mediaKind } from "../types";
 function loadMuted(): boolean {
   try {
     return localStorage.getItem("mold.gallery.muted") !== "false";
@@ -515,12 +517,39 @@ function onTemplatesPointerDown(event: PointerEvent) {
   ) {
     showTemplates.value = false;
   }
+  const target = event.target as HTMLElement | null;
+  if (!target?.closest("[data-test='recent-context-menu']")) {
+    closeRecentContextMenu();
+  }
 }
 
 function onTemplatesKeydown(event: KeyboardEvent) {
   if (showTemplates.value && event.key === "Escape") {
     event.preventDefault();
     showTemplates.value = false;
+  }
+  if (recentContextMenu.value && event.key === "Escape") {
+    event.preventDefault();
+    closeRecentContextMenu(true);
+    return;
+  }
+  if (!recentContextMenu.value) return;
+  const items = Array.from(
+    recentContextMenuElement.value?.querySelectorAll<HTMLButtonElement>(
+      '[role="menuitem"]:not(:disabled)',
+    ) ?? [],
+  );
+  if (items.length === 0) return;
+  const active = document.activeElement;
+  const index = items.findIndex((item) => item === active);
+  let next = -1;
+  if (event.key === "ArrowDown") next = (index + 1) % items.length;
+  if (event.key === "ArrowUp") next = (index - 1 + items.length) % items.length;
+  if (event.key === "Home") next = 0;
+  if (event.key === "End") next = items.length - 1;
+  if (next >= 0) {
+    event.preventDefault();
+    items[next]?.focus();
   }
 }
 
@@ -4502,7 +4531,69 @@ function onApplyMask(mask: SourceImageState) {
 }
 
 // ── Gallery drawer (preserved) ────────────────────────────────────────
+const recentContextMenu = ref<{
+  item: GalleryImage;
+  x: number;
+  y: number;
+  trigger: HTMLElement | null;
+} | null>(null);
+const recentContextMenuElement = ref<HTMLElement | null>(null);
+const RECENT_CONTEXT_WIDTH = 182;
+const RECENT_CONTEXT_HEIGHT = 172;
+const RECENT_CONTEXT_MARGIN = 6;
+const recentContextPosition = computed(() => {
+  const menu = recentContextMenu.value;
+  if (!menu) return {};
+  return {
+    left: `${Math.max(
+      RECENT_CONTEXT_MARGIN,
+      Math.min(
+        menu.x,
+        window.innerWidth - RECENT_CONTEXT_WIDTH - RECENT_CONTEXT_MARGIN,
+      ),
+    )}px`,
+    top: `${Math.max(
+      RECENT_CONTEXT_MARGIN,
+      Math.min(
+        menu.y,
+        window.innerHeight - RECENT_CONTEXT_HEIGHT - RECENT_CONTEXT_MARGIN,
+      ),
+    )}px`,
+  };
+});
+const recentSourceDisabled = computed(() => {
+  const item = recentContextMenu.value?.item;
+  if (!item || !sequenceMode.value) return false;
+  const kind = mediaKind(item.format, item.filename);
+  return kind === "video" || kind === "audio";
+});
+
+async function openRecentContextMenu(payload: {
+  item: GalleryImage;
+  x: number;
+  y: number;
+  trigger?: HTMLElement | null;
+}) {
+  recentContextMenu.value = { ...payload, trigger: payload.trigger ?? null };
+  await nextTick();
+  recentContextMenuElement.value
+    ?.querySelector<HTMLButtonElement>('[role="menuitem"]')
+    ?.focus();
+}
+
+function closeRecentContextMenu(restoreFocus = false) {
+  const trigger = recentContextMenu.value?.trigger;
+  recentContextMenu.value = null;
+  if (restoreFocus) void nextTick(() => trigger?.focus());
+}
+
+async function useRecentAsSource(item: GalleryImage) {
+  if (recentSourceDisabled.value) return;
+  await onLightboxUseSource(item);
+}
+
 function openItem(item: GalleryImage) {
+  closeRecentContextMenu();
   selectedIndex.value = galleryEntries.value.findIndex(
     (e) => e.filename === item.filename,
   );
@@ -4729,6 +4820,7 @@ function closeDrawer() {
 }
 
 function onLightboxReuse(item: GalleryImage) {
+  closeRecentContextMenu();
   recreateFromGallery(item);
   closeDrawer();
 }
@@ -4737,10 +4829,72 @@ async function attachLightboxSource(item: GalleryImage): Promise<boolean> {
   try {
     const res = await fetch(imageUrl(item.filename));
     if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
-    const base64 = await blobToBase64(await res.blob());
-    form.state.value.imageAttachments = [
-      { kind: "gallery", filename: item.filename, base64 },
-    ];
+    const blob = await res.blob();
+    const base64 = await blobToBase64(blob);
+    const kind = mediaKind(item.format, item.filename);
+    if (kind === "video") {
+      form.state.value.sourceVideo = {
+        kind: "upload",
+        filename: item.filename,
+        base64,
+        mime: blob.type || null,
+      };
+      form.state.value.sourceVideoPath = "";
+    } else if (kind === "audio") {
+      form.state.value.audioFile = {
+        kind: "upload",
+        filename: item.filename,
+        base64,
+        mime: blob.type || null,
+      };
+      form.state.value.audioFilePath = "";
+    } else {
+      const state = form.state.value;
+      if (sequenceMode.value) {
+        const dimensions = imageDimensionsFromBase64(base64) ?? {
+          width: item.metadata.width,
+          height: item.metadata.height,
+        };
+        draft.openingImage = {
+          filename: item.filename,
+          base64,
+          width: dimensions.width,
+          height: dimensions.height,
+        };
+        state.sourceFitPolicy = coerceSourceFitForMaskless(
+          state.sourceFitPolicy ?? { mode: "crop-fill" },
+        );
+        return true;
+      }
+      const h3Task = minimaxH3TaskForModel(state.model);
+      if (h3Task) {
+        const dimensions = imageDimensionsFromBase64(base64) ?? {
+          width: item.metadata.width,
+          height: item.metadata.height,
+        };
+        const image = {
+          filename: item.filename,
+          mimeType: blob.type || `image/${item.format}`,
+          width: dimensions.width,
+          height: dimensions.height,
+          data: base64,
+        };
+        const result =
+          h3Task === "ref2va"
+            ? appendMinimaxH3GalleryImageReference(state.h3Authoring, image)
+            : setMinimaxH3GalleryImageFirstFrame(state.h3Authoring, image);
+        if (!result.ok) throw new Error(result.error);
+        state.h3Authoring = result.state;
+      } else if (isMinimaxH3Identity(state.modelFamily, state.model)) {
+        throw new Error(
+          "Choose an explicit MiniMax H3 FL2VA or Ref2VA model before adding a source.",
+        );
+      } else {
+        state.imageAttachments = [
+          { kind: "gallery", filename: item.filename, base64 },
+        ];
+      }
+    }
     return true;
   } catch (err) {
     toast("error", err instanceof Error ? err.message : String(err));
@@ -4749,6 +4903,7 @@ async function attachLightboxSource(item: GalleryImage): Promise<boolean> {
 }
 
 async function onLightboxUseSource(item: GalleryImage) {
+  closeRecentContextMenu();
   if (!(await attachLightboxSource(item))) return;
   closeDrawer();
 }
@@ -4773,6 +4928,7 @@ function stepDrawer(delta: number) {
   selected.value = galleryEntries.value[next] ?? null;
 }
 async function handleDelete(item: GalleryImage) {
+  closeRecentContextMenu();
   try {
     await deleteGalleryImage(item.filename);
     galleryEntries.value = galleryEntries.value.filter(
@@ -5430,6 +5586,7 @@ onBeforeUnmount(() => {
             :entries="galleryEntries"
             :limit="isPhone ? 18 : 50"
             @open="openItem"
+            @context-menu="openRecentContextMenu"
           />
         </section>
       </main>
@@ -5671,8 +5828,101 @@ onBeforeUnmount(() => {
       @delete="handleDelete"
     />
 
+    <div
+      v-if="recentContextMenu"
+      ref="recentContextMenuElement"
+      class="recent-context"
+      data-test="recent-context-menu"
+      role="menu"
+      :style="recentContextPosition"
+    >
+      <button
+        type="button"
+        role="menuitem"
+        @click="openItem(recentContextMenu.item)"
+      >
+        Open
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        data-test="recent-context-reuse"
+        @click="onLightboxReuse(recentContextMenu.item)"
+      >
+        Reuse settings
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        data-test="recent-context-source"
+        :disabled="recentSourceDisabled"
+        :title="
+          recentSourceDisabled
+            ? 'Sequence opening media must be an image.'
+            : undefined
+        "
+        @click="useRecentAsSource(recentContextMenu.item)"
+      >
+        Use as source
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        class="recent-context__danger"
+        data-test="recent-context-delete"
+        @click="handleDelete(recentContextMenu.item)"
+      >
+        Delete
+      </button>
+    </div>
+
     <!-- The machine picker for a pre-submit missing-model pull. The Models
          page mounts the same dialog; only one route is mounted at a time. -->
     <ModelInstallTargetDialog />
   </div>
 </template>
+
+<style scoped>
+.recent-context {
+  position: fixed;
+  z-index: 70;
+  display: grid;
+  min-width: 170px;
+  padding: 6px;
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control-lg);
+  background: var(--bench);
+  box-shadow: var(--shadow-popover);
+}
+
+.recent-context button {
+  min-height: 40px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--rebate);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.recent-context button:hover,
+.recent-context button:focus-visible {
+  background: var(--sel-bg);
+}
+
+.recent-context button:disabled {
+  color: var(--ink-3);
+  cursor: default;
+}
+
+.recent-context button:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: -2px;
+}
+
+.recent-context__danger {
+  color: var(--stop) !important;
+}
+</style>
