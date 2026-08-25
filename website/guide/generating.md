@@ -100,6 +100,19 @@ Use regular img2img families when you need `--strength`-based denoising.
 Use `qwen-image-edit` when you want instruction-following edits against one or
 more reference images.
 
+FLUX.2 Dev has a different native reference workflow. It accepts up to four
+ordered PNG/JPEG inputs, but it is not strength-based img2img: masks,
+ControlNet, request-time LoRA, and referenced batches are rejected.
+
+```bash
+mold run flux2-dev:bf16 \
+  --image subject.png --image lighting-reference.jpg \
+  "preserve Picture 1 and use the lighting from Picture 2"
+```
+
+See [Flux.2](/models/flux2) for the gated checkpoint and runtime
+requirements.
+
 In Mold Studio, Qwen Image Edit uses the same Target image well as other
 source-driven models on web, desktop, and iPhone. Its ordered picture strip
 still adds and reorders References, while the Target offers contain, crop,
@@ -238,10 +251,11 @@ plainly when it does not.
 
 ## Video Generation
 
-mold supports text-to-video generation with the LTX Video, LTX-2 (next
-section), and Wan 2.1/2.2 model families. LTX Video, LTX-2, and Wan all
-default to MP4 output (GIF, APNG, and feature-gated WebP are also supported);
-a build compiled without the `mp4` feature falls back to APNG.
+mold supports video generation with LTX Video, LTX-2 (next section), Wan
+2.1/2.2, and MiniMax H3. LTX Video, LTX-2, and Wan default to MP4 output (GIF,
+APNG, and feature-gated WebP are also supported); a build compiled without the
+`mp4` feature falls back to APNG. MiniMax H3 is MP4-only because every render
+contains synchronized generated audio.
 
 ```bash
 # Generate a 25-frame video clip with the fast distilled path
@@ -309,6 +323,32 @@ checkpoint's trained 81 frames — automatic partial block offload fits them on
 a 24 GB card — while `:q8` defaults to 73 frames and `:fp8` to 45, their
 measured 24 GB envelopes. See
 [Wan Video](/models/wan) for variants, defaults, and limits.
+
+### MiniMax H3
+
+The runnable compact H3 surface has two task partitions. FL2VA generates from
+a required first frame; Ref2VA generates from an ordered set of image, video,
+or audio references. Both produce synchronized audio-video, use a fixed 24 fps
+clock, and accept 107–345 frames on the `17n+5` grid.
+
+```bash
+# First-frame audio-video on the reviewed compact FL2VA stack
+mold run minimax-h3-fl2va:comfy-pruned-int8 \
+  "the camera drifts toward the illuminated pavilion" \
+  --first-frame pavilion.png --duration 5
+
+# Ordered heterogeneous references; MOLD_API_KEY is required for upload
+mold run minimax-h3-ref2va:comfy-pruned-int8 \
+  "a slow dolly through the scene" \
+  --reference image=hero.png --reference video=clip.mp4 \
+  --reference audio=score.wav
+```
+
+H3 clips are single-shot: sequence, extend, retake, arbitrary LoRA, negative
+prompt, and generic scheduler controls are unavailable. Generation currently
+requires an H3-enabled SM89 CUDA build; the shipped Metal route remains
+correctness-only and unqualified, and CPU is unsupported. See
+[MiniMax H3](/models/minimax-h3) before its 34–44 GB downloads.
 
 ## Joint Audio-Video Generation
 

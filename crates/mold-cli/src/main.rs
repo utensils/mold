@@ -764,7 +764,7 @@ Examples:
         #[arg(long, help_heading = "Video")]
         fps: Option<u32>,
 
-        /// MiniMax H3 duration in seconds (5 through 15). Resolves to the
+        /// MiniMax H3 duration in seconds (4 through 15). Resolves to the
         /// nearest exact 17n+5 frame count on H3's fixed 24 FPS clock.
         #[arg(long, conflicts_with = "frames", help_heading = "Video")]
         duration: Option<f64>,

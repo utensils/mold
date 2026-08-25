@@ -4,9 +4,10 @@ title: Video Generation
 
 # Video Generation
 
-mold supports generating video clips using the LTX Video, LTX-2, and Wan
-2.1/2.2 model families. Every LTX-2 and Wan checkpoint can chain multiple clips
-together for longer videos with scene-by-scene direction. A dev checkpoint
+mold supports generating video clips using the LTX Video, LTX-2, Wan 2.1/2.2,
+and MiniMax H3 model families. Every LTX-2 and Wan checkpoint can chain multiple
+clips together for longer videos with scene-by-scene direction; H3 is
+single-clip only. A dev checkpoint
 renders its clips through the two-stage pipeline, so expect roughly twice the
 wall time per clip as a distilled one — stage 1 runs classifier-free guidance
 as two sequential forward passes.
@@ -58,6 +59,25 @@ specific negative prompt that mold applies automatically when a request
 carries no negative at all; every surface shows it, editing replaces it, and
 clearing it (`--no-negative` on the CLI) sends a real empty negative. See
 [Wan Video](/models/wan) for variants, defaults, and limits.
+
+## MiniMax H3
+
+MiniMax H3 always returns MP4 with synchronized generated audio. The compact
+FL2VA route requires a first frame; the compact Ref2VA route takes 1–12 ordered
+image, video, or audio references. Both use 24 fps and a `17n+5` frame grid
+from 107 through 345 frames.
+
+```bash
+mold run minimax-h3-fl2va:comfy-pruned-int8 \
+  "the camera circles the lantern as wind moves the trees" \
+  --first-frame lantern.png --duration 5
+```
+
+Generation is available on H3-enabled SM89 CUDA builds. The shipped Apple
+Metal route is correctness-only and not yet hardware-qualified; CPU is
+unsupported. H3 does not participate in the sequence workflow below. See
+[MiniMax H3](/models/minimax-h3) for Ref2VA uploads, Turbo tags, download-only
+layouts, and exact request limits.
 
 ## Resolution and spatial tiling
 

@@ -128,6 +128,33 @@ for (const relPath of requiredVisibleDocs) {
   }
 }
 
+const modelIndex = readRel('models/index.md')
+const modelPages = readdirSync(join(websiteDir, 'models'))
+  .filter((name) => name.endsWith('.md') && name !== 'index.md')
+  .map((name) => `models/${name}`)
+for (const relPath of modelPages) {
+  const route = routeForDoc(relPath)
+  if (!visibleLinks.has(route)) {
+    fail(`model guide is not linked from the sidebar: ${route}`)
+  }
+  if (!modelIndex.includes(`](${route})`)) {
+    fail(`model guide is not linked from the models overview: ${route}`)
+  }
+}
+
+for (const relPath of [
+  'guide/generating.md',
+  'guide/video.md',
+  'guide/feature-matrix.md',
+]) {
+  const source = readRel(relPath)
+  for (const modelRoute of ['/models/minimax-h3', '/models/wan']) {
+    if (!source.includes(modelRoute)) {
+      fail(`${relPath} must link to ${modelRoute}`)
+    }
+  }
+}
+
 const h3ModelDoc = readRel('models/minimax-h3.md')
 const requiredH3DownloadFacts = [
   'minimax-h3-fl2va:comfy-pruned-int8',
@@ -309,6 +336,8 @@ if (!loraMatch?.groups?.body) {
 
 const apiDocs = readRel('api/index.md')
 const requiredApiEndpoints = [
+  '/api/generate/reference-upload-sessions',
+  '/api/generate/reference-upload',
   '/api/gallery/media-token',
   '/api/pairing/sessions',
   '/api/pairing/claim',

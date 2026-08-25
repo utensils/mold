@@ -57,7 +57,7 @@ curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
 # Generate your first image
 mold run "a sunset over mountains"
 
-# That's it — the model downloads on first run (~12GB for flux-schnell:q8)
+# That's it — mold shows the complete download before the first pull
 ```
 
 For the latest rolling CLI build from `main`, add `MOLD_CHANNEL=nightly` on
@@ -67,28 +67,32 @@ the `sh` side of the install pipe.
 
 - **Broad model support** — FLUX.1, SDXL, SD 1.5, SD 3.5, Z-Image, Flux.2 Klein
   and Dev, Qwen-Image, Qwen-Image-Edit, Wuerstchen v2, LTX Video,
-  LTX-2 / LTX-2.3, Wan 2.1/2.2, and MiniMax H3 (compact FL2VA; generation on
-  supported SM89 CUDA builds, with Apple Metal correctness-only)
+  LTX-2 / LTX-2.3, Wan 2.1/2.2, and MiniMax H3 (compact FL2VA + Ref2VA;
+  generation on supported SM89 CUDA builds, with Apple Metal correctness-only)
 - **txt2img, img2img, multimodal edit, inpainting, ControlNet** — all in one binary
 - **Image upscaling** — Real-ESRGAN super-resolution (2x/4x) via CLI, server API, or TUI
 - **Pipe-friendly** — `mold run "a cat" | viu -` just works
 - **Client-server** — run the GPU part on one machine, generate from anywhere
-- **Native apps** — a local/multi-host desktop studio and a remote-only iPhone
-  companion
+- **Native apps** — a local/multi-host desktop studio plus remote-only iPhone
+  and Android companions
 - **Prompt expansion** — short prompts become detailed via local LLM
 - **LoRA adapters** — apply fine-tuned styles across FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, Qwen-Image-Edit, Wan, and Z-Image
 - **PNG metadata** — generation parameters embedded for reproducibility
 
 ## Requirements
 
-- **NVIDIA GPU** with CUDA or **Apple Silicon** with Metal
-- Models auto-download on first use (~2–30 GB depending on model)
+- For practical local generation: an **NVIDIA GPU** with CUDA or **Apple
+  Silicon** with Metal. CPU correctness paths and remote-client-only use do not
+  require a local GPU.
+- Models auto-download on first use (~2 GB to 50+ GB depending on model and
+  optional assets)
 
 ## Next Steps
 
 - [Installation](/guide/installation) — all the ways to install mold
 - [Configuration](/guide/configuration) — environment variables, config file
 - [Generating Images](/guide/generating) — full usage guide
+- [Video Generation](/guide/video) — LTX, Wan, and MiniMax H3 workflows
 - [Desktop App](/guide/desktop) — local and multi-host native studio
 - [iPhone App](/guide/iphone) — remote Create, Library, Models, Machines, and
   Settings

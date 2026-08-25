@@ -2,7 +2,8 @@
 
 MiniMax H3 is an audio-video generation family from
 [MiniMax](https://huggingface.co/MiniMaxAI/MiniMax-H3). Mold can discover,
-download, verify, repair, inventory, and remove two compact Comfy variants. The
+download, verify, repair, inventory, and remove two task partitions across
+seven compact Comfy tags, plus two official BF16 qualification references. The
 files are downloaded directly from their pinned Hugging Face repositories;
 Mold does not bundle or mirror the weights.
 
@@ -46,6 +47,11 @@ speed one.
 | `minimax-h3-ref2va:comfy-pruned-int8`                 | Reference media to video with audio               |  42.482 GB | CUDA generation; ordered references  |
 | `minimax-h3-fl2va:comfy-pruned-nvfp4`                 | First/last-frame conditioning with audio          |  34.040 GB | Downloadable; execution unavailable  |
 | `minimax-h3-ref2va:comfy-pruned-nvfp4`                | Reference media to video with audio               |  34.040 GB | Downloadable; execution unavailable  |
+
+The official `minimax-h3-fl2va:official-bf16` and
+`minimax-h3-ref2va:official-bf16` identities are also visible downloads. They
+are large qualification references with no public execution arm, so their
+model rows report `runtime_available: false` before the pull.
 
 The two NVFP4 rows pin a pruned NVFP4 transformer in place of the INT8 one.
 Mold has no engine arm that reads that weight layout yet, so they download,
@@ -194,7 +200,7 @@ full-file manifest identities rather than estimates from repository listings.
 
 ## Supported FL2VA request
 
-The initial compact CUDA implementation supports this request profile:
+The current compact implementation supports this request profile:
 
 - an SM89 CUDA GPU with sufficient VRAM and the H3 attention/runtime operators
   enabled (an Apple Silicon Metal GPU is admitted but unqualified — see above)
@@ -206,12 +212,19 @@ The initial compact CUDA implementation supports this request profile:
   default); a reviewed Turbo tag instead requires exactly its tier's own count
   (9 for `-turbo-8step`, 5 for `-turbo-4step-768p`), because that count is the
   distilled adapter's own schedule length
-- one required first-frame image and no last-frame endpoint
+- one required first-frame image; the current compact runtime refuses a
+  closing endpoint
 - MP4 output with synchronized generated audio
 - a prompt of roughly 1,000 tokens or fewer: the reviewed conditioner sequence
   budgets 2,048 rows, of which the first-frame image's vision pads and label
   take 1,014, and a longer prompt is refused immediately with its exact budget
   named rather than after artifact verification
+
+```bash
+mold run minimax-h3-fl2va:comfy-pruned-int8 \
+  "the camera drifts toward the illuminated pavilion" \
+  --first-frame pavilion.png --duration 5
+```
 
 ### Canvas and duration
 
@@ -334,5 +347,6 @@ geolocation check, H3-specific generated-content label, downstream contract, or
 surface-specific acceptable-use control. Existing Mold authentication,
 validation, capability, safety, and operational controls continue to apply.
 
-The official BF16 checkpoints remain hidden qualification references. Their
-much larger artifact graphs are not public Mold download options.
+The official BF16 checkpoints remain download-only qualification references.
+Their much larger artifact graphs are visible to preserve exact acquisition
+and inventory authority, but no released build executes them.

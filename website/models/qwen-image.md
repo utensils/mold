@@ -61,14 +61,15 @@ back to quantized GGUF variants when that resident encoder would be too heavy.
 
 ### Qwen-Image-2512
 
-| Model                | Steps | Size    | Validated On 24 GB | Notes                                |
-| -------------------- | ----- | ------- | ------------------ | ------------------------------------ |
-| `qwen-image-2512:q8` | 50    | 21.8 GB | `768x768`          | Highest-quality 2512 GGUF tier       |
-| `qwen-image-2512:q6` | 50    | 16.8 GB | `1024x1024`        | Quality/size trade-off               |
-| `qwen-image-2512:q5` | 50    | 15.0 GB | `1024x1024`        | Dynamic `K_M` quant                  |
-| `qwen-image-2512:q4` | 50    | 13.2 GB | `1328x1328`        | Stable 24 GB choice                  |
-| `qwen-image-2512:q3` | 50    | 9.9 GB  | `1024x1024`        | Lower bitrate, still prompt-faithful |
-| `qwen-image-2512:q2` | 50    | 7.3 GB  | `1024x1024`        | Smallest published 2512 GGUF         |
+| Model                  | Steps | Size    | Validated On 24 GB   | Notes                                |
+| ---------------------- | ----- | ------- | -------------------- | ------------------------------------ |
+| `qwen-image-2512:bf16` | 50    | 40.9 GB | Larger GPU / offload | Strongest full-precision 2512 tier   |
+| `qwen-image-2512:q8`   | 50    | 21.8 GB | `768x768`            | Highest-quality 2512 GGUF tier       |
+| `qwen-image-2512:q6`   | 50    | 16.8 GB | `1024x1024`          | Quality/size trade-off               |
+| `qwen-image-2512:q5`   | 50    | 15.0 GB | `1024x1024`          | Dynamic `K_M` quant                  |
+| `qwen-image-2512:q4`   | 50    | 13.2 GB | `1328x1328`          | Stable 24 GB choice                  |
+| `qwen-image-2512:q3`   | 50    | 9.9 GB  | `1024x1024`          | Lower bitrate, still prompt-faithful |
+| `qwen-image-2512:q2`   | 50    | 7.3 GB  | `1024x1024`          | Smallest published 2512 GGUF         |
 
 ### Qwen-Image-Edit-2511
 
@@ -278,7 +279,8 @@ using it by default with `qwen-image:q2` through `qwen-image:q8` or
 ## Other Qwen Variants
 
 `mold` also exposes higher-VRAM Qwen paths such as `qwen-image:bf16`,
-`qwen-image:fp8`, `qwen-image-lightning:fp8` (4 steps, 20.4 GB), and
+`qwen-image:fp8`, `qwen-image-2512:bf16`,
+`qwen-image-lightning:fp8` (4 steps, 20.4 GB), and
 `qwen-image-lightning:fp8-8step` (8 steps, 20.5 GB). Those are separate from the
 GGUF quantized matrix above and have different memory and scheduler behavior.
 

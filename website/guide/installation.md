@@ -19,9 +19,14 @@
   directly to an Android 7.0 or newer device. No archive extraction is needed;
   follow the [Android App guide](/guide/android#download-and-install) for the
   one-time sideload permission.
+- **Linux desktop:** build the Nix package for the host GPU with
+  `nix build .#mold-desktop`, `.#mold-desktop-sm86`, or
+  `.#mold-desktop-sm120`. `desktop-build` can produce an AppImage on a
+  conventional Linux host; tagged releases do not publish that AppImage yet.
+  See the [Desktop App guide](/guide/desktop).
 
 Mold is CLI-native. The command-line installation below installs the primary
-Mold interface and the same engine/server used by both native apps, scripts,
+Mold interface and the same engine/server used by the native apps, scripts,
 agents, and custom API clients.
 
 ## Windows CLI
@@ -272,6 +277,7 @@ builds stay much faster than the shipping `--release` profile.
 ## Docker
 
 ```bash
+# Ada / SM89 only; choose an architecture-specific tag for other GPUs
 docker pull ghcr.io/utensils/mold:latest
 docker run --gpus all -p 7680:7680 ghcr.io/utensils/mold:latest
 ```

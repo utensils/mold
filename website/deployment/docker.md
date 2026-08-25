@@ -35,7 +35,9 @@ docker build --build-arg CUDA_COMPUTE_CAP=120 -t mold-server-rtx5090 .
 
 ## Pre-Built Images
 
-Images are published to GHCR on every push to `main` and on version tags:
+Rolling `latest*` images are published by the scheduled release workflow;
+version tags publish immutable version aliases. `latest` is the Ada/SM89
+image, not a portable CUDA image, so select the tag matching the host GPU:
 
 ```bash
 # Ada (RTX 4090) — default

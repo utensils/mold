@@ -15,20 +15,22 @@ features today?
 
 ## Source Image Workflows
 
-| Family          | img2img | Inpainting | Edit-family refs |
-| --------------- | ------- | ---------- | ---------------- |
-| FLUX.1          | Yes     | Yes        | No               |
-| SDXL            | Yes     | Yes        | No               |
-| SD 1.5          | Yes     | Yes        | No               |
-| SD 3.5          | Yes     | Yes        | No               |
-| Z-Image         | Yes     | Yes        | No               |
-| Flux.2 Klein    | Yes     | Yes        | No               |
-| Wuerstchen v2   | Yes     | Yes        | No               |
-| Qwen-Image      | Yes     | Yes        | No               |
-| Qwen-Image-Edit | No      | No         | Yes              |
-| LTX Video       | Not yet | Not yet    | Not yet          |
-| LTX-2           | Yes     | No         | Keyframes        |
-| Wan Video       | Not yet | Not yet    | Not yet          |
+| Family          | img2img | Inpainting | Edit / video references                               |
+| --------------- | ------- | ---------- | ----------------------------------------------------- |
+| FLUX.1          | Yes     | Yes        | No                                                    |
+| SDXL            | Yes     | Yes        | No                                                    |
+| SD 1.5          | Yes     | Yes        | No                                                    |
+| SD 3.5          | Yes     | Yes        | No                                                    |
+| Z-Image         | Yes     | Yes        | No                                                    |
+| Flux.2 Klein    | Yes     | Yes        | No                                                    |
+| Flux.2 Dev      | No      | No         | Up to 4 ordered native references                     |
+| Wuerstchen v2   | Yes     | Yes        | No                                                    |
+| Qwen-Image      | Yes     | Yes        | No                                                    |
+| Qwen-Image-Edit | No      | No         | Yes                                                   |
+| LTX Video       | Not yet | Not yet    | Not yet                                               |
+| LTX-2           | Yes     | No         | Keyframes                                             |
+| Wan Video       | N/A     | N/A        | First/last frame on capable checkpoints               |
+| MiniMax H3      | N/A     | N/A        | Required first frame (FL2VA) or ordered refs (Ref2VA) |
 
 ## Control and Adapters
 
@@ -36,6 +38,7 @@ features today?
 | --------------- | --------------- | ---------- | ---- |
 | FLUX.1          | flux            | No         | Yes  |
 | Flux.2 Klein    | flux2           | No         | Yes  |
+| Flux.2 Dev      | flux2           | No         | No   |
 | LTX-2           | ltx2            | No         | Yes  |
 | SD 1.5          | sd15            | Yes        | Yes  |
 | SD 3.5          | sd3             | No         | Yes  |
@@ -46,6 +49,10 @@ features today?
 | Wuerstchen v2   | wuerstchen      | No         | No   |
 | LTX Video       | ltx-video       | No         | No   |
 | Wan Video       | wan             | No         | Yes  |
+| MiniMax H3      | minimax-h3      | No         | No¹  |
+
+¹ H3 Turbo model tags contain manifest-pinned, reviewed distillation adapters.
+They do not enable arbitrary request-time LoRA stacks.
 
 ## Prompt Conditioning
 
@@ -57,11 +64,13 @@ features today?
 | SD 3.5          | Yes              | No                 |
 | Z-Image         | No               | No                 |
 | Flux.2 Klein    | No               | No                 |
+| Flux.2 Dev      | No               | No                 |
 | Wuerstchen v2   | Yes              | No                 |
 | Qwen-Image      | Yes              | No                 |
 | Qwen-Image-Edit | Yes              | No                 |
 | LTX Video       | No               | No                 |
 | Wan Video       | Yes              | No                 |
+| MiniMax H3      | No               | No                 |
 
 ## Video Generation
 
@@ -70,7 +79,11 @@ features today?
 | LTX Video  | Yes     | Not yet | No        | No         | No     | No      | No      | No          |
 | LTX-2      | Yes     | Yes     | Yes       | Yes        | Yes    | Yes     | Yes     | Yes         |
 | Wan Video  | Yes     | Yes     | No        | First/last | No     | No      | No      | No          |
+| MiniMax H3 | No¹     | Yes     | Ref2VA    | First      | No     | No      | No      | Required    |
 | All others | No      | No      | No        | No         | No     | No      | No      | No          |
+
+¹ The currently advertised compact FL2VA profile requires a first frame.
+Ref2VA instead requires an ordered set of image, video, or audio references.
 
 LTX Video, LTX-2, and Wan all default to MP4 — LTX-2 so it can preserve
 synchronized audio when requested; Wan renders video only and has no audio
@@ -93,24 +106,30 @@ bytes, and an explicit `--format` that disagrees with the filename is reported
 instead of silently overriding it. `--output -` writes to stdout and claims no
 extension, so it keeps whatever container the family resolved.
 
+MiniMax H3 is separate from those fallback rules: it always emits MP4 with
+synchronized generated audio, runs at 24 fps, and accepts 107–345 frames on
+its `17n+5` grid. It does not support sequences. See
+[MiniMax H3](/models/minimax-h3) for its request and build constraints.
+
 The recommended LTX default today is `ltx-video-0.9.6-distilled:bf16`. The
 `0.9.8` family is available, pulls its spatial upscaler asset, and now runs
 the full multiscale refinement path.
 
 ## Backend Support
 
-| Family          | CUDA | Metal            | CPU              |
-| --------------- | ---- | ---------------- | ---------------- |
-| FLUX.1 / FLUX.2 | Yes  | Yes              | Yes (slow)       |
-| SDXL / SD 1.5   | Yes  | Yes              | Yes              |
-| SD 3.5          | Yes  | Yes              | Yes              |
-| Z-Image         | Yes  | Yes              | Yes              |
-| Wuerstchen v2   | Yes  | Yes              | Yes              |
-| Qwen-Image      | Yes  | Yes              | Yes              |
-| Qwen-Image-Edit | Yes  | Yes              | Yes              |
-| LTX Video       | Yes  | Yes              | Yes              |
-| **LTX-2**       | Yes  | Yes              | Correctness-only |
-| Wan Video       | Yes  | Correctness-only | Correctness-only |
+| Family          | CUDA           | Metal                         | CPU              |
+| --------------- | -------------- | ----------------------------- | ---------------- |
+| FLUX.1 / FLUX.2 | Yes            | Yes                           | Yes (slow)       |
+| SDXL / SD 1.5   | Yes            | Yes                           | Yes              |
+| SD 3.5          | Yes            | Yes                           | Yes              |
+| Z-Image         | Yes            | Yes                           | Yes              |
+| Wuerstchen v2   | Yes            | Yes                           | Yes              |
+| Qwen-Image      | Yes            | Yes                           | Yes              |
+| Qwen-Image-Edit | Yes            | Yes                           | Yes              |
+| LTX Video       | Yes            | Yes                           | Yes              |
+| **LTX-2**       | Yes            | Yes                           | Correctness-only |
+| Wan Video       | Yes            | Correctness-only              | Correctness-only |
+| MiniMax H3      | SM89 H3 builds | Correctness-only, unqualified | No               |
 
 ::: tip LTX-2 Metal qualification
 LTX-2 / LTX-2.3's Apple Metal path is performance-qualified: BF16 transformer
@@ -120,14 +139,22 @@ Silicon. Metal remains slower than a comparable CUDA card — streaming trades
 speed for fitting the model in unified memory.
 :::
 
-Wan Video's Metal path is correctness-qualified (family-scoped BF16, chunked
+[Wan Video](/models/wan)'s Metal path is correctness-qualified (family-scoped BF16, chunked
 attention; fp8-scaled Wan checkpoints are refused on Metal), pending
 performance UAT.
 
+MiniMax H3's Metal route is shipped but has not completed hardware
+qualification; the compact stack needs a 64 GB-class Apple Silicon host. H3
+generation is otherwise limited to binaries built with the H3 engine, including
+the Linux SM89 release. Other release targets can still download and verify the
+registered models and report why generation is unavailable.
+
 ## Native app surfaces
 
-Both native apps use the family capabilities above and the same generation
-request contract. Their platform roles differ intentionally:
+Desktop and mobile apps use the family capabilities above and the same
+generation request contract. The table focuses on desktop and iPhone; Android
+uses the same remote-only Studio surface and native bridge described in the
+[Android guide](/guide/android).
 
 | Area      | Desktop                                                                                                                                                                                                                   | iPhone                                                                                                                                                                                                                                                                                                           |
 | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
