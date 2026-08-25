@@ -69,6 +69,10 @@ if [ -z "$plugin_root" ]; then
 fi
 
 viewer="$plugin_root/packages/viewer/bin/viewer.mjs"
+# This helper is strictly loopback-bound by the official viewer. Make the
+# clean root URL self-authenticate while retaining token checks on graph and
+# source-file endpoints. Set UNDERSTAND_AUTO_AUTH=0 to restore the token gate.
+export UNDERSTAND_AUTO_AUTH="${UNDERSTAND_AUTO_AUTH:-1}"
 if [ -f "$viewer" ] && [ -d "$plugin_root/packages/viewer/dist" ]; then
     exec node "$viewer" "$project_dir" "$@"
 fi
