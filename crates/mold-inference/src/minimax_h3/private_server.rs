@@ -1765,11 +1765,31 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // than after ~37 GB of SHA-256. This stays a provable lower bound of the
     // exact per-attempt budget compared at the end of this function, because
     // it is the same scaling that budget's own grant is derived from.
+    // Task-keyed, because the conditioning half of the envelope and every
+    // workspace scaled from it are a function of the ordered reference set
+    // for Ref2VA and of the canvas alone for FL2VA. Asking FL2VA's question
+    // here refused every Ref2VA request for a text ceiling its references'
+    // own vision pads had already spent.
     #[cfg(feature = "h3")]
-    let precheck_bounds = public_runtime_bounds_for_shape(
-        (request.width, request.height),
-        request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
-    );
+    let precheck_reference_rows = match admitted_task {
+        Task::Fl2va => None,
+        Task::Ref2va => Some(ref2va_reference_rows(
+            request.references.as_deref().unwrap_or_default(),
+            request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
+        )?),
+    };
+    #[cfg(feature = "h3")]
+    let precheck_bounds = match precheck_reference_rows.as_ref() {
+        None => public_runtime_bounds_for_shape(
+            (request.width, request.height),
+            request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
+        ),
+        Some(rows) => public_ref2va_runtime_bounds_for_shape(
+            (request.width, request.height),
+            request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
+            rows,
+        ),
+    };
     #[cfg(not(feature = "h3"))]
     let precheck_bounds = runtime_qualification_source.precheck_bounds();
     precheck_private_h3_admission_capacity(
@@ -1824,11 +1844,19 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // ceilings. The authenticated backstop below still validates the step axis
     // against the tier's own minted envelope.
     #[cfg(feature = "h3")]
-    let precheck_envelope = public_runtime_envelope_for_shape(
-        (request.width, request.height),
-        request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
-        contract::COMFY_DEFAULT_STEPS,
-    );
+    let precheck_envelope = match precheck_reference_rows.as_ref() {
+        None => public_runtime_envelope_for_shape(
+            (request.width, request.height),
+            request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
+            contract::COMFY_DEFAULT_STEPS,
+        ),
+        Some(rows) => public_ref2va_runtime_envelope_for_shape(
+            (request.width, request.height),
+            request.frames.unwrap_or(contract::DEFAULT_COMPACT_FRAMES),
+            contract::COMFY_DEFAULT_STEPS,
+            rows,
+        ),
+    };
     #[cfg(not(feature = "h3"))]
     let precheck_envelope = runtime_qualification_source.precheck_envelope();
     precheck_private_h3_prepared_rows(
@@ -7379,6 +7407,333 @@ mod tests {
         assert_eq!(capture.max_qwen_output_text_rows, 1_058);
         assert_eq!(capture.endpoint_count, 0);
         assert_eq!(capture.endpoint_anchor, "none");
+    }
+
+    /// One ordered Ref2VA set covering all three modalities, as a client
+    /// would send it.
+    #[cfg(all(feature = "h3", feature = "mp4"))]
+    fn ref2va_reference_set() -> Vec<mold_core::GenerationReference> {
+        use mold_core::{
+            GenerationReference, GenerationReferenceAuthority, GenerationReferenceProvenance,
+        };
+
+        let provenance = |name: &str, seed: &[u8]| GenerationReferenceProvenance {
+            name: Some(name.to_string()),
+            sha256: Some(format!("{:x}", Sha256::digest(seed))),
+        };
+        vec![
+            // A plain 16:9 photograph. Its short edge is normalized to 2048,
+            // so it packs far more than a square still would — which is the
+            // case a fixed per-reference ceiling would have refused.
+            GenerationReference::Image {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance: provenance("hero.png", b"hero"),
+                mime_type: "image/png".into(),
+                width: 1_920,
+                height: 1_080,
+            },
+            GenerationReference::Video {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance: provenance("clip.mp4", b"clip"),
+                mime_type: "video/mp4".into(),
+                width: 1_280,
+                height: 720,
+                duration_ms: 5_000,
+                frame_count: Some(120),
+                fps: 24.0,
+                has_audio: true,
+                audio_duration_ms: Some(5_000),
+                audio_sample_count: Some(240_000),
+                audio_sample_rate: Some(48_000),
+                audio_channels: Some(2),
+            },
+            GenerationReference::Audio {
+                media: GenerationReferenceAuthority::Descriptor,
+                provenance: provenance("score.wav", b"score"),
+                mime_type: "audio/wav".into(),
+                duration_ms: 5_000,
+                sample_count: Some(220_500),
+                sample_rate: 44_100,
+                channels: 2,
+            },
+        ]
+    }
+
+    /// The envelope's conditioning caps are DERIVED from the ordered set, and
+    /// every one of them is at or above what the frozen request actually
+    /// packs.
+    ///
+    /// This is the property `row_cap_mismatches` reads with `<=`: an
+    /// underderived cap refuses a set the runtime would render, and an
+    /// overderived one silently undercharges the memory grant that scales
+    /// from the same numbers.
+    #[cfg(all(feature = "h3", feature = "mp4"))]
+    #[test]
+    fn the_public_ref2va_envelope_covers_every_row_the_request_packs() {
+        let references = ref2va_reference_set();
+        let rows = ref2va_reference_rows(&references, contract::DEFAULT_COMPACT_FRAMES).unwrap();
+        let envelope = public_ref2va_runtime_envelope_for_shape(
+            (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
+            contract::DEFAULT_COMPACT_FRAMES,
+            contract::COMFY_DEFAULT_STEPS,
+            &rows,
+        );
+        envelope.validate_for_task(Task::Ref2va).unwrap();
+        assert_eq!(envelope.endpoint_count, 0);
+        assert_eq!(envelope.endpoint_anchor, "none");
+
+        // The exact per-reference charges the frozen plan is built from.
+        let shapes = contract::reference_prepared_shapes_for_target(
+            &references,
+            contract::DEFAULT_COMPACT_FRAMES,
+        )
+        .unwrap();
+        let (mut visual, mut audio, mut qwen_vision) = (0_u64, 0_u64, 0_u64);
+        for (index, shape) in shapes.iter().enumerate() {
+            use crate::h3_factory::{H3FactoryReferenceInput, H3FactoryReferenceKind};
+            let kind = match &references[index] {
+                mold_core::GenerationReference::Image { .. } => H3FactoryReferenceKind::Image,
+                mold_core::GenerationReference::Video { .. } => H3FactoryReferenceKind::Video,
+                mold_core::GenerationReference::Audio { .. } => H3FactoryReferenceKind::Audio,
+            };
+            let charges = crate::h3_factory::expected_h3_factory_reference_charges(
+                &H3FactoryReferenceInput {
+                    index: index as u32 + 1,
+                    kind,
+                    content_sha256: format!("{:x}", Sha256::digest(b"x")),
+                    preprocess_version: shape.version,
+                    normalized_width: shape.normalized_width,
+                    normalized_height: shape.normalized_height,
+                    normalized_video_frames: shape.normalized_video_frames,
+                    video_frames: shape.video_frames,
+                    qwen_video_frames: shape.qwen_video_frames,
+                    audio_samples_per_channel: shape.audio_samples_per_channel,
+                    // Native geometry the decoder would report; only the
+                    // retained-byte terms read it, which this test ignores.
+                    native_width: shape.normalized_width.map(|_| 4_000),
+                    native_height: shape.normalized_height.map(|_| 3_000),
+                    native_audio_samples_per_channel: shape.audio_samples_per_channel,
+                    native_audio_channels: shape.audio_samples_per_channel.map(|_| 2),
+                    visual_rows: 0,
+                    audio_rows: 0,
+                    qwen_vision_rows: 0,
+                    normalized_host_bytes: 0,
+                    native_host_bytes: 0,
+                },
+            )
+            .unwrap();
+            // The one authority: the derived pads must equal the factory's.
+            assert_eq!(
+                reference_qwen_vision_rows(shape),
+                charges.qwen_vision_rows,
+                "reference {}",
+                index + 1
+            );
+            visual += charges.visual_rows;
+            audio += charges.audio_rows;
+            qwen_vision += charges.qwen_vision_rows;
+        }
+        assert_eq!(rows.visual, visual);
+        assert_eq!(rows.audio, audio);
+        assert_eq!(rows.qwen_vision, qwen_vision);
+
+        // A 1920x1080 still alone packs more than the 4,096 rows a fixed
+        // per-reference ceiling would have allowed, which is why the caps are
+        // derived rather than transcribed.
+        assert!(qwen_vision > 4_096, "{qwen_vision}");
+
+        let video = contract::target_video_rows(
+            contract::DEFAULT_WIDTH,
+            contract::DEFAULT_HEIGHT,
+            contract::DEFAULT_COMPACT_FRAMES,
+        )
+        .unwrap();
+        let generated_audio = contract::target_audio_rows(contract::DEFAULT_COMPACT_FRAMES).unwrap();
+        let packed = H3FactoryPreparedRowsInput {
+            // The presentation is the pads plus labels plus the prompt; the
+            // cap budgets `REVIEWED_REF2VA_PROMPT_AND_LABEL_ROWS` above them.
+            qwen_output_text_rows: qwen_vision + 512,
+            qwen_vision_rows: qwen_vision,
+            condition_visual_rows: visual,
+            condition_audio_rows: audio,
+            target_video_rows: video,
+            target_audio_rows: generated_audio,
+            total_packed_rows: qwen_vision + 512 + visual + audio + video + generated_audio,
+        };
+        assert!(
+            envelope.row_cap_mismatches(&packed).is_empty(),
+            "{:?}",
+            envelope.row_cap_mismatches(&packed)
+        );
+        // The conditioning soundtracks alone exceed the generated track, so
+        // the audio ceiling has to be the larger of the two.
+        assert!(audio > generated_audio, "{audio} vs {generated_audio}");
+        assert_eq!(envelope.max_target_audio_rows, audio);
+    }
+
+    /// The Ref2VA bounds are derived from the SAME measured FL2VA
+    /// observations, scaled by the quantity each term is a function of — so a
+    /// bigger ordered set buys a bigger grant rather than an undercharge, and
+    /// the Qwen grant is never below the demand the exact budget charges.
+    #[cfg(all(feature = "h3", feature = "mp4"))]
+    #[test]
+    fn the_public_ref2va_bounds_scale_with_the_ordered_set() {
+        let one = ref2va_reference_rows(
+            &ref2va_reference_set()[..1],
+            contract::DEFAULT_COMPACT_FRAMES,
+        )
+        .unwrap();
+        let all =
+            ref2va_reference_rows(&ref2va_reference_set(), contract::DEFAULT_COMPACT_FRAMES)
+                .unwrap();
+        let canvas = (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT);
+        let small = public_ref2va_runtime_bounds_for_shape(
+            canvas,
+            contract::DEFAULT_COMPACT_FRAMES,
+            &one,
+        );
+        let large = public_ref2va_runtime_bounds_for_shape(
+            canvas,
+            contract::DEFAULT_COMPACT_FRAMES,
+            &all,
+        );
+        small.validate().unwrap();
+        large.validate().unwrap();
+        assert!(large.attention_workspace_device_bytes >= small.attention_workspace_device_bytes);
+        assert!(large.ffn_workspace_device_bytes >= small.ffn_workspace_device_bytes);
+        // The generated side is identical: same canvas, same clip length.
+        let fl2va = public_runtime_bounds_for_shape(canvas, contract::DEFAULT_COMPACT_FRAMES);
+        assert_eq!(
+            large.decoder_tile_workspace_device_bytes,
+            fl2va.decoder_tile_workspace_device_bytes
+        );
+        assert_eq!(
+            large.audio_decode_workspace_device_bytes,
+            fl2va.audio_decode_workspace_device_bytes
+        );
+        assert_eq!(
+            large.fixed_runtime_device_bytes,
+            fl2va.fixed_runtime_device_bytes
+        );
+
+        // The grant must cover the demand the exact budget charges, which is
+        // derived from the request's own rows under the same policy.
+        let envelope = public_ref2va_runtime_envelope_for_shape(
+            canvas,
+            contract::DEFAULT_COMPACT_FRAMES,
+            contract::COMFY_DEFAULT_STEPS,
+            &all,
+        );
+        let mut request = ref2va_envelope_request(&envelope);
+        let demand = crate::minimax_h3::private_opened_evidence::qwen_activation_workspace_demand_bytes(
+            &request,
+            large.qwen_activation_workspace_bytes,
+        )
+        .unwrap();
+        assert!(demand <= large.qwen_activation_workspace_bytes);
+        // One row past the envelope's own ceiling is a named refusal, never
+        // an undercharged admit.
+        request.rows.qwen_output_text_rows += envelope.max_qwen_output_text_rows;
+        assert!(
+            crate::minimax_h3::private_opened_evidence::qwen_activation_workspace_demand_bytes(
+                &request,
+                large.qwen_activation_workspace_bytes,
+            )
+            .is_err()
+        );
+    }
+
+    /// A frozen request packing exactly the envelope's own ceilings.
+    #[cfg(all(feature = "h3", feature = "mp4"))]
+    fn ref2va_envelope_request(
+        envelope: &H3PrivateRuntimeEnvelopeRecord,
+    ) -> H3FactoryPreparedRequestInput {
+        H3FactoryPreparedRequestInput {
+            identity_sha256: String::new(),
+            canonical_model: contract::REF2VA_COMFY.into(),
+            task: Task::Ref2va,
+            mode: Mode::ReferenceToAudioVideo,
+            prompt_sha256: format!("{:x}", Sha256::digest(b"prompt")),
+            seed: 1,
+            grid_points: envelope.max_steps,
+            denoise_forward_count: envelope.max_steps - 1,
+            guidance_f64_bits: 0_f64.to_bits(),
+            strength_f64_bits: 1_f64.to_bits(),
+            batch_size: 1,
+            width: envelope.width,
+            height: envelope.height,
+            frames: envelope.frames,
+            fps: envelope.fps,
+            synchronized_audio: true,
+            mp4_output: true,
+            video_latent_frames: 1,
+            audio_latents_per_channel: 1,
+            audio_samples_per_channel: 800,
+            conditioning_fingerprint: format!("{:x}", Sha256::digest(b"conditioning")),
+            reference_fingerprint: format!("{:x}", Sha256::digest(b"references")),
+            endpoints: Vec::new(),
+            references: Vec::new(),
+            rows: H3FactoryPreparedRowsInput {
+                qwen_output_text_rows: envelope.max_qwen_output_text_rows,
+                qwen_vision_rows: envelope.max_qwen_vision_rows,
+                condition_visual_rows: envelope.max_condition_visual_rows,
+                condition_audio_rows: 0,
+                target_video_rows: envelope.max_target_video_rows,
+                target_audio_rows: envelope.max_target_audio_rows,
+                total_packed_rows: envelope.max_total_packed_rows,
+            },
+        }
+    }
+
+    /// The Ref2VA qualification is minted by the same function, keyed on the
+    /// task, and it never inherits FL2VA's identities.
+    #[cfg(all(feature = "h3", feature = "mp4"))]
+    #[test]
+    fn the_public_ref2va_qualification_is_its_own_record() {
+        let mut artifact = artifact_report();
+        artifact.canonical_model = contract::REF2VA_COMFY.into();
+        artifact.task = "ref2va".into();
+        let references = ref2va_reference_set();
+        let mint = |artifact: &H3PrivateArtifactQualificationReport,
+                    task: Task,
+                    references: &[mold_core::GenerationReference]| {
+            public_runtime_qualification(
+                artifact,
+                (contract::DEFAULT_WIDTH, contract::DEFAULT_HEIGHT),
+                contract::DEFAULT_COMPACT_FRAMES,
+                contract::COMFY_DEFAULT_STEPS,
+                "gpu-0",
+                0,
+                Some((8, 9)),
+                &sha('a'),
+                "synthetic-qualified-kernel",
+                &sha('b'),
+                None,
+                task,
+                references,
+            )
+        };
+        let authority = mint(&artifact, Task::Ref2va, &references).unwrap();
+        authority.revalidate().unwrap();
+        assert_eq!(authority.record.task, "ref2va");
+        assert_eq!(authority.record.canonical_model, contract::REF2VA_COMFY);
+        assert_eq!(authority.record.schema, PUBLIC_REF2VA_RUNTIME_PROFILE_SCHEMA);
+        assert_eq!(
+            authority.record.decision,
+            PUBLIC_REF2VA_RUNTIME_PROFILE_DECISION
+        );
+        assert_ne!(authority.record.schema, PUBLIC_RUNTIME_PROFILE_SCHEMA);
+        assert_ne!(authority.record.decision, PUBLIC_RUNTIME_PROFILE_DECISION);
+
+        // Neither half of the pair may be crossed: an FL2VA artifact cannot
+        // mint a Ref2VA record, a Ref2VA artifact cannot mint an FL2VA one,
+        // and a Ref2VA mint with no ordered set has no conditioning to derive
+        // its envelope from.
+        assert!(mint(&artifact_report(), Task::Ref2va, &references).is_err());
+        assert!(mint(&artifact, Task::Fl2va, &[]).is_err());
+        assert!(mint(&artifact, Task::Ref2va, &[]).is_err());
+        // FL2VA must not be handed an ordered set either.
+        assert!(mint(&artifact_report(), Task::Fl2va, &references).is_err());
     }
 
     /// The reviewed rows a maximum-length FL2VA request packs.

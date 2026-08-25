@@ -157,7 +157,13 @@ const requiredH3DownloadFacts = [
   // no H3 checkpoint has ever completed a render on it. All three strings are
   // pinned because the interesting way this doc goes wrong is describing Metal
   // as qualified, or quietly dropping the caveat.
-  'Ref2VA execution and the CPU backend remain unavailable',
+  'The CPU backend remains unavailable',
+  // Both compact task partitions execute since #825. Pinned because the
+  // interesting way this doc goes wrong is leaving the old "Ref2VA executes on
+  // no released build" claim behind, or describing the ordered set as a
+  // reviewed list of shapes rather than a per-request derivation.
+  'Supported Ref2VA request',
+  'order is authority',
   'correctness-only',
   'no H3 checkpoint has ever completed a render on Metal',
   'every territory',

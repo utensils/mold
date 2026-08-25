@@ -18,10 +18,16 @@ directly from Hugging Face, verify their recorded SHA-256 identities, retain
 them in the user's model store, and expose supported generation capabilities.
 Mold's current releases do not bundle or mirror model payloads.
 
-Execution remains capability-gated for technical reasons. The first supported
-runtime is the compact FL2VA graph on CUDA and its documented request profile.
+Execution remains capability-gated for technical reasons. The supported
+runtimes are the compact FL2VA and Ref2VA graphs on CUDA and their documented
+request profiles; Ref2VA joined them on 2026-08-24 (#825), and the pinned
+license was re-reviewed against that change with no term affected — the
+governance decision below already covers every task partition, and Ref2VA
+adds no new artifact, repository, or distribution path (it shares the compact
+stack and differs only by its task transformer, which was already listed,
+downloadable, and covered).
 The Apple Silicon Metal route is admitted and shipped but not yet
-hardware-qualified. The unsupported CPU route, Ref2VA execution, altered
+hardware-qualified. The unsupported CPU route, altered
 weights, and broader request shapes remain fail-closed because they are not
 implemented or tested,
 not because the user, location, deployment topology, or distribution path lacks

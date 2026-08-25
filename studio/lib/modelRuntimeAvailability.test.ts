@@ -31,7 +31,7 @@ describe("model runtime availability", () => {
   it("renders the server's own sentence, whichever of the three it is", () => {
     for (const reason of [
       "MiniMax H3 has no runtime for this model's weight layout in this build.",
-      "MiniMax H3 reference-to-audio-video (Ref2VA) execution is not available in any released build.",
+      "MiniMax H3 has no runtime for this model's task partition in this build.",
       "This mold build was compiled without the MiniMax H3 engine.",
     ]) {
       expect(
@@ -61,13 +61,20 @@ describe("model runtime availability", () => {
   it("answers for a Discover row before anything is downloaded", () => {
     // The whole point of #1276: the manifest row is already in /api/models
     // with `downloaded: false`, so its runtime answer is knowable before the
-    // 21-42 GB pull rather than at submit time.
+    // 21-42 GB pull rather than at submit time. Both compact task partitions
+    // execute since #825, so the download-only row here is a pinned layout
+    // the build has no loader for.
     const rows = [
       { name: "flux-dev:q8" },
       {
-        name: "minimax-h3-ref2va:comfy-pruned-int8",
+        name: "minimax-h3-ref2va:comfy-pruned-nvfp4",
         runtime_available: false,
-        runtime_unavailable_reason: "Ref2VA execution is not available.",
+        runtime_unavailable_reason:
+          "MiniMax H3 has no runtime for this model's weight layout in this build.",
+      },
+      {
+        name: "minimax-h3-ref2va:comfy-pruned-int8",
+        runtime_available: true,
       },
       {
         name: "minimax-h3-fl2va:comfy-pruned-int8",
@@ -75,11 +82,15 @@ describe("model runtime availability", () => {
       },
     ];
     expect(
-      modelRuntimeNoticeForId("minimax-h3-ref2va:comfy-pruned-int8", rows),
+      modelRuntimeNoticeForId("minimax-h3-ref2va:comfy-pruned-nvfp4", rows),
     ).toEqual({
-      message: "Ref2VA execution is not available.",
+      message:
+        "MiniMax H3 has no runtime for this model's weight layout in this build.",
       fromServer: true,
     });
+    expect(
+      modelRuntimeNoticeForId("minimax-h3-ref2va:comfy-pruned-int8", rows),
+    ).toBeNull();
     expect(
       modelRuntimeNoticeForId("minimax-h3-fl2va:comfy-pruned-int8", rows),
     ).toBeNull();
