@@ -160,11 +160,13 @@ pub const fn reviewed_h3_private_runtime_available_for_task(task: Task) -> bool 
         #[cfg(not(feature = "h3"))]
         Task::Fl2va => !REVIEWED_RUNTIME_QUALIFICATION_RECORD_SHA256.is_empty(),
         // Ref2VA carries its OWN compiled public qualification since #825 —
-        // `public_ref2va_runtime_qualification`, a separate schema, decision
-        // string, envelope, and bounds record derived from the same measured
-        // observations FL2VA's is. Authority is still never inherited from an
-        // FL2VA record: the two are minted by different functions and each
-        // validator pins its own task and canonical model.
+        // `PUBLIC_REF2VA_RUNTIME_PROFILE_SCHEMA`, its own decision string, and
+        // the envelope and bounds `public_ref2va_runtime_envelope_for_shape` /
+        // `_bounds_for_shape` derive from the same measured observations
+        // FL2VA's do. Authority is still never inherited from an FL2VA record:
+        // `public_runtime_profile_identities` pins each task's schema,
+        // decision, canonical model, and task name together, so a record
+        // minted for one can never revalidate as the other.
         //
         // The campaign build keeps its own arm because it authenticates the
         // capture-scope profile instead, which is a different storage variant

@@ -1,11 +1,11 @@
 //! Runtime-neutral ordered Ref2VA orchestration for MiniMax H3.
 //!
-//! This adapter is deliberately unreachable from the engine registry. It owns
-//! no checkpoint paths, downloads, or model weights; a future legal-gated
-//! runtime may implement [`H3Ref2VaBackend`] only after admission has frozen a
-//! single device. The pipeline itself stores payload-free reference metadata
-//! and proves ordering, geometry, noise, denoise, and output contracts with a
-//! synthetic unit-test backend.
+//! The adapter owns no checkpoint paths, downloads, or model weights: it
+//! stores payload-free reference metadata and proves ordering, geometry,
+//! noise, denoise, and output contracts against a synthetic unit-test backend.
+//! [`H3Ref2VaBackend`] is implemented by the private phase backend, which
+//! admission constructs only after it has frozen a single device — so this
+//! module never decides whether Ref2VA may run, only what running it means.
 
 use super::*;
 use crate::engine::GenerationReferenceBinding;
