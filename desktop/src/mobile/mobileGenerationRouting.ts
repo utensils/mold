@@ -15,6 +15,7 @@ import {
   pickMostCapableHost,
   type CapableHostBase,
 } from "@studio/lib/hostRouting";
+import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Identity";
 import type { MobileHost } from "./hosts";
 import { mobileIdentityRouteRefusal } from "./identity";
 
@@ -134,11 +135,21 @@ export interface PreviewPinnedMobileGenerationOptions {
   signal?: AbortSignal;
 }
 
-/** Validate one frozen machine's placement answer under the same legacy policy as Auto. */
+/**
+ * Validate one frozen machine only when the request needs an authoritative
+ * capability fence. Ordinary pinned work has no routing decision to make, so
+ * it goes straight to admission; the server queues it before expensive model
+ * preparation and remains authoritative for every execution check.
+ */
 export async function previewPinnedMobileGeneration(
   options: PreviewPinnedMobileGenerationOptions,
 ): Promise<MobilePinnedPlacement> {
   const isCurrent = options.isCurrent ?? (() => true);
+  if (!isCurrent()) return { kind: "abandoned" };
+  const model = typeof options.request.model === "string" ? options.request.model : null;
+  if (!options.requireAuthoritative && isMinimaxH3Identity(null, model)) {
+    return { kind: "placement", placement: null, legacyUnsupported: false };
+  }
   let placement: GenerationPlacementPreview | null = null;
   let legacyUnsupported = false;
   try {

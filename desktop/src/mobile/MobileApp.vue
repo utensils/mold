@@ -5786,10 +5786,16 @@ async function generate(): Promise<void> {
     releasePreparedSubmission();
     return;
   }
-  if (!unmounted && uiId === submissionUiId) generationSubmissionPhase.value = "placement";
   const requireAuthoritativePlacement = requiresAuthoritativePlacement(
     request as unknown as Record<string, unknown>,
   );
+  const skipPinnedH3Placement =
+    !automaticOrdinary &&
+    !requireAuthoritativePlacement &&
+    isMinimaxH3Identity(draft.family, request.model);
+  if (!unmounted && uiId === submissionUiId && !skipPinnedH3Placement) {
+    generationSubmissionPhase.value = "placement";
+  }
   let placement: GenerationPlacementPreview | null = null;
   let legacyUnsupported = false;
   const previewRequest =

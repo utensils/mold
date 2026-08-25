@@ -256,6 +256,24 @@ describe("mobile pinned generation placement", () => {
     });
   });
 
+  it("submits pinned H3 directly so cold verification happens after queueing", async () => {
+    await expect(
+      previewPinnedMobileGeneration({
+        ...pinnedOptions(),
+        request: {
+          model: "minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p",
+          source_image: "frame",
+        },
+      }),
+    ).resolves.toEqual({
+      kind: "placement",
+      placement: null,
+      legacyUnsupported: false,
+    });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+    expect(previewChainPlacement).not.toHaveBeenCalled();
+  });
+
   it("refuses a legacy identity placement", async () => {
     previewGenerationPlacement.mockRejectedValue(new ApiError("missing", 404));
 
