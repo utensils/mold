@@ -138,7 +138,7 @@ export default defineConfig({
             { text: 'Z-Image', link: '/models/z-image' },
             { text: 'Wuerstchen', link: '/models/wuerstchen' },
             { text: 'Qwen-Image', link: '/models/qwen-image' },
-            { text: 'LTX-2', link: '/models/ltx2' },
+            { text: 'LTX-2 / 2.3', link: '/models/ltx2' },
             { text: 'LTX Video', link: '/models/ltx-video' },
             { text: 'MiniMax H3', link: '/models/minimax-h3' },
             { text: 'Wan Video', link: '/models/wan' },

@@ -13,43 +13,36 @@ community checkpoints and LoRAs. See the
 
 ## Choosing a Model
 
-| Need              | Recommended                      | Why                                                    |
-| ----------------- | -------------------------------- | ------------------------------------------------------ |
-| Fast iterations   | `flux2-klein:q8`                 | 4 steps, ungated, Apache 2.0                           |
-| Best quality      | `flux-dev:q4`                    | 25 steps, excellent detail                             |
-| Low VRAM (<8 GB)  | `flux2-klein:q4`                 | 2.6 GB, 4 steps                                        |
-| Classic ecosystem | `sd15:fp16` or `dreamshaper-v8`  | Huge model library, ControlNet                         |
-| Fast + great      | `z-image-turbo:q8`               | 9 steps, excellent quality                             |
-| SDXL              | `sdxl-turbo:fp16`                | 4 steps, 1024x1024                                     |
-| **Video**         | `ltx-video-0.9.6-distilled:bf16` | Text-to-video, 30fps, APNG/MP4, best-supported default |
-| **Audio + video** | `ltx-2-19b-distilled:fp8`        | Joint audio-video, MP4-first, advanced conditioning    |
+| Need                | Recommended                           | Why                                                    |
+| ------------------- | ------------------------------------- | ------------------------------------------------------ |
+| Fast iterations     | `flux2-klein:q8`                      | 4 steps, ungated, Apache 2.0                           |
+| Best quality        | `flux-dev:q4`                         | 25 steps, excellent detail                             |
+| Smallest checkpoint | `flux2-klein:q4`                      | 2.6 GB transformer, 4 steps                            |
+| Classic ecosystem   | `sd15:fp16` or `dreamshaper-v8`       | Huge model library, ControlNet                         |
+| Fast + great        | `z-image-turbo:q8`                    | 9 steps, excellent quality                             |
+| SDXL                | `sdxl-turbo:fp16`                     | 4 steps, 1024x1024                                     |
+| **Video**           | `ltx-video-0.9.6-distilled:bf16`      | Text-to-video, 30fps, APNG/MP4, best-supported default |
+| **Audio + video**   | `ltx-2-19b-distilled:fp8`             | Joint audio-video, MP4-first, advanced conditioning    |
+| **Wan video**       | `wan22-ti2v-5b:q8`                    | Text/image-to-video with broad Wan workflow support    |
+| **Reference AV**    | `minimax-h3-ref2va:comfy-pruned-int8` | Ordered image/video/audio references; SM89 CUDA build  |
 
-## VRAM Guide
+## Choosing a Video Family
 
-| Model                               | Variant | Approx. VRAM | Speed                           | Quality                                   |
-| ----------------------------------- | ------- | ------------ | ------------------------------- | ----------------------------------------- |
-| `flux-schnell:q8`                   | Q8      | ~12 GB       | Fast, 4 steps                   | Good                                      |
-| `flux-schnell:q6`                   | Q6      | ~14 GB       | Fast, 4 steps                   | Better than Q8                            |
-| `flux-dev:q4`                       | Q4      | ~8 GB        | Slow, 25 steps                  | Excellent                                 |
-| `flux-dev:q6`                       | Q6      | ~10 GB       | Slow, 25 steps                  | Best FLUX quality/size trade              |
-| `flux-dev:bf16`                     | BF16    | ~24 GB       | Slow, 25 steps                  | Best FLUX quality                         |
-| `flux2-klein:q4`                    | Q4      | ~4 GB        | Fast, 4 steps                   | Good for very small GPUs                  |
-| `z-image-turbo:q8`                  | Q8      | ~10 GB       | Fast, 9 steps                   | Excellent                                 |
-| `sdxl-turbo:fp16`                   | FP16    | ~10 GB       | Very fast, 4 steps              | Good                                      |
-| `sd15:fp16`                         | FP16    | ~6 GB        | Medium, 25 steps                | Good, broad ecosystem                     |
-| `qwen-image:q4`                     | Q4      | ~14 GB       | Slow, 50 steps                  | Good, stable at 1024x1024                 |
-| `qwen-image-2512:q4`                | Q4      | ~14 GB       | Slow, 50 steps                  | Good, stable at 1024x1024                 |
-| `qwen-image:q8`                     | Q8      | ~22 GB       | Slow, 50 steps                  | Best GGUF, validated at 768               |
-| `qwen-image-flash:q4`               | Q4      | ~13 GB       | Fast, 4 steps                   | DMD2 distill; softer on fine detail       |
-| `qwen-image-distill:q4`             | Q4      | ~14 GB       | Medium, 15 steps                | Distill-Full merge, closer to base        |
-| `ltx-video-0.9.6-distilled:bf16`    | BF16    | ~10 GB       | Fast, 8 steps                   | Video, low-VRAM default                   |
-| `ltx-video-0.9.8-2b-distilled:bf16` | BF16    | ~10-12 GB    | Fast, 7+3 steps                 | Newer video checkpoint, multiscale refine |
-| `ltx-2-19b-distilled:fp8`           | FP8     | ~24 GB       | Slow, 8 steps                   | Joint audio-video, recommended LTX-2      |
-| `ltx-2.3-22b-distilled:fp8`         | FP8     | ~24 GB       | Slow, 8 steps                   | Larger joint audio-video path             |
-| `ltx-2.3-22b-dev:bf16`              | BF16    | 48 GB+       | Very slow, streamed below 48 GB | Full-quality trainable reference path     |
-| `ltx-2.3-22b-distilled:bf16`        | BF16    | 48 GB+       | Slow, streamed below 48 GB      | Full-precision eight-step path            |
+| Family                           | Start with                           | Best for                                                | Important boundary                           |
+| -------------------------------- | ------------------------------------ | ------------------------------------------------------- | -------------------------------------------- |
+| [LTX Video](/models/ltx-video)   | `ltx-video-0.9.6-distilled:bf16`     | Straightforward text-to-video                           | No generated audio                           |
+| [LTX-2 / 2.3](/models/ltx2)      | `ltx-2-19b-distilled:fp8`            | Joint audio-video and the broadest conditioning surface | Large gated checkpoints                      |
+| [Wan Video](/models/wan)         | `wan22-ti2v-5b:q8`                   | Text/image-to-video, first/last frames, and sequences   | CUDA-qualified; Metal/CPU correctness-only   |
+| [MiniMax H3](/models/minimax-h3) | `minimax-h3-fl2va:comfy-pruned-int8` | First-frame or ordered-reference audio-video            | 42.482 GB base pull; runtime is build-scoped |
 
-VRAM estimates include the transformer, text encoder(s), VAE, and ~2 GB
+MiniMax H3's pull size is disk/download size, not peak VRAM. Its compact
+runtime is available on H3-enabled SM89 CUDA builds; Metal is shipped as an
+unqualified correctness-only route, and CPU is unsupported. Check the model
+row's `runtime_available` reason before downloading on another target.
+
+## Image VRAM Guide
+
+These estimates include the transformer, text encoder(s), VAE, and ~2 GB
 activation headroom. The **default** column is sequential mode (drop-and-reload),
 which loads components one at a time. **Eager** mode keeps everything on GPU
 simultaneously for faster inference but needs more VRAM.
@@ -160,13 +153,15 @@ for more options.
 | [Wuerstchen](/models/wuerstchen)      | 1024x1024                     | 3-stage cascade, 42x compress                  |
 | [Qwen-Image](/models/qwen-image)      | 1328x1328                     | Qwen2.5-VL, flow-matching, CFG                 |
 | [Qwen-Image-Edit](/models/qwen-image) | Derived from first edit image | Qwen2.5-VL multimodal edit, flow-matching, CFG |
-| [LTX-2](/models/ltx2)                 | 1216x704                      | Gemma 3, joint audio-video transformer         |
+| [LTX-2 / 2.3](/models/ltx2)           | 1216x704                      | Gemma 3, joint audio-video transformer         |
 | [LTX Video](/models/ltx-video)        | 768x512                       | T5-XXL, DiT, 3D causal VAE                     |
 | [MiniMax H3](/models/minimax-h3)      | 1344x768                      | Qwen3-VL, joint audio-video DiT, dual VAEs     |
 | [Wan Video](/models/wan)              | 832x480 / 1280x704            | UMT5-XXL, flow DiT, causal 3D VAE, A14B MoE    |
+| [Upscalers](/models/upscalers)        | 2x / 4x source size           | Real-ESRGAN super-resolution                   |
 
-Each family page lists recommended dimensions for non-square aspect ratios.
-Using non-recommended dimensions will trigger a warning.
+Each family page lists its actual shape contract. Bucketed families may warn
+when a request misses their recommended dimensions. MiniMax H3 instead accepts
+any 32-aligned canvas inside its documented continuous area and aspect bounds.
 
 Maintainers should use the
 [model resolution and aspect-ratio matrix](https://github.com/utensils/mold/blob/main/docs/model-resolution-matrix.md)

@@ -6,8 +6,8 @@ hero:
   text: Local AI Image & Video Generation on Your GPU
   tagline:
     'CLI-native and built for people, scripts, and agents. CUDA on Linux, Metal
-    on macOS, and the same local engine behind desktop, web, TUI, iPhone, REST,
-    SSE, and MCP.'
+    on macOS, with one engine and wire contract behind desktop, web, TUI, REST,
+    SSE, and MCP; iPhone and Android are remote-only clients.'
   image:
     src: /logo-transparent.png
     alt: mold logo
@@ -41,8 +41,9 @@ features:
     title: Broad Model Support
     details: FLUX.1, SDXL, SD 1.5, SD 3.5, Z-Image, Flux.2 Klein, Qwen-Image,
       Qwen-Image-Edit, Wuerstchen v2, LTX Video, LTX-2 / LTX-2.3, Wan 2.1/2.2,
-      and MiniMax H3 (compact FL2VA, SM89 CUDA). Images, native joint
-      audio-video, and quantized variants that fit a wide range of GPUs.
+      and MiniMax H3 (compact FL2VA + Ref2VA on SM89 CUDA; Metal
+      correctness-only). Images, native joint audio-video, and quantized
+      variants that fit a wide range of GPUs.
   - icon:
       src: /icons/rust.svg
     title: Native GPU engine
@@ -111,8 +112,8 @@ features:
 Mold began as a single-binary command-line tool and the CLI remains its stable
 foundation. Every core workflow can be run by a person, composed in a shell
 pipeline, automated in CI, or called by an agent. `mold serve`, REST/SSE, MCP,
-and the desktop, web, TUI, and iPhone clients all extend that same engine and
-contract.
+and the desktop, web, and TUI surfaces all extend that same engine and contract;
+the iPhone and Android apps use the same contract as remote-only clients.
 
 ## Mold Studio for desktop
 
