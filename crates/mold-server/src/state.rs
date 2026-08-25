@@ -129,6 +129,10 @@ pub struct BatchChildExecution {
 pub struct GenerationJobResult {
     pub response: mold_core::GenerateResponse,
     pub image: mold_core::ImageData,
+    /// Exact gallery identity published for this job. Attached batch adapters
+    /// use this instead of re-querying a queue row that completion removes.
+    pub filename: Option<String>,
+    pub original_filename: Option<String>,
 }
 
 /// Handle for submitting jobs to the generation queue.

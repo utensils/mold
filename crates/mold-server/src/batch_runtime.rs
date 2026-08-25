@@ -1,31 +1,26 @@
-//! Live server-owned adaptive batch execution.
-//!
-//! The public parent is normalized once. Singleton child requests are then
-//! admitted through the ordinary authoritative scheduler, but their outputs
-//! remain private until the durable reducer and gallery transaction commit the
-//! entire ordered parent.
+//! Direct-batch normalization plus recovery for atomic batches written by
+//! older servers. New work is admitted as ordinary durable queue siblings;
+//! only an already-persisted legacy attempt enters the recovery machinery.
 
 use crate::batch_attempt::DurableBatchAttempt;
 use crate::batch_parent::{BatchChildLease, ChildCompletion, CompletionDisposition};
 use crate::execution_plan::{DeviceFact, PreparedExecutionInputs, ResolvedExecutionPlan};
-use crate::queue::{build_sse_complete_event, SavedOutputNames};
 use crate::state::{
     AppState, BatchChildExecution, GenerationJob, GenerationJobResult, SseCompletionPayload,
     SubmitError,
 };
 use anyhow::{ensure, Context as _};
 use futures::stream::{FuturesUnordered, StreamExt as _};
-use mold_core::{
-    BatchGenerateOutput, BatchGenerateResponse, GenerateRequest, OutputMetadata,
-    SseBatchCompleteEvent,
-};
+use mold_core::{GenerateRequest, OutputMetadata};
 use mold_db::{GenerationRecord, RecordSource};
 use mold_scheduler::{
     AdaptiveBatchPlan, BatchDeviceProfile, BatchPartitionPlanner, BatchPartitionRequest,
     BatchSizeEstimate,
 };
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 const LIVE_BATCH_RECOVERY_VERSION: u32 = 1;
 
@@ -89,71 +84,10 @@ struct FrozenBatchPlan {
     ordinal_by_device: BTreeMap<String, usize>,
 }
 
-pub(crate) enum CompletedServerBatch {
-    Json(BatchGenerateResponse),
-    Sse(SseBatchCompleteEvent),
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum ServerBatchDelivery {
-    Json,
-    Sse(SseCompletionPayload),
-}
-
 struct BatchParentRegistration {
     registry: crate::job_registry::SharedJobRegistry,
     parent_id: String,
     commit_closed: bool,
-}
-
-pub(crate) struct RegisteredServerBatch {
-    parent_id: String,
-    registration: BatchParentRegistration,
-    cancel: tokio_util::sync::CancellationToken,
-}
-
-impl RegisteredServerBatch {
-    pub(crate) fn id(&self) -> &str {
-        &self.parent_id
-    }
-}
-
-pub(crate) fn register_server_batch(state: &AppState) -> RegisteredServerBatch {
-    let parent_id = uuid::Uuid::new_v4().to_string();
-    let (registration, cancel) = BatchParentRegistration::new(state, &parent_id);
-    RegisteredServerBatch {
-        parent_id,
-        registration,
-        cancel,
-    }
-}
-
-fn spawn_owned_supervisor<T, F>(future: F) -> tokio::sync::oneshot::Receiver<T>
-where
-    T: Send + 'static,
-    F: std::future::Future<Output = T> + Send + 'static,
-{
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        let result = future.await;
-        let _ = result_tx.send(result);
-    });
-    result_rx
-}
-
-/// Own the durable parent independently from the HTTP response future.
-/// Disconnecting either a JSON or SSE client must never drop live leases or
-/// strand an attempt until restart.
-pub(crate) fn spawn_server_batch(
-    state: AppState,
-    authority: RegisteredServerBatch,
-    request: GenerateRequest,
-    output_dir: PathBuf,
-    delivery: ServerBatchDelivery,
-) -> tokio::sync::oneshot::Receiver<anyhow::Result<CompletedServerBatch>> {
-    spawn_owned_supervisor(async move {
-        execute_server_batch(&state, authority, request, output_dir, delivery).await
-    })
 }
 
 impl BatchParentRegistration {
@@ -393,6 +327,7 @@ fn frozen_seed(parent_id: &str, requested: Option<u64>) -> u64 {
 /// normal operation), plus generated PCM audio and explicit container/journal
 /// headroom. Post-generation spatial/temporal upscalers are applied before the
 /// bound so admission covers the artifact that is actually staged.
+#[cfg(test)]
 fn conservative_batch_output_bytes(request: &GenerateRequest) -> anyhow::Result<u64> {
     const BYTES_PER_RGBA_PIXEL: u64 = 4;
     const AUDIO_SAMPLE_RATE: u64 = 48_000;
@@ -474,6 +409,19 @@ fn normalized_child(
     child
 }
 
+/// Normalize the legacy direct `batch_size` shape into the same durable
+/// singleton siblings used by every first-party client. The operation id
+/// freezes a deterministic seed when the caller requested Random.
+pub(crate) fn expand_direct_children(
+    operation_id: &str,
+    request: &GenerateRequest,
+) -> Vec<GenerateRequest> {
+    let base_seed = frozen_seed(operation_id, request.seed);
+    (0..request.batch_size)
+        .map(|index| normalized_child(operation_id, request, base_seed, index))
+        .collect()
+}
+
 #[cfg(test)]
 fn normalize_children(
     parent_id: &str,
@@ -498,17 +446,6 @@ fn normalize_children(
 /// option here. What that costs is resumability, and `decode_recovery_envelope`
 /// spends it honestly: a recovered identity batch is refused, never resumed
 /// with the face silently missing.
-fn recovery_envelope(
-    request: &GenerateRequest,
-    plan: &FrozenBatchPlan,
-) -> LiveBatchRecoveryEnvelope {
-    redacted_recovery_envelope(
-        request,
-        &plan.equivalence,
-        plan.prepared_inputs.identity_embedding.as_ref(),
-    )
-}
-
 /// The identity marker this envelope records, from whichever authority exists.
 ///
 /// #1227 phase 2 moved extraction inside the lease, so a NEW identity parent no
@@ -522,6 +459,7 @@ fn recovery_envelope(
 /// point: the redaction removes the only fields
 /// `mold_core::identity::request_mentions_identity` can see on an ordinary CLI
 /// request, so without this the refusal at decode silently stops firing.
+#[cfg(test)]
 fn envelope_identity_marker(
     request: &GenerateRequest,
     identity: Option<&mold_core::identity::FrozenIdentityEmbedding>,
@@ -533,6 +471,7 @@ fn envelope_identity_marker(
 
 /// The redaction itself, independent of the plan's shape so the rule can be
 /// stated and tested on its own.
+#[cfg(test)]
 fn redacted_recovery_envelope(
     request: &GenerateRequest,
     execution_equivalence_fingerprint: &str,
@@ -600,6 +539,7 @@ fn decode_recovery_envelope(
     Ok(envelope)
 }
 
+#[cfg(test)]
 fn batch_records(
     output_dir: &Path,
     parent: &GenerateRequest,
@@ -780,6 +720,7 @@ async fn await_batch_child(mut child: AwaitingBatchChild) -> AwaitedBatchChild {
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 struct CompactBatchResult {
     response: mold_core::GenerateResponse,
     image: mold_core::ImageData,
@@ -803,6 +744,7 @@ fn stage_batch_result_auxiliaries(
     Ok(())
 }
 
+#[cfg(test)]
 fn compact_batch_result(mut result: GenerationJobResult) -> CompactBatchResult {
     if let Some(audio) = result.response.audio.as_mut() {
         // Compaction exists so a wide batch does not hold every child's media
@@ -827,6 +769,7 @@ fn compact_batch_result(mut result: GenerationJobResult) -> CompactBatchResult {
     }
 }
 
+#[cfg(test)]
 fn video_thumbnail_path(filename: &str) -> PathBuf {
     mold_core::Config::mold_dir()
         .unwrap_or_else(|| PathBuf::from(".mold"))
@@ -835,6 +778,7 @@ fn video_thumbnail_path(filename: &str) -> PathBuf {
         .join(format!("{filename}.png"))
 }
 
+#[cfg(test)]
 fn video_preview_path(filename: &str) -> PathBuf {
     mold_core::Config::mold_dir()
         .unwrap_or_else(|| PathBuf::from(".mold"))
@@ -843,6 +787,7 @@ fn video_preview_path(filename: &str) -> PathBuf {
         .join(mold_core::media_paths::preview_gif_filename(filename))
 }
 
+#[cfg(test)]
 fn hydrate_batch_result(
     output_dir: &Path,
     filename: &str,
@@ -853,6 +798,8 @@ fn hydrate_batch_result(
         return Ok(GenerationJobResult {
             response: compact.response,
             image: compact.image,
+            filename: Some(filename.to_string()),
+            original_filename: None,
         });
     }
     let media = std::fs::read(output_dir.join(filename))
@@ -867,6 +814,8 @@ fn hydrate_batch_result(
         return Ok(GenerationJobResult {
             response: compact.response,
             image: compact.image,
+            filename: Some(filename.to_string()),
+            original_filename: None,
         });
     }
     if let Some(video) = compact.response.video.as_mut() {
@@ -890,6 +839,8 @@ fn hydrate_batch_result(
     Ok(GenerationJobResult {
         response: compact.response,
         image: compact.image,
+        filename: Some(filename.to_string()),
+        original_filename: None,
     })
 }
 
@@ -1064,263 +1015,6 @@ fn rolling_batch_window_for(child_count: usize, schedulable_lanes: usize) -> any
     Ok(child_count
         .min(schedulable_lanes.saturating_mul(2))
         .clamp(1, crate::batch_parent::MAX_MATERIALIZED_CHILDREN))
-}
-
-/// Execute a normalized server-owned parent. No child writes to the gallery.
-pub(crate) async fn execute_server_batch(
-    state: &AppState,
-    authority: RegisteredServerBatch,
-    mut request: GenerateRequest,
-    output_dir: PathBuf,
-    delivery: ServerBatchDelivery,
-) -> anyhow::Result<CompletedServerBatch> {
-    validate_live_server_batch_size(&request)?;
-    ensure!(
-        request.batch_size > 1,
-        "server batch execution requires batch_size > 1"
-    );
-    ensure!(
-        request.batch_id.is_none()
-            && request.batch_index.is_none()
-            && request.batch_count.is_none(),
-        "raw server batches cannot also carry prepared-sibling batch authority"
-    );
-    let RegisteredServerBatch {
-        parent_id,
-        registration: mut parent_registration,
-        cancel: parent_cancel,
-    } = authority;
-    ensure!(
-        !parent_cancel.is_cancelled(),
-        "batch parent cancelled before planning"
-    );
-    let plan = freeze_batch_plan(state, &parent_id, &request).await?;
-    ensure!(
-        !parent_cancel.is_cancelled(),
-        "batch parent cancelled during planning"
-    );
-    let base_seed = frozen_seed(&parent_id, request.seed);
-    request.seed = Some(base_seed);
-    let child_count =
-        usize::try_from(request.batch_size).context("batch size exceeds platform usize")?;
-    let estimated_bytes = conservative_batch_output_bytes(&request)?;
-    crate::batch_transaction::preflight_disk_space(&output_dir, estimated_bytes)?;
-    let metadata_template = batch_metadata_template(&parent_id, &request, base_seed);
-    let records = batch_records(&output_dir, &request, base_seed, &metadata_template);
-    let normalized = serde_json::to_value(recovery_envelope(&request, &plan))?;
-    let mut attempt = DurableBatchAttempt::begin(&output_dir, &parent_id, normalized, records)?;
-    attempt.start()?;
-
-    let window = rolling_batch_window_for(child_count, plan.adaptive.devices_used as usize)?;
-    let submission = BatchSubmissionContext {
-        state,
-        parent_id: &parent_id,
-        parent_request: &request,
-        base_seed,
-        metadata_template: &metadata_template,
-        plan: &plan,
-        parent_cancel: parent_cancel.clone(),
-    };
-    let mut active = FuturesUnordered::new();
-    let mut next_index = 0_usize;
-    let mut terminal_error = None;
-    while next_index < child_count && active.len() < window {
-        match grant_and_submit_child(&submission, &mut attempt, next_index, 0).await {
-            Ok(child) => {
-                active.push(await_batch_child(child));
-                next_index += 1;
-            }
-            Err(error) => {
-                terminal_error = Some(error);
-                let _ = state.job_registry.cancel_queued(&parent_id);
-                break;
-            }
-        }
-    }
-    let mut results = (0..child_count)
-        .map(|_| None)
-        .collect::<Vec<Option<CompactBatchResult>>>();
-    let mut parent_cancel_reduced = false;
-    while !active.is_empty() {
-        let completed = tokio::select! {
-            _ = parent_cancel.cancelled(), if !parent_cancel_reduced => {
-                let _ = attempt.request_cancel()?;
-                let _ = state.job_registry.cancel_queued(&parent_id);
-                parent_cancel_reduced = true;
-                terminal_error.get_or_insert_with(|| anyhow::anyhow!("batch parent cancelled"));
-                continue;
-            }
-            completed = active.next() => completed.expect("non-empty batch future set ended"),
-        };
-        let AwaitedBatchChild {
-            job_id,
-            index,
-            lease,
-            retry,
-            result,
-        } = completed;
-        state
-            .job_registry
-            .unregister_batch_child(&parent_id, &job_id);
-        match result {
-            Ok(result) if terminal_error.is_none() => {
-                let filename = attempt.transaction().manifest().children[index]
-                    .final_name
-                    .clone();
-                let record = completed_record(
-                    &output_dir,
-                    &filename,
-                    &metadata_template,
-                    index as u32,
-                    &result,
-                );
-                stage_batch_result_auxiliaries(&mut attempt, &lease, &result)?;
-                let disposition =
-                    attempt.stage_record_and_accept(&lease, record, media_bytes(&result))?;
-                ensure!(
-                    matches!(
-                        disposition,
-                        CompletionDisposition::Accepted | CompletionDisposition::AttemptPrepared
-                    ),
-                    "live batch child completion lost parent authority: {disposition:?}"
-                );
-                results[index] = Some(compact_batch_result(result));
-                if next_index < child_count {
-                    match grant_and_submit_child(&submission, &mut attempt, next_index, 0).await {
-                        Ok(child) => {
-                            active.push(await_batch_child(child));
-                            next_index += 1;
-                        }
-                        Err(error) => {
-                            terminal_error = Some(error);
-                            let _ = state.job_registry.cancel_queued(&parent_id);
-                        }
-                    }
-                }
-            }
-            Ok(_) => {
-                let _ = attempt.complete_without_artifact(&lease, ChildCompletion::Cancelled)?;
-            }
-            Err(error) => {
-                let completion = child_completion_from_error(&error);
-                let disposition = attempt.complete_without_artifact(&lease, completion)?;
-                if disposition == CompletionDisposition::RetryChild && terminal_error.is_none() {
-                    match grant_and_submit_child(
-                        &submission,
-                        &mut attempt,
-                        index,
-                        retry.saturating_add(1),
-                    )
-                    .await
-                    {
-                        Ok(child) => {
-                            active.push(await_batch_child(child));
-                            continue;
-                        }
-                        Err(submit_error) => terminal_error = Some(submit_error),
-                    }
-                }
-                if terminal_error.is_none() {
-                    terminal_error =
-                        Some(anyhow::anyhow!("batch child {} failed: {error}", index + 1));
-                }
-                let _ = state.job_registry.cancel_queued(&parent_id);
-            }
-        }
-    }
-    if let Some(error) = terminal_error {
-        ensure!(
-            attempt.parent().state() == crate::batch_parent::BatchParentState::Fenced,
-            "failed batch did not drain every active child"
-        );
-        attempt.rollback_fenced()?;
-        return Err(error);
-    }
-    if parent_cancel.is_cancelled() || !parent_registration.begin_commit() {
-        let _ = attempt.request_cancel()?;
-        ensure!(
-            attempt.parent().state() == crate::batch_parent::BatchParentState::Fenced,
-            "cancelled prepared batch did not fence"
-        );
-        attempt.rollback_fenced()?;
-        anyhow::bail!("batch parent cancelled");
-    }
-    ensure!(
-        results.iter().all(Option::is_some),
-        "batch completed without every ordered child"
-    );
-    attempt
-        .converge_commit(&state.gallery_publication_gate, state.metadata_db.clone())
-        .await?;
-
-    let filenames = attempt
-        .transaction()
-        .manifest()
-        .children
-        .iter()
-        .map(|child| child.final_name.clone())
-        .collect::<Vec<_>>();
-    let mut outputs =
-        matches!(delivery, ServerBatchDelivery::Json).then(|| Vec::with_capacity(results.len()));
-    let mut events =
-        matches!(delivery, ServerBatchDelivery::Sse(_)).then(|| Vec::with_capacity(results.len()));
-    for (index, (compact, filename)) in results.into_iter().zip(filenames).enumerate() {
-        let completion_payload = match delivery {
-            ServerBatchDelivery::Json | ServerBatchDelivery::Sse(SseCompletionPayload::Full) => {
-                SseCompletionPayload::Full
-            }
-            ServerBatchDelivery::Sse(SseCompletionPayload::MetadataOnly) => {
-                SseCompletionPayload::MetadataOnly
-            }
-        };
-        let result = hydrate_batch_result(
-            &output_dir,
-            &filename,
-            compact.context("committed batch child has no compact result")?,
-            completion_payload == SseCompletionPayload::Full,
-        )?;
-        if let Some(events) = events.as_mut() {
-            let mut metadata =
-                child_metadata(&metadata_template, index as u32, result.response.seed_used);
-            if let Some(video) = result.response.video.as_ref() {
-                metadata.apply_video_output(video);
-            }
-            let saved = SavedOutputNames {
-                output: Some(filename.clone()),
-                original: None,
-            };
-            events.push(build_sse_complete_event(
-                &result.response,
-                &result.image,
-                None,
-                Some(&metadata),
-                &saved,
-                completion_payload,
-            ));
-        }
-        state.events.publish(mold_core::ServerEvent::GalleryAdded {
-            filename: filename.clone(),
-            image: None,
-        });
-        if let Some(outputs) = outputs.as_mut() {
-            outputs.push(BatchGenerateOutput {
-                batch_index: index as u32 + 1,
-                filename,
-                response: result.response,
-            });
-        }
-    }
-    Ok(match (outputs, events) {
-        (Some(outputs), None) => CompletedServerBatch::Json(BatchGenerateResponse {
-            batch_id: parent_id.clone(),
-            outputs,
-        }),
-        (None, Some(outputs)) => CompletedServerBatch::Sse(SseBatchCompleteEvent {
-            batch_id: parent_id,
-            outputs,
-        }),
-        _ => unreachable!("server batch delivery has exactly one wire response"),
-    })
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -1509,7 +1203,7 @@ async fn resume_recovered_batch(
                     ),
                     "recovered batch child completion lost parent authority: {disposition:?}"
                 );
-                drop(compact_batch_result(result));
+                drop(result);
                 if let Some(next_index) = next_pending_child(&attempt)? {
                     match grant_and_submit_child(&submission, &mut attempt, next_index, 0).await {
                         Ok(child) => {
@@ -1755,29 +1449,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn dropping_http_waiter_does_not_drop_owned_batch_supervisor() {
-        let started = std::sync::Arc::new(tokio::sync::Notify::new());
-        let release = std::sync::Arc::new(tokio::sync::Notify::new());
-        let finished = std::sync::Arc::new(tokio::sync::Notify::new());
-        let result_rx = spawn_owned_supervisor({
-            let started = started.clone();
-            let release = release.clone();
-            let finished = finished.clone();
-            async move {
-                started.notify_one();
-                release.notified().await;
-                finished.notify_one();
-            }
-        });
-        started.notified().await;
-        drop(result_rx);
-        release.notify_one();
-        tokio::time::timeout(std::time::Duration::from_secs(1), finished.notified())
-            .await
-            .expect("owned batch supervisor must survive response waiter disconnect");
-    }
-
     #[test]
     fn committed_video_batch_retains_preview_under_final_gallery_name() {
         let result = GenerationJobResult {
@@ -1814,6 +1485,8 @@ mod tests {
                 height: 64,
                 index: 0,
             },
+            filename: None,
+            original_filename: None,
         };
 
         let (filename, bytes) =
@@ -1852,6 +1525,8 @@ mod tests {
                 height: 360,
                 index: 0,
             },
+            filename: None,
+            original_filename: None,
         }
     }
 
@@ -2205,20 +1880,6 @@ mod tests {
 
         request.batch_size = 1;
         assert_eq!(validate_live_server_batch_size(&request), Ok(()));
-    }
-
-    #[test]
-    fn registered_parent_id_is_immediately_publicly_cancellable() {
-        let state = AppState::for_tests();
-        let authority = register_server_batch(&state);
-        let parent_id = authority.id().to_string();
-        assert!(uuid::Uuid::parse_str(&parent_id).is_ok());
-        state.job_registry.cancel_queued(&parent_id).unwrap();
-        assert!(authority.cancel.is_cancelled());
-        assert!(
-            !state.job_registry.begin_batch_commit(&parent_id),
-            "cancellation must win before any child is registered"
-        );
     }
 
     #[tokio::test]

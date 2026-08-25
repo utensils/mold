@@ -1851,7 +1851,7 @@ mod tests {
                         admission_authority: None,
                     },
                 ],
-                observer_job_id: None,
+                observer_job_ids: &[],
             })
             .unwrap();
 

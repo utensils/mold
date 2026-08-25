@@ -2016,8 +2016,8 @@ pub struct GenerateResponse {
     pub request_warnings: Vec<String>,
 }
 
-/// Ordered response for a server-owned atomic batch submitted through
-/// `POST /api/generate` with `batch_size > 1`.
+/// Ordered response for a direct batch submitted through `POST /api/generate`.
+/// Every output is an independently durable queue sibling.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct BatchGenerateResponse {
     pub batch_id: String,
@@ -8390,12 +8390,13 @@ pub struct QueueCapabilities {
     /// stream died — on this host that job is still going to run.
     #[serde(default)]
     pub durable_queue: bool,
-    /// Server accepts one atomic batch request instead of client siblings.
+    /// Server durably normalizes one direct batch request into ordered queue
+    /// siblings instead of using an ephemeral batch execution route.
     #[serde(default)]
     pub server_batch: bool,
-    /// Maximum number of ordered outputs accepted by one live atomic
-    /// `POST /api/generate` or `/api/generate/stream` parent. Absent on older
-    /// servers and whenever live server batches are unavailable.
+    /// Maximum number of ordered outputs accepted by one direct
+    /// `POST /api/generate` or `/api/generate/stream` request. Absent on older
+    /// servers and whenever durable batch admission is unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_batch_max_outputs: Option<u32>,
     /// Server accepts one idempotent heterogeneous prepared-batch admission.

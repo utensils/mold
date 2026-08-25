@@ -5639,6 +5639,70 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn direct_raw_batch_commits_every_child_before_model_resolution() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let mut body = serde_json::from_str::<serde_json::Value>(&generate_body_for_model(
+            "queue both before resolving",
+            "not-installed-at-admission",
+            512,
+            512,
+        ))
+        .unwrap();
+        body["batch_size"] = serde_json::json!(2);
+        let request = tokio::spawn(app_with_state(state).oneshot(json_request(
+            "POST",
+            "/api/generate",
+            body,
+        )));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while journal.list_all().len() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both direct batch children must commit before attachment waits");
+        assert!(journal
+            .list_all()
+            .iter()
+            .all(|row| row.model == "not-installed-at-admission"));
+        request.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn direct_stream_batch_commits_every_child_before_model_resolution() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let mut body = serde_json::from_str::<serde_json::Value>(&generate_body_for_model(
+            "queue stream siblings before resolving",
+            "not-installed-at-admission",
+            512,
+            512,
+        ))
+        .unwrap();
+        body["batch_size"] = serde_json::json!(3);
+
+        let response = app_with_state(state)
+            .oneshot(json_request("POST", "/api/generate/stream", body))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(journal.list_all().len(), 3);
+        assert!(journal
+            .list_all()
+            .iter()
+            .all(|row| row.model == "not-installed-at-admission"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn heterogeneous_batch_persists_raw_filing_without_preack_db_resolution() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
@@ -6222,7 +6286,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn headerless_direct_media_remains_attached_and_never_enters_sqlite() {
+    async fn headerless_direct_media_is_durable_without_a_client_operation_id() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let (state, mut rx) = durable_state(db, root.path());
@@ -6238,15 +6302,19 @@ mod tests {
             .await
         });
 
-        let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-            .await
-            .expect("headerless media must enter the attached runtime queue")
-            .expect("runtime queue remains open");
-        assert!(job.journal.is_none());
-        assert!(job.deferred_media.is_none());
-        assert!(journal.list_all().is_empty());
-        drop(job);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while journal.list_all().len() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("headerless media must commit before waiting for a worker");
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 1);
+        assert!(uuid::Uuid::parse_str(&rows[0].id).is_ok());
+        assert!(rx.try_recv().is_err(), "the feeder owns durable dispatch");
         request.abort();
+        let _ = request.await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6288,6 +6356,52 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_direct_raw_batch_preserves_ordered_json_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
+        let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
+        let mut body = serde_json::from_str::<serde_json::Value>(&durable_direct_media_body(
+            "durable raw batch",
+        ))
+        .unwrap();
+        body["batch_size"] = serde_json::json!(2);
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            app_with_state(state).oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .header("x-mold-operation-id", uuid::Uuid::new_v4().to_string())
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("durable raw batch must settle")
+        .unwrap();
+
+        let status = response.status();
+        let content_type = response.headers().get("content-type").cloned();
+        let body = json_body(response).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(content_type.unwrap(), "application/json");
+        let outputs = body["outputs"].as_array().unwrap();
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0]["batch_index"], 1);
+        assert_eq!(outputs[1]["batch_index"], 2);
+        assert_ne!(
+            outputs[0]["response"]["seed_used"],
+            outputs[1]["response"]["seed_used"]
+        );
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
+        worker.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn durable_direct_sse_observer_preserves_queued_and_complete_events() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
@@ -6320,6 +6434,45 @@ mod tests {
         let body = String::from_utf8_lossy(&body);
         assert!(body.contains("\"type\":\"queued\""), "{body}");
         assert!(body.contains("event: complete"), "{body}");
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
+        worker.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_direct_sse_batch_emits_one_ordered_batch_complete() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
+        let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
+        let mut body = serde_json::from_str::<serde_json::Value>(&durable_direct_media_body(
+            "durable SSE batch",
+        ))
+        .unwrap();
+        body["batch_size"] = serde_json::json!(2);
+        let response = app_with_state(state)
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .header("x-mold-operation-id", uuid::Uuid::new_v4().to_string())
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = tokio::time::timeout(
+            Duration::from_secs(10),
+            axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024),
+        )
+        .await
+        .expect("durable SSE batch must terminate")
+        .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert_eq!(body.matches("event: batch_complete").count(), 1, "{body}");
+        assert_eq!(body.matches("\"type\":\"queued\"").count(), 2, "{body}");
         feeder_shutdown.cancel();
         feeder.await.unwrap();
         worker.abort();
@@ -7066,7 +7219,7 @@ mod tests {
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
 
         let submitted_id = {
-            let (mut state, mut rx) = durable_state(db.clone(), output_dir.path());
+            let (mut state, _rx) = durable_state(db.clone(), output_dir.path());
             state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
                 workers: vec![gpu_worker_stub_with_stable_id(2, STABLE_ID)].into(),
             });
@@ -7087,22 +7240,24 @@ mod tests {
                 app.oneshot(json_request("POST", "/api/generate", body))
                     .await
             });
-            let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-                .await
-                .expect("direct admission")
-                .expect("queue open");
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while journal.list_all().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("direct admission");
             task.abort();
             let _ = task.await;
             let row = journal
                 .list_all()
                 .into_iter()
-                .find(|row| row.id == job.id)
+                .next()
                 .expect("durable direct row");
             assert_eq!(row.target_gpu, Some(2));
             assert_eq!(row.target_device_id.as_deref(), Some(STABLE_ID));
-            let id = job.id.clone();
+            let id = row.id;
             journal.retain_all();
-            drop(job);
             id
         };
 

@@ -25,7 +25,9 @@ pub(crate) struct DurableMediaAdmission {
 pub(crate) struct DurableAdmissionOutcome {
     pub status_code: StatusCode,
     pub status: mold_core::GenerationBatchStatus,
-    pub observer: Option<ObserverRegistration>,
+    /// One slot per admitted child. `None` means admission stayed durable but
+    /// the bounded attached-observer registry was full for that child.
+    pub observers: Vec<Option<ObserverRegistration>>,
     pub warnings: Option<RequestWarnings>,
 }
 
@@ -154,12 +156,6 @@ impl DurableMediaAdmission {
                 "requests must contain at least one child",
             ));
         }
-        if observer_mode.is_some() && body.requests.len() != 1 {
-            return Err(ApiError::internal(
-                "an attached durable observer requires exactly one child",
-            ));
-        }
-
         let typed_history = body
             .requests
             .iter()
@@ -260,7 +256,7 @@ impl DurableMediaAdmission {
             return Ok(DurableAdmissionOutcome {
                 status_code: StatusCode::OK,
                 status: crate::routes::generation_batch_status(&state.instance_id, existing),
-                observer: None,
+                observers: Vec::new(),
                 warnings: None,
             });
         }
@@ -300,12 +296,19 @@ impl DurableMediaAdmission {
         let lifecycle = Arc::clone(&self.lifecycle);
         let fingerprint_for_seal = fingerprint.clone();
         let operation_id = body.client_batch_id.clone();
-        let observer = observer_mode.and_then(|mode| self.ingress.reserve(&job_ids[0], mode));
-        let observer_job_id = observer.as_ref().map(|_| job_ids[0].clone());
+        let observers = job_ids
+            .iter()
+            .map(|job_id| observer_mode.and_then(|mode| self.ingress.reserve(job_id, mode)))
+            .collect::<Vec<_>>();
+        let observer_job_ids = observers
+            .iter()
+            .zip(&job_ids)
+            .filter_map(|(observer, job_id)| observer.as_ref().map(|_| job_id.clone()))
+            .collect::<Vec<_>>();
         let journal = state.queue_journal.clone();
         let batch_id_for_db = batch_id.clone();
         let client_id_for_db = body.client_batch_id.clone();
-        let observer_for_db = observer_job_id;
+        let observers_for_db = observer_job_ids;
         // One blocking operation owns extraction, safe-open, hashing,
         // encryption, fsync, file-first cleanup, and the committing DB
         // transaction. Cancellation detaches this operation but cannot strand
@@ -343,7 +346,7 @@ impl DurableMediaAdmission {
                         .expect("sealed batch has an operation receipt")
                         .as_str(),
                     children: &children,
-                    observer_job_id: observer_for_db.as_deref(),
+                    observer_job_ids: &observers_for_db,
                 }) {
                     Ok(
                         mold_db::generation_batches::GenerationBatchMediaInsertOutcome::Inserted(_),
@@ -385,7 +388,7 @@ impl DurableMediaAdmission {
                 Ok(DurableAdmissionOutcome {
                     status_code: StatusCode::ACCEPTED,
                     status: crate::routes::generation_batch_status(&state.instance_id, detail),
-                    observer,
+                    observers,
                     warnings: direct_warnings,
                 })
             }
@@ -393,7 +396,7 @@ impl DurableMediaAdmission {
                 batch_id,
                 colliding_media_set_ids,
             } => {
-                drop(observer);
+                drop(observers);
                 if !colliding_media_set_ids.is_empty() {
                     return Err(ApiError::with_code(
                         "a durable media set id collided with existing authority",
@@ -409,7 +412,7 @@ impl DurableMediaAdmission {
                 Ok(DurableAdmissionOutcome {
                     status_code: StatusCode::OK,
                     status: crate::routes::generation_batch_status(&state.instance_id, detail),
-                    observer: None,
+                    observers: Vec::new(),
                     warnings: None,
                 })
             }
