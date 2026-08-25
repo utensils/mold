@@ -836,7 +836,8 @@ async fn feed_available(
                 }
             }
         }
-        let request: mold_core::GenerateRequest = match serde_json::from_str(&row.request_json) {
+        let mut request: mold_core::GenerateRequest = match serde_json::from_str(&row.request_json)
+        {
             Ok(request) => request,
             Err(error) => {
                 let held = hold_claimed(
@@ -858,6 +859,23 @@ async fn feed_available(
                 continue;
             }
         };
+        // Normalize a persisted accelerator identity before deferred
+        // preparation validates placement. A device missing after restart
+        // falls back to Auto; it must not be held as an invalid request before
+        // the final registry fence gets a chance to resolve replay affinity.
+        let _ = crate::queue_journal::resolve_replay_affinity(
+            &mut request,
+            row.target_gpu,
+            row.target_device_id.as_deref(),
+            |device_id| {
+                state
+                    .gpu_pool
+                    .workers
+                    .iter()
+                    .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
+                    .map(|worker| worker.gpu.ordinal)
+            },
+        );
         let deferred_media = if let Some(set_id) = row.media_set_id.as_ref() {
             let Some(lifecycle) = state.queue_journal.queue_media_lifecycle() else {
                 drop(reservation);
