@@ -149,9 +149,9 @@ pub(crate) struct MediaBatchJournalAdmission<'a> {
     /// Randomized authenticated receipt, never a plaintext media fingerprint.
     pub operation_receipt: &'a str,
     pub children: &'a [MediaJournalAdmission<'a>],
-    /// Present only for a direct attached observer. Publication occurs after
-    /// the immediate transaction commits and before the feeder wake.
-    pub observer_job_id: Option<&'a str>,
+    /// Direct attached observers to publish after the immediate transaction
+    /// commits and before the feeder wake.
+    pub observer_job_ids: &'a [String],
 }
 
 /// Whether this request carries a face photograph.
@@ -1067,10 +1067,10 @@ impl QueueJournal {
         let outcome = generation_batches::insert_or_get_with_media(db, &batch, &rows, &obligations)
             .map_err(|error| format!("could not persist media generation batch: {error:#}"))?;
         if matches!(outcome, GenerationBatchMediaInsertOutcome::Inserted(_)) {
-            if let (Some(job_id), Some(service)) =
-                (admission.observer_job_id, self.queue_media_admission.get())
-            {
-                service.publish_observer(job_id);
+            if let Some(service) = self.queue_media_admission.get() {
+                for job_id in admission.observer_job_ids {
+                    service.publish_observer(job_id);
+                }
             }
             self.feeder_notify.notify_one();
         }
