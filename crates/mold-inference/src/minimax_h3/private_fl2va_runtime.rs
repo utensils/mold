@@ -117,6 +117,10 @@ pub(crate) struct H3PrivateFl2VaMemoryOverlapAuthority {
     /// reference set — and each must be nonzero exactly for its own task.
     task: Task,
     condition_visual_rows: u64,
+    /// The soundtrack half of the same conditioning. FL2VA pins it to zero;
+    /// an audio-only Ref2VA set has this and nothing else, which is exactly
+    /// the case a visual-rows-only presence test refused.
+    condition_audio_rows: u64,
     condition_backing_host_bytes: u64,
     condition_backing_device_bytes: u64,
     target_audio_latent_device_bytes: u64,
@@ -145,6 +149,7 @@ impl H3PrivateFl2VaMemoryOverlapAuthority {
         target_budget_identity_sha256: impl Into<String>,
         task: Task,
         condition_visual_rows: u64,
+        condition_audio_rows: u64,
         condition_backing_host_bytes: u64,
         condition_backing_device_bytes: u64,
         target_audio_latent_device_bytes: u64,
@@ -161,6 +166,7 @@ impl H3PrivateFl2VaMemoryOverlapAuthority {
             target_budget_identity_sha256: target_budget_identity_sha256.into(),
             task,
             condition_visual_rows,
+            condition_audio_rows,
             condition_backing_host_bytes,
             condition_backing_device_bytes,
             target_audio_latent_device_bytes,
@@ -221,7 +227,12 @@ impl H3PrivateFl2VaMemoryOverlapAuthority {
                 self.task
             );
         }
-        if self.condition_visual_rows == 0 {
+        // Presence is asked of BOTH conditioning modalities: a Ref2VA set of
+        // standalone audio references conditions on real retained media with
+        // zero visual rows, and reading only the visual half called that an
+        // invented charge.
+        let conditions_on_media = self.condition_visual_rows != 0 || self.condition_audio_rows != 0;
+        if !conditions_on_media {
             if condition_bytes != (0, 0, 0) {
                 bail!("private MiniMax H3 T2VA overlap authority invents condition backing");
             }
@@ -265,6 +276,7 @@ fn memory_overlap_identity(authority: &H3PrivateFl2VaMemoryOverlapAuthority) -> 
         Task::Ref2va => b"ref2va".as_slice(),
     });
     hash.update(authority.condition_visual_rows.to_le_bytes());
+    hash.update(authority.condition_audio_rows.to_le_bytes());
     for bytes in [
         authority.condition_backing_host_bytes,
         authority.condition_backing_device_bytes,
@@ -312,6 +324,7 @@ pub(crate) fn issue_private_fl2va_memory_overlap(
         target_budget_identity_sha256: identities.1.into(),
         task: request.task,
         condition_visual_rows: request.rows.condition_visual_rows,
+        condition_audio_rows: request.rows.condition_audio_rows,
         condition_backing_host_bytes: budget.condition_backing_host_bytes,
         condition_backing_device_bytes: budget.condition_latent_backing_device_bytes,
         target_audio_latent_device_bytes: budget.target_audio_latent_device_bytes,
@@ -1430,6 +1443,7 @@ fn validate_prepared_overlap_binding(
         || overlap.task != request.task
         || request.rows.condition_visual_rows != admitted.condition_visual_rows
         || overlap.condition_visual_rows != request.rows.condition_visual_rows
+        || overlap.condition_audio_rows != request.rows.condition_audio_rows
         || overlap.condition_backing_host_bytes != budget.condition_backing_host_bytes
         || overlap.condition_backing_device_bytes != budget.condition_latent_backing_device_bytes
         || overlap.target_audio_latent_device_bytes != budget.target_audio_latent_device_bytes
@@ -3570,6 +3584,7 @@ mod tests {
             sha('b'),
             Task::Fl2va,
             admitted.condition_visual_rows,
+            0,
             condition_host,
             condition_device,
             30,
@@ -4030,6 +4045,7 @@ mod tests {
                     0,
                     0,
                     0,
+                    0,
                     30,
                     40,
                     50,
@@ -4419,6 +4435,72 @@ mod tests {
         assert!(fixture.forwarded.lock().unwrap().is_empty());
     }
 
+    /// An ordered Ref2VA set of standalone audio references conditions on
+    /// real retained media with ZERO visual rows.
+    ///
+    /// The presence rule reads both modalities: the visual-rows-only test
+    /// called that legitimate backing an invented charge and refused every
+    /// such attempt before execution (#825 review). The cross-task rule still
+    /// holds in both directions — Ref2VA never charges an endpoint, FL2VA
+    /// never charges normalized reference media.
+    #[test]
+    fn audio_only_ref2va_conditioning_is_a_real_charge_not_an_invented_one() {
+        let admitted = authority()
+            .private_fl2va_runtime_authority_for_schema_tests()
+            .unwrap();
+        let overlap = |visual_rows: u64, audio_rows: u64, endpoint: u64, reference: u64| {
+            H3PrivateFl2VaMemoryOverlapAuthority::new(
+                admitted.factory_identity_sha256.clone(),
+                sha('a'),
+                sha('b'),
+                Task::Ref2va,
+                visual_rows,
+                audio_rows,
+                10,
+                20,
+                30,
+                40,
+                50,
+                90,
+                120,
+                endpoint,
+                reference,
+            )
+        };
+        // Audio-only: no visual rows, real reference media, admitted.
+        overlap(0, 414, 0, 60).unwrap();
+        // Visual-only and mixed both still work.
+        overlap(1_008, 0, 0, 60).unwrap();
+        overlap(1_008, 414, 0, 60).unwrap();
+        // No conditioning at all must charge nothing.
+        assert!(overlap(0, 0, 0, 60).is_err());
+        // A Ref2VA record may never charge FL2VA's boundary endpoint.
+        assert!(overlap(0, 414, 70, 60).is_err());
+        // ... and an audio-only set that charges no retained media is an
+        // undercharge, not a T2VA record.
+        assert!(overlap(0, 414, 0, 0).is_err());
+
+        // The mirror: FL2VA may never charge normalized reference media.
+        assert!(H3PrivateFl2VaMemoryOverlapAuthority::new(
+            admitted.factory_identity_sha256.clone(),
+            sha('a'),
+            sha('b'),
+            Task::Fl2va,
+            admitted.condition_visual_rows,
+            0,
+            10,
+            20,
+            30,
+            40,
+            50,
+            90,
+            120,
+            60,
+            60,
+        )
+        .is_err());
+    }
+
     #[test]
     fn conservative_overlap_rejects_condition_vae_and_audio_latent_undercharge() {
         let admitted = authority()
@@ -4430,6 +4512,7 @@ mod tests {
             sha('b'),
             Task::Fl2va,
             admitted.condition_visual_rows,
+            0,
             0,
             20,
             30,
@@ -4449,6 +4532,7 @@ mod tests {
             sha('b'),
             Task::Fl2va,
             admitted.condition_visual_rows,
+            0,
             10,
             20,
             30,
@@ -4468,6 +4552,7 @@ mod tests {
             sha('b'),
             Task::Fl2va,
             admitted.condition_visual_rows,
+            0,
             10,
             20,
             30,
@@ -4492,6 +4577,7 @@ mod tests {
             0,
             0,
             0,
+            0,
             30,
             40,
             50,
@@ -4506,6 +4592,7 @@ mod tests {
             sha('a'),
             sha('b'),
             Task::Fl2va,
+            0,
             0,
             1,
             0,

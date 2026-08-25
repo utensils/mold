@@ -1757,10 +1757,24 @@ fn build_canonical_private_fl2va_target_budget(
     // header, and the VAE authorities' two decoded config buffers.
     let qwen_retained_header_host_bytes = qwen_memory.retained_raw_header_bytes;
     let transformer_retained_header_host_bytes = checkpoint.retained_header_host_bytes;
-    let condition_latent_backing_device_bytes = request
+    // Conditioning latents are BOTH modalities. FL2VA pins
+    // `condition_audio_rows` to zero, so its arithmetic is byte-identical;
+    // Ref2VA's ordered set may carry soundtracks, and an audio-only set
+    // carries nothing else — charging the visual half alone left it with no
+    // conditioning backing at all, which the overlap authority then read as
+    // an invented charge and refused (#825).
+    let condition_visual_latent_device_bytes = request
         .rows
         .condition_visual_rows
         .checked_mul(96 * 4)
+        .ok_or_else(|| anyhow!("private H3 condition latent bytes overflow"))?;
+    let condition_audio_latent_device_bytes = request
+        .rows
+        .condition_audio_rows
+        .checked_mul(32 * 4)
+        .ok_or_else(|| anyhow!("private H3 condition audio latent bytes overflow"))?;
+    let condition_latent_backing_device_bytes = condition_visual_latent_device_bytes
+        .checked_add(condition_audio_latent_device_bytes)
         .ok_or_else(|| anyhow!("private H3 condition latent bytes overflow"))?;
     let target_video_latent_device_bytes = request
         .rows
@@ -1772,10 +1786,16 @@ fn build_canonical_private_fl2va_target_budget(
         .target_audio_rows
         .checked_mul(32 * 4)
         .ok_or_else(|| anyhow!("private H3 target audio bytes overflow"))?;
-    let packed_video_state_device_bytes = condition_latent_backing_device_bytes
+    // The packed video state carries the VISUAL conditioning prefix and the
+    // generated suffix; the audio state carries the soundtrack prefix and its
+    // own generated suffix. Folding the audio conditioning into the video
+    // state would count it at the video latent's 96-wide stride.
+    let packed_video_state_device_bytes = condition_visual_latent_device_bytes
         .checked_add(target_video_latent_device_bytes)
         .ok_or_else(|| anyhow!("private H3 packed video bytes overflow"))?;
-    let packed_audio_state_device_bytes = target_audio_latent_device_bytes;
+    let packed_audio_state_device_bytes = condition_audio_latent_device_bytes
+        .checked_add(target_audio_latent_device_bytes)
+        .ok_or_else(|| anyhow!("private H3 packed audio bytes overflow"))?;
     let packed_layout_device_bytes = request
         .rows
         .total_packed_rows

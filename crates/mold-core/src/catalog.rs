@@ -758,14 +758,12 @@ mod tests {
             // became runnable (#825).
             let resolution = resolution_defaults_from_profile(&profile);
             assert_eq!(
-                row.defaults.max_pixels,
-                resolution.max_pixels,
+                row.defaults.max_pixels, resolution.max_pixels,
                 "{} row max_pixels disagrees with its profile",
                 row.info.name
             );
             assert_eq!(
-                row.defaults.max_axis_pixels,
-                resolution.max_axis_pixels,
+                row.defaults.max_axis_pixels, resolution.max_axis_pixels,
                 "{} row max_axis_pixels disagrees with its profile",
                 row.info.name
             );
@@ -781,9 +779,7 @@ mod tests {
             // generation itself asks.
             assert_eq!(
                 row.runtime_available,
-                Some(
-                    crate::minimax_h3::model_runtime_availability(&row.info.name).is_available()
-                ),
+                Some(crate::minimax_h3::model_runtime_availability(&row.info.name).is_available()),
                 "{} row runtime availability disagrees with the activation authority",
                 row.info.name
             );
@@ -816,7 +812,10 @@ mod tests {
             .iter()
             .find(|row| row.info.name == crate::minimax_h3::REF2VA_COMFY)
             .expect("the compact Ref2VA acquisition row is always listed");
-        assert_eq!(row.runtime_available, Some(crate::minimax_h3::engine_is_built()));
+        assert_eq!(
+            row.runtime_available,
+            Some(crate::minimax_h3::engine_is_built())
+        );
         assert_eq!(
             row.runtime_unavailable_reason.is_some(),
             !crate::minimax_h3::engine_is_built()

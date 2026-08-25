@@ -1190,7 +1190,7 @@ mod tests {
         .err()
         .unwrap()
         .to_string()
-        .contains("frozen FL2VA route"));
+        .contains("frozen Fl2va route"));
 
         let mut wrong_artifact = runtime(Arc::clone(&drops), &authority);
         wrong_artifact.plan = "not-a-digest";
@@ -1202,7 +1202,7 @@ mod tests {
         .err()
         .unwrap()
         .to_string()
-        .contains("frozen FL2VA route"));
+        .contains("frozen Fl2va route"));
 
         let inactive = runtime(Arc::clone(&drops), &authority);
         inactive.active.store(false, Ordering::SeqCst);
@@ -1233,7 +1233,7 @@ mod tests {
         )
         .err()
         .unwrap();
-        assert!(error.to_string().contains("frozen FL2VA route"));
+        assert!(error.to_string().contains("frozen Fl2va route"));
         assert_eq!(*visual_calls.lock().unwrap(), 0);
 
         let mut wrong_components = backend(Arc::clone(&drops), &authority);
@@ -1247,7 +1247,7 @@ mod tests {
         )
         .err()
         .unwrap();
-        assert!(error.to_string().contains("frozen FL2VA route"));
+        assert!(error.to_string().contains("frozen Fl2va route"));
         assert_eq!(*visual_calls.lock().unwrap(), 0);
     }
 
@@ -1282,7 +1282,7 @@ mod tests {
         )
         .err()
         .unwrap();
-        assert!(error.to_string().contains("frozen FL2VA route"));
+        assert!(error.to_string().contains("frozen Fl2va route"));
 
         let audio_calls = Arc::new(AtomicUsize::new(0));
         let mut vae = runtime(Arc::clone(&drops), &authority);

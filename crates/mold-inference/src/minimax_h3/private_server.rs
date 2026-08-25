@@ -3276,7 +3276,12 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
                     .map(|(index, reference)| reference.redacted_metadata_lossless(index))
                     .collect::<Vec<_>>();
                 (
-                    Some(prepared.prepared_request_input().reference_fingerprint.clone()),
+                    Some(
+                        prepared
+                            .prepared_request_input()
+                            .reference_fingerprint
+                            .clone(),
+                    ),
                     Some(mold_core::generation_reference_fingerprint(
                         &resolved_metadata,
                     )),
@@ -7764,8 +7769,7 @@ mod tests {
             references[0],
             mold_core::GenerationReference::Audio { .. }
         ));
-        let rows =
-            ref2va_reference_rows(&references, contract::DEFAULT_COMPACT_FRAMES).unwrap();
+        let rows = ref2va_reference_rows(&references, contract::DEFAULT_COMPACT_FRAMES).unwrap();
         assert_eq!(rows.visual, 0);
         assert_eq!(rows.qwen_vision, 0);
         assert_eq!(rows.largest_canvas_pixels, 0);
@@ -7795,7 +7799,7 @@ mod tests {
     fn the_public_ref2va_qualification_is_its_own_record() {
         let mut artifact = artifact_report();
         artifact.canonical_model = contract::REF2VA_COMFY.into();
-        artifact.task = "ref2va".into();
+        artifact.task = "ref2va";
         let references = ref2va_reference_set();
         let mint = |artifact: &H3PrivateArtifactQualificationReport,
                     task: Task,
@@ -9390,13 +9394,41 @@ mod tests {
     fn frozen_media_contract_is_task_paired() {
         media().validate().unwrap();
 
+        // A Ref2VA contract carries its ordered-reference authority; the same
+        // fields on an FL2VA contract, or their absence here, is a crossed
+        // partition.
         let ref2va = H3PrivateFl2VaMediaContract {
             canonical_model: contract::REF2VA_COMFY.into(),
             task: Task::Ref2va,
             mode: Mode::ReferenceToAudioVideo,
+            reference_fingerprint_sha256: Some(sha('7')),
+            resolved_reference_fingerprint_sha256: Some(sha('8')),
+            reference_count: 3,
             ..media()
         };
         ref2va.validate().unwrap();
+        for stripped in [
+            H3PrivateFl2VaMediaContract {
+                reference_fingerprint_sha256: None,
+                ..ref2va.clone()
+            },
+            H3PrivateFl2VaMediaContract {
+                resolved_reference_fingerprint_sha256: None,
+                ..ref2va.clone()
+            },
+            H3PrivateFl2VaMediaContract {
+                reference_count: 0,
+                ..ref2va.clone()
+            },
+        ] {
+            assert!(stripped.validate().is_err());
+        }
+        // FL2VA must never carry one.
+        let fl2va_with_references = H3PrivateFl2VaMediaContract {
+            reference_count: 1,
+            ..media()
+        };
+        assert!(fl2va_with_references.validate().is_err());
 
         // Each axis crossed against the task is refused: the FL2VA mode on a
         // Ref2VA contract, the Ref2VA mode on an FL2VA contract, and either
