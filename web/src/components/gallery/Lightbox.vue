@@ -94,6 +94,10 @@ const emit = defineEmits<{
   (e: "new-collection", item: GalleryImage): void;
   (e: "restore", item: GalleryImage): void;
   (e: "delete-forever", item: GalleryImage): void;
+  (
+    e: "context-menu",
+    payload: { item: GalleryImage; x: number; y: number },
+  ): void;
 }>();
 
 const organizer = ref<InstanceType<typeof PrintOrganizer> | null>(null);
@@ -358,6 +362,16 @@ function onReuse() {
 function onUseSource() {
   if (props.item) emit("use-source", props.item);
 }
+function onMediaContextMenu(event: MouseEvent) {
+  if (!props.item || props.inTrash) return;
+  event.preventDefault();
+  event.stopPropagation();
+  emit("context-menu", {
+    item: props.item,
+    x: event.clientX,
+    y: event.clientY,
+  });
+}
 function onUpscale() {
   menuOpen.value = false;
   if (props.item) emit("upscale", props.item);
@@ -454,7 +468,7 @@ async function performVideoExport(options: VideoExportOptions) {
     >
       <!-- ============================ DESKTOP ============================ -->
       <div v-if="wide" class="lb__card" @click.stop>
-        <div class="lb__stage">
+        <div class="lb__stage" @contextmenu="onMediaContextMenu">
           <p v-if="streamBlocked" class="lb__blocked" role="status">
             <span class="lb__blocked-title">{{ blockedTitle }}</span>
             <span class="lb__blocked-body">{{ streamMessage }}</span>
@@ -851,7 +865,10 @@ async function performVideoExport(options: VideoExportOptions) {
           </div>
         </div>
 
-        <div class="lb__stage lb__stage--full">
+        <div
+          class="lb__stage lb__stage--full"
+          @contextmenu="onMediaContextMenu"
+        >
           <p v-if="streamBlocked" class="lb__blocked" role="status">
             <span class="lb__blocked-title">{{ blockedTitle }}</span>
             <span class="lb__blocked-body">{{ streamMessage }}</span>

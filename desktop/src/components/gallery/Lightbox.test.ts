@@ -287,9 +287,16 @@ describe("Lightbox a11y", () => {
     expect(menu.entries).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ label: "Copy image", disabled: false }),
+        expect.objectContaining({ label: "Use as source", disabled: false }),
         expect.objectContaining({ label: "Copy file path" }),
       ]),
     );
+    const useSource = menu.entries.find(
+      (entry) => !("separator" in entry) && entry.label === "Use as source",
+    );
+    expect(useSource).toBeDefined();
+    menu.activate(useSource!);
+    expect(wrapper.emitted("useSource")).toHaveLength(1);
     wrapper.unmount();
   });
 });

@@ -2968,6 +2968,7 @@ onBeforeUnmount(() => {
       @new-collection="onNewCollection"
       @restore="restoreOne"
       @delete-forever="deleteForeverOne"
+      @context-menu="openContextMenu"
     />
 
     <HistoryDrawer
@@ -3015,6 +3016,9 @@ onBeforeUnmount(() => {
 
 .gal__scope {
   flex: 0 0 auto;
+}
+.gal__scope :deep(.ms-seg__label) {
+  white-space: nowrap;
 }
 .gal__filter {
   flex: 0 0 auto;

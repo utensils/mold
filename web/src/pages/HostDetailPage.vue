@@ -868,7 +868,11 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <div class="md-grid" :data-dimmed="reconnecting ? 'true' : undefined">
+      <div
+        class="md-grid"
+        :data-dimmed="reconnecting ? 'true' : undefined"
+        :data-has-library="trashCapable ? 'true' : undefined"
+      >
         <CardSurface class="md-telemetry">
           <div class="md-label">Telemetry</div>
           <div class="md-gpu" data-test="telemetry-gpu">
@@ -1222,10 +1226,19 @@ onBeforeUnmount(() => {
 }
 
 .md-grid {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  grid-template-areas:
+    "telemetry library"
+    "models models";
   gap: 16px;
   align-items: flex-start;
-  flex-wrap: wrap;
+}
+
+.md-grid:not([data-has-library="true"]) {
+  grid-template-areas:
+    "telemetry telemetry"
+    "models models";
 }
 
 .md-grid[data-dimmed="true"],
@@ -1235,21 +1248,37 @@ onBeforeUnmount(() => {
 }
 
 .md-telemetry {
-  flex: 1;
+  grid-area: telemetry;
   min-width: 280px;
 }
 
-.md-models,
-.md-library {
-  width: 300px;
-  flex: 0 0 300px;
+.md-models {
+  grid-area: models;
+  min-width: 0;
 }
 
-@media (max-width: 640px) {
-  .md-models,
+.md-library {
+  grid-area: library;
+  width: 300px;
+}
+
+@media (max-width: 820px) {
+  .md-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "telemetry"
+      "library"
+      "models";
+  }
+
+  .md-grid:not([data-has-library="true"]) {
+    grid-template-areas:
+      "telemetry"
+      "models";
+  }
+
   .md-library {
     width: 100%;
-    flex: 1 1 100%;
   }
 }
 
@@ -1390,9 +1419,13 @@ onBeforeUnmount(() => {
 }
 
 .md-models__list {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 2px;
+  max-height: clamp(180px, 32vh, 320px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
 }
 
 .md-models__row {

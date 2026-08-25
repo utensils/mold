@@ -321,6 +321,11 @@ function imageMenu(): MenuEntry[] {
       action: () => void copyImage(),
     },
     {
+      label: "Use as source",
+      disabled: props.audio,
+      action: () => emit("useSource"),
+    },
+    {
       label: "Copy file path",
       action: () =>
         void copyLocalOutputPath(props.item.filename, fromTrash.value)
