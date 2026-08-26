@@ -63,7 +63,9 @@ const route: HostRoute = {
   instanceId: "instance-1",
   durableGeneration: {
     heterogeneous_batch: true,
+    heterogeneous_batch_max_outputs: 64,
     durable_batch_outcomes: true,
+    admission_protocol_version: 2,
   },
   eventsAvailable: true,
 };
@@ -71,7 +73,7 @@ const route: HostRoute = {
 const durableMediaRoute: HostRoute = {
   ...route,
   durableMedia: {
-    protocol_version: 1,
+    protocol_version: 2,
     encrypted_at_rest: true,
     generate_request_media: true,
     identity: true,
@@ -85,7 +87,6 @@ const canonicalH3Route: HostRoute = {
   modelFamily: "minimax-h3",
   durableGeneration: {
     ...route.durableGeneration,
-    admission_protocol_version: 2,
   },
   durableMedia: {
     protocol_version: 3,
@@ -314,6 +315,31 @@ describe("web durable generation lifecycle", () => {
       ]),
     );
     expect(admitGenerationBatch.mock.calls[1]![1].requests).toHaveLength(3);
+  });
+
+  it("chunks Batch N at the host limit without opening attached streams", () => {
+    admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
+    const limitedRoute: HostRoute = {
+      ...route,
+      durableGeneration: {
+        ...route.durableGeneration,
+        heterogeneous_batch_max_outputs: 2,
+      },
+    };
+    const stream = useGenerateStream();
+
+    const ids = stream.submitBatch(
+      [request("one"), request("two"), request("three")],
+      { kind: "single" },
+      limitedRoute,
+    );
+
+    expect(ids).toHaveLength(3);
+    expect(admitGenerationBatch).toHaveBeenCalledTimes(2);
+    expect(
+      admitGenerationBatch.mock.calls.map((call) => call[1].requests.length),
+    ).toEqual([2, 1]);
+    expect(generateStream).not.toHaveBeenCalled();
   });
 
   it("never turns browser quota into a durable admission gate", async () => {

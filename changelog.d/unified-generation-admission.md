@@ -1,0 +1,1 @@
+- Generation submission now commits Batch N as durable singleton children through one `/api/generation-batches` operation across Studio, mobile, CLI, and TUI. Direct generation is singleton-only, accepted work survives disconnects and restarts, held failures remain visible and retryable, and legacy raw-parent records are retained only for restart recovery.

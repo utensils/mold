@@ -97,8 +97,10 @@ surface powers it, so anything the app does maps to a documented endpoint.
   with a compact first-eight review and bounded Review all pages. Mold shows
   and freezes the resolved host for expansion and every sibling. One reviewed
   set may contain up to 10,000 variations as a memory-safety boundary; the
-  number of sets you can queue is not limited. Once the host
-  accepts a batch, the composer is immediately available to queue another
+  number of sets you can queue is not limited. Protocol-v2 hosts accept Batch N
+  through one durable `/api/generation-batches` operation, chunked at the
+  advertised limit; held children remain visible and retryable, while older
+  hosts retain singleton fan-out. Once the host accepts a batch, the composer is immediately available to queue another
   while the earlier work continues in Activity. When a Batch 1 rewrite becomes stale, Create immediately
   offers to re-expand the original for the current model and generate, generate
   the visible rewrite anyway, or restore the original; generation errors use

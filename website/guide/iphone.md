@@ -220,7 +220,9 @@ every terminal, stale, superseded, or aborted attempt releases the lease before
 Retry reacquires the same frozen route. Editing/removing reviewed work cancels
 a pending replacement. Siblings remain independently cancellable and keep
 deterministic seeds, the source prompt, and durable batch position through
-long-video chains. A partial result names each failed variation and reviewed
+long-video chains. Protocol-v2 hosts accept them through one durable
+`/api/generation-batches` operation, chunked at the advertised limit; held
+children survive app/server restarts with an error and retry action. A partial result names each failed variation and reviewed
 prompt, plus any separate unconfirmed-cancellation caveat, while keeping
 successful prints. Library shows **Batch N of M** and the source prompt when
 that provenance is present; prints from older servers remain unchanged.

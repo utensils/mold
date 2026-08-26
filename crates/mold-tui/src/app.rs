@@ -45,6 +45,16 @@ pub struct LicenseDownloadRequirement {
     pub licenses: Vec<mold_core::LicenseRefusal>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableGenerationChildOutcome {
+    pub index: u32,
+    pub job_id: String,
+    pub filename: Option<String>,
+    pub original_filename: Option<String>,
+    pub error: Option<String>,
+    pub retryable: bool,
+}
+
 /// Events sent from background tasks to the main TUI loop.
 pub enum BackgroundEvent {
     /// Progress update from generation or model pull.
@@ -59,6 +69,11 @@ pub enum BackgroundEvent {
         response: Box<GenerateResponse>,
         from_local: bool,
         metadata_snapshot: Box<GenerationMetadataSnapshot>,
+    },
+    /// A canonical remote Batch N settled through the reconnectable queue API.
+    /// Results are gallery identities, not fabricated response bytes.
+    DurableGenerationBatchComplete {
+        outcomes: Vec<DurableGenerationChildOutcome>,
     },
     /// Generation or background task failed.
     Error(String),
@@ -8344,6 +8359,57 @@ impl App {
                             .await
                             .ok();
                         });
+                    }
+                }
+                BackgroundEvent::DurableGenerationBatchComplete { outcomes } => {
+                    self.generate.generating = false;
+                    self.generate.batch_remaining = 0;
+                    self.generate.clear_live_preview();
+                    self.generate.progress.generation_started_at = None;
+                    self.generate.progress.stage_started_at = None;
+
+                    let mut failures = Vec::new();
+                    let mut last_filename = None;
+                    for outcome in outcomes {
+                        let mut filenames = [outcome.filename, outcome.original_filename]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>();
+                        filenames.dedup();
+                        if !filenames.is_empty() {
+                            last_filename = filenames.first().cloned();
+                            self.generate.progress.push_log(ProgressLogEntry {
+                                message: format!(
+                                    "Batch {} saved {}",
+                                    outcome.index,
+                                    filenames.join(" + ")
+                                ),
+                                style: ProgressStyle::Done,
+                            });
+                        } else if let Some(error) = outcome.error {
+                            let retry = if outcome.retryable {
+                                format!(" (retryable queue job {})", outcome.job_id)
+                            } else {
+                                String::new()
+                            };
+                            let message = format!("Batch {}: {error}{retry}", outcome.index);
+                            self.generate.progress.push_log(ProgressLogEntry {
+                                message: message.clone(),
+                                style: if outcome.retryable {
+                                    ProgressStyle::Warning
+                                } else {
+                                    ProgressStyle::Error
+                                },
+                            });
+                            failures.push(message);
+                        }
+                    }
+                    self.generate.last_output_path = last_filename.map(std::path::PathBuf::from);
+                    self.generate.error_message =
+                        (!failures.is_empty()).then(|| failures.join("; "));
+                    if self.should_poll_remote() {
+                        self.gallery.scanning = true;
+                        self.spawn_gallery_scan();
                     }
                 }
                 BackgroundEvent::Error(msg) => {

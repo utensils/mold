@@ -73,6 +73,7 @@ describe("mobile durable generation recovery", () => {
   };
   const canonicalQueue = {
     heterogeneous_batch: true,
+    heterogeneous_batch_max_outputs: 64,
     durable_batch_outcomes: true,
     admission_protocol_version: 2,
   };

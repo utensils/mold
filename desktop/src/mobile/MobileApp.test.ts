@@ -1745,6 +1745,7 @@ describe("MobileApp generation queue", () => {
           events: { available: true },
           queue: {
             heterogeneous_batch: true,
+            heterogeneous_batch_max_outputs: 64,
             durable_batch_outcomes: true,
             admission_protocol_version: 2,
           },
@@ -1812,7 +1813,12 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+          queue: {
+            heterogeneous_batch: true,
+            heterogeneous_batch_max_outputs: 64,
+            durable_batch_outcomes: true,
+            admission_protocol_version: 2,
+          },
         });
       }
       if (path === "/api/activity") {
@@ -1867,7 +1873,12 @@ describe("MobileApp generation queue", () => {
         if (path === "/api/capabilities") {
           return Promise.resolve({
             events: { available: true },
-            queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+            queue: {
+              heterogeneous_batch: true,
+              heterogeneous_batch_max_outputs: 64,
+              durable_batch_outcomes: true,
+              admission_protocol_version: 2,
+            },
           });
         }
         if (path === "/api/activity") {
@@ -1944,9 +1955,14 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+          queue: {
+            heterogeneous_batch: true,
+            heterogeneous_batch_max_outputs: 64,
+            durable_batch_outcomes: true,
+            admission_protocol_version: 2,
+          },
           durable_media: {
-            protocol_version: 1,
+            protocol_version: 2,
             encrypted_at_rest: true,
             generate_request_media: true,
             identity: true,
@@ -2007,7 +2023,12 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+          queue: {
+            heterogeneous_batch: true,
+            heterogeneous_batch_max_outputs: 64,
+            durable_batch_outcomes: true,
+            admission_protocol_version: 2,
+          },
         });
       }
       if (path === "/api/activity") {
@@ -2090,7 +2111,12 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+          queue: {
+            heterogeneous_batch: true,
+            heterogeneous_batch_max_outputs: 64,
+            durable_batch_outcomes: true,
+            admission_protocol_version: 2,
+          },
         });
       }
       if (path === "/api/activity") {
@@ -2150,7 +2176,12 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+          queue: {
+            heterogeneous_batch: true,
+            heterogeneous_batch_max_outputs: 64,
+            durable_batch_outcomes: true,
+            admission_protocol_version: 2,
+          },
         });
       }
       if (path === "/api/activity") {
@@ -2206,7 +2237,12 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+          queue: {
+            heterogeneous_batch: true,
+            heterogeneous_batch_max_outputs: 64,
+            durable_batch_outcomes: true,
+            admission_protocol_version: 2,
+          },
         });
       }
       if (path === "/api/activity") {
@@ -2260,6 +2296,7 @@ describe("MobileApp generation queue", () => {
           events: { available: true },
           queue: {
             heterogeneous_batch: true,
+            heterogeneous_batch_max_outputs: 64,
             durable_batch_outcomes: true,
             admission_protocol_version: 2,
           },
@@ -2337,7 +2374,12 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+          queue: {
+            heterogeneous_batch: true,
+            heterogeneous_batch_max_outputs: 64,
+            durable_batch_outcomes: true,
+            admission_protocol_version: 2,
+          },
         });
       }
       if (path === "/api/activity") {
@@ -2399,6 +2441,7 @@ describe("MobileApp generation queue", () => {
           events: { available: true },
           queue: {
             heterogeneous_batch: true,
+            heterogeneous_batch_max_outputs: 64,
             durable_batch_outcomes: true,
             admission_protocol_version: 2,
           },
@@ -2448,8 +2491,8 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.find("[data-test='mobile-generation-queue']").exists()).toBe(false);
   });
 
-  it("admits a prepared Batch N as sibling children in one durable POST", async () => {
-    let admittedRequests: Array<Record<string, unknown>> = [];
+  it("chunks a prepared Batch N at the durable host limit", async () => {
+    const admittedChunks: Array<Array<Record<string, unknown>>> = [];
     apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
@@ -2457,7 +2500,12 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+          queue: {
+            heterogeneous_batch: true,
+            heterogeneous_batch_max_outputs: 1,
+            durable_batch_outcomes: true,
+            admission_protocol_version: 2,
+          },
         });
       }
       if (path === "/api/activity") {
@@ -2468,7 +2516,7 @@ describe("MobileApp generation queue", () => {
           client_batch_id: string;
           requests: Array<Record<string, unknown>>;
         };
-        admittedRequests = body.requests;
+        admittedChunks.push(body.requests);
         return Promise.resolve({
           id: "batch-n",
           client_batch_id: body.client_batch_id,
@@ -2495,8 +2543,8 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
     await flushPromises();
 
-    expect(admittedRequests).toHaveLength(2);
-    expect(admittedRequests.map((request) => request.batch_size)).toEqual([1, 1]);
+    expect(admittedChunks).toHaveLength(2);
+    expect(admittedChunks.flat().map((request) => request.batch_size)).toEqual([1, 1]);
     expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(2);
     expect(openStreams.filter((stream) => stream.path === "/api/events")).toHaveLength(1);
     expect(openStreams.filter((stream) => stream.path === "/api/generate/stream")).toHaveLength(0);
@@ -2533,7 +2581,12 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: { heterogeneous_batch: true, durable_batch_outcomes: true },
+          queue: {
+            heterogeneous_batch: true,
+            heterogeneous_batch_max_outputs: 64,
+            durable_batch_outcomes: true,
+            admission_protocol_version: 2,
+          },
         });
       }
       if (path === "/api/activity") {

@@ -159,6 +159,29 @@ impl QueueMediaIngress {
         self.detach(job_id);
     }
 
+    /// Cancellation won before feeder handoff. Resolve the attached direct
+    /// caller explicitly; never turn an accepted durable operation into an
+    /// opaque dropped channel.
+    pub(crate) fn cancel(&self, job_id: &str) {
+        let Some(claim) = self.take_claimed(job_id) else {
+            return;
+        };
+        match claim.mode() {
+            ObserverMode::Raw => {
+                let (send, receive) = tokio::sync::oneshot::channel();
+                let _ = send.send(SupervisedOutcome::Cancelled);
+                claim.deliver(AttachedObserver::Raw { outcome: receive });
+            }
+            ObserverMode::Sse(_) => {
+                let (send, receive) = tokio::sync::mpsc::unbounded_channel();
+                let _ = send.send(SseMessage::Error(mold_core::SseErrorEvent::cancelled(
+                    format!("generation job {job_id} was cancelled while queued"),
+                )));
+                claim.deliver(AttachedObserver::Sse { messages: receive });
+            }
+        }
+    }
+
     /// Resolve an attached direct request when deferred preparation parks its
     /// durable row. SQLite remains authoritative and the row stays visible;
     /// this only prevents the HTTP observer from hanging or seeing silent EOF.
@@ -309,5 +332,36 @@ mod tests {
             panic!("SSE registration received the wrong observer type");
         };
         assert!(matches!(messages.recv().await, Some(SseMessage::Error(_))));
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_handoff_resolves_raw_and_sse_observers() {
+        let ingress = QueueMediaIngress::new(2);
+        let raw = ingress.reserve("raw", ObserverMode::Raw).unwrap();
+        ingress.publish_committed("raw");
+        ingress.cancel("raw");
+        let AttachedObserver::Raw { outcome } = raw.attached().await.unwrap() else {
+            panic!("raw registration received the wrong observer type");
+        };
+        assert!(matches!(
+            outcome.await.unwrap(),
+            SupervisedOutcome::Cancelled
+        ));
+
+        let sse = ingress
+            .reserve("sse", ObserverMode::Sse(SseCompletionPayload::Full))
+            .unwrap();
+        ingress.publish_committed("sse");
+        ingress.cancel("sse");
+        let AttachedObserver::Sse { mut messages } = sse.attached().await.unwrap() else {
+            panic!("SSE registration received the wrong observer type");
+        };
+        let Some(SseMessage::Error(error)) = messages.recv().await else {
+            panic!("cancelled SSE observer must receive a terminal error");
+        };
+        assert_eq!(
+            error.code.as_deref(),
+            Some(mold_core::SSE_ERROR_CODE_QUEUED_CANCELLED)
+        );
     }
 }

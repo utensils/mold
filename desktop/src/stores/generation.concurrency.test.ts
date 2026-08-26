@@ -321,7 +321,7 @@ describe("submitBatch connection cap", () => {
     },
   );
 
-  it("admits singleton and Batch N durably without held generation streams", async () => {
+  it("admits singleton and chunks Batch N without held generation streams", async () => {
     const store = useGenerationStore();
     const hosts = useHostsStore();
     hosts.extras = [
@@ -364,8 +364,9 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatch: true,
-      heterogeneousBatchMaxOutputs: 64,
+      heterogeneousBatchMaxOutputs: 2,
       durableBatchOutcomes: true,
+      admissionProtocolVersion: 2,
       mirrorRemoteOutput: false,
     };
 
@@ -377,9 +378,12 @@ describe("submitBatch connection cap", () => {
     expect(batch.jobs.map((job) => job.id)).toEqual([
       "job-2-1",
       "job-2-2",
-      "job-2-3",
-      "job-2-4",
-      "job-2-5",
+      "job-3-1",
+      "job-3-2",
+      "job-4-1",
+    ]);
+    expect(durableApi.admit.mock.calls.map((call) => call[1].requests.length)).toEqual([
+      1, 2, 2, 1,
     ]);
     expect(mockSse).not.toHaveBeenCalled();
   });

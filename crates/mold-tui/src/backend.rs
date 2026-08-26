@@ -1,15 +1,19 @@
 use std::sync::Arc;
 
+#[cfg(test)]
+use mold_core::ServerCapabilities;
 use mold_core::{
     classify_generate_error, download::DownloadProgressEvent, ChainRequest, GenerateRequest,
-    GenerateResponse, GenerateServerAction, LoraWeight, MoldClient, PromptExpander,
-    PromptTransformOperation, RemixRequest, RemixResponse, RemixVariant, SseProgressEvent,
+    GenerateResponse, GenerateServerAction, GenerationBatchAdmissionRequest,
+    GenerationBatchChildState, GenerationBatchStatus, GenerationBatchStatusRequest, LoraWeight,
+    MoldClient, PromptExpander, PromptTransformOperation, RemixRequest, RemixResponse,
+    RemixVariant, SseProgressEvent,
 };
 use tokio::sync::mpsc;
 
 use crate::app::{
-    BackgroundEvent, GenerateParams, GenerationMetadataSnapshot, InferenceMode,
-    PromptTransformSnapshot,
+    BackgroundEvent, DurableGenerationChildOutcome, GenerateParams, GenerationMetadataSnapshot,
+    InferenceMode, PromptTransformSnapshot,
 };
 
 /// Prepare reviewable Expand/Remix alternatives without queueing generation.
@@ -198,6 +202,34 @@ pub async fn run_generation(
         prepared_prompts.len() as u32
     };
     let base_seed = params.seed;
+
+    if batch > 1 && params.inference_mode != InferenceMode::Local {
+        let effective_url = params.host.clone().or_else(|| server_url.clone());
+        if let Some(url) = effective_url {
+            let client = crate::hosts::client_for(&url, api_key.as_deref());
+            match try_canonical_remote_batch(CanonicalBatchInput {
+                client: &client,
+                params: &params,
+                prompt: &prompt,
+                negative_prompt: &negative_prompt,
+                prepared_prompts: &prepared_prompts,
+                prepared_transforms: &prepared_transforms,
+                batch,
+                base_seed,
+                tx: &tx,
+            })
+            .await
+            {
+                CanonicalBatchResult::Done => return,
+                CanonicalBatchResult::Unsupported => {}
+                CanonicalBatchResult::Error(error) => {
+                    let _ = tx.send(BackgroundEvent::Error(error));
+                    return;
+                }
+            }
+        }
+    }
+
     let prepared_batch_id =
         (!prepared_prompts.is_empty()).then(|| format!("remix-{:032x}", rand::random::<u128>()));
 
@@ -575,6 +607,268 @@ enum ServerResult {
     Done,
     FallbackLocal,
     Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CanonicalBatchResult {
+    Done,
+    Unsupported,
+    Error(String),
+}
+
+fn new_client_batch_id() -> String {
+    let mut bytes: [u8; 16] = rand::random();
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+    )
+}
+
+fn build_batch_requests(
+    params: &GenerateParams,
+    prompt: &str,
+    negative_prompt: &Option<String>,
+    prepared_prompts: &[String],
+    prepared_transforms: &[mold_core::PromptTransformProvenance],
+    batch: u32,
+    base_seed: Option<u64>,
+) -> Result<Vec<GenerateRequest>, String> {
+    let mut requests = Vec::with_capacity(batch as usize);
+    for index in 0..batch {
+        let mut child = params.clone();
+        child.batch = 1;
+        child.prepared_prompts.clear();
+        child.prepared_prompt_transforms.clear();
+        child.seed = base_seed.map(|seed| seed.wrapping_add(index as u64));
+        let child_prompt = prepared_prompts
+            .get(index as usize)
+            .map(String::as_str)
+            .unwrap_or(prompt);
+        if let Some(transform) = prepared_transforms.get(index as usize) {
+            child.prompt_transform = Some(transform.clone());
+        }
+        let mut request = build_request(&child, child_prompt, negative_prompt)?;
+        request.batch_size = 1;
+        requests.push(request);
+    }
+    Ok(requests)
+}
+
+async fn admit_or_recover_batch(
+    client: &MoldClient,
+    request: &GenerationBatchAdmissionRequest,
+) -> Result<GenerationBatchStatus, String> {
+    match client.admit_generation_batch(request).await {
+        Ok(status) => Ok(status),
+        Err(admit_error) => {
+            let mut last_lookup_error = None;
+            for attempt in 0..5 {
+                match client
+                    .generation_batch_by_client_id(&request.client_batch_id)
+                    .await
+                {
+                    Ok(Some(status)) => return Ok(status),
+                    Ok(None) => {
+                        return Err(format!(
+                            "durable batch admission failed before acceptance: {admit_error}"
+                        ));
+                    }
+                    Err(error) => last_lookup_error = Some(error),
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250 * (attempt + 1))).await;
+            }
+            Err(format!(
+                "durable batch admission is uncertain for {}: {admit_error}; recovery lookup failed: {}",
+                request.client_batch_id,
+                last_lookup_error
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "unknown lookup error".to_string())
+            ))
+        }
+    }
+}
+
+fn batch_child_is_settled(state: &GenerationBatchChildState) -> bool {
+    matches!(
+        state,
+        GenerationBatchChildState::Complete
+            | GenerationBatchChildState::Failed
+            | GenerationBatchChildState::Cancelled
+            | GenerationBatchChildState::Held
+    )
+}
+
+fn batch_child_state_label(state: &GenerationBatchChildState) -> &'static str {
+    match state {
+        GenerationBatchChildState::Accepted => "accepted",
+        GenerationBatchChildState::Running => "running",
+        GenerationBatchChildState::Complete => "complete",
+        GenerationBatchChildState::Failed => "failed",
+        GenerationBatchChildState::Cancelled => "cancelled",
+        GenerationBatchChildState::Held => "held",
+    }
+}
+
+struct CanonicalBatchInput<'a> {
+    client: &'a MoldClient,
+    params: &'a GenerateParams,
+    prompt: &'a str,
+    negative_prompt: &'a Option<String>,
+    prepared_prompts: &'a [String],
+    prepared_transforms: &'a [mold_core::PromptTransformProvenance],
+    batch: u32,
+    base_seed: Option<u64>,
+    tx: &'a mpsc::UnboundedSender<BackgroundEvent>,
+}
+
+async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> CanonicalBatchResult {
+    let requests = match build_batch_requests(
+        input.params,
+        input.prompt,
+        input.negative_prompt,
+        input.prepared_prompts,
+        input.prepared_transforms,
+        input.batch,
+        input.base_seed,
+    ) {
+        Ok(requests) => requests,
+        Err(error) => return CanonicalBatchResult::Error(error),
+    };
+    let capabilities = match input.client.capabilities().await {
+        Ok(capabilities) => capabilities,
+        Err(_) => return CanonicalBatchResult::Unsupported,
+    };
+    let Some(chunk_limit) = capabilities.canonical_generation_batch_limit(&requests) else {
+        return CanonicalBatchResult::Unsupported;
+    };
+
+    let mut admitted = Vec::new();
+    for (chunk_index, chunk) in requests.chunks(chunk_limit).enumerate() {
+        let request = GenerationBatchAdmissionRequest {
+            client_batch_id: new_client_batch_id(),
+            requests: chunk.to_vec(),
+        };
+        let status = match admit_or_recover_batch(input.client, &request).await {
+            Ok(status) => status,
+            Err(error) => return CanonicalBatchResult::Error(error),
+        };
+        let first = chunk_index * chunk_limit + 1;
+        let last = first + chunk.len() - 1;
+        let _ = input
+            .tx
+            .send(BackgroundEvent::Progress(SseProgressEvent::Info {
+                message: format!("Durably accepted batch {first}-{last}"),
+            }));
+        admitted.push((first as u32 - 1, status));
+    }
+
+    let client_batch_ids = admitted
+        .iter()
+        .map(|(_, status)| status.client_batch_id.clone())
+        .collect::<Vec<_>>();
+    let offsets = admitted
+        .iter()
+        .map(|(offset, status)| (status.client_batch_id.clone(), *offset))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut statuses = admitted
+        .into_iter()
+        .map(|(_, status)| (status.client_batch_id.clone(), status))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut observed = std::collections::HashMap::<String, GenerationBatchChildState>::new();
+    let mut consecutive_errors = 0u8;
+
+    loop {
+        if statuses
+            .values()
+            .flat_map(|status| &status.children)
+            .all(|child| batch_child_is_settled(&child.state))
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        let request = GenerationBatchStatusRequest {
+            client_batch_ids: client_batch_ids.clone(),
+            batch_ids: Vec::new(),
+        };
+        match input.client.generation_batch_statuses(&request).await {
+            Ok(response) => {
+                consecutive_errors = 0;
+                if !response.missing.client_batch_ids.is_empty() {
+                    return CanonicalBatchResult::Error(format!(
+                        "server lost durable batch identities: {}",
+                        response.missing.client_batch_ids.join(", ")
+                    ));
+                }
+                for status in response.batches {
+                    for child in &status.children {
+                        let changed = observed.get(&child.job_id) != Some(&child.state);
+                        if changed {
+                            observed.insert(child.job_id.clone(), child.state.clone());
+                            let offset = offsets.get(&status.client_batch_id).copied().unwrap_or(0);
+                            let _ =
+                                input
+                                    .tx
+                                    .send(BackgroundEvent::Progress(SseProgressEvent::Info {
+                                        message: format!(
+                                            "Batch {} {}",
+                                            offset + child.index,
+                                            batch_child_state_label(&child.state)
+                                        ),
+                                    }));
+                        }
+                    }
+                    statuses.insert(status.client_batch_id.clone(), status);
+                }
+            }
+            Err(error) => {
+                consecutive_errors = consecutive_errors.saturating_add(1);
+                if consecutive_errors >= 5 {
+                    return CanonicalBatchResult::Error(format!(
+                        "durable batch remains queued but reconciliation failed: {error}; client ids: {}",
+                        client_batch_ids.join(", ")
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut outcomes = Vec::new();
+    for (client_batch_id, status) in statuses {
+        let offset = offsets.get(&client_batch_id).copied().unwrap_or(0);
+        for child in status.children {
+            let result = child.result.unwrap_or(mold_core::GenerationBatchResult {
+                filename: None,
+                original_filename: None,
+            });
+            let error = match child.state {
+                GenerationBatchChildState::Complete
+                    if result.filename.is_none() && result.original_filename.is_none() =>
+                {
+                    Some("completed without a durable gallery filename".to_string())
+                }
+                GenerationBatchChildState::Complete => None,
+                _ => Some(child.error.unwrap_or_else(|| {
+                    format!("generation {}", batch_child_state_label(&child.state))
+                })),
+            };
+            outcomes.push(DurableGenerationChildOutcome {
+                index: offset + child.index,
+                job_id: child.job_id,
+                filename: result.filename,
+                original_filename: result.original_filename,
+                error,
+                retryable: child.retryable.unwrap_or(false),
+            });
+        }
+    }
+    outcomes.sort_by_key(|outcome| outcome.index);
+    let _ = input
+        .tx
+        .send(BackgroundEvent::DurableGenerationBatchComplete { outcomes });
+    CanonicalBatchResult::Done
 }
 
 fn requires_secure_generation_stream(req: &GenerateRequest) -> bool {
@@ -1378,6 +1672,139 @@ pub fn remove_model(model_name: String, tx: mpsc::UnboundedSender<BackgroundEven
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn canonical_batch_capabilities(limit: u32) -> ServerCapabilities {
+        let mut capabilities = ServerCapabilities::default();
+        capabilities.queue.heterogeneous_batch = true;
+        capabilities.queue.durable_batch_outcomes = true;
+        capabilities.queue.admission_protocol_version = Some(2);
+        capabilities.queue.heterogeneous_batch_max_outputs = Some(limit);
+        capabilities.durable_media = Some(mold_core::DurableMediaCapabilities::v2(false));
+        capabilities
+    }
+
+    fn ordinary_request() -> GenerateRequest {
+        let config = mold_core::Config::default();
+        build_request(&GenerateParams::from_config(&config), "print", &None).unwrap()
+    }
+
+    #[test]
+    fn canonical_batch_gate_requires_the_complete_versioned_contract() {
+        let request = ordinary_request();
+        let mut capabilities = canonical_batch_capabilities(17);
+        assert_eq!(
+            capabilities.canonical_generation_batch_limit(std::slice::from_ref(&request)),
+            Some(17)
+        );
+
+        capabilities.queue.admission_protocol_version = Some(1);
+        assert_eq!(
+            capabilities.canonical_generation_batch_limit(std::slice::from_ref(&request)),
+            None
+        );
+        capabilities.queue.admission_protocol_version = Some(3);
+        capabilities.queue.durable_batch_outcomes = false;
+        assert_eq!(
+            capabilities.canonical_generation_batch_limit(std::slice::from_ref(&request)),
+            None
+        );
+        capabilities.queue.durable_batch_outcomes = true;
+        capabilities.queue.heterogeneous_batch_max_outputs = None;
+        assert_eq!(
+            capabilities.canonical_generation_batch_limit(&[request]),
+            None
+        );
+    }
+
+    #[test]
+    fn canonical_batch_gate_uses_media_capabilities_and_preserves_attached_fallbacks() {
+        let capabilities = canonical_batch_capabilities(64);
+        let mut source = ordinary_request();
+        source.source_image = Some(vec![1, 2, 3]);
+        assert_eq!(
+            capabilities.canonical_generation_batch_limit(std::slice::from_ref(&source)),
+            Some(64)
+        );
+
+        let mut no_media = capabilities.clone();
+        no_media.durable_media = None;
+        assert_eq!(
+            no_media.canonical_generation_batch_limit(&[source.clone()]),
+            None
+        );
+
+        source.lora = Some(LoraWeight {
+            path: "adapter.safetensors".into(),
+            scale: 1.0,
+            expert: None,
+        });
+        assert_eq!(
+            capabilities.canonical_generation_batch_limit(&[source]),
+            None
+        );
+
+        let mut references = ordinary_request();
+        references.references = Some(Vec::new());
+        assert_eq!(
+            capabilities.canonical_generation_batch_limit(&[references]),
+            None
+        );
+
+        let mut hdr = ordinary_request();
+        hdr.hdr_exr_dir = Some("/trusted/output".into());
+        assert_eq!(capabilities.canonical_generation_batch_limit(&[hdr]), None);
+    }
+
+    #[test]
+    fn batch_request_builder_freezes_order_prompts_and_singleton_seeds() {
+        let config = mold_core::Config::default();
+        let mut params = GenerateParams::from_config(&config);
+        params.batch = 3;
+        params.seed = Some(u64::MAX - 1);
+        let prompts = vec![
+            "first".to_string(),
+            "second".to_string(),
+            "third".to_string(),
+        ];
+
+        let requests =
+            build_batch_requests(&params, "unused", &None, &prompts, &[], 3, params.seed).unwrap();
+
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second", "third"]
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.seed)
+                .collect::<Vec<_>>(),
+            vec![Some(u64::MAX - 1), Some(u64::MAX), Some(0)]
+        );
+        assert!(requests.iter().all(|request| request.batch_size == 1));
+    }
+
+    #[test]
+    fn client_batch_ids_are_uuid_v4_shaped_and_unique() {
+        let first = new_client_batch_id();
+        let second = new_client_batch_id();
+        assert_ne!(first, second);
+        assert_eq!(first.len(), 36);
+        assert_eq!(&first[14..15], "4");
+        assert!(matches!(&first[19..20], "8" | "9" | "a" | "b"));
+        assert_eq!(
+            first
+                .chars()
+                .enumerate()
+                .filter(|(_, ch)| *ch == '-')
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>(),
+            vec![8, 13, 18, 23]
+        );
+    }
 
     #[test]
     fn license_requirements_group_future_terms_by_install_bundle() {

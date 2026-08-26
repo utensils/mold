@@ -1379,7 +1379,7 @@ impl QueueJournal {
         if outcome == generation_batches::OwnedCancellation::Settled {
             self.cleanup_media_candidate(candidate);
             if let Some(service) = self.queue_media_admission.get() {
-                service.ingress().discard_hint(id);
+                service.ingress().cancel(id);
             }
             self.publish_state_committed(id);
         }

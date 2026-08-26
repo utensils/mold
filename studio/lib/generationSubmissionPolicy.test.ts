@@ -7,6 +7,7 @@ import {
 
 const legacyQueue = {
   heterogeneous_batch: true,
+  heterogeneous_batch_max_outputs: 64,
   durable_batch_outcomes: true,
 };
 
@@ -61,6 +62,37 @@ describe("generation submission policy", () => {
       ["hal", "telemetry_only"],
       ["studio", "telemetry_only"],
     ]);
+  });
+
+  it("keeps request traits outside protocol v2 on the attached transport", () => {
+    const cases = [
+      { model: "flux-dev", hdr_exr_dir: "/private/hdr" },
+      { model: "flux-dev", source_image: "frame", lora: "local.safetensors" },
+      {
+        model: "flux-dev",
+        source_image: "frame",
+        loras: [{ path: "local.safetensors" }],
+      },
+      { model: "minimax-h3-ref2va", references: [{ image: "frame" }] },
+    ];
+    for (const request of cases) {
+      const host = canonicalHost("hal", {
+        durableMedia: {
+          ...canonicalHost("hal").durableMedia!,
+          h3_references: false,
+        },
+      });
+      expect(
+        planGenerationSubmission({
+          target: { kind: "pinned", hostId: "hal" },
+          hosts: [host],
+          request,
+        }).hosts[0],
+      ).toMatchObject({
+        compatibility: "legacy",
+        admission: "legacy_attached",
+      });
+    }
   });
 
   it("keeps old and incompletely capable hosts on explicit legacy paths", () => {

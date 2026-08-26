@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ApiTarget } from "./client";
 import {
+  canonicalGenerationBatchLimit,
+  chunkGenerationBatchRequests,
   admitGenerationBatch,
   getGenerationBatch,
   lookupGenerationBatchByClientId,
@@ -319,5 +321,29 @@ describe("durable generation admission API", () => {
         missing: { client_batch_ids: [], batch_ids: [] },
       }),
     ).toThrow("duplicates a client batch");
+  });
+
+  it("derives the canonical limit and chunks without changing request order", () => {
+    const queue = {
+      heterogeneous_batch: true,
+      heterogeneous_batch_max_outputs: 2,
+      durable_batch_outcomes: true,
+      admission_protocol_version: 2,
+    };
+    expect(canonicalGenerationBatchLimit(queue)).toBe(2);
+    expect(chunkGenerationBatchRequests([1, 2, 3, 4, 5], 2)).toEqual([
+      [1, 2],
+      [3, 4],
+      [5],
+    ]);
+    expect(() => chunkGenerationBatchRequests([1], 0)).toThrow(
+      "positive integer",
+    );
+    expect(
+      canonicalGenerationBatchLimit({
+        ...queue,
+        admission_protocol_version: 1,
+      }),
+    ).toBeNull();
   });
 });

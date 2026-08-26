@@ -1369,7 +1369,8 @@ fn private_ingress_partition_identity_sha256(task: mold_core::minimax_h3::Task) 
 
 #[cfg(any(test, feature = "h3", feature = "h3-private-uat"))]
 fn request_authority_sha256(request: &mold_core::GenerateRequest) -> Result<String, String> {
-    let mut canonical = request.clone();
+    let mut canonical =
+        crate::queue_media_runtime::ZeroizingGenerateRequest::from_owned(request.clone());
     if canonical.audio_file_path.is_some() {
         canonical.audio_file_path = Some("<durable-media:audio-file-path>".into());
     }
@@ -1379,7 +1380,7 @@ fn request_authority_sha256(request: &mold_core::GenerateRequest) -> Result<Stri
     if canonical.extend_video_path.is_some() {
         canonical.extend_video_path = Some("<durable-media:extend-video-path>".into());
     }
-    let serialized = zeroize::Zeroizing::new(serde_json::to_vec(&canonical).map_err(|error| {
+    let serialized = zeroize::Zeroizing::new(serde_json::to_vec(&*canonical).map_err(|error| {
         format!("MiniMax H3 request authority could not be serialized: {error}")
     })?);
     Ok(ingress_digest(

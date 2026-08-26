@@ -4771,12 +4771,10 @@ mod tests {
         assert_eq!(body["queue"]["can_pause"], true);
         assert_eq!(body["queue"]["can_cancel_all"], true);
         assert_eq!(body["queue"]["can_reorder"], true);
-        assert_eq!(body["queue"]["server_batch"], false);
         assert!(
             body.get("durable_media").is_none(),
             "the server must keep durable request-media capability dark until activation is complete"
         );
-        assert!(body["queue"]["server_batch_max_outputs"].is_null());
         assert_eq!(body["devices"]["available"], true);
         assert_eq!(body["devices"]["lifecycle"], true);
         assert_eq!(body["devices"]["restart_enable"], false);
@@ -4815,6 +4813,29 @@ mod tests {
             json_body(resp).await.get("durable_media").is_none(),
             "readiness without lifecycle/admission services must remain dark"
         );
+    }
+
+    #[tokio::test]
+    async fn capabilities_keep_canonical_admission_dark_when_media_reconciliation_is_dark() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        state.queue_journal.set_durable_media_ready(false);
+
+        let response = app_with_state(state)
+            .oneshot(
+                Request::get("/api/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert!(body.get("durable_media").is_none());
+        assert!(body["queue"]["admission_protocol_version"].is_null());
+        assert_eq!(body["queue"]["heterogeneous_batch"], false);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4958,11 +4979,6 @@ mod tests {
             assert_eq!(body["devices"]["stable_pins"], true, "{label}");
             assert_eq!(body["devices"]["planned_lanes"], false, "{label}");
             assert_eq!(body["devices"]["learned_eta"], false, "{label}");
-            assert_eq!(body["queue"]["server_batch"], false, "{label}");
-            assert!(
-                body["queue"]["server_batch_max_outputs"].is_null(),
-                "{label}"
-            );
         }
     }
 
@@ -5695,6 +5711,57 @@ mod tests {
         assert!(body.contains("event: complete"), "{body}");
         assert!(journal.list_all().is_empty());
         worker.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dark_media_services_refuse_media_before_direct_raw_or_sse_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        state.queue_journal.set_durable_media_ready(false);
+        let journal = state.queue_journal.clone();
+        let app = app_with_state(state);
+        let body: serde_json::Value =
+            serde_json::from_str(&durable_direct_media_body("dark media store")).unwrap();
+
+        for path in ["/api/generate", "/api/generate/stream"] {
+            let response = app
+                .clone()
+                .oneshot(json_request("POST", path, body.clone()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                json_body(response).await["code"],
+                "DURABLE_MEDIA_UNAVAILABLE"
+            );
+        }
+        assert!(journal.list_all().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unsupported_direct_traits_fallback_only_without_an_operation_id() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let mut request: GenerateRequest =
+            serde_json::from_str(&generate_body("attached fallback", 64, 64)).unwrap();
+        request.references = Some(Vec::new());
+
+        assert!(
+            crate::routes::direct_durable_admission(&state, &request, false)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let error = match crate::routes::direct_durable_admission(&state, &request, true).await {
+            Err(error) => error,
+            Ok(_) => panic!("an explicit durable operation must not downgrade"),
+        };
+        assert_eq!(error.code, "DURABLE_MEDIA_REFERENCES_UNSUPPORTED");
+        assert!(state.queue_journal.list_all().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6460,6 +6527,63 @@ mod tests {
             journal.list_all().is_empty(),
             "DELETE remains cancellation authority"
         );
+
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
+        drop(full_runtime);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_cancellation_resolves_the_attached_durable_sse() {
+        use futures::StreamExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        state.queue_capacity = 1;
+        install_authoritative_v2(&mut state);
+        let full_runtime = state
+            .queue
+            .try_reserve(state.queue_capacity)
+            .expect("test owns the only runtime slot");
+        let journal = state.queue_journal.clone();
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
+        let app = app_with_state(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .header("x-mold-operation-id", uuid::Uuid::new_v4().to_string())
+                    .body(Body::from(durable_direct_media_body("cancel before claim")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let job_id = journal.list_all()[0].id.clone();
+        let mut stream = response.into_body().into_data_stream();
+        let queued = stream.next().await.unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&queued).contains(&job_id));
+
+        let cancelled = app
+            .oneshot(
+                Request::delete(format!("/api/queue/{job_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::NO_CONTENT);
+        let terminal = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("cancellation must resolve the observer")
+            .expect("SSE terminal frame")
+            .unwrap();
+        let terminal = String::from_utf8_lossy(&terminal);
+        assert!(terminal.contains("queued_cancelled"), "{terminal}");
+        assert!(journal.list_all().is_empty());
 
         feeder_shutdown.cancel();
         feeder.await.unwrap();

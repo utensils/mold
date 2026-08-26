@@ -166,7 +166,12 @@ import {
   retryQueueJob,
   type QueueListing,
 } from "@studio/api/queuePlan";
-import { admitGenerationBatch, reconcileGenerationBatches } from "@studio/api/generationAdmission";
+import {
+  admitGenerationBatch,
+  canonicalGenerationBatchLimit,
+  chunkGenerationBatchRequests,
+  reconcileGenerationBatches,
+} from "@studio/api/generationAdmission";
 import {
   selectedQueueGeneration,
   watchSelectedQueuePreview,
@@ -3051,7 +3056,7 @@ async function reconcileMobileDurableHost(
   return task;
 }
 
-async function submitMobileDurableGeneration(input: {
+async function submitMobileDurableGenerationChunk(input: {
   route: HostRoute;
   requests: GenerateRequest[];
 }): Promise<void> {
@@ -3124,6 +3129,24 @@ async function submitMobileDurableGeneration(input: {
   } else if (recovery.tracker.admission.phase === "rejected") {
     setGenerationStatus(recovery.tracker.admission.error ?? "Generation was not accepted", true);
   }
+}
+
+async function submitMobileDurableGeneration(input: {
+  route: HostRoute;
+  requests: GenerateRequest[];
+}): Promise<void> {
+  const limit = canonicalGenerationBatchLimit({
+    heterogeneous_batch: input.route.heterogeneousBatch === true,
+    heterogeneous_batch_max_outputs: input.route.heterogeneousBatchMaxOutputs ?? null,
+    durable_batch_outcomes: input.route.durableBatchOutcomes === true,
+    admission_protocol_version: input.route.admissionProtocolVersion ?? null,
+  });
+  if (limit === null) throw new Error("This host does not support durable generation admission.");
+  await Promise.all(
+    chunkGenerationBatchRequests(input.requests, limit).map((requests) =>
+      submitMobileDurableGenerationChunk({ route: input.route, requests }),
+    ),
+  );
 }
 
 function loadHosts(): MobileHost[] {
@@ -5954,6 +5977,7 @@ async function generate(): Promise<void> {
     useMobileDurableGenerationLifecycle({
       queue: {
         heterogeneous_batch: route.heterogeneousBatch === true,
+        heterogeneous_batch_max_outputs: route.heterogeneousBatchMaxOutputs ?? null,
         durable_batch_outcomes: route.durableBatchOutcomes === true,
         admission_protocol_version: route.admissionProtocolVersion ?? null,
       },

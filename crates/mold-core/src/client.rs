@@ -8,10 +8,12 @@ use crate::types::{
     AudioData, Collection, CollectionCreateRequest, CollectionItemsRequest,
     CollectionUpdateRequest, DeviceState, EmptyTrashResult, ExpandRequest, ExpandResponse,
     GalleryImage, GalleryOrganizeRequest, GalleryPatchRequest, GenerateRequest, GenerateResponse,
-    ImageData, LoraInfo, ModelInfo, ModelInfoExtended, OutputFormat, QueueListingWire,
-    ReferenceUploadCompleteResponse, ReferenceUploadSessionRequest, ReferenceUploadSessionResponse,
-    ServerStatus, SseCompleteEvent, SseErrorEvent, SseProgressEvent, TagCount, TagRenameRequest,
-    TrashFilenamesRequest, TrashSweepResult, VideoData,
+    GenerationBatchAdmissionRequest, GenerationBatchStatus, GenerationBatchStatusRequest,
+    GenerationBatchStatusResponse, ImageData, LoraInfo, ModelInfo, ModelInfoExtended, OutputFormat,
+    QueueListingWire, ReferenceUploadCompleteResponse, ReferenceUploadSessionRequest,
+    ReferenceUploadSessionResponse, ServerStatus, SseCompleteEvent, SseErrorEvent,
+    SseProgressEvent, TagCount, TagRenameRequest, TrashFilenamesRequest, TrashSweepResult,
+    VideoData,
 };
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -52,6 +54,17 @@ pub struct MoldClient {
 /// holding the socket — would otherwise strand the original SSE error and the
 /// caller would never learn the stream failed at all.
 const RETENTION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
+fn require_direct_singleton(req: &GenerateRequest) -> Result<()> {
+    if req.batch_size != 1 {
+        return Err(MoldError::Validation(
+            "direct generation accepts batch_size = 1; use durable generation-batch admission for multiple outputs"
+                .to_string(),
+        )
+        .into());
+    }
+    Ok(())
+}
 
 /// An admitted generation plus the in-flight answer to "did the host journal
 /// THIS job?". Held only while a stream is open; read only if that stream dies
@@ -309,14 +322,16 @@ impl MoldClient {
     /// The server returns raw bytes, not JSON — callers are responsible for
     /// writing the bytes to disk or further processing.
     pub async fn generate_raw(&self, req: &GenerateRequest) -> Result<Vec<u8>> {
+        require_direct_singleton(req)?;
         let wire_req = crate::prompt_text::protect_generate_request_for_wire(req);
-        let bytes = self
+        let response = self
             .client
             .post(format!("{}/api/generate", self.base_url))
             .json(&wire_req)
             .send()
+            .await?;
+        let bytes = require_direct_media_response(response)
             .await?
-            .error_for_status()?
             .bytes()
             .await?
             .to_vec();
@@ -328,6 +343,7 @@ impl MoldClient {
     /// For video responses the server sends `x-mold-video-*` metadata headers
     /// alongside the raw video bytes so we can reconstruct [`VideoData`].
     pub async fn generate(&self, req: GenerateRequest) -> Result<GenerateResponse> {
+        require_direct_singleton(&req)?;
         let fallback_seed = req.seed.unwrap_or(0);
         let width = req.width;
         let height = req.height;
@@ -341,8 +357,8 @@ impl MoldClient {
             .post(format!("{}/api/generate", self.base_url))
             .json(&wire_req)
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        let resp = require_direct_media_response(resp).await?;
 
         // Read the seed the server actually used from the response header.
         // Fall back to the request seed for backward compat with older servers.
@@ -571,6 +587,7 @@ impl MoldClient {
         req: &GenerateRequest,
         progress_tx: tokio::sync::mpsc::UnboundedSender<SseProgressEvent>,
     ) -> Result<Option<GenerateResponse>> {
+        require_direct_singleton(req)?;
         let wire_req = crate::prompt_text::protect_generate_request_for_wire(req);
         let mut resp = self
             .client
@@ -1316,6 +1333,104 @@ impl MoldClient {
         self.server_capabilities().await
     }
 
+    /// Durably admit one ordered set of independently executing singleton
+    /// requests. `client_batch_id` is the caller's idempotency key.
+    pub async fn admit_generation_batch(
+        &self,
+        request: &GenerationBatchAdmissionRequest,
+    ) -> Result<GenerationBatchStatus> {
+        let response = self
+            .client
+            .post(format!("{}/api/generation-batches", self.base_url))
+            .json(request)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(response)
+            .await?
+            .json::<GenerationBatchStatus>()
+            .await?)
+    }
+
+    /// Resolve an ambiguous admission response using the caller-owned
+    /// idempotency key. A genuine 404 is represented as `None`.
+    pub async fn generation_batch_by_client_id(
+        &self,
+        client_batch_id: &str,
+    ) -> Result<Option<GenerationBatchStatus>> {
+        let response = self
+            .client
+            .get(format!(
+                "{}/api/generation-batches/by-client/{}",
+                self.base_url,
+                encode_path_segment(client_batch_id)
+            ))
+            .send()
+            .await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(
+            error_for_status_with_body(response)
+                .await?
+                .json::<GenerationBatchStatus>()
+                .await?,
+        ))
+    }
+
+    /// Read one durable generation batch by server-assigned id.
+    pub async fn generation_batch(&self, id: &str) -> Result<Option<GenerationBatchStatus>> {
+        let response = self
+            .client
+            .get(format!(
+                "{}/api/generation-batches/{}",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(
+            error_for_status_with_body(response)
+                .await?
+                .json::<GenerationBatchStatus>()
+                .await?,
+        ))
+    }
+
+    /// Reconcile a bounded set of durable generation batches in one request.
+    pub async fn generation_batch_statuses(
+        &self,
+        request: &GenerationBatchStatusRequest,
+    ) -> Result<GenerationBatchStatusResponse> {
+        let response = self
+            .client
+            .post(format!("{}/api/generation-batches/status", self.base_url))
+            .json(request)
+            .send()
+            .await?;
+        Ok(error_for_status_with_body(response)
+            .await?
+            .json::<GenerationBatchStatusResponse>()
+            .await?)
+    }
+
+    /// Return a retryable held generation child to the durable queue.
+    pub async fn retry_queue_job(&self, id: &str) -> Result<()> {
+        let response = self
+            .client
+            .post(format!(
+                "{}/api/queue/{}/retry",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        error_for_status_with_body(response).await?;
+        Ok(())
+    }
+
     /// Enable or disable one stable device. The server may return a draining
     /// or starting state while the owner transition completes.
     pub async fn set_device_enabled(
@@ -1966,6 +2081,18 @@ async fn error_for_status_with_body(resp: reqwest::Response) -> Result<reqwest::
         anyhow::bail!("server error {status}: {body}");
     }
     Ok(resp)
+}
+
+async fn require_direct_media_response(resp: reqwest::Response) -> Result<reqwest::Response> {
+    if resp.status() == StatusCode::ACCEPTED {
+        let status = resp.json::<GenerationBatchStatus>().await?;
+        anyhow::bail!(
+            "durable generation was accepted but its direct observer detached; reconcile batch {} or client operation {}",
+            status.id,
+            status.client_batch_id
+        );
+    }
+    error_for_status_with_body(resp).await
 }
 
 fn api_error_detail(body: &str) -> String {
@@ -4059,5 +4186,137 @@ mod tests {
         // …and it stays off the wire when the response is re-serialized.
         let wire = serde_json::to_value(&response).unwrap();
         assert!(wire.get("request_warnings").is_none(), "{wire}");
+    }
+
+    #[tokio::test]
+    async fn direct_generation_clients_reject_batches_before_network() {
+        let server = wiremock::MockServer::start().await;
+        let client = MoldClient::new(&server.uri());
+        let mut request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"two cats","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        request.batch_size = 2;
+
+        let raw = client.generate_raw(&request).await.unwrap_err().to_string();
+        let blocking = client
+            .generate(request.clone())
+            .await
+            .unwrap_err()
+            .to_string();
+        let (progress, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let streaming = client
+            .generate_stream(&request, progress)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        for error in [raw, blocking, streaming] {
+            assert!(error.contains("batch_size = 1"), "{error}");
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn direct_generation_surfaces_detached_durable_authority() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "id": "batch-detached",
+                "client_batch_id": "operation-detached",
+                "instance_id": "instance-1",
+                "durable": true,
+                "children": [{
+                    "index": 1,
+                    "job_id": "job-1",
+                    "state": "accepted",
+                    "created_at_ms": 10,
+                    "updated_at_ms": 11
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+
+        let error = MoldClient::new(&server.uri())
+            .generate_raw(&request)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("batch-detached"), "{error}");
+        assert!(error.contains("operation-detached"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn durable_generation_batch_methods_preserve_typed_ids_and_routes() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        let admission = GenerationBatchAdmissionRequest {
+            client_batch_id: "00000000-0000-4000-8000-000000000001".into(),
+            requests: vec![request],
+        };
+        let status = serde_json::json!({
+            "id": "batch-1",
+            "client_batch_id": admission.client_batch_id,
+            "instance_id": "instance-1",
+            "durable": true,
+            "children": [{
+                "index": 1,
+                "job_id": "job-1",
+                "state": "accepted",
+                "created_at_ms": 1,
+                "updated_at_ms": 1
+            }]
+        });
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .and(body_json(&admission))
+            .respond_with(ResponseTemplate::new(202).set_body_json(&status))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/api/generation-batches/by-client/{}",
+                admission.client_batch_id
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&status))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/queue/job-1/retry"))
+            .respond_with(ResponseTemplate::new(202))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let admitted = client.admit_generation_batch(&admission).await.unwrap();
+        assert_eq!(admitted.id, "batch-1");
+        assert_eq!(
+            client
+                .generation_batch_by_client_id(&admission.client_batch_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .children[0]
+                .job_id,
+            "job-1"
+        );
+        client.retry_queue_job("job-1").await.unwrap();
     }
 }

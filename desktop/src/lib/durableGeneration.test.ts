@@ -71,7 +71,11 @@ describe("desktop durable generation recovery", () => {
   });
 
   it("uses canonical v2 transport for H3 and future durable-media protocols", () => {
-    const canonicalQueue = { ...queue, admission_protocol_version: 2 };
+    const canonicalQueue = {
+      ...queue,
+      heterogeneous_batch_max_outputs: 64,
+      admission_protocol_version: 2,
+    };
     const futureMedia = {
       ...durableMedia,
       protocol_version: 3,

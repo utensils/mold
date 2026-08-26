@@ -330,6 +330,11 @@ conditioning names the work as stale, and `/api/expand` receives only the task,
 never source media bytes.
 Once the host accepts the batch, the composer is immediately available to
 prepare another while earlier siblings remain queued or running.
+On a protocol-v2 host, that acceptance is one durable
+`POST /api/generation-batches` operation of ordered singleton children; larger
+sets are chunked at the advertised limit without changing global sibling
+provenance. Held children survive app/server restarts and remain visible with
+their error and retry action. Legacy hosts retain singleton stream fan-out.
 After source preprocessing, Create performs one read-only placement preview for
 the finalized sibling shape (`batch_size: 1`, `copies: N`) on that exact frozen
 route. A URL, Keychain key, or instance change, an authoritative infeasible

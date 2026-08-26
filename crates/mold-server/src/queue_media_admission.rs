@@ -504,7 +504,9 @@ pub(crate) fn request_has_durable_media(request: &mold_core::GenerateRequest) ->
     crate::queue_media::request_has_extractable_media(request)
 }
 
-fn durable_media_preflight(request: &mold_core::GenerateRequest) -> Result<(), ApiError> {
+pub(crate) fn durable_media_preflight(
+    request: &mold_core::GenerateRequest,
+) -> Result<(), ApiError> {
     if request_has_durable_media(request)
         && !crate::queue_media_store::QueueMediaStore::supports_mixed_hydration()
     {
