@@ -11212,6 +11212,13 @@ mod tests {
             spec["paths"]["/api/generate/placement-preview"]["post"].is_object(),
             "spec should document POST /api/generate/placement-preview"
         );
+        // A route installed on the router but missing from `ApiDoc`'s paths
+        // list is invisible to generated clients and API discovery — the
+        // `#[utoipa::path]` annotation alone does not register it.
+        assert!(
+            spec["paths"]["/api/queue/held/sweep"]["post"].is_object(),
+            "spec should document POST /api/queue/held/sweep"
+        );
         assert!(
             spec["paths"]["/api/generate/reference-upload-sessions"]["post"].is_object(),
             "spec should document reference upload session creation"
