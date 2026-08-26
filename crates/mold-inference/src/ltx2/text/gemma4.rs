@@ -389,8 +389,13 @@ impl Gemma4HiddenStateEncoder {
         mold_core::ltx25_probe::probe_ltx25_gemma(path).with_context(|| {
             format!("incompatible LTX-2.5 Gemma 4 encoder '{}'", path.display())
         })?;
-        let vb: VarBuilder<'static> = unsafe {
-            VarBuilder::from_mmaped_safetensors(std::slice::from_ref(path), dtype, device)?
+        let vb: VarBuilder<'static> = if super::super::convrot::checkpoint_is_convrot_w4a4(path) {
+            let backend = super::super::convrot::Ltx2ConvRotBackend::from_flattened_path(path)?;
+            VarBuilder::from_backend(Box::new(backend), dtype, device.clone())
+        } else {
+            unsafe {
+                VarBuilder::from_mmaped_safetensors(std::slice::from_ref(path), dtype, device)?
+            }
         };
         Self::new_streaming(Gemma4Config::ltx_12b(), vb)
     }

@@ -6875,10 +6875,10 @@ fn load_ltx2_av_transformer_with_loras_inner(
     let checkpoint_is_nvfp4 = super::nvfp4::checkpoint_is_nvfp4(checkpoint_path);
     let checkpoint_is_convrot =
         !checkpoint_is_nvfp4 && super::convrot::checkpoint_is_convrot_w4a4(checkpoint_path);
-    // ConvRot stores packed INT4 rows but the compatibility backend reconstructs
-    // BF16 weights. Header byte sizes therefore cannot safely drive resident
-    // placement; stream blocks so the planner never prices packed bytes as GPU
-    // residency.
+    // Comfy ConvRot stores either full-shape INT8 or packed INT4 rows, while
+    // the portable Candle compatibility backend reconstructs BF16 weights.
+    // Header byte sizes therefore cannot safely drive resident placement;
+    // stream blocks so compact bytes are never priced as BF16 GPU residency.
     let force_streaming = ltx2_effective_force_streaming(force_streaming, checkpoint_is_convrot);
     // One header pass feeds both the fp8 probe and the residency sizing; the
     // packed backends read their own layout and don't consult it.

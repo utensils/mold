@@ -149,13 +149,14 @@ impl NativePromptEncoder {
             "loaded LTX-2 prompt encoder"
         );
         let (video_connector_prefix, audio_connector_prefix) = connector_prefixes(checkpoint_path)?;
-        let mut connector_paths = vec![checkpoint_path];
-        if let Some(path) = text_projection_path {
-            connector_paths.push(path);
-        }
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&connector_paths, dtype, device)? };
-        let embeddings_processor = build_embeddings_processor(
-            vb,
+        let connector_vb = embeddings_var_builder(checkpoint_path, dtype, device)?;
+        let projection_vb = text_projection_path
+            .map(|path| embeddings_var_builder(path, dtype, device))
+            .transpose()?
+            .unwrap_or_else(|| connector_vb.clone());
+        let embeddings_processor = build_embeddings_processor_from_sources(
+            projection_vb,
+            connector_vb,
             preset.feature_extractor,
             preset.gemma.hidden_size,
             preset.gemma.num_hidden_layers,
@@ -261,6 +262,23 @@ impl NativePromptEncoder {
     }
 }
 
+fn embeddings_var_builder(
+    path: &std::path::Path,
+    dtype: DType,
+    device: &Device,
+) -> Result<VarBuilder<'static>> {
+    if crate::ltx2::convrot::checkpoint_is_convrot_w4a4(path) {
+        let backend = crate::ltx2::convrot::Ltx2ConvRotBackend::from_flattened_path(path)?;
+        return Ok(VarBuilder::from_backend(
+            Box::new(backend),
+            dtype,
+            device.clone(),
+        ));
+    }
+    unsafe { VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&path), dtype, device) }
+        .with_context(|| format!("mmap LTX-2 embeddings weights at {}", path.display()))
+}
+
 fn connector_prefixes(checkpoint_path: &std::path::Path) -> Result<(&'static str, &'static str)> {
     let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::new(checkpoint_path) }
         .with_context(|| {
@@ -321,8 +339,33 @@ pub(crate) struct ConnectorSpec<'a> {
     pub(crate) num_learnable_registers: Option<usize>,
 }
 
+#[cfg(test)]
 pub(crate) fn build_embeddings_processor(
     vb: VarBuilder,
+    feature_extractor_kind: GemmaFeatureExtractorKind,
+    gemma_hidden_size: usize,
+    gemma_num_hidden_layers: usize,
+    video_out_dim: usize,
+    audio_out_dim: Option<usize>,
+    video_connector: ConnectorSpec<'_>,
+    audio_connector: Option<ConnectorSpec<'_>>,
+) -> Result<EmbeddingsProcessor> {
+    build_embeddings_processor_from_sources(
+        vb.clone(),
+        vb,
+        feature_extractor_kind,
+        gemma_hidden_size,
+        gemma_num_hidden_layers,
+        video_out_dim,
+        audio_out_dim,
+        video_connector,
+        audio_connector,
+    )
+}
+
+fn build_embeddings_processor_from_sources(
+    projection_vb: VarBuilder,
+    connector_vb: VarBuilder,
     feature_extractor_kind: GemmaFeatureExtractorKind,
     gemma_hidden_size: usize,
     gemma_num_hidden_layers: usize,
@@ -334,7 +377,7 @@ pub(crate) fn build_embeddings_processor(
     let flat_dim = gemma_hidden_size * (gemma_num_hidden_layers + 1);
     let feature_extractor = match feature_extractor_kind {
         GemmaFeatureExtractorKind::V1SharedAv => {
-            let weight = vb.get(
+            let weight = projection_vb.get(
                 (video_out_dim, flat_dim),
                 "text_embedding_projection.aggregate_embed.weight",
             )?;
@@ -344,20 +387,20 @@ pub(crate) fn build_embeddings_processor(
             ))
         }
         GemmaFeatureExtractorKind::V2DualAv => {
-            let video_weight = vb.get(
+            let video_weight = projection_vb.get(
                 (video_out_dim, flat_dim),
                 "text_embedding_projection.video_aggregate_embed.weight",
             )?;
-            let video_bias = vb.get(
+            let video_bias = projection_vb.get(
                 video_out_dim,
                 "text_embedding_projection.video_aggregate_embed.bias",
             )?;
             let audio_out_dim = audio_out_dim.expect("V2 feature extractor requires audio output");
-            let audio_weight = vb.get(
+            let audio_weight = projection_vb.get(
                 (audio_out_dim, flat_dim),
                 "text_embedding_projection.audio_aggregate_embed.weight",
             )?;
-            let audio_bias = vb.get(
+            let audio_bias = projection_vb.get(
                 audio_out_dim,
                 "text_embedding_projection.audio_aggregate_embed.bias",
             )?;
@@ -369,9 +412,9 @@ pub(crate) fn build_embeddings_processor(
         }
     };
 
-    let video_connector = build_connector(vb.clone(), video_connector)?;
+    let video_connector = build_connector(connector_vb.clone(), video_connector)?;
     let audio_connector = audio_connector
-        .map(|spec| build_connector(vb.clone(), spec))
+        .map(|spec| build_connector(connector_vb.clone(), spec))
         .transpose()?;
 
     Ok(EmbeddingsProcessor::new(
@@ -406,8 +449,8 @@ mod tests {
     use candle_nn::VarBuilder;
 
     use super::{
-        build_embeddings_processor, connector_prefixes_from_keys, ConnectorSpec,
-        NativePromptEncoder,
+        build_embeddings_processor, build_embeddings_processor_from_sources,
+        connector_prefixes_from_keys, ConnectorSpec, NativePromptEncoder,
     };
     use crate::ltx2::model::LtxRopeType;
     use crate::ltx2::preset::GemmaFeatureExtractorKind;
@@ -520,24 +563,13 @@ mod tests {
         VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu)
     }
 
-    fn zero_connector_source_var_builder() -> VarBuilder<'static> {
+    fn zero_connector_source_var_builder_with_projection(
+        include_projection: bool,
+    ) -> VarBuilder<'static> {
         let mut tensors = HashMap::new();
-        tensors.insert(
-            "text_embedding_projection.video_aggregate_embed.weight".to_string(),
-            Tensor::zeros((8, 24), DType::F32, &Device::Cpu).unwrap(),
-        );
-        tensors.insert(
-            "text_embedding_projection.video_aggregate_embed.bias".to_string(),
-            Tensor::zeros(8, DType::F32, &Device::Cpu).unwrap(),
-        );
-        tensors.insert(
-            "text_embedding_projection.audio_aggregate_embed.weight".to_string(),
-            Tensor::zeros((4, 24), DType::F32, &Device::Cpu).unwrap(),
-        );
-        tensors.insert(
-            "text_embedding_projection.audio_aggregate_embed.bias".to_string(),
-            Tensor::zeros(4, DType::F32, &Device::Cpu).unwrap(),
-        );
+        if include_projection {
+            tensors.extend(zero_projection_tensors());
+        }
         for (prefix, dim) in [
             ("model.diffusion_model.video_embeddings_connector", 8usize),
             ("model.diffusion_model.audio_embeddings_connector", 4usize),
@@ -582,6 +614,39 @@ mod tests {
         VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu)
     }
 
+    fn zero_projection_tensors() -> HashMap<String, Tensor> {
+        HashMap::from([
+            (
+                "text_embedding_projection.video_aggregate_embed.weight".to_string(),
+                Tensor::zeros((8, 24), DType::F32, &Device::Cpu).unwrap(),
+            ),
+            (
+                "text_embedding_projection.video_aggregate_embed.bias".to_string(),
+                Tensor::zeros(8, DType::F32, &Device::Cpu).unwrap(),
+            ),
+            (
+                "text_embedding_projection.audio_aggregate_embed.weight".to_string(),
+                Tensor::zeros((4, 24), DType::F32, &Device::Cpu).unwrap(),
+            ),
+            (
+                "text_embedding_projection.audio_aggregate_embed.bias".to_string(),
+                Tensor::zeros(4, DType::F32, &Device::Cpu).unwrap(),
+            ),
+        ])
+    }
+
+    fn zero_connector_source_var_builder() -> VarBuilder<'static> {
+        zero_connector_source_var_builder_with_projection(true)
+    }
+
+    fn zero_connector_only_var_builder() -> VarBuilder<'static> {
+        zero_connector_source_var_builder_with_projection(false)
+    }
+
+    fn zero_projection_var_builder() -> VarBuilder<'static> {
+        VarBuilder::from_tensors(zero_projection_tensors(), DType::F32, &Device::Cpu)
+    }
+
     fn prompt_pair() -> EncodedPromptPair {
         EncodedPromptPair {
             conditional: PromptTokens {
@@ -602,8 +667,9 @@ mod tests {
     fn native_prompt_encoder_wires_gemma_and_embeddings_processor() {
         let cfg = tiny_gemma_config();
         let gemma = GemmaHiddenStateEncoder::new(&cfg, zero_gemma_var_builder(&cfg)).unwrap();
-        let processor = build_embeddings_processor(
-            zero_connector_source_var_builder(),
+        let processor = build_embeddings_processor_from_sources(
+            zero_projection_var_builder(),
+            zero_connector_only_var_builder(),
             GemmaFeatureExtractorKind::V2DualAv,
             cfg.hidden_size,
             cfg.num_hidden_layers,

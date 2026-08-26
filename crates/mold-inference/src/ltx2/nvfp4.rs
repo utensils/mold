@@ -19,7 +19,7 @@ pub(super) fn checkpoint_is_nvfp4(path: &Path) -> bool {
     };
     st.tensors()
         .into_iter()
-        .any(|(key, _)| key.ends_with(".weight_scale_2") || key.ends_with(".comfy_quant"))
+        .any(|(key, _)| key.ends_with(".weight_scale_2"))
 }
 
 pub(super) fn remap_ltx2_transformer_key(name: &str) -> String {
@@ -267,6 +267,26 @@ mod tests {
         serialize_to_file(&tensors, &None, path).unwrap();
     }
 
+    fn write_convrot_marker_fixture(path: &std::path::Path) {
+        let weight = vec![1u8; 16];
+        let scale = 0.5f32.to_le_bytes();
+        let marker = br#"{"format":"int8_tensorwise","convrot":true,"convrot_groupsize":256}"#;
+        let mut tensors: HashMap<String, TensorView<'_>> = HashMap::new();
+        tensors.insert(
+            "model.diffusion_model.transformer_blocks.0.attn1.to_q.weight".to_string(),
+            TensorView::new(SafeDtype::I8, vec![2, 8], &weight).unwrap(),
+        );
+        tensors.insert(
+            "model.diffusion_model.transformer_blocks.0.attn1.to_q.weight_scale".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1], &scale).unwrap(),
+        );
+        tensors.insert(
+            "model.diffusion_model.transformer_blocks.0.attn1.to_q.comfy_quant".to_string(),
+            TensorView::new(SafeDtype::U8, vec![marker.len()], marker).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, path).unwrap();
+    }
+
     #[test]
     fn ltx2_nvfp4_backend_exposes_sidecar_subkeys_and_hides_packed_weight() {
         let path = temp_path("sidecars");
@@ -301,6 +321,14 @@ mod tests {
         assert_eq!(tensor_scale.to_scalar::<f32>().unwrap(), 0.5);
         assert_eq!(bias.dims(), &[2]);
 
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn convrot_comfy_markers_do_not_select_the_nvfp4_backend() {
+        let path = temp_path("convrot-marker");
+        write_convrot_marker_fixture(&path);
+        assert!(!checkpoint_is_nvfp4(&path));
         let _ = std::fs::remove_file(path);
     }
 }

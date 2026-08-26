@@ -2811,9 +2811,13 @@ fn build_plan(
                         | ComponentRole::TransformerShard(_)
                         | ComponentRole::LowNoiseTransformer
                 ) {
-                // Streamed blocks are uploaded at their stored precision, so
-                // the host copy is the artifact's own size.
-                host_bytes_by_path.insert(path.clone(), bytes);
+                // Most streamed backends retain an anonymous host copy at the
+                // artifact's stored precision. LTX-2 safetensors is the
+                // exception: its ordinary and ConvRot loaders retain only a
+                // reclaimable mmap and materialize one bounded block/weight.
+                if !ltx2_transformer_streams_from_mmap(context.family, role, path) {
+                    host_bytes_by_path.insert(path.clone(), bytes);
+                }
                 ComponentLoadStrategy::StreamedBlocks
             } else if role.is_text_encoder() {
                 ComponentLoadStrategy::DropReload
@@ -3221,6 +3225,7 @@ fn is_gemma_weight_file(path: &Path) -> bool {
     name.ends_with(".gguf")
         || name == "model.safetensors"
         || (name.starts_with("model-") && name.ends_with(".safetensors"))
+        || (name.starts_with("gemma4-") && name.ends_with(".safetensors"))
 }
 
 /// Whether a CPU-placed component's weights stay a reclaimable file mapping
@@ -3239,6 +3244,28 @@ fn ltx2_cpu_gemma_streams_from_mmap(family: &str, role: &ComponentRole, path: &P
         && matches!(role, ComponentRole::GemmaShard(_))
         && is_gemma_weight_file(path)
         && mold_inference::ltx2::cpu_gemma_allocates_anon_peak(path)
+}
+
+/// Whether LTX-2 block streaming keeps the checkpoint as a reclaimable file
+/// mapping instead of copying the full artifact into anonymous host memory.
+///
+/// Both the ordinary safetensors backend and the ConvRot backend retain an
+/// mmap and materialize one block/weight at a time. Charging the complete
+/// transformer again as concurrent host residency is especially wrong on
+/// Metal, where that charge is folded back into the same unified-memory gate.
+/// The real transient is bounded by `BASE_HOST_TRANSIENT` (the largest
+/// official LTX-2.5 packed weight is 64 MiB).
+fn ltx2_transformer_streams_from_mmap(family: &str, role: &ComponentRole, path: &Path) -> bool {
+    matches!(family, "ltx2" | "ltx-2" | "ltx2.3")
+        && matches!(
+            role,
+            ComponentRole::Transformer
+                | ComponentRole::TransformerShard(_)
+                | ComponentRole::LowNoiseTransformer
+        )
+        && path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
 }
 
 fn ltx2_cpu_gemma_anon_peak_anchor(
@@ -4526,6 +4553,12 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn packed_gemma4_safetensors_are_streamed_weights() {
+        assert!(is_gemma_weight_file(Path::new("gemma4-12b-it.safetensors")));
+        assert!(!is_gemma_weight_file(Path::new("tokenizer.json")));
+    }
+
+    #[test]
     fn production_family_planning_uses_the_static_batch_registry_before_load() {
         for entry in mold_inference::production_batch_capabilities() {
             let expected_tiled = entry.tiled_vae != mold_inference::TiledVaeCapability::Unsupported;
@@ -5293,6 +5326,29 @@ mod tests {
         assert!(
             plan.predicted_host_increment_bytes >= BASE_HOST_TRANSIENT + 24 * GIB,
             "streamed transformer weights remain resident in host memory"
+        );
+    }
+
+    #[test]
+    fn ltx2_safetensors_streaming_does_not_double_charge_its_mmap() {
+        let root = TempDir::new().unwrap();
+        let (config, request) = sized_config(root.path(), "ltx2", 8, 1, 1);
+        let plan = resolve_execution_plans(&config, &request, &metal_devices(&[24 * GIB]), true)
+            .expect("LTX-2 safetensors streaming must fit without charging its mmap twice")
+            .remove(0);
+
+        assert_eq!(plan.offload_mode, OffloadMode::Block);
+        assert_eq!(
+            plan.components[&ComponentRole::Transformer].load_strategy,
+            ComponentLoadStrategy::StreamedBlocks
+        );
+        assert_eq!(
+            plan.predicted_host_increment_bytes, BASE_HOST_TRANSIENT,
+            "the file mapping is reclaimable; only the bounded anonymous transient remains"
+        );
+        assert_eq!(
+            plan.admission_vram_demand_bytes(),
+            plan.predicted_vram_peak_bytes + BASE_HOST_TRANSIENT
         );
     }
 

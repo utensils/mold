@@ -1379,6 +1379,492 @@ Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a5
 
 Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
 
+### Profile `ltx2.ltx-2.5-22b-dev`
+
+Schema 1 · hash `22ec925ec347d72e84dfba2428c70c2def537112155d67bac1c770b3a6d3fd91` · default recipe `auto`
+
+Models: `ltx-2.5-22b-dev:bf16-conv`, `ltx-2.5-22b-dev:int8-conv`.
+
+#### Auto (`auto`)
+
+- Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
+- Defaults: `1216x704`, 30 steps, guidance 3.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+| `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
+| `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### One Stage (`one-stage`)
+
+- Resolution: dynamic; alignment `32`; minimum `64x64`; maximum `2088960` pixels; axis limit `2048`; aspect range `unbounded`.
+- Defaults: `1216x704`, 30 steps, guidance 3.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `22:15` | `704x480` (recommended) |
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### Two Stage (`two-stage`)
+
+- Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
+- Defaults: `1216x704`, 30 steps, guidance 3.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+| `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
+| `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### Two Stage Hq (`two-stage-hq`)
+
+- Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
+- Defaults: `1216x704`, 30 steps, guidance 3.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+| `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
+| `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### Distilled (`distilled`)
+
+- Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
+- Defaults: `1216x704`, 30 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+| `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
+| `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### Ic Lora (`ic-lora`)
+
+- Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
+- Defaults: `1216x704`, 30 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+| `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
+| `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### Keyframe (`keyframe`)
+
+- Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
+- Defaults: `1216x704`, 30 steps, guidance 3.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+| `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
+| `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### A2 Vid (`a2-vid`)
+
+- Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
+- Defaults: `1216x704`, 30 steps, guidance 3.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+| `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
+| `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### Retake (`retake`)
+
+- Resolution: source driven; alignment `32`; minimum `64x64`; maximum `2088960` pixels; axis limit `2048`; aspect range `unbounded`.
+- Defaults: `1216x704`, 30 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `22:15` | `704x480` (recommended) |
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### Lip Dub (`lip-dub`)
+
+- Resolution: source driven; alignment `32`; minimum `64x64`; maximum `2088960` pixels; axis limit `2048`; aspect range `unbounded`.
+- Defaults: `1216x704`, 30 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `22:15` | `704x480` (recommended) |
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### T2a (`t2a`)
+
+- Resolution: none; alignment `1`; minimum `0x0`; maximum `0` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `0x0`, 30 steps, guidance 3.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+- Presets: none.
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+### Profile `ltx2.ltx-2.5-22b-distilled`
+
+Schema 1 · hash `27455a2efaf8ecab2001bec1e9b0c45938d944a648ca9f21f5c1d411946426e4` · default recipe `auto`
+
+Models: `ltx-2.5-22b-distilled:bf16-conv`, `ltx-2.5-22b-distilled:int8-conv`.
+
+#### Auto (`auto`)
+
+- Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
+- Defaults: `1216x704`, 8 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+| `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
+| `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### One Stage (`one-stage`)
+
+- Resolution: dynamic; alignment `32`; minimum `64x64`; maximum `2088960` pixels; axis limit `2048`; aspect range `unbounded`.
+- Defaults: `1216x704`, 8 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `22:15` | `704x480` (recommended) |
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### Two Stage (`two-stage`)
+
+- Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
+- Defaults: `1216x704`, 8 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+| `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
+| `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### Two Stage Hq (`two-stage-hq`)
+
+- Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
+- Defaults: `1216x704`, 8 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+| `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
+| `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### Distilled (`distilled`)
+
+- Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
+- Defaults: `1216x704`, 8 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+| `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
+| `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### Ic Lora (`ic-lora`)
+
+- Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
+- Defaults: `1216x704`, 8 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+| `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
+| `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### Keyframe (`keyframe`)
+
+- Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
+- Defaults: `1216x704`, 8 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+| `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
+| `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### A2 Vid (`a2-vid`)
+
+- Resolution: dynamic; alignment `64`; minimum `64x64`; maximum `8912896` pixels; axis limit `4096`; aspect range `unbounded`.
+- Defaults: `1216x704`, 8 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+| `20:11` | `2560x1408` (recommended), `3840x2112` (recommended) |
+| `11:20` | `1408x2560` (recommended), `2112x3840` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### Retake (`retake`)
+
+- Resolution: source driven; alignment `32`; minimum `64x64`; maximum `2088960` pixels; axis limit `2048`; aspect range `unbounded`.
+- Defaults: `1216x704`, 8 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `22:15` | `704x480` (recommended) |
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### Lip Dub (`lip-dub`)
+
+- Resolution: source driven; alignment `32`; minimum `64x64`; maximum `2088960` pixels; axis limit `2048`; aspect range `unbounded`.
+- Defaults: `1216x704`, 8 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 1–1 by 0.1 (Fixed).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+
+| Exact ratio | Qualified presets |
+|---|---|
+| `22:15` | `704x480` (recommended) |
+| `3:2` | `768x512` (recommended), `1536x1024` (recommended) |
+| `1:1` | `512x512` (recommended), `768x768` (recommended) |
+| `16:9` | `1024x576` (recommended) |
+| `19:11` | `1216x704` (recommended) |
+| `11:19` | `704x1216` (recommended) |
+| `9:16` | `576x1024` (recommended) |
+| `2:3` | `512x768` (recommended), `1024x1536` (recommended) |
+| `30:17` | `1920x1088` (recommended) |
+| `17:30` | `1088x1920` (recommended) |
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
+#### T2a (`t2a`)
+
+- Resolution: none; alignment `1`; minimum `0x0`; maximum `0` pixels; axis limit `none`; aspect range `unbounded`.
+- Defaults: `0x0`, 8 steps, guidance 1.
+- Steps: 1–100 by 1; guidance: 0–100 by 0.1 (Adjustable).
+- Temporal: frames 1–601 on `8n+1` (default 121); FPS 1–120 by 1, default 24; duration limit 20s.
+- Presets: none.
+
+Provenance: [Upstream](https://github.com/Lightricks/LTX-2) at `4f8905737aac86a554637cac86c178877a39c744`, qualified: `true`, evidence: `mold.generation-profile.v1`.
+
 ## `minimax-h3`
 
 ### Profile `minimax-h3.minimax-h3-fl2va`

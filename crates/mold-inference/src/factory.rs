@@ -318,6 +318,34 @@ fn validate_prepared_gemma_dependencies(
     if frozen.selected_gemma_paths.is_empty() {
         return Ok(());
     }
+    if paths.text_encoder_files.first().is_some_and(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.to_ascii_lowercase().contains("gemma4"))
+    }) {
+        let packed = paths
+            .text_encoder_files
+            .first()
+            .expect("checked packed Gemma 4 path");
+        let expected_variant = if packed
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.contains("int8-convrot"))
+        {
+            "int8"
+        } else {
+            "bf16"
+        };
+        if frozen.ltx2_gemma_variant.as_deref() != Some(expected_variant)
+            || frozen.selected_gemma_paths.as_slice() != [packed.as_path()]
+            || !packed.is_file()
+        {
+            bail!(
+                "prepared packed Gemma 4 artifact changed after admission; refusing live variant discovery"
+            );
+        }
+        return Ok(());
+    }
     let root = paths
         .text_encoder_files
         .first()
@@ -433,14 +461,16 @@ fn boxed_inference_engine(engine: impl InferenceEngine + 'static) -> Box<dyn Inf
 
 fn validate_ltx25_runtime_paths(model_name: &str, paths: &ModelPaths) -> Result<()> {
     match model_name {
-        mold_core::ltx25_manifest::DEV_CONV | mold_core::ltx25_manifest::DISTILLED_CONV => {}
+        name if mold_core::ltx25_manifest::is_runtime_manifest(name) => {}
         mold_core::ltx25_manifest::DEV | mold_core::ltx25_manifest::DISTILLED => anyhow::bail!(
             "LTX-2.5 Phase 2 supports the convolutional video VAE only; use '{model_name}-conv'. The diffusion decoder is tracked for Phase 3"
         ),
         _ => anyhow::bail!(
-            "unsupported LTX-2.5 Phase 2 checkpoint '{model_name}'; use '{}' or '{}'. Quantized LTX-2.5 transformer/text-encoder packs are not yet supported",
+            "unsupported LTX-2.5 Phase 2 checkpoint '{model_name}'; use '{}', '{}', '{}', or '{}'. NVFP4 LTX-2.5 packs require a Blackwell CUDA kernel and are not supported by this runtime",
             mold_core::ltx25_manifest::DEV_CONV,
             mold_core::ltx25_manifest::DISTILLED_CONV,
+            mold_core::ltx25_manifest::DEV_INT8_CONV,
+            mold_core::ltx25_manifest::DISTILLED_INT8_CONV,
         ),
     }
     let gemma = paths.text_encoder_files.first().ok_or_else(|| {
@@ -776,17 +806,17 @@ where
                 )))
             }
         }
-        family if family == mold_core::ltx25_manifest::FAMILY => {
-            validate_ltx25_runtime_paths(&model_name, &paths)?;
-            Ok(boxed_inference_engine(Ltx2Engine::new_with_gemma_variant(
-                model_name,
-                paths,
-                load_strategy,
-                gpu_ordinal,
-                frozen.ltx2_gemma_variant.clone(),
-            )))
-        }
         "ltx2" | "ltx-2" | "ltx2.3" => {
+            if mold_core::ltx25_manifest::is_contract_manifest(&model_name) {
+                validate_ltx25_runtime_paths(&model_name, &paths)?;
+                return Ok(boxed_inference_engine(Ltx2Engine::new_with_gemma_variant(
+                    model_name,
+                    paths,
+                    load_strategy,
+                    gpu_ordinal,
+                    frozen.ltx2_gemma_variant.clone(),
+                )));
+            }
             if is_ltx2_native_single_file(&paths) {
                 // Civitai single-file dispatch. Combined checkpoints use
                 // `vae.*`; transformer-only checkpoints use `paths.vae`.
@@ -1050,12 +1080,13 @@ mod tests {
 
     #[test]
     fn ltx25_unknown_quantization_fails_with_supported_model_names() {
-        let error = validate_ltx25_runtime_paths("ltx-2.5-22b-distilled:int8-conv", &dummy_paths())
-            .expect_err("an unsupported quantization must fail before probing its files");
+        let error =
+            validate_ltx25_runtime_paths("ltx-2.5-22b-distilled:nvfp4-conv", &dummy_paths())
+                .expect_err("an unsupported quantization must fail before probing its files");
         let message = error.to_string();
-        assert!(message.contains("Quantized LTX-2.5"), "{message}");
+        assert!(message.contains("NVFP4 LTX-2.5"), "{message}");
         assert!(
-            message.contains(mold_core::ltx25_manifest::DISTILLED_CONV),
+            message.contains(mold_core::ltx25_manifest::DISTILLED_INT8_CONV),
             "{message}"
         );
     }

@@ -213,6 +213,27 @@ fn local_generation_profile(
         .into_iter()
         .find(|entry| entry.info.name == model || entry.info.name == canonical)
         .and_then(|entry| entry.generation_profile)
+        .or_else(|| {
+            // Keep exact-name LTX-2.5 runs registry-authored even when a
+            // caller filters hidden or not-yet-installed catalog entries.
+            if !mold_core::ltx25_manifest::is_runtime_manifest(&canonical) {
+                return None;
+            }
+            let manifest = manifest::find_manifest(&canonical)?;
+            let model_cfg = config.resolved_model_config(&canonical);
+            Some(mold_core::generation_profile_for_manifest_with_defaults(
+                manifest,
+                mold_core::GenerationDefaultsProfile {
+                    width: model_cfg.effective_width(config),
+                    height: model_cfg.effective_height(config),
+                    steps: model_cfg.effective_steps(config),
+                    guidance: model_cfg.effective_guidance(),
+                    frames: model_cfg.effective_frames(),
+                    fps: model_cfg.effective_fps(),
+                    negative_prompt: None,
+                },
+            ))
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3600,6 +3621,28 @@ mod tests {
             mold_core::minimax_h3::FL2VA_OFFICIAL
         )
         .is_none());
+    }
+
+    #[test]
+    fn ltx25_conv_models_have_native_profiles() {
+        let profile = local_generation_profile(
+            &Config::default(),
+            mold_core::ltx25_manifest::DISTILLED_CONV,
+        )
+        .expect("Phase 2 Conv-VAE model must be runnable by exact name");
+        let recipe = profile.default_recipe().expect("default LTX-2 recipe");
+        assert_eq!(recipe.defaults.steps, 8);
+        assert_eq!(recipe.defaults.guidance, 1.0);
+        assert_eq!(recipe.defaults.frames, Some(121));
+        assert!(local_generation_profile(
+            &Config::default(),
+            mold_core::ltx25_manifest::DISTILLED_INT8_CONV,
+        )
+        .is_some());
+        assert!(
+            local_generation_profile(&Config::default(), mold_core::ltx25_manifest::DISTILLED)
+                .is_none()
+        );
     }
 
     #[test]

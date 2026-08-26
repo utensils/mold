@@ -15587,6 +15587,6067 @@
     {
       "models": [
         {
+          "model": "ltx-2.5-22b-dev:bf16-conv",
+          "family": "ltx2",
+          "hidden": false
+        },
+        {
+          "model": "ltx-2.5-22b-dev:int8-conv",
+          "family": "ltx2",
+          "hidden": false
+        }
+      ],
+      "profile": {
+        "schema_version": 1,
+        "profile_id": "ltx2.ltx-2.5-22b-dev",
+        "profile_hash": "22ec925ec347d72e84dfba2428c70c2def537112155d67bac1c770b3a6d3fd91",
+        "default_recipe_id": "auto",
+        "recipes": [
+          {
+            "id": "auto",
+            "label": "Auto",
+            "request_selector": {},
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 30,
+              "guidance": 3.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 64,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 8912896,
+              "max_axis_pixels": 4096,
+              "aspect_groups": [
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "20:11",
+                  "label": "20:11",
+                  "presets": [
+                    {
+                      "id": "2560x1408",
+                      "width": 2560,
+                      "height": 1408,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "3840x2112",
+                      "width": 3840,
+                      "height": 2112,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:20",
+                  "label": "11:20",
+                  "presets": [
+                    {
+                      "id": "1408x2560",
+                      "width": 1408,
+                      "height": 2560,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "2112x3840",
+                      "width": 2112,
+                      "height": 3840,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 30,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                30
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 3.0,
+              "min": 0.0,
+              "max": 100.0,
+              "step": 0.1,
+              "mode": "adjustable"
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": true,
+                "supports_negative_prompt": true
+              },
+              "negative_prompt": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "one-stage",
+            "label": "One Stage",
+            "request_selector": {
+              "pipeline": "one-stage"
+            },
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 30,
+              "guidance": 3.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 32,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 2088960,
+              "max_axis_pixels": 2048,
+              "aspect_groups": [
+                {
+                  "id": "22:15",
+                  "label": "22:15",
+                  "presets": [
+                    {
+                      "id": "704x480",
+                      "width": 704,
+                      "height": 480,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 30,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                30
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 3.0,
+              "min": 0.0,
+              "max": 100.0,
+              "step": 0.1,
+              "mode": "adjustable"
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": true,
+                "supports_negative_prompt": true
+              },
+              "negative_prompt": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "two-stage",
+            "label": "Two Stage",
+            "request_selector": {
+              "pipeline": "two-stage"
+            },
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 30,
+              "guidance": 3.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 64,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 8912896,
+              "max_axis_pixels": 4096,
+              "aspect_groups": [
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "20:11",
+                  "label": "20:11",
+                  "presets": [
+                    {
+                      "id": "2560x1408",
+                      "width": 2560,
+                      "height": 1408,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "3840x2112",
+                      "width": 3840,
+                      "height": 2112,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:20",
+                  "label": "11:20",
+                  "presets": [
+                    {
+                      "id": "1408x2560",
+                      "width": 1408,
+                      "height": 2560,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "2112x3840",
+                      "width": 2112,
+                      "height": 3840,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 30,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                30
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 3.0,
+              "min": 0.0,
+              "max": 100.0,
+              "step": 0.1,
+              "mode": "adjustable"
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": true,
+                "supports_negative_prompt": true
+              },
+              "negative_prompt": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "two-stage-hq",
+            "label": "Two Stage Hq",
+            "request_selector": {
+              "pipeline": "two-stage-hq"
+            },
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 30,
+              "guidance": 3.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 64,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 8912896,
+              "max_axis_pixels": 4096,
+              "aspect_groups": [
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "20:11",
+                  "label": "20:11",
+                  "presets": [
+                    {
+                      "id": "2560x1408",
+                      "width": 2560,
+                      "height": 1408,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "3840x2112",
+                      "width": 3840,
+                      "height": 2112,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:20",
+                  "label": "11:20",
+                  "presets": [
+                    {
+                      "id": "1408x2560",
+                      "width": 1408,
+                      "height": 2560,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "2112x3840",
+                      "width": 2112,
+                      "height": 3840,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 30,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                30
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 3.0,
+              "min": 0.0,
+              "max": 100.0,
+              "step": 0.1,
+              "mode": "adjustable"
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": true,
+                "supports_negative_prompt": true
+              },
+              "negative_prompt": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "distilled",
+            "label": "Distilled",
+            "request_selector": {
+              "pipeline": "distilled"
+            },
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 30,
+              "guidance": 1.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 64,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 8912896,
+              "max_axis_pixels": 4096,
+              "aspect_groups": [
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "20:11",
+                  "label": "20:11",
+                  "presets": [
+                    {
+                      "id": "2560x1408",
+                      "width": 2560,
+                      "height": 1408,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "3840x2112",
+                      "width": 3840,
+                      "height": 2112,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:20",
+                  "label": "11:20",
+                  "presets": [
+                    {
+                      "id": "1408x2560",
+                      "width": 1408,
+                      "height": 2560,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "2112x3840",
+                      "width": 2112,
+                      "height": 3840,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 30,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                30
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 1.0,
+              "min": 1.0,
+              "max": 1.0,
+              "step": 0.1,
+              "mode": "fixed",
+              "note": "Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with Auto or a guided pipeline to adjust it."
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": false,
+                "supports_negative_prompt": false,
+                "fixed_scale": 1.0
+              },
+              "negative_prompt": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not encode a negative prompt."
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "ic-lora",
+            "label": "Ic Lora",
+            "request_selector": {
+              "pipeline": "ic-lora"
+            },
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 30,
+              "guidance": 1.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 64,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 8912896,
+              "max_axis_pixels": 4096,
+              "aspect_groups": [
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "20:11",
+                  "label": "20:11",
+                  "presets": [
+                    {
+                      "id": "2560x1408",
+                      "width": 2560,
+                      "height": 1408,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "3840x2112",
+                      "width": 3840,
+                      "height": 2112,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:20",
+                  "label": "11:20",
+                  "presets": [
+                    {
+                      "id": "1408x2560",
+                      "width": 1408,
+                      "height": 2560,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "2112x3840",
+                      "width": 2112,
+                      "height": 3840,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 30,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                30
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 1.0,
+              "min": 1.0,
+              "max": 1.0,
+              "step": 0.1,
+              "mode": "fixed",
+              "note": "Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with Auto or a guided pipeline to adjust it."
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": false,
+                "supports_negative_prompt": false,
+                "fixed_scale": 1.0
+              },
+              "negative_prompt": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not encode a negative prompt."
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": true
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 3
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "keyframe",
+            "label": "Keyframe",
+            "request_selector": {
+              "pipeline": "keyframe"
+            },
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 30,
+              "guidance": 3.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 64,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 8912896,
+              "max_axis_pixels": 4096,
+              "aspect_groups": [
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "20:11",
+                  "label": "20:11",
+                  "presets": [
+                    {
+                      "id": "2560x1408",
+                      "width": 2560,
+                      "height": 1408,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "3840x2112",
+                      "width": 3840,
+                      "height": 2112,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:20",
+                  "label": "11:20",
+                  "presets": [
+                    {
+                      "id": "1408x2560",
+                      "width": 1408,
+                      "height": 2560,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "2112x3840",
+                      "width": 2112,
+                      "height": 3840,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 30,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                30
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 3.0,
+              "min": 0.0,
+              "max": 100.0,
+              "step": 0.1,
+              "mode": "adjustable"
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": true,
+                "supports_negative_prompt": true
+              },
+              "negative_prompt": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": true
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "a2-vid",
+            "label": "A2 Vid",
+            "request_selector": {
+              "pipeline": "a2-vid"
+            },
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 30,
+              "guidance": 3.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 64,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 8912896,
+              "max_axis_pixels": 4096,
+              "aspect_groups": [
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "20:11",
+                  "label": "20:11",
+                  "presets": [
+                    {
+                      "id": "2560x1408",
+                      "width": 2560,
+                      "height": 1408,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "3840x2112",
+                      "width": 3840,
+                      "height": 2112,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:20",
+                  "label": "11:20",
+                  "presets": [
+                    {
+                      "id": "1408x2560",
+                      "width": 1408,
+                      "height": 2560,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "2112x3840",
+                      "width": 2112,
+                      "height": 3840,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 30,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                30
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 3.0,
+              "min": 0.0,
+              "max": 100.0,
+              "step": 0.1,
+              "mode": "adjustable"
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": true,
+                "supports_negative_prompt": true
+              },
+              "negative_prompt": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": true
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "retake",
+            "label": "Retake",
+            "request_selector": {
+              "pipeline": "retake"
+            },
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 30,
+              "guidance": 1.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "source-driven",
+              "alignment": 32,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 2088960,
+              "max_axis_pixels": 2048,
+              "aspect_groups": [
+                {
+                  "id": "22:15",
+                  "label": "22:15",
+                  "presets": [
+                    {
+                      "id": "704x480",
+                      "width": 704,
+                      "height": 480,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 30,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                30
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 1.0,
+              "min": 1.0,
+              "max": 1.0,
+              "step": 0.1,
+              "mode": "fixed",
+              "note": "Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with Auto or a guided pipeline to adjust it."
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": false,
+                "supports_negative_prompt": false,
+                "fixed_scale": 1.0
+              },
+              "negative_prompt": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not encode a negative prompt."
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": true
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "lip-dub",
+            "label": "Lip Dub",
+            "request_selector": {
+              "pipeline": "lip-dub"
+            },
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 30,
+              "guidance": 1.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "source-driven",
+              "alignment": 32,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 2088960,
+              "max_axis_pixels": 2048,
+              "aspect_groups": [
+                {
+                  "id": "22:15",
+                  "label": "22:15",
+                  "presets": [
+                    {
+                      "id": "704x480",
+                      "width": 704,
+                      "height": 480,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 30,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                30
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 1.0,
+              "min": 1.0,
+              "max": 1.0,
+              "step": 0.1,
+              "mode": "fixed",
+              "note": "Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with Auto or a guided pipeline to adjust it."
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": false,
+                "supports_negative_prompt": false,
+                "fixed_scale": 1.0
+              },
+              "negative_prompt": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not encode a negative prompt."
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": true
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "t2a",
+            "label": "T2a",
+            "request_selector": {
+              "pipeline": "t2a"
+            },
+            "defaults": {
+              "width": 0,
+              "height": 0,
+              "steps": 30,
+              "guidance": 3.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "none",
+              "alignment": 1,
+              "min_width": 0,
+              "min_height": 0,
+              "max_pixels": 0,
+              "aspect_groups": []
+            },
+            "steps": {
+              "default": 30,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                30
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 3.0,
+              "min": 0.0,
+              "max": 100.0,
+              "step": 0.1,
+              "mode": "adjustable"
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": true,
+                "supports_negative_prompt": true
+              },
+              "negative_prompt": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": false,
+              "supports_extend": false,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not accept a source video."
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not accept source audio."
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "wav",
+                "formats": [
+                  "wav"
+                ],
+                "audio_requires_mp4": false,
+                "delivery_reason": "Audio-only delivery uses WAV."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "models": [
+        {
+          "model": "ltx-2.5-22b-distilled:bf16-conv",
+          "family": "ltx2",
+          "hidden": false
+        },
+        {
+          "model": "ltx-2.5-22b-distilled:int8-conv",
+          "family": "ltx2",
+          "hidden": false
+        }
+      ],
+      "profile": {
+        "schema_version": 1,
+        "profile_id": "ltx2.ltx-2.5-22b-distilled",
+        "profile_hash": "27455a2efaf8ecab2001bec1e9b0c45938d944a648ca9f21f5c1d411946426e4",
+        "default_recipe_id": "auto",
+        "recipes": [
+          {
+            "id": "auto",
+            "label": "Auto",
+            "request_selector": {},
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 8,
+              "guidance": 1.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 64,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 8912896,
+              "max_axis_pixels": 4096,
+              "aspect_groups": [
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "20:11",
+                  "label": "20:11",
+                  "presets": [
+                    {
+                      "id": "2560x1408",
+                      "width": 2560,
+                      "height": 1408,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "3840x2112",
+                      "width": 3840,
+                      "height": 2112,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:20",
+                  "label": "11:20",
+                  "presets": [
+                    {
+                      "id": "1408x2560",
+                      "width": 1408,
+                      "height": 2560,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "2112x3840",
+                      "width": 2112,
+                      "height": 3840,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 8,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                8
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 1.0,
+              "min": 1.0,
+              "max": 1.0,
+              "step": 0.1,
+              "mode": "fixed",
+              "note": "Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with Auto or a guided pipeline to adjust it."
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": false,
+                "supports_negative_prompt": false,
+                "fixed_scale": 1.0
+              },
+              "negative_prompt": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not encode a negative prompt."
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "one-stage",
+            "label": "One Stage",
+            "request_selector": {
+              "pipeline": "one-stage"
+            },
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 8,
+              "guidance": 1.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 32,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 2088960,
+              "max_axis_pixels": 2048,
+              "aspect_groups": [
+                {
+                  "id": "22:15",
+                  "label": "22:15",
+                  "presets": [
+                    {
+                      "id": "704x480",
+                      "width": 704,
+                      "height": 480,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 8,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                8
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 1.0,
+              "min": 0.0,
+              "max": 100.0,
+              "step": 0.1,
+              "mode": "adjustable"
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": true,
+                "supports_negative_prompt": true
+              },
+              "negative_prompt": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "two-stage",
+            "label": "Two Stage",
+            "request_selector": {
+              "pipeline": "two-stage"
+            },
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 8,
+              "guidance": 1.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 64,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 8912896,
+              "max_axis_pixels": 4096,
+              "aspect_groups": [
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "20:11",
+                  "label": "20:11",
+                  "presets": [
+                    {
+                      "id": "2560x1408",
+                      "width": 2560,
+                      "height": 1408,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "3840x2112",
+                      "width": 3840,
+                      "height": 2112,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:20",
+                  "label": "11:20",
+                  "presets": [
+                    {
+                      "id": "1408x2560",
+                      "width": 1408,
+                      "height": 2560,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "2112x3840",
+                      "width": 2112,
+                      "height": 3840,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 8,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                8
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 1.0,
+              "min": 0.0,
+              "max": 100.0,
+              "step": 0.1,
+              "mode": "adjustable"
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": true,
+                "supports_negative_prompt": true
+              },
+              "negative_prompt": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "two-stage-hq",
+            "label": "Two Stage Hq",
+            "request_selector": {
+              "pipeline": "two-stage-hq"
+            },
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 8,
+              "guidance": 1.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 64,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 8912896,
+              "max_axis_pixels": 4096,
+              "aspect_groups": [
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "20:11",
+                  "label": "20:11",
+                  "presets": [
+                    {
+                      "id": "2560x1408",
+                      "width": 2560,
+                      "height": 1408,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "3840x2112",
+                      "width": 3840,
+                      "height": 2112,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:20",
+                  "label": "11:20",
+                  "presets": [
+                    {
+                      "id": "1408x2560",
+                      "width": 1408,
+                      "height": 2560,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "2112x3840",
+                      "width": 2112,
+                      "height": 3840,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 8,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                8
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 1.0,
+              "min": 0.0,
+              "max": 100.0,
+              "step": 0.1,
+              "mode": "adjustable"
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": true,
+                "supports_negative_prompt": true
+              },
+              "negative_prompt": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "distilled",
+            "label": "Distilled",
+            "request_selector": {
+              "pipeline": "distilled"
+            },
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 8,
+              "guidance": 1.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 64,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 8912896,
+              "max_axis_pixels": 4096,
+              "aspect_groups": [
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "20:11",
+                  "label": "20:11",
+                  "presets": [
+                    {
+                      "id": "2560x1408",
+                      "width": 2560,
+                      "height": 1408,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "3840x2112",
+                      "width": 3840,
+                      "height": 2112,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:20",
+                  "label": "11:20",
+                  "presets": [
+                    {
+                      "id": "1408x2560",
+                      "width": 1408,
+                      "height": 2560,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "2112x3840",
+                      "width": 2112,
+                      "height": 3840,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 8,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                8
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 1.0,
+              "min": 1.0,
+              "max": 1.0,
+              "step": 0.1,
+              "mode": "fixed",
+              "note": "Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with Auto or a guided pipeline to adjust it."
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": false,
+                "supports_negative_prompt": false,
+                "fixed_scale": 1.0
+              },
+              "negative_prompt": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not encode a negative prompt."
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "ic-lora",
+            "label": "Ic Lora",
+            "request_selector": {
+              "pipeline": "ic-lora"
+            },
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 8,
+              "guidance": 1.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 64,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 8912896,
+              "max_axis_pixels": 4096,
+              "aspect_groups": [
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "20:11",
+                  "label": "20:11",
+                  "presets": [
+                    {
+                      "id": "2560x1408",
+                      "width": 2560,
+                      "height": 1408,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "3840x2112",
+                      "width": 3840,
+                      "height": 2112,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:20",
+                  "label": "11:20",
+                  "presets": [
+                    {
+                      "id": "1408x2560",
+                      "width": 1408,
+                      "height": 2560,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "2112x3840",
+                      "width": 2112,
+                      "height": 3840,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 8,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                8
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 1.0,
+              "min": 1.0,
+              "max": 1.0,
+              "step": 0.1,
+              "mode": "fixed",
+              "note": "Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with Auto or a guided pipeline to adjust it."
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": false,
+                "supports_negative_prompt": false,
+                "fixed_scale": 1.0
+              },
+              "negative_prompt": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not encode a negative prompt."
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": true
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 3
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "keyframe",
+            "label": "Keyframe",
+            "request_selector": {
+              "pipeline": "keyframe"
+            },
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 8,
+              "guidance": 1.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 64,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 8912896,
+              "max_axis_pixels": 4096,
+              "aspect_groups": [
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "20:11",
+                  "label": "20:11",
+                  "presets": [
+                    {
+                      "id": "2560x1408",
+                      "width": 2560,
+                      "height": 1408,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "3840x2112",
+                      "width": 3840,
+                      "height": 2112,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:20",
+                  "label": "11:20",
+                  "presets": [
+                    {
+                      "id": "1408x2560",
+                      "width": 1408,
+                      "height": 2560,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "2112x3840",
+                      "width": 2112,
+                      "height": 3840,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 8,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                8
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 1.0,
+              "min": 0.0,
+              "max": 100.0,
+              "step": 0.1,
+              "mode": "adjustable"
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": true,
+                "supports_negative_prompt": true
+              },
+              "negative_prompt": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": true
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "a2-vid",
+            "label": "A2 Vid",
+            "request_selector": {
+              "pipeline": "a2-vid"
+            },
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 8,
+              "guidance": 1.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "dynamic",
+              "alignment": 64,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 8912896,
+              "max_axis_pixels": 4096,
+              "aspect_groups": [
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "20:11",
+                  "label": "20:11",
+                  "presets": [
+                    {
+                      "id": "2560x1408",
+                      "width": 2560,
+                      "height": 1408,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "3840x2112",
+                      "width": 3840,
+                      "height": 2112,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:20",
+                  "label": "11:20",
+                  "presets": [
+                    {
+                      "id": "1408x2560",
+                      "width": 1408,
+                      "height": 2560,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "2112x3840",
+                      "width": 2112,
+                      "height": 3840,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 8,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                8
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 1.0,
+              "min": 0.0,
+              "max": 100.0,
+              "step": 0.1,
+              "mode": "adjustable"
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": true,
+                "supports_negative_prompt": true
+              },
+              "negative_prompt": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": true
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "retake",
+            "label": "Retake",
+            "request_selector": {
+              "pipeline": "retake"
+            },
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 8,
+              "guidance": 1.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "source-driven",
+              "alignment": 32,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 2088960,
+              "max_axis_pixels": 2048,
+              "aspect_groups": [
+                {
+                  "id": "22:15",
+                  "label": "22:15",
+                  "presets": [
+                    {
+                      "id": "704x480",
+                      "width": 704,
+                      "height": 480,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 8,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                8
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 1.0,
+              "min": 1.0,
+              "max": 1.0,
+              "step": 0.1,
+              "mode": "fixed",
+              "note": "Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with Auto or a guided pipeline to adjust it."
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": false,
+                "supports_negative_prompt": false,
+                "fixed_scale": 1.0
+              },
+              "negative_prompt": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not encode a negative prompt."
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": true
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "lip-dub",
+            "label": "Lip Dub",
+            "request_selector": {
+              "pipeline": "lip-dub"
+            },
+            "defaults": {
+              "width": 1216,
+              "height": 704,
+              "steps": 8,
+              "guidance": 1.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "source-driven",
+              "alignment": 32,
+              "min_width": 64,
+              "min_height": 64,
+              "max_pixels": 2088960,
+              "max_axis_pixels": 2048,
+              "aspect_groups": [
+                {
+                  "id": "22:15",
+                  "label": "22:15",
+                  "presets": [
+                    {
+                      "id": "704x480",
+                      "width": 704,
+                      "height": 480,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "3:2",
+                  "label": "3:2",
+                  "presets": [
+                    {
+                      "id": "768x512",
+                      "width": 768,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1536x1024",
+                      "width": 1536,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "1:1",
+                  "label": "1:1",
+                  "presets": [
+                    {
+                      "id": "512x512",
+                      "width": 512,
+                      "height": 512,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "768x768",
+                      "width": 768,
+                      "height": 768,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "16:9",
+                  "label": "16:9",
+                  "presets": [
+                    {
+                      "id": "1024x576",
+                      "width": 1024,
+                      "height": 576,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "19:11",
+                  "label": "19:11",
+                  "presets": [
+                    {
+                      "id": "1216x704",
+                      "width": 1216,
+                      "height": 704,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "11:19",
+                  "label": "11:19",
+                  "presets": [
+                    {
+                      "id": "704x1216",
+                      "width": 704,
+                      "height": 1216,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "9:16",
+                  "label": "9:16",
+                  "presets": [
+                    {
+                      "id": "576x1024",
+                      "width": 576,
+                      "height": 1024,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "2:3",
+                  "label": "2:3",
+                  "presets": [
+                    {
+                      "id": "512x768",
+                      "width": 512,
+                      "height": 768,
+                      "tier": "recommended"
+                    },
+                    {
+                      "id": "1024x1536",
+                      "width": 1024,
+                      "height": 1536,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "30:17",
+                  "label": "30:17",
+                  "presets": [
+                    {
+                      "id": "1920x1088",
+                      "width": 1920,
+                      "height": 1088,
+                      "tier": "recommended"
+                    }
+                  ]
+                },
+                {
+                  "id": "17:30",
+                  "label": "17:30",
+                  "presets": [
+                    {
+                      "id": "1088x1920",
+                      "width": 1088,
+                      "height": 1920,
+                      "tier": "recommended"
+                    }
+                  ]
+                }
+              ]
+            },
+            "steps": {
+              "default": 8,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                8
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 1.0,
+              "min": 1.0,
+              "max": 1.0,
+              "step": 0.1,
+              "mode": "fixed",
+              "note": "Distilled recipe fixes CFG at 1.0. Choose a Dev checkpoint with Auto or a guided pipeline to adjust it."
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": false,
+                "supports_negative_prompt": false,
+                "fixed_scale": 1.0
+              },
+              "negative_prompt": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not encode a negative prompt."
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": true,
+              "supports_extend": true,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "adjustable",
+                "required": true
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "mp4",
+                "formats": [
+                  "mp4",
+                  "gif",
+                  "apng",
+                  "webp"
+                ],
+                "audio_requires_mp4": true,
+                "delivery_reason": "Audio-enabled video delivery requires MP4."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          },
+          {
+            "id": "t2a",
+            "label": "T2a",
+            "request_selector": {
+              "pipeline": "t2a"
+            },
+            "defaults": {
+              "width": 0,
+              "height": 0,
+              "steps": 8,
+              "guidance": 1.0,
+              "frames": 121,
+              "fps": 24
+            },
+            "resolution": {
+              "domain": "none",
+              "alignment": 1,
+              "min_width": 0,
+              "min_height": 0,
+              "max_pixels": 0,
+              "aspect_groups": []
+            },
+            "steps": {
+              "default": 8,
+              "min": 1,
+              "max": 100,
+              "step": 1,
+              "recommended": [
+                8
+              ],
+              "mode": "adjustable"
+            },
+            "guidance": {
+              "default": 1.0,
+              "min": 0.0,
+              "max": 100.0,
+              "step": 0.1,
+              "mode": "adjustable"
+            },
+            "temporal": {
+              "frames": {
+                "default": 121,
+                "min": 1,
+                "max": 601,
+                "step": 8,
+                "recommended": [
+                  121
+                ],
+                "mode": "adjustable"
+              },
+              "frame_offset": 1,
+              "fps": {
+                "mode": "adjustable",
+                "default": 24,
+                "min": 1,
+                "max": 120,
+                "step": 1
+              },
+              "max_duration_seconds": 20
+            },
+            "capabilities": {
+              "guidance": {
+                "adjustable": true,
+                "supports_negative_prompt": true
+              },
+              "negative_prompt": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "source_image": "optional",
+              "supports_lora": true,
+              "supports_controlnet": false,
+              "supports_identity": false,
+              "supports_sequence": false,
+              "supports_extend": false,
+              "supports_audio": true,
+              "source_video": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not accept a source video."
+              },
+              "mask": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This model does not accept an inpainting mask."
+              },
+              "keyframes": {
+                "mode": "adjustable",
+                "required": false
+              },
+              "audio": {
+                "mode": "hidden",
+                "required": false,
+                "reason": "This recipe does not accept source audio."
+              },
+              "lora": {
+                "mode": "adjustable",
+                "max_count": 4
+              },
+              "controlnet": {
+                "mode": "hidden",
+                "max_count": 0,
+                "reason": "ControlNet generation is available for SD1.5 models."
+              },
+              "output": {
+                "default_format": "wav",
+                "formats": [
+                  "wav"
+                ],
+                "audio_requires_mp4": false,
+                "delivery_reason": "Audio-only delivery uses WAV."
+              },
+              "wan_recipe": {
+                "mode": "hidden",
+                "supports_distill_strength": false,
+                "supports_first_last_frame": false,
+                "reason": "Wan sampler controls apply only to Wan models."
+              }
+            },
+            "provenance": [
+              {
+                "kind": "upstream",
+                "source": "https://github.com/Lightricks/LTX-2",
+                "revision": "4f8905737aac86a554637cac86c178877a39c744",
+                "qualified": true,
+                "evidence": "mold.generation-profile.v1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "models": [
+        {
           "model": "minimax-h3-fl2va:comfy-pruned-int8",
           "family": "minimax-h3",
           "hidden": false

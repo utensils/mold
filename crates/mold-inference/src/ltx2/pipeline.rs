@@ -1592,12 +1592,12 @@ impl InferenceEngine for Ltx2Engine {
             );
         }
         let gemma_root = self.gemma_root()?;
-        if !gemma_root.join("tokenizer.json").exists() {
-            bail!(
-                "missing Gemma tokenizer assets for LTX-2: {}",
+        GemmaAssets::discover(&gemma_root).with_context(|| {
+            format!(
+                "missing or invalid Gemma tokenizer assets for LTX-2: {}",
                 gemma_root.display()
-            );
-        }
+            )
+        })?;
         Ltx2Backend::detect().ensure_supported()?;
         self.loaded = true;
         Ok(())
