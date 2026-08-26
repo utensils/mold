@@ -5133,7 +5133,14 @@ mod tests {
         AppState,
         tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
     ) {
-        durable_state_with_admission_policy(db, root, engine, require_media_ready, true)
+        durable_state_with_admission_policy(
+            db,
+            root,
+            engine,
+            require_media_ready,
+            true,
+            "test-instance",
+        )
     }
 
     fn durable_state_with_admission_policy(
@@ -5142,6 +5149,7 @@ mod tests {
         engine: MockEngine,
         require_media_ready: bool,
         install_admission: bool,
+        instance_id: &str,
     ) -> (
         AppState,
         tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
@@ -5154,7 +5162,7 @@ mod tests {
         state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
             db.clone(),
             Some(root),
-            "test-instance",
+            instance_id,
         ));
         if let Some(owner) = state.queue_journal.owner_uuid() {
             let lifecycle = Arc::new(crate::queue_media_lifecycle::QueueMediaLifecycle::new(
@@ -6176,6 +6184,7 @@ mod tests {
                 MockEngine::ready(),
                 true,
                 false,
+                "test-instance",
             );
             install_authoritative_v2(&mut restarted);
             let lifecycle = restarted.queue_journal.queue_media_lifecycle().unwrap();
@@ -6206,6 +6215,74 @@ mod tests {
                 .unwrap();
             assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn orphan_owner_receipt_prevents_global_key_regeneration_for_fresh_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let body = serde_json::json!({
+            "client_batch_id": uuid::Uuid::new_v4().to_string(),
+            "requests": [serde_json::from_str::<serde_json::Value>(
+                &generate_body("orphan receipt evidence", 64, 64)
+            ).unwrap()],
+        });
+        let (mut first, first_rx) = durable_state(db.clone(), root.path());
+        install_authoritative_v2(&mut first);
+        let first_owner = first.queue_journal.owner_uuid().unwrap().to_string();
+        let first_app = app_with_state(first);
+        let admitted = first_app
+            .clone()
+            .oneshot(json_request("POST", "/api/generation-batches", body))
+            .await
+            .unwrap();
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+
+        // Claim a distinct owner while the first still holds its identity.
+        // Once the first stops, its generation-v2 row is orphan evidence for
+        // the one MOLD_HOME-global admission key.
+        let (mut fresh, _fresh_rx) = durable_state_with_admission_policy(
+            db,
+            root.path(),
+            MockEngine::ready(),
+            true,
+            false,
+            "fresh-instance",
+        );
+        assert_ne!(fresh.queue_journal.owner_uuid().unwrap(), first_owner);
+        drop(first_app);
+        drop(first_rx);
+        install_authoritative_v2(&mut fresh);
+
+        let key = root.path().join("queue-media/generation-admission.key");
+        std::fs::remove_file(&key).unwrap();
+        let lifecycle = fresh.queue_journal.queue_media_lifecycle().unwrap();
+        assert!(!crate::install_durable_admission_if_available(
+            &fresh.queue_journal,
+            lifecycle,
+            fresh.queue_capacity,
+        ));
+        assert!(
+            !key.exists(),
+            "receipt evidence must prevent silent rekeying"
+        );
+
+        let app = app_with_state(fresh);
+        assert_eq!(
+            app.clone()
+                .oneshot(empty_request("GET", "/api/status"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        let capabilities = app
+            .oneshot(empty_request("GET", "/api/capabilities"))
+            .await
+            .unwrap();
+        let capabilities = json_body(capabilities).await;
+        assert_eq!(capabilities["queue"]["heterogeneous_batch"], false);
+        assert!(capabilities["queue"]["admission_protocol_version"].is_null());
     }
 
     #[tokio::test(flavor = "current_thread")]

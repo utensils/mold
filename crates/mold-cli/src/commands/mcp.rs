@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc,
+    Arc, Weak,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -170,7 +170,7 @@ async fn run_async_generation(
             // The shared canonical helper currently returns only after an
             // authoritative terminal child. Keep the local row truthfully
             // queued while it waits rather than fabricating Running.
-            finish_canonical_async(&client, &jobs, &local_job_id, report).await;
+            finish_canonical_async(&jobs, &local_job_id, report).await;
         }
         Ok(None) => {
             jobs.mark_running(&local_job_id, AsyncGenerationTransport::Legacy)
@@ -205,7 +205,6 @@ async fn run_async_generation(
 }
 
 async fn finish_canonical_async(
-    client: &MoldClient,
     jobs: &AsyncJobRegistry,
     local_job_id: &str,
     report: CanonicalGenerationReport,
@@ -232,7 +231,6 @@ async fn finish_canonical_async(
         return;
     };
     finish_canonical_child(
-        client,
         jobs,
         local_job_id,
         outcome.authority,
@@ -243,7 +241,6 @@ async fn finish_canonical_async(
 }
 
 async fn finish_canonical_child(
-    client: &MoldClient,
     jobs: &AsyncJobRegistry,
     local_job_id: &str,
     authority: GenerationBatchAuthority,
@@ -259,36 +256,17 @@ async fn finish_canonical_child(
         | GenerationBatchChildState::Running
         | GenerationBatchChildState::Cancelling => AsyncJobStatus::Failed,
     };
-    let response = if status == AsyncJobStatus::Succeeded {
-        match hydrate_canonical_outcome(client, &child).await {
-            Ok(response) => Some(response),
-            Err(error) => {
-                jobs.finish_canonical(
-                    local_job_id,
-                    CanonicalAsyncSettlement {
-                        authority: Some(authority),
-                        durable_job_id: Some(child.job_id),
-                        status: AsyncJobStatus::Failed,
-                        error: Some(error),
-                        ..Default::default()
-                    },
-                )
-                .await;
-                return;
-            }
-        }
-    } else {
-        None
-    };
+    let durable_job_id = child.job_id.clone();
     jobs.finish_canonical(
         local_job_id,
         CanonicalAsyncSettlement {
             authority: Some(authority),
-            durable_job_id: Some(child.job_id),
+            durable_job_id: Some(durable_job_id),
             retryable: child.retryable,
             status,
-            error: child.error.or(failure),
-            result: response,
+            error: child.error.clone().or(failure),
+            result: None,
+            canonical_child: Some(child),
         },
     )
     .await;
@@ -579,10 +557,13 @@ impl McpServer {
     async fn tool_generation_status(&self, arguments: Value) -> std::result::Result<Value, String> {
         let args: GenerationStatusArgs =
             serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
-        let include_result = args.include_result.unwrap_or(true);
+        let include_result = args.include_result == Some(true);
 
         if let Some(job_id) = args.job_id {
             self.jobs.reconcile_pending_job(&self.client, &job_id).await;
+            if include_result {
+                self.jobs.hydrate_result(&self.client, &job_id).await;
+            }
             let Some(job) = self.jobs.get(&job_id).await else {
                 return Err(format!("unknown async generation job: {job_id}"));
             };
@@ -1131,6 +1112,7 @@ struct CanonicalAsyncSettlement {
     status: AsyncJobStatus,
     error: Option<String>,
     result: Option<GenerateResponse>,
+    canonical_child: Option<GenerationBatchChild>,
 }
 
 impl Default for CanonicalAsyncSettlement {
@@ -1142,6 +1124,7 @@ impl Default for CanonicalAsyncSettlement {
             status: AsyncJobStatus::Failed,
             error: None,
             result: None,
+            canonical_child: None,
         }
     }
 }
@@ -1169,6 +1152,8 @@ struct AsyncGenerationJob {
     latest_progress: Option<SseProgressEvent>,
     error: Option<String>,
     result: Option<GenerateResponse>,
+    canonical_child: Option<GenerationBatchChild>,
+    result_error: Option<String>,
     transport: AsyncGenerationTransport,
     authority: Option<GenerationBatchAuthority>,
     durable_job_id: Option<String>,
@@ -1192,6 +1177,8 @@ impl AsyncGenerationJob {
             latest_progress: None,
             error: None,
             result: None,
+            canonical_child: None,
+            result_error: None,
             transport: AsyncGenerationTransport::Probing,
             authority: None,
             durable_job_id: None,
@@ -1220,6 +1207,7 @@ struct AsyncJobRegistryInner {
     next_id: AtomicU64,
     jobs: Mutex<HashMap<String, AsyncGenerationJob>>,
     reconciliations: Mutex<HashMap<String, Arc<Mutex<ReconciliationAttempt>>>>,
+    hydrations: Mutex<HashMap<String, Weak<Mutex<()>>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1305,6 +1293,8 @@ impl AsyncJobRegistry {
             job.finished_at_ms = settlement.status.is_terminal().then_some(now);
             job.error = settlement.error;
             job.result = settlement.result;
+            job.canonical_child = settlement.canonical_child;
+            job.result_error = None;
         }
         prune_completed_jobs(&mut jobs);
     }
@@ -1393,6 +1383,8 @@ impl AsyncJobRegistry {
             job.latest_progress = None;
             job.error = None;
             job.result = None;
+            job.canonical_child = None;
+            job.result_error = None;
             job.reconciliation_pending = true;
             job.updated_at_ms = now;
             job.authority
@@ -1524,7 +1516,7 @@ impl AsyncJobRegistry {
                     true
                 } else {
                     confirmation_finished = confirmation_attempt.is_some();
-                    finish_canonical_child(client, self, id, authority, child, None).await;
+                    finish_canonical_child(self, id, authority, child, None).await;
                     false
                 }
             }
@@ -1590,6 +1582,84 @@ impl AsyncJobRegistry {
         if let Some(job) = jobs.get_mut(id) {
             job.error = Some(error);
             job.updated_at_ms = now_ms();
+        }
+    }
+
+    async fn hydrate_result(&self, client: &MoldClient, id: &str) {
+        let pending = {
+            let jobs = self.inner.jobs.lock().await;
+            let Some(job) = jobs.get(id) else {
+                return;
+            };
+            if job.status != AsyncJobStatus::Succeeded || job.result.is_some() {
+                return;
+            }
+            job.authority
+                .clone()
+                .zip(job.durable_job_id.clone())
+                .zip(job.canonical_child.clone())
+        };
+        let Some(((authority, durable_job_id), child)) = pending else {
+            return;
+        };
+        let key = reconciliation_key(&authority, &durable_job_id);
+        let hydration = {
+            let mut hydrations = self.inner.hydrations.lock().await;
+            hydrations.retain(|_, hydration| hydration.strong_count() > 0);
+            match hydrations.get(&key).and_then(Weak::upgrade) {
+                Some(hydration) => hydration,
+                None => {
+                    let hydration = Arc::new(Mutex::new(()));
+                    hydrations.insert(key.clone(), Arc::downgrade(&hydration));
+                    hydration
+                }
+            }
+        };
+        let hydration_identity = Arc::clone(&hydration);
+        let Ok(hydration) = hydration.try_lock_owned() else {
+            return;
+        };
+
+        let result = tokio::time::timeout(
+            reconciliation_read_timeout(),
+            hydrate_canonical_outcome(client, &child),
+        )
+        .await;
+        {
+            let mut jobs = self.inner.jobs.lock().await;
+            if let Some(job) = jobs.get_mut(id) {
+                if job.status == AsyncJobStatus::Succeeded
+                    && job.durable_job_id.as_deref() == Some(durable_job_id.as_str())
+                {
+                    match result {
+                        Ok(Ok(response)) => {
+                            job.result = Some(response);
+                            job.result_error = None;
+                        }
+                        Ok(Err(error)) => {
+                            job.result_error = Some(format!(
+                                "result hydration delayed; request the result again to retry: {error}"
+                            ));
+                        }
+                        Err(_) => {
+                            job.result_error = Some(
+                                "result hydration timed out; request the result again to retry"
+                                    .into(),
+                            );
+                        }
+                    }
+                    job.updated_at_ms = now_ms();
+                }
+            }
+        }
+        drop(hydration);
+        let mut hydrations = self.inner.hydrations.lock().await;
+        if hydrations
+            .get(&key)
+            .and_then(Weak::upgrade)
+            .is_some_and(|current| Arc::ptr_eq(&current, &hydration_identity))
+        {
+            hydrations.remove(&key);
         }
     }
 
@@ -1669,6 +1739,11 @@ fn apply_canonical_child_to_job(
     job.retryable = child.retryable;
     job.status = async_status_from_child(&child.state);
     job.error = child.error.clone();
+    job.canonical_child = Some(child.clone());
+    if job.status != AsyncJobStatus::Succeeded {
+        job.result = None;
+        job.result_error = None;
+    }
     job.updated_at_ms = now;
     if job.status == AsyncJobStatus::Running {
         job.started_at_ms.get_or_insert(now);
@@ -1734,6 +1809,9 @@ fn job_status_line(job: &AsyncGenerationJob) -> String {
     if let Some(error) = &job.error {
         line.push_str(&format!("; error: {error}"));
     }
+    if let Some(error) = &job.result_error {
+        line.push_str(&format!("; {error}"));
+    }
     if let Some(response) = &job.result {
         if let Some(image) = response.images.first() {
             line.push_str(&format!(
@@ -1794,6 +1872,7 @@ fn job_summary_json(job: &AsyncGenerationJob) -> Value {
         "retryable": job.retryable,
         "retry_in_flight": job.retry_in_flight,
         "error": job.error,
+        "result_error": job.result_error,
         "result": result,
     })
 }
@@ -2483,7 +2562,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "generation_status",
-            "description": "List async generation jobs or return status for one job. Completed image jobs include image content by default.",
+            "description": "List async generation jobs or return status for one job. Completed image content is hydrated only when explicitly requested.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2493,7 +2572,7 @@ fn tool_definitions() -> Value {
                     },
                     "include_result": {
                         "type": "boolean",
-                        "description": "Include completed image content when job_id is provided. Defaults to true."
+                        "description": "Include completed image content when job_id is provided. Defaults to false; a failed or timed-out hydration can be retried by requesting it again."
                     }
                 },
                 "additionalProperties": false
@@ -2748,10 +2827,108 @@ mod tests {
                 status: AsyncJobStatus::Held,
                 error: Some("model dependency is unavailable".into()),
                 result: None,
+                canonical_child: None,
             },
         )
         .await;
         id
+    }
+
+    async fn seed_completed_canonical_job(jobs: &AsyncJobRegistry) -> String {
+        let request = transport_request();
+        let id = jobs.create(&request).await.unwrap();
+        let child = serde_json::from_value(json!({
+            "index": 1,
+            "job_id": "durable-job-1",
+            "state": "complete",
+            "result": { "filename": "result.png" }
+        }))
+        .unwrap();
+        finish_canonical_child(
+            jobs,
+            &id,
+            GenerationBatchAuthority {
+                instance_id: "instance-1".into(),
+                batch_id: "batch-1".into(),
+                client_batch_id: "client-batch-1".into(),
+            },
+            child,
+            None,
+        )
+        .await;
+        id
+    }
+
+    fn spawn_hung_then_hydrated_gallery_server() -> (
+        String,
+        Arc<Notify>,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_for_server = requests.clone();
+        let first_request_seen = Arc::new(Notify::new());
+        let first_request_seen_for_server = first_request_seen.clone();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(1, 1)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let png = png.into_inner();
+        let mut gallery = test_gallery_image("result.png", "flux-dev:q4", "transport proof", 1);
+        gallery.metadata.job_id = Some("durable-job-1".into());
+        let gallery = serde_json::to_vec(&vec![gallery]).unwrap();
+
+        let server = tokio::spawn(async move {
+            let mut hung_sockets = Vec::new();
+            for request_index in 0..4 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                requests_for_server.fetch_add(1, Ordering::SeqCst);
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 2048];
+                loop {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                if request_index < 2 {
+                    if request_index == 0 {
+                        first_request_seen_for_server.notify_waiters();
+                    }
+                    hung_sockets.push(socket);
+                    continue;
+                }
+                let head = String::from_utf8_lossy(&request);
+                let (content_type, body) = if head.starts_with("GET /api/gallery/image/result.png")
+                {
+                    ("image/png", png.as_slice())
+                } else {
+                    assert!(head.starts_with("GET /api/gallery "));
+                    ("application/json", gallery.as_slice())
+                };
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                socket.write_all(body).await.unwrap();
+            }
+            drop(hung_sockets);
+        });
+        (base_url, first_request_seen, requests, server)
     }
 
     fn spawn_hung_then_running_retry_server() -> (
@@ -3334,6 +3511,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_status_skips_gallery_until_bounded_explicit_hydration_and_recovers() {
+        let (base_url, first_request_seen, gallery_requests, server) =
+            spawn_hung_then_hydrated_gallery_server();
+        let mcp = McpServer {
+            client: MoldClient::new(&base_url),
+            jobs: AsyncJobRegistry::default(),
+        };
+        let local_id = seed_completed_canonical_job(&mcp.jobs).await;
+
+        let listed = mcp.tool_generation_status(json!({})).await.unwrap();
+        assert_eq!(
+            listed["structuredContent"]["jobs"][0]["status"],
+            "succeeded"
+        );
+        let status_only = mcp
+            .tool_generation_status(json!({
+                "job_id": local_id,
+                "include_result": false
+            }))
+            .await
+            .unwrap();
+        assert_eq!(status_only["structuredContent"]["status"], "succeeded");
+        assert_eq!(status_only["structuredContent"]["result"], Value::Null);
+        assert_eq!(gallery_requests.load(Ordering::SeqCst), 0);
+
+        {
+            let pending = mcp.tool_generation_status(json!({
+                "job_id": local_id,
+                "include_result": true
+            }));
+            tokio::pin!(pending);
+            tokio::select! {
+                result = &mut pending => panic!("hung result hydration completed unexpectedly: {result:?}"),
+                () = first_request_seen.notified() => {}
+            }
+        }
+
+        let started = Instant::now();
+        let timed_out = mcp
+            .tool_generation_status(json!({
+                "job_id": local_id,
+                "include_result": true
+            }))
+            .await
+            .unwrap();
+        assert!(started.elapsed() < reconciliation_read_timeout() * 2);
+        assert_eq!(timed_out["structuredContent"]["status"], "succeeded");
+        assert_eq!(timed_out["structuredContent"]["result"], Value::Null);
+        assert!(timed_out["structuredContent"]["result_error"]
+            .as_str()
+            .unwrap()
+            .contains("timed out"));
+
+        let hydrated = mcp
+            .tool_generation_status(json!({
+                "job_id": local_id,
+                "include_result": true
+            }))
+            .await
+            .unwrap();
+        assert_eq!(hydrated["structuredContent"]["status"], "succeeded");
+        assert_eq!(hydrated["structuredContent"]["result"]["image"]["width"], 1);
+        assert_eq!(hydrated["structuredContent"]["result_error"], Value::Null);
+        assert_eq!(gallery_requests.load(Ordering::SeqCst), 4);
+        assert_eq!(hydrated["content"][1]["type"], "image");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn concurrent_status_reads_coalesce_exact_retry_reconciliation() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -3446,6 +3692,7 @@ mod tests {
                     status: AsyncJobStatus::Held,
                     error: Some("dependency unavailable".into()),
                     result: None,
+                    canonical_child: None,
                 },
             )
             .await;

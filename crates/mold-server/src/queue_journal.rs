@@ -758,10 +758,10 @@ impl QueueJournal {
     }
 
     pub(crate) fn has_generation_v2_receipt_evidence(&self) -> Result<bool, String> {
-        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+        let Some(db) = self.db() else {
             return Ok(false);
         };
-        generation_batches::has_request_receipt_prefix(db, owner, "generation-v2.")
+        generation_batches::has_any_request_receipt_prefix(db, "generation-v2.")
             .map_err(|error| format!("could not inspect durable generation receipts: {error:#}"))
     }
 

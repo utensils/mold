@@ -171,18 +171,17 @@ pub fn replace_request_receipt(
     })
 }
 
-/// Whether this owner has durable receipts issued by the named protocol.
-/// Used only to decide whether a missing authentication key may be created;
-/// the receipt remains authenticated at the server boundary.
-pub fn has_request_receipt_prefix(db: &MetadataDb, owner_uuid: &str, prefix: &str) -> Result<bool> {
+/// Whether any queue owner has durable receipts issued by the named protocol.
+/// The admission key is database/MOLD_HOME-global, so creation must preserve
+/// receipt evidence belonging to inactive and orphaned owners too.
+pub fn has_any_request_receipt_prefix(db: &MetadataDb, prefix: &str) -> Result<bool> {
     db.with_conn(|conn| {
         Ok(conn.query_row(
             "SELECT EXISTS(
                  SELECT 1 FROM generation_batches
-                  WHERE owner_uuid = ?1
-                    AND substr(request_sha256, 1, length(?2)) = ?2
+                  WHERE substr(request_sha256, 1, length(?1)) = ?1
              )",
-            params![owner_uuid, prefix],
+            params![prefix],
             |row| row.get(0),
         )?)
     })
@@ -1317,6 +1316,30 @@ mod tests {
             request_sha256: hash.into(),
             created_at_ms: 1,
         }
+    }
+
+    #[test]
+    fn receipt_evidence_scan_includes_inactive_owners() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO generation_batches
+                    (id, client_batch_id, owner_uuid, request_sha256, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    "orphan-batch",
+                    "orphan-client",
+                    "orphan-owner",
+                    "generation-v2.opaque-receipt",
+                    1_i64
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(has_any_request_receipt_prefix(&db, "generation-v2.").unwrap());
+        assert!(!has_any_request_receipt_prefix(&db, "generation-v3.").unwrap());
     }
 
     fn media_obligation(id: &str) -> QueueMediaObligation {
