@@ -429,6 +429,7 @@ fn refit_request_after_pull(
 
 pub struct Ltx2Options {
     pub frames: Option<u32>,
+    pub predict_duration: bool,
     pub fps: Option<u32>,
     /// Per-clip cap for chained rendering. `None` = use the model-family default
     /// (currently 97 for LTX-2 distilled). Only read when `frames > cap`.
@@ -580,6 +581,7 @@ pub async fn run(
 ) -> Result<()> {
     let Ltx2Options {
         frames,
+        predict_duration,
         fps,
         clip_frames,
         motion_tail,
@@ -646,7 +648,9 @@ pub async fn run(
             "MiniMax H3 reference descriptors require authenticated streaming upload sources"
         );
     }
-    let effective_frames = if is_h3 {
+    let effective_frames = if predict_duration {
+        None
+    } else if is_h3 {
         Some(frames.unwrap_or(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES))
     } else {
         frames.or_else(|| model_cfg.effective_frames())
@@ -4441,6 +4445,7 @@ mod tests {
             1,
             Ltx2Options {
                 frames: None,
+                predict_duration: false,
                 fps: None,
                 clip_frames: None,
                 motion_tail: 17,

@@ -265,6 +265,9 @@ pub fn visible_rows(caps: &ModelCapabilities, adv: &AdvancedState) -> Vec<Create
         CreateRow::Field(ParamField::Guidance),
     ];
     if caps.supports_video {
+        if caps.supports_duration_prediction {
+            rows.push(CreateRow::Field(ParamField::PredictDuration));
+        }
         rows.push(CreateRow::Field(ParamField::Duration));
     }
     rows.extend([
@@ -997,12 +1000,17 @@ mod tests {
     }
 
     #[test]
-    fn video_section_only_when_caps_support_video() {
-        let video_caps = capabilities_for_family("ltx-video");
+    fn video_and_duration_prediction_rows_follow_capabilities() {
+        let mut video_caps = capabilities_for_family("ltx-video");
         assert!(video_caps.supports_video);
         let rows = visible_rows(&video_caps, &open_state(None));
         assert!(rows.contains(&CreateRow::Section(AdvSection::Video)));
         assert!(rows.contains(&CreateRow::Field(ParamField::Duration)));
+        assert!(!rows.contains(&CreateRow::Field(ParamField::PredictDuration)));
+
+        video_caps.supports_duration_prediction = true;
+        let rows = visible_rows(&video_caps, &open_state(None));
+        assert!(rows.contains(&CreateRow::Field(ParamField::PredictDuration)));
 
         let image_caps = capabilities_for_family("flux");
         assert!(!image_caps.supports_video);

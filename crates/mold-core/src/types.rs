@@ -2827,6 +2827,19 @@ pub struct ModelInfoExtended {
     /// compatibility with older servers that only advertised family support.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_audio: Option<bool>,
+    /// Whether omitting `GenerateRequest.frames` asks this concrete model to
+    /// run its qualified prompt-conditioned duration head. Absent on older
+    /// servers and false for models without that exact component contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_duration_prediction: Option<bool>,
+    /// Whether every component required by this concrete split pack is
+    /// present and header-qualified on this host. LTX-2.5 publishes this even
+    /// for incomplete rows so automatic routing can refuse them before queueing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_ready: Option<bool>,
+    /// Human-readable reason paired with `runtime_ready == false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_readiness_error: Option<String>,
     /// Whether this concrete model can accept a face-identity reference
     /// (`GenerateRequest.id_image`). Derived from the same generation-profile
     /// authority as `capabilities.supports_identity`, never a second
@@ -3098,6 +3111,9 @@ mod model_display_name_tests {
 
     fn model(name: &str, display_name: Option<&str>, description: &str) -> ModelInfoExtended {
         ModelInfoExtended {
+            supports_duration_prediction: None,
+            runtime_ready: None,
+            runtime_readiness_error: None,
             runtime_available: None,
             runtime_unavailable_reason: None,
             info: ModelInfo {
@@ -4953,6 +4969,36 @@ mod tests {
         assert_eq!(back.embed_metadata, req.embed_metadata);
         assert_eq!(back.scheduler, None);
         assert_eq!(back.ic_lora_control.as_deref(), Some("union"));
+    }
+
+    #[test]
+    fn ltx25_http_duration_and_audio_contract_round_trips() {
+        let predicted = serde_json::json!({
+            "prompt": "a drummer in a rainstorm",
+            "model": "ltx-2.5-22b-distilled:int8-conv",
+            "width": 768,
+            "height": 512,
+            "steps": 8,
+            "batch_size": 1,
+            "fps": 24,
+            "enable_audio": true
+        });
+        let predicted_request: GenerateRequest = serde_json::from_value(predicted).unwrap();
+        assert_eq!(predicted_request.frames, None);
+        assert_eq!(predicted_request.fps, Some(24));
+        assert_eq!(predicted_request.enable_audio, Some(true));
+        let predicted_wire = serde_json::to_value(&predicted_request).unwrap();
+        assert!(predicted_wire.get("frames").is_none());
+        assert_eq!(predicted_wire["enable_audio"], true);
+
+        let mut explicit_wire = predicted_wire;
+        explicit_wire
+            .as_object_mut()
+            .unwrap()
+            .insert("frames".to_string(), serde_json::json!(97));
+        let explicit_request: GenerateRequest = serde_json::from_value(explicit_wire).unwrap();
+        assert_eq!(explicit_request.frames, Some(97));
+        assert_eq!(explicit_request.enable_audio, Some(true));
     }
 
     #[test]

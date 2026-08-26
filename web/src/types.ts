@@ -479,6 +479,11 @@ export interface ModelInfoExtended extends ModelDefaults {
   nsfw?: boolean | null;
   /** Model-specific LTX-2 audio output support; absent on older servers. */
   supports_audio?: boolean | null;
+  /** Omitting frames invokes this model's qualified prompt duration head. */
+  supports_duration_prediction?: boolean | null;
+  /** Complete split-pack readiness on this host; absent on older servers. */
+  runtime_ready?: boolean | null;
+  runtime_readiness_error?: string | null;
   /** Model accepts a face-identity (PuLID) photo. Absent on servers that
    * predate identity conditioning — read absence as "no", which is what
    * keeps the control hidden instead of queueing work the host refuses.
@@ -1087,6 +1092,8 @@ export interface GenerateFormState {
   batchSize: number;
   strength: number;
   frames: number | null;
+  /** When true, omit frames and let a qualified LTX-2.5 duration head decide. */
+  predictDuration?: boolean;
   fps: number | null;
   scheduler: Scheduler | null;
   cfgPlus: boolean;

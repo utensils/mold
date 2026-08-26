@@ -158,6 +158,7 @@ function defaultForm(): GenerateFormState {
     batchSize: 1,
     strength: 0.75,
     frames: null,
+    predictDuration: false,
     fps: null,
     scheduler: null,
     cfgPlus: false,
@@ -685,6 +686,8 @@ export function applyMetadataToForm(
     guidanceOverrides: guidanceOverridesFromWire(metadata.guidance_overrides),
     wanRecipe: wanRecipeFromWire(metadata),
     frames: metadata.frames ?? null,
+    predictDuration:
+      metadata.frames == null && metadata.model?.startsWith("ltx-2.5"),
     fps: metadata.fps ?? null,
     outputFormat: outputFormat ?? next.outputFormat,
     imageAttachments: [],
@@ -1287,7 +1290,11 @@ export function useGenerateForm(): UseGenerateForm {
               ...(firstLastFrames ? { keyframes: firstLastFrames } : {}),
             }),
         expand: s.expand.enabled || undefined,
-        frames: capabilities.supportsVideo ? s.frames : undefined,
+        frames:
+          capabilities.supportsVideo &&
+          !(s.predictDuration && model?.supports_duration_prediction === true && model.runtime_ready !== false)
+            ? s.frames
+            : undefined,
         fps: capabilities.supportsVideo ? s.fps : undefined,
         upscale_model: upscaleModel || undefined,
         gif_preview:

@@ -252,6 +252,9 @@ export interface ModelEntry {
   nsfw?: boolean | null;
   /** Model-specific LTX-2 audio output support; absent on older servers. */
   supports_audio?: boolean | null;
+  supports_duration_prediction?: boolean | null;
+  runtime_ready?: boolean | null;
+  runtime_readiness_error?: string | null;
   /** Checkpoint accepts a face-identity (PuLID) photo. Additive: absent on a
    * server that predates identity conditioning and on a build without the
    * adapter, and absence reads as "no" — offering the control optimistically

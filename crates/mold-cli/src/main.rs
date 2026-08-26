@@ -759,6 +759,11 @@ Examples:
         #[arg(long, help_heading = "Video")]
         frames: Option<u32>,
 
+        /// Let a qualified LTX-2.5 duration head choose a 1–20 second clip.
+        /// This deliberately omits `frames` from the request.
+        #[arg(long, conflicts_with_all = ["frames", "duration"], help_heading = "Video")]
+        predict_duration: bool,
+
         /// Video frames per second for output encoding (default: 24).
         /// Only used with --frames or video model families.
         #[arg(long, help_heading = "Video")]
@@ -1971,6 +1976,7 @@ async fn run() -> anyhow::Result<()> {
             seed,
             batch,
             frames,
+            predict_duration,
             fps,
             duration,
             clip_frames,
@@ -2160,6 +2166,7 @@ async fn run() -> anyhow::Result<()> {
                 seed,
                 batch,
                 frames,
+                predict_duration,
                 fps,
                 duration,
                 clip_frames,
@@ -3561,6 +3568,36 @@ mod tests {
             }
             _ => panic!("expected Run"),
         }
+    }
+
+    #[test]
+    fn run_predict_duration_flag_is_explicit_and_conflicts_with_frames() {
+        let cli = parse(&[
+            "run",
+            "ltx-2.5-22b-distilled:int8-conv",
+            "test",
+            "--predict-duration",
+        ]);
+        match cli.command {
+            Commands::Run {
+                frames,
+                predict_duration,
+                ..
+            } => {
+                assert_eq!(frames, None);
+                assert!(predict_duration);
+            }
+            _ => panic!("expected Run"),
+        }
+        assert!(try_parse(&[
+            "run",
+            "ltx-2.5-22b-distilled:int8-conv",
+            "test",
+            "--predict-duration",
+            "--frames",
+            "97",
+        ])
+        .is_err());
     }
 
     #[test]

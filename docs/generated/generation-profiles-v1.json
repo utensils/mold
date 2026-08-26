@@ -15587,6 +15587,11 @@
     {
       "models": [
         {
+          "model": "ltx-2.5-22b-dev:bf16",
+          "family": "ltx2",
+          "hidden": false
+        },
+        {
           "model": "ltx-2.5-22b-dev:bf16-conv",
           "family": "ltx2",
           "hidden": false
@@ -18615,6 +18620,11 @@
     },
     {
       "models": [
+        {
+          "model": "ltx-2.5-22b-distilled:bf16",
+          "family": "ltx2",
+          "hidden": false
+        },
         {
           "model": "ltx-2.5-22b-distilled:bf16-conv",
           "family": "ltx2",

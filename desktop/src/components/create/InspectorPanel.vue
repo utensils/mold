@@ -345,6 +345,18 @@ function pickerDisabledReason(model: ModelEntry): string | null {
 // ── Output (One shot | Sequence) — a setting, not a place ────────────────────
 const draft = useSequenceDraftStore();
 const isSequence = computed(() => draft.output === "sequence");
+const canPredictDuration = computed(
+  () =>
+    !isSequence.value &&
+    selectedModel.value?.supports_duration_prediction === true &&
+    selectedModel.value.runtime_ready !== false,
+);
+function setPredictDuration(value: boolean) {
+  props.form.predictDuration = value;
+  if (!value && !Number.isFinite(props.form.frames)) {
+    props.form.frames = selectedModel.value?.default_frames ?? 25;
+  }
+}
 const sequenceCapableModels = computed(() =>
   stickyTarget.value &&
   stickyTarget.value !== "capable" &&
@@ -800,7 +812,20 @@ function resetSettings() {
 
       <!-- Duration is the human-facing video control; exact frames/FPS stay in Advanced. -->
       <div v-if="caps.supportsVideo && !isSequence" class="ms-field">
+        <div
+          v-if="canPredictDuration"
+          class="ms-field ms-field--row"
+          data-test="predict-duration-control"
+        >
+          <span class="ms-field__label ms-field__label--inline">Predict duration</span>
+          <SwitchToggle
+            :model-value="form.predictDuration"
+            label="Predict duration from prompt"
+            @update:model-value="setPredictDuration"
+          />
+        </div>
         <VideoDurationSlider
+          v-if="!form.predictDuration"
           :frames="form.frames"
           :fps="form.fps"
           :model="selectedModel"
@@ -810,6 +835,9 @@ function resetSettings() {
           :routing-request="durationRoutingRequest"
           @update:frames="form.frames = $event"
         />
+        <p v-else class="ms-field__hint" data-test="predicted-duration-hint">
+          The host will choose 1–20 seconds from the prompt.
+        </p>
       </div>
 
       <!-- Frame rate — sequence output surfaces it outside Advanced -->

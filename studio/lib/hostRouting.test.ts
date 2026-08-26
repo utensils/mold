@@ -241,6 +241,15 @@ describe("fleet model views", () => {
     ]);
     expect(hostIdsForModel(modelsByHost, "missing")).toEqual([]);
   });
+
+  it("excludes an explicitly incomplete split runtime from automatic routing", () => {
+    const byHost = {
+      studio: [{ name: "ltx-2.5-22b-distilled:int8", downloaded: true, runtime_ready: false }],
+      plato: [{ name: "ltx-2.5-22b-distilled:int8", downloaded: true, runtime_ready: true }],
+    };
+    expect(hostIdsForModel(byHost, "ltx-2.5-22b-distilled:int8")).toEqual(["plato"]);
+    expect(unionModelsByName(byHost, ["studio", "plato"])[0]?.runtime_ready).toBe(true);
+  });
 });
 
 describe("chooseRoutedHost", () => {

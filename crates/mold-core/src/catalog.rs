@@ -268,6 +268,9 @@ pub fn build_model_catalog(
 
         models.push(ModelInfoExtended {
             downloaded,
+            supports_duration_prediction: None,
+            runtime_ready: None,
+            runtime_readiness_error: None,
             runtime_available: h3_runtime.map(crate::minimax_h3::RuntimeAvailability::is_available),
             runtime_unavailable_reason: h3_runtime
                 .and_then(crate::minimax_h3::RuntimeAvailability::reason)
@@ -480,6 +483,9 @@ pub fn build_model_catalog(
 
         models.push(ModelInfoExtended {
             downloaded: true,
+            supports_duration_prediction: None,
+            runtime_ready: None,
+            runtime_readiness_error: None,
             // Catalog-installed `cv:`/`hf:` rows are never H3 manifest
             // identities; H3 is manifest-pinned only.
             runtime_available: None,
@@ -1370,6 +1376,9 @@ mod tests {
 
         fn stub(name: &str) -> ModelInfoExtended {
             ModelInfoExtended {
+                supports_duration_prediction: None,
+                runtime_ready: None,
+                runtime_readiness_error: None,
                 runtime_available: None,
                 runtime_unavailable_reason: None,
                 info: ModelInfo {

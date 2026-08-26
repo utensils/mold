@@ -34,9 +34,9 @@ h3-private-uat = []
 flash-attn = ["dep:candle-flash-attn", "cuda"]
 
 [dependencies]
-candle = { package = "candle-core-mold", git = "https://github.com/utensils/candle.git", rev = "c1072297aa04552f2e3ddc47526b8023fcc09a04" }
-candle-nn = { package = "candle-nn-mold", git = "https://github.com/utensils/candle.git", rev = "c1072297aa04552f2e3ddc47526b8023fcc09a04" }
-candle-transformers = { package = "candle-transformers-mold", git = "https://github.com/utensils/candle.git", rev = "c1072297aa04552f2e3ddc47526b8023fcc09a04" }
+candle = { package = "candle-core-mold", git = "https://github.com/utensils/candle.git", rev = "ad5fd432974913887f17b25c8ee863cfc54eb67c" }
+candle-nn = { package = "candle-nn-mold", git = "https://github.com/utensils/candle.git", rev = "ad5fd432974913887f17b25c8ee863cfc54eb67c" }
+candle-transformers = { package = "candle-transformers-mold", git = "https://github.com/utensils/candle.git", rev = "ad5fd432974913887f17b25c8ee863cfc54eb67c" }
 half = "2"
 # Already vendored transitively through candle-core, so this adds no new crates
 # to the Nix vendor set. `float8` must resolve to the same version candle uses
