@@ -231,8 +231,7 @@ export function useMobileDurableGenerationLifecycle(input: {
   modelFamily?: string | null;
 }): boolean {
   const canonicalV2 =
-    input.queue?.admission_protocol_version != null &&
-    input.queue.admission_protocol_version >= 2;
+    input.queue?.admission_protocol_version != null && input.queue.admission_protocol_version >= 2;
   if (canonicalV2) {
     return (
       !input.chain &&
