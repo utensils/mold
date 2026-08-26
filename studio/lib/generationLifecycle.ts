@@ -183,6 +183,20 @@ function equivalentJob(
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+/**
+ * A child's own revision, or `null` when it has no revision authority.
+ *
+ * `0` is deliberately not a revision: rows admitted before the server grew
+ * the column sit at `0` until their next transition, so reading it as one
+ * would let a pre-migration snapshot outrank nothing and be outranked by
+ * nothing. Both absence and `0` fall back to the timestamp comparison.
+ */
+function childRevision(child: GenerationBatchChild): number | null {
+  const revision = child.revision;
+  if (typeof revision !== "number" || !Number.isFinite(revision)) return null;
+  return revision > 0 ? revision : null;
+}
+
 function lifecycleJob(
   state: GenerationBatchTracker,
   instanceId: string,
@@ -205,7 +219,10 @@ function lifecycleJob(
     retryable: child.retryable ?? null,
     createdAtMs: child.created_at_ms,
     completedAtMs: child.completed_at_ms ?? null,
-    version: { updatedAtMs: child.updated_at_ms, revision },
+    version: {
+      updatedAtMs: child.updated_at_ms,
+      revision: revision ?? childRevision(child),
+    },
     error: child.error ?? null,
     terminalError: child.terminal_error ?? null,
     result: child.result

@@ -67,6 +67,7 @@ mod queue_media_admission;
 mod queue_media_ingress;
 mod queue_media_lifecycle;
 pub mod queue_media_runtime;
+mod queue_retention;
 // This dependency-free policy seam lands default-dark. The concrete
 // schema/store adapter activates it atomically with queue-media admission.
 #[allow(dead_code)]
@@ -1051,6 +1052,13 @@ pub async fn run_server(
     // the HTTP server drains like the other gallery observers.
     let mut trash_sweeper_handle = None;
 
+    // Retention sweeper for HELD durable queue rows. Unlike the trash
+    // sweeper it does not wait on the gallery reconcile: it reads the queue,
+    // not the output directory, and a held row's media is released by the
+    // `generation_queue_media_retire` trigger rather than by a file walk.
+    let held_sweeper_handle =
+        queue_retention::spawn_held_sweeper(state.clone(), scheduler_shutdown.child_token());
+
     // Ensure output directory exists and pre-generate thumbnails.
     {
         let config = state.config.read().await;
@@ -1412,6 +1420,8 @@ pub async fn run_server(
         // the cancel above; a pass already inside `spawn_blocking` finishes.
         let _ = handle.await;
     }
+    // Same child-token contract as the trash sweeper.
+    let _ = held_sweeper_handle.await;
     if let Some(generation_worker_handle) = generation_worker_handle {
         if !uses_cooperative_gpu_dispatch {
             // The CPU/legacy worker predates the coordinator cancellation

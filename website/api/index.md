@@ -41,7 +41,7 @@ clients, and custom integrations on one generation contract.
 | `POST`   | `/api/models/pull`                            | Pull/download a model                                                                                             |
 | `DELETE` | `/api/models/unload`                          | Unload model to free GPU memory                                                                                   |
 | `DELETE` | `/api/models/:model`                          | Remove a downloaded model (keeps components shared with other models)                                             |
-| `GET`    | `/api/gallery`                                | List saved images                                                                                                 |
+| `GET`    | `/api/gallery`                                | List saved images (`?view=library\|trash`, `?filename=` narrows to one print)                                     |
 | `POST`   | `/api/gallery/media-token`                    | Mint a short-lived, read-only ticket for one full-size gallery path                                               |
 | `POST`   | `/api/pairing/sessions`                       | Mint an authenticated, one-use, two-minute iPhone pairing ticket                                                  |
 | `POST`   | `/api/pairing/claim`                          | Redeem a pairing ticket once; the durable key is never present in the QR                                          |
@@ -73,6 +73,7 @@ clients, and custom integrations on one generation contract.
 | `PATCH`  | `/api/queue/:id`                              | Update the preferred GPU lane and/or dispatch position for a queued job                                           |
 | `DELETE` | `/api/queue/:id`                              | Cancel a still-queued generation job                                                                              |
 | `POST`   | `/api/queue/:id/retry`                        | Retry a held child using its complete fenced batch authority                                                      |
+| `POST`   | `/api/queue/held/sweep`                       | Purge held rows past `queue.held_retention_days` and release their staged media                                   |
 | `GET`    | `/api/history`                                | Prompt history, newest first (`?query=` substring filter, `?limit=` up to 500)                                    |
 | `DELETE` | `/api/history`                                | Clear prompt history (`?keep=N` trims to the most recent N)                                                       |
 | `GET`    | `/api/capabilities`                           | Feature capabilities, including optional per-host expansion and LAN-discovery state                               |
@@ -310,6 +311,35 @@ explicit durable request and always refuses rather than falling back.
 re-queues GPU work. A retry restores the job's dispatch budget but not its
 replay budget, which bounds a boot crash loop and is not an operator's to
 spend.
+
+### Child revisions
+
+Every child in a `GenerationBatchStatus` carries a monotonic `revision`,
+incremented by each authoritative state transition and by nothing else. Order
+snapshots and events by it rather than by `updated_at_ms`: several transitions
+routinely commit inside one millisecond, and a retry moves a child backward
+from `held` to `accepted`, so a client that breaks that tie by timestamp can
+drop the retry entirely.
+
+`revision` is additive. A server that predates it omits the field, and `0`
+also means "not yet transitioned since the migration" — treat both as absent
+and fall back to the timestamp.
+
+A retry whose response was lost is reconciled by comparing the child's current
+revision against the one observed before the POST. A child that is still
+`held` at a HIGHER revision was retried and held again for a new reason; one
+still at the submitted revision was never retried, and the caller should keep
+its retry fence rather than treat the stale snapshot as fresh.
+
+### Held-row retention
+
+A held row survives `queue.held_retention_days` (default 30; `0` keeps held
+rows forever; env `MOLD_QUEUE_HELD_RETENTION_DAYS`) measured from when it was
+held. The server sweeps hourly, and `POST /api/queue/held/sweep` runs one pass
+on demand, returning `{ "purged", "remaining", "media_deferred" }`. Purging a
+row releases the encrypted request media it pinned and settles its batch child
+as `failed`, so a reconnecting client still sees a terminal outcome rather
+than a missing print. A retry or cancel that lands before the purge wins.
 
 ```bash
 curl -i -X POST http://localhost:7680/api/generate \

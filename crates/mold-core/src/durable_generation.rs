@@ -57,7 +57,16 @@ pub enum CanonicalGenerationEvent {
 #[derive(Debug, PartialEq, Eq)]
 pub enum CanonicalRetrySubmission {
     Accepted,
-    Ambiguous { error: String },
+    Ambiguous {
+        error: String,
+        /// The child's `revision` as the caller last observed it, captured
+        /// BEFORE the POST that was lost. Reconciliation compares against
+        /// this to tell "my retry landed and the child re-held" from "my
+        /// retry never arrived" — two facts a `held` state alone conflates.
+        /// `0` means the caller had no revision authority (an older server),
+        /// and reconciliation degrades to the state-only rule.
+        observed_revision: u64,
+    },
 }
 
 pub type CanonicalGenerationObserver<'a> = dyn Fn(CanonicalGenerationEvent) + Send + Sync + 'a;
@@ -187,10 +196,13 @@ async fn wait_for_batch(
     }
 }
 
+/// Submit one retry, carrying the revision the caller last saw for the child
+/// so an interrupted response can still be reconciled exactly.
 pub async fn retry_canonical_child(
     client: &MoldClient,
     authority: &GenerationBatchAuthority,
     job_id: &str,
+    observed_revision: u64,
 ) -> Result<CanonicalRetrySubmission> {
     match client
         .retry_queue_job(&GenerationRetryRequest::from_authority(authority, job_id))
@@ -200,6 +212,7 @@ pub async fn retry_canonical_child(
         Err(error) if is_transient_request_error(&error) => {
             Ok(CanonicalRetrySubmission::Ambiguous {
                 error: error.to_string(),
+                observed_revision,
             })
         }
         Err(error) => Err(error),
@@ -285,10 +298,23 @@ const AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS: usize = 5;
 
 /// Reconcile a retry whose POST response was lost without publishing the old
 /// Held snapshot as fresh authority.
+///
+/// `observed_revision` is the child's `revision` from before the lost POST.
+/// A child whose revision has advanced past it was retried — even if it is
+/// held again, which is a legitimate outcome the state alone cannot express.
+/// A child still sitting at that exact revision when the bounded attempts run
+/// out was NOT retried, and this returns an error with the retry fence still
+/// held rather than republishing the pre-retry snapshot as fresh authority.
+///
+/// `observed_revision == 0` means the caller had no revision authority (a
+/// server predating the column). The bounded loop then keeps its original
+/// behaviour and publishes on exhaustion, because with no version to compare
+/// there is no evidence either way and hanging forever is worse.
 pub async fn reconcile_ambiguous_retry_observed(
     client: &MoldClient,
     authority: &GenerationBatchAuthority,
     job_id: &str,
+    observed_revision: u64,
     observer: Option<&CanonicalGenerationObserver<'_>>,
 ) -> Result<GenerationBatchStatus> {
     for attempt in 0..AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS {
@@ -345,9 +371,36 @@ pub async fn reconcile_ambiguous_retry_observed(
             .iter()
             .find(|child| child.job_id == job_id)
             .with_context(|| format!("generation batch lost durable job {job_id} after retry"))?;
-        if child.state != GenerationBatchChildState::Held
-            || attempt + 1 == AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS
-        {
+        // A revision past the pre-POST one proves the retry landed, whatever
+        // state the child is in now: a re-held child at a higher revision was
+        // retried and held again for a fresh reason.
+        let advanced = observed_revision > 0 && child.revision > observed_revision;
+        let last_attempt = attempt + 1 == AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS;
+        if advanced || child.state != GenerationBatchChildState::Held {
+            observe(
+                observer,
+                CanonicalGenerationEvent::Snapshot {
+                    authority: authority.clone(),
+                    status: status.clone(),
+                    request_offset: 0,
+                },
+            );
+            return wait_for_batch(client, status, authority, 0, observer).await;
+        }
+        if last_attempt {
+            // Still held at exactly the revision we submitted against: the
+            // retry did not land. Releasing the fence here would republish a
+            // pre-retry snapshot as fresh authority while the original POST
+            // may yet commit, so refuse and keep the fence.
+            if observed_revision > 0 {
+                anyhow::bail!(
+                    "ambiguous retry did not reach durable job {job_id}: it remains held at revision {} after {} bounded attempts; retry lock retained",
+                    child.revision,
+                    AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS
+                );
+            }
+            // No revision authority to compare against (older server). Keep
+            // the original behaviour rather than hanging on no evidence.
             observe(
                 observer,
                 CanonicalGenerationEvent::Snapshot {
@@ -681,6 +734,7 @@ mod tests {
             retryable: None,
             created_at_ms: 0,
             updated_at_ms: 0,
+            revision: 1,
             completed_at_ms: Some(1),
             terminal_error: None,
             result: None,
@@ -811,6 +865,7 @@ mod tests {
                 retryable: None,
                 created_at_ms: 0,
                 updated_at_ms: 0,
+                revision: 1,
                 completed_at_ms: None,
                 terminal_error: None,
                 result: None,
@@ -1014,7 +1069,7 @@ mod tests {
         });
         let client = MoldClient::new(&base);
         assert!(matches!(
-            retry_canonical_child(&client, &authority(), "job-1")
+            retry_canonical_child(&client, &authority(), "job-1", 0)
                 .await
                 .unwrap(),
             CanonicalRetrySubmission::Ambiguous { .. }
@@ -1023,7 +1078,7 @@ mod tests {
         let observer = |event| events.lock().unwrap().push(event);
 
         let status =
-            reconcile_ambiguous_retry_observed(&client, &authority(), "job-1", Some(&observer))
+            reconcile_ambiguous_retry_observed(&client, &authority(), "job-1", 0, Some(&observer))
                 .await
                 .unwrap();
 
@@ -1059,7 +1114,7 @@ mod tests {
         let client = MoldClient::new(&server.uri());
         let observer = move |event| observed.lock().unwrap().push(event);
         let error =
-            reconcile_ambiguous_retry_observed(&client, &authority(), "job-1", Some(&observer))
+            reconcile_ambiguous_retry_observed(&client, &authority(), "job-1", 0, Some(&observer))
                 .await
                 .unwrap_err();
         assert!(
@@ -1135,7 +1190,7 @@ mod tests {
         let client = MoldClient::new(&server.uri());
         let observer = move |event| observed.lock().unwrap().push(event);
         let status =
-            reconcile_ambiguous_retry_observed(&client, &authority(), "job-1", Some(&observer))
+            reconcile_ambiguous_retry_observed(&client, &authority(), "job-1", 0, Some(&observer))
                 .await
                 .unwrap();
         assert_eq!(
@@ -1151,5 +1206,115 @@ mod tests {
             CanonicalGenerationEvent::Snapshot { status, .. }
                 if status.children[0].state == GenerationBatchChildState::Held
         )));
+    }
+
+    // ── Ambiguous-retry revision fence ────────────────────────────────────────
+    // An interrupted retry POST leaves the client unable to tell whether the
+    // retry landed. `held` alone cannot answer it: a retry that landed and
+    // was immediately re-held for a fresh reason presents identically to one
+    // that never arrived. The child's revision separates them.
+
+    fn held_batch(revision: u64) -> serde_json::Value {
+        serde_json::json!({
+            "id": "batch-1",
+            "client_batch_id": "accepted-id",
+            "instance_id": "instance-1",
+            "durable": true,
+            "children": [{
+                "index": 1,
+                "job_id": "job-1",
+                "state": "held",
+                "error": "dependency unavailable",
+                "retryable": true,
+                "created_at_ms": 10,
+                "updated_at_ms": 20,
+                "revision": revision,
+                "completed_at_ms": null
+            }]
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unadvanced_revision_keeps_the_retry_fence_instead_of_republishing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/generation-batches/batch-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(held_batch(4)))
+            .mount(&server)
+            .await;
+        let client = MoldClient::new(&server.uri());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let observed = events.clone();
+        let observer = move |event| observed.lock().unwrap().push(event);
+
+        let error =
+            reconcile_ambiguous_retry_observed(&client, &authority(), "job-1", 4, Some(&observer))
+                .await
+                .unwrap_err();
+
+        assert!(
+            error.to_string().contains("remains held at revision 4"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            error.to_string().contains("retry lock retained"),
+            "the fence must be reported as retained: {error:#}"
+        );
+        // Republishing the pre-retry snapshot as fresh authority is the exact
+        // defect this fence exists to prevent.
+        assert!(!events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, CanonicalGenerationEvent::Snapshot { .. })));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_advanced_revision_confirms_the_retry_even_while_still_held() {
+        // The retry landed and the job was held again for a new reason. That
+        // is a real outcome, not an unconfirmed retry.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/generation-batches/batch-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(held_batch(5)))
+            .mount(&server)
+            .await;
+        let client = MoldClient::new(&server.uri());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let observed = events.clone();
+        let observer = move |event| observed.lock().unwrap().push(event);
+
+        let status =
+            reconcile_ambiguous_retry_observed(&client, &authority(), "job-1", 4, Some(&observer))
+                .await
+                .unwrap();
+
+        assert_eq!(status.children[0].state, GenerationBatchChildState::Held);
+        assert_eq!(status.children[0].revision, 5);
+        assert!(events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, CanonicalGenerationEvent::Snapshot { .. })));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_host_without_revisions_keeps_publishing_on_exhaustion() {
+        // Degrade, do not hang: with no version to compare there is no
+        // evidence either way, and an unbounded wait is the worse failure.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/generation-batches/batch-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(held_batch(0)))
+            .expect(AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS as u64)
+            .mount(&server)
+            .await;
+        let client = MoldClient::new(&server.uri());
+
+        let status = reconcile_ambiguous_retry_observed(&client, &authority(), "job-1", 0, None)
+            .await
+            .unwrap();
+
+        assert_eq!(status.children[0].state, GenerationBatchChildState::Held);
     }
 }

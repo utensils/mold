@@ -7487,6 +7487,7 @@ mod tests {
                 retryable: None,
                 created_at_ms: 10,
                 updated_at_ms: 20,
+                revision: 2,
                 completed_at_ms: Some(20),
                 terminal_error: None,
                 result: Some(super::GenerationBatchResult {
@@ -8201,6 +8202,23 @@ pub struct GenerationBatchChild {
     /// Unix-epoch milliseconds of the latest authoritative state transition.
     #[serde(default)]
     pub updated_at_ms: i64,
+    /// Monotonic per-child version, incremented by every authoritative state
+    /// transition and by nothing else.
+    ///
+    /// This is the ordering authority clients compare to decide whether an
+    /// incoming snapshot supersedes the one they hold. `updated_at_ms` cannot
+    /// serve that role: several transitions commit inside one millisecond
+    /// routinely, and `POST /api/queue/{id}/retry` moves a child BACKWARD
+    /// through the client's forward-phase ordering (held -> accepted), so a
+    /// same-millisecond collision decides whether the retry is visible at all.
+    ///
+    /// Additive: a server that predates it sends nothing and every client
+    /// deserializes `0`, which reads as "no revision authority" and falls back
+    /// to the timestamp comparison. A client MUST NOT treat `0` as a real
+    /// revision — rows created before migration v29 also sit at `0` until
+    /// their next transition.
+    #[serde(default)]
+    pub revision: u64,
     /// Unix-epoch milliseconds when the child reached a terminal state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at_ms: Option<i64>,
@@ -8464,6 +8482,20 @@ pub struct TrashSweepResult {
     pub purged: u64,
     /// Trashed prints still waiting for their purge date.
     pub remaining: u64,
+}
+
+/// Result of `POST /api/queue/held/sweep` (durable held-row retention).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct HeldSweepResult {
+    /// Held rows purged because they exceeded `queue.held_retention_days`.
+    pub purged: u64,
+    /// Held rows still inside their retention window.
+    pub remaining: u64,
+    /// Purged rows whose encrypted media could not be collected in this pass.
+    /// Their obligation is already `gc_pending`, so startup reconciliation
+    /// still owns them — reported rather than hidden.
+    #[serde(default)]
+    pub media_deferred: u64,
 }
 
 /// Result of `DELETE /api/gallery/trash` (empty trash).

@@ -1721,6 +1721,7 @@ mod tests {
                     retryable: Some(true),
                     created_at_ms: 0,
                     updated_at_ms: 0,
+                    revision: 1,
                     completed_at_ms: None,
                     terminal_error: None,
                     result: None,
