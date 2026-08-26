@@ -1609,9 +1609,18 @@ pub async fn run(
             } else {
                 vec![req.clone()]
             };
-            if run_canonical_remote_batch(ctx.client(), &requests, &output, piped, preview)
-                .await
-                .map_err(|error| tag_remote(ctx.client(), error))?
+            // Batch N only. A singleton keeps the attached path, which is the
+            // one that carries live step progress, the denoise preview, and
+            // `GenerateServerAction::PullModelAndRetry` for a model the remote
+            // host does not have yet. Routing singletons canonically bought
+            // nothing durable — `/api/generate` admits through
+            // `direct_durable_admission` either way — and silently cost all
+            // three. Removing this gate needs the canonical path to carry
+            // progress and the missing-model resume first.
+            if batch > 1
+                && run_canonical_remote_batch(ctx.client(), &requests, &output, piped, preview)
+                    .await
+                    .map_err(|error| tag_remote(ctx.client(), error))?
             {
                 if let Some(lease) = reference_session.as_mut() {
                     lease.mark_consumed();
@@ -4770,12 +4779,16 @@ mod tests {
             .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
 
         let requests = server.received_requests().await.unwrap();
+        // No capability probe: a singleton does not attempt canonical batch
+        // admission, so it goes straight to the attached stream. That is what
+        // keeps live progress, the denoise preview, and missing-model auto-pull
+        // on the single-image path.
         assert_eq!(
             requests
                 .iter()
                 .map(|request| request.url.path())
                 .collect::<Vec<_>>(),
-            vec!["/api/capabilities", "/api/generate/stream"]
+            vec!["/api/generate/stream"]
         );
         let generation = requests
             .iter()

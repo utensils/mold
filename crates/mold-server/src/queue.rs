@@ -2462,9 +2462,16 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 .unwrap_or("unknown panic");
             let err_msg = request.redact_staging_paths(format!("inference panicked: {msg}"));
             tracing::error!(%err_msg, "inference panicked");
+            // A panic is never user-retryable. The GPU-owner path answers
+            // `Retain` because it quarantines the worker and the process
+            // restarts, which replays the row; this path cannot quarantine, so
+            // `Retain` would strand the row with nothing to restart it. A
+            // non-retryable hold is settled, visible, and fenced off from
+            // `POST /api/queue/:id/retry`, whose `retryable` bit means "safe to
+            // re-run in this process".
             let settlement = durable_generation_settlement::settle_async(
                 &mut job.journal,
-                DurableDisposition::RetryableHold,
+                DurableDisposition::NonRetryableHold,
                 &err_msg,
             )
             .await;

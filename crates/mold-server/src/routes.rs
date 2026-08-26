@@ -2403,36 +2403,48 @@ pub(crate) async fn direct_durable_admission(
     }
     ensure_generation_available(state)?;
     let config = state.config.read().await;
-    if state.is_output_disabled(&config) {
+    // One resolved value, read once. This used to be a ladder of free-standing
+    // gates that between them omitted conjunct 3 entirely, so a legacy or
+    // observe host ran durable semantics on a request whose client had
+    // negotiated the attached path from `heterogeneous_batch: false`.
+    let readiness = DurableAdmissionReadiness::resolve(state, &config);
+    drop(config);
+    // THE RULE. A readiness gate refuses only when the caller explicitly asked
+    // for durable admission; otherwise it returns `Ok(None)` and the request
+    // takes the attached path, which is what capability discovery already told
+    // that client to do. Every gate here is also a conjunct of an advertised
+    // capability, except the platform-hydration check in
+    // `durable_media_preflight` above — that one is a host property with no
+    // advertised conjunct, and it obeys the same rule because the attached
+    // path carries its media inline and needs nothing this path provides.
+    if let Some(unready) = readiness.unready_for_direct() {
+        return if explicitly_requested {
+            Err(unready.api_error())
+        } else {
+            Ok(None)
+        };
+    }
+    // The encrypted store is a separate axis from the four conjuncts: the
+    // admission service can be installed while the store is still degraded.
+    // This gate previously ignored `explicitly_requested` while the gate
+    // immediately below it consulted it, so a degraded store hard-503'd every
+    // img2img, identity, edit, mask, control, audio, source-video, extend,
+    // keyframe and H3 request on both direct routes — behind a 503 that both
+    // client classifiers read as transient, on a host serving /health 200.
+    if !readiness.media_ready()
+        && crate::queue_media_admission::request_requires_encrypted_durable_media(request)
+    {
         return if explicitly_requested {
             Err(ApiError::with_code(
-                "durable direct admission requires server gallery output",
-                "DURABLE_ADMISSION_UNAVAILABLE",
+                "encrypted durable request media is unavailable",
+                "DURABLE_MEDIA_UNAVAILABLE",
                 StatusCode::SERVICE_UNAVAILABLE,
             ))
         } else {
             Ok(None)
         };
     }
-    let durable_media_ready = state.queue_journal.durable_media_capabilities().is_some();
-    if !durable_media_ready
-        && crate::queue_media_admission::request_requires_encrypted_durable_media(request)
-    {
-        return Err(ApiError::with_code(
-            "encrypted durable request media is unavailable",
-            "DURABLE_MEDIA_UNAVAILABLE",
-            StatusCode::SERVICE_UNAVAILABLE,
-        ));
-    }
-    let admission = state.queue_journal.queue_media_admission();
-    if admission.is_none() && explicitly_requested {
-        return Err(ApiError::with_code(
-            "durable direct admission is unavailable on this host",
-            "DURABLE_ADMISSION_UNAVAILABLE",
-            StatusCode::SERVICE_UNAVAILABLE,
-        ));
-    }
-    Ok(admission)
+    Ok(readiness.admission())
 }
 
 fn durable_reconciliation_response(
@@ -2538,25 +2550,15 @@ async fn admit_generation_batch(
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     Json(mut body): Json<mold_core::GenerationBatchAdmissionRequest>,
 ) -> Result<(StatusCode, Json<mold_core::GenerationBatchStatus>), ApiError> {
-    if !state.scheduled_work.v2_authoritative()
-        || !state.queue_journal.is_enabled()
-        || state.queue_journal.queue_media_admission().is_none()
-    {
-        return Err(ApiError::with_code(
-            "batch admission requires Scheduler V2 and the durable queue",
-            "HETEROGENEOUS_BATCH_UNAVAILABLE",
-            StatusCode::SERVICE_UNAVAILABLE,
-        ));
-    }
+    // Every conjunct at one evaluation point. This used to be two statements
+    // separated by the config read, which made the one correct site correct by
+    // sequencing rather than by construction.
     let config = state.config.read().await;
-    if state.is_output_disabled(&config) {
-        return Err(ApiError::with_code(
-            "durable batch admission requires server gallery output",
-            "DURABLE_ADMISSION_UNAVAILABLE",
-            StatusCode::SERVICE_UNAVAILABLE,
-        ));
-    }
+    let readiness = DurableAdmissionReadiness::resolve(&state, &config);
     drop(config);
+    if let Some(unready) = readiness.unready() {
+        return Err(unready.api_error());
+    }
     body.client_batch_id = canonical_client_batch_id(&body.client_batch_id)?;
     if body.requests.is_empty() || body.requests.len() > MAX_HETEROGENEOUS_BATCH_OUTPUTS {
         return Err(ApiError::validation(format!(
@@ -5340,7 +5342,7 @@ async fn server_status(State(state): State<AppState>) -> Result<Json<ServerStatu
     let (durable_media_applicable, models_dir) = {
         let config = state.config.read().await;
         (
-            durable_media_is_applicable(&state, &config),
+            DurableAdmissionReadiness::resolve(&state, &config).applicable(),
             config.resolved_models_dir(),
         )
     };
@@ -5772,19 +5774,174 @@ async fn patch_device(
     Ok((status, Json(outcome.device)).into_response())
 }
 
-// ── /health ───────────────────────────────────────────────────────────────────
+// ── Durable-admission readiness ───────────────────────────────────────────────
 
-/// The runtime half of the conjunction that gates
-/// `capabilities.durable_media`, read by capability discovery, `/api/status`,
-/// and `/health` so the three can never disagree about whether this server
-/// offers restart-safe request media at all.
+/// Which conjunct of the durable-admission question is unmet.
 ///
-/// It deliberately excludes the journal's own readiness: this answers "would
-/// this server ever advertise it", and `QueueJournal::durable_media_status`
-/// answers "is it actually on".
-fn durable_media_is_applicable(state: &AppState, config: &mold_core::Config) -> bool {
-    !state.is_output_disabled(config) && state.scheduled_work.v2_authoritative()
+/// The resolved value must retain WHICH conjunct failed rather than collapsing
+/// to a bool, because two consumers report a per-conjunct cause and would
+/// otherwise be handed a lossy answer: the two HTTP refusal codes below, and
+/// `QueueJournal::durable_media_status`'s `reasons`, which exist because "a
+/// widened store directory and a never-installed admission service need
+/// different repairs" (`queue_journal.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DurableAdmissionUnready {
+    /// Conjunct 1 — the queue journal claimed no owner.
+    QueueJournalDisabled,
+    /// Conjunct 2 — this server writes no gallery output.
+    GalleryOutputDisabled,
+    /// Conjunct 3 — Scheduler V2 is not authoritative (legacy/observe).
+    SchedulerNotAuthoritative,
+    /// Conjunct 4 — the admission service failed to install (corrupt or
+    /// missing `generation-admission.key`); the process still serves.
+    AdmissionServiceMissing,
 }
+
+impl DurableAdmissionUnready {
+    /// The refusal code for this conjunct.
+    ///
+    /// This mapping is a CONTRACT, not a formatting choice:
+    /// `routes_test::output_disabled_batch_admission_is_a_typed_unavailable_response`
+    /// asserts the code, and it is the only thing distinguishing the two gates
+    /// in `admit_generation_batch`. Collapsing both onto one code compiles,
+    /// passes on both sides of a rebase, and silently deletes that coverage.
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::GalleryOutputDisabled => "DURABLE_ADMISSION_UNAVAILABLE",
+            Self::QueueJournalDisabled
+            | Self::SchedulerNotAuthoritative
+            | Self::AdmissionServiceMissing => "HETEROGENEOUS_BATCH_UNAVAILABLE",
+        }
+    }
+
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::GalleryOutputDisabled => "durable admission requires server gallery output",
+            Self::QueueJournalDisabled | Self::SchedulerNotAuthoritative => {
+                "batch admission requires Scheduler V2 and the durable queue"
+            }
+            Self::AdmissionServiceMissing => "durable admission is unavailable on this host",
+        }
+    }
+
+    pub(crate) fn api_error(self) -> ApiError {
+        ApiError::with_code(self.message(), self.code(), StatusCode::SERVICE_UNAVAILABLE)
+    }
+}
+
+/// The complete durable-admission answer for one request-time snapshot.
+///
+/// Before this existed, four sites took four DIFFERENT subsets of the same
+/// four conjuncts — `capabilities.queue.heterogeneous_batch` took 1∧2∧3,
+/// `durable_media_is_applicable` took 2∧3, `direct_durable_admission` took
+/// 2∧4, and only `admit_generation_batch` took all four (and only by
+/// sequencing across a `config.read().await`). The gaps between those subsets
+/// were four separate defects. One resolved value read by every consumer is
+/// what stops a fifth subset appearing.
+pub(crate) struct DurableAdmissionReadiness {
+    journal_enabled: bool,
+    output_enabled: bool,
+    authoritative: bool,
+    admission: Option<Arc<crate::queue_media_admission::DurableMediaAdmission>>,
+    /// Already the conjunction of reconciliation, lifecycle and the admission
+    /// service (`QueueJournal::durable_media_capabilities`); carried, never
+    /// recomputed.
+    media: Option<mold_core::DurableMediaCapabilities>,
+}
+
+impl DurableAdmissionReadiness {
+    /// The only constructor, and it is TOTAL over all four conjuncts at ONE
+    /// evaluation point.
+    ///
+    /// `config` is a required parameter and is never read inside. That is what
+    /// keeps this from becoming a fifth wrong subset: conjunct 2 is
+    /// `!is_output_disabled(config)`, so a caller without a config cannot call
+    /// this at all. There is deliberately no config-free constructor.
+    pub(crate) fn resolve(state: &AppState, config: &mold_core::Config) -> Self {
+        Self {
+            journal_enabled: state.queue_journal.is_enabled(),
+            output_enabled: !state.is_output_disabled(config),
+            authoritative: state.scheduled_work.v2_authoritative(),
+            admission: state.queue_journal.queue_media_admission(),
+            media: state.queue_journal.durable_media_capabilities(),
+        }
+    }
+
+    /// The first unmet conjunct of the BATCH protocol, or `None` when
+    /// `/api/generation-batches` would accept.
+    ///
+    /// Order is load-bearing and preserves the pre-existing refusal precedence:
+    /// `admit_generation_batch` checked scheduler/journal/admission first and
+    /// gallery output last, so a host that is both non-authoritative AND
+    /// output-disabled must still answer `HETEROGENEOUS_BATCH_UNAVAILABLE`.
+    pub(crate) fn unready(&self) -> Option<DurableAdmissionUnready> {
+        if !self.authoritative {
+            return Some(DurableAdmissionUnready::SchedulerNotAuthoritative);
+        }
+        self.unready_for_direct()
+    }
+
+    /// The first unmet conjunct of DIRECT durable admission.
+    ///
+    /// Deliberately does NOT require an authoritative scheduler, and the
+    /// difference from [`Self::unready`] is a real contract rather than an
+    /// oversight: the durable feeder is spawned on `start_generation_runner`
+    /// alone and runs in legacy and observe dispatch too, so a direct
+    /// generation on such a host is genuinely durable and survives a restart.
+    /// The client cannot tell either way — a headerless request receives the
+    /// same attached media bytes — so requiring V2 here would remove real
+    /// durability from every legacy and observe host in exchange for nothing.
+    /// The batch PROTOCOL is what needs V2, because that is what
+    /// `capabilities.queue.heterogeneous_batch` advertises.
+    pub(crate) fn unready_for_direct(&self) -> Option<DurableAdmissionUnready> {
+        if !self.journal_enabled {
+            return Some(DurableAdmissionUnready::QueueJournalDisabled);
+        }
+        if self.admission.is_none() {
+            return Some(DurableAdmissionUnready::AdmissionServiceMissing);
+        }
+        if !self.output_enabled {
+            return Some(DurableAdmissionUnready::GalleryOutputDisabled);
+        }
+        None
+    }
+
+    /// Would this server ever offer restart-safe request media — gallery
+    /// output on and an authoritative scheduler. False is a configuration,
+    /// never a degradation, which is why `/health` must not report it.
+    pub(crate) fn applicable(&self) -> bool {
+        self.output_enabled && self.authoritative
+    }
+
+    /// `capabilities.queue.heterogeneous_batch` and friends. True exactly when
+    /// `admit_generation_batch` would accept, so the capability can never
+    /// advertise a protocol the same server refuses.
+    pub(crate) fn heterogeneous_batch(&self) -> bool {
+        self.unready().is_none()
+    }
+
+    /// `capabilities.durable_media`. The ONLY route to the advertised media
+    /// value, so applicability cannot be forgotten at the call site — which is
+    /// exactly how it was forgotten before.
+    pub(crate) fn advertised_media(&self) -> Option<mold_core::DurableMediaCapabilities> {
+        self.heterogeneous_batch()
+            .then(|| self.media.clone())
+            .flatten()
+    }
+
+    /// The encrypted request-media store is reconciled and usable.
+    pub(crate) fn media_ready(&self) -> bool {
+        self.media.is_some()
+    }
+
+    pub(crate) fn admission(
+        &self,
+    ) -> Option<Arc<crate::queue_media_admission::DurableMediaAdmission>> {
+        self.admission.clone()
+    }
+}
+
+// ── /health ───────────────────────────────────────────────────────────────────
 
 /// Which subsystems this process has switched off, by name.
 ///
@@ -5814,7 +5971,10 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     // write reports healthy instead of blocking behind it. `/api/status` is
     // the authority for the degraded state and does await the lock.
     let degraded = match state.config.try_read() {
-        Ok(config) => degraded_subsystems(&state, durable_media_is_applicable(&state, &config)),
+        Ok(config) => degraded_subsystems(
+            &state,
+            DurableAdmissionReadiness::resolve(&state, &config).applicable(),
+        ),
         Err(_) => Vec::new(),
     };
     // Deliberately still 200 while degraded. A subsystem being off does not
@@ -6777,7 +6937,11 @@ async fn server_capabilities(
     // makes it a systematic over-promise rather than an edge case, and clients
     // read this to decide whether to keep polling a job whose stream died.
     let durable_queue = state.queue_journal.is_enabled() && !state.is_output_disabled(&config);
-    let heterogeneous_batch = durable_queue && durable_media_is_applicable(&state, &config);
+    // One resolved value, total over all four conjuncts. Advertising the batch
+    // protocol without conjunct 4 is what let a host with a corrupt admission
+    // key promise `admission_protocol_version: 2` and then 503 every POST.
+    let readiness = DurableAdmissionReadiness::resolve(&state, &config);
+    let heterogeneous_batch = readiness.heterogeneous_batch();
     // Trash and organization both live in the metadata DB; trash additionally
     // needs somewhere to move bytes to. With the DB disabled, DELETE stays a
     // hard delete and the organization routes answer 501.
@@ -6827,7 +6991,7 @@ async fn server_capabilities(
             durable_batch_outcomes: heterogeneous_batch,
             admission_protocol_version: heterogeneous_batch.then_some(2),
         },
-        durable_media: state.queue_journal.durable_media_capabilities(),
+        durable_media: readiness.advertised_media(),
         reference_uploads: mold_core::ReferenceUploadCapabilities {
             available: true,
             // V2 rebinds the request scope to content-probed canonical

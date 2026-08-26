@@ -709,6 +709,13 @@ pub fn hold_owned(
 /// operator-approved attempt a fresh budget. A heterogeneous child is restored
 /// in that transaction so its status cannot remain held while the queue has
 /// resumed it.
+/// Return one explicitly retryable held row to the feeder backlog.
+///
+/// `dispatch_attempts` resets because an operator-approved retry IS a fresh
+/// attempt. `replay_seen` deliberately does NOT: it is the only bound on a
+/// boot crash loop (a job that kills the process during its own load), it is
+/// charged once per boot rather than per attempt, and it is not the operator's
+/// to spend.
 pub fn retry_held_owned(
     db: &MetadataDb,
     owner_uuid: &str,
@@ -768,7 +775,7 @@ pub fn retry_held_owned(
         let updated = conn.execute(
             "UPDATE generation_queue
                 SET state = 'queued', held_reason = NULL, retryable = 0,
-                    claim_token = NULL, dispatch_attempts = 0, replay_seen = 0,
+                    claim_token = NULL, dispatch_attempts = 0,
                     started_at = NULL, updated_at = ?3
               WHERE id = ?1 AND owner_uuid = ?2
                 AND state = 'held' AND retryable = 1",

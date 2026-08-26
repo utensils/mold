@@ -215,7 +215,7 @@ pub(crate) fn test_operation_fingerprint(
     for request in &mut requests {
         mold_core::minimax_h3::canonicalize_request_model(request);
     }
-    normalize_batch_provenance(&mut requests, operation_id).unwrap();
+    normalize_batch_provenance(&mut requests, operation_id, false).unwrap();
     let mut writer = FingerprintWriter::new();
     serde_json::to_writer(&mut writer, &requests).unwrap();
     writer.finish()
@@ -370,7 +370,8 @@ impl DurableMediaAdmission {
                 )));
             }
         }
-        normalize_batch_provenance(&mut body.requests, &body.client_batch_id)?;
+        let direct_one_shot = observer_mode.is_some() && body.requests.len() == 1;
+        normalize_batch_provenance(&mut body.requests, &body.client_batch_id, direct_one_shot)?;
         // Protocol-level authority refusals are request facts, not stored
         // operation state. Resolve them before even a read-only SQLite lookup;
         // in particular an HDR output path must never cross the DB boundary.
@@ -735,12 +736,24 @@ impl DurableMediaAdmission {
 fn normalize_batch_provenance(
     requests: &mut [mold_core::GenerateRequest],
     client_batch_id: &str,
+    direct_one_shot: bool,
 ) -> Result<(), ApiError> {
     const MAX_LOGICAL_BATCH_ID_BYTES: usize = 128;
     let supplied = requests.iter().any(|request| {
         request.batch_id.is_some() || request.batch_index.is_some() || request.batch_count.is_some()
     });
     if !supplied {
+        // A DIRECT one-shot is not a batch. `batch_id`/`batch_index`/
+        // `batch_count` ARE the prepared-expansion contract, and they flow into
+        // `OutputMetadata` and the Library — synthesising them for an ordinary
+        // `/api/generate` makes "was this a prepared variation?" unanswerable to
+        // every gallery and reuse consumer, and stops a one-shot print's
+        // metadata being byte-identical to a pre-durable build's. An explicit
+        // `/api/generation-batches` call keeps its provenance even at one child,
+        // because that caller asked for a batch.
+        if direct_one_shot {
+            return Ok(());
+        }
         let count = u32::try_from(requests.len())
             .map_err(|_| ApiError::validation("requests contains too many children"))?;
         for (offset, request) in requests.iter_mut().enumerate() {
@@ -1075,7 +1088,7 @@ mod tests {
             request.batch_index = Some(offset as u32 + 65);
             request.batch_count = Some(130);
         }
-        normalize_batch_provenance(&mut requests, "operation-id").unwrap();
+        normalize_batch_provenance(&mut requests, "operation-id", false).unwrap();
         assert_eq!(requests[0].batch_id.as_deref(), Some("logical-batch"));
         assert_eq!(requests[0].batch_index, Some(65));
         assert_eq!(requests[1].batch_index, Some(66));
@@ -1086,7 +1099,7 @@ mod tests {
     fn partial_or_duplicate_batch_provenance_is_rejected() {
         let mut partial = vec![request()];
         partial[0].batch_id = Some("logical-batch".to_string());
-        assert!(normalize_batch_provenance(&mut partial, "operation-id").is_err());
+        assert!(normalize_batch_provenance(&mut partial, "operation-id", false).is_err());
 
         let mut duplicate = vec![request(), request()];
         for request in &mut duplicate {
@@ -1094,22 +1107,25 @@ mod tests {
             request.batch_index = Some(1);
             request.batch_count = Some(2);
         }
-        assert!(normalize_batch_provenance(&mut duplicate, "operation-id").is_err());
+        assert!(normalize_batch_provenance(&mut duplicate, "operation-id", false).is_err());
 
         let mut boundary = vec![request()];
         boundary[0].batch_id = Some("b".repeat(128));
         boundary[0].batch_index = Some(1);
         boundary[0].batch_count = Some(1);
-        normalize_batch_provenance(&mut boundary, "operation-id").unwrap();
+        normalize_batch_provenance(&mut boundary, "operation-id", false).unwrap();
 
         for invalid in ["b".repeat(129), "batch\nheader".to_string()] {
             let mut request_with_invalid_id = vec![request()];
             request_with_invalid_id[0].batch_id = Some(invalid);
             request_with_invalid_id[0].batch_index = Some(1);
             request_with_invalid_id[0].batch_count = Some(1);
-            assert!(
-                normalize_batch_provenance(&mut request_with_invalid_id, "operation-id").is_err()
-            );
+            assert!(normalize_batch_provenance(
+                &mut request_with_invalid_id,
+                "operation-id",
+                false
+            )
+            .is_err());
         }
     }
 

@@ -143,11 +143,17 @@ async fn wait_for_batch(
             return Ok(status);
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
+        // The OUTER settle loop is deliberately unbounded — a queued job may
+        // legitimately wait hours. Only this transient-error retry is bounded,
+        // so a host that has genuinely gone away reports it instead of spinning
+        // in silence forever.
+        let mut transient_attempts = 0_u32;
         let next = loop {
             match client.generation_batch(&status.id).await {
                 Ok(Some(next)) => break next,
                 Ok(None) => anyhow::bail!("generation batch {} disappeared", status.id),
                 Err(error) if is_transient_request_error(&error) => {
+                    transient_attempts += 1;
                     observe(
                         observer,
                         CanonicalGenerationEvent::ReconcileDelayed {
@@ -155,6 +161,12 @@ async fn wait_for_batch(
                             error: error.to_string(),
                         },
                     );
+                    if transient_attempts >= RECONCILE_TRANSIENT_ATTEMPTS {
+                        return Err(error).context(format!(
+                            "generation batch {} could not be reconciled after {RECONCILE_TRANSIENT_ATTEMPTS} transient failures",
+                            status.id
+                        ));
+                    }
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
                 Err(error) => return Err(error),
@@ -199,20 +211,27 @@ async fn read_canonical_authority(
     authority: &GenerationBatchAuthority,
     observer: Option<&CanonicalGenerationObserver<'_>>,
 ) -> Result<GenerationBatchStatus> {
+    let mut attempts = 0_u32;
     let status = loop {
+        attempts += 1;
+        let exhausted = attempts >= RECONCILE_TRANSIENT_ATTEMPTS;
         match client.generation_batch(&authority.batch_id).await {
             Ok(Some(status)) => break status,
             Ok(None) => {
+                let error = format!("generation batch {} is not visible yet", authority.batch_id);
                 observe(
                     observer,
                     CanonicalGenerationEvent::ReconcileDelayed {
                         authority: authority.clone(),
-                        error: format!(
-                            "generation batch {} is not visible yet",
-                            authority.batch_id
-                        ),
+                        error: error.clone(),
                     },
                 );
+                if exhausted {
+                    anyhow::bail!(
+                        "generation batch {} did not become visible after {RECONCILE_TRANSIENT_ATTEMPTS} attempts: {error}",
+                        authority.batch_id
+                    );
+                }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
             Err(error) if is_transient_request_error(&error) => {
@@ -223,6 +242,12 @@ async fn read_canonical_authority(
                         error: error.to_string(),
                     },
                 );
+                if exhausted {
+                    return Err(error).context(format!(
+                        "generation batch {} could not be read after {RECONCILE_TRANSIENT_ATTEMPTS} transient failures",
+                        authority.batch_id
+                    ));
+                }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
             Err(error) => return Err(error),
@@ -250,6 +275,11 @@ pub async fn reconcile_canonical_authority_observed(
     );
     wait_for_batch(client, status, authority, 0, observer).await
 }
+
+/// Bound on transient-failure retries inside one reconciliation read. Sibling
+/// of [`AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS`]; the outer settle loop stays
+/// unbounded on purpose, because queued work may legitimately wait hours.
+const RECONCILE_TRANSIENT_ATTEMPTS: u32 = 5;
 
 const AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS: usize = 5;
 
