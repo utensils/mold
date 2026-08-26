@@ -6072,11 +6072,19 @@ fn hold_preparation_failure(state: &AppState, job: GenerationJob, error: String)
 /// A process-level interruption is not a job failure. Release the durable
 /// claim so the next feeder pass or process boot replays it automatically.
 fn retain_generation(state: &AppState, mut job: GenerationJob, error: String) {
-    crate::durable_generation_settlement::settle_blocking(
+    let settlement = crate::durable_generation_settlement::settle_blocking(
         &mut job.journal,
         crate::durable_generation_settlement::DurableDisposition::Retain,
         &error,
     );
+    if let Some(progress) = &job.progress_tx {
+        let event = if settlement.is_retained() {
+            mold_core::SseErrorEvent::retained(error.clone())
+        } else {
+            mold_core::SseErrorEvent::failed(error.clone())
+        };
+        let _ = progress.send(SseMessage::Error(event));
+    }
     let id = job.id.clone();
     let _ = job.result_tx.send(Err(error));
     state.queue.decrement();
@@ -8007,11 +8015,12 @@ mod tests {
         let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
         journal.fail_claim_release_for_tests();
         let mut ticket = Some(ticket);
-        crate::durable_generation_settlement::settle_blocking(
+        let outcome = crate::durable_generation_settlement::settle_blocking(
             &mut ticket,
             crate::durable_generation_settlement::DurableDisposition::Retain,
             "settlement-retry",
         );
+        assert!(outcome.is_retained());
         assert!(ticket.is_none());
 
         let reclaimed = journal
@@ -8022,6 +8031,106 @@ mod tests {
         journal
             .attach_claimed(&reclaimed.row.id, reclaimed.claim_token)
             .discard();
+    }
+
+    #[test]
+    fn completion_settlement_retries_before_reporting_success() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("gallery");
+        std::fs::create_dir_all(&output).unwrap();
+        let journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap())),
+            Some(root.path()),
+            "scheduler-completion-test",
+        ));
+        let (job, _result) = fake_generation("completion-retry");
+        let admission = journal
+            .clone()
+            .record(crate::queue_journal::JournalAdmission {
+                id: &job.id,
+                request: &job.request,
+                output_dir: Some(&output),
+                target_gpu: None,
+                target_device_id: None,
+                completion_payload: SseCompletionPayload::Full,
+                batch_child: false,
+                carries_reference_authority: false,
+            })
+            .unwrap();
+        assert!(matches!(
+            admission.retain(),
+            crate::queue_journal::RetainOutcome::Released
+        ));
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+        assert_eq!(
+            ticket.claim_dispatch(),
+            crate::queue_journal::DispatchClaim::Granted
+        );
+        journal.fail_completion_transition_for_tests(2);
+        let mut ticket = Some(ticket);
+        let outcome = crate::durable_generation_settlement::settle_completion_blocking(
+            &mut ticket,
+            r#"{"filename":"done.png"}"#,
+        );
+        assert_eq!(
+            outcome,
+            crate::durable_generation_settlement::SettlementOutcome::Settled
+        );
+        assert!(journal.list_all().is_empty());
+    }
+
+    #[test]
+    fn persistent_completion_failure_retains_without_pinning_the_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("gallery");
+        std::fs::create_dir_all(&output).unwrap();
+        let journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap())),
+            Some(root.path()),
+            "scheduler-persistent-completion-test",
+        ));
+        let (job, _result) = fake_generation("completion-retained");
+        let admission = journal
+            .clone()
+            .record(crate::queue_journal::JournalAdmission {
+                id: &job.id,
+                request: &job.request,
+                output_dir: Some(&output),
+                target_gpu: None,
+                target_device_id: None,
+                completion_payload: SseCompletionPayload::Full,
+                batch_child: false,
+                carries_reference_authority: false,
+            })
+            .unwrap();
+        assert!(matches!(
+            admission.retain(),
+            crate::queue_journal::RetainOutcome::Released
+        ));
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+        assert_eq!(
+            ticket.claim_dispatch(),
+            crate::queue_journal::DispatchClaim::Granted
+        );
+        journal.fail_completion_transition_for_tests(usize::MAX);
+        let mut ticket = Some(ticket);
+        let outcome = crate::durable_generation_settlement::settle_completion_blocking(
+            &mut ticket,
+            r#"{"filename":"done.png"}"#,
+        );
+        assert_eq!(
+            outcome,
+            crate::durable_generation_settlement::SettlementOutcome::Retained
+        );
+        assert!(ticket.is_none());
+        let row = journal.list_all().into_iter().next().unwrap();
+        assert_eq!(row.state, mold_db::generation_queue::QueueRowState::Running);
+        assert!(
+            journal.claim_next_feeder().unwrap().is_none(),
+            "the exact claim remains owned until startup recovery"
+        );
     }
 
     #[test]

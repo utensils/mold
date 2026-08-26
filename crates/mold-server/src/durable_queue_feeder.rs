@@ -1177,6 +1177,20 @@ async fn feed_available(
                     publication_guard,
                 }) => break (cancel, publication_guard),
                 Ok(ClaimRegistration::WaitingForPredecessor) => {
+                    // An attached hint may name any row in the bounded durable
+                    // window. Do not let all preparation workers sit on deep
+                    // exact claims while the unclaimed FIFO predecessors that
+                    // would release them have nobody left to feed. Preserve
+                    // the observer, release the exact claim, and let this
+                    // worker's next (FIFO-preferred) pass make progress.
+                    if claim.claimed_as_attached {
+                        if let Some(ingress) = ingress.as_deref() {
+                            ingress.defer_claimed_hint(&row.id);
+                        }
+                        drop(reservation);
+                        retain_for_retry(ticket, shutdown).await;
+                        continue 'feed;
+                    }
                     tokio::select! {
                         _ = shutdown.cancelled() => {
                             drop(reservation);
@@ -1498,6 +1512,63 @@ mod tests {
         shutdown.cancel();
         handle.await.unwrap();
         drop(jobs);
+    }
+
+    #[tokio::test]
+    async fn attached_deep_hints_cannot_occupy_all_preparation_workers() {
+        let (state, mut rx, home) = state_with_home(200);
+        // Keep the production-sized runtime capacity while limiting the
+        // fixture to the two worker-widths needed to prove forward progress.
+        // Leaving hundreds of live jobs behind would test shutdown teardown,
+        // not the attached-hint deadlock this regression guards.
+        let ids = admit(&state, 16);
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        let lifecycle = Arc::new(crate::queue_media_lifecycle::QueueMediaLifecycle::new(
+            state.metadata_db.clone(),
+            home,
+            owner,
+        ));
+        state
+            .queue_journal
+            .install_queue_media_lifecycle(lifecycle.clone())
+            .unwrap();
+        let admission = crate::queue_media_admission::DurableMediaAdmission::new(lifecycle, 200);
+        state
+            .queue_journal
+            .install_queue_media_admission(admission.clone())
+            .unwrap();
+        let registrations = ids[8..]
+            .iter()
+            .map(|id| {
+                let registration = admission
+                    .ingress()
+                    .reserve(id, crate::queue_media_ingress::ObserverMode::Raw)
+                    .unwrap();
+                admission.publish_observer(id);
+                registration
+            })
+            .collect::<Vec<_>>();
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+        let mut jobs = Vec::new();
+        for _ in 0..16 {
+            jobs.push(
+                tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("FIFO preparation must continue past one worker width")
+                    .expect("the runtime queue remains open"),
+            );
+        }
+        assert_eq!(
+            jobs.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(),
+            ids[..16].iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        state.queue_journal.retain_all();
+        shutdown.cancel();
+        handle.await.unwrap();
+        drop(jobs);
+        drop(registrations);
     }
 
     #[tokio::test]

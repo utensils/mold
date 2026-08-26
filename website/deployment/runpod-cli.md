@@ -46,8 +46,10 @@ What this does:
    - retries across datacenters if scheduling stalls.
 3. Waits for the mold server inside the pod to be reachable, streaming a
    readiness progress bar.
-4. Calls `/api/generate/stream` — SSE events drive a live progress display
-   (model pull, weight load, denoise steps).
+4. On current servers, durably admits the request through
+   `/api/generation-batches`, polls its exact client id to completion, and
+   downloads the gallery result. Older or capability-ineligible servers use
+   the attached SSE generation endpoint as an explicit compatibility path.
 5. Saves the output to `./mold-outputs/runpod-<pod-id>-<timestamp>.png`
    (directory auto-created, `.gitignore`'d by default).
 6. Prints the proxy URL so you can open the pod's

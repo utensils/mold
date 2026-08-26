@@ -781,7 +781,14 @@ async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> Canonical
     };
     let capabilities = match input.client.capabilities().await {
         Ok(capabilities) => capabilities,
-        Err(_) => return CanonicalBatchResult::Unsupported,
+        Err(error) if mold_core::client::is_missing_endpoint_error(&error) => {
+            return CanonicalBatchResult::Unsupported;
+        }
+        Err(error) => {
+            return CanonicalBatchResult::Error(format!(
+                "could not read generation admission capabilities: {error}"
+            ));
+        }
     };
     let Some(chunk_limit) = capabilities.canonical_generation_batch_limit(&requests) else {
         return CanonicalBatchResult::Unsupported;

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use base64::{engine::general_purpose, Engine as _};
+use image::GenericImageView;
 use mold_core::{
     Config, GalleryImage, GenerateRequest, GenerateResponse, LoraInfo, LoraWeight, MoldClient,
     OutputFormat, SseProgressEvent,
@@ -15,8 +16,49 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Mutex;
 
+use crate::commands::durable_generation::try_canonical_singleton_artifact;
+
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_ASYNC_JOBS: usize = 32;
+
+async fn generate_with_canonical_fallback(
+    client: &MoldClient,
+    req: GenerateRequest,
+) -> std::result::Result<GenerateResponse, String> {
+    match try_canonical_singleton_artifact(client, &req).await {
+        Ok(Some(artifact)) => {
+            let image = image::load_from_memory(&artifact.bytes)
+                .map_err(|error| format!("could not decode durable output: {error}"))?;
+            let (width, height) = image.dimensions();
+            let format = artifact
+                .filename
+                .rsplit_once('.')
+                .and_then(|(_, extension)| extension.parse::<OutputFormat>().ok())
+                .unwrap_or_else(|| artifact.request.resolved_output_format());
+            Ok(GenerateResponse {
+                images: vec![mold_core::ImageData {
+                    data: artifact.bytes,
+                    format,
+                    width,
+                    height,
+                    index: 0,
+                }],
+                video: None,
+                audio: None,
+                generation_time_ms: 0,
+                model: artifact.request.model,
+                seed_used: artifact.request.seed.unwrap_or(0),
+                gpu: None,
+                request_warnings: Vec::new(),
+            })
+        }
+        Ok(None) => client
+            .generate(req)
+            .await
+            .map_err(|error| format!("mold generation failed: {error}")),
+        Err(error) => Err(format!("mold durable generation failed: {error:#}")),
+    }
+}
 
 pub async fn run(host: Option<String>) -> Result<()> {
     let server = McpServer::new(host);
@@ -232,11 +274,7 @@ impl McpServer {
             serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
         let loras = self.resolve_loras(args.loras.take()).await?;
         let req = build_generate_request(args, loras)?;
-        let response = self
-            .client
-            .generate(req)
-            .await
-            .map_err(|e| format!("mold generation failed: {e}"))?;
+        let response = generate_with_canonical_fallback(&self.client, req).await?;
         let image = response
             .images
             .first()
@@ -283,25 +321,7 @@ impl McpServer {
         tokio::spawn(async move {
             jobs.mark_running(&task_job_id).await;
 
-            let (progress_tx, mut progress_rx) =
-                tokio::sync::mpsc::unbounded_channel::<SseProgressEvent>();
-            let progress_jobs = jobs.clone();
-            let progress_job_id = task_job_id.clone();
-            let progress_task = tokio::spawn(async move {
-                while let Some(event) = progress_rx.recv().await {
-                    progress_jobs.record_progress(&progress_job_id, event).await;
-                }
-            });
-
-            let result = match client.generate_stream(&req, progress_tx).await {
-                Ok(Some(response)) => Ok(response),
-                Ok(None) => client.generate(req).await.map_err(|e| {
-                    format!("mold generation failed after non-streaming fallback: {e}")
-                }),
-                Err(e) => Err(format!("mold generation failed: {e}")),
-            };
-
-            let _ = progress_task.await;
+            let result = generate_with_canonical_fallback(&client, req).await;
             jobs.finish(&task_job_id, result).await;
         });
 
@@ -857,18 +877,6 @@ impl AsyncJobRegistry {
             job.status = AsyncJobStatus::Running;
             job.started_at_ms.get_or_insert(now);
             job.updated_at_ms = now;
-        }
-    }
-
-    async fn record_progress(&self, id: &str, event: SseProgressEvent) {
-        let mut jobs = self.inner.jobs.lock().await;
-        if let Some(job) = jobs.get_mut(id) {
-            job.status = match event {
-                SseProgressEvent::Queued { .. } => AsyncJobStatus::Queued,
-                _ => AsyncJobStatus::Running,
-            };
-            job.latest_progress = Some(event);
-            job.updated_at_ms = now_ms();
         }
     }
 
