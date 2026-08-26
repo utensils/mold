@@ -50,6 +50,10 @@ impl QueueMediaLifecycle {
         &self.mold_home
     }
 
+    pub(crate) fn owner_uuid(&self) -> &str {
+        &self.owner_uuid
+    }
+
     pub(crate) fn new(db: Arc<Option<MetadataDb>>, mold_home: PathBuf, owner_uuid: String) -> Self {
         Self {
             db,
@@ -474,9 +478,9 @@ fn db_error(error: anyhow::Error) -> AdapterError {
 
 fn store_error(error: QueueMediaError) -> AdapterError {
     let kind = match &error {
-        QueueMediaError::MissingKeyWithExistingStore | QueueMediaError::MissingKey => {
-            AdapterFailureKind::KeyMissing
-        }
+        QueueMediaError::MissingKeyWithExistingStore
+        | QueueMediaError::MissingKey
+        | QueueMediaError::MissingAdmissionKeyWithReceipts => AdapterFailureKind::KeyMissing,
         QueueMediaError::Authentication | QueueMediaError::Corrupt(_) => {
             AdapterFailureKind::KeyCorrupt
         }

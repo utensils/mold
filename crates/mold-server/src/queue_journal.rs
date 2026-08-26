@@ -757,6 +757,14 @@ impl QueueJournal {
         self.queue_media_admission.get().cloned()
     }
 
+    pub(crate) fn has_generation_v2_receipt_evidence(&self) -> Result<bool, String> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(false);
+        };
+        generation_batches::has_request_receipt_prefix(db, owner, "generation-v2.")
+            .map_err(|error| format!("could not inspect durable generation receipts: {error:#}"))
+    }
+
     // Called by the default-dark startup coordinator once its independently
     // reviewed concrete DB/store adapter is integrated.
     #[allow(dead_code)]

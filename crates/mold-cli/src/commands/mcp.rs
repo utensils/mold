@@ -28,6 +28,7 @@ const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_ASYNC_JOBS: usize = 32;
 const RECONCILE_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const RECONCILE_MAX_BACKOFF: Duration = Duration::from_secs(30);
+const RECONCILE_READ_TIMEOUT: Duration = Duration::from_secs(4);
 const AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS: usize = 5;
 const MAX_LIST_STATUS_RECONCILIATIONS: usize = 4;
 
@@ -44,6 +45,14 @@ fn reconciliation_max_backoff() -> Duration {
         Duration::from_millis(80)
     } else {
         RECONCILE_MAX_BACKOFF
+    }
+}
+
+fn reconciliation_read_timeout() -> Duration {
+    if cfg!(test) {
+        Duration::from_millis(100)
+    } else {
+        RECONCILE_READ_TIMEOUT
     }
 }
 
@@ -1201,7 +1210,6 @@ struct CanonicalRetryClaim {
 
 #[derive(Debug)]
 struct ReconciliationAttempt {
-    in_flight: bool,
     next_attempt: Instant,
     backoff: Duration,
     ambiguous_confirmation_attempts: Option<usize>,
@@ -1211,7 +1219,7 @@ struct ReconciliationAttempt {
 struct AsyncJobRegistryInner {
     next_id: AtomicU64,
     jobs: Mutex<HashMap<String, AsyncGenerationJob>>,
-    reconciliations: Mutex<HashMap<String, ReconciliationAttempt>>,
+    reconciliations: Mutex<HashMap<String, Arc<Mutex<ReconciliationAttempt>>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1395,12 +1403,11 @@ impl AsyncJobRegistry {
         if let Some(key) = reconciliation {
             self.inner.reconciliations.lock().await.insert(
                 key,
-                ReconciliationAttempt {
-                    in_flight: false,
+                Arc::new(Mutex::new(ReconciliationAttempt {
                     next_attempt: Instant::now(),
                     backoff: reconciliation_initial_backoff(),
                     ambiguous_confirmation_attempts: ambiguous.then_some(0),
-                },
+                })),
             );
         }
     }
@@ -1420,35 +1427,43 @@ impl AsyncJobRegistry {
             return;
         };
         let key = reconciliation_key(&authority, &durable_job_id);
-        let confirmation_attempt = {
+        let attempt = {
             let mut attempts = self.inner.reconciliations.lock().await;
-            let attempt = attempts
-                .entry(key.clone())
-                .or_insert_with(|| ReconciliationAttempt {
-                    in_flight: false,
+            Arc::clone(attempts.entry(key.clone()).or_insert_with(|| {
+                Arc::new(Mutex::new(ReconciliationAttempt {
                     next_attempt: Instant::now(),
                     backoff: reconciliation_initial_backoff(),
                     ambiguous_confirmation_attempts: None,
-                });
-            if attempt.in_flight || Instant::now() < attempt.next_attempt {
-                return;
-            }
-            attempt.in_flight = true;
-            attempt
-                .ambiguous_confirmation_attempts
-                .as_mut()
-                .map(|count| {
-                    *count += 1;
-                    *count
-                })
+                }))
+            }))
         };
+        let attempt_identity = Arc::clone(&attempt);
+        let Ok(mut attempt) = attempt.try_lock_owned() else {
+            return;
+        };
+        if Instant::now() < attempt.next_attempt {
+            return;
+        }
+        let confirmation_attempt = attempt
+            .ambiguous_confirmation_attempts
+            .map(|count| count + 1);
 
         enum ReadOutcome {
             Found(GenerationBatchChild),
             Retry(String),
             Stop(String),
         }
-        let outcome = match client.generation_batch(&authority.batch_id).await {
+        let read = tokio::time::timeout(
+            reconciliation_read_timeout(),
+            client.generation_batch(&authority.batch_id),
+        )
+        .await;
+        let outcome = match read {
+            Err(_) => ReadOutcome::Retry(format!(
+                "generation batch {} status read timed out",
+                authority.batch_id
+            )),
+            Ok(result) => match result {
             Ok(Some(status)) => match authority.validate_status(&status) {
                 Ok(()) => match status
                     .children
@@ -1471,7 +1486,11 @@ impl AsyncJobRegistry {
                 ReadOutcome::Retry(error.to_string())
             }
             Err(error) => ReadOutcome::Stop(error.to_string()),
+            },
         };
+        if let Some(confirmation_attempt) = confirmation_attempt {
+            attempt.ambiguous_confirmation_attempts = Some(confirmation_attempt);
+        }
 
         let mut confirmation_finished = false;
         let keep_polling = match outcome {
@@ -1540,11 +1559,6 @@ impl AsyncJobRegistry {
             }
         };
 
-        let mut attempts = self.inner.reconciliations.lock().await;
-        let Some(attempt) = attempts.get_mut(&key) else {
-            return;
-        };
-        attempt.in_flight = false;
         if keep_polling {
             if confirmation_attempt.is_some() && !confirmation_finished {
                 attempt.next_attempt = Instant::now() + reconciliation_initial_backoff();
@@ -1560,7 +1574,14 @@ impl AsyncJobRegistry {
                     .min(reconciliation_max_backoff());
             }
         } else {
-            attempts.remove(&key);
+            drop(attempt);
+            let mut attempts = self.inner.reconciliations.lock().await;
+            if attempts
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &attempt_identity))
+            {
+                attempts.remove(&key);
+            }
         }
     }
 
@@ -1594,9 +1615,11 @@ impl AsyncJobRegistry {
         candidates
             .into_iter()
             .filter(|(_, _, key)| {
-                attempts
-                    .get(key)
-                    .is_none_or(|attempt| !attempt.in_flight && now >= attempt.next_attempt)
+                attempts.get(key).is_none_or(|attempt| {
+                    attempt
+                        .try_lock()
+                        .is_ok_and(|attempt| now >= attempt.next_attempt)
+                })
             })
             .take(limit)
             .map(|(_, id, _)| id)
@@ -2672,6 +2695,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
+    use tokio::sync::Notify;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
@@ -2728,6 +2752,91 @@ mod tests {
         )
         .await;
         id
+    }
+
+    fn spawn_hung_then_running_retry_server() -> (
+        String,
+        Arc<Notify>,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let first_status_seen = Arc::new(Notify::new());
+        let retry_posts = Arc::new(AtomicUsize::new(0));
+        let status_reads = Arc::new(AtomicUsize::new(0));
+        let first_status_seen_for_server = first_status_seen.clone();
+        let retry_posts_for_server = retry_posts.clone();
+        let status_reads_for_server = status_reads.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        let server = tokio::spawn(async move {
+            let mut hung_sockets = Vec::new();
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 2048];
+                loop {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = String::from_utf8_lossy(&request);
+                if head.starts_with("POST /api/queue/durable-job-1/retry") {
+                    retry_posts_for_server.fetch_add(1, Ordering::SeqCst);
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                assert!(head.starts_with("GET /api/generation-batches/batch-1"));
+                let status_read = status_reads_for_server.fetch_add(1, Ordering::SeqCst);
+                if status_read == 0 {
+                    first_status_seen_for_server.notify_waiters();
+                    hung_sockets.push(socket);
+                    continue;
+                }
+                let body = json!({
+                    "id": "batch-1",
+                    "client_batch_id": "client-batch-1",
+                    "instance_id": "instance-1",
+                    "durable": true,
+                    "children": [{
+                        "index": 1,
+                        "job_id": "durable-job-1",
+                        "state": "running"
+                    }]
+                })
+                .to_string();
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            drop(hung_sockets);
+        });
+        (
+            base_url,
+            first_status_seen,
+            retry_posts,
+            status_reads,
+            server,
+        )
     }
 
     async fn mount_canonical_capabilities(server: &MockServer) {
@@ -3153,6 +3262,75 @@ mod tests {
                 assert_eq!(job["retryable"], true);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn reconciliation_read_timeout_releases_key_for_recovery() {
+        let (base_url, _first_seen, retry_posts, status_reads, server) =
+            spawn_hung_then_running_retry_server();
+        let mcp = McpServer {
+            client: MoldClient::new(&base_url),
+            jobs: AsyncJobRegistry::default(),
+        };
+        let local_id = seed_retryable_canonical_job(&mcp.jobs).await;
+        mcp.tool_generation_retry(json!({ "job_id": local_id }))
+            .await
+            .unwrap();
+
+        let started = Instant::now();
+        let timed_out = mcp
+            .tool_generation_status(json!({ "job_id": local_id, "include_result": false }))
+            .await
+            .unwrap();
+        assert!(started.elapsed() < reconciliation_read_timeout() * 2);
+        assert_eq!(timed_out["structuredContent"]["status"], "queued");
+        assert!(timed_out["structuredContent"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("status read timed out"));
+
+        tokio::time::sleep(reconciliation_initial_backoff()).await;
+        let recovered = mcp
+            .tool_generation_status(json!({ "job_id": local_id, "include_result": false }))
+            .await
+            .unwrap();
+        assert_eq!(recovered["structuredContent"]["status"], "running");
+        assert_eq!(retry_posts.load(Ordering::SeqCst), 1);
+        assert_eq!(status_reads.load(Ordering::SeqCst), 2);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_reconciliation_future_releases_key_for_immediate_recovery() {
+        let (base_url, first_seen, retry_posts, status_reads, server) =
+            spawn_hung_then_running_retry_server();
+        let mcp = McpServer {
+            client: MoldClient::new(&base_url),
+            jobs: AsyncJobRegistry::default(),
+        };
+        let local_id = seed_retryable_canonical_job(&mcp.jobs).await;
+        mcp.tool_generation_retry(json!({ "job_id": local_id }))
+            .await
+            .unwrap();
+
+        {
+            let pending =
+                mcp.tool_generation_status(json!({ "job_id": local_id, "include_result": false }));
+            tokio::pin!(pending);
+            tokio::select! {
+                result = &mut pending => panic!("hung status read completed unexpectedly: {result:?}"),
+                () = first_seen.notified() => {}
+            }
+        }
+
+        let recovered = mcp
+            .tool_generation_status(json!({ "job_id": local_id, "include_result": false }))
+            .await
+            .unwrap();
+        assert_eq!(recovered["structuredContent"]["status"], "running");
+        assert_eq!(retry_posts.load(Ordering::SeqCst), 1);
+        assert_eq!(status_reads.load(Ordering::SeqCst), 2);
+        server.await.unwrap();
     }
 
     #[tokio::test]

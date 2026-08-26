@@ -171,6 +171,23 @@ pub fn replace_request_receipt(
     })
 }
 
+/// Whether this owner has durable receipts issued by the named protocol.
+/// Used only to decide whether a missing authentication key may be created;
+/// the receipt remains authenticated at the server boundary.
+pub fn has_request_receipt_prefix(db: &MetadataDb, owner_uuid: &str, prefix: &str) -> Result<bool> {
+    db.with_conn(|conn| {
+        Ok(conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM generation_batches
+                  WHERE owner_uuid = ?1
+                    AND substr(request_sha256, 1, length(?2)) = ?2
+             )",
+            params![owner_uuid, prefix],
+            |row| row.get(0),
+        )?)
+    })
+}
+
 /// Insert the grouping rows and every ordinary durable queue row atomically.
 /// A retry with the same client id returns the existing detail; a different
 /// payload using that id is rejected.

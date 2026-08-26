@@ -109,6 +109,43 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
+fn install_durable_admission_if_available(
+    queue_journal: &std::sync::Arc<queue_journal::QueueJournal>,
+    lifecycle: std::sync::Arc<queue_media_lifecycle::QueueMediaLifecycle>,
+    queue_capacity: usize,
+) -> bool {
+    let admission = queue_journal
+        .has_generation_v2_receipt_evidence()
+        .map_err(anyhow::Error::msg)
+        .and_then(|receipt_evidence_exists| {
+            queue_media_admission::DurableMediaAdmission::new(
+                lifecycle,
+                queue_capacity,
+                receipt_evidence_exists,
+            )
+            .map_err(anyhow::Error::new)
+        });
+    match admission {
+        Ok(admission) => match queue_journal.install_queue_media_admission(admission) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::error!(
+                    error,
+                    "canonical durable admission service was already installed"
+                );
+                false
+            }
+        },
+        Err(error) => {
+            tracing::error!(
+                %error,
+                "canonical durable admission disabled: receipt authority is unavailable"
+            );
+            false
+        }
+    }
+}
+
 use state::QueueHandle;
 
 /// Retains Mold's compile-time H3 attention exclusion proof in server-backed
@@ -718,11 +755,7 @@ pub async fn run_server(
     // One admission/observer service is shared by both route shapes and the
     // sole durable feeder. Install it before runtime recovery or the router.
     if let Some(lifecycle) = queue_journal.queue_media_lifecycle() {
-        let admission =
-            queue_media_admission::DurableMediaAdmission::new(lifecycle, state.queue_capacity)?;
-        queue_journal
-            .install_queue_media_admission(admission)
-            .map_err(anyhow::Error::msg)?;
+        install_durable_admission_if_available(&queue_journal, lifecycle, state.queue_capacity);
     }
 
     // Startup token recovery is a serving precondition. Await it before any
