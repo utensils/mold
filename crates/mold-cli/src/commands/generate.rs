@@ -7,11 +7,10 @@ use indicatif::{ProgressBar, ProgressStyle};
 use mold_core::ServerCapabilities;
 use mold_core::{
     classify_generate_error, fit_to_model_dimensions_aligned, fit_to_target_area, manifest, Config,
-    DevicePlacement, GenerateRequest, GenerateResponse, GenerateServerAction,
-    GenerationBatchAdmissionRequest, GenerationBatchChildState, GenerationBatchStatus,
-    GenerationReference, GenerationReferenceAuthority, ImageData, KeyframeCondition, LoraWeight,
-    Ltx2GuidanceOverrides, Ltx2PipelineMode, Ltx2SpatialUpscale, Ltx2TemporalUpscale, MoldClient,
-    OutputFormat, ReferenceUploadLease, ReferenceUploadSource, Scheduler, TimeRange,
+    DevicePlacement, GenerateRequest, GenerateResponse, GenerateServerAction, GenerationReference,
+    GenerationReferenceAuthority, ImageData, KeyframeCondition, LoraWeight, Ltx2GuidanceOverrides,
+    Ltx2PipelineMode, Ltx2SpatialUpscale, Ltx2TemporalUpscale, MoldClient, OutputFormat,
+    ReferenceUploadLease, ReferenceUploadSource, Scheduler, TimeRange,
 };
 use rand::Rng;
 #[cfg(feature = "preview")]
@@ -19,6 +18,9 @@ use std::io::IsTerminal;
 use std::io::Write;
 use std::time::Duration;
 
+#[cfg(test)]
+use crate::commands::durable_generation::admit_for_test;
+use crate::commands::durable_generation::try_canonical_generation;
 use crate::commands::h3::ReferenceUpload;
 use crate::control::{stream_server_pull, CliContext};
 use crate::errors::RemoteInferenceError;
@@ -422,107 +424,6 @@ fn remote_batch_requests(
         .collect()
 }
 
-async fn admit_generation_batch_recovering_ambiguity(
-    client: &MoldClient,
-    request: &GenerationBatchAdmissionRequest,
-) -> Result<GenerationBatchStatus> {
-    match client.admit_generation_batch(request).await {
-        Ok(status) => Ok(status),
-        Err(error) if generation_admission_may_have_committed(&error) => {
-            const LOOKUP_ATTEMPTS: u32 = 5;
-            let mut last_lookup_error = None;
-            for attempt in 0..LOOKUP_ATTEMPTS {
-                match client
-                    .generation_batch_by_client_id(&request.client_batch_id)
-                    .await
-                {
-                    Ok(Some(status)) => return Ok(status),
-                    Ok(None) => {
-                        return Err(error.context(format!(
-                            "generation-batch admission is uncertain for client id {}; the host did not retain that idempotency key",
-                            request.client_batch_id
-                        )));
-                    }
-                    Err(lookup) => last_lookup_error = Some(lookup),
-                }
-                if attempt + 1 < LOOKUP_ATTEMPTS {
-                    tokio::time::sleep(Duration::from_millis(250 * u64::from(attempt + 1))).await;
-                }
-            }
-            Err(error.context(format!(
-                "generation-batch admission is uncertain for client id {}; idempotency lookup failed after {LOOKUP_ATTEMPTS} attempts: {}",
-                request.client_batch_id,
-                last_lookup_error
-                    .map(|lookup| lookup.to_string())
-                    .unwrap_or_else(|| "unknown lookup error".to_string())
-            )))
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn generation_admission_may_have_committed(error: &anyhow::Error) -> bool {
-    if MoldClient::is_connection_error(error) {
-        return true;
-    }
-    error.downcast_ref::<reqwest::Error>().is_some_and(|error| {
-        error.is_timeout() || error.is_body() || error.is_decode() || error.is_request()
-    })
-}
-
-async fn wait_for_generation_batch(
-    client: &MoldClient,
-    mut status: GenerationBatchStatus,
-) -> Result<GenerationBatchStatus> {
-    let mut last_states = status
-        .children
-        .iter()
-        .map(|child| child.state.clone())
-        .collect::<Vec<_>>();
-    loop {
-        if status.children.iter().all(|child| {
-            matches!(
-                child.state,
-                GenerationBatchChildState::Complete
-                    | GenerationBatchChildState::Failed
-                    | GenerationBatchChildState::Cancelled
-                    | GenerationBatchChildState::Held
-            )
-        }) {
-            return Ok(status);
-        }
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        status = client
-            .generation_batch(&status.id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("generation batch {} disappeared", status.id))?;
-        for (offset, child) in status.children.iter().enumerate() {
-            if last_states.get(offset) != Some(&child.state) {
-                status!(
-                    "{} Batch item {} is {}",
-                    theme::icon_info(),
-                    child.index,
-                    match child.state {
-                        GenerationBatchChildState::Accepted => "accepted",
-                        GenerationBatchChildState::Cancelling => "cancelling",
-                        GenerationBatchChildState::Running => "running",
-                        GenerationBatchChildState::Complete => "complete",
-                        GenerationBatchChildState::Failed => "failed",
-                        GenerationBatchChildState::Cancelled => "cancelled",
-                        GenerationBatchChildState::Held => "held",
-                    }
-                );
-            }
-        }
-        last_states = status
-            .children
-            .iter()
-            .map(|child| child.state.clone())
-            .collect();
-    }
-}
-
 fn durable_batch_download_destination(
     server_filename: &str,
     request: &GenerateRequest,
@@ -595,80 +496,39 @@ fn save_durable_batch_download(
 async fn run_canonical_remote_batch(
     client: &MoldClient,
     requests: &[GenerateRequest],
-    max_outputs: usize,
     output: &Option<String>,
     piped: bool,
     preview: bool,
-) -> Result<()> {
+) -> Result<bool> {
     let total = u32::try_from(requests.len()).context("batch is too large")?;
-    let mut admitted = Vec::new();
-    let mut failures = Vec::new();
-    for chunk in requests.chunks(max_outputs.max(1)) {
-        let client_batch_id = new_client_batch_id();
-        let admission = GenerationBatchAdmissionRequest {
-            client_batch_id: client_batch_id.clone(),
-            requests: chunk.to_vec(),
-        };
-        match admit_generation_batch_recovering_ambiguity(client, &admission).await {
-            Ok(status) => admitted.push((admission.requests, status)),
-            Err(error) => {
-                failures.push(format!(
-                    "generation-batch admission failed for client id {client_batch_id}: {error:#}"
-                ));
-                break;
-            }
-        }
-    }
+    let Some(report) = try_canonical_generation(client, requests).await? else {
+        return Ok(false);
+    };
+    let admitted_client_ids = report.admitted_client_ids;
+    let mut failures = report.failures;
 
-    let admitted_client_ids = admitted
-        .iter()
-        .map(|(_, status)| status.client_batch_id.clone())
-        .collect::<Vec<_>>();
-    if !failures.is_empty() && !admitted_client_ids.is_empty() {
-        failures.push(format!(
-            "already accepted client ids were reconciled: {}",
-            admitted_client_ids.join(", ")
-        ));
-    }
-
-    // Every chunk is durable before waiting for the first result. Large CLI
-    // batches therefore retain the same fast queue-delivery property as one
-    // endpoint-sized batch instead of serializing admission behind inference.
-    for (chunk, initial_status) in admitted {
-        let client_batch_id = initial_status.client_batch_id.clone();
-        let status = match wait_for_generation_batch(client, initial_status).await {
-            Ok(status) => status,
-            Err(error) => {
+    for outcome in report.outcomes {
+        if outcome.child.state == mold_core::GenerationBatchChildState::Complete {
+            let request = &outcome.request;
+            let child = &outcome.child;
+            let Some(result) = child.result.as_ref() else {
                 failures.push(format!(
-                    "could not reconcile accepted client id {client_batch_id}: {error:#}"
+                    "completed child {} for client id {} has no gallery result",
+                    child.index, outcome.client_batch_id
                 ));
                 continue;
-            }
-        };
-        for child in status
-            .children
-            .iter()
-            .filter(|child| child.state == GenerationBatchChildState::Complete)
-        {
-            let request = chunk
-                .get(child.index.saturating_sub(1) as usize)
-                .ok_or_else(|| anyhow::anyhow!("server returned an invalid batch child index"))?;
-            let result = child.result.as_ref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "completed generation batch child {} has no gallery result",
-                    child.index
-                )
-            })?;
+            };
             let filename = result.filename.as_deref();
             let original_filename = result
                 .original_filename
                 .as_deref()
                 .filter(|original| Some(*original) != filename);
             if filename.is_none() && original_filename.is_none() {
-                anyhow::bail!(
-                    "completed generation batch child {} has no gallery filename",
-                    child.index
-                );
+                failures.push(format!(
+                    "completed child {} for client id {} has no gallery filename",
+                    child.index, outcome.client_batch_id
+                ));
+                continue;
             }
             let global_index = request.batch_index.unwrap_or(child.index).saturating_sub(1);
             let stdout_output = (piped && output.is_none()) || output.as_deref() == Some("-");
@@ -677,14 +537,23 @@ async fn run_canonical_remote_batch(
                 // contract by preferring the final/upscaled result and falling
                 // back to the original only when it is the sole durable output.
                 let stdout_filename = filename.or(original_filename).expect("checked above");
-                let bytes = client.get_gallery_image(stdout_filename).await?;
+                let bytes = match client.get_gallery_image(stdout_filename).await {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        failures.push(format!(
+                            "could not download {stdout_filename} for accepted client id {}: {error}",
+                            outcome.client_batch_id
+                        ));
+                        continue;
+                    }
+                };
                 let mut stdout = std::io::stdout().lock();
                 stdout.write_all(&bytes)?;
                 stdout.flush()?;
                 continue;
             }
             if let Some(original_filename) = original_filename {
-                let bytes = client.get_gallery_image(original_filename).await?;
+                let downloaded = client.get_gallery_image(original_filename).await;
                 let destination = durable_batch_download_destination(
                     original_filename,
                     request,
@@ -692,16 +561,29 @@ async fn run_canonical_remote_batch(
                     total,
                     global_index,
                     filename.is_some(),
-                )?;
-                save_durable_batch_download(
-                    &bytes,
-                    &destination,
-                    request.resolved_output_format(),
-                    preview && filename.is_none(),
-                )?;
+                );
+                match (downloaded, destination) {
+                    (Ok(bytes), Ok(destination)) => {
+                        if let Err(error) = save_durable_batch_download(
+                            &bytes,
+                            &destination,
+                            request.resolved_output_format(),
+                            preview && filename.is_none(),
+                        ) {
+                            failures.push(format!(
+                                "could not save {original_filename} for accepted client id {}: {error}",
+                                outcome.client_batch_id
+                            ));
+                        }
+                    }
+                    (Err(error), _) | (_, Err(error)) => failures.push(format!(
+                        "could not hydrate {original_filename} for accepted client id {}: {error}",
+                        outcome.client_batch_id
+                    )),
+                }
             }
             if let Some(filename) = filename {
-                let bytes = client.get_gallery_image(filename).await?;
+                let downloaded = client.get_gallery_image(filename).await;
                 let destination = durable_batch_download_destination(
                     filename,
                     request,
@@ -709,54 +591,39 @@ async fn run_canonical_remote_batch(
                     total,
                     global_index,
                     false,
-                )?;
-                save_durable_batch_download(
-                    &bytes,
-                    &destination,
-                    request.resolved_output_format(),
-                    preview,
-                )?;
-            }
-        }
-        if let Some(child) = status.children.iter().find(|child| {
-            matches!(
-                child.state,
-                GenerationBatchChildState::Held
-                    | GenerationBatchChildState::Failed
-                    | GenerationBatchChildState::Cancelled
-            )
-        }) {
-            let detail = child.error.as_deref().unwrap_or(match child.state {
-                GenerationBatchChildState::Held => "dependency preparation stopped",
-                GenerationBatchChildState::Cancelled => "cancelled without server detail",
-                _ => "failed without server detail",
-            });
-            let retry = if child.state == GenerationBatchChildState::Held
-                && child.retryable == Some(true)
-            {
-                format!(
-                    "; durable job {} is retryable after correcting the cause",
-                    child.job_id
-                )
-            } else {
-                String::new()
-            };
-            failures.push(format!(
-                "generation batch child {} for client id {} is {}: {detail}{retry}",
-                child.index,
-                status.client_batch_id,
-                match child.state {
-                    GenerationBatchChildState::Held => "held",
-                    GenerationBatchChildState::Cancelled => "cancelled",
-                    _ => "failed",
+                );
+                match (downloaded, destination) {
+                    (Ok(bytes), Ok(destination)) => {
+                        if let Err(error) = save_durable_batch_download(
+                            &bytes,
+                            &destination,
+                            request.resolved_output_format(),
+                            preview,
+                        ) {
+                            failures.push(format!(
+                                "could not save {filename} for accepted client id {}: {error}",
+                                outcome.client_batch_id
+                            ));
+                        }
+                    }
+                    (Err(error), _) | (_, Err(error)) => failures.push(format!(
+                        "could not hydrate {filename} for accepted client id {}: {error}",
+                        outcome.client_batch_id
+                    )),
                 }
-            ));
+            }
         }
     }
     if !failures.is_empty() {
+        if !admitted_client_ids.is_empty() {
+            failures.push(format!(
+                "accepted client ids: {}",
+                admitted_client_ids.join(", ")
+            ));
+        }
         anyhow::bail!(failures.join("; "));
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Re-derive request defaults after an auto-pull refreshed the model
@@ -1742,29 +1609,14 @@ pub async fn run(
             } else {
                 vec![req.clone()]
             };
-            let capabilities = match ctx.client().server_capabilities().await {
-                Ok(capabilities) => Some(capabilities),
-                Err(error) if mold_core::client::is_missing_endpoint_error(&error) => None,
-                Err(error) => return Err(tag_remote(ctx.client(), error)),
-            };
-            if let Some(capabilities) = capabilities.as_ref() {
-                if let Some(max_outputs) = capabilities.canonical_generation_batch_limit(&requests)
-                {
-                    run_canonical_remote_batch(
-                        ctx.client(),
-                        &requests,
-                        max_outputs,
-                        &output,
-                        piped,
-                        preview,
-                    )
-                    .await
-                    .map_err(|error| tag_remote(ctx.client(), error))?;
-                    if let Some(lease) = reference_session.as_mut() {
-                        lease.mark_consumed();
-                    }
-                    return Ok(());
+            if run_canonical_remote_batch(ctx.client(), &requests, &output, piped, preview)
+                .await
+                .map_err(|error| tag_remote(ctx.client(), error))?
+            {
+                if let Some(lease) = reference_session.as_mut() {
+                    lease.mark_consumed();
                 }
+                return Ok(());
             }
             requests
         };
@@ -6374,6 +6226,22 @@ mod hdr_chain_guard_tests {
 mod audio_batch_passthrough_tests {
     use super::*;
 
+    async fn mount_canonical_capabilities(server: &wiremock::MockServer, limit: u32) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let mut capabilities = ServerCapabilities::default();
+        capabilities.queue.heterogeneous_batch = true;
+        capabilities.queue.durable_batch_outcomes = true;
+        capabilities.queue.admission_protocol_version = Some(2);
+        capabilities.queue.heterogeneous_batch_max_outputs = Some(limit);
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(capabilities))
+            .mount(server)
+            .await;
+    }
+
     fn audio_response(seed: u64, bytes: &[u8]) -> GenerateResponse {
         GenerateResponse {
             request_warnings: Vec::new(),
@@ -6514,6 +6382,7 @@ mod audio_batch_passthrough_tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
+        mount_canonical_capabilities(&server, 64).await;
         Mock::given(method("POST"))
             .and(path("/api/generation-batches"))
             .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
@@ -6556,7 +6425,6 @@ mod audio_batch_passthrough_tests {
         run_canonical_remote_batch(
             &MoldClient::new(&server.uri()),
             &[request],
-            64,
             &output,
             false,
             false,
@@ -6594,6 +6462,7 @@ mod audio_batch_passthrough_tests {
         }
 
         let server = MockServer::start().await;
+        mount_canonical_capabilities(&server, 1).await;
         Mock::given(method("POST"))
             .and(path("/api/generation-batches"))
             .and(ChildIndex(1))
@@ -6638,7 +6507,6 @@ mod audio_batch_passthrough_tests {
         let error = run_canonical_remote_batch(
             &MoldClient::new(&server.uri()),
             &requests,
-            1,
             &output,
             false,
             false,
@@ -6651,7 +6519,7 @@ mod audio_batch_passthrough_tests {
             b"first"
         );
         assert!(error.to_string().contains("accepted-client"));
-        assert!(error.to_string().contains("already accepted"));
+        assert!(error.to_string().contains("accepted client ids"));
         let submitted = server.received_requests().await.unwrap();
         let failed_client_id = submitted
             .iter()
@@ -6687,9 +6555,9 @@ mod audio_batch_passthrough_tests {
             r#"{"prompt":"print","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
         )
         .unwrap();
-        let error = admit_generation_batch_recovering_ambiguity(
+        let error = admit_for_test(
             &MoldClient::new(&server.uri()),
-            &GenerationBatchAdmissionRequest {
+            &mold_core::GenerationBatchAdmissionRequest {
                 client_batch_id: "recovery-key".into(),
                 requests: vec![request],
             },

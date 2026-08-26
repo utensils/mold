@@ -18,6 +18,7 @@ use mold_core::runpod::{
     NETWORK_VOLUME_MAX_GB, NETWORK_VOLUME_MIN_GB,
 };
 
+use crate::commands::durable_generation::try_canonical_singleton_artifact;
 use crate::theme;
 use crate::AlreadyReported;
 
@@ -1709,75 +1710,89 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         output_path.display().to_string().cyan()
     );
 
-    // Stream progress via SSE so RunPod's 100s Cloudflare proxy timeout
-    // doesn't kill the model-pull phase.
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<mold_core::types::SseProgressEvent>();
-    let progress_task = tokio::spawn(async move {
-        let pb = indicatif::ProgressBar::new_spinner();
-        pb.set_style(
-            indicatif::ProgressStyle::with_template(&format!(
-                "{{spinner:.{}}} {{msg}}",
-                theme::SPINNER_STYLE
-            ))
-            .unwrap(),
-        );
-        pb.enable_steady_tick(std::time::Duration::from_millis(80));
-        while let Some(ev) = rx.recv().await {
-            let line = format_progress_event(&ev);
-            pb.set_message(line);
-        }
-        pb.finish_and_clear();
-    });
-
-    let maybe_resp = http
-        .generate_stream(&req, tx)
+    let canonical = try_canonical_singleton_artifact(&http, &req)
         .await
-        .with_context(|| "generation failed")?;
-    let _ = progress_task.await;
-
-    let resp = match maybe_resp {
-        Some(r) => r,
-        None => match http.generate(req).await {
-            Ok(r) => r,
-            Err(e) => {
-                // Translate common Cloudflare-proxy failures into actionable
-                // hints. A 404 on /api/generate when /api/status succeeded
-                // usually means the container's binary doesn't match the
-                // host GPU (e.g. :latest built for sm_89 running on H100).
-                let msg = e.to_string();
-                let gpu = pod.gpu_name().unwrap_or_default();
-                if msg.contains("404") {
-                    bail!(
-                        "generation failed: proxy returned 404 on /api/generate. \
+        .with_context(|| "durable generation failed")?;
+    let resp = if let Some(artifact) = canonical {
+        std::fs::write(&output_path, &artifact.bytes)?;
+        println!(
+            "{} saved {} (durable output {})",
+            theme::icon_done(),
+            output_path.display(),
+            artifact.filename
+        );
+        None
+    } else {
+        // Explicit compatibility path for servers that cannot admit this
+        // request through protocol v2.
+        let (tx, mut rx) =
+            tokio::sync::mpsc::unbounded_channel::<mold_core::types::SseProgressEvent>();
+        let progress_task = tokio::spawn(async move {
+            let pb = indicatif::ProgressBar::new_spinner();
+            pb.set_style(
+                indicatif::ProgressStyle::with_template(&format!(
+                    "{{spinner:.{}}} {{msg}}",
+                    theme::SPINNER_STYLE
+                ))
+                .unwrap(),
+            );
+            pb.enable_steady_tick(std::time::Duration::from_millis(80));
+            while let Some(ev) = rx.recv().await {
+                pb.set_message(format_progress_event(&ev));
+            }
+            pb.finish_and_clear();
+        });
+        let maybe_resp = http
+            .generate_stream(&req, tx)
+            .await
+            .with_context(|| "generation failed")?;
+        let _ = progress_task.await;
+        Some(match maybe_resp {
+            Some(r) => r,
+            None => match http.generate(req.clone()).await {
+                Ok(r) => r,
+                Err(e) => {
+                    // Translate common Cloudflare-proxy failures into actionable
+                    // hints. A 404 on /api/generate when /api/status succeeded
+                    // usually means the container's binary doesn't match the
+                    // host GPU (e.g. :latest built for sm_89 running on H100).
+                    let msg = e.to_string();
+                    let gpu = pod.gpu_name().unwrap_or_default();
+                    if msg.contains("404") {
+                        bail!(
+                            "generation failed: proxy returned 404 on /api/generate. \
                          The mold binary in the container may not match the host \
                          GPU ({gpu}). Try `--image-tag latest-sm80` for broad compat, \
                          or check pod logs via `mold runpod logs {}`.",
-                        pod.id
-                    );
+                            pod.id
+                        );
+                    }
+                    return Err(e).context("generation failed (non-stream fallback)");
                 }
-                return Err(e).context("generation failed (non-stream fallback)");
-            }
-        },
+            },
+        })
     };
 
-    if let Some(video) = resp.video {
-        let vid_path = opts.output_dir.join(format!(
-            "runpod-{}-{}.{}",
-            pod.id,
-            short_timestamp(),
-            extension_for_video(video.format)
-        ));
-        std::fs::write(&vid_path, &video.data)?;
-        println!("{} saved {}", theme::icon_done(), vid_path.display());
-    } else if let Some(img) = resp.images.first() {
-        std::fs::write(&output_path, &img.data)?;
-        println!(
-            "{} saved {} ({:.1}s on seed {})",
-            theme::icon_done(),
-            output_path.display(),
-            resp.generation_time_ms as f64 / 1000.0,
-            resp.seed_used,
-        );
+    if let Some(resp) = resp {
+        if let Some(video) = resp.video {
+            let vid_path = opts.output_dir.join(format!(
+                "runpod-{}-{}.{}",
+                pod.id,
+                short_timestamp(),
+                extension_for_video(video.format)
+            ));
+            std::fs::write(&vid_path, &video.data)?;
+            println!("{} saved {}", theme::icon_done(), vid_path.display());
+        } else if let Some(img) = resp.images.first() {
+            std::fs::write(&output_path, &img.data)?;
+            println!(
+                "{} saved {} ({:.1}s on seed {})",
+                theme::icon_done(),
+                output_path.display(),
+                resp.generation_time_ms as f64 / 1000.0,
+                resp.seed_used,
+            );
+        }
     }
 
     // Update state + history.

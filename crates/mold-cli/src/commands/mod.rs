@@ -6,6 +6,7 @@ pub mod config;
 pub mod default;
 #[cfg(feature = "discord")]
 pub mod discord;
+pub(crate) mod durable_generation;
 pub mod expand;
 pub(crate) mod generate;
 pub mod gpu;

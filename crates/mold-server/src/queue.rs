@@ -2317,11 +2317,13 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             // retention fence and replay into a duplicate print; and a failed
             // publication would delete the row, losing a replayed job outright
             // since the gallery file is its only delivery.
-            if saved_names.output.is_some() {
-                if let Some(ticket) = job.journal.take() {
-                    let result_json = saved_names.terminal_json();
-                    ticket.complete_with_result(Some(&result_json));
-                }
+            let settlement = if saved_names.output.is_some() {
+                let result_json = saved_names.terminal_json();
+                durable_generation_settlement::settle_completion_async(
+                    &mut job.journal,
+                    &result_json,
+                )
+                .await
             } else {
                 tracing::error!(
                     job = %job.id,
@@ -2334,7 +2336,17 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                     DurableDisposition::RetryableHold,
                     "the generated output could not be saved to the gallery",
                 )
-                .await;
+                .await
+            };
+            if settlement.is_retained() {
+                let message =
+                    "generation output is retained for durable reconciliation after restart"
+                        .to_string();
+                if let Some(ref tx) = job.progress_tx {
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent::retained(message.clone())));
+                }
+                let _ = job.result_tx.send(Err(message));
+                return;
             }
 
             // Send SSE complete event
@@ -3445,13 +3457,17 @@ pub(crate) fn legacy_generation_preferred_gpu(
 }
 
 fn reject_generation_job(state: &AppState, mut job: GenerationJob, message: String) {
-    durable_generation_settlement::settle_blocking(
+    let settlement = durable_generation_settlement::settle_blocking(
         &mut job.journal,
         DurableDisposition::Retain,
         &message,
     );
     if let Some(progress) = &job.progress_tx {
-        let _ = progress.send(SseMessage::Error(SseErrorEvent::failed(message.clone())));
+        let _ = progress.send(SseMessage::Error(if settlement.is_retained() {
+            SseErrorEvent::retained(message.clone())
+        } else {
+            SseErrorEvent::failed(message.clone())
+        }));
     }
     let job_id = job.id.clone();
     let _ = job.result_tx.send(Err(message));

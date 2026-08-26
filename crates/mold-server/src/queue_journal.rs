@@ -20,6 +20,8 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -493,6 +495,8 @@ pub struct QueueJournal {
     fail_claim_release: AtomicBool,
     #[cfg(test)]
     fail_hold_transition: AtomicBool,
+    #[cfg(test)]
+    fail_completion_transition: AtomicUsize,
     /// Held for the process's lifetime so a peer sharing this `MOLD_HOME`
     /// cannot adopt the same identity.
     _owner_claim: Option<QueueOwnerClaim>,
@@ -560,6 +564,8 @@ impl QueueJournal {
             fail_claim_release: AtomicBool::new(false),
             #[cfg(test)]
             fail_hold_transition: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_completion_transition: AtomicUsize::new(0),
             retain: AtomicBool::new(false),
             max_bytes: env_usize(JOURNAL_MAX_BYTES_ENV, DEFAULT_JOURNAL_MAX_BYTES),
             max_dispatch_attempts: env_u32(
@@ -590,6 +596,8 @@ impl QueueJournal {
             fail_claim_release: AtomicBool::new(false),
             #[cfg(test)]
             fail_hold_transition: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_completion_transition: AtomicUsize::new(0),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
@@ -1541,6 +1549,14 @@ impl QueueJournal {
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Test seam: fail the next `attempts` exact completion transactions
+    /// before SQLite changes, preserving the claimed ticket for retry.
+    #[cfg(test)]
+    pub(crate) fn fail_completion_transition_for_tests(&self, attempts: usize) {
+        self.fail_completion_transition
+            .store(attempts, std::sync::atomic::Ordering::SeqCst);
+    }
+
     #[cfg(test)]
     pub(crate) fn claim_release_failure_pending_for_tests(&self) -> bool {
         self.fail_claim_release
@@ -2241,6 +2257,77 @@ impl QueueTicket {
         self.journal.discard_id(&self.id);
     }
 
+    /// Persist completion while preserving the exact token-owned ticket when
+    /// SQLite cannot commit. Observer-bearing execution paths retry this
+    /// operation before reporting success; a returned retry ticket has inert
+    /// drop semantics and is therefore safe to retain for restart.
+    pub(crate) fn complete_exact_with_result(mut self, result_json: Option<&str>) -> RetainOutcome {
+        let Some(token) = self.claim_token.as_deref() else {
+            self.complete_with_result(result_json);
+            return RetainOutcome::Released;
+        };
+        #[cfg(test)]
+        if self
+            .journal
+            .fail_completion_transition
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            self.settled = true;
+            return RetainOutcome::Retry {
+                ticket: self,
+                error: anyhow::anyhow!("injected completion transition failure"),
+            };
+        }
+        let terminal = mold_db::generation_batches::GenerationBatchTerminal {
+            state: mold_db::generation_batches::GenerationBatchTerminalState::Complete,
+            error: None,
+            terminal_error_json: None,
+            result_json,
+            completed_at_ms: now_ms(),
+        };
+        let Some(db) = self.journal.db() else {
+            self.settled = true;
+            return RetainOutcome::Retry {
+                ticket: self,
+                error: anyhow::anyhow!("durable generation database is unavailable"),
+            };
+        };
+        let candidate = self.journal.media_candidate(&self.id);
+        match generation_batches::finish_claimed(
+            db,
+            &self.id,
+            token,
+            QueueRowState::Running,
+            terminal,
+        ) {
+            Ok(commit) if commit.queue_deleted => {
+                self.journal.cleanup_media_candidate(candidate);
+                if commit.batch_child_updated {
+                    self.journal.publish_state_committed(&self.id);
+                }
+                self.settled = true;
+                RetainOutcome::Released
+            }
+            Ok(commit) => {
+                if commit.batch_child_updated {
+                    self.journal.publish_state_committed(&self.id);
+                }
+                self.settled = true;
+                RetainOutcome::Stale
+            }
+            Err(error) => {
+                self.settled = true;
+                RetainOutcome::Retry {
+                    ticket: self,
+                    error,
+                }
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn complete_before_dispatch(self) {
         self.complete_before_dispatch_with_result(None);
@@ -2647,6 +2734,7 @@ mod tests {
             fail_completion_lookup: AtomicBool::new(false),
             fail_claim_release: AtomicBool::new(false),
             fail_hold_transition: AtomicBool::new(false),
+            fail_completion_transition: AtomicUsize::new(0),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
@@ -3276,6 +3364,7 @@ mod tests {
             fail_completion_lookup: AtomicBool::new(false),
             fail_claim_release: AtomicBool::new(false),
             fail_hold_transition: AtomicBool::new(false),
+            fail_completion_transition: AtomicUsize::new(0),
             retain: AtomicBool::new(false),
             max_bytes: 64,
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
@@ -3308,6 +3397,7 @@ mod tests {
             fail_completion_lookup: AtomicBool::new(false),
             fail_claim_release: AtomicBool::new(false),
             fail_hold_transition: AtomicBool::new(false),
+            fail_completion_transition: AtomicUsize::new(0),
             retain: AtomicBool::new(false),
             max_bytes: DEFAULT_JOURNAL_MAX_BYTES,
             max_dispatch_attempts: 2,
