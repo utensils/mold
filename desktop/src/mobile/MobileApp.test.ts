@@ -2343,6 +2343,17 @@ describe("MobileApp generation queue", () => {
 
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/retry%2Fjob/retry", {
       method: "POST",
+      headers: { "content-type": "application/json" },
+      body: expect.any(String),
+    });
+    const retryRequest = vi
+      .mocked(apiFetchTo)
+      .mock.calls.find(([, path]) => path === "/api/queue/retry%2Fjob/retry")!;
+    expect(JSON.parse(String(retryRequest[2]?.body))).toEqual({
+      instance_id: "studio-id",
+      batch_id: "retry-batch",
+      client_batch_id: expect.any(String),
+      job_id: "retry/job",
     });
   });
 

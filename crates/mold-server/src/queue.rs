@@ -1828,6 +1828,11 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 let _ = job.result_tx.send(Err(err_msg));
                 return;
             }
+            crate::queue_journal::DispatchClaim::Cancelled => {
+                drop(scheduler_mutation);
+                finish_single_worker_cancelled(job, true);
+                return;
+            }
             crate::queue_journal::DispatchClaim::Granted
             | crate::queue_journal::DispatchClaim::Untracked => {}
         }
@@ -4112,6 +4117,41 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn single_worker_user_cancellation_emits_canonical_cancelled_observer() {
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let job = GenerationJob {
+            id: "single-worker-dispatch-cancelled".to_string(),
+            durable_queue_rank: None,
+            request: fake_request("mock-model"),
+            deferred_media: None,
+            resolved_references: None,
+            completion_payload: SseCompletionPayload::Full,
+            progress_tx: Some(progress_tx),
+            result_tx,
+            output_dir: None,
+            batch_child: None,
+            journal: None,
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+            h3_private_ingress_grant: None,
+        };
+
+        finish_single_worker_cancelled(job, true);
+
+        let SseMessage::Error(error) = progress_rx.recv().await.unwrap() else {
+            panic!("user cancellation must emit a terminal SSE error frame");
+        };
+        assert_eq!(
+            error.code.as_deref(),
+            Some(mold_core::SSE_ERROR_CODE_QUEUED_CANCELLED)
+        );
+        assert!(matches!(
+            result_rx.await.unwrap(),
+            Err(ref message) if message == "Cancelled"
+        ));
     }
 
     #[test]

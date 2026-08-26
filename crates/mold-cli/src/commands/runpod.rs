@@ -2540,6 +2540,26 @@ mod tests {
         }
     }
 
+    struct CompleteCanonicalAdmission;
+
+    impl Respond for CompleteCanonicalAdmission {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "id": "batch-1",
+                "client_batch_id": body["client_batch_id"],
+                "instance_id": "instance-1",
+                "durable": true,
+                "children": [{
+                    "index": 1,
+                    "job_id": "durable-runpod-1",
+                    "state": "complete",
+                    "result": {"filename": "durable.png"}
+                }]
+            }))
+        }
+    }
+
     #[tokio::test]
     async fn runpod_transport_uses_canonical_admission_without_raw_or_sse() {
         let server = MockServer::start().await;
@@ -2566,6 +2586,70 @@ mod tests {
         assert!(requests
             .iter()
             .any(|request| request.url.path() == "/api/generation-batches"));
+        assert!(!requests.iter().any(|request| {
+            matches!(request.url.path(), "/api/generate" | "/api/generate/stream")
+        }));
+    }
+
+    #[tokio::test]
+    async fn runpod_canonical_success_hydrates_the_exact_durable_artifact() {
+        let server = MockServer::start().await;
+        mount_canonical_capabilities(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .respond_with(CompleteCanonicalAdmission)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/image/durable.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes([1_u8, 2, 3]))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "filename": "durable.png",
+                    "timestamp": 1,
+                    "metadata": {
+                        "prompt": "runpod transport proof",
+                        "job_id": "durable-runpod-1",
+                        "model": "flux-dev:q4",
+                        "seed": 7,
+                        "steps": 1,
+                        "guidance": 1.0,
+                        "width": 64,
+                        "height": 64,
+                        "version": "test"
+                    }
+                }])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = generate_with_runpod_transport(
+            &mold_core::MoldClient::new(&server.uri()),
+            &transport_request(),
+            tx,
+        )
+        .await
+        .unwrap();
+
+        let RunPodGenerationTransport::Canonical(artifact) = outcome else {
+            panic!("protocol v2 must not fall back after durable admission");
+        };
+        assert_eq!(artifact.filename, "durable.png");
+        assert_eq!(artifact.bytes, [1_u8, 2, 3]);
+        assert_eq!(
+            artifact.metadata.job_id.as_deref(),
+            Some("durable-runpod-1")
+        );
+        assert_eq!(artifact.request.prompt, "runpod transport proof");
+        let requests = server.received_requests().await.unwrap();
         assert!(!requests.iter().any(|request| {
             matches!(request.url.path(), "/api/generate" | "/api/generate/stream")
         }));

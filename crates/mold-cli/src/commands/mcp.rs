@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 use crate::commands::durable_generation::{
     hydrate_canonical_artifact, reconcile_canonical_authority_observed, retry_canonical_child,
     try_canonical_generation_observed, try_canonical_singleton_artifact, CanonicalGenerationEvent,
-    CanonicalGenerationReport,
+    CanonicalGenerationReport, CanonicalRetrySubmission,
 };
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -564,17 +564,30 @@ impl McpServer {
             serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
         let retry = self.jobs.begin_retry(&args.job_id).await?;
 
-        let retry_result =
-            retry_canonical_child(&self.client, &retry.authority, &retry.durable_job_id)
-                .await
-                .map_err(|error| format!("could not retry durable generation: {error}"));
-
-        if let Err(error) = retry_result {
-            self.jobs.abort_retry(&args.job_id, error.clone()).await;
-            return Err(error);
-        }
+        let retry_result = match retry_canonical_child(
+            &self.client,
+            &retry.authority,
+            &retry.durable_job_id,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let error = format!("could not retry durable generation: {error}");
+                self.jobs.abort_retry(&args.job_id, error.clone()).await;
+                return Err(error);
+            }
+        };
 
         self.jobs.mark_retry_queued(&args.job_id).await;
+        if let CanonicalRetrySubmission::Ambiguous { error } = retry_result {
+            self.jobs
+                .record_reconciliation_error(
+                    &args.job_id,
+                    format!("retry response was interrupted; reconciling durable state: {error}"),
+                )
+                .await;
+        }
         let client = self.client.clone();
         let jobs = self.jobs.clone();
         let local_job_id = args.job_id.clone();

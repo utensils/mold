@@ -14,6 +14,11 @@ const effectMocks = vi.hoisted(() => ({
   fetchGalleryMediaBytes: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3])),
   saveOutputBytes: vi.fn().mockResolvedValue("saved.png"),
 }));
+const queueApi = vi.hoisted(() => ({ retryQueueJob: vi.fn() }));
+vi.mock("@studio/api/queuePlan", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/queuePlan")>()),
+  retryQueueJob: (...args: unknown[]) => queueApi.retryQueueJob(...args),
+}));
 vi.mock("../lib/notify", () => ({
   notifyGenerated: effectMocks.notifyGenerated,
   notifyGenerationFailed: effectMocks.notifyGenerationFailed,
@@ -161,6 +166,8 @@ describe("submitBatch connection cap", () => {
     durableApi.admit.mockReset();
     durableApi.lookup.mockReset();
     durableApi.reconcile.mockReset();
+    queueApi.retryQueueJob.mockReset();
+    queueApi.retryQueueJob.mockResolvedValue(undefined);
     effectMocks.notifyGenerated.mockClear();
     effectMocks.notifyGenerationFailed.mockClear();
     effectMocks.fetchGalleryMediaBytes.mockClear();
@@ -377,7 +384,65 @@ describe("submitBatch connection cap", () => {
       stage: "Original machine identity changed — outcome unknown",
     });
     await expect(store.retryHeld(submitted.jobs[0]!.clientId)).rejects.toThrow("not retryable");
-    expect(vi.mocked(apiFetchTo)).not.toHaveBeenCalled();
+    expect(queueApi.retryQueueJob).not.toHaveBeenCalled();
+  });
+
+  it("retries a held child with its complete durable admission authority", async () => {
+    const store = useGenerationStore();
+    const hosts = useHostsStore();
+    hosts.extras = [
+      {
+        id: "hal9000",
+        label: "hal9000",
+        url: "http://hal9000:7680",
+        apiKey: "fresh-key",
+        status: "ready",
+        error: null,
+        instanceId: "instance-1",
+      },
+    ];
+    durableApi.admit.mockImplementation(async (_target, body) => ({
+      id: "held-batch",
+      client_batch_id: (body as { client_batch_id: string }).client_batch_id,
+      instance_id: "instance-1",
+      durable: true,
+      children: [
+        {
+          index: 1,
+          job_id: "held/job",
+          state: "held",
+          error: "model preparation failed",
+          retryable: true,
+          created_at_ms: 1,
+          updated_at_ms: 2,
+        },
+      ],
+    }));
+
+    const submitted = store.submitBatch(req, 1, {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      instanceId: "instance-1",
+      heterogeneousBatch: true,
+      heterogeneousBatchMaxOutputs: 64,
+      durableBatchOutcomes: true,
+      admissionProtocolVersion: 2,
+    });
+    await flushPromises();
+
+    await store.retryHeld(submitted.jobs[0]!.clientId);
+
+    expect(queueApi.retryQueueJob).toHaveBeenCalledWith(
+      { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      {
+        instanceId: "instance-1",
+        batchId: "held-batch",
+        clientBatchId: expect.any(String),
+        jobId: "held/job",
+      },
+    );
   });
 
   it("admits singleton and chunks Batch N without held generation streams", async () => {

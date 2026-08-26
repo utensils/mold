@@ -1747,12 +1747,19 @@ impl QueueJournal {
     /// Return one explicitly retryable held row to the feeder backlog.
     pub fn retry_held(
         &self,
+        serving_instance_id: &str,
         authority: &mold_core::GenerationRetryRequest,
     ) -> anyhow::Result<generation_batches::OwnedRetry> {
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
             return Ok(generation_batches::OwnedRetry::NotOwned);
         };
-        let outcome = generation_batches::retry_held_owned(db, owner, authority, now_ms())?;
+        let outcome = generation_batches::retry_held_owned(
+            db,
+            owner,
+            serving_instance_id,
+            authority,
+            now_ms(),
+        )?;
         if outcome == generation_batches::OwnedRetry::Retried {
             self.publish_state_committed(&authority.job_id);
             self.wake_feeder();
@@ -2217,6 +2224,9 @@ pub enum DispatchClaim {
     Untracked,
     /// A feeder token no longer owns the row. The stale runtime must not run.
     Fenced,
+    /// Cancellation won while an exhausted attempt was being parked. The
+    /// runtime must report cancellation, not manufacture a stale-claim error.
+    Cancelled,
 }
 
 /// Result of returning one token-owned row to the feeder backlog.
@@ -2516,7 +2526,7 @@ impl QueueTicket {
                 match self.hold_owned(&reason, false, now) {
                     Ok(generation_batches::OwnedHold::Held) => {}
                     Ok(generation_batches::OwnedHold::Cancelled) => {
-                        return DispatchClaim::Fenced;
+                        return DispatchClaim::Cancelled;
                     }
                     Ok(generation_batches::OwnedHold::Fenced) => {
                         return if self.claim_token.is_some() {
@@ -3572,6 +3582,44 @@ mod tests {
         let held = journal.list_all().pop().unwrap();
         assert_eq!(held.state, QueueRowState::Held);
         assert!(held.held_reason.is_some());
+    }
+
+    #[test]
+    fn cancellation_wins_when_an_exhausted_dispatch_is_being_parked() {
+        let journal = journal_with_db();
+        let request = request();
+        journal
+            .record_batch(BatchJournalAdmission {
+                id: "dispatch-cancel-batch",
+                client_batch_id: "dispatch-cancel-client",
+                request_sha256: "dispatch-cancel-sha",
+                children: &[admission(
+                    "dispatch-cancel-child",
+                    &request,
+                    Path::new("/gallery"),
+                )],
+            })
+            .unwrap();
+
+        for _ in 0..journal.max_dispatch_attempts() {
+            let claim = journal.claim_next_feeder().unwrap().unwrap();
+            let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+            assert_eq!(ticket.claim_dispatch(), DispatchClaim::Granted);
+            assert!(matches!(ticket.retain(), RetainOutcome::Released));
+        }
+
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+        assert!(journal.cancel_id("dispatch-cancel-child").unwrap());
+        assert_eq!(ticket.claim_dispatch(), DispatchClaim::Cancelled);
+
+        assert!(journal.list_all().is_empty());
+        let child = &journal
+            .generation_batch("dispatch-cancel-batch")
+            .unwrap()
+            .children[0];
+        assert_eq!(child.state, "cancelled");
+        assert_eq!(child.error.as_deref(), Some("Cancelled"));
     }
 
     #[test]

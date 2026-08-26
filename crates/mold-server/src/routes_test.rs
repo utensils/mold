@@ -5551,19 +5551,36 @@ mod tests {
         assert_eq!(held["error"], "dependency download failed");
         assert_eq!(held["retryable"], true);
 
+        let admitted: mold_core::GenerationBatchStatus = serde_json::from_value(
+            json_body(
+                app.clone()
+                    .oneshot(
+                        Request::get("/api/generation-batches/batch-retry")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await,
+        )
+        .unwrap();
+        let authority =
+            mold_core::GenerationBatchAuthority::from_admission(&admitted, "client-batch-retry")
+                .unwrap();
+        let retry =
+            mold_core::GenerationRetryRequest::from_authority(&authority, "retryable-preparation");
+        assert_eq!(retry.instance_id, *state.instance_id);
+
+        let mut replacement_authority = retry.clone();
+        replacement_authority.instance_id = "replacement".to_string();
         let replacement = app
             .clone()
             .oneshot(
                 Request::post("/api/queue/retryable-preparation/retry")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({
-                            "instance_id": "replacement",
-                            "batch_id": "batch-retry",
-                            "client_batch_id": "client-batch-retry",
-                            "job_id": "retryable-preparation"
-                        })
-                        .to_string(),
+                        serde_json::to_vec(&replacement_authority).unwrap(),
                     ))
                     .unwrap(),
             )
@@ -5579,15 +5596,7 @@ mod tests {
             .oneshot(
                 Request::post("/api/queue/retryable-preparation/retry")
                     .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "instance_id": owner,
-                            "batch_id": "batch-retry",
-                            "client_batch_id": "client-batch-retry",
-                            "job_id": "retryable-preparation"
-                        })
-                        .to_string(),
-                    ))
+                    .body(Body::from(serde_json::to_vec(&retry).unwrap()))
                     .unwrap(),
             )
             .await

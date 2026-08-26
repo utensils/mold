@@ -2079,6 +2079,31 @@ pub fn is_missing_endpoint_error(err: &anyhow::Error) -> bool {
         })
 }
 
+/// True when retrying an idempotent read or reconciling an ambiguously
+/// committed mutation is safe. HTTP response failures are wrapped so their
+/// status and body remain actionable; keep the classification here rather
+/// than making callers guess from formatted error text.
+pub fn is_transient_request_error(err: &anyhow::Error) -> bool {
+    if MoldClient::is_connection_error(err) {
+        return true;
+    }
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<ServerResponseError>()
+            .is_some_and(|error| error.status.is_server_error() || error.status.as_u16() == 429)
+            || cause.downcast_ref::<reqwest::Error>().is_some_and(|error| {
+                error.is_timeout()
+                    || error.is_connect()
+                    || error.is_body()
+                    || error.is_decode()
+                    || error.is_request()
+                    || error
+                        .status()
+                        .is_some_and(|status| status.is_server_error() || status.as_u16() == 429)
+            })
+    })
+}
+
 #[derive(Debug)]
 struct ServerResponseError {
     status: StatusCode,
@@ -2435,6 +2460,23 @@ impl std::error::Error for ModelNotFoundError {}
 mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
+
+    #[test]
+    fn transient_request_errors_include_wrapped_rate_limits_and_server_failures() {
+        for status in [StatusCode::TOO_MANY_REQUESTS, StatusCode::BAD_GATEWAY] {
+            let error = anyhow::Error::new(ServerResponseError {
+                status,
+                body: "retry later".into(),
+            });
+            assert!(is_transient_request_error(&error), "status {status}");
+        }
+
+        let conflict = anyhow::Error::new(ServerResponseError {
+            status: StatusCode::CONFLICT,
+            body: "authority mismatch".into(),
+        });
+        assert!(!is_transient_request_error(&conflict));
+    }
 
     fn reference_session_request() -> ReferenceUploadSessionRequest {
         let request = serde_json::from_value(serde_json::json!({

@@ -6153,9 +6153,21 @@ async function retryHeldGeneration(job: Job): Promise<void> {
     setGenerationStatus(`Reconnect ${job.hostLabel} before retrying this print.`, true);
     return;
   }
+  if (!durable.recovery.tracker.serverBatchId) {
+    setGenerationStatus(
+      `This print no longer has enough admission identity to retry safely.`,
+      true,
+    );
+    return;
+  }
   durableGenerationRetryAttempts.add(job.id);
   try {
-    await retryQueueJob(mobileHostTarget(host), job.id);
+    await retryQueueJob(mobileHostTarget(host), {
+      instanceId: durable.recovery.tracker.expectedInstanceId,
+      batchId: durable.recovery.tracker.serverBatchId,
+      clientBatchId: durable.recovery.tracker.clientBatchId,
+      jobId: job.id,
+    });
     await reconcileMobileDurableHost(durable.recovery.tracker.hostId);
     setGenerationStatus(`Retry queued on ${job.hostLabel}.`);
   } catch (error) {
