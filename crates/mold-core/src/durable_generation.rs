@@ -202,7 +202,19 @@ async fn read_canonical_authority(
     let status = loop {
         match client.generation_batch(&authority.batch_id).await {
             Ok(Some(status)) => break status,
-            Ok(None) => anyhow::bail!("generation batch {} disappeared", authority.batch_id),
+            Ok(None) => {
+                observe(
+                    observer,
+                    CanonicalGenerationEvent::ReconcileDelayed {
+                        authority: authority.clone(),
+                        error: format!(
+                            "generation batch {} is not visible yet",
+                            authority.batch_id
+                        ),
+                    },
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
             Err(error) if is_transient_request_error(&error) => {
                 observe(
                     observer,

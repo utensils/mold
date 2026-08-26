@@ -574,6 +574,13 @@ pub(crate) fn request_has_durable_media(request: &mold_core::GenerateRequest) ->
     crate::queue_media::request_has_extractable_media(request)
 }
 
+pub(crate) fn request_requires_encrypted_durable_media(
+    request: &mold_core::GenerateRequest,
+) -> bool {
+    request_has_durable_media(request)
+        || mold_core::minimax_h3::task_for_model(&request.model).is_some()
+}
+
 pub(crate) fn durable_media_preflight(
     request: &mold_core::GenerateRequest,
 ) -> Result<(), ApiError> {

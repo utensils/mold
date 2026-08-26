@@ -4816,7 +4816,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capabilities_keep_canonical_admission_dark_when_media_reconciliation_is_dark() {
+    async fn capabilities_keep_canonical_admission_available_when_media_reconciliation_is_dark() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let (mut state, _rx) = durable_state(db, root.path());
@@ -4834,8 +4834,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
         assert!(body.get("durable_media").is_none());
-        assert!(body["queue"]["admission_protocol_version"].is_null());
-        assert_eq!(body["queue"]["heterogeneous_batch"], false);
+        assert_eq!(body["queue"]["admission_protocol_version"], 2);
+        assert_eq!(body["queue"]["heterogeneous_batch"], true);
+        assert_eq!(body["queue"]["durable_batch_outcomes"], true);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5822,11 +5823,39 @@ mod tests {
         let app = app_with_state(state);
         let body: serde_json::Value =
             serde_json::from_str(&durable_direct_media_body("dark media store")).unwrap();
+        let h3_body = {
+            let mut request: serde_json::Value =
+                serde_json::from_str(&generate_body("dark H3 authority", 64, 64)).unwrap();
+            request["model"] = serde_json::json!(mold_core::minimax_h3::FL2VA_COMFY);
+            request
+        };
 
         for path in ["/api/generate", "/api/generate/stream"] {
+            for request in [&body, &h3_body] {
+                let response = app
+                    .clone()
+                    .oneshot(json_request("POST", path, request.clone()))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(
+                    json_body(response).await["code"],
+                    "DURABLE_MEDIA_UNAVAILABLE"
+                );
+            }
+        }
+
+        for request in [body, h3_body] {
             let response = app
                 .clone()
-                .oneshot(json_request("POST", path, body.clone()))
+                .oneshot(json_request(
+                    "POST",
+                    "/api/generation-batches",
+                    serde_json::json!({
+                        "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                        "requests": [request],
+                    }),
+                ))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -5836,6 +5865,40 @@ mod tests {
             );
         }
         assert!(journal.list_all().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dark_media_services_still_admit_media_free_direct_and_batch_requests() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        state.queue_journal.set_durable_media_ready(false);
+        let request: GenerateRequest =
+            serde_json::from_str(&generate_body("media-free admission", 64, 64)).unwrap();
+
+        assert!(
+            crate::routes::direct_durable_admission(&state, &request, true)
+                .await
+                .unwrap()
+                .is_some(),
+            "encrypted-media readiness must not disable media-free direct admission"
+        );
+
+        let journal = state.queue_journal.clone();
+        let response = app_with_state(state)
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [request],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(journal.list_all().len(), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]

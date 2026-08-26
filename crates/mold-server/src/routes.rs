@@ -2403,8 +2403,7 @@ pub(crate) async fn direct_durable_admission(
     }
     let durable_media_ready = state.queue_journal.durable_media_capabilities().is_some();
     if !durable_media_ready
-        && (crate::queue_media_admission::request_has_durable_media(request)
-            || mold_core::minimax_h3::task_for_model(&request.model).is_some())
+        && crate::queue_media_admission::request_requires_encrypted_durable_media(request)
     {
         return Err(ApiError::with_code(
             "encrypted durable request media is unavailable",
@@ -2419,9 +2418,7 @@ pub(crate) async fn direct_durable_admission(
             Ok(None)
         };
     }
-    let admission = durable_media_ready
-        .then(|| state.queue_journal.queue_media_admission())
-        .flatten();
+    let admission = state.queue_journal.queue_media_admission();
     if admission.is_none() && explicitly_requested {
         return Err(ApiError::with_code(
             "durable direct admission is unavailable on this host",
@@ -2537,10 +2534,10 @@ async fn admit_generation_batch(
 ) -> Result<(StatusCode, Json<mold_core::GenerationBatchStatus>), ApiError> {
     if !state.scheduled_work.v2_authoritative()
         || !state.queue_journal.is_enabled()
-        || state.queue_journal.durable_media_capabilities().is_none()
+        || state.queue_journal.queue_media_admission().is_none()
     {
         return Err(ApiError::with_code(
-            "batch admission requires Scheduler V2 and the encrypted durable queue",
+            "batch admission requires Scheduler V2 and the durable queue",
             "HETEROGENEOUS_BATCH_UNAVAILABLE",
             StatusCode::SERVICE_UNAVAILABLE,
         ));
@@ -2550,6 +2547,18 @@ async fn admit_generation_batch(
         return Err(ApiError::validation(format!(
             "requests must contain 1..={MAX_HETEROGENEOUS_BATCH_OUTPUTS} children"
         )));
+    }
+    if state.queue_journal.durable_media_capabilities().is_none()
+        && body
+            .requests
+            .iter()
+            .any(crate::queue_media_admission::request_requires_encrypted_durable_media)
+    {
+        return Err(ApiError::with_code(
+            "encrypted durable request media is unavailable",
+            "DURABLE_MEDIA_UNAVAILABLE",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
     }
     let admission = state
         .queue_journal
@@ -6803,9 +6812,7 @@ async fn server_capabilities(
             durable_batch_outcomes: heterogeneous_batch,
             admission_protocol_version: heterogeneous_batch.then_some(2),
         },
-        durable_media: heterogeneous_batch
-            .then(|| state.queue_journal.durable_media_capabilities())
-            .flatten(),
+        durable_media: state.queue_journal.durable_media_capabilities(),
         reference_uploads: mold_core::ReferenceUploadCapabilities {
             available: true,
             // V2 rebinds the request scope to content-probed canonical
