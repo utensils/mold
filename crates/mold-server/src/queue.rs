@@ -2338,6 +2338,15 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 )
                 .await
             };
+            state.job_registry.finish_completion(&job.id);
+            if settlement.is_cancelled() {
+                let message = "Cancelled".to_string();
+                if let Some(ref tx) = job.progress_tx {
+                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(message.clone())));
+                }
+                let _ = job.result_tx.send(Err(message));
+                return;
+            }
             if settlement.is_retained() {
                 let message =
                     "generation output is retained for durable reconciliation after restart"

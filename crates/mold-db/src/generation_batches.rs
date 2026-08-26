@@ -115,6 +115,9 @@ pub struct GenerationBatchTerminal<'a> {
 pub struct ClaimedTerminalCommit {
     pub queue_deleted: bool,
     pub batch_child_updated: bool,
+    /// The child was already cancelling, so the transaction committed
+    /// cancellation instead of the requested terminal result.
+    pub cancelled: bool,
 }
 
 /// Durable result of cancelling one queue row through its owning server.
@@ -458,6 +461,15 @@ pub fn finish_claimed(
             return Ok(ClaimedTerminalCommit::default());
         }
 
+        let cancelled = conn
+            .query_row(
+                "SELECT state FROM generation_batch_children WHERE job_id = ?1",
+                params![job_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .as_deref()
+            == Some("cancelling");
         let child_updated = update_terminal_child(conn, job_id, terminal)?;
         let queue_deleted = conn.execute(
             "DELETE FROM generation_queue
@@ -470,6 +482,7 @@ pub fn finish_claimed(
         Ok(ClaimedTerminalCommit {
             queue_deleted: true,
             batch_child_updated: child_updated,
+            cancelled,
         })
     })
 }
@@ -745,6 +758,7 @@ pub fn finish_unclaimed_queued(
         Ok(ClaimedTerminalCommit {
             queue_deleted: queue_deleted == 1,
             batch_child_updated: child_updated,
+            cancelled: false,
         })
     })
 }

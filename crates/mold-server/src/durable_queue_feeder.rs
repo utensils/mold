@@ -237,7 +237,8 @@ async fn retain_for_retry(
             }
         };
         match retained {
-            Ok(crate::queue_journal::RetainOutcome::Released) => return,
+            Ok(crate::queue_journal::RetainOutcome::Released)
+            | Ok(crate::queue_journal::RetainOutcome::Cancelled) => return,
             Ok(crate::queue_journal::RetainOutcome::Stale) => {
                 tracing::warn!(%job, "durable feeder claim became stale while retaining");
                 return;
@@ -298,6 +299,12 @@ async fn hold_claimed(
             }
             HoldClaimOutcome::Held
         }
+        Ok(crate::queue_journal::RetainOutcome::Cancelled) => {
+            if let Some(ingress) = ingress {
+                ingress.fail_claimed(job_id, "Cancelled".into());
+            }
+            HoldClaimOutcome::Held
+        }
         Ok(crate::queue_journal::RetainOutcome::Retry { ticket, error }) => {
             tracing::warn!(job = %job_id, %error, "hold transition failed; returning durable row to replay");
             retain_for_retry(ticket, shutdown).await;
@@ -322,7 +329,8 @@ async fn hold_claimed(
 async fn retain_for_shutdown(ticket: crate::queue_journal::QueueTicket) {
     let job = ticket.id().to_owned();
     match tokio::task::spawn_blocking(move || ticket.retain()).await {
-        Ok(crate::queue_journal::RetainOutcome::Released) => {}
+        Ok(crate::queue_journal::RetainOutcome::Released)
+        | Ok(crate::queue_journal::RetainOutcome::Cancelled) => {}
         Ok(crate::queue_journal::RetainOutcome::Stale) => {
             tracing::warn!(%job, "shutdown found a stale durable feeder claim");
         }
@@ -1517,11 +1525,10 @@ mod tests {
     #[tokio::test]
     async fn attached_deep_hints_cannot_occupy_all_preparation_workers() {
         let (state, mut rx, home) = state_with_home(200);
-        // Keep the production-sized runtime capacity while limiting the
-        // fixture to the two worker-widths needed to prove forward progress.
-        // Leaving hundreds of live jobs behind would test shutdown teardown,
-        // not the attached-hint deadlock this regression guards.
-        let ids = admit(&state, 16);
+        // Three worker-widths are required: 0..7 occupy the first wave,
+        // attached hints 16..23 compete for the second, and FIFO predecessors
+        // 8..15 must still publish before those deep hints can proceed.
+        let ids = admit(&state, 24);
         let owner = state.queue_journal.owner_uuid().unwrap().to_string();
         let lifecycle = Arc::new(crate::queue_media_lifecycle::QueueMediaLifecycle::new(
             state.metadata_db.clone(),
@@ -1537,7 +1544,7 @@ mod tests {
             .queue_journal
             .install_queue_media_admission(admission.clone())
             .unwrap();
-        let registrations = ids[8..]
+        let registrations = ids[16..]
             .iter()
             .map(|id| {
                 let registration = admission

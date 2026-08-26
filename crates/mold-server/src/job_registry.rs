@@ -149,6 +149,10 @@ struct EntryInternal {
     /// hand-off race and cancels the token as soon as it appears.
     running_cancel: Option<mold_inference::InferenceCancellationToken>,
     cancel_requested: bool,
+    /// Terminal publication has won the lifecycle race. Keep the row visible
+    /// until SQLite is settled so DELETE cannot fall through to the durable
+    /// row and revoke authority after bytes have started publishing.
+    completion_claimed: bool,
     /// Exact route-owned token that temporarily excludes this queued row from
     /// scheduler planning/grant while its durable PATCH is in flight.
     queue_patch_token: Option<u64>,
@@ -165,6 +169,7 @@ pub enum TargetGpuUpdateError {
 pub enum QueuedJobCancelError {
     NotFound,
     AlreadyRunning,
+    CompletionClaimed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -351,6 +356,7 @@ impl JobRegistry {
                     cancel: cancel.clone(),
                     running_cancel: None,
                     cancel_requested: false,
+                    completion_claimed: false,
                     queue_patch_token: None,
                 },
             );
@@ -490,6 +496,9 @@ impl JobRegistry {
             let Some(pos) = entries.iter().position(|e| e.id == id) else {
                 return Err(QueuedJobCancelError::NotFound);
             };
+            if entries[pos].completion_claimed {
+                return Err(QueuedJobCancelError::CompletionClaimed);
+            }
             if entries[pos].state == JobLifecycle::Running || entries[pos].running_cancel.is_some()
             {
                 entries[pos].cancel_requested = true;
@@ -611,8 +620,10 @@ impl JobRegistry {
     }
 
     /// Claim the right to publish a terminal result. DELETE takes the same
-    /// write lock, so once this removes the row a later cancel returns 404;
-    /// if cancellation won, publication is refused.
+    /// write lock, so once this marks the row a later cancel is refused; if
+    /// cancellation won first, publication is refused. The row remains until
+    /// [`Self::finish_completion`] so the durable fallback cannot cancel it
+    /// during gallery publication.
     pub(crate) fn claim_completion(&self, id: &str) -> CompletionClaim {
         let claim = {
             let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
@@ -630,15 +641,37 @@ impl JobRegistry {
             {
                 CompletionClaim::AttemptCancelled
             } else {
-                entries.remove(pos);
+                entries[pos].completion_claimed = true;
                 CompletionClaim::Claimed
             }
         };
-        if claim == CompletionClaim::Claimed {
+        claim
+    }
+
+    /// Remove a row after its durable terminal disposition is settled and
+    /// gallery publication is no longer cancellable.
+    pub(crate) fn finish_completion(&self, id: &str) {
+        let removed = {
+            let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            entries
+                .iter()
+                .position(|entry| entry.id == id && entry.completion_claimed)
+                .map(|pos| entries.remove(pos))
+                .is_some()
+        };
+        if removed {
             self.mark_mutated();
             self.emit(ServerEvent::JobEnded { id: id.to_string() });
         }
-        claim
+    }
+
+    #[cfg(test)]
+    pub(crate) fn completion_claimed_for_tests(&self, id: &str) -> bool {
+        self.inner
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .any(|entry| entry.id == id && entry.completion_claimed)
     }
 
     pub(crate) fn cancel_requested(&self, id: &str) -> bool {
@@ -1446,7 +1479,13 @@ mod tests {
             mold_inference::InferenceCancellationToken::default(),
         );
         assert_eq!(reg.claim_completion("a"), CompletionClaim::Claimed);
-        assert_eq!(reg.cancel_queued("a"), Err(QueuedJobCancelError::NotFound));
+        assert_eq!(
+            reg.cancel_queued("a"),
+            Err(QueuedJobCancelError::CompletionClaimed)
+        );
+        assert_eq!(reg.len(), 1);
+        reg.finish_completion("a");
+        assert!(reg.is_empty());
     }
 
     #[test]

@@ -2792,14 +2792,24 @@ async fn generate(
         if result.is_err() {
             let batch_id = status.id.clone();
             let journal = state.queue_journal.clone();
-            let refreshed = spawn_queue_read(move || {
+            let refreshed = match spawn_queue_read(move || {
                 journal
                     .durable_generation_batch(&batch_id)
                     .map_err(anyhow::Error::msg)
             })
-            .await?
-            .map(|detail| generation_batch_status(&state.instance_id, detail))
-            .unwrap_or(status);
+            .await
+            {
+                Ok(Some(detail)) => generation_batch_status(&state.instance_id, detail),
+                Ok(None) => status,
+                Err(error) => {
+                    tracing::warn!(
+                        batch = %status.id,
+                        error = ?error,
+                        "durable generation status refresh failed after acceptance; returning original reconciliation identity"
+                    );
+                    status
+                }
+            };
             return Ok(durable_reconciliation_response(
                 refreshed,
                 "accepted durable generation ended without a media response",
@@ -6383,6 +6393,11 @@ async fn cancel_queue_job(
                 // `cancel_queued` already signalled (or latched) the exact running
                 // attempt token while holding the same lifecycle lock used by
                 // terminal publication.
+            }
+            Err(crate::job_registry::QueuedJobCancelError::CompletionClaimed) => {
+                return Err(ApiError::queue_job_not_found(format!(
+                    "queue job {id} is already completing"
+                )));
             }
             // Some retained rows have no registry entry: a held job, and a queued
             // job on a boot with no dispatch owner. This endpoint is the

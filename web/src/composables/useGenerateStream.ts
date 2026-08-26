@@ -36,7 +36,10 @@ import {
 import { blobToBase64 } from "../lib/base64";
 import { inferFormatFromName, type OutputFormat } from "../types";
 import { ApiError, apiHeaders, type ApiTarget } from "@studio/api/client";
-import { mergeQueueEntries, retryQueueJob } from "@studio/api/queuePlan";
+import {
+  mergeQueueEntries,
+  mutateQueueJobOnExpectedInstance,
+} from "@studio/api/queuePlan";
 import {
   admitGenerationBatch,
   canonicalGenerationBatchLimit,
@@ -2294,15 +2297,26 @@ function markCancellationConfirmed(job: Job): void {
 }
 
 async function confirmDurableCancellation(job: Job): Promise<void> {
-  if (job.state !== "running" || !job.serverId) return;
+  const durable = job.durableBatch;
+  if (job.state !== "running" || !job.serverId || !durable) return;
   const active = durableCancellations.get(job.id);
   if (active) return active;
   job.cancelRequested = true;
   job.cancelling = true;
-  if (job.durableBatch) {
-    persistDurableRecoveryBatch(job.durableBatch.clientBatchId);
+  persistDurableRecoveryBatch(durable.clientBatchId);
+  const route = durableRoutes.get(job.hostId ?? "");
+  const target = job.target ?? route?.target ?? null;
+  if (!target) {
+    job.cancelling = false;
+    persistDurableRecoveryBatch(durable.clientBatchId);
+    throw new Error("The original machine is not connected.");
   }
-  const task = cancelQueueJob(job.serverId, routeForDetachedJob(job))
+  const task = mutateQueueJobOnExpectedInstance(
+    { baseUrl: target.baseUrl, apiKey: target.apiKey ?? null },
+    durable.expectedInstanceId,
+    job.serverId,
+    "cancel",
+  )
     .then(() => {
       // Complete/failed/cancelled authority may have arrived during DELETE.
       if (job.state === "running") markCancellationConfirmed(job);
@@ -2377,9 +2391,11 @@ async function retryJob(id: string): Promise<void> {
   if (!target) throw new Error("The original machine is not connected.");
   job.retrying = true;
   try {
-    await retryQueueJob(
+    await mutateQueueJobOnExpectedInstance(
       { baseUrl: target.baseUrl, apiKey: target.apiKey ?? null },
+      job.durableBatch.expectedInstanceId,
       job.serverId,
+      "retry",
     );
     job.retryable = false;
     job.holdError = null;

@@ -854,7 +854,10 @@ the server internally. Streaming is singleton-only; Batch N uses the durable,
 pollable `/api/generation-batches` lifecycle above.
 
 ::: tip RunPod Note
-RunPod's proxy has a 100-second timeout. Use the SSE streaming endpoint for long generations to keep the connection alive.
+RunPod's proxy can close a long-lived generation response. For reliable delivery,
+submit through `POST /api/generation-batches` and reconcile the returned durable
+batch status; the accepted work survives a client or proxy disconnect. Treat the
+SSE streaming endpoint as live progress, not as the durability boundary.
 :::
 
 ## `/api/events`

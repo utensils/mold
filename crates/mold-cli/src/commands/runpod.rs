@@ -19,6 +19,36 @@ use mold_core::runpod::{
 };
 
 use crate::commands::durable_generation::try_canonical_singleton_artifact;
+
+enum RunPodGenerationTransport {
+    Canonical(Box<crate::commands::durable_generation::CanonicalGenerationArtifact>),
+    Legacy(Box<mold_core::GenerateResponse>),
+}
+
+async fn generate_with_runpod_transport(
+    client: &mold_core::MoldClient,
+    request: &mold_core::GenerateRequest,
+    progress_tx: tokio::sync::mpsc::UnboundedSender<mold_core::types::SseProgressEvent>,
+) -> Result<RunPodGenerationTransport> {
+    if let Some(artifact) = try_canonical_singleton_artifact(client, request)
+        .await
+        .with_context(|| "durable generation failed")?
+    {
+        return Ok(RunPodGenerationTransport::Canonical(Box::new(artifact)));
+    }
+    let response = match client
+        .generate_stream(request, progress_tx)
+        .await
+        .with_context(|| "generation failed")?
+    {
+        Some(response) => response,
+        None => client
+            .generate(request.clone())
+            .await
+            .with_context(|| "generation failed (non-stream fallback)")?,
+    };
+    Ok(RunPodGenerationTransport::Legacy(Box::new(response)))
+}
 use crate::theme;
 use crate::AlreadyReported;
 
@@ -1710,67 +1740,59 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         output_path.display().to_string().cyan()
     );
 
-    let canonical = try_canonical_singleton_artifact(&http, &req)
-        .await
-        .with_context(|| "durable generation failed")?;
-    let resp = if let Some(artifact) = canonical {
-        std::fs::write(&output_path, &artifact.bytes)?;
-        println!(
-            "{} saved {} (durable output {})",
-            theme::icon_done(),
-            output_path.display(),
-            artifact.filename
-        );
-        None
-    } else {
-        // Explicit compatibility path for servers that cannot admit this
-        // request through protocol v2.
-        let (tx, mut rx) =
-            tokio::sync::mpsc::unbounded_channel::<mold_core::types::SseProgressEvent>();
-        let progress_task = tokio::spawn(async move {
-            let pb = indicatif::ProgressBar::new_spinner();
-            pb.set_style(
-                indicatif::ProgressStyle::with_template(&format!(
-                    "{{spinner:.{}}} {{msg}}",
-                    theme::SPINNER_STYLE
-                ))
-                .unwrap(),
-            );
-            pb.enable_steady_tick(std::time::Duration::from_millis(80));
-            while let Some(ev) = rx.recv().await {
-                pb.set_message(format_progress_event(&ev));
-            }
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<mold_core::types::SseProgressEvent>();
+    let progress_task = tokio::spawn(async move {
+        let mut pb = None;
+        while let Some(ev) = rx.recv().await {
+            let pb = pb.get_or_insert_with(|| {
+                let pb = indicatif::ProgressBar::new_spinner();
+                pb.set_style(
+                    indicatif::ProgressStyle::with_template(&format!(
+                        "{{spinner:.{}}} {{msg}}",
+                        theme::SPINNER_STYLE
+                    ))
+                    .unwrap(),
+                );
+                pb.enable_steady_tick(std::time::Duration::from_millis(80));
+                pb
+            });
+            pb.set_message(format_progress_event(&ev));
+        }
+        if let Some(pb) = pb {
             pb.finish_and_clear();
-        });
-        let maybe_resp = http
-            .generate_stream(&req, tx)
-            .await
-            .with_context(|| "generation failed")?;
-        let _ = progress_task.await;
-        Some(match maybe_resp {
-            Some(r) => r,
-            None => match http.generate(req.clone()).await {
-                Ok(r) => r,
-                Err(e) => {
-                    // Translate common Cloudflare-proxy failures into actionable
-                    // hints. A 404 on /api/generate when /api/status succeeded
-                    // usually means the container's binary doesn't match the
-                    // host GPU (e.g. :latest built for sm_89 running on H100).
-                    let msg = e.to_string();
-                    let gpu = pod.gpu_name().unwrap_or_default();
-                    if msg.contains("404") {
-                        bail!(
-                            "generation failed: proxy returned 404 on /api/generate. \
-                         The mold binary in the container may not match the host \
-                         GPU ({gpu}). Try `--image-tag latest-sm80` for broad compat, \
-                         or check pod logs via `mold runpod logs {}`.",
-                            pod.id
-                        );
-                    }
-                    return Err(e).context("generation failed (non-stream fallback)");
-                }
-            },
-        })
+        }
+    });
+    let transport = generate_with_runpod_transport(&http, &req, tx).await;
+    let _ = progress_task.await;
+    let transport = match transport {
+        Ok(transport) => transport,
+        Err(error) => {
+            let msg = format!("{error:#}");
+            let gpu = pod.gpu_name().unwrap_or_default();
+            if msg.contains("404") {
+                bail!(
+                    "generation failed: proxy returned 404 on /api/generate. \
+                     The mold binary in the container may not match the host \
+                     GPU ({gpu}). Try `--image-tag latest-sm80` for broad compat, \
+                     or check pod logs via `mold runpod logs {}`.",
+                    pod.id
+                );
+            }
+            return Err(error);
+        }
+    };
+    let resp = match transport {
+        RunPodGenerationTransport::Canonical(artifact) => {
+            std::fs::write(&output_path, &artifact.bytes)?;
+            println!(
+                "{} saved {} (durable output {})",
+                theme::icon_done(),
+                output_path.display(),
+                artifact.filename
+            );
+            None
+        }
+        RunPodGenerationTransport::Legacy(response) => Some(*response),
     };
 
     if let Some(resp) = resp {
@@ -2466,7 +2488,142 @@ mod tests {
         atomic::{AtomicBool, Ordering},
         Arc,
     };
-    use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, Request, Respond, ResponseTemplate,
+    };
+
+    fn transport_request() -> mold_core::GenerateRequest {
+        serde_json::from_value(serde_json::json!({
+            "prompt": "runpod transport proof",
+            "model": "flux-dev:q4",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "guidance": 1.0
+        }))
+        .unwrap()
+    }
+
+    async fn mount_canonical_capabilities(server: &MockServer) {
+        let mut capabilities = mold_core::ServerCapabilities::default();
+        capabilities.queue.heterogeneous_batch = true;
+        capabilities.queue.durable_batch_outcomes = true;
+        capabilities.queue.admission_protocol_version = Some(2);
+        capabilities.queue.heterogeneous_batch_max_outputs = Some(64);
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(capabilities))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    struct HeldCanonicalAdmission;
+
+    impl Respond for HeldCanonicalAdmission {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "id": "batch-1",
+                "client_batch_id": body["client_batch_id"],
+                "instance_id": "instance-1",
+                "durable": true,
+                "children": [{
+                    "index": 1,
+                    "job_id": "durable-runpod-1",
+                    "state": "held",
+                    "error": "dependency is unavailable",
+                    "retryable": true
+                }]
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn runpod_transport_uses_canonical_admission_without_raw_or_sse() {
+        let server = MockServer::start().await;
+        mount_canonical_capabilities(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .respond_with(HeldCanonicalAdmission)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let error = generate_with_runpod_transport(
+            &mold_core::MoldClient::new(&server.uri()),
+            &transport_request(),
+            tx,
+        )
+        .await
+        .err()
+        .expect("held canonical work is not a successful artifact");
+
+        assert!(error.to_string().contains("durable generation failed"));
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests
+            .iter()
+            .any(|request| request.url.path() == "/api/generation-batches"));
+        assert!(!requests.iter().any(|request| {
+            matches!(request.url.path(), "/api/generate" | "/api/generate/stream")
+        }));
+    }
+
+    #[tokio::test]
+    async fn runpod_transport_uses_sse_only_after_explicit_legacy_fallback() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let complete = serde_json::json!({
+            "image": base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                [1_u8, 2, 3]
+            ),
+            "format": "png",
+            "width": 64,
+            "height": 64,
+            "seed_used": 7,
+            "generation_time_ms": 12,
+            "model": "flux-dev:q4"
+        });
+        Mock::given(method("POST"))
+            .and(path("/api/generate/stream"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!("event: complete\ndata: {complete}\n\n")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = generate_with_runpod_transport(
+            &mold_core::MoldClient::new(&server.uri()),
+            &transport_request(),
+            tx,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, RunPodGenerationTransport::Legacy(_)));
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests
+            .iter()
+            .any(|request| request.url.path() == "/api/generate/stream"));
+        assert!(!requests
+            .iter()
+            .any(|request| request.url.path() == "/api/generation-batches"));
+        assert!(!requests
+            .iter()
+            .any(|request| request.url.path() == "/api/generate"));
+    }
 
     fn policy_create_options(model: Option<&str>) -> CreateOptions {
         CreateOptions {

@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
 use mold_core::{
-    GenerateRequest, GenerationBatchAdmissionRequest, GenerationBatchChild,
-    GenerationBatchChildState, GenerationBatchStatus, MoldClient,
+    GenerateRequest, GenerationBatchAdmissionRequest, GenerationBatchAuthority,
+    GenerationBatchChild, GenerationBatchChildState, GenerationBatchStatus, MoldClient,
 };
 use std::time::Duration;
 
 #[derive(Debug)]
 pub(crate) struct CanonicalGenerationOutcome {
+    pub authority: GenerationBatchAuthority,
     pub client_batch_id: String,
     pub request: GenerateRequest,
     pub child: GenerationBatchChild,
@@ -24,6 +25,7 @@ pub(crate) struct CanonicalGenerationArtifact {
     pub bytes: Vec<u8>,
     pub filename: String,
     pub request: GenerateRequest,
+    pub metadata: mold_core::OutputMetadata,
 }
 
 fn new_client_batch_id() -> String {
@@ -45,12 +47,20 @@ fn admission_may_have_committed(error: &anyhow::Error) -> bool {
     })
 }
 
+enum CanonicalAdmission {
+    Admitted(GenerationBatchStatus),
+    MissingEndpoint,
+}
+
 async fn admit_recovering_ambiguity(
     client: &MoldClient,
     request: &GenerationBatchAdmissionRequest,
-) -> Result<GenerationBatchStatus> {
+) -> Result<CanonicalAdmission> {
     match client.admit_generation_batch(request).await {
-        Ok(status) => Ok(status),
+        Ok(status) => Ok(CanonicalAdmission::Admitted(status)),
+        Err(error) if mold_core::client::is_missing_endpoint_error(&error) => {
+            Ok(CanonicalAdmission::MissingEndpoint)
+        }
         Err(error) if admission_may_have_committed(&error) => {
             const LOOKUP_ATTEMPTS: u32 = 5;
             let mut last_lookup_error = None;
@@ -59,7 +69,7 @@ async fn admit_recovering_ambiguity(
                     .generation_batch_by_client_id(&request.client_batch_id)
                     .await
                 {
-                    Ok(Some(status)) => return Ok(status),
+                    Ok(Some(status)) => return Ok(CanonicalAdmission::Admitted(status)),
                     Ok(None) => {
                         return Err(error.context(format!(
                             "generation-batch admission is uncertain for client id {}; the host did not retain that idempotency key",
@@ -97,7 +107,11 @@ fn child_is_settled(state: &GenerationBatchChildState) -> bool {
 async fn wait_for_batch(
     client: &MoldClient,
     mut status: GenerationBatchStatus,
+    authority: &GenerationBatchAuthority,
 ) -> Result<GenerationBatchStatus> {
+    authority
+        .validate_status(&status)
+        .map_err(anyhow::Error::msg)?;
     loop {
         if status
             .children
@@ -107,10 +121,14 @@ async fn wait_for_batch(
             return Ok(status);
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
-        status = client
+        let next = client
             .generation_batch(&status.id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("generation batch {} disappeared", status.id))?;
+        authority
+            .validate_status(&next)
+            .map_err(anyhow::Error::msg)?;
+        status = next;
     }
 }
 
@@ -169,11 +187,27 @@ pub(crate) async fn try_canonical_generation(
             requests: chunk.to_vec(),
         };
         match admit_recovering_ambiguity(client, &admission).await {
-            Ok(status) => {
+            Ok(CanonicalAdmission::Admitted(status)) => {
+                let authority =
+                    match GenerationBatchAuthority::from_admission(&status, &client_batch_id) {
+                        Ok(authority) => authority,
+                        Err(error) => {
+                            report.failures.push(error);
+                            break;
+                        }
+                    };
                 report
                     .admitted_client_ids
                     .push(status.client_batch_id.clone());
-                admitted.push((admission.requests, status));
+                admitted.push((admission.requests, status, authority));
+            }
+            Ok(CanonicalAdmission::MissingEndpoint) if admitted.is_empty() => return Ok(None),
+            Ok(CanonicalAdmission::MissingEndpoint) => {
+                report.failures.push(format!(
+                    "generation-batch endpoint disappeared after accepting client ids: {}",
+                    report.admitted_client_ids.join(", ")
+                ));
+                break;
             }
             Err(error) => {
                 report.failures.push(format!(
@@ -184,9 +218,9 @@ pub(crate) async fn try_canonical_generation(
         }
     }
 
-    for (chunk, initial_status) in admitted {
+    for (chunk, initial_status, authority) in admitted {
         let client_batch_id = initial_status.client_batch_id.clone();
-        let status = match wait_for_batch(client, initial_status).await {
+        let status = match wait_for_batch(client, initial_status, &authority).await {
             Ok(status) => status,
             Err(error) => {
                 report.failures.push(format!(
@@ -207,6 +241,7 @@ pub(crate) async fn try_canonical_generation(
                 report.failures.push(error);
             }
             report.outcomes.push(CanonicalGenerationOutcome {
+                authority: authority.clone(),
                 client_batch_id: client_batch_id.clone(),
                 request: request.clone(),
                 child,
@@ -241,6 +276,10 @@ pub(crate) async fn try_canonical_singleton_artifact(
         .into_iter()
         .find(|outcome| outcome.child.state == GenerationBatchChildState::Complete)
         .context("canonical singleton completed without a successful child")?;
+    if outcome.authority.client_batch_id != outcome.client_batch_id {
+        anyhow::bail!("canonical singleton outcome lost its admission authority");
+    }
+    let job_id = outcome.child.job_id.clone();
     let result = outcome
         .child
         .result
@@ -253,10 +292,23 @@ pub(crate) async fn try_canonical_singleton_artifact(
         .get_gallery_image(&filename)
         .await
         .with_context(|| format!("could not hydrate accepted output {filename}"))?;
+    let gallery = client
+        .list_gallery()
+        .await
+        .with_context(|| format!("could not read metadata for accepted output {filename}"))?;
+    let metadata = gallery
+        .into_iter()
+        .find(|item| item.filename == filename)
+        .with_context(|| format!("accepted output {filename} is missing from the gallery index"))?
+        .metadata;
+    if metadata.job_id.as_deref() != Some(job_id.as_str()) {
+        anyhow::bail!("accepted output {filename} does not belong to durable job {job_id}");
+    }
     Ok(Some(CanonicalGenerationArtifact {
         bytes,
         filename,
         request: outcome.request,
+        metadata,
     }))
 }
 
@@ -265,7 +317,12 @@ pub(crate) async fn admit_for_test(
     client: &MoldClient,
     request: &GenerationBatchAdmissionRequest,
 ) -> Result<GenerationBatchStatus> {
-    admit_recovering_ambiguity(client, request).await
+    match admit_recovering_ambiguity(client, request).await? {
+        CanonicalAdmission::Admitted(status) => Ok(status),
+        CanonicalAdmission::MissingEndpoint => {
+            anyhow::bail!("generation-batch endpoint is unavailable")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -317,21 +374,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn definite_first_admission_404_selects_legacy_transport() {
+        let server = MockServer::start().await;
+        mount_capabilities(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = try_canonical_generation(&MoldClient::new(&server.uri()), &[request("one")])
+            .await
+            .unwrap();
+        assert!(result.is_none());
+        let requests = server.received_requests().await.unwrap();
+        assert!(!requests
+            .iter()
+            .any(|request| request.url.path().contains("/by-client/")));
+    }
+
+    #[tokio::test]
+    async fn polling_rejects_a_replacement_server_instance() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/generation-batches/batch-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "batch-1",
+                "client_batch_id": "accepted-id",
+                "instance_id": "instance-2",
+                "durable": true,
+                "children": [{"index": 1, "job_id": "job-1", "state": "complete", "result": {"filename": "wrong.png"}}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let initial = GenerationBatchStatus {
+            id: "batch-1".into(),
+            client_batch_id: "accepted-id".into(),
+            instance_id: "instance-1".into(),
+            durable: true,
+            children: vec![GenerationBatchChild {
+                index: 1,
+                job_id: "job-1".into(),
+                state: GenerationBatchChildState::Accepted,
+                error: None,
+                retryable: None,
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                completed_at_ms: None,
+                terminal_error: None,
+                result: None,
+            }],
+        };
+        let authority = GenerationBatchAuthority::from_admission(&initial, "accepted-id").unwrap();
+        let error = wait_for_batch(&MoldClient::new(&server.uri()), initial, &authority)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("instance changed from instance-1 to instance-2"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[tokio::test]
     async fn reports_every_terminal_child_error() {
         let server = MockServer::start().await;
         mount_capabilities(&server).await;
         Mock::given(method("POST"))
             .and(path("/api/generation-batches"))
-            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
-                "id": "batch-1",
-                "client_batch_id": "accepted-id",
-                "instance_id": "instance-1",
-                "durable": true,
-                "children": [
-                    {"index": 1, "job_id": "job-1", "state": "held", "error": "missing license", "retryable": true},
-                    {"index": 2, "job_id": "job-2", "state": "failed", "error": "bad weights"}
-                ]
-            })))
+            .respond_with(|request: &wiremock::Request| {
+                let admission = request
+                    .body_json::<GenerationBatchAdmissionRequest>()
+                    .unwrap();
+                ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                    "id": "batch-1",
+                    "client_batch_id": admission.client_batch_id,
+                    "instance_id": "instance-1",
+                    "durable": true,
+                    "children": [
+                        {"index": 1, "job_id": "job-1", "state": "held", "error": "missing license", "retryable": true},
+                        {"index": 2, "job_id": "job-2", "state": "failed", "error": "bad weights"}
+                    ]
+                }))
+            })
             .expect(1)
             .mount(&server)
             .await;

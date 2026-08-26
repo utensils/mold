@@ -7505,6 +7505,110 @@ mod tests {
         );
     }
 
+    #[test]
+    fn generation_batch_authority_rejects_identity_changes() {
+        let status = super::GenerationBatchStatus {
+            id: "batch-1".into(),
+            client_batch_id: "client-1".into(),
+            instance_id: "instance-1".into(),
+            durable: true,
+            children: Vec::new(),
+        };
+        let authority =
+            super::GenerationBatchAuthority::from_admission(&status, "client-1").unwrap();
+        authority.validate_status(&status).unwrap();
+
+        for (field, changed) in [
+            (
+                "instance",
+                super::GenerationBatchStatus {
+                    instance_id: "instance-2".into(),
+                    ..status.clone()
+                },
+            ),
+            (
+                "batch",
+                super::GenerationBatchStatus {
+                    id: "batch-2".into(),
+                    ..status.clone()
+                },
+            ),
+            (
+                "client",
+                super::GenerationBatchStatus {
+                    client_batch_id: "client-2".into(),
+                    ..status.clone()
+                },
+            ),
+        ] {
+            assert!(authority
+                .validate_status(&changed)
+                .unwrap_err()
+                .contains(field));
+        }
+    }
+
+    #[test]
+    fn generation_batch_bulk_authority_rejects_foreign_duplicate_and_omitted_rows() {
+        let status = |batch: &str, client: &str| super::GenerationBatchStatus {
+            id: batch.into(),
+            client_batch_id: client.into(),
+            instance_id: "instance-1".into(),
+            durable: true,
+            children: Vec::new(),
+        };
+        let first = status("batch-1", "client-1");
+        let second = status("batch-2", "client-2");
+        let authorities = [
+            super::GenerationBatchAuthority::from_admission(&first, "client-1").unwrap(),
+            super::GenerationBatchAuthority::from_admission(&second, "client-2").unwrap(),
+        ];
+        let response = |batches, missing| super::GenerationBatchStatusResponse {
+            instance_id: "instance-1".into(),
+            batches,
+            missing: super::GenerationBatchMissing {
+                client_batch_ids: missing,
+                batch_ids: Vec::new(),
+            },
+        };
+        super::validate_generation_batch_status_response(
+            &response(vec![first.clone(), second.clone()], Vec::new()),
+            &authorities,
+        )
+        .unwrap();
+        assert!(super::validate_generation_batch_status_response(
+            &response(vec![first.clone(), first.clone()], Vec::new()),
+            &authorities,
+        )
+        .unwrap_err()
+        .contains("duplicated"));
+        assert!(super::validate_generation_batch_status_response(
+            &response(vec![first.clone()], Vec::new()),
+            &authorities,
+        )
+        .unwrap_err()
+        .contains("omitted"));
+        assert!(super::validate_generation_batch_status_response(
+            &response(vec![first, status("foreign", "foreign")], Vec::new()),
+            &authorities,
+        )
+        .unwrap_err()
+        .contains("foreign"));
+        assert!(super::validate_generation_batch_status_response(
+            &super::GenerationBatchStatusResponse {
+                instance_id: "instance-1".into(),
+                batches: vec![second],
+                missing: super::GenerationBatchMissing {
+                    client_batch_ids: Vec::new(),
+                    batch_ids: vec!["foreign-batch".into()],
+                },
+            },
+            &authorities,
+        )
+        .unwrap_err()
+        .contains("foreign batch"));
+    }
+
     // ── UpscaleRequest / UpscaleResponse tests ────────────────────────────
 
     #[test]
@@ -8151,6 +8255,146 @@ pub struct GenerationBatchStatusResponse {
     pub instance_id: String,
     pub batches: Vec<GenerationBatchStatus>,
     pub missing: GenerationBatchMissing,
+}
+
+/// Immutable identity captured from canonical generation admission. Rust
+/// clients validate every later snapshot against this fence before merging
+/// lifecycle state or acting on a returned job id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationBatchAuthority {
+    pub instance_id: String,
+    pub batch_id: String,
+    pub client_batch_id: String,
+}
+
+impl GenerationBatchAuthority {
+    pub fn from_admission(
+        status: &GenerationBatchStatus,
+        expected_client_batch_id: &str,
+    ) -> Result<Self, String> {
+        if !status.durable || status.instance_id.is_empty() || status.id.is_empty() {
+            return Err("generation batch admission did not return durable identity".to_string());
+        }
+        if status.client_batch_id != expected_client_batch_id {
+            return Err(format!(
+                "generation batch admission returned client id {}, expected {expected_client_batch_id}",
+                status.client_batch_id
+            ));
+        }
+        Ok(Self {
+            instance_id: status.instance_id.clone(),
+            batch_id: status.id.clone(),
+            client_batch_id: status.client_batch_id.clone(),
+        })
+    }
+
+    pub fn validate_status(&self, status: &GenerationBatchStatus) -> Result<(), String> {
+        if status.instance_id != self.instance_id {
+            return Err(format!(
+                "generation batch instance changed from {} to {}",
+                self.instance_id, status.instance_id
+            ));
+        }
+        if status.id != self.batch_id {
+            return Err(format!(
+                "generation batch id changed from {} to {}",
+                self.batch_id, status.id
+            ));
+        }
+        if status.client_batch_id != self.client_batch_id {
+            return Err(format!(
+                "generation batch client id changed from {} to {}",
+                self.client_batch_id, status.client_batch_id
+            ));
+        }
+        if !status.durable {
+            return Err("generation batch lost its durable authority".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Validate one bulk lifecycle snapshot against the complete accepted set.
+/// Each authority must appear exactly once, either as a batch or as an
+/// explicit missing client or batch id; foreign and duplicate identities are
+/// rejected.
+pub fn validate_generation_batch_status_response(
+    response: &GenerationBatchStatusResponse,
+    authorities: &[GenerationBatchAuthority],
+) -> Result<(), String> {
+    if authorities.is_empty() {
+        return Err("generation batch authority set is empty".to_string());
+    }
+    if authorities
+        .iter()
+        .any(|authority| authority.instance_id != response.instance_id)
+    {
+        return Err(format!(
+            "generation batch reconciliation returned unexpected instance {}",
+            response.instance_id
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for batch in &response.batches {
+        let authority = authorities
+            .iter()
+            .find(|authority| authority.client_batch_id == batch.client_batch_id)
+            .ok_or_else(|| {
+                format!(
+                    "generation batch reconciliation returned foreign client id {}",
+                    batch.client_batch_id
+                )
+            })?;
+        authority.validate_status(batch)?;
+        if !seen.insert(batch.client_batch_id.as_str()) {
+            return Err(format!(
+                "generation batch reconciliation duplicated client id {}",
+                batch.client_batch_id
+            ));
+        }
+    }
+    for client_batch_id in &response.missing.client_batch_ids {
+        if !authorities
+            .iter()
+            .any(|authority| authority.client_batch_id == *client_batch_id)
+        {
+            return Err(format!(
+                "generation batch reconciliation marked foreign client id {client_batch_id} missing"
+            ));
+        }
+        if !seen.insert(client_batch_id.as_str()) {
+            return Err(format!(
+                "generation batch reconciliation duplicated client id {client_batch_id}"
+            ));
+        }
+    }
+    for batch_id in &response.missing.batch_ids {
+        let authority = authorities
+            .iter()
+            .find(|authority| authority.batch_id == *batch_id)
+            .ok_or_else(|| {
+                format!(
+                    "generation batch reconciliation marked foreign batch id {batch_id} missing"
+                )
+            })?;
+        if !seen.insert(authority.client_batch_id.as_str()) {
+            return Err(format!(
+                "generation batch reconciliation duplicated batch identity {batch_id}"
+            ));
+        }
+    }
+    if seen.len() != authorities.len() {
+        let omitted = authorities
+            .iter()
+            .filter(|authority| !seen.contains(authority.client_batch_id.as_str()))
+            .map(|authority| authority.client_batch_id.as_str())
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "generation batch reconciliation omitted client ids: {}",
+            omitted.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 /// Body of `POST /api/gallery/collections`.

@@ -5,9 +5,9 @@ use mold_core::ServerCapabilities;
 use mold_core::{
     classify_generate_error, download::DownloadProgressEvent, ChainRequest, GenerateRequest,
     GenerateResponse, GenerateServerAction, GenerationBatchAdmissionRequest,
-    GenerationBatchChildState, GenerationBatchStatus, GenerationBatchStatusRequest, LoraWeight,
-    MoldClient, PromptExpander, PromptTransformOperation, RemixRequest, RemixResponse,
-    RemixVariant, SseProgressEvent,
+    GenerationBatchAuthority, GenerationBatchChildState, GenerationBatchStatus,
+    GenerationBatchStatusRequest, LoraWeight, MoldClient, PromptExpander, PromptTransformOperation,
+    RemixRequest, RemixResponse, RemixVariant, SseProgressEvent,
 };
 use tokio::sync::mpsc;
 
@@ -701,9 +701,12 @@ fn partial_batch_admission_error(
 async fn admit_or_recover_batch(
     client: &MoldClient,
     request: &GenerationBatchAdmissionRequest,
-) -> Result<GenerationBatchStatus, String> {
+) -> Result<TuiCanonicalAdmission, String> {
     match client.admit_generation_batch(request).await {
-        Ok(status) => Ok(status),
+        Ok(status) => Ok(TuiCanonicalAdmission::Admitted(status)),
+        Err(error) if mold_core::client::is_missing_endpoint_error(&error) => {
+            Ok(TuiCanonicalAdmission::MissingEndpoint)
+        }
         Err(admit_error) => {
             let mut last_lookup_error = None;
             for attempt in 0..5 {
@@ -711,7 +714,7 @@ async fn admit_or_recover_batch(
                     .generation_batch_by_client_id(&request.client_batch_id)
                     .await
                 {
-                    Ok(Some(status)) => return Ok(status),
+                    Ok(Some(status)) => return Ok(TuiCanonicalAdmission::Admitted(status)),
                     Ok(None) => {
                         return Err(format!(
                             "durable batch admission failed before acceptance: {admit_error}"
@@ -730,6 +733,11 @@ async fn admit_or_recover_batch(
             ))
         }
     }
+}
+
+enum TuiCanonicalAdmission {
+    Admitted(GenerationBatchStatus),
+    MissingEndpoint,
 }
 
 fn batch_child_is_settled(state: &GenerationBatchChildState) -> bool {
@@ -803,7 +811,24 @@ async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> Canonical
             requests: chunk.to_vec(),
         };
         let status = match admit_or_recover_batch(input.client, &request).await {
-            Ok(status) => status,
+            Ok(TuiCanonicalAdmission::Admitted(status)) => status,
+            Ok(TuiCanonicalAdmission::MissingEndpoint) if admitted.is_empty() => {
+                return CanonicalBatchResult::Unsupported;
+            }
+            Ok(TuiCanonicalAdmission::MissingEndpoint) => {
+                admission_failure = Some((
+                    client_batch_id,
+                    "generation-batch endpoint disappeared after partial acceptance".to_string(),
+                ));
+                break;
+            }
+            Err(error) => {
+                admission_failure = Some((client_batch_id, error));
+                break;
+            }
+        };
+        let authority = match GenerationBatchAuthority::from_admission(&status, &client_batch_id) {
+            Ok(authority) => authority,
             Err(error) => {
                 admission_failure = Some((client_batch_id, error));
                 break;
@@ -816,7 +841,7 @@ async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> Canonical
             .send(BackgroundEvent::Progress(SseProgressEvent::Info {
                 message: format!("Durably accepted batch {first}-{last}"),
             }));
-        admitted.push((first as u32 - 1, status));
+        admitted.push((first as u32 - 1, status, authority));
     }
 
     if admitted.is_empty() {
@@ -830,15 +855,19 @@ async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> Canonical
 
     let client_batch_ids = admitted
         .iter()
-        .map(|(_, status)| status.client_batch_id.clone())
+        .map(|(_, status, _)| status.client_batch_id.clone())
         .collect::<Vec<_>>();
     let offsets = admitted
         .iter()
-        .map(|(offset, status)| (status.client_batch_id.clone(), *offset))
+        .map(|(offset, status, _)| (status.client_batch_id.clone(), *offset))
         .collect::<std::collections::HashMap<_, _>>();
+    let authorities = admitted
+        .iter()
+        .map(|(_, _, authority)| authority.clone())
+        .collect::<Vec<_>>();
     let mut statuses = admitted
         .into_iter()
-        .map(|(_, status)| (status.client_batch_id.clone(), status))
+        .map(|(_, status, _)| (status.client_batch_id.clone(), status))
         .collect::<std::collections::HashMap<_, _>>();
     let mut observed = std::collections::HashMap::<String, GenerationBatchChildState>::new();
     let mut consecutive_errors = 0u8;
@@ -859,6 +888,14 @@ async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> Canonical
         match input.client.generation_batch_statuses(&request).await {
             Ok(response) => {
                 consecutive_errors = 0;
+                if let Err(error) =
+                    mold_core::validate_generation_batch_status_response(&response, &authorities)
+                {
+                    return CanonicalBatchResult::Error(format!(
+                        "durable batch identity check failed: {error}; client ids: {}",
+                        client_batch_ids.join(", ")
+                    ));
+                }
                 if !response.missing.client_batch_ids.is_empty() {
                     return CanonicalBatchResult::Error(format!(
                         "server lost durable batch identities: {}",
