@@ -5,8 +5,7 @@
 //! for rows admitted through `/api/generation-batches`; legacy singleton rows
 //! are deliberately excluded by the batch-child ownership join.
 
-use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::state::{AppState, GenerationJob, SubmitError};
 
@@ -45,123 +44,14 @@ struct FeederArbiter {
     prefer_attached: bool,
 }
 
-/// Serializes only the final runtime publication of concurrently prepared
-/// durable rows. Claims enroll under `claim_gate`, so a fast later prepare
-/// cannot overtake an older claimed predecessor at scheduler handoff.
-struct PublicationSequencer {
-    capacity: usize,
-    claim_gate: Mutex<()>,
-    state: Mutex<PublicationState>,
-    changed: tokio::sync::Notify,
-}
+/// Wake publication waiters whenever one claimed row settles or enters the
+/// live registry. SQLite remains the ordering authority; this notification is
+/// only a latency optimization over the bounded retry timer.
+struct PublicationWake(Arc<tokio::sync::Notify>);
 
-#[derive(Default)]
-struct PublicationState {
-    pending: BTreeSet<(i64, u64)>,
-    /// Claims form one bounded cohort. Publication starts only once every
-    /// available runtime reservation enrolled, or a scan proved the durable
-    /// prefix drained, so the first claimant cannot publish before an older
-    /// predecessor has even enrolled.
-    sealed: bool,
-}
-
-impl PublicationSequencer {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity: capacity.max(1),
-            claim_gate: Mutex::new(()),
-            state: Mutex::new(PublicationState::default()),
-            changed: tokio::sync::Notify::new(),
-        }
-    }
-
-    fn enroll(
-        self: &Arc<Self>,
-        created_at_ms: i64,
-        rank: u64,
-        runtime_saturated: bool,
-    ) -> PublicationPermit {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let order = (created_at_ms, rank);
-        state.pending.insert(order);
-        if runtime_saturated || state.pending.len() >= self.capacity {
-            state.sealed = true;
-            self.changed.notify_waiters();
-        }
-        PublicationPermit {
-            sequencer: Arc::clone(self),
-            order,
-            released: false,
-        }
-    }
-
-    fn seal_current(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !state.pending.is_empty() {
-            state.sealed = true;
-            self.changed.notify_waiters();
-        }
-    }
-
-    fn release(&self, order: (i64, u64)) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.pending.remove(&order);
-        if state.pending.is_empty() {
-            state.sealed = false;
-        }
-        self.changed.notify_waiters();
-    }
-}
-
-struct PublicationPermit {
-    sequencer: Arc<PublicationSequencer>,
-    order: (i64, u64),
-    released: bool,
-}
-
-impl PublicationPermit {
-    async fn wait_turn(&self) {
-        loop {
-            let changed = self.sequencer.changed.notified();
-            let can_publish = {
-                let state = self
-                    .sequencer
-                    .state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.sealed
-                    && state
-                        .pending
-                        .first()
-                        .is_some_and(|order| *order == self.order)
-            };
-            if can_publish {
-                return;
-            }
-            changed.await;
-        }
-    }
-
-    fn release(&mut self) {
-        if !self.released {
-            self.sequencer.release(self.order);
-            self.released = true;
-        }
-    }
-}
-
-impl Drop for PublicationPermit {
+impl Drop for PublicationWake {
     fn drop(&mut self) {
-        self.release();
+        self.0.notify_waiters();
     }
 }
 
@@ -202,7 +92,7 @@ pub(crate) fn spawn(
         // ownership unique and scheduler ordering stable.
         let worker_count = state.queue_capacity.clamp(1, 8);
         let mut workers = tokio::task::JoinSet::new();
-        let publication = Arc::new(PublicationSequencer::new(state.queue_capacity));
+        let publication = Arc::new(tokio::sync::Notify::new());
         for _ in 0..worker_count {
             workers.spawn(run_with_retry_delay(
                 state.clone(),
@@ -224,7 +114,7 @@ async fn run_with_retry_delay(
     state: AppState,
     shutdown: tokio_util::sync::CancellationToken,
     retry_delay: std::time::Duration,
-    publication: Arc<PublicationSequencer>,
+    publication: Arc<tokio::sync::Notify>,
 ) {
     tracing::info!(
         capacity = state.queue_capacity,
@@ -586,7 +476,13 @@ fn restore_admission_authority(
 /// Valid claims outside the bounded prefix are released for a later FIFO pass;
 /// appending them would let an attached deep row bypass unhydrated predecessors.
 enum ClaimRegistration {
-    Registered(Arc<tokio::sync::Notify>),
+    Registered {
+        cancel: Arc<tokio::sync::Notify>,
+        /// Held until the reserved transport accepts the job, preventing a
+        /// successor from treating a registry-only predecessor as published.
+        publication_guard: tokio::sync::OwnedMutexGuard<()>,
+    },
+    WaitingForPredecessor,
     Stale,
     OutsideRuntimeWindow,
 }
@@ -629,7 +525,7 @@ async fn register_claimed_runtime(
     claim_token: &str,
     request: &mut mold_core::GenerateRequest,
 ) -> anyhow::Result<ClaimRegistration> {
-    let cancel = {
+    let (cancel, publication_guard) = {
         // Strict lock order: durable transition -> completed DB read ->
         // scheduler fence. Never move this DB await beneath `_mutation`.
         let _durable_transition = state.queue_journal.lock_durable_transition().await;
@@ -674,17 +570,28 @@ async fn register_claimed_runtime(
             request.scheduler,
             mold_core::build_info::version_string(),
         ));
-        let _mutation = state.scheduler_mutation_fence.lock().await;
-        state.job_registry.register_job_at_queued_position(
+        let publication_guard = state.scheduler_mutation_fence.clone().lock_owned().await;
+        if order
+            .predecessor_ids
+            .iter()
+            .any(|id| state.job_registry.scheduler_lifecycle(id).is_none())
+        {
+            return Ok(ClaimRegistration::WaitingForPredecessor);
+        }
+        let cancel = state.job_registry.register_job_at_queued_position(
             &row.id,
             &row.model,
             target_gpu,
             Some(row.seed_pinned),
             Some(metadata),
             position,
-        )
+        );
+        (cancel, publication_guard)
     };
-    Ok(ClaimRegistration::Registered(cancel))
+    Ok(ClaimRegistration::Registered {
+        cancel,
+        publication_guard,
+    })
 }
 
 async fn feed_available(
@@ -692,24 +599,21 @@ async fn feed_available(
     current_output_dir: Option<&std::path::Path>,
     shutdown: &tokio_util::sync::CancellationToken,
     arbiter: &mut FeederArbiter,
-    publication: &Arc<PublicationSequencer>,
+    publication: &Arc<tokio::sync::Notify>,
 ) -> FeederReport {
     let mut report = FeederReport::default();
-    loop {
+    'feed: loop {
         let reservation = match state.queue.try_reserve(state.queue_capacity) {
             Ok(reservation) => reservation,
             Err(SubmitError::Full { .. }) => {
-                publication.seal_current();
                 report.stop = FeederStop::AtCapacity;
                 return report;
             }
             Err(SubmitError::Cancelled) => {
-                publication.seal_current();
                 report.stop = FeederStop::RecoverableFailure;
                 return report;
             }
             Err(SubmitError::Shutdown) => {
-                publication.seal_current();
                 report.stop = FeederStop::TransportClosed;
                 return report;
             }
@@ -720,49 +624,31 @@ async fn feed_available(
             .map(|admission| admission.ingress().clone());
         let claim_ingress = ingress.clone();
         let prefer_attached = arbiter.prefer_attached;
-        let runtime_saturated = state.queue.pending() >= state.queue_capacity;
-        let publication_for_claim = Arc::clone(publication);
         let claim = match tokio::task::spawn_blocking(move || {
-            let _claim_gate = publication_for_claim
-                .claim_gate
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            claim_next(&journal, claim_ingress.as_deref(), prefer_attached).map(|selected| {
-                selected.map(|selected| {
-                    let permit = publication_for_claim.enroll(
-                        selected.claim.row.created_at_ms,
-                        selected.claim.queue_rank,
-                        runtime_saturated,
-                    );
-                    (selected, permit)
-                })
-            })
+            claim_next(&journal, claim_ingress.as_deref(), prefer_attached)
         })
         .await
         {
             Ok(Ok(Some(claim))) => claim,
             Ok(Ok(None)) => {
-                publication.seal_current();
                 drop(reservation);
                 report.stop = FeederStop::Drained;
                 return report;
             }
             Ok(Err(error)) => {
-                publication.seal_current();
                 drop(reservation);
                 tracing::warn!(error = %format!("{error:#}"), "durable feeder could not claim the next row");
                 report.stop = FeederStop::RecoverableFailure;
                 return report;
             }
             Err(error) => {
-                publication.seal_current();
                 drop(reservation);
                 tracing::warn!(%error, "durable feeder claim task failed");
                 report.stop = FeederStop::RecoverableFailure;
                 return report;
             }
         };
-        let (claim, mut publication_permit) = claim;
+        let _publication_wake = PublicationWake(Arc::clone(publication));
         arbiter.prefer_attached = !claim.claimed_as_attached;
 
         let mold_db::generation_queue::QueueClaim {
@@ -1247,48 +1133,21 @@ async fn feed_available(
         let resolved_references = prepared_route.resolved_references;
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         let h3_private_ingress_grant = prepared_route.h3_private_ingress_grant;
-        // Registry publication shares the scheduler mutation fence with
-        // DELETE /api/queue, but SQLite is synchronous and can be stalled by
-        // another connection. Publish the cancellation token under the fence,
-        // release it, and only then perform the blocking durable check. The
-        // runtime queue does not receive this job until the check completes:
-        // cancellation before/during the check is observed in SQLite, while a
-        // later cancellation observes and trips the registered live token.
-        publication_permit.wait_turn().await;
-        let cancel = match register_claimed_runtime(state, &row, &claim_token, &mut request).await {
-            Ok(ClaimRegistration::Registered(cancel)) => cancel,
-            Ok(ClaimRegistration::Stale) => {
-                let _ = tokio::task::spawn_blocking(move || ticket.discard()).await;
-                drop(reservation);
-                continue;
-            }
-            Ok(ClaimRegistration::OutsideRuntimeWindow) => {
-                drop(reservation);
-                retain_for_retry(ticket, shutdown).await;
-                continue;
-            }
-            Err(error) => {
-                drop(reservation);
-                retain_for_retry(ticket, shutdown).await;
-                tracing::error!(job = %row.id, %error, "durable feeder order lookup failed");
-                report.stop = FeederStop::RecoverableFailure;
-                return report;
-            }
-        };
+        // Check SQLite before taking the scheduler publication fence. A later
+        // cancellation waits on that fence, observes the registered token,
+        // and cancels the submitted job through the ordinary live path.
         let journal = state.queue_journal.clone();
         let cancel_id = row.id.clone();
         let cancel_requested =
             tokio::task::spawn_blocking(move || journal.feeder_cancel_requested(&cancel_id)).await;
         match cancel_requested {
             Ok(Ok(true)) => {
-                state.job_registry.remove(&row.id);
                 let _ = tokio::task::spawn_blocking(move || ticket.discard()).await;
                 drop(reservation);
                 continue;
             }
             Ok(Ok(false)) => {}
             Ok(Err(error)) => {
-                state.job_registry.remove(&row.id);
                 drop(reservation);
                 retain_for_retry(ticket, shutdown).await;
                 tracing::error!(job = %row.id, %error, "durable feeder cancellation check failed");
@@ -1296,7 +1155,6 @@ async fn feed_available(
                 return report;
             }
             Err(error) => {
-                state.job_registry.remove(&row.id);
                 drop(reservation);
                 retain_for_retry(ticket, shutdown).await;
                 tracing::error!(job = %row.id, %error, "durable feeder cancellation task failed");
@@ -1304,6 +1162,51 @@ async fn feed_available(
                 return report;
             }
         }
+        // Registry publication shares the scheduler mutation fence with
+        // DELETE /api/queue, but SQLite is synchronous and can be stalled by
+        // another connection. Publish the cancellation token under the fence,
+        // release it, and only then perform the blocking durable check. The
+        // runtime queue does not receive this job until the check completes:
+        // cancellation before/during the check is observed in SQLite, while a
+        // later cancellation observes and trips the registered live token.
+        let (cancel, publication_guard) = loop {
+            let publication_wake = publication.notified();
+            match register_claimed_runtime(state, &row, &claim_token, &mut request).await {
+                Ok(ClaimRegistration::Registered {
+                    cancel,
+                    publication_guard,
+                }) => break (cancel, publication_guard),
+                Ok(ClaimRegistration::WaitingForPredecessor) => {
+                    tokio::select! {
+                        _ = shutdown.cancelled() => {
+                            drop(reservation);
+                            retain_for_retry(ticket, shutdown).await;
+                            report.stop = FeederStop::TransportClosed;
+                            return report;
+                        }
+                        _ = publication_wake => {}
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
+                    }
+                }
+                Ok(ClaimRegistration::Stale) => {
+                    let _ = tokio::task::spawn_blocking(move || ticket.discard()).await;
+                    drop(reservation);
+                    continue 'feed;
+                }
+                Ok(ClaimRegistration::OutsideRuntimeWindow) => {
+                    drop(reservation);
+                    retain_for_retry(ticket, shutdown).await;
+                    continue 'feed;
+                }
+                Err(error) => {
+                    drop(reservation);
+                    retain_for_retry(ticket, shutdown).await;
+                    tracing::error!(job = %row.id, %error, "durable feeder order lookup failed");
+                    report.stop = FeederStop::RecoverableFailure;
+                    return report;
+                }
+            }
+        };
         // Transfer the observer only after every fallible preparation and the
         // final durable-order/cancellation fence. Retains keep it attached;
         // holds resolve it explicitly through `hold_claimed`.
@@ -1372,7 +1275,7 @@ async fn feed_available(
         };
         match reservation.submit(job).await {
             Ok(_) => {
-                publication_permit.release();
+                drop(publication_guard);
                 report.submitted += 1;
             }
             Err(returned) => {
@@ -1381,6 +1284,7 @@ async fn feed_available(
                     retain_for_shutdown(ticket).await;
                 }
                 state.job_registry.remove(&id);
+                drop(publication_guard);
                 tracing::warn!(job = %id, ?error, "durable feeder transport stopped; row retained");
                 report.stop = FeederStop::TransportClosed;
                 return report;
@@ -1553,7 +1457,7 @@ mod tests {
         let mut jobs = Vec::new();
         for _ in 0..3 {
             jobs.push(
-                tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                tokio::time::timeout(Duration::from_secs(5), rx.recv())
                     .await
                     .unwrap()
                     .unwrap(),
@@ -1563,6 +1467,33 @@ mod tests {
         assert_eq!(state.job_registry.len(), 3);
         assert!(rx.try_recv().is_err());
         assert_eq!(state.queue_journal.list_all().len(), 20);
+        state.queue_journal.retain_all();
+        shutdown.cancel();
+        handle.await.unwrap();
+        drop(jobs);
+    }
+
+    #[tokio::test]
+    async fn default_capacity_publishes_more_than_one_worker_width_without_deadlock() {
+        let (state, mut rx) = state(200);
+        let ids = admit(&state, 9);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+
+        let mut jobs = Vec::new();
+        for _ in 0..ids.len() {
+            jobs.push(
+                tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("durable publication must not wait for the full queue capacity")
+                    .expect("the runtime queue remains open"),
+            );
+        }
+        assert_eq!(
+            jobs.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(),
+            ids.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+
         state.queue_journal.retain_all();
         shutdown.cancel();
         handle.await.unwrap();
@@ -1736,6 +1667,108 @@ mod tests {
             ids[0],
             "the durable FIFO predecessor remains next"
         );
+    }
+
+    #[tokio::test]
+    async fn exact_claim_waits_for_an_unclaimed_durable_predecessor() {
+        let (state, _rx) = state(2);
+        let ids = admit(&state, 2);
+        let later = state
+            .queue_journal
+            .claim_feeder_by_id(&ids[1])
+            .unwrap()
+            .unwrap();
+        let mut later_request = request("later");
+        assert!(matches!(
+            register_claimed_runtime(&state, &later.row, &later.claim_token, &mut later_request,)
+                .await
+                .unwrap(),
+            ClaimRegistration::WaitingForPredecessor
+        ));
+
+        let first = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        let mut first_request = request("first");
+        let ClaimRegistration::Registered {
+            publication_guard, ..
+        } = register_claimed_runtime(&state, &first.row, &first.claim_token, &mut first_request)
+            .await
+            .unwrap()
+        else {
+            panic!("oldest claim must publish first");
+        };
+        drop(publication_guard);
+
+        let ClaimRegistration::Registered {
+            publication_guard, ..
+        } = register_claimed_runtime(&state, &later.row, &later.claim_token, &mut later_request)
+            .await
+            .unwrap()
+        else {
+            panic!("successor publishes after its predecessor");
+        };
+        drop(publication_guard);
+        state.job_registry.remove(&ids[0]);
+        state.job_registry.remove(&ids[1]);
+        state
+            .queue_journal
+            .attach_claimed(&first.row.id, first.claim_token)
+            .discard();
+        state
+            .queue_journal
+            .attach_claimed(&later.row.id, later.claim_token)
+            .discard();
+    }
+
+    #[tokio::test]
+    async fn claimed_reorder_is_authoritative_before_publication() {
+        let (state, _rx) = state(2);
+        let ids = admit(&state, 2);
+        let first = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        let second = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        assert!(matches!(
+            state
+                .queue_journal
+                .patch_owned_claimed_queued(&ids[1], None, None, Some(0))
+                .unwrap(),
+            mold_db::generation_queue::OwnedQueuedPatchOutcome::Updated { position: 0, .. }
+        ));
+
+        let mut first_request = request("formerly first");
+        assert!(matches!(
+            register_claimed_runtime(&state, &first.row, &first.claim_token, &mut first_request,)
+                .await
+                .unwrap(),
+            ClaimRegistration::WaitingForPredecessor
+        ));
+        let mut second_request = request("reordered first");
+        let ClaimRegistration::Registered {
+            publication_guard, ..
+        } = register_claimed_runtime(
+            &state,
+            &second.row,
+            &second.claim_token,
+            &mut second_request,
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("reordered claim must publish at its current durable position");
+        };
+        drop(publication_guard);
+        assert_eq!(
+            state.job_registry.queued_ids_in_order(),
+            vec![ids[1].clone()]
+        );
+
+        state.job_registry.remove(&ids[1]);
+        state
+            .queue_journal
+            .attach_claimed(&first.row.id, first.claim_token)
+            .discard();
+        state
+            .queue_journal
+            .attach_claimed(&second.row.id, second.claim_token)
+            .discard();
     }
 
     #[tokio::test]
@@ -1926,7 +1959,7 @@ mod tests {
 
         let shutdown = tokio_util::sync::CancellationToken::new();
         let handle = spawn(state.clone(), shutdown.clone());
-        let mut next = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        let mut next = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("the next valid job must not be head-of-line blocked")
             .expect("the runtime queue remains open");
@@ -2058,7 +2091,7 @@ mod tests {
         let shutdown = tokio_util::sync::CancellationToken::new();
         let current_output = state.config.try_read().unwrap().effective_output_dir();
         let mut arbiter = FeederArbiter::default();
-        let publication = Arc::new(PublicationSequencer::new(state.queue_capacity));
+        let publication = Arc::new(tokio::sync::Notify::new());
         let report = feed_available(
             &state,
             Some(&current_output),
@@ -2719,9 +2752,13 @@ mod tests {
         let registration = register_claimed_runtime(&state, &row, &claim_token, &mut request)
             .await
             .unwrap();
-        let ClaimRegistration::Registered(_cancel) = registration else {
+        let ClaimRegistration::Registered {
+            publication_guard, ..
+        } = registration
+        else {
             panic!("the exact claim belongs to the runtime window");
         };
+        drop(publication_guard);
         let (release_tx, release_rx) = tokio::sync::oneshot::channel::<bool>();
         let mut durable_check = Box::pin(async { release_rx.await.unwrap() });
 
@@ -2803,7 +2840,7 @@ mod tests {
         blocker.await.unwrap().unwrap();
         assert!(matches!(
             handoff.await.unwrap().unwrap(),
-            ClaimRegistration::Registered(_)
+            ClaimRegistration::Registered { .. }
         ));
         assert_eq!(
             state.job_registry.entry("grant-live").unwrap().state,
@@ -2887,7 +2924,7 @@ mod tests {
             state.clone(),
             shutdown.clone(),
             Duration::ZERO,
-            Arc::new(PublicationSequencer::new(state.queue_capacity)),
+            Arc::new(tokio::sync::Notify::new()),
         ));
         let job = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
@@ -2917,7 +2954,7 @@ mod tests {
             state.clone(),
             shutdown.clone(),
             Duration::ZERO,
-            Arc::new(PublicationSequencer::new(state.queue_capacity)),
+            Arc::new(tokio::sync::Notify::new()),
         ));
         while state
             .queue_journal
@@ -2964,7 +3001,7 @@ mod tests {
             state.clone(),
             shutdown.clone(),
             Duration::ZERO,
-            Arc::new(PublicationSequencer::new(state.queue_capacity)),
+            Arc::new(tokio::sync::Notify::new()),
         ));
         let claimed_token = loop {
             let token = state

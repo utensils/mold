@@ -505,6 +505,7 @@ fn normalize_batch_provenance(
     requests: &mut [mold_core::GenerateRequest],
     client_batch_id: &str,
 ) -> Result<(), ApiError> {
+    const MAX_LOGICAL_BATCH_ID_BYTES: usize = 128;
     let supplied = requests.iter().any(|request| {
         request.batch_id.is_some() || request.batch_index.is_some() || request.batch_count.is_some()
     });
@@ -536,6 +537,12 @@ fn normalize_batch_provenance(
         if batch_id.trim().is_empty() {
             return Err(ApiError::validation(format!(
                 "requests[{}].batch_id must not be empty",
+                offset + 1
+            )));
+        }
+        if batch_id.len() > MAX_LOGICAL_BATCH_ID_BYTES || batch_id.chars().any(char::is_control) {
+            return Err(ApiError::validation(format!(
+                "requests[{}].batch_id must be at most {MAX_LOGICAL_BATCH_ID_BYTES} bytes and contain no control characters",
                 offset + 1
             )));
         }
@@ -817,6 +824,22 @@ mod tests {
             request.batch_count = Some(2);
         }
         assert!(normalize_batch_provenance(&mut duplicate, "operation-id").is_err());
+
+        let mut boundary = vec![request()];
+        boundary[0].batch_id = Some("b".repeat(128));
+        boundary[0].batch_index = Some(1);
+        boundary[0].batch_count = Some(1);
+        normalize_batch_provenance(&mut boundary, "operation-id").unwrap();
+
+        for invalid in ["b".repeat(129), "batch\nheader".to_string()] {
+            let mut request_with_invalid_id = vec![request()];
+            request_with_invalid_id[0].batch_id = Some(invalid);
+            request_with_invalid_id[0].batch_index = Some(1);
+            request_with_invalid_id[0].batch_count = Some(1);
+            assert!(
+                normalize_batch_provenance(&mut request_with_invalid_id, "operation-id").is_err()
+            );
+        }
     }
 
     #[cfg(unix)]

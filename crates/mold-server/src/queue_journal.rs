@@ -2210,6 +2210,10 @@ impl QueueTicket {
         &self.id
     }
 
+    pub(crate) fn retention_requested(&self) -> bool {
+        self.journal.is_retaining()
+    }
+
     /// The job produced its output. Delete the row unconditionally — a
     /// completed job must never be replayed, fence or no fence.
     pub fn complete(self) {
@@ -2464,6 +2468,33 @@ impl QueueTicket {
                     "could not hold a retryable durable queue row; returning it to the replay backlog"
                 );
                 self.retain()
+            }
+        }
+    }
+
+    /// Attempt the exact requested hold without silently converting a failed
+    /// persistence transition into a queued replay. Execution observers use
+    /// this seam so they cannot be told a job failed while its row still says
+    /// `running`. A retry ticket keeps the exact claim token and has inert
+    /// drop semantics until the caller retries this same transition.
+    pub(crate) fn hold_exact(mut self, reason: &str, retryable: bool) -> RetainOutcome {
+        match self.hold_owned(reason, retryable, now_ms()) {
+            Ok(_) => {
+                self.settled = true;
+                RetainOutcome::Released
+            }
+            Err(error) => {
+                tracing::warn!(
+                    job = %self.id,
+                    error = %format!("{error:#}"),
+                    retryable,
+                    "could not persist the requested durable hold"
+                );
+                self.settled = true;
+                RetainOutcome::Retry {
+                    ticket: self,
+                    error,
+                }
             }
         }
     }

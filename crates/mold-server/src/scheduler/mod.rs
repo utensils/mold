@@ -6035,12 +6035,13 @@ fn reject_generation(state: &AppState, mut job: GenerationJob, error: String) {
         )));
     }
     let id = job.id.clone();
-    if let Some(ticket) = job.journal.take() {
-        // Deterministic planning and validation refusals remain visible but
-        // cannot be retried unchanged. Transient preparation failures use the
-        // explicit retryable path below; shutdown uses retention for replay.
-        ticket.hold(&error);
-    }
+    // Deterministic planning and validation refusals remain visible but cannot
+    // be retried unchanged. Persist that fact before resolving observers.
+    crate::durable_generation_settlement::settle_blocking(
+        &mut job.journal,
+        crate::durable_generation_settlement::DurableDisposition::NonRetryableHold,
+        &error,
+    );
     let _ = job.result_tx.send(Err(error));
     state.queue.decrement();
     state.job_registry.remove(&id);
@@ -6058,9 +6059,11 @@ fn hold_preparation_failure(state: &AppState, job: GenerationJob, error: String)
         )));
     }
     let id = job.id.clone();
-    if let Some(ticket) = job.journal.take() {
-        ticket.hold_retryable(&error);
-    }
+    crate::durable_generation_settlement::settle_blocking(
+        &mut job.journal,
+        crate::durable_generation_settlement::DurableDisposition::RetryableHold,
+        &error,
+    );
     let _ = job.result_tx.send(Err(error));
     state.queue.decrement();
     state.job_registry.remove(&id);
@@ -6069,9 +6072,11 @@ fn hold_preparation_failure(state: &AppState, job: GenerationJob, error: String)
 /// A process-level interruption is not a job failure. Release the durable
 /// claim so the next feeder pass or process boot replays it automatically.
 fn retain_generation(state: &AppState, mut job: GenerationJob, error: String) {
-    if let Some(ticket) = job.journal.take() {
-        let _ = ticket.retain();
-    }
+    crate::durable_generation_settlement::settle_blocking(
+        &mut job.journal,
+        crate::durable_generation_settlement::DurableDisposition::Retain,
+        &error,
+    );
     let id = job.id.clone();
     let _ = job.result_tx.send(Err(error));
     state.queue.decrement();
@@ -7967,6 +7972,56 @@ mod tests {
             Some("dependency unavailable")
         );
         assert!(page.rows[0].retryable);
+    }
+
+    #[test]
+    fn scheduler_settlement_retries_a_token_owning_persistence_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("gallery");
+        std::fs::create_dir_all(&output).unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            db,
+            Some(root.path()),
+            "scheduler-settlement-test",
+        ));
+        let (job, _result) = fake_generation("settlement-retry");
+        let admission = journal
+            .clone()
+            .record(crate::queue_journal::JournalAdmission {
+                id: &job.id,
+                request: &job.request,
+                output_dir: Some(&output),
+                target_gpu: None,
+                target_device_id: None,
+                completion_payload: SseCompletionPayload::Full,
+                batch_child: false,
+                carries_reference_authority: false,
+            })
+            .unwrap();
+        assert!(matches!(
+            admission.retain(),
+            crate::queue_journal::RetainOutcome::Released
+        ));
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+        journal.fail_claim_release_for_tests();
+        let mut ticket = Some(ticket);
+        crate::durable_generation_settlement::settle_blocking(
+            &mut ticket,
+            crate::durable_generation_settlement::DurableDisposition::Retain,
+            "settlement-retry",
+        );
+        assert!(ticket.is_none());
+
+        let reclaimed = journal
+            .claim_next_feeder()
+            .unwrap()
+            .expect("the live scheduler retry releases the exact claim");
+        assert_eq!(reclaimed.row.id, "settlement-retry");
+        journal
+            .attach_claimed(&reclaimed.row.id, reclaimed.claim_token)
+            .discard();
     }
 
     #[test]

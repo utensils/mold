@@ -6418,6 +6418,50 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_direct_raw_failure_returns_reconciliation_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, rx) = durable_state_with_engine(db, root.path(), MockEngine::failing());
+        install_authoritative_v2(&mut state);
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
+        let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            app_with_state(state).oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .header("x-mold-operation-id", &operation_id)
+                    .body(Body::from(durable_direct_media_body("durable raw failure")))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("durable raw failure must settle with reconciliation state")
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = json_body(response).await;
+        assert_eq!(body["client_batch_id"], operation_id);
+        assert_eq!(body["durable"], true);
+        assert!(body["id"].as_str().is_some_and(|id| !id.is_empty()));
+        assert!(body["children"][0]["job_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()));
+        assert_eq!(body["children"][0]["state"], "held");
+        assert_eq!(body["children"][0]["retryable"], true);
+        assert!(body["children"][0]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("mock engine error")));
+
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
+        worker.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn durable_direct_sse_observer_preserves_queued_and_complete_events() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));

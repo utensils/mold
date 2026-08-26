@@ -2789,6 +2789,22 @@ async fn generate(
                 ));
             }
         };
+        if result.is_err() {
+            let batch_id = status.id.clone();
+            let journal = state.queue_journal.clone();
+            let refreshed = spawn_queue_read(move || {
+                journal
+                    .durable_generation_batch(&batch_id)
+                    .map_err(anyhow::Error::msg)
+            })
+            .await?
+            .map(|detail| generation_batch_status(&state.instance_id, detail))
+            .unwrap_or(status);
+            return Ok(durable_reconciliation_response(
+                refreshed,
+                "accepted durable generation ended without a media response",
+            ));
+        }
         return generation_result_response(
             result,
             merge_request_warnings(warnings, deferred_warnings),
