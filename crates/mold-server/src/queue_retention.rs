@@ -82,10 +82,26 @@ pub(crate) async fn sweep_held_once(state: &AppState) -> anyhow::Result<HeldSwee
         // Resolve the GC candidate BEFORE deleting the queue row: the
         // lifecycle resolves it by job id, and the row is what carries the
         // association. Afterwards there is nothing left to ask.
-        let candidate = state
-            .queue_journal
-            .queue_media_lifecycle()
-            .and_then(|lifecycle| lifecycle.candidate_for_job(&row.id).ok().flatten());
+        //
+        // A LOOKUP FAILURE IS NOT "no media". Collapsing the error into
+        // `None` would purge the row, leave its bytes `gc_pending`, and
+        // still report `media_deferred: 0` — the one number that tells an
+        // operator startup reconciliation has work left to do.
+        let mut candidate = None;
+        let mut candidate_unresolved = false;
+        if let Some(lifecycle) = state.queue_journal.queue_media_lifecycle() {
+            match lifecycle.candidate_for_job(&row.id) {
+                Ok(found) => candidate = found,
+                Err(error) => {
+                    candidate_unresolved = true;
+                    tracing::warn!(
+                        job = %row.id,
+                        %error,
+                        "could not resolve expired held media before purge"
+                    );
+                }
+            }
+        }
 
         let deleted = mold_db::generation_queue::purge_held(
             db,
@@ -99,6 +115,12 @@ pub(crate) async fn sweep_held_once(state: &AppState) -> anyhow::Result<HeldSwee
             continue;
         }
         purged += 1;
+        if candidate_unresolved {
+            // The row is gone and the retire trigger has marked its
+            // obligation, but we never learned which set to collect.
+            media_deferred += 1;
+            continue;
+        }
         // The row is gone, so the retire trigger has already moved the
         // obligation to `gc_pending`. Collect the bytes now; if that fails,
         // startup reconciliation still owns it.

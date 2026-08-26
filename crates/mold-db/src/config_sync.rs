@@ -397,6 +397,12 @@ pub fn migrate_config_toml_to_db(db: &MetadataDb, cfg: &Config) -> Result<bool> 
     if cfg.generate != GenerateSettings::default() {
         save_generate_settings_to_db(db, cfg.generate)?;
     }
+    // And again for `[queue]`. Without this the migration rewrites
+    // `config.toml` as bootstrap-only and the hand-written retention is
+    // silently reset to the compiled default on the next load.
+    if cfg.queue != mold_core::config::QueueSettings::default() {
+        save_queue_to_db(db, cfg.queue)?;
+    }
 
     // Per-model user prefs. Skip rows that carry nothing but paths — we
     // want a ModelPrefs row only when the user has set at least one
@@ -1072,6 +1078,38 @@ mod tests {
                 .unwrap(),
             Some(7)
         );
+    }
+
+    #[test]
+    fn migration_imports_hand_written_queue_section_only_when_set() {
+        // The migration rewrites `config.toml` as bootstrap-only, so a
+        // hand-written `[queue]` section that is not imported here is not
+        // "left in the file" — it is lost, and the next load silently
+        // resets to the compiled default.
+        let db = db();
+        let cfg = Config::default();
+        assert!(migrate_config_toml_to_db(&db, &cfg).unwrap());
+        assert_eq!(
+            Settings::new(&db)
+                .get_int(keys::QUEUE_HELD_RETENTION_DAYS)
+                .unwrap(),
+            None,
+            "default queue settings must not be pinned into the DB"
+        );
+
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut cfg = Config::default();
+        cfg.queue.held_retention_days = 7;
+        assert!(migrate_config_toml_to_db(&db, &cfg).unwrap());
+        assert_eq!(
+            Settings::new(&db)
+                .get_int(keys::QUEUE_HELD_RETENTION_DAYS)
+                .unwrap(),
+            Some(7)
+        );
+        let mut hydrated = Config::default();
+        hydrate_config_from_db(&db, &mut hydrated).unwrap();
+        assert_eq!(hydrated.queue.held_retention_days, 7);
     }
 
     #[test]

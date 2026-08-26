@@ -612,10 +612,14 @@ impl McpServer {
             }
         };
 
-        let retry_was_ambiguous =
-            matches!(retry_result, CanonicalRetrySubmission::Ambiguous { .. });
+        let (retry_was_ambiguous, observed_revision) = match &retry_result {
+            CanonicalRetrySubmission::Ambiguous {
+                observed_revision, ..
+            } => (true, *observed_revision),
+            CanonicalRetrySubmission::Accepted => (false, 0),
+        };
         self.jobs
-            .mark_retry_queued(&args.job_id, retry_was_ambiguous)
+            .mark_retry_queued(&args.job_id, retry_was_ambiguous, observed_revision)
             .await;
         if let CanonicalRetrySubmission::Ambiguous { error, .. } = &retry_result {
             self.jobs
@@ -1204,6 +1208,11 @@ struct ReconciliationAttempt {
     next_attempt: Instant,
     backoff: Duration,
     ambiguous_confirmation_attempts: Option<usize>,
+    /// The child's `revision` before the retry POST whose response was lost.
+    /// A child observed ABOVE it was retried, whatever state it is in now;
+    /// one still AT it was not. `0` means the host has no revision
+    /// authority, and reconciliation stays state-only as it always was.
+    observed_revision: u64,
 }
 
 #[derive(Debug, Default)]
@@ -1380,7 +1389,7 @@ impl AsyncJobRegistry {
         }
     }
 
-    async fn mark_retry_queued(&self, id: &str, ambiguous: bool) {
+    async fn mark_retry_queued(&self, id: &str, ambiguous: bool, observed_revision: u64) {
         let reconciliation = {
             let mut jobs = self.inner.jobs.lock().await;
             let Some(job) = jobs.get_mut(id) else {
@@ -1411,6 +1420,7 @@ impl AsyncJobRegistry {
                     next_attempt: Instant::now(),
                     backoff: reconciliation_initial_backoff(),
                     ambiguous_confirmation_attempts: ambiguous.then_some(0),
+                    observed_revision,
                 })),
             );
         }
@@ -1438,6 +1448,7 @@ impl AsyncJobRegistry {
                     next_attempt: Instant::now(),
                     backoff: reconciliation_initial_backoff(),
                     ambiguous_confirmation_attempts: None,
+                    observed_revision: 0,
                 }))
             }))
         };
@@ -1451,6 +1462,7 @@ impl AsyncJobRegistry {
         let confirmation_attempt = attempt
             .ambiguous_confirmation_attempts
             .map(|count| count + 1);
+        let observed_revision = attempt.observed_revision;
 
         enum ReadOutcome {
             Found(GenerationBatchChild),
@@ -1499,7 +1511,14 @@ impl AsyncJobRegistry {
         let mut confirmation_finished = false;
         let keep_polling = match outcome {
             ReadOutcome::Found(child) => {
+                // A revision past the pre-POST one proves the retry landed,
+                // whatever state the child is in now — a re-held child at a
+                // higher revision was retried and held again for a fresh
+                // reason. Short-circuit rather than burning five polls
+                // waiting for a state change that already happened.
+                let retry_landed = observed_revision > 0 && child.revision > observed_revision;
                 if child.state == GenerationBatchChildState::Held
+                    && !retry_landed
                     && confirmation_attempt
                         .is_some_and(|attempt| attempt < AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS)
                 {
@@ -1528,6 +1547,30 @@ impl AsyncJobRegistry {
                     true
                 } else {
                     confirmation_finished = confirmation_attempt.is_some();
+                    // Settling a still-held child at the SAME revision we
+                    // submitted against is not the retry's outcome: that
+                    // retry never landed, and the original POST may yet
+                    // commit. The job stays retryable either way, so the
+                    // settled error must say which of the two happened
+                    // rather than presenting the pre-retry snapshot as the
+                    // retry's result. It is composed onto the child's own
+                    // error because `finish_canonical_child` lets the
+                    // child's error win over any separate note.
+                    let mut child = child;
+                    if confirmation_attempt.is_some()
+                        && child.state == GenerationBatchChildState::Held
+                        && observed_revision > 0
+                        && !retry_landed
+                    {
+                        let unlanded = format!(
+                            "the retry did not reach durable job {durable_job_id}: it remains held at revision {} after {AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS} bounded attempts; retry it again once the cause is corrected",
+                            child.revision
+                        );
+                        child.error = Some(match child.error.take() {
+                            Some(existing) => format!("{existing}; {unlanded}"),
+                            None => unlanded,
+                        });
+                    }
                     finish_canonical_child(self, id, authority, child, None).await;
                     false
                 }
@@ -2846,6 +2889,43 @@ mod tests {
         id
     }
 
+    /// Same as [`seed_retryable_canonical_job`] but with a concrete child
+    /// revision, which is the fence an interrupted retry reconciles against.
+    async fn seed_retryable_canonical_job_at_revision(
+        jobs: &AsyncJobRegistry,
+        revision: u64,
+    ) -> String {
+        let request = transport_request();
+        let id = jobs.create(&request).await.unwrap();
+        let child: GenerationBatchChild = serde_json::from_value(json!({
+            "index": 1,
+            "job_id": "durable-job-1",
+            "state": "held",
+            "error": "model dependency is unavailable",
+            "retryable": true,
+            "revision": revision
+        }))
+        .unwrap();
+        jobs.finish_canonical(
+            &id,
+            CanonicalAsyncSettlement {
+                authority: Some(GenerationBatchAuthority {
+                    instance_id: "instance-1".into(),
+                    batch_id: "batch-1".into(),
+                    client_batch_id: "client-batch-1".into(),
+                }),
+                durable_job_id: Some("durable-job-1".into()),
+                retryable: Some(true),
+                status: AsyncJobStatus::Held,
+                error: Some("model dependency is unavailable".into()),
+                result: None,
+                canonical_child: Some(child),
+            },
+        )
+        .await;
+        id
+    }
+
     async fn seed_completed_canonical_job(jobs: &AsyncJobRegistry) -> String {
         let request = transport_request();
         let id = jobs.create(&request).await.unwrap();
@@ -3409,6 +3489,177 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_advanced_revision_settles_a_re_held_retry_without_five_polls() {
+        // The retry landed and the job was held again for a NEW reason.
+        // State alone cannot tell that from a retry that never arrived, so
+        // the old code spent all five confirmation attempts staring at
+        // `held` and then settled either case identically.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let status_reads = Arc::new(AtomicUsize::new(0));
+        let status_reads_for_server = status_reads.clone();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 2048];
+                loop {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = String::from_utf8_lossy(&request);
+                if head.starts_with("POST /api/queue/durable-job-1/retry") {
+                    // Lost response: the retry is ambiguous to the client.
+                    socket.shutdown().await.unwrap();
+                    continue;
+                }
+                assert!(head.starts_with("GET /api/generation-batches/batch-1"));
+                status_reads_for_server.fetch_add(1, Ordering::SeqCst);
+                let body = json!({
+                    "id": "batch-1",
+                    "client_batch_id": "client-batch-1",
+                    "instance_id": "instance-1",
+                    "durable": true,
+                    "children": [{
+                        "index": 1,
+                        "job_id": "durable-job-1",
+                        "state": "held",
+                        "error": "a different dependency failed",
+                        "retryable": true,
+                        // Higher than the seeded revision: the retry landed.
+                        "revision": 8
+                    }]
+                })
+                .to_string();
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let mcp = McpServer {
+            client: MoldClient::new(&base_url),
+            jobs: AsyncJobRegistry::default(),
+        };
+        let local_id = seed_retryable_canonical_job_at_revision(&mcp.jobs, 7).await;
+
+        mcp.tool_generation_retry(json!({ "job_id": local_id }))
+            .await
+            .unwrap();
+        let settled = mcp
+            .tool_generation_status(json!({ "job_id": local_id, "include_result": false }))
+            .await
+            .unwrap();
+
+        assert_eq!(settled["structuredContent"]["status"], "held");
+        assert_eq!(settled["structuredContent"]["retryable"], true);
+        assert!(
+            settled["structuredContent"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("a different dependency failed"),
+            "the NEW hold reason must surface: {settled}"
+        );
+        assert_eq!(
+            status_reads.load(Ordering::SeqCst),
+            1,
+            "an advanced revision settles on the first read"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unadvanced_revision_names_the_retry_that_never_landed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for _ in 0..(1 + AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS) {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 2048];
+                loop {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = String::from_utf8_lossy(&request);
+                if head.starts_with("POST /api/queue/durable-job-1/retry") {
+                    socket.shutdown().await.unwrap();
+                    continue;
+                }
+                let body = json!({
+                    "id": "batch-1",
+                    "client_batch_id": "client-batch-1",
+                    "instance_id": "instance-1",
+                    "durable": true,
+                    "children": [{
+                        "index": 1,
+                        "job_id": "durable-job-1",
+                        "state": "held",
+                        "error": "model dependency is unavailable",
+                        "retryable": true,
+                        // Unchanged: the retry never reached the server.
+                        "revision": 7
+                    }]
+                })
+                .to_string();
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let mcp = McpServer {
+            client: MoldClient::new(&base_url),
+            jobs: AsyncJobRegistry::default(),
+        };
+        let local_id = seed_retryable_canonical_job_at_revision(&mcp.jobs, 7).await;
+
+        mcp.tool_generation_retry(json!({ "job_id": local_id }))
+            .await
+            .unwrap();
+        let mut last = serde_json::Value::Null;
+        for _ in 0..AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS {
+            last = mcp
+                .tool_generation_status(json!({ "job_id": local_id, "include_result": false }))
+                .await
+                .unwrap();
+            tokio::time::sleep(reconciliation_initial_backoff()).await;
+        }
+
+        assert_eq!(last["structuredContent"]["retryable"], true);
+        let error = last["structuredContent"]["error"].as_str().unwrap_or("");
+        assert!(
+            error.contains("the retry did not reach durable job"),
+            "an unlanded retry must be named, not settled silently: {last}"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn list_status_poll_recovers_ambiguous_retry_without_a_job_filter() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -3715,7 +3966,7 @@ mod tests {
                 },
             )
             .await;
-            jobs.mark_retry_queued(&id, false).await;
+            jobs.mark_retry_queued(&id, false, 0).await;
         }
 
         assert_eq!(
