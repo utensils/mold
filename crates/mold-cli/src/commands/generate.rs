@@ -4918,8 +4918,18 @@ mod tests {
             .contains(mold_core::MINIMAX_H3_AUTHORIZATION_REQUIRED));
 
         let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 1);
-        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.url.path())
+                .collect::<Vec<_>>(),
+            vec!["/api/capabilities", "/api/generate/stream"]
+        );
+        let generation = requests
+            .iter()
+            .find(|request| request.url.path() == "/api/generate/stream")
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&generation.body).unwrap();
         assert_eq!(body["output_format"], "mp4");
         assert_eq!(body["width"], mold_core::minimax_h3::DEFAULT_WIDTH);
         assert_eq!(body["height"], mold_core::minimax_h3::DEFAULT_HEIGHT);
