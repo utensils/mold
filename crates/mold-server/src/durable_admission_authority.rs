@@ -3,14 +3,6 @@
 //! Generic queue code persists and restores only opaque envelopes plus a
 //! typed disposition. Family policy remains behind this module.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) enum FailureDisposition {
-    Hold,
-    HoldRetryable,
-    Retain,
-}
-
 /// Durable outcome for failures discovered only after acknowledgement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PreparationDisposition {
@@ -35,7 +27,7 @@ pub(crate) fn preparation_disposition(error: &crate::routes::ApiError) -> Prepar
 }
 
 pub(crate) struct Failure {
-    pub disposition: FailureDisposition,
+    pub disposition: PreparationDisposition,
     pub message: String,
 }
 
@@ -125,7 +117,7 @@ pub(crate) fn restore(
         let Some(envelope) = envelope else {
             return if requires_h3 {
                 Err(Failure {
-                    disposition: FailureDisposition::Hold,
+                    disposition: PreparationDisposition::Hold,
                     message: "durable MiniMax H3 admission authority is missing".into(),
                 })
             } else {
@@ -134,13 +126,13 @@ pub(crate) fn restore(
         };
         let envelope: AuthorityEnvelope =
             serde_json::from_slice(envelope).map_err(|_| Failure {
-                disposition: FailureDisposition::Hold,
+                disposition: PreparationDisposition::Hold,
                 message: "durable admission authority envelope is invalid".into(),
             })?;
         if envelope.version != ENVELOPE_VERSION || envelope.kind != H3_PRIVATE_KIND || !requires_h3
         {
             return Err(Failure {
-                disposition: FailureDisposition::Hold,
+                disposition: PreparationDisposition::Hold,
                 message: "durable admission authority is attached to an unsupported request".into(),
             });
         }
@@ -160,9 +152,9 @@ pub(crate) fn restore(
         })
         .map_err(|error| Failure {
             disposition: if error.code == crate::h3_private_bridge::H3_PRIVATE_RUNTIME_UNAVAILABLE {
-                FailureDisposition::HoldRetryable
+                PreparationDisposition::HoldRetryable
             } else {
-                FailureDisposition::Hold
+                PreparationDisposition::Hold
             },
             message: error.error,
         })
@@ -172,7 +164,7 @@ pub(crate) fn restore(
         let _ = (request, instance_id);
         if envelope.is_some() {
             Err(Failure {
-                disposition: FailureDisposition::Hold,
+                disposition: PreparationDisposition::Hold,
                 message: "durable admission authority is unsupported by this build".into(),
             })
         } else {

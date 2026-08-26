@@ -772,11 +772,21 @@ pub fn retry_held_owned(
             bail!("retryable queue row has a non-held batch child");
         }
 
+        // `MAX(?3, updated_at + 1)`, not `?3`: a retry is the first transition in
+        // the codebase that moves a job BACKWARD through the browser reducer's
+        // rank ordering (`generationLifecycle.ts` FORWARD_PHASE_RANK — held is 2,
+        // queued is 1). That reducer accepts a backward move only when the
+        // snapshot is strictly newer, `revision` is never supplied on the wire,
+        // so the comparison falls through to this timestamp. A retry landing in
+        // the same millisecond as its own hold would be neither newer nor
+        // forward, and the client would silently keep rendering Held for a job
+        // that is queued. Forcing monotonicity here fixes it server-side for
+        // every client, rather than redesigning the tie-break.
         let updated = conn.execute(
             "UPDATE generation_queue
                 SET state = 'queued', held_reason = NULL, retryable = 0,
                     claim_token = NULL, dispatch_attempts = 0,
-                    started_at = NULL, updated_at = ?3
+                    started_at = NULL, updated_at = MAX(?3, updated_at + 1)
               WHERE id = ?1 AND owner_uuid = ?2
                 AND state = 'held' AND retryable = 1",
             params![authority.job_id, owner_uuid, now_ms],
@@ -785,9 +795,12 @@ pub fn retry_held_owned(
             bail!("retryable queue row changed during retry");
         }
         if child_state.is_some() {
+            // Same monotonicity requirement: this is the row the browser
+            // reducer actually reads.
             let child_updated = conn.execute(
                 "UPDATE generation_batch_children
-                    SET state = 'accepted', error = NULL, updated_at_ms = ?2
+                    SET state = 'accepted', error = NULL,
+                        updated_at_ms = MAX(?2, updated_at_ms + 1)
                   WHERE job_id = ?1 AND state = 'held'",
                 params![authority.job_id, now_ms],
             )?;
@@ -2550,6 +2563,57 @@ mod tests {
         assert_eq!(detail.children[0].state, "accepted");
         assert_eq!(detail.children[0].error, None);
         assert_eq!(detail.children[1].state, "held");
+    }
+
+    /// A retry is the first transition that moves a job BACKWARD through the
+    /// browser reducer's rank ordering (`generationLifecycle.ts`
+    /// FORWARD_PHASE_RANK: held is 2, queued is 1). That reducer accepts a
+    /// backward move only when the snapshot is strictly newer, and since
+    /// `revision` is never supplied on the wire the comparison falls through to
+    /// this timestamp. Retrying in the same millisecond as the hold must still
+    /// advance it, or the client silently keeps rendering Held for a job the
+    /// server has queued.
+    #[test]
+    fn a_retry_advances_its_timestamps_even_within_one_millisecond() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
+        let authority = mold_core::GenerationRetryRequest {
+            instance_id: "instance-1".into(),
+            batch_id: "batch-1".into(),
+            client_batch_id: "client-1".into(),
+            job_id: "job-0".into(),
+        };
+
+        // Hold and retry at the SAME now_ms — the collision case.
+        hold_owned(&db, "owner-1", "job-0", None, "dependency failed", true, 7).unwrap();
+        let held_queue = crate::generation_queue::get(&db, "job-0").unwrap().unwrap();
+        let held_child_ms = get_durable(&db, "owner-1", "batch-1")
+            .unwrap()
+            .unwrap()
+            .children[0]
+            .updated_at_ms;
+
+        assert_eq!(
+            retry_held_owned(&db, "owner-1", "instance-1", &authority, 7).unwrap(),
+            OwnedRetry::Retried
+        );
+
+        let queued = crate::generation_queue::get(&db, "job-0").unwrap().unwrap();
+        assert!(
+            queued.updated_at_ms > held_queue.updated_at_ms,
+            "queue row must advance: held {} -> queued {}",
+            held_queue.updated_at_ms,
+            queued.updated_at_ms
+        );
+        let child_ms = get_durable(&db, "owner-1", "batch-1")
+            .unwrap()
+            .unwrap()
+            .children[0]
+            .updated_at_ms;
+        assert!(
+            child_ms > held_child_ms,
+            "child row must advance: held {held_child_ms} -> accepted {child_ms}"
+        );
     }
 
     #[test]
