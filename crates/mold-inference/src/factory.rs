@@ -318,6 +318,34 @@ fn validate_prepared_gemma_dependencies(
     if frozen.selected_gemma_paths.is_empty() {
         return Ok(());
     }
+    if paths.text_encoder_files.first().is_some_and(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.to_ascii_lowercase().contains("gemma4"))
+    }) {
+        let packed = paths
+            .text_encoder_files
+            .first()
+            .expect("checked packed Gemma 4 path");
+        let expected_variant = if packed
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.contains("int8-convrot"))
+        {
+            "int8"
+        } else {
+            "bf16"
+        };
+        if frozen.ltx2_gemma_variant.as_deref() != Some(expected_variant)
+            || frozen.selected_gemma_paths.as_slice() != [packed.as_path()]
+            || !packed.is_file()
+        {
+            bail!(
+                "prepared packed Gemma 4 artifact changed after admission; refusing live variant discovery"
+            );
+        }
+        return Ok(());
+    }
     let root = paths
         .text_encoder_files
         .first()
@@ -429,6 +457,29 @@ pub fn create_engine_with_pool(
 
 fn boxed_inference_engine(engine: impl InferenceEngine + 'static) -> Box<dyn InferenceEngine> {
     Box::new(engine)
+}
+
+fn validate_ltx25_runtime_paths(model_name: &str, paths: &ModelPaths) -> Result<()> {
+    match model_name {
+        name if mold_core::ltx25_manifest::is_runtime_manifest(name) => {}
+        _ => anyhow::bail!(
+            "unsupported LTX-2.5 checkpoint '{model_name}'; supported packs: {}, {}, {}, {}, {}, {}. NVFP4 LTX-2.5 packs require a Blackwell CUDA kernel and are not supported by this runtime",
+            mold_core::ltx25_manifest::DEV,
+            mold_core::ltx25_manifest::DEV_CONV,
+            mold_core::ltx25_manifest::DEV_INT8_CONV,
+            mold_core::ltx25_manifest::DISTILLED,
+            mold_core::ltx25_manifest::DISTILLED_CONV,
+            mold_core::ltx25_manifest::DISTILLED_INT8_CONV,
+        ),
+    }
+    let gemma = paths.text_encoder_files.first().ok_or_else(|| {
+        anyhow::anyhow!("LTX-2.5 requires its matching packed Gemma 4 text encoder")
+    })?;
+    mold_core::ltx25_probe::validate_ltx25_transformer_gemma(&paths.transformer, gemma)
+        .map_err(anyhow::Error::from)?;
+    mold_core::ltx25_probe::probe_ltx25_video_vae(&paths.vae)
+        .map(|_| ())
+        .map_err(anyhow::Error::from)
 }
 
 /// Create an engine from scheduler-frozen construction inputs.
@@ -749,12 +800,31 @@ where
                 )))
             }
         }
-        family if family == mold_core::ltx25_manifest::FAMILY => {
-            anyhow::bail!(
-                "LTX-2.5 assets are download-only until the native split-pack runtime is implemented"
-            )
-        }
         "ltx2" | "ltx-2" | "ltx2.3" => {
+            if mold_core::ltx25_manifest::is_contract_manifest(&model_name) {
+                validate_ltx25_runtime_paths(&model_name, &paths)?;
+                let split_pack = mold_core::ltx25_manifest::Ltx25ModelPaths::resolve_in(
+                    &frozen.artifact_root,
+                    &model_name,
+                )
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "LTX-2.5 split-pack paths are incomplete for '{model_name}'"
+                    )
+                })?;
+                split_pack.qualify().map_err(anyhow::Error::from)?;
+                return Ok(boxed_inference_engine(
+                    Ltx2Engine::new_with_gemma_variant(
+                        model_name,
+                        paths,
+                        load_strategy,
+                        gpu_ordinal,
+                        frozen.ltx2_gemma_variant.clone(),
+                    )
+                    .with_duration_head_path(split_pack.duration_head)
+                    .with_audio_components_path(split_pack.audio_vae),
+                ));
+            }
             if is_ltx2_native_single_file(&paths) {
                 // Civitai single-file dispatch. Combined checkpoints use
                 // `vae.*`; transformer-only checkpoints use `paths.vae`.
@@ -996,22 +1066,32 @@ mod tests {
     }
 
     #[test]
-    fn ltx25_contract_family_cannot_reach_the_ltx23_engine() {
-        let mut frozen =
-            FrozenEngineConfig::resolve(mold_core::ltx25_manifest::DISTILLED, &Config::default());
-        frozen.family = mold_core::ltx25_manifest::FAMILY.to_string();
-        let error = create_engine_with_frozen_config(
-            mold_core::ltx25_manifest::DISTILLED.into(),
-            dummy_paths(),
-            &frozen,
-            LoadStrategy::Sequential,
-            0,
-            false,
-            None,
-        )
-        .err()
-        .expect("Phase 1 LTX-2.5 assets must remain download-only");
-        assert!(error.to_string().contains("download-only"), "{error}");
+    fn ltx25_contract_family_requires_its_packed_gemma4_encoder() {
+        let error =
+            validate_ltx25_runtime_paths(mold_core::ltx25_manifest::DISTILLED_CONV, &dummy_paths())
+                .expect_err("incomplete LTX-2.5 split pack must fail before engine construction");
+        assert!(error.to_string().contains("packed Gemma 4"), "{error}");
+    }
+
+    #[test]
+    fn ltx25_diffusion_vae_variant_reaches_component_validation() {
+        let error =
+            validate_ltx25_runtime_paths(mold_core::ltx25_manifest::DISTILLED, &dummy_paths())
+                .expect_err("dummy paths must fail component validation");
+        assert!(error.to_string().contains("packed Gemma 4"), "{error}");
+    }
+
+    #[test]
+    fn ltx25_unknown_quantization_fails_with_supported_model_names() {
+        let error =
+            validate_ltx25_runtime_paths("ltx-2.5-22b-distilled:nvfp4-conv", &dummy_paths())
+                .expect_err("an unsupported quantization must fail before probing its files");
+        let message = error.to_string();
+        assert!(message.contains("NVFP4 LTX-2.5"), "{message}");
+        assert!(
+            message.contains(mold_core::ltx25_manifest::DISTILLED_INT8_CONV),
+            "{message}"
+        );
     }
 
     #[test]

@@ -1174,6 +1174,9 @@ mod tests {
             source_image: None,
             generation_profile: None,
             supports_identity: None,
+            supports_duration_prediction: None,
+            runtime_ready: None,
+            runtime_readiness_error: None,
         }];
         let embed = format_model_list(&models);
         assert!(embed.description.contains("**FLUX**"));
@@ -1219,6 +1222,9 @@ mod tests {
                 source_image: None,
                 generation_profile: None,
                 supports_identity: None,
+                supports_duration_prediction: None,
+                runtime_ready: None,
+                runtime_readiness_error: None,
             },
             ModelInfoExtended {
                 runtime_available: None,
@@ -1254,6 +1260,9 @@ mod tests {
                 source_image: None,
                 generation_profile: None,
                 supports_identity: None,
+                supports_duration_prediction: None,
+                runtime_ready: None,
+                runtime_readiness_error: None,
             },
             ModelInfoExtended {
                 runtime_available: None,
@@ -1289,6 +1298,9 @@ mod tests {
                 source_image: None,
                 generation_profile: None,
                 supports_identity: None,
+                supports_duration_prediction: None,
+                runtime_ready: None,
+                runtime_readiness_error: None,
             },
         ];
         let embed = format_model_list(&models);

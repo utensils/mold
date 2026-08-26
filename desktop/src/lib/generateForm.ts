@@ -239,6 +239,10 @@ export interface GenerateForm {
   loras: FormLora[];
   // Video families (ltx-video / ltx2).
   frames: number;
+  /** Omit frames so a qualified LTX-2.5 duration head chooses the clip length. */
+  predictDuration: boolean;
+  /** Selected host/model positively advertised duration-head readiness. */
+  durationPredictionSupported: boolean;
   fps: number;
   enableAudio: boolean;
   // LTX-2 advanced video (ltx2 only). All optional-safe: null / [] defaults so
@@ -325,6 +329,8 @@ export function newGenerateForm(): GenerateForm {
     controlScale: 1.0,
     loras: [],
     frames: 97,
+    predictDuration: false,
+    durationPredictionSupported: false,
     fps: 24,
     enableAudio: false,
     sourceVideo: null,
@@ -400,6 +406,7 @@ export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
   form.steps = m.default_steps;
   form.guidance = m.default_guidance;
   form.guidanceCapabilities = m.guidance_capabilities ?? null;
+  form.predictDuration = false;
   if (isMinimaxH3Family(m.family)) {
     form.frames = m.default_frames ?? MINIMAX_H3_REVIEWED_COMPACT_FRAMES;
   } else if (m.default_frames != null) {
@@ -511,6 +518,9 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
   form.model = m.name;
   form.family = m.family;
   form.sourceImageCapability = m.source_image ?? null;
+  form.durationPredictionSupported =
+    m.supports_duration_prediction === true && m.runtime_ready !== false;
+  if (!form.durationPredictionSupported) form.predictDuration = false;
   form.extendDefaultOverlapFrames = m.extend_default_overlap_frames ?? null;
   // #787: a Negative field still showing the previous model's advertised
   // default follows the new model (that is also how the default first
@@ -1010,7 +1020,9 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   if (!caps.supportsVideo && form.upscaleModel) req.upscale_model = form.upscaleModel;
 
   if (caps.supportsVideo) {
-    req.frames = form.frames;
+    if (!(form.predictDuration && form.durationPredictionSupported)) {
+      req.frames = form.frames;
+    }
     req.fps = form.fps;
     if (caps.supportsAudio) req.enable_audio = form.enableAudio;
   }
@@ -1252,6 +1264,11 @@ export function applyMetadataToForm(
   // Video params (`video_frames`/`video_fps` are legacy desktop aliases).
   const frames = metadata.frames ?? metadata.video_frames;
   if (frames != null) form.frames = frames;
+  // Preserve authored provenance even when Library reuse happens before the
+  // inventory row arrives. Request building remains fail-closed against
+  // `durationPredictionSupported`, and the later capability reconcile either
+  // validates this opt-in or clears it.
+  form.predictDuration = metadata.duration_prediction_requested === true;
   const fps = metadata.fps ?? metadata.video_fps;
   if (fps != null) form.fps = fps;
   if (metadata.enable_audio != null) form.enableAudio = metadata.enable_audio;
@@ -1404,6 +1421,10 @@ export function applyRequestToForm(
       .map((lora) => cameraMotionFromLoraPath(lora.path))
       .find((value): value is string => value !== null) ?? null;
   form.frames = request.frames ?? form.frames;
+  form.predictDuration =
+    request.frames == null &&
+    request.model.startsWith("ltx-2.5") &&
+    form.durationPredictionSupported;
   form.fps = request.fps ?? form.fps;
   form.enableAudio = request.enable_audio ?? false;
   form.audioFile = request.audio_file

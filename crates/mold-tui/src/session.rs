@@ -702,6 +702,8 @@ mod tests {
             id_start_step: mold_core::identity::ID_START_STEP_DEFAULT,
             strength: 0.6,
             mask_image_path: None,
+            predict_duration: false,
+            duration_prediction_supported: false,
             frames: 25,
             fps: 24,
             pipeline: None,

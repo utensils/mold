@@ -339,7 +339,7 @@ mold run ltx-video-0.9.6-distilled:bf16 "a waterfall" --frames 9 --format webp -
 
 **`--output` extensions are authoritative for video.** A `.gif` / `.png` / `.apng` / `.webp` / `.mp4` name outranks the family's container default, and an extension this build cannot encode (`.mp4` without the `mp4` feature, `.webp` without `webp`) is refused before any weight is read instead of being written with another container's bytes. A raster or audio extension on a video render is refused the same way, an explicit `--format` that disagrees with the filename is reported rather than silently applied, and `--output -` (stdout) claims no extension so it keeps the resolved container.
 
-### Joint Audio-Video Generation (LTX-2 / LTX-2.3)
+### Joint Audio-Video Generation (LTX-2 / LTX-2.3 / LTX-2.5)
 
 Generate synchronized MP4 clips with the LTX-2 family. This family defaults to
 MP4 output and exposes audio/video-specific controls.
@@ -347,6 +347,10 @@ MP4 output and exposes audio/video-specific controls.
 ```bash
 # Fast default joint audio-video generation
 mold run ltx-2-19b-distilled:fp8 "rain on a neon taxi window" --frames 97 --format mp4
+
+# LTX-2.5 defaults to the smaller distilled INT8 ConvRot split pack
+mold run ltx-2.5-22b-distilled "a complete product reveal" \
+  --predict-duration --fps 24 --audio --format mp4
 
 # Audio-to-video
 mold run ltx-2-19b-distilled:fp8 "paper sculpture reacting to music" --audio-file cello.wav
@@ -394,7 +398,7 @@ default renders hiss here. Only the `audio_*` half of the checkpoint is loaded,
 so it fits a 24 GB card without block streaming. Audio prints appear in the
 gallery with a rendered waveform tile and an **Audio** kind filter.
 
-**Models:** `ltx-2-19b-dev:fp8`, `ltx-2-19b-distilled:fp8`, `ltx-2.3-22b-dev:fp8`, `ltx-2.3-22b-distilled:fp8`
+**Models:** `ltx-2-19b-dev:fp8`, `ltx-2-19b-distilled:fp8`, `ltx-2.3-22b-dev:fp8`, `ltx-2.3-22b-distilled:fp8`, `ltx-2.5-22b-dev:{int8-conv,bf16-conv,bf16}`, `ltx-2.5-22b-distilled:{int8-conv,bf16-conv,bf16}`
 
 **Lip dub** (`--pipeline lip-dub`, or just `--ic-lora-control lipdub`, which
 selects it) re-voices an existing clip on the gated LTX-2.3 22B DubIt adapter.

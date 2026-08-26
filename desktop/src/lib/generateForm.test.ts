@@ -708,6 +708,17 @@ describe("cloneGenerateForm", () => {
 });
 
 describe("buildRequest — LTX-2 advanced video", () => {
+  it("omits frames only when the selected LTX-2.5 runtime is qualified", () => {
+    const form = ltx2Form();
+    form.frames = 97;
+    form.predictDuration = true;
+    expect(buildRequest(form).frames).toBe(97);
+
+    form.durationPredictionSupported = true;
+    expect(buildRequest(form).frames).toBeUndefined();
+    expect(buildRequest(form).fps).toBe(form.fps);
+  });
+
   it("serializes fixed distilled guidance while preserving reusable form state", () => {
     const form = ltx2Form();
     form.model = "hf:opaque/distilled-checkpoint";
@@ -1708,6 +1719,69 @@ function richImageMetadata(): OutputMetadata {
 }
 
 describe("applyMetadataToForm", () => {
+  it("restores a qualified LTX-2.5 predicted-duration print without inventing frames", () => {
+    const form = newGenerateForm();
+    const model = {
+      ...ltx2Model(),
+      name: "ltx-2.5-22b-distilled:int8-conv",
+      supports_duration_prediction: true,
+      runtime_ready: true,
+    };
+    applyMetadataToForm(
+      form,
+      {
+        prompt: "a drummer in a rainstorm",
+        model: model.name,
+        seed: 42,
+        steps: 8,
+        guidance: 1,
+        width: 768,
+        height: 512,
+        frames: 121,
+        fps: 24,
+        enable_audio: true,
+        duration_prediction_requested: true,
+      } as OutputMetadata,
+      [model],
+    );
+    expect(form.predictDuration).toBe(true);
+    expect(buildRequest(form).frames).toBeUndefined();
+    expect(buildRequest(form).enable_audio).toBe(true);
+  });
+
+  it("preserves predicted-duration provenance until a late inventory row arrives", () => {
+    const model = {
+      ...ltx2Model(),
+      name: "ltx-2.5-22b-distilled:int8-conv",
+      supports_duration_prediction: true,
+      runtime_ready: true,
+    };
+    const form = newGenerateForm();
+    applyMetadataToForm(
+      form,
+      {
+        prompt: "a drummer in a rainstorm",
+        model: model.name,
+        seed: 42,
+        steps: 8,
+        guidance: 1,
+        width: 768,
+        height: 512,
+        frames: 121,
+        fps: 24,
+        duration_prediction_requested: true,
+      } as OutputMetadata,
+      [],
+    );
+
+    expect(form.predictDuration).toBe(true);
+    expect(form.durationPredictionSupported).toBe(false);
+
+    reconcileModelCapabilities(form, model);
+    expect(form.predictDuration).toBe(true);
+    expect(buildRequest(form).frames).toBeUndefined();
+  });
+
   it("preserves canonical multiline prompts through desktop Library reuse", () => {
     const form = newGenerateForm();
     applyMetadataToForm(

@@ -886,6 +886,7 @@ pub async fn run(
     seed: Option<u64>,
     batch: u32,
     frames: Option<u32>,
+    predict_duration: bool,
     fps: Option<u32>,
     duration: Option<f64>,
     clip_frames: Option<u32>,
@@ -957,6 +958,9 @@ pub async fn run(
     let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &mut config)?;
     let family = resolve_family(&model, &config);
     let is_h3 = mold_core::minimax_h3::is_family(&family);
+    if predict_duration && !mold_core::ltx25_manifest::is_contract_manifest(&model) {
+        anyhow::bail!("--predict-duration is available only for LTX-2.5 checkpoints");
+    }
 
     h3::validate_h3_flags(h3::FlagValidation {
         family: &family,
@@ -1502,6 +1506,7 @@ pub async fn run(
         batch,
         generate::Ltx2Options {
             frames,
+            predict_duration,
             fps,
             clip_frames,
             motion_tail,

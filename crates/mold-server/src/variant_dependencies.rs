@@ -1264,10 +1264,42 @@ fn auto_gemma_tag(bf16: &[PathBuf], gguf: &[PathBuf]) -> &'static str {
 }
 
 fn materialize_gemma(
+    model_name: &str,
     preference: Option<&str>,
     paths: &ModelPaths,
     frozen: &mut mold_inference::FrozenEngineConfig,
 ) -> Result<(), String> {
+    if mold_core::ltx25_manifest::is_runtime_manifest(model_name) {
+        let packed = paths
+            .text_encoder_files
+            .first()
+            .filter(|path| path.is_file())
+            .cloned()
+            .ok_or_else(|| {
+                "LTX-2.5 requires its installed packed Gemma 4 safetensors encoder".to_string()
+            })?;
+        if preference.is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "q4" | "gguf" | "q4_gguf"
+            )
+        }) {
+            return Err(
+                "LTX-2.5 requires its matching packed Gemma 4 encoder; a Q4 Gemma 3 override is incompatible"
+                    .to_string(),
+            );
+        }
+        frozen.ltx2_gemma_variant = Some(
+            if model_name.contains(":int8-conv") {
+                "int8"
+            } else {
+                "bf16"
+            }
+            .to_string(),
+        );
+        frozen.selected_gemma_paths = vec![packed];
+        return Ok(());
+    }
     // Every built-in runnable LTX-2 manifest carries the five verified Gemma
     // BF16 shards as TextEncoder files (guarded by the manifest contract
     // test). Catalog companions must establish the same complete local root
@@ -1453,10 +1485,14 @@ pub(crate) async fn prepare_inputs_for_devices(
         // matching it, so this must too — otherwise `AUTO` or ` auto ` selects
         // automatically and then never replans. The arms above compare the raw
         // string and carry the same latent gap.
-        "ltx2" | "ltx-2" | "ltx2.3" => base.ltx2_gemma_variant.as_deref().is_none_or(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            value.is_empty() || value == "auto"
-        }),
+        "ltx2" | "ltx-2" | "ltx2.3"
+            if !mold_core::ltx25_manifest::is_runtime_manifest(&request.model) =>
+        {
+            base.ltx2_gemma_variant.as_deref().is_none_or(|value| {
+                let value = value.trim().to_ascii_lowercase();
+                value.is_empty() || value == "auto"
+            })
+        }
         _ => false,
     };
 
@@ -1528,6 +1564,7 @@ pub(crate) async fn prepare_inputs_for_devices(
                 .await
             }
             "ltx2" | "ltx-2" | "ltx2.3" => materialize_gemma(
+                &request.model,
                 base.ltx2_gemma_variant.as_deref(),
                 &selected_paths,
                 &mut frozen,
@@ -3823,13 +3860,59 @@ mod tests {
             "ltx-2-19b-distilled:fp8",
             &Config::default(),
         );
-        materialize_gemma(None, &paths, &mut frozen).unwrap();
+        materialize_gemma("ltx-2.3-22b-distilled:bf16", None, &paths, &mut frozen).unwrap();
         assert_eq!(frozen.ltx2_gemma_variant.as_deref(), Some("bf16"));
         assert_eq!(frozen.selected_gemma_paths, expected);
 
         let mut q4 = frozen.clone();
-        let error = materialize_gemma(Some("q4"), &paths, &mut q4).unwrap_err();
+        let error = materialize_gemma("ltx-2.3-22b-distilled:bf16", Some("q4"), &paths, &mut q4)
+            .unwrap_err();
         assert!(error.contains("q4 encoder is not locally available"));
+    }
+
+    #[test]
+    fn ltx25_materializes_only_its_packed_gemma4_encoder() {
+        let root = TempDir::new().unwrap();
+        let packed = root
+            .path()
+            .join("gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors");
+        std::fs::write(&packed, b"packed weights and tokenizer").unwrap();
+        let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
+            transformer: root.path().join("transformer.safetensors"),
+            transformer_shards: Vec::new(),
+            vae: root.path().join("vae.safetensors"),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![packed.clone()],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let mut frozen = mold_inference::FrozenEngineConfig::resolve(
+            "ltx-2.5-22b-distilled:int8-conv",
+            &Config::default(),
+        );
+
+        materialize_gemma("ltx-2.5-22b-distilled:int8-conv", None, &paths, &mut frozen).unwrap();
+        assert_eq!(frozen.ltx2_gemma_variant.as_deref(), Some("int8"));
+        assert_eq!(frozen.selected_gemma_paths, vec![packed]);
+
+        let error = materialize_gemma(
+            "ltx-2.5-22b-distilled:int8-conv",
+            Some("q4"),
+            &paths,
+            &mut frozen,
+        )
+        .unwrap_err();
+        assert!(error.contains("Q4 Gemma 3 override is incompatible"));
     }
 
     #[test]
@@ -3863,7 +3946,13 @@ mod tests {
         };
         let mut frozen = mold_inference::FrozenEngineConfig::resolve("ltx-2", &Config::default());
 
-        let error = materialize_gemma(Some("bf16"), &paths, &mut frozen).unwrap_err();
+        let error = materialize_gemma(
+            "ltx-2.3-22b-distilled:bf16",
+            Some("bf16"),
+            &paths,
+            &mut frozen,
+        )
+        .unwrap_err();
         assert!(error.contains("incomplete Gemma BF16 shard set"), "{error}");
 
         std::fs::write(
@@ -3871,7 +3960,13 @@ mod tests {
             b"inconsistent",
         )
         .unwrap();
-        let error = materialize_gemma(Some("bf16"), &paths, &mut frozen).unwrap_err();
+        let error = materialize_gemma(
+            "ltx-2.3-22b-distilled:bf16",
+            Some("bf16"),
+            &paths,
+            &mut frozen,
+        )
+        .unwrap_err();
         assert!(
             error.contains("inconsistent Gemma BF16 shard totals"),
             "{error}"
@@ -3906,7 +4001,13 @@ mod tests {
         };
         let mut frozen = mold_inference::FrozenEngineConfig::resolve("ltx-2", &Config::default());
 
-        materialize_gemma(Some("bf16"), &paths, &mut frozen).unwrap();
+        materialize_gemma(
+            "ltx-2.3-22b-distilled:bf16",
+            Some("bf16"),
+            &paths,
+            &mut frozen,
+        )
+        .unwrap();
         assert_eq!(frozen.selected_gemma_paths, vec![weights]);
     }
 

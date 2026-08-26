@@ -1089,6 +1089,11 @@ fn h3_model_row(
             mold_core::minimax_h3::FAMILY,
             model,
         ),
+        // These readiness fields describe the split LTX-2.5 runtime contract;
+        // H3 remains executable through its own authenticated bridge.
+        supports_duration_prediction: None,
+        runtime_ready: None,
+        runtime_readiness_error: None,
         supports_identity: Some(false),
         supports_extend: Some(false),
         extend_default_overlap_frames: None,

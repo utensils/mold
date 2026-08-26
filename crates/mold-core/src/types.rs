@@ -2331,6 +2331,12 @@ pub struct OutputMetadata {
     /// override. Absent on legacy metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline_requested: Option<bool>,
+    /// Whether the authored request deliberately omitted `frames` so an
+    /// LTX-2.5 duration head could choose the clip length. `frames` is later
+    /// replaced with the realized output shape, so this additive bit keeps
+    /// request provenance available to Library reuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_prediction_requested: Option<bool>,
     /// Persisted terminal runtime provenance for pipelines that expose an
     /// exact additive SHA-256 identity. Absent for legacy and other outputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2558,6 +2564,10 @@ impl OutputMetadata {
                 .then_some(req.effective_extend_overlap_frames()),
             pipeline: req.pipeline,
             pipeline_requested: Some(req.pipeline.is_some()),
+            duration_prediction_requested: req
+                .model
+                .starts_with("ltx-2.5")
+                .then_some(req.frames.is_none()),
             pipeline_provenance_sha256: None,
             source_preprocessing: None,
             ic_lora_control: req.ic_lora_control.clone(),
@@ -2827,6 +2837,19 @@ pub struct ModelInfoExtended {
     /// compatibility with older servers that only advertised family support.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_audio: Option<bool>,
+    /// Whether omitting `GenerateRequest.frames` asks this concrete model to
+    /// run its qualified prompt-conditioned duration head. Absent on older
+    /// servers and false for models without that exact component contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_duration_prediction: Option<bool>,
+    /// Whether every component required by this concrete split pack is
+    /// present and header-qualified on this host. LTX-2.5 publishes this even
+    /// for incomplete rows so automatic routing can refuse them before queueing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_ready: Option<bool>,
+    /// Human-readable reason paired with `runtime_ready == false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_readiness_error: Option<String>,
     /// Whether this concrete model can accept a face-identity reference
     /// (`GenerateRequest.id_image`). Derived from the same generation-profile
     /// authority as `capabilities.supports_identity`, never a second
@@ -3098,6 +3121,9 @@ mod model_display_name_tests {
 
     fn model(name: &str, display_name: Option<&str>, description: &str) -> ModelInfoExtended {
         ModelInfoExtended {
+            supports_duration_prediction: None,
+            runtime_ready: None,
+            runtime_readiness_error: None,
             runtime_available: None,
             runtime_unavailable_reason: None,
             info: ModelInfo {
@@ -4723,6 +4749,42 @@ mod tests {
         assert!(legacy.pipeline_provenance_sha256.is_none());
     }
 
+    #[test]
+    fn predicted_duration_provenance_survives_video_finalization() {
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a drummer in rain","model":"ltx-2.5-22b-distilled:int8-conv","width":768,"height":512,"steps":8}"#,
+        )
+        .unwrap();
+        let video = VideoData {
+            data: vec![1],
+            format: OutputFormat::Mp4,
+            width: 768,
+            height: 512,
+            frames: 121,
+            fps: 24,
+            pipeline: Some(Ltx2PipelineMode::Distilled),
+            pipeline_provenance_sha256: None,
+            source_preprocessing: None,
+            thumbnail: vec![2],
+            gif_preview: Vec::new(),
+            has_audio: true,
+            duration_ms: Some(5_041),
+            audio_sample_rate: Some(48_000),
+            audio_channels: Some(2),
+        };
+        let mut metadata = OutputMetadata::from_generate_request(&request, 42, None, "test");
+
+        assert_eq!(metadata.frames, None);
+        assert_eq!(metadata.duration_prediction_requested, Some(true));
+
+        metadata.apply_video_output(&video);
+
+        assert_eq!(metadata.frames, Some(121));
+        assert_eq!(metadata.duration_prediction_requested, Some(true));
+        let encoded = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(encoded["duration_prediction_requested"], true);
+    }
+
     // ── GET /api/queue wire types ────────────────────────────────────────
 
     #[test]
@@ -4953,6 +5015,36 @@ mod tests {
         assert_eq!(back.embed_metadata, req.embed_metadata);
         assert_eq!(back.scheduler, None);
         assert_eq!(back.ic_lora_control.as_deref(), Some("union"));
+    }
+
+    #[test]
+    fn ltx25_http_duration_and_audio_contract_round_trips() {
+        let predicted = serde_json::json!({
+            "prompt": "a drummer in a rainstorm",
+            "model": "ltx-2.5-22b-distilled:int8-conv",
+            "width": 768,
+            "height": 512,
+            "steps": 8,
+            "batch_size": 1,
+            "fps": 24,
+            "enable_audio": true
+        });
+        let predicted_request: GenerateRequest = serde_json::from_value(predicted).unwrap();
+        assert_eq!(predicted_request.frames, None);
+        assert_eq!(predicted_request.fps, Some(24));
+        assert_eq!(predicted_request.enable_audio, Some(true));
+        let predicted_wire = serde_json::to_value(&predicted_request).unwrap();
+        assert!(predicted_wire.get("frames").is_none());
+        assert_eq!(predicted_wire["enable_audio"], true);
+
+        let mut explicit_wire = predicted_wire;
+        explicit_wire
+            .as_object_mut()
+            .unwrap()
+            .insert("frames".to_string(), serde_json::json!(97));
+        let explicit_request: GenerateRequest = serde_json::from_value(explicit_wire).unwrap();
+        assert_eq!(explicit_request.frames, Some(97));
+        assert_eq!(explicit_request.enable_audio, Some(true));
     }
 
     #[test]

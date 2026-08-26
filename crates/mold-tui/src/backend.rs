@@ -1197,7 +1197,9 @@ fn build_request(
         // Image recipes reject video timing even when the values happen to
         // match the TUI's hidden defaults. Only put these fields on the wire
         // when the selected family exposes the Frames/FPS controls.
-        frames: supports_video.then_some(params.frames),
+        frames: (supports_video
+            && !(params.predict_duration && params.duration_prediction_supported))
+            .then_some(params.frames),
         fps: supports_video.then_some(params.fps),
         upscale_model: params.upscale_model.clone(),
         gif_preview: true,
@@ -1652,6 +1654,23 @@ mod tests {
         let image = build_request(&params, "p", &None).unwrap();
         assert_eq!(image.frames, None);
         assert_eq!(image.fps, None);
+    }
+
+    #[test]
+    fn build_request_omits_frames_only_for_qualified_duration_prediction() {
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        params.model = mold_core::ltx25_manifest::DISTILLED_INT8_CONV.to_string();
+        params.frames = 97;
+        params.predict_duration = true;
+
+        let unqualified = build_request(&params, "p", &None).unwrap();
+        assert_eq!(unqualified.frames, Some(97));
+
+        params.duration_prediction_supported = true;
+        let qualified = build_request(&params, "p", &None).unwrap();
+        assert_eq!(qualified.frames, None);
+        assert_eq!(qualified.fps, Some(params.fps));
     }
 
     /// The four identity fields ship as one group. A request carrying a knob

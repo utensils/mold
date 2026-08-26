@@ -66,10 +66,15 @@ mold serve
 Models download automatically on first use. Generated media is saved locally
 with prompt, model, seed, and generation metadata.
 
+LTX-2.5 uses a gated split pack. Its bare distilled alias defaults to the
+smaller INT8 model; BF16 and both video VAE choices remain available. See the
+[LTX-2.5 guide](docs/ltx-2.5.md) for model sizes, duration prediction,
+multishot, license terms, and deferred features.
+
 ## What it supports
 
 - **Models**: FLUX.1, Flux.2 Klein/Dev, SD 1.5, SDXL, SD 3.5, Z-Image,
-  Qwen-Image, Qwen-Image-Edit, Wuerstchen v2, LTX Video, LTX-2 / LTX-2.3,
+  Qwen-Image, Qwen-Image-Edit, Wuerstchen v2, LTX Video, LTX-2 / LTX-2.3 / LTX-2.5,
   Wan 2.1/2.2, and MiniMax H3 — see the
   [model catalog](https://utensils.io/mold/models/) for sizes, VRAM needs, and
   settings

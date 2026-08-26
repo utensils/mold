@@ -222,6 +222,7 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
             primary.is_some(),
         ));
         annotate_audio_capabilities(&mut catalog, &config);
+        annotate_ltx25_runtime_readiness(&mut catalog, &config);
         annotate_source_image_capabilities(&mut catalog, &config);
         synchronize_generation_profile_capabilities(&mut catalog);
         retain_deliverable_generation_profiles(&mut catalog);
@@ -239,6 +240,7 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
         snapshot.is_loaded,
     ));
     annotate_audio_capabilities(&mut catalog, &config);
+    annotate_ltx25_runtime_readiness(&mut catalog, &config);
     // CPU-fallback / maintenance runtimes (no workers) advertise the same
     // conditioning contracts: classification reads safetensors headers, not
     // a GPU.
@@ -246,6 +248,41 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
     synchronize_generation_profile_capabilities(&mut catalog);
     retain_deliverable_generation_profiles(&mut catalog);
     catalog
+}
+
+fn annotate_ltx25_runtime_readiness(catalog: &mut [ModelInfoExtended], config: &Config) {
+    for entry in catalog {
+        if !mold_core::ltx25_manifest::is_contract_manifest(&entry.info.name) {
+            continue;
+        }
+        if !entry.downloaded {
+            entry.runtime_ready = Some(false);
+            entry.runtime_readiness_error = Some(
+                "LTX-2.5 split pack is incomplete on this host; pull or repair the model before generation."
+                    .to_string(),
+            );
+            entry.supports_duration_prediction = Some(false);
+            continue;
+        }
+        let qualification =
+            mold_core::ltx25_manifest::Ltx25ModelPaths::resolve(config, &entry.info.name)
+                .ok_or_else(|| "LTX-2.5 split component graph could not be resolved.".to_string())
+                .and_then(|paths| paths.qualify().map_err(|error| error.to_string()));
+        match qualification {
+            Ok(()) => {
+                entry.runtime_ready = Some(true);
+                entry.runtime_readiness_error = None;
+                entry.supports_duration_prediction = Some(true);
+            }
+            Err(error) => {
+                entry.runtime_ready = Some(false);
+                entry.runtime_readiness_error = Some(format!(
+                    "LTX-2.5 split pack failed component qualification: {error}"
+                ));
+                entry.supports_duration_prediction = Some(false);
+            }
+        }
+    }
 }
 
 /// Drop rows whose profile lost every recipe to this binary's delivery
@@ -807,6 +844,9 @@ fn installed_catalog_models(
         let resolution = mold_core::catalog::resolution_defaults_from_profile(&generation_profile);
         out.push(ModelInfoExtended {
             downloaded: true,
+            supports_duration_prediction: None,
+            runtime_ready: None,
+            runtime_readiness_error: None,
             // Sidecar-installed catalog rows are never H3 manifest
             // identities; H3 is manifest-pinned only.
             runtime_available: None,
@@ -2192,6 +2232,30 @@ mod tests {
     use std::path::PathBuf;
 
     const GB: u64 = 1_000_000_000;
+
+    #[test]
+    fn ltx25_incomplete_pack_is_not_ready_or_duration_capable() {
+        let config = Config::default();
+        let mut catalog = build_model_catalog(&config, None, false);
+        let row = catalog
+            .iter_mut()
+            .find(|entry| mold_core::ltx25_manifest::is_contract_manifest(&entry.info.name))
+            .expect("LTX-2.5 manifest row");
+        row.downloaded = false;
+
+        annotate_ltx25_runtime_readiness(&mut catalog, &config);
+
+        let row = catalog
+            .iter()
+            .find(|entry| mold_core::ltx25_manifest::is_contract_manifest(&entry.info.name))
+            .unwrap();
+        assert_eq!(row.runtime_ready, Some(false));
+        assert_eq!(row.supports_duration_prediction, Some(false));
+        assert!(row
+            .runtime_readiness_error
+            .as_deref()
+            .is_some_and(|reason| reason.contains("incomplete")));
+    }
 
     fn neutral_catalog_intent() -> mold_catalog::synthesis::CatalogModelIntent {
         mold_catalog::synthesis::CatalogModelIntent {

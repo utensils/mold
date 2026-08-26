@@ -1,13 +1,52 @@
 use anyhow::{Context, Result};
 use candle_core::{safetensors::MmapedSafetensors, DType, Device, Shape, Tensor};
 use candle_nn::var_builder::SimpleBackend;
+use rayon::prelude::*;
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::Mutex;
 
 use super::nvfp4::remap_ltx2_transformer_key;
 
 const CONVROT_GROUP_SIZE: usize = 256;
+
+#[derive(Debug, Clone, Copy)]
+enum KeySpace {
+    Ltx2Transformer,
+    Identity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuantizedFormat {
+    ConvRotW4A4 { group_size: usize },
+    Int8Tensorwise { convrot: bool, group_size: usize },
+}
+
+fn parse_quantized_format(config: &serde_json::Value) -> Result<QuantizedFormat> {
+    let params = config.get("params");
+    let integer = |name: &str, default: usize| {
+        config
+            .get(name)
+            .or_else(|| params.and_then(|params| params.get(name)))
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(default)
+    };
+    match config.get("format").and_then(serde_json::Value::as_str) {
+        Some("convrot_w4a4") => Ok(QuantizedFormat::ConvRotW4A4 {
+            group_size: integer("convrot_groupsize", CONVROT_GROUP_SIZE),
+        }),
+        Some("int8_tensorwise") => Ok(QuantizedFormat::Int8Tensorwise {
+            convrot: config
+                .get("convrot")
+                .or_else(|| params.and_then(|params| params.get("convrot")))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            group_size: integer("convrot_groupsize", CONVROT_GROUP_SIZE),
+        }),
+        Some(other) => anyhow::bail!("unsupported Comfy quantization format '{other}'"),
+        None => anyhow::bail!("Comfy quantization marker has no format"),
+    }
+}
 
 pub(crate) fn checkpoint_is_convrot_w4a4(path: &Path) -> bool {
     let Ok(st) = (unsafe { MmapedSafetensors::new(path) }) else {
@@ -26,30 +65,68 @@ pub(crate) fn checkpoint_is_convrot_w4a4(path: &Path) -> bool {
 pub(super) struct Ltx2ConvRotBackend {
     st: MmapedSafetensors,
     keys: BTreeSet<String>,
-    quantized_bases: BTreeSet<String>,
-    cpu_cache: Mutex<HashMap<String, Tensor>>,
+    quantized: HashMap<String, QuantizedFormat>,
+    key_space: KeySpace,
 }
 
 impl Ltx2ConvRotBackend {
     pub(super) fn from_path(path: &Path) -> Result<Self> {
+        Self::from_path_with_key_space(path, KeySpace::Ltx2Transformer)
+    }
+
+    pub(super) fn from_flattened_path(path: &Path) -> Result<Self> {
+        Self::from_path_with_key_space(path, KeySpace::Identity)
+    }
+
+    fn from_path_with_key_space(path: &Path, key_space: KeySpace) -> Result<Self> {
         let st = unsafe { MmapedSafetensors::new(path) }
             .with_context(|| format!("mmap LTX-2 ConvRot checkpoint at {}", path.display()))?;
         let keys: BTreeSet<String> = st.tensors().into_iter().map(|(key, _)| key).collect();
-        let quantized_bases = keys
+        let mut quantized = keys
             .iter()
             .filter_map(|key| key.strip_suffix(".weight_scale"))
             .filter(|base| keys.contains(&format!("{base}.weight")))
-            .map(str::to_string)
-            .collect();
+            .map(|base| {
+                (
+                    base.to_string(),
+                    QuantizedFormat::ConvRotW4A4 {
+                        group_size: CONVROT_GROUP_SIZE,
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        for marker in keys.iter().filter(|key| key.ends_with(".comfy_quant")) {
+            let base = marker.trim_end_matches(".comfy_quant");
+            let bytes = st.get(marker)?.data();
+            let config: serde_json::Value = serde_json::from_slice(bytes).with_context(|| {
+                format!(
+                    "parse Comfy quantization marker {marker} in {}",
+                    path.display()
+                )
+            })?;
+            let format = parse_quantized_format(&config).with_context(|| {
+                format!(
+                    "invalid Comfy quantization marker {marker} in {}",
+                    path.display()
+                )
+            })?;
+            quantized.insert(base.to_string(), format);
+        }
         Ok(Self {
             st,
             keys,
-            quantized_bases,
-            cpu_cache: Mutex::new(HashMap::new()),
+            quantized,
+            key_space,
         })
     }
 
     fn source_key(&self, logical_name: &str) -> Option<String> {
+        if matches!(self.key_space, KeySpace::Identity) {
+            return self
+                .keys
+                .contains(logical_name)
+                .then(|| logical_name.to_string());
+        }
         let prefixed = remap_ltx2_transformer_key(logical_name);
         if self.keys.contains(&prefixed) {
             return Some(prefixed);
@@ -61,44 +138,30 @@ impl Ltx2ConvRotBackend {
     fn is_quantized_weight(&self, source_key: &str) -> bool {
         source_key
             .strip_suffix(".weight")
-            .is_some_and(|base| self.quantized_bases.contains(base))
+            .is_some_and(|base| self.quantized.contains_key(base))
     }
 
-    fn dequantize_weight(&self, source_key: &str) -> candle_core::Result<Tensor> {
-        if let Some(cached) = self
-            .cpu_cache
-            .lock()
-            .map_err(|_| candle_core::Error::Msg("LTX-2 ConvRot cache poisoned".into()))?
-            .get(source_key)
-            .cloned()
-        {
-            return Ok(cached);
-        }
-
+    fn dequantize_weight(&self, source_key: &str, dev: &Device) -> candle_core::Result<Tensor> {
         let base = source_key.strip_suffix(".weight").ok_or_else(|| {
             candle_core::Error::Msg(format!("ConvRot source is not a weight: {source_key}"))
         })?;
-        // Candle does not expose an I8 tensor dtype, so read the packed bytes
-        // straight from the safetensors view and interpret each byte as two
-        // signed four-bit values below.
-        let packed = self.st.get(source_key)?;
-        if format!("{:?}", packed.dtype()) != "I8" {
+        // Candle does not expose an I8 tensor dtype, so preserve the raw
+        // two's-complement bytes from the safetensors view and decode them on
+        // the host. The row loop is parallel and bounded to one dense weight;
+        // never queue whole-model Metal reconstructions from this backend.
+        let packed_view = self.st.get(source_key)?;
+        if format!("{:?}", packed_view.dtype()) != "I8" {
             return Err(candle_core::Error::Msg(format!(
                 "LTX-2 ConvRot expected I8 packed weight at {source_key}, got {:?}",
-                packed.dtype()
+                packed_view.dtype()
             )));
         }
-        let [rows, packed_cols] = packed.shape() else {
+        let [rows, packed_cols] = packed_view.shape() else {
             return Err(candle_core::Error::Msg(format!(
                 "LTX-2 ConvRot expected rank-2 packed weight at {source_key}, got {:?}",
-                packed.shape()
+                packed_view.shape()
             )));
         };
-        let packed = packed
-            .data()
-            .chunks_exact(*packed_cols)
-            .map(<[u8]>::to_vec)
-            .collect::<Vec<_>>();
         let scales = self
             .st
             .load(&format!("{base}.weight_scale"), &Device::Cpu)?
@@ -106,22 +169,59 @@ impl Ltx2ConvRotBackend {
             .flatten_all()?
             .to_vec1::<f32>()?;
         let rows = *rows;
-        let cols = packed.first().map_or(0, |row| row.len() * 2);
-        if scales.len() != rows {
+        if scales.len() != 1 && scales.len() != rows {
             return Err(candle_core::Error::Msg(format!(
-                "LTX-2 ConvRot scale count mismatch for {source_key}: {} rows, {} scales",
+                "LTX-2 Comfy quant scale count mismatch for {source_key}: {} rows, {} scales",
                 rows,
                 scales.len()
             )));
         }
-        let values = dequantize_convrot_rows(&packed, &scales, CONVROT_GROUP_SIZE)?;
-        // Cache the reconstructed model precision, not F32: keeping all
-        // streamed 22B weights as F32 would roughly double host residency.
+        let format = self.quantized.get(base).ok_or_else(|| {
+            candle_core::Error::Msg(format!(
+                "missing Comfy quantization format for {source_key}"
+            ))
+        })?;
+        if matches!(
+            format,
+            QuantizedFormat::Int8Tensorwise {
+                convrot: true,
+                group_size: CONVROT_GROUP_SIZE
+            }
+        ) && dev.is_metal()
+        {
+            let packed = Tensor::from_vec(packed_view.data().to_vec(), (rows, *packed_cols), dev)?;
+            let scale_count = scales.len();
+            let scales = Tensor::from_vec(scales, scale_count, dev)?;
+            let output = candle_core::convrot::dequantize_int8_convrot_256(&packed, &scales)?;
+            // Bound residency to this packed input plus its BF16 output. In
+            // particular, do not let streaming layer loads queue packed input
+            // buffers behind later command buffers after the local tensor is
+            // dropped.
+            dev.synchronize()?;
+            return Ok(output);
+        }
+        let packed = packed_view
+            .data()
+            .chunks_exact(*packed_cols)
+            .map(<[u8]>::to_vec)
+            .collect::<Vec<_>>();
+        let (values, cols) = match *format {
+            QuantizedFormat::ConvRotW4A4 { group_size } => (
+                dequantize_convrot_rows(&packed, &scales, group_size)?,
+                packed.first().map_or(0, |row| row.len() * 2),
+            ),
+            QuantizedFormat::Int8Tensorwise {
+                convrot,
+                group_size,
+            } => (
+                dequantize_int8_rows(&packed, &scales, convrot, group_size)?,
+                packed.first().map_or(0, Vec::len),
+            ),
+        };
+        // Keep only the returned model-precision tensor. Streaming callers
+        // drop each layer/block after use; retaining a backend cache would
+        // silently reconstruct the compact checkpoint into a 40+ GB model.
         let tensor = Tensor::from_vec(values, (rows, cols), &Device::Cpu)?.to_dtype(DType::BF16)?;
-        self.cpu_cache
-            .lock()
-            .map_err(|_| candle_core::Error::Msg("LTX-2 ConvRot cache poisoned".into()))?
-            .insert(source_key.to_string(), tensor.clone());
         Ok(tensor)
     }
 
@@ -130,9 +230,17 @@ impl Ltx2ConvRotBackend {
             .source_key(name)
             .unwrap_or_else(|| remap_ltx2_transformer_key(name));
         let tensor = if self.is_quantized_weight(&source_key) {
-            self.dequantize_weight(&source_key)?
+            self.dequantize_weight(&source_key, dev).map_err(|error| {
+                candle_core::Error::Msg(format!(
+                    "failed to reconstruct LTX-2 ConvRot tensor {name} from {source_key}: {error}"
+                ))
+            })?
         } else {
-            self.st.load(&source_key, &Device::Cpu)?
+            self.st.load(&source_key, &Device::Cpu).map_err(|error| {
+                candle_core::Error::Msg(format!(
+                    "failed to load LTX-2 ConvRot tensor {name} from {source_key}: {error}"
+                ))
+            })?
         };
         tensor.to_device(dev)
     }
@@ -155,22 +263,26 @@ fn dequantize_convrot_rows(
         )));
     }
     let normalization = (group_size as f32).sqrt().recip();
-    let mut output = Vec::with_capacity(packed.len() * cols);
-    for (row, scale) in packed.iter().zip(scales) {
-        let mut values = Vec::with_capacity(cols);
-        for byte in row {
-            let byte = *byte;
-            values.push(sign_extend_nibble(byte & 0x0f) as f32 * *scale);
-            values.push(sign_extend_nibble(byte >> 4) as f32 * *scale);
-        }
-        for group in values.chunks_exact_mut(group_size) {
-            hadamard4_in_place(group);
-            for value in group {
-                *value *= normalization;
+    let mut output = vec![0.0; packed.len() * cols];
+    output
+        .par_chunks_mut(cols)
+        .zip(packed.par_iter())
+        .enumerate()
+        .for_each(|(index, (values, row))| {
+            let scale = scales[if scales.len() == 1 { 0 } else { index }];
+            let (pairs, remainder) = values.as_chunks_mut::<2>();
+            debug_assert!(remainder.is_empty());
+            for (pair, byte) in pairs.iter_mut().zip(row) {
+                pair[0] = sign_extend_nibble(byte & 0x0f) as f32 * scale;
+                pair[1] = sign_extend_nibble(byte >> 4) as f32 * scale;
             }
-        }
-        output.extend(values);
-    }
+            for group in values.chunks_exact_mut(group_size) {
+                hadamard4_in_place(group);
+                for value in group {
+                    *value *= normalization;
+                }
+            }
+        });
     Ok(output)
 }
 
@@ -229,16 +341,54 @@ impl SimpleBackend for Ltx2ConvRotBackend {
     }
 
     fn contains_tensor(&self, name: &str) -> bool {
-        self.source_key(name).is_some_and(|source_key| {
-            !is_consumed_convrot_sidecar(&source_key, &self.quantized_bases)
-        })
+        self.source_key(name)
+            .is_some_and(|source_key| !is_consumed_convrot_sidecar(&source_key, &self.quantized))
     }
 }
 
-fn is_consumed_convrot_sidecar(source_key: &str, quantized_bases: &BTreeSet<String>) -> bool {
+fn dequantize_int8_rows(
+    rows: &[Vec<u8>],
+    scales: &[f32],
+    convrot: bool,
+    group_size: usize,
+) -> candle_core::Result<Vec<f32>> {
+    let cols = rows.first().map_or(0, Vec::len);
+    if convrot && cols.checked_rem(group_size) != Some(0) {
+        return Err(candle_core::Error::Msg(format!(
+            "ConvRot INT8 input width {cols} is not divisible by group size {group_size}"
+        )));
+    }
+    let normalization = (group_size as f32).sqrt().recip();
+    let mut output = vec![0.0; rows.len() * cols];
+    output
+        .par_chunks_mut(cols)
+        .zip(rows.par_iter())
+        .enumerate()
+        .for_each(|(index, (values, row))| {
+            let scale = scales[if scales.len() == 1 { 0 } else { index }];
+            for (value, byte) in values.iter_mut().zip(row) {
+                *value = (*byte as i8) as f32 * scale;
+            }
+            if convrot {
+                for group in values.chunks_exact_mut(group_size) {
+                    hadamard4_in_place(group);
+                    for value in group {
+                        *value *= normalization;
+                    }
+                }
+            }
+        });
+    Ok(output)
+}
+
+fn is_consumed_convrot_sidecar(
+    source_key: &str,
+    quantized: &HashMap<String, QuantizedFormat>,
+) -> bool {
     source_key
         .strip_suffix(".weight_scale")
-        .is_some_and(|base| quantized_bases.contains(base))
+        .or_else(|| source_key.strip_suffix(".comfy_quant"))
+        .is_some_and(|base| quantized.contains_key(base))
 }
 
 #[cfg(test)]
@@ -262,14 +412,54 @@ mod tests {
 
     #[test]
     fn row_scales_are_hidden_after_weight_reconstruction() {
-        let bases = BTreeSet::from(["transformer_blocks.1.attn1.to_q".to_string()]);
+        let bases = HashMap::from([(
+            "transformer_blocks.1.attn1.to_q".to_string(),
+            QuantizedFormat::ConvRotW4A4 { group_size: 256 },
+        )]);
         assert!(is_consumed_convrot_sidecar(
             "transformer_blocks.1.attn1.to_q.weight_scale",
+            &bases,
+        ));
+        assert!(is_consumed_convrot_sidecar(
+            "transformer_blocks.1.attn1.to_q.comfy_quant",
             &bases,
         ));
         assert!(!is_consumed_convrot_sidecar(
             "transformer_blocks.1.attn1.to_q.input_scale",
             &bases,
         ));
+    }
+
+    #[test]
+    fn int8_tensorwise_rows_dequantize_and_unrotate() {
+        let values = dequantize_int8_rows(&[vec![1, 0, 0, 0]], &[2.0], true, 4).unwrap();
+        assert_eq!(values, vec![1.0, 1.0, 1.0, -1.0]);
+        let plain = dequantize_int8_rows(&[vec![0xff, 0x02]], &[0.5], false, 256).unwrap();
+        assert_eq!(plain, vec![-0.5, 1.0]);
+    }
+
+    #[test]
+    fn comfy_markers_select_exact_convrot_layouts() {
+        assert_eq!(
+            parse_quantized_format(&serde_json::json!({
+                "format": "convrot_w4a4",
+                "params": {"convrot_groupsize": 64}
+            }))
+            .unwrap(),
+            QuantizedFormat::ConvRotW4A4 { group_size: 64 }
+        );
+        assert_eq!(
+            parse_quantized_format(&serde_json::json!({
+                "format": "int8_tensorwise",
+                "convrot": true,
+                "convrot_groupsize": 256
+            }))
+            .unwrap(),
+            QuantizedFormat::Int8Tensorwise {
+                convrot: true,
+                group_size: 256,
+            }
+        );
+        assert!(parse_quantized_format(&serde_json::json!({"format": "nvfp4"})).is_err());
     }
 }

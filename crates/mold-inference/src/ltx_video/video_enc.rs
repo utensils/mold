@@ -140,6 +140,7 @@ impl VideoMetadata {
             extend_overlap_frames: None,
             pipeline: None,
             pipeline_requested: None,
+            duration_prediction_requested: None,
             pipeline_provenance_sha256: None,
             source_preprocessing: None,
             ic_lora_control: None,

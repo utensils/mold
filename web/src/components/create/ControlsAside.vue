@@ -121,6 +121,23 @@ const resolutionWarning = computed(() => {
   return finding?.level === "warn" ? finding.message : null;
 });
 const sequenceMode = computed(() => props.output === "sequence");
+const canPredictDuration = computed(
+  () =>
+    !sequenceMode.value &&
+    props.model?.supports_duration_prediction === true &&
+    props.model.runtime_ready !== false,
+);
+const predictDuration = computed(
+  () => props.modelValue.predictDuration === true,
+);
+function setPredictDuration(value: boolean) {
+  patch({
+    predictDuration: value,
+    frames: value
+      ? null
+      : (props.modelValue.frames ?? props.model?.default_frames ?? 25),
+  });
+}
 const draft = useSequenceDraftStore();
 const showGenerateAudio = computed(() =>
   sequenceMode.value
@@ -364,7 +381,22 @@ function lockLastSeed() {
       v-if="capabilities.supportsVideo && !sequenceMode"
       class="controls__group"
     >
+      <div
+        v-if="canPredictDuration"
+        class="controls__toggle"
+        data-test="predict-duration-control"
+      >
+        <span class="controls__label controls__label--inline"
+          >Predict duration</span
+        >
+        <SwitchToggle
+          :model-value="predictDuration"
+          label="Predict duration from prompt"
+          @update:model-value="setPredictDuration"
+        />
+      </div>
       <VideoDurationSlider
+        v-if="!predictDuration || !canPredictDuration"
         :frames="modelValue.frames ?? model?.default_frames ?? 25"
         :fps="modelValue.fps ?? model?.default_fps ?? 24"
         :model="model"
@@ -376,6 +408,13 @@ function lockLastSeed() {
         :routing-request="routingRequest"
         @update:frames="patch({ frames: $event })"
       />
+      <p
+        v-else-if="canPredictDuration"
+        class="controls__hint"
+        data-test="predicted-duration-hint"
+      >
+        The host will choose 1–20 seconds from the prompt.
+      </p>
     </div>
 
     <div

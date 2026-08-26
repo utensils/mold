@@ -196,6 +196,8 @@ export function isAutomaticTarget(
 export interface RoutableModel {
   name: string;
   downloaded?: boolean;
+  /** Explicit split-pack qualification; false is never routable. */
+  runtime_ready?: boolean | null;
 }
 
 /**
@@ -211,7 +213,11 @@ export function unionModelsByName<T extends RoutableModel>(
   for (const id of hostIds) {
     for (const model of modelsByHost[id] ?? []) {
       const existing = byName.get(model.name);
-      if (!existing || (!existing.downloaded && model.downloaded))
+      if (
+        !existing ||
+        (existing.runtime_ready === false && model.runtime_ready !== false) ||
+        (!existing.downloaded && model.downloaded)
+      )
         byName.set(model.name, model);
     }
   }
@@ -227,7 +233,12 @@ export function hostIdsForModel<T extends RoutableModel>(
   return Object.entries(modelsByHost)
     .filter(([id]) => !hostIds || hostIds.includes(id))
     .filter(([, models]) =>
-      models.some((model) => model.name === name && model.downloaded),
+      models.some(
+        (model) =>
+          model.name === name &&
+          model.downloaded &&
+          model.runtime_ready !== false,
+      ),
     )
     .map(([id]) => id);
 }

@@ -4,11 +4,20 @@ use mold_core::{download, Ltx2SpatialUpscale, Ltx2TemporalUpscale, ModelPaths};
 use std::path::{Path, PathBuf};
 
 pub(crate) fn gemma_root(paths: &ModelPaths) -> Result<PathBuf> {
-    paths
+    let path = paths
         .text_encoder_files
         .first()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .ok_or_else(|| anyhow!("LTX-2 requires Gemma text encoder files to be available"))
+        .ok_or_else(|| anyhow!("LTX-2 requires Gemma text encoder files to be available"))?;
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().contains("gemma4"))
+    {
+        return Ok(path.clone());
+    }
+    path.parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow!("LTX-2 Gemma text encoder path has no parent directory"))
 }
 
 pub(crate) fn request_quantization(model_name: &str) -> Option<String> {

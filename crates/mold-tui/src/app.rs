@@ -464,6 +464,7 @@ pub enum ParamField {
     Guidance,
     Seed,
     Batch,
+    PredictDuration,
     Duration,
     // Advanced — Sampling
     Scheduler,
@@ -519,6 +520,7 @@ impl ParamField {
             Self::Guidance => "Prompt strength",
             Self::Seed => "Seed",
             Self::Batch => "Batch",
+            Self::PredictDuration => "Predict duration",
             Self::Duration => "Duration",
             Self::Format => "Format",
             Self::Scheduler => "Scheduler",
@@ -699,6 +701,10 @@ pub struct GenerateParams {
     /// First identity-conditioned denoise step; always `< steps`.
     pub id_start_step: u32,
     // Video
+    /// User opt-in to LTX-2.5's duration head. It only takes effect while the
+    /// selected server positively advertises a complete runtime pack.
+    pub predict_duration: bool,
+    pub duration_prediction_supported: bool,
     pub frames: u32,
     pub fps: u32,
     /// Explicit source-free LTX-2 video recipe. `None` lets the server select
@@ -848,6 +854,8 @@ impl GenerateParams {
             identity_image_path: None,
             id_weight: mold_core::identity::ID_WEIGHT_DEFAULT,
             id_start_step: mold_core::identity::ID_START_STEP_DEFAULT,
+            predict_duration: false,
+            duration_prediction_supported: false,
             frames: 25,
             fps: 24,
             pipeline: None,
@@ -887,12 +895,19 @@ impl GenerateParams {
                 ),
             },
             ParamField::Batch => self.batch.to_string(),
+            ParamField::PredictDuration => {
+                if self.predict_duration { "on" } else { "off" }.to_string()
+            }
             ParamField::Duration => {
-                format!(
-                    "{:.1}s · {}f",
-                    self.frames as f64 / self.fps.max(1) as f64,
-                    self.frames
-                )
+                if self.predict_duration && self.duration_prediction_supported {
+                    "automatic · 1–20s".to_string()
+                } else {
+                    format!(
+                        "{:.1}s · {}f",
+                        self.frames as f64 / self.fps.max(1) as f64,
+                        self.frames
+                    )
+                }
             }
             ParamField::Format => format!("{:?}", self.format).to_lowercase(),
             ParamField::Upscale => self.upscale_model.clone().unwrap_or_else(|| "off".into()),
@@ -2199,7 +2214,8 @@ impl App {
 
         let family = family_for_model(&params.model, &config);
         normalize_generate_params_for_family(&mut params, &family);
-        let capabilities = capabilities_for_model(
+        let selected_catalog_entry = catalog.iter().find(|model| model.name == params.model);
+        let mut capabilities = capabilities_for_model(
             &family,
             &params.model,
             catalog
@@ -2219,6 +2235,13 @@ impl App {
                 .find(|model| model.name == params.model)
                 .and_then(|model| model.supports_identity),
         );
+        capabilities.supports_duration_prediction = selected_catalog_entry.is_some_and(|entry| {
+            entry.supports_duration_prediction == Some(true) && entry.runtime_ready != Some(false)
+        });
+        params.duration_prediction_supported = capabilities.supports_duration_prediction;
+        if !params.duration_prediction_supported {
+            params.predict_duration = false;
+        }
 
         let model_description = mold_core::manifest::find_manifest(&params.model)
             .and_then(|m| {
@@ -2653,6 +2676,20 @@ impl App {
                 .find(|entry| entry.name == model)
                 .and_then(|entry| entry.supports_identity),
         );
+        self.generate.capabilities.supports_duration_prediction = self
+            .models
+            .catalog
+            .iter()
+            .find(|entry| entry.name == model)
+            .is_some_and(|entry| {
+                entry.supports_duration_prediction == Some(true)
+                    && entry.runtime_ready != Some(false)
+            });
+        self.generate.params.duration_prediction_supported =
+            self.generate.capabilities.supports_duration_prediction;
+        if !self.generate.params.duration_prediction_supported {
+            self.generate.params.predict_duration = false;
+        }
         // #787: keep the Negative editor and its advertised default in step
         // with the selected model. The server's per-model advertisement wins;
         // the family constant covers local mode and older servers (it *is*
@@ -5234,6 +5271,11 @@ impl App {
             ParamField::Batch => {
                 p.batch = (p.batch as i32 + delta).max(1) as u32;
             }
+            ParamField::PredictDuration => {
+                if p.duration_prediction_supported {
+                    p.predict_duration = !p.predict_duration;
+                }
+            }
             ParamField::Duration => {
                 let grid = video_grid.expect("duration has video grid");
                 let fps = p.fps.max(1);
@@ -7531,7 +7573,9 @@ impl App {
             false,
             0,
             false,
-            Some(self.generate.params.frames),
+            (!(self.generate.params.predict_duration
+                && self.generate.params.duration_prediction_supported))
+                .then_some(self.generate.params.frames),
         )
     }
 
@@ -8213,6 +8257,10 @@ impl App {
                             extend_overlap_frames: None,
                             pipeline: response.video.as_ref().and_then(|video| video.pipeline),
                             pipeline_requested: Some(submitted_params.pipeline.is_some()),
+                            duration_prediction_requested: Some(
+                                submitted_params.predict_duration
+                                    && submitted_params.duration_prediction_supported,
+                            ),
                             source_preprocessing: response
                                 .video
                                 .as_ref()
@@ -8638,6 +8686,9 @@ impl App {
                             .and_then(|m| m.extend_overlap_frames),
                         pipeline: source_meta.as_ref().and_then(|m| m.pipeline),
                         pipeline_requested: source_meta.as_ref().and_then(|m| m.pipeline_requested),
+                        duration_prediction_requested: source_meta
+                            .as_ref()
+                            .and_then(|m| m.duration_prediction_requested),
                         source_preprocessing: source_meta
                             .as_ref()
                             .and_then(|m| m.source_preprocessing.clone()),
@@ -9853,6 +9904,7 @@ mod tests {
                 extend_overlap_frames: None,
                 pipeline: None,
                 pipeline_requested: None,
+                duration_prediction_requested: None,
                 pipeline_provenance_sha256: None,
                 source_preprocessing: None,
                 ic_lora_control: None,
@@ -9937,6 +9989,7 @@ mod tests {
                 extend_overlap_frames: None,
                 pipeline: None,
                 pipeline_requested: None,
+                duration_prediction_requested: None,
                 pipeline_provenance_sha256: None,
                 source_preprocessing: None,
                 ic_lora_control: None,
@@ -10087,6 +10140,7 @@ mod tests {
             extend_overlap_frames: None,
             pipeline: None,
             pipeline_requested: None,
+            duration_prediction_requested: None,
             pipeline_provenance_sha256: None,
             source_preprocessing: None,
             ic_lora_control: None,
@@ -15340,6 +15394,9 @@ mod tests {
             source_image: None,
             generation_profile: None,
             supports_identity: None,
+            supports_duration_prediction: None,
+            runtime_ready: None,
+            runtime_readiness_error: None,
         }
     }
 
@@ -17217,6 +17274,9 @@ mod tests {
             source_image: None,
             generation_profile: None,
             supports_identity: None,
+            supports_duration_prediction: None,
+            runtime_ready: None,
+            runtime_readiness_error: None,
         }
     }
 

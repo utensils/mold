@@ -107,6 +107,10 @@ pub struct Ltx2VideoTransformer3DModelConfig {
     pub apply_gated_attention: bool,
     pub av_ca_timestep_scale_multiplier: f64,
     pub cross_attention_adaln: bool,
+    pub video_ff_bias: bool,
+    pub audio_ff_bias: bool,
+    #[allow(dead_code)]
+    pub use_keyframes_abs_pos_embedding: bool,
     pub streaming_prefetch_count: usize,
 }
 
@@ -142,6 +146,9 @@ impl Default for Ltx2VideoTransformer3DModelConfig {
             apply_gated_attention: false,
             av_ca_timestep_scale_multiplier: 1000.0,
             cross_attention_adaln: false,
+            video_ff_bias: true,
+            audio_ff_bias: true,
+            use_keyframes_abs_pos_embedding: false,
             streaming_prefetch_count: 1,
         }
     }
@@ -903,11 +910,12 @@ impl GeluProjection {
         lora_registry: Option<&Ltx2LoraRegistry>,
         lora_key: &str,
         nvfp4_cache: Option<&Nvfp4LinearCache>,
+        bias: bool,
     ) -> Result<Self> {
         let proj = LtxLinear::load_with_nvfp4_cache(
             dim_in,
             dim_out,
-            true,
+            bias,
             vb.pp("proj"),
             lora_adapters_for(lora_registry, lora_key),
             nvfp4_cache,
@@ -954,6 +962,7 @@ impl FeedForward {
         lora_registry: Option<&Ltx2LoraRegistry>,
         lora_key_prefix: &str,
         nvfp4_cache: Option<&Nvfp4LinearCache>,
+        bias: bool,
     ) -> Result<Self> {
         let hidden = dim * 4;
         let net_0 = GeluProjection::new(
@@ -963,11 +972,12 @@ impl FeedForward {
             lora_registry,
             &format!("{lora_key_prefix}.net.0.proj"),
             nvfp4_cache,
+            bias,
         )?;
         let net_2 = LtxLinear::load_with_nvfp4_cache(
             hidden,
             dim,
-            true,
+            bias,
             vb.pp("net.2"),
             lora_adapters_for(lora_registry, &format!("{lora_key_prefix}.net.2")),
             nvfp4_cache,
@@ -2176,6 +2186,7 @@ impl LtxVideoTransformerBlock {
             lora_registry,
             &format!("{block_key}.ff"),
             nvfp4_cache,
+            true,
         )?;
         let scale_shift_table = vb.get((6, dim), "scale_shift_table")?;
 
@@ -2855,6 +2866,7 @@ impl LtxAvTransformerBlock {
             lora_registry,
             &format!("{block_key}.ff"),
             nvfp4_cache,
+            config.video_ff_bias,
         )?;
         let video_scale_shift_table = vb.get(
             (if config.cross_attention_adaln { 9 } else { 6 }, video_dim),
@@ -2901,6 +2913,7 @@ impl LtxAvTransformerBlock {
             lora_registry,
             &format!("{block_key}.audio_ff"),
             nvfp4_cache,
+            config.audio_ff_bias,
         )?;
         let audio_scale_shift_table = vb.get(
             (if config.cross_attention_adaln { 9 } else { 6 }, audio_dim),
@@ -4832,6 +4845,9 @@ pub(crate) mod tests {
             audio_cross_attention_dim: 8,
             audio_positional_embedding_max_pos: vec![4],
             apply_gated_attention: false,
+            video_ff_bias: true,
+            audio_ff_bias: true,
+            use_keyframes_abs_pos_embedding: false,
             av_ca_timestep_scale_multiplier: 1000.0,
             cross_attention_adaln: false,
             streaming_prefetch_count: 2,
@@ -6468,11 +6484,51 @@ pub(crate) mod tests {
         VarBuilder::from_tensors(tensors, DType::F32, device)
     }
 
+    fn biasless_feed_forward_var_builder(dim: usize, device: &Device) -> VarBuilder<'static> {
+        let hidden = dim * 4;
+        let tensors = HashMap::from([
+            (
+                "net.0.proj.weight".to_string(),
+                Tensor::from_vec(patterned_values(hidden * dim, 3), (hidden, dim), device).unwrap(),
+            ),
+            (
+                "net.2.weight".to_string(),
+                Tensor::from_vec(patterned_values(dim * hidden, 7), (dim, hidden), device).unwrap(),
+            ),
+        ]);
+        VarBuilder::from_tensors(tensors, DType::F32, device)
+    }
+
+    #[test]
+    fn ltx25_video_feed_forward_loads_without_bias_tensors() {
+        let device = Device::Cpu;
+        let ff = FeedForward::new(
+            4,
+            biasless_feed_forward_var_builder(4, &device),
+            None,
+            "ff",
+            None,
+            false,
+        )
+        .unwrap();
+        let output = ff
+            .forward(&Tensor::ones((1, 2, 4), DType::F32, &device).unwrap())
+            .unwrap();
+        assert_eq!(output.dims(), &[1, 2, 4]);
+    }
+
     #[test]
     fn feed_forward_token_chunking_matches_unchunked_output() {
         let device = Device::Cpu;
-        let ff =
-            FeedForward::new(4, feed_forward_var_builder(4, &device), None, "ff", None).unwrap();
+        let ff = FeedForward::new(
+            4,
+            feed_forward_var_builder(4, &device),
+            None,
+            "ff",
+            None,
+            true,
+        )
+        .unwrap();
         let xs = Tensor::from_vec(patterned_values(2 * 10 * 4, 13), (2, 10, 4), &device).unwrap();
 
         let unchunked = ff.forward_token_chunked(&xs, usize::MAX).unwrap();
@@ -6485,8 +6541,15 @@ pub(crate) mod tests {
     #[test]
     fn feed_forward_leaves_small_token_counts_unchunked() {
         let device = Device::Cpu;
-        let ff =
-            FeedForward::new(4, feed_forward_var_builder(4, &device), None, "ff", None).unwrap();
+        let ff = FeedForward::new(
+            4,
+            feed_forward_var_builder(4, &device),
+            None,
+            "ff",
+            None,
+            true,
+        )
+        .unwrap();
         let xs = Tensor::from_vec(patterned_values(5 * 4, 17), (1, 5, 4), &device).unwrap();
 
         let via_forward = ff.forward(&xs).unwrap();

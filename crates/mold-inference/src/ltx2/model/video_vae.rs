@@ -12,6 +12,7 @@ use candle_nn::{group_norm, ops, Conv2d, Conv2dConfig, GroupNorm, VarBuilder};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use super::diffusion_video_vae::Ltx2DiffusionVideoDecoder;
 use crate::ltx2::tiling::{split_by_size, SpatialDecodeTiling};
 
 fn cat_dim(xs: &[Tensor], dim: usize) -> Result<Tensor> {
@@ -1272,9 +1273,30 @@ impl Ltx2VideoDecoder {
 }
 
 #[derive(Debug, Clone)]
+enum Ltx2VideoDecoderKind {
+    Convolutional(Ltx2VideoDecoder),
+    Diffusion(Ltx2DiffusionVideoDecoder),
+}
+
+impl Ltx2VideoDecoderKind {
+    fn forward(&self, latents: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Convolutional(decoder) => decoder.forward(latents),
+            Self::Diffusion(decoder) => decoder
+                .forward(latents)
+                .map_err(|err| candle_core::Error::Msg(err.to_string())),
+        }
+    }
+
+    fn supports_chunked_decode(&self) -> bool {
+        matches!(self, Self::Convolutional(_))
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct AutoencoderKLLtx2Video {
     encoder: Ltx2VideoEncoder,
-    decoder: Ltx2VideoDecoder,
+    decoder: Ltx2VideoDecoderKind,
     latents_mean: Tensor,
     latents_std: Tensor,
     latent_stats_cache: Arc<Mutex<HashMap<VideoVaeLatentStatsCacheKey, (Tensor, Tensor)>>>,
@@ -1306,7 +1328,26 @@ struct VideoVaeLatentStatsCacheKey {
 impl AutoencoderKLLtx2Video {
     pub fn new(config: AutoencoderKLLtx2VideoConfig, vb: VarBuilder) -> Result<Self> {
         let encoder = Ltx2VideoEncoder::new(&config, vb.pp("encoder"))?;
-        let decoder = Ltx2VideoDecoder::new(&config, vb.pp("decoder"))?;
+        let decoder =
+            Ltx2VideoDecoderKind::Convolutional(Ltx2VideoDecoder::new(&config, vb.pp("decoder"))?);
+        Self::from_parts(config, encoder, decoder, vb)
+    }
+
+    pub fn new_diffusion(config: AutoencoderKLLtx2VideoConfig, vb: VarBuilder) -> Result<Self> {
+        let encoder = Ltx2VideoEncoder::new(&config, vb.pp("encoder"))?;
+        let decoder = Ltx2VideoDecoderKind::Diffusion(
+            Ltx2DiffusionVideoDecoder::new(vb.pp("decoder"))
+                .map_err(|err| candle_core::Error::Msg(err.to_string()))?,
+        );
+        Self::from_parts(config, encoder, decoder, vb)
+    }
+
+    fn from_parts(
+        config: AutoencoderKLLtx2VideoConfig,
+        encoder: Ltx2VideoEncoder,
+        decoder: Ltx2VideoDecoderKind,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let stats_vb = vb.pp("per_channel_statistics");
         let latents_mean = if stats_vb.contains_tensor("mean-of-means") {
             stats_vb.get(config.latent_channels, "mean-of-means")?
@@ -1437,7 +1478,10 @@ impl AutoencoderKLLtx2Video {
         _train: bool,
     ) -> Result<(Option<DecoderOutput>, Tensor)> {
         let latents = self.denormalize_latents(latents)?;
-        let decoded = match self.spatial_decode_tiling {
+        let decoded = match self
+            .spatial_decode_tiling
+            .filter(|_| self.decoder.supports_chunked_decode())
+        {
             Some(tiling) => self.decode_spatial_tiles(&latents, tiling)?,
             None => self.decode_frames(&latents)?,
         };
@@ -1455,7 +1499,9 @@ impl AutoencoderKLLtx2Video {
 
     /// Decode a whole latent block, temporally chunked when configured.
     fn decode_frames(&self, latents: &Tensor) -> Result<Tensor> {
-        if self.use_framewise_decoding || self.use_tiling {
+        if self.decoder.supports_chunked_decode()
+            && (self.use_framewise_decoding || self.use_tiling)
+        {
             self.decode_temporal_chunks(latents)
         } else {
             self.decoder.forward(latents)
@@ -1518,6 +1564,9 @@ impl AutoencoderKLLtx2Video {
     }
 
     fn decoder_temporal_context_latent_frames(&self) -> usize {
+        if !self.decoder.supports_chunked_decode() {
+            return 0;
+        }
         let mut causal_conv_count = 2usize; // decoder conv_in + conv_out.
         for block in &self.config.decoder_blocks {
             match block.name.as_str() {
@@ -1632,8 +1681,8 @@ impl AutoencoderKLLtx2Video {
 mod tests {
     use super::{
         patchify_video, unpatchify_video, AutoencoderKLLtx2Video, AutoencoderKLLtx2VideoConfig,
-        Ltx2VideoDownsampler3d, Ltx2VideoResnetBlock3d, Ltx2VideoUpsampler3d, SpatialDecodeTiling,
-        SpatialPaddingMode, VaeBlockConfig,
+        Ltx2VideoDecoderKind, Ltx2VideoDownsampler3d, Ltx2VideoResnetBlock3d, Ltx2VideoUpsampler3d,
+        SpatialDecodeTiling, SpatialPaddingMode, VaeBlockConfig,
     };
     // Only the Metal-gated tests below reach these, so the default
     // `--workspace --all-targets` Clippy gate sees them as unused otherwise.
@@ -2254,7 +2303,10 @@ mod tests {
             AutoencoderKLLtx2Video::new(config.clone(), tiny_autoencoder_var_builder(&config))
                 .unwrap();
         assert_eq!(vae.encoder.norm_out.eps, eps);
-        assert_eq!(vae.decoder.norm_out.eps, eps);
+        let Ltx2VideoDecoderKind::Convolutional(decoder) = &vae.decoder else {
+            panic!("test fixture must use the convolutional decoder")
+        };
+        assert_eq!(decoder.norm_out.eps, eps);
     }
 
     #[test]

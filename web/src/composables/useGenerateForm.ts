@@ -158,6 +158,7 @@ function defaultForm(): GenerateFormState {
     batchSize: 1,
     strength: 0.75,
     frames: null,
+    predictDuration: false,
     fps: null,
     scheduler: null,
     cfgPlus: false,
@@ -279,6 +280,12 @@ function modelDefaultsPatch(
     loras: [],
     icLoraControl: null,
   };
+  if (
+    model.supports_duration_prediction !== true ||
+    model.runtime_ready === false
+  ) {
+    next.predictDuration = false;
+  }
   // Staged media survives a capability-losing switch (see the source-media
   // bridge below); the identity SETTINGS do not. A weight left set on a
   // checkpoint whose Identity group no longer renders is an inline error the
@@ -685,6 +692,7 @@ export function applyMetadataToForm(
     guidanceOverrides: guidanceOverridesFromWire(metadata.guidance_overrides),
     wanRecipe: wanRecipeFromWire(metadata),
     frames: metadata.frames ?? null,
+    predictDuration: metadata.duration_prediction_requested === true,
     fps: metadata.fps ?? null,
     outputFormat: outputFormat ?? next.outputFormat,
     imageAttachments: [],
@@ -1005,6 +1013,9 @@ export interface UseGenerateForm {
    * keeping the prompt, style, and model (`settingsResetPatch`). */
   resetSettings: (model: ModelInfoExtended | null) => void;
   applyModelDefaults: (model: ModelInfoExtended) => void;
+  /** Refresh capability-only state for the currently selected model without
+   * reapplying model defaults or discarding authored controls. */
+  reconcileModelCapabilities: (model: ModelInfoExtended) => void;
   /**
    * Reconcile the restored form's negative-default state against the resolved
    * catalog row for the *currently selected* model once the inventory lands
@@ -1106,6 +1117,16 @@ export function useGenerateForm(): UseGenerateForm {
       // change — even FLUX→FLUX swaps because the LoRA might not target
       // the new variant's tensor layout.
       state.value = modelDefaultsPatch(state.value, m);
+    },
+    reconcileModelCapabilities: (m) => {
+      const s = state.value;
+      if (m.name !== s.model) return;
+      if (
+        m.supports_duration_prediction !== true ||
+        m.runtime_ready === false
+      ) {
+        s.predictDuration = false;
+      }
     },
     reconcileNegativeDefault: (m) => {
       const s = state.value;
@@ -1287,7 +1308,15 @@ export function useGenerateForm(): UseGenerateForm {
               ...(firstLastFrames ? { keyframes: firstLastFrames } : {}),
             }),
         expand: s.expand.enabled || undefined,
-        frames: capabilities.supportsVideo ? s.frames : undefined,
+        frames:
+          capabilities.supportsVideo &&
+          !(
+            s.predictDuration &&
+            model?.supports_duration_prediction === true &&
+            model.runtime_ready !== false
+          )
+            ? s.frames
+            : undefined,
         fps: capabilities.supportsVideo ? s.fps : undefined,
         upscale_model: upscaleModel || undefined,
         gif_preview:

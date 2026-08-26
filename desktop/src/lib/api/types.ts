@@ -252,6 +252,9 @@ export interface ModelEntry {
   nsfw?: boolean | null;
   /** Model-specific LTX-2 audio output support; absent on older servers. */
   supports_audio?: boolean | null;
+  supports_duration_prediction?: boolean | null;
+  runtime_ready?: boolean | null;
+  runtime_readiness_error?: string | null;
   /** Checkpoint accepts a face-identity (PuLID) photo. Additive: absent on a
    * server that predates identity conditioning and on a build without the
    * adapter, and absence reads as "no" — offering the control optimistically
@@ -780,6 +783,7 @@ export interface OutputMetadata {
   extend_overlap_frames?: number | null;
   pipeline?: Ltx2PipelineMode | null;
   pipeline_requested?: boolean | null;
+  duration_prediction_requested?: boolean | null;
   ic_lora_control?: string | null;
   retake_range?: TimeRange | null;
   spatial_upscale?: Ltx2SpatialUpscale | null;

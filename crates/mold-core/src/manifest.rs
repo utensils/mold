@@ -193,7 +193,8 @@ impl ModelManifest {
     /// downloaded by one rule and reported missing by another.
     pub fn is_files_only_bundle(&self) -> bool {
         self.is_utility()
-            || crate::ltx25_manifest::is_contract_manifest(&self.name)
+            || (crate::ltx25_manifest::is_contract_manifest(&self.name)
+                && !crate::ltx25_manifest::is_runtime_manifest(&self.name))
             || matches!(
                 self.family.as_str(),
                 "ltx2-control" | "ltx2-camera-control" | PULID_FAMILY
@@ -3822,6 +3823,11 @@ pub fn resolve_model_name(input: &str) -> String {
     // continue to resolve to the smaller FP8 checkpoints.
     if matches!(input, "ltx-2.3-22b-dev" | "ltx-2.3-22b-distilled") {
         return format!("{input}:fp8");
+    }
+    // LTX-2.5 offers the full BF16 Conv-VAE pack explicitly, while bare
+    // names select the official compact ConvRot INT8 pack.
+    if matches!(input, "ltx-2.5-22b-dev" | "ltx-2.5-22b-distilled") {
+        return format!("{input}:int8-conv");
     }
     // The bare 5B name stays on the fp16 safetensors default. The tag loop
     // below tries `:q8` before `:fp16`, so without this pin the small-card
@@ -7491,6 +7497,14 @@ mod tests {
             resolve_model_name("ltx-2.3-22b-distilled"),
             "ltx-2.3-22b-distilled:fp8"
         );
+        assert_eq!(
+            resolve_model_name("ltx-2.5-22b-dev"),
+            "ltx-2.5-22b-dev:int8-conv"
+        );
+        assert_eq!(
+            resolve_model_name("ltx-2.5-22b-distilled"),
+            "ltx-2.5-22b-distilled:int8-conv"
+        );
     }
 
     #[test]
@@ -7876,9 +7890,10 @@ mod tests {
         // Ref2VA Turbo (#825): +minimax-h3-ref2va:comfy-pruned-int8-turbo-4step
         // — the reviewed 4-step adapter beside the Ref2VA base stack, added
         // once Ref2VA execution landed.
-        // LTX 2.5 contract bump (#1372): four hidden download-only contracts
-        // covering Dev/Distilled and diffusion/convolutional decoder variants.
-        assert_eq!(known_manifests().len(), 168);
+        // LTX 2.5 contract/runtime bump (#1372/#1373): six split-pack
+        // manifests. Dev/Distilled each expose compact INT8 and full BF16
+        // Conv-VAE runtimes; the two diffusion-VAE contracts stay hidden.
+        assert_eq!(known_manifests().len(), 170);
     }
 
     #[test]

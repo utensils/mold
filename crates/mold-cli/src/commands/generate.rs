@@ -213,6 +213,27 @@ fn local_generation_profile(
         .into_iter()
         .find(|entry| entry.info.name == model || entry.info.name == canonical)
         .and_then(|entry| entry.generation_profile)
+        .or_else(|| {
+            // Keep exact-name LTX-2.5 runs registry-authored even when a
+            // caller filters hidden or not-yet-installed catalog entries.
+            if !mold_core::ltx25_manifest::is_runtime_manifest(&canonical) {
+                return None;
+            }
+            let manifest = manifest::find_manifest(&canonical)?;
+            let model_cfg = config.resolved_model_config(&canonical);
+            Some(mold_core::generation_profile_for_manifest_with_defaults(
+                manifest,
+                mold_core::GenerationDefaultsProfile {
+                    width: model_cfg.effective_width(config),
+                    height: model_cfg.effective_height(config),
+                    steps: model_cfg.effective_steps(config),
+                    guidance: model_cfg.effective_guidance(),
+                    frames: model_cfg.effective_frames(),
+                    fps: model_cfg.effective_fps(),
+                    negative_prompt: None,
+                },
+            ))
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -408,6 +429,7 @@ fn refit_request_after_pull(
 
 pub struct Ltx2Options {
     pub frames: Option<u32>,
+    pub predict_duration: bool,
     pub fps: Option<u32>,
     /// Per-clip cap for chained rendering. `None` = use the model-family default
     /// (currently 97 for LTX-2 distilled). Only read when `frames > cap`.
@@ -559,6 +581,7 @@ pub async fn run(
 ) -> Result<()> {
     let Ltx2Options {
         frames,
+        predict_duration,
         fps,
         clip_frames,
         motion_tail,
@@ -625,7 +648,9 @@ pub async fn run(
             "MiniMax H3 reference descriptors require authenticated streaming upload sources"
         );
     }
-    let effective_frames = if is_h3 {
+    let effective_frames = if predict_duration {
+        None
+    } else if is_h3 {
         Some(frames.unwrap_or(mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES))
     } else {
         frames.or_else(|| model_cfg.effective_frames())
@@ -3603,6 +3628,28 @@ mod tests {
     }
 
     #[test]
+    fn ltx25_conv_models_have_native_profiles() {
+        let profile = local_generation_profile(
+            &Config::default(),
+            mold_core::ltx25_manifest::DISTILLED_CONV,
+        )
+        .expect("Phase 2 Conv-VAE model must be runnable by exact name");
+        let recipe = profile.default_recipe().expect("default LTX-2 recipe");
+        assert_eq!(recipe.defaults.steps, 8);
+        assert_eq!(recipe.defaults.guidance, 1.0);
+        assert_eq!(recipe.defaults.frames, Some(121));
+        assert!(local_generation_profile(
+            &Config::default(),
+            mold_core::ltx25_manifest::DISTILLED_INT8_CONV,
+        )
+        .is_some());
+        assert!(
+            local_generation_profile(&Config::default(), mold_core::ltx25_manifest::DISTILLED)
+                .is_some()
+        );
+    }
+
+    #[test]
     fn local_profile_resolves_config_only_model_from_catalog_contract() {
         let mut config = Config::default();
         config.models.insert(
@@ -4398,6 +4445,7 @@ mod tests {
             1,
             Ltx2Options {
                 frames: None,
+                predict_duration: false,
                 fps: None,
                 clip_frames: None,
                 motion_tail: 17,

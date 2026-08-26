@@ -104,12 +104,19 @@ pub(crate) struct Ltx2GeneratePlan {
     pub(crate) checkpoint_path: String,
     pub(crate) vae_checkpoint_path: String,
     pub(crate) vae_in_checkpoint: bool,
+    /// Split LTX-2.5 audio VAE and vocoder checkpoint. Older combined packs
+    /// leave this unset and load both namespaces from `checkpoint_path`.
+    pub(crate) audio_components_path: Option<String>,
     pub(crate) text_projection_path: Option<String>,
     #[allow(dead_code)]
     pub(crate) distilled_checkpoint_path: Option<String>,
     pub(crate) distilled_lora_path: Option<String>,
     pub(crate) spatial_upsampler_path: Option<String>,
     pub(crate) temporal_upsampler_path: Option<String>,
+    /// Dedicated LTX-2.5 duration-head checkpoint, present exactly when
+    /// `auto_duration` asks runtime to replace the admitted maximum.
+    pub(crate) duration_head_path: Option<String>,
+    pub(crate) auto_duration: Option<mold_core::ltx2_duration::AutoDurationBounds>,
     pub(crate) gemma_root: String,
     #[allow(dead_code)]
     pub(crate) output_path: String,

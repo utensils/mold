@@ -1068,6 +1068,26 @@ describe("useGenerateForm", () => {
     expect(form.state.value.fps).toBe(24);
   });
 
+  it("omits frames only for a positively qualified LTX-2.5 duration head", () => {
+    const form = useGenerateForm();
+    const model = makeModel({
+      name: "ltx-2.5-22b-distilled:int8",
+      family: "ltx2",
+      supports_duration_prediction: true,
+      runtime_ready: true,
+    });
+    form.applyModelDefaults(model);
+    form.state.value.frames = 97;
+    form.state.value.predictDuration = true;
+    expect(form.toRequest(model).frames).toBeUndefined();
+
+    expect(form.toRequest({ ...model, runtime_ready: false }).frames).toBe(97);
+
+    form.reconcileModelCapabilities({ ...model, runtime_ready: false });
+    expect(form.state.value.predictDuration).toBe(false);
+    expect(form.toRequest({ ...model, runtime_ready: false }).frames).toBe(97);
+  });
+
   it("applyModelDefaults takes the model's advertised fps, like steps and guidance", () => {
     const form = useGenerateForm();
     form.state.value.fps = 24;

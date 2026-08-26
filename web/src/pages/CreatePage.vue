@@ -1828,6 +1828,7 @@ watch(
       // needs the advertised default reconciled in (idempotent; typed text
       // and an explicit clear survive).
       form.reconcileNegativeDefault(currentRow);
+      form.reconcileModelCapabilities(currentRow);
       return;
     }
     if (current) {

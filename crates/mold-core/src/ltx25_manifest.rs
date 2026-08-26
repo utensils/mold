@@ -11,16 +11,28 @@ use crate::manifest::{ManifestDefaults, ModelComponent, ModelFile, ModelManifest
 use crate::types::SourceImageCapability;
 
 const REPO: &str = "Lightricks/LTX-2.5";
-pub const FAMILY: &str = "ltx2.5-contract";
+pub const FAMILY: &str = "ltx2";
 pub const DEV: &str = "ltx-2.5-22b-dev:bf16";
 pub const DEV_CONV: &str = "ltx-2.5-22b-dev:bf16-conv";
+pub const DEV_INT8_CONV: &str = "ltx-2.5-22b-dev:int8-conv";
 pub const DISTILLED: &str = "ltx-2.5-22b-distilled:bf16";
 pub const DISTILLED_CONV: &str = "ltx-2.5-22b-distilled:bf16-conv";
-const ALL: &[&str] = &[DEV, DEV_CONV, DISTILLED, DISTILLED_CONV];
-const DEV_VARIANTS: &[&str] = &[DEV, DEV_CONV];
-const DISTILLED_VARIANTS: &[&str] = &[DISTILLED, DISTILLED_CONV];
+pub const DISTILLED_INT8_CONV: &str = "ltx-2.5-22b-distilled:int8-conv";
+const ALL: &[&str] = &[
+    DEV,
+    DEV_CONV,
+    DEV_INT8_CONV,
+    DISTILLED,
+    DISTILLED_CONV,
+    DISTILLED_INT8_CONV,
+];
+const DEV_BF16_VARIANTS: &[&str] = &[DEV, DEV_CONV];
+const DISTILLED_BF16_VARIANTS: &[&str] = &[DISTILLED, DISTILLED_CONV];
+const BF16_VARIANTS: &[&str] = &[DEV, DEV_CONV, DISTILLED, DISTILLED_CONV];
+const INT8_VARIANTS: &[&str] = &[DEV_INT8_CONV, DISTILLED_INT8_CONV];
+const DEV_VARIANTS: &[&str] = &[DEV, DEV_CONV, DEV_INT8_CONV];
 const DIFFUSION_VAE_VARIANTS: &[&str] = &[DEV, DISTILLED];
-const CONV_VAE_VARIANTS: &[&str] = &[DEV_CONV, DISTILLED_CONV];
+const CONV_VAE_VARIANTS: &[&str] = &[DEV_CONV, DEV_INT8_CONV, DISTILLED_CONV, DISTILLED_INT8_CONV];
 const REFERENCE_ONLY: &[&str] = &[];
 
 #[derive(Debug, Clone, Copy)]
@@ -41,21 +53,21 @@ const ASSETS: &[Asset] = &[
         component: ModelComponent::Transformer,
         size_bytes: 42_018_190_584,
         sha256: "792a2bad501ca03262c0bc2ce7a2949e85b142ce18e30894aad5bc849c8e7584",
-        manifests: DEV_VARIANTS,
+        manifests: DEV_BF16_VARIANTS,
     },
     Asset {
         filename: "diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors",
         component: ModelComponent::Transformer,
         size_bytes: 42_018_190_584,
         sha256: "31eb3cad89b9e54e99dd3baf286f70825ac4f6c660a70d9184d895be76d7bff4",
-        manifests: DISTILLED_VARIANTS,
+        manifests: DISTILLED_BF16_VARIANTS,
     },
     Asset {
         filename: "diffusion_models/ltx-2.5-22b-dev-transformer-comfy-int8-convrot.safetensors",
         component: ModelComponent::Transformer,
         size_bytes: 21_504_034_224,
         sha256: "2edbdb4465cd6c3b532cd67a31ddb38a63e97dcad20be3729675e2a4e8caf92b",
-        manifests: REFERENCE_ONLY,
+        manifests: &[DEV_INT8_CONV],
     },
     Asset {
         filename:
@@ -63,7 +75,7 @@ const ASSETS: &[Asset] = &[
         component: ModelComponent::Transformer,
         size_bytes: 21_504_034_224,
         sha256: "c4279eeff115cbeaca494bd2183e7d768c38fe85a184dc6afbb7159157c44334",
-        manifests: REFERENCE_ONLY,
+        manifests: &[DISTILLED_INT8_CONV],
     },
     Asset {
         filename: "diffusion_models/ltx-2.5-22b-distilled-transformer-nvfp4.safetensors",
@@ -77,14 +89,14 @@ const ASSETS: &[Asset] = &[
         component: ModelComponent::TextEncoder,
         size_bytes: 26_263_858_182,
         sha256: "ef7243612fdae7a75cb4d5cee9433e81380675fb6c213bd98ae74a9cd16561d1",
-        manifests: ALL,
+        manifests: BF16_VARIANTS,
     },
     Asset {
         filename: "text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
         component: ModelComponent::TextEncoder,
         size_bytes: 15_372_969_374,
         sha256: "6ce688a0aa98a5fa36a9f1e6c3f42152a498cc2b53ee8c15674c64244f91487f",
-        manifests: REFERENCE_ONLY,
+        manifests: INT8_VARIANTS,
     },
     Asset {
         filename: "vae/ltx-2.5-video-vae-conv-bf16.safetensors",
@@ -171,26 +183,41 @@ pub(crate) fn manifests() -> Vec<ModelManifest> {
     [
         (DEV, "dev", "diffusion", 30, 3.0),
         (DEV_CONV, "dev", "convolutional", 30, 3.0),
+        (DEV_INT8_CONV, "dev", "convolutional", 30, 3.0),
         (DISTILLED, "distilled", "diffusion", 8, 1.0),
         (DISTILLED_CONV, "distilled", "convolutional", 8, 1.0),
+        (DISTILLED_INT8_CONV, "distilled", "convolutional", 8, 1.0),
     ]
     .into_iter()
     .map(
         |(name, checkpoint, decoder, steps, guidance)| ModelManifest {
             name: name.to_string(),
             family: FAMILY.to_string(),
-            description: format!(
-            "LTX-2.5 22B {checkpoint} BF16 — download-only Phase 1 contract ({decoder} video VAE)"
-        ),
+            description: if name.contains(":int8-conv") {
+                format!(
+                    "LTX-2.5 22B {checkpoint} INT8 ConvRot — compact native Conv-VAE split pack"
+                )
+            } else if decoder == "convolutional" {
+                format!("LTX-2.5 22B {checkpoint} BF16 — full-precision native Conv-VAE split pack")
+            } else {
+                format!(
+                    "LTX-2.5 22B {checkpoint} BF16 — downloadable diffusion-VAE Phase 3 contract"
+                )
+            },
             files: files_for(name),
             defaults: defaults(steps, guidance),
-            hidden: true,
+            hidden: !is_runtime_manifest(name),
         },
     )
     .collect()
 }
 
-pub(crate) fn is_contract_manifest(name: &str) -> bool {
+pub fn is_contract_manifest(name: &str) -> bool {
+    ALL.contains(&name)
+}
+
+/// True for split packs whose complete native runtime path is available.
+pub fn is_runtime_manifest(name: &str) -> bool {
     ALL.contains(&name)
 }
 
@@ -257,6 +284,16 @@ impl Ltx25ModelPaths {
         })
     }
 
+    /// Recover the lossless split graph from the transformer path carried by
+    /// legacy `ModelPaths`. Decoder siblings may share that transformer; all
+    /// such siblings share these auxiliary audio/duration assets too.
+    pub fn resolve_for_transformer_in(models_root: &Path, transformer: &Path) -> Option<Self> {
+        manifests().into_iter().find_map(|manifest| {
+            let paths = Self::resolve_in(models_root, &manifest.name)?;
+            (paths.transformer == transformer).then_some(paths)
+        })
+    }
+
     pub fn all_file_paths(&self) -> impl Iterator<Item = &Path> {
         [
             Some(self.transformer.as_path()),
@@ -275,6 +312,19 @@ impl Ltx25ModelPaths {
     pub fn qualify(&self) -> std::io::Result<()> {
         crate::ltx25_probe::validate_ltx25_transformer_gemma(&self.transformer, &self.gemma)?;
         crate::ltx25_probe::probe_ltx25_video_vae(&self.video_vae)?;
+        crate::ltx25_probe::validate_ltx25_audio_components(&self.audio_vae)?;
+        crate::ltx25_probe::validate_ltx25_duration_head(&self.duration_head)?;
+        crate::ltx25_probe::validate_ltx25_upscaler(
+            &self.spatial_upscaler,
+            crate::ltx25_probe::Ltx25UpscalerKind::Spatial,
+        )?;
+        crate::ltx25_probe::validate_ltx25_upscaler(
+            &self.temporal_upscaler,
+            crate::ltx25_probe::Ltx25UpscalerKind::Temporal,
+        )?;
+        if let Some(lora) = self.distilled_lora.as_ref() {
+            crate::safetensors_probe::read_safetensors_header(lora)?;
+        }
         Ok(())
     }
 }
@@ -302,16 +352,18 @@ mod tests {
     }
 
     #[test]
-    fn runnable_manifests_have_every_split_runtime_role() {
+    fn manifests_have_every_split_runtime_role() {
         for manifest in manifests() {
-            assert!(
-                manifest.hidden,
-                "{} must remain download-only",
-                manifest.name
-            );
+            assert_eq!(manifest.hidden, !is_runtime_manifest(&manifest.name));
             assert_eq!(manifest.family, FAMILY);
-            assert!(manifest.is_files_only_bundle());
-            assert!(!manifest.is_generation_model());
+            assert_eq!(
+                manifest.is_generation_model(),
+                is_runtime_manifest(&manifest.name)
+            );
+            assert_eq!(
+                manifest.is_files_only_bundle(),
+                !is_runtime_manifest(&manifest.name)
+            );
             let components: Vec<_> = manifest.files.iter().map(|file| file.component).collect();
             for required in [
                 ModelComponent::Transformer,
@@ -373,6 +425,22 @@ mod tests {
             .files
             .iter()
             .any(|file| file.component == ModelComponent::DistilledLora));
+    }
+
+    #[test]
+    fn compact_distilled_pack_is_the_smallest_native_variant() {
+        let int8 = manifests()
+            .into_iter()
+            .find(|manifest| manifest.name == DISTILLED_INT8_CONV)
+            .unwrap();
+        let bf16 = manifests()
+            .into_iter()
+            .find(|manifest| manifest.name == DISTILLED_CONV)
+            .unwrap();
+        assert_eq!(int8.total_size_bytes(), 39_955_706_502);
+        assert!(int8.total_size_bytes() < bf16.total_size_bytes());
+        assert!(!int8.hidden);
+        assert!(!bf16.hidden);
     }
 
     #[test]

@@ -111,6 +111,7 @@ impl LtxAudioTransformerBlock {
             lora_registry,
             &format!("{block_key}.audio_ff"),
             nvfp4_cache,
+            config.audio_ff_bias,
         )?;
         let audio_scale_shift_table = vb.get(
             (if config.cross_attention_adaln { 9 } else { 6 }, audio_dim),

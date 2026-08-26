@@ -24,6 +24,12 @@ pub enum Ltx25VideoVaeKind {
     Diffusion,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ltx25UpscalerKind {
+    Spatial,
+    Temporal,
+}
+
 fn invalid_data(path: &Path, message: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::InvalidData,
@@ -41,6 +47,21 @@ fn config_value<'a>(header: &'a SafetensorsHeader, path: &[&str]) -> Option<&'a 
         value = value.get(*key)?;
     }
     Some(value)
+}
+
+fn gemma_config_value<'a>(header: &'a SafetensorsHeader, path: &[&str]) -> Option<&'a Value> {
+    let mut value = header
+        .metadata
+        .get("gemma_config")
+        .or_else(|| header.metadata.get("config"))?;
+    for key in path {
+        value = value.get(*key)?;
+    }
+    Some(value)
+}
+
+fn transformer_config_value<'a>(header: &'a SafetensorsHeader, key: &str) -> Option<&'a Value> {
+    config_value(header, &["transformer", key]).or_else(|| config_value(header, &[key]))
 }
 
 fn is_ltx_2_5(version: &str) -> bool {
@@ -68,13 +89,17 @@ pub fn probe_ltx25_transformer(path: &Path) -> std::io::Result<Ltx25TransformerP
         .and_then(Value::as_str)
         .filter(|version| !version.is_empty())
         .ok_or_else(|| invalid_data(path, "missing gemma_source_checkpoint.gemma_version"))?;
-    for key in ["ff_bias", "audio_ff_bias"] {
-        if config_value(&header, &[key]).and_then(Value::as_bool) != Some(false) {
-            return Err(invalid_data(
-                path,
-                format!("LTX-2.5 transformer config must set {key}=false"),
-            ));
-        }
+    if transformer_config_value(&header, "ff_bias").and_then(Value::as_bool) != Some(false) {
+        return Err(invalid_data(
+            path,
+            "LTX-2.5 transformer config must set ff_bias=false",
+        ));
+    }
+    if transformer_config_value(&header, "audio_ff_bias").and_then(Value::as_bool) == Some(false) {
+        return Err(invalid_data(
+            path,
+            "LTX-2.5 transformer config must keep audio_ff_bias=true",
+        ));
     }
     Ok(Ltx25TransformerProbe {
         model_version: model_version.to_string(),
@@ -103,12 +128,12 @@ pub fn probe_ltx25_gemma(path: &Path) -> std::io::Result<Ltx25GemmaProbe> {
             "expected Gemma 4 12B Unified tensors and LTX-2.5 projection",
         ));
     }
-    let model_type = config_value(&header, &["model_type"])
+    let model_type = gemma_config_value(&header, &["model_type"])
         .and_then(Value::as_str)
         .or_else(|| metadata_string(&header, "model_type"))
         .filter(|model_type| *model_type == "gemma4_unified")
         .ok_or_else(|| invalid_data(path, "expected config.model_type=gemma4_unified"))?;
-    let gemma_version = config_value(&header, &["gemma_version"])
+    let gemma_version = gemma_config_value(&header, &["gemma_version"])
         .and_then(Value::as_str)
         .or_else(|| metadata_string(&header, "gemma_version"))
         .filter(|version| !version.is_empty())
@@ -162,6 +187,96 @@ pub fn probe_ltx25_video_vae(path: &Path) -> std::io::Result<Ltx25VideoVaeKind> 
         return Ok(Ltx25VideoVaeKind::Convolutional);
     }
     Err(invalid_data(path, "unrecognized LTX-2.5 video VAE layout"))
+}
+
+/// Qualify the split checkpoint that owns both audio decode namespaces.
+pub fn validate_ltx25_audio_components(path: &Path) -> std::io::Result<()> {
+    let header = read_safetensors_header(path)?;
+    let version = metadata_string(&header, "model_version")
+        .filter(|version| is_ltx_2_5(version))
+        .ok_or_else(|| invalid_data(path, "expected an LTX-2.5 model_version"))?;
+    let has_audio_decoder = header
+        .tensor_names
+        .iter()
+        .any(|name| name == "audio_vae.decoder.conv_in.conv.weight");
+    let has_vocoder = header
+        .tensor_names
+        .iter()
+        .any(|name| name == "vocoder.vocoder.conv_pre.weight");
+    let has_bwe = header
+        .tensor_names
+        .iter()
+        .any(|name| name == "vocoder.bwe_generator.conv_pre.weight");
+    if !has_audio_decoder || !has_vocoder || !has_bwe {
+        return Err(invalid_data(
+            path,
+            format!(
+                "LTX-{version} audio checkpoint must contain audio_vae, vocoder, and BWE tensors"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Qualify the official 15-tensor automatic-duration head.
+pub fn validate_ltx25_duration_head(path: &Path) -> std::io::Result<()> {
+    let header = read_safetensors_header(path)?;
+    if metadata_string(&header, "model_version")
+        .filter(|version| is_ltx_2_5(version))
+        .is_none()
+    {
+        return Err(invalid_data(path, "expected an LTX-2.5 model_version"));
+    }
+    let required = [
+        "duration_head.video_input_proj.weight",
+        "duration_head.audio_input_proj.weight",
+        "duration_head.attention_pooler.query_tokens",
+        "duration_head.attention_pooler.cross_attn.in_proj_weight",
+        "duration_head.mlp_out.weight",
+    ];
+    if header.tensor_names.len() != 15
+        || required
+            .iter()
+            .any(|required| !header.tensor_names.iter().any(|name| name == required))
+    {
+        return Err(invalid_data(
+            path,
+            "expected the official 15-tensor LTX-2.5 duration head",
+        ));
+    }
+    Ok(())
+}
+
+/// Qualify one of the two 2.5 latent upscalers by its embedded config.
+pub fn validate_ltx25_upscaler(path: &Path, kind: Ltx25UpscalerKind) -> std::io::Result<()> {
+    let header = read_safetensors_header(path)?;
+    let config = header
+        .metadata
+        .get("config")
+        .ok_or_else(|| invalid_data(path, "missing latent upscaler config"))?;
+    let expected = match kind {
+        Ltx25UpscalerKind::Spatial => (true, false),
+        Ltx25UpscalerKind::Temporal => (false, true),
+    };
+    let actual = (
+        config.get("spatial_upsample").and_then(Value::as_bool),
+        config.get("temporal_upsample").and_then(Value::as_bool),
+    );
+    let has_weights = header
+        .tensor_names
+        .iter()
+        .any(|name| name == "initial_conv.conv.weight" || name == "initial_conv.weight")
+        && header
+            .tensor_names
+            .iter()
+            .any(|name| name == "final_conv.conv.weight" || name == "final_conv.weight");
+    if actual != (Some(expected.0), Some(expected.1)) || !has_weights {
+        return Err(invalid_data(
+            path,
+            format!("expected the LTX-2.5 {kind:?} latent upscaler layout"),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -222,14 +337,16 @@ mod tests {
             ),
             (
                 "config".into(),
-                serde_json::json!({"ff_bias": ff_bias, "audio_ff_bias": false}),
+                serde_json::json!({
+                    "transformer": {"ff_bias": ff_bias, "audio_ff_bias": true}
+                }),
             ),
         ])
     }
 
     fn gemma_metadata(model_type: &str, gemma_version: &str) -> serde_json::Map<String, Value> {
         serde_json::Map::from_iter([(
-            "config".into(),
+            "gemma_config".into(),
             serde_json::json!({
                 "model_type": model_type,
                 "gemma_version": gemma_version
@@ -375,5 +492,63 @@ mod tests {
         let _ = std::fs::remove_file(conv);
         let _ = std::fs::remove_file(diffusion);
         let _ = std::fs::remove_file(unknown);
+    }
+
+    #[test]
+    fn split_auxiliary_components_fail_closed_on_wrong_roles() {
+        let audio = temp_safetensors("audio");
+        let duration = temp_safetensors("duration");
+        let spatial = temp_safetensors("spatial-upscaler");
+        write_fixture(
+            &audio,
+            &[
+                "audio_vae.decoder.conv_in.conv.weight",
+                "vocoder.vocoder.conv_pre.weight",
+                "vocoder.bwe_generator.conv_pre.weight",
+            ],
+            serde_json::Map::from_iter([("model_version".into(), Value::String("2.5.0".into()))]),
+        );
+        let duration_keys = [
+            "duration_head.video_input_proj.weight",
+            "duration_head.audio_input_proj.weight",
+            "duration_head.attention_pooler.query_tokens",
+            "duration_head.attention_pooler.cross_attn.in_proj_weight",
+            "duration_head.mlp_out.weight",
+            "duration_head.0",
+            "duration_head.1",
+            "duration_head.2",
+            "duration_head.3",
+            "duration_head.4",
+            "duration_head.5",
+            "duration_head.6",
+            "duration_head.7",
+            "duration_head.8",
+            "duration_head.9",
+        ];
+        write_fixture(
+            &duration,
+            &duration_keys,
+            serde_json::Map::from_iter([("model_version".into(), Value::String("2.5.0".into()))]),
+        );
+        write_fixture(
+            &spatial,
+            &["initial_conv.weight", "final_conv.weight"],
+            serde_json::Map::from_iter([(
+                "config".into(),
+                serde_json::json!({
+                    "spatial_upsample": true,
+                    "temporal_upsample": false
+                }),
+            )]),
+        );
+
+        validate_ltx25_audio_components(&audio).unwrap();
+        validate_ltx25_duration_head(&duration).unwrap();
+        validate_ltx25_upscaler(&spatial, Ltx25UpscalerKind::Spatial).unwrap();
+        assert!(validate_ltx25_upscaler(&spatial, Ltx25UpscalerKind::Temporal).is_err());
+
+        let _ = std::fs::remove_file(audio);
+        let _ = std::fs::remove_file(duration);
+        let _ = std::fs::remove_file(spatial);
     }
 }

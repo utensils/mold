@@ -47,8 +47,18 @@ pub fn audio_output_supported(paths: &mold_core::ModelPaths) -> bool {
 /// misdirected: the tensors were present, under a prefix the probe did not
 /// know. An error that misleads costs more than one that is merely vague.
 pub fn audio_output_gap(paths: &mold_core::ModelPaths) -> Option<String> {
+    audio_output_gap_with_components(paths, None)
+}
+
+fn audio_output_gap_with_components(
+    paths: &mold_core::ModelPaths,
+    audio_components_path: Option<&std::path::Path>,
+) -> Option<String> {
     let mut flags = single_file::AudioOutputAssetFlags::default();
-    for path in [&paths.transformer, &paths.vae] {
+    for path in [paths.transformer.as_path(), paths.vae.as_path()]
+        .into_iter()
+        .chain(audio_components_path)
+    {
         let Ok(found) = single_file::audio_output_asset_flags(path) else {
             continue;
         };

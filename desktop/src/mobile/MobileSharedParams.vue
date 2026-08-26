@@ -13,6 +13,7 @@ import type { ModelEntry } from "../lib/api/types";
 import MobileResolutionPicker from "./MobileResolutionPicker.vue";
 import MobileSeedPicker from "./MobileSeedPicker.vue";
 import VideoDurationSlider from "@ui/components/VideoDurationSlider.vue";
+import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
 import { controlNote, effectiveGenerationRecipe } from "@studio/lib/generationProfile";
@@ -61,6 +62,13 @@ const supportsVideo = computed(
       effectiveGenerationRecipe(props.model, props.form.pipeline),
     ).supportsVideo,
 );
+const durationCapabilityModel = computed(() => props.durationModel ?? props.model);
+const canPredictDuration = computed(
+  () =>
+    !props.showFps &&
+    durationCapabilityModel.value?.supports_duration_prediction === true &&
+    durationCapabilityModel.value.runtime_ready !== false,
+);
 const guidanceCaps = computed(() =>
   generationCapabilitiesForFamily(
     props.form.family,
@@ -108,8 +116,20 @@ const sourceDimensions = computed(() => {
     @validity-change="emit('resolution-validity', $event)"
     @canvas-intent="emit('canvas-intent', $event)"
   />
+  <div
+    v-if="canPredictDuration"
+    class="field mobile-predict-duration"
+    data-test="mobile-predict-duration"
+  >
+    <span>Predict duration</span>
+    <SwitchToggle
+      :model-value="form.predictDuration"
+      label="Predict duration from prompt"
+      @update:model-value="form.predictDuration = $event"
+    />
+  </div>
   <VideoDurationSlider
-    v-if="supportsVideo && !showFps"
+    v-if="supportsVideo && !showFps && !form.predictDuration"
     class="mobile-duration-field"
     :frames="form.frames"
     :fps="form.fps"
@@ -124,6 +144,13 @@ const sourceDimensions = computed(() => {
     data-test="mobile-duration"
     @update:frames="form.frames = $event"
   />
+  <p
+    v-else-if="supportsVideo && !showFps && form.predictDuration"
+    class="field-hint"
+    data-test="mobile-predicted-duration-hint"
+  >
+    The host will choose 1–20 seconds from the prompt.
+  </p>
   <label v-if="showFps" class="field" data-test="mobile-sequence-fps">
     <span>FPS</span>
     <input

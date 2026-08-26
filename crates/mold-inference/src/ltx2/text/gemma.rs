@@ -1,6 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use tokenizers::{
     PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer, TruncationDirection,
@@ -64,6 +65,8 @@ impl EncodedPromptPair {
 pub struct GemmaAssets {
     pub root: PathBuf,
     pub tokenizer_json: PathBuf,
+    tokenizer_bytes: Option<Vec<u8>>,
+    pub packed_weights: Option<PathBuf>,
     pub tokenizer_model: Option<PathBuf>,
     pub special_tokens_map: Option<PathBuf>,
     pub tokenizer_config: Option<PathBuf>,
@@ -75,8 +78,24 @@ pub struct GemmaAssets {
 
 impl GemmaAssets {
     pub fn discover(root: &Path) -> Result<Self> {
+        if root.is_file() && root.extension().is_some_and(|ext| ext == "safetensors") {
+            let tokenizer_bytes = read_packed_byte_tensor(root, "tokenizer_json")?;
+            return Ok(Self {
+                root: root.to_path_buf(),
+                tokenizer_json: root.to_path_buf(),
+                tokenizer_bytes: Some(tokenizer_bytes),
+                packed_weights: Some(root.to_path_buf()),
+                tokenizer_model: None,
+                special_tokens_map: None,
+                tokenizer_config: None,
+                gguf_path: None,
+            });
+        }
         if !root.is_dir() {
-            bail!("Gemma asset root '{}' is not a directory", root.display());
+            bail!(
+                "Gemma assets '{}' are neither a directory nor a packed .safetensors file",
+                root.display()
+            );
         }
 
         let tokenizer_json = root.join("tokenizer.json");
@@ -90,6 +109,8 @@ impl GemmaAssets {
         Ok(Self {
             root: root.to_path_buf(),
             tokenizer_json,
+            tokenizer_bytes: None,
+            packed_weights: None,
             tokenizer_model: candidate(root, "tokenizer.model"),
             special_tokens_map: candidate(root, "special_tokens_map.json"),
             tokenizer_config: candidate(root, "tokenizer_config.json"),
@@ -100,6 +121,9 @@ impl GemmaAssets {
     /// True when the asset root contains BF16 safetensors weights
     /// (`model.safetensors` or sharded `model-*-of-*.safetensors`).
     pub fn has_bf16_weights(&self) -> bool {
+        if self.packed_weights.is_some() {
+            return true;
+        }
         let Ok(entries) = std::fs::read_dir(&self.root) else {
             return false;
         };
@@ -146,7 +170,12 @@ impl GemmaAssets {
     }
 
     fn load_tokenizer(&self, max_length: usize) -> Result<Tokenizer> {
-        let mut tokenizer = Tokenizer::from_file(&self.tokenizer_json).map_err(|err| {
+        let tokenizer = if let Some(bytes) = self.tokenizer_bytes.as_deref() {
+            Tokenizer::from_bytes(bytes)
+        } else {
+            Tokenizer::from_file(&self.tokenizer_json)
+        };
+        let mut tokenizer = tokenizer.map_err(|err| {
             anyhow!(
                 "failed to load Gemma tokenizer '{}': {err}",
                 self.tokenizer_json.display()
@@ -246,6 +275,53 @@ impl GemmaAssets {
     }
 }
 
+/// Read one U8/I8 byte tensor without mapping or copying the multi-GB weight
+/// payload surrounding it. Safetensors stores both integer variants as raw
+/// bytes, so their signedness is irrelevant for reconstructing tokenizer JSON.
+fn read_packed_byte_tensor(path: &Path, name: &str) -> Result<Vec<u8>> {
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("failed to open packed Gemma assets '{}'", path.display()))?;
+    let mut length = [0u8; 8];
+    file.read_exact(&mut length)?;
+    let header_len = u64::from_le_bytes(length);
+    let mut header = vec![0u8; header_len as usize];
+    file.read_exact(&mut header)?;
+    let header: serde_json::Value = serde_json::from_slice(&header)
+        .with_context(|| format!("invalid safetensors header in '{}'", path.display()))?;
+    let tensor = header.get(name).ok_or_else(|| {
+        anyhow!(
+            "packed Gemma assets '{}' are missing {name}",
+            path.display()
+        )
+    })?;
+    let dtype = tensor.get("dtype").and_then(serde_json::Value::as_str);
+    if !matches!(dtype, Some("U8" | "I8")) {
+        bail!(
+            "packed Gemma {name} in '{}' must use U8 or I8 storage, got {dtype:?}",
+            path.display()
+        );
+    }
+    let offsets = tensor
+        .get("data_offsets")
+        .and_then(serde_json::Value::as_array)
+        .filter(|offsets| offsets.len() == 2)
+        .ok_or_else(|| anyhow!("packed Gemma {name} has invalid data_offsets"))?;
+    let start = offsets[0]
+        .as_u64()
+        .ok_or_else(|| anyhow!("packed Gemma {name} has invalid start offset"))?;
+    let end = offsets[1]
+        .as_u64()
+        .ok_or_else(|| anyhow!("packed Gemma {name} has invalid end offset"))?;
+    let byte_len: usize = end
+        .checked_sub(start)
+        .and_then(|len| len.try_into().ok())
+        .ok_or_else(|| anyhow!("packed Gemma {name} byte range is invalid"))?;
+    file.seek(SeekFrom::Start(8 + header_len + start))?;
+    let mut bytes = vec![0u8; byte_len];
+    file.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
 #[allow(dead_code)]
 pub fn pad_to_alignment(
     input_ids: &[u32],
@@ -299,13 +375,38 @@ fn encode_with_tokenizer(tokenizer: &mut Tokenizer, text: &str) -> Result<Prompt
     let encoding = tokenizer
         .encode(text.trim(), true)
         .map_err(|err| anyhow!("Gemma tokenization failed: {err}"))?;
+    let mut input_ids = encoding.get_ids().to_vec();
+    let mut attention_mask = encoding
+        .get_attention_mask()
+        .iter()
+        .map(|value| u8::from(*value != 0))
+        .collect::<Vec<_>>();
+    if let Some(bos_id) = tokenizer.token_to_id("<bos>") {
+        let first_valid = attention_mask.iter().position(|mask| *mask != 0);
+        if first_valid.is_none_or(|index| input_ids[index] != bos_id) {
+            match first_valid {
+                Some(index) if index > 0 => {
+                    input_ids[index - 1] = bos_id;
+                    attention_mask[index - 1] = 1;
+                }
+                Some(0) if !input_ids.is_empty() => {
+                    input_ids.rotate_right(1);
+                    input_ids[0] = bos_id;
+                    attention_mask.rotate_right(1);
+                    attention_mask[0] = 1;
+                }
+                None if !input_ids.is_empty() => {
+                    let last = input_ids.len() - 1;
+                    input_ids[last] = bos_id;
+                    attention_mask[last] = 1;
+                }
+                _ => {}
+            }
+        }
+    }
     Ok(PromptTokens {
-        input_ids: encoding.get_ids().to_vec(),
-        attention_mask: encoding
-            .get_attention_mask()
-            .iter()
-            .map(|value| u8::from(*value != 0))
-            .collect(),
+        input_ids,
+        attention_mask,
     })
 }
 
@@ -464,6 +565,7 @@ mod tests {
         GemmaVariant, DEFAULT_GEMMA_MAX_LENGTH,
     };
     use std::fs;
+    use std::io::Write;
     use std::sync::{Mutex, OnceLock};
 
     /// Variant-resolver tests mutate `MOLD_LTX2_GEMMA_VARIANT`. Process-global
@@ -559,6 +661,41 @@ mod tests {
     "unk_token": "<eos>"
   }
 }"#
+    }
+
+    #[test]
+    fn packed_i8_tokenizer_is_read_in_place_and_receives_leading_bos() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("gemma4-packed.safetensors");
+        let tokenizer =
+            tokenizer_json_with_pad().replace("\"<eos>\": 7,", "\"<bos>\": 2, \"<eos>\": 7,");
+        let header = serde_json::json!({
+            "tokenizer_json": {
+                "dtype": "I8",
+                "shape": [tokenizer.len()],
+                "data_offsets": [0, tokenizer.len()]
+            }
+        });
+        let header = serde_json::to_vec(&header).unwrap();
+        let mut file = fs::File::create(&path).unwrap();
+        file.write_all(&(header.len() as u64).to_le_bytes())
+            .unwrap();
+        file.write_all(&header).unwrap();
+        file.write_all(tokenizer.as_bytes()).unwrap();
+
+        let assets = GemmaAssets::discover(&path).unwrap();
+        assert_eq!(assets.packed_weights.as_deref(), Some(path.as_path()));
+        let pair = assets
+            .encode_prompt_pair_with_max_length("hello", None, 8)
+            .unwrap();
+        let first_valid = pair
+            .conditional
+            .attention_mask
+            .iter()
+            .position(|mask| *mask != 0)
+            .unwrap();
+        assert_eq!(pair.conditional.input_ids[first_valid], 2);
+        assert_eq!(pair.conditional.valid_len(), 2);
     }
 
     fn write_gemma_assets(
