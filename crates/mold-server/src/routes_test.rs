@@ -7249,50 +7249,7 @@ mod tests {
     async fn retained_generations_replay_in_order_under_their_original_ids() {
         let output_dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-
-        let submitted = {
-            let (state, mut rx) = durable_state(db.clone(), output_dir.path());
-            let app = app_with_state(state.clone());
-            let mut submitted = Vec::new();
-            // Held until the fence goes up: dropping a job before that is
-            // ordinary completion, and deletes its row.
-            let mut in_flight = Vec::new();
-            for index in 0..3 {
-                let app = app.clone();
-                let task = tokio::spawn(async move {
-                    app.oneshot(
-                        Request::post("/api/generate")
-                            .header("content-type", "application/json")
-                            .body(Body::from(generate_body(
-                                &format!("prompt {index}"),
-                                512,
-                                512,
-                            )))
-                            .unwrap(),
-                    )
-                    .await
-                });
-                let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-                    .await
-                    .expect("submitted job")
-                    .expect("open queue");
-                submitted.push(job.id.clone());
-                // The client goes away and the whole runtime is torn down.
-                task.abort();
-                let _ = task.await;
-                // One of them was already claimed by a worker before the crash.
-                if index == 0 {
-                    assert_eq!(
-                        job.journal.as_ref().unwrap().claim_dispatch(),
-                        crate::queue_journal::DispatchClaim::Granted
-                    );
-                }
-                in_flight.push(job);
-            }
-            state.queue_journal.retain_all();
-            drop(in_flight);
-            submitted
-        };
+        let submitted = seed_retained_jobs(db.clone(), output_dir.path(), 3).await;
 
         // A fresh server on the same database.
         let (state, mut rx) = durable_state(db.clone(), output_dir.path());
@@ -7722,36 +7679,30 @@ mod tests {
         output_dir: &std::path::Path,
         count: usize,
     ) -> Vec<String> {
-        let (state, mut rx) = durable_state(db, output_dir);
-        let app = app_with_state(state.clone());
+        let (mut state, _rx) = durable_state(db, output_dir);
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::new(scheduled_tx);
+        let app = app_with_state(state);
         let mut submitted = Vec::new();
-        let mut in_flight = Vec::new();
         for index in 0..count {
-            let app = app.clone();
-            let task = tokio::spawn(async move {
-                app.oneshot(
-                    Request::post("/api/generate")
-                        .header("content-type", "application/json")
-                        .body(Body::from(generate_body(
-                            &format!("prompt {index}"),
-                            512,
-                            512,
-                        )))
-                        .unwrap(),
-                )
+            let request: serde_json::Value =
+                serde_json::from_str(&generate_body(&format!("prompt {index}"), 512, 512)).unwrap();
+            let response = app
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/api/generation-batches",
+                    serde_json::json!({
+                        "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                        "requests": [request],
+                    }),
+                ))
                 .await
-            });
-            let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-                .await
-                .expect("submitted job")
-                .expect("open queue");
-            submitted.push(job.id.clone());
-            task.abort();
-            let _ = task.await;
-            in_flight.push(job);
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let body = json_body(response).await;
+            submitted.push(body["children"][0]["job_id"].as_str().unwrap().to_string());
         }
-        state.queue_journal.retain_all();
-        drop(in_flight);
         submitted
     }
 
@@ -7875,27 +7826,10 @@ mod tests {
         let output_dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
 
-        let finished_id = {
-            let (state, mut rx) = durable_state(db.clone(), output_dir.path());
-            let app = app_with_state(state.clone());
-            let task = tokio::spawn(async move {
-                app.oneshot(
-                    Request::post("/api/generate")
-                        .header("content-type", "application/json")
-                        .body(Body::from(generate_body("a cat", 512, 512)))
-                        .unwrap(),
-                )
-                .await
-            });
-            let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-                .await
-                .expect("submitted job")
-                .expect("open queue");
-            task.abort();
-            let _ = task.await;
-            state.queue_journal.retain_all();
-            job.id.clone()
-        };
+        let finished_id = seed_retained_jobs(db.clone(), output_dir.path(), 1)
+            .await
+            .pop()
+            .unwrap();
 
         // The print landed; only the journal delete was lost.
         db.as_ref()
@@ -8066,7 +8000,9 @@ mod tests {
     async fn the_queue_listing_reports_durability_and_surfaces_held_rows() {
         let output_dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+        let (mut state, _rx) = durable_state(db.clone(), output_dir.path());
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::new(scheduled_tx);
         let app = app_with_state(state.clone());
 
         let capabilities = json_body(
@@ -8083,21 +8019,23 @@ mod tests {
         assert_eq!(capabilities["queue"]["durable_queue"], true);
         assert_eq!(capabilities["queue"]["cooperative_cancellation"], true);
 
-        let gen_app = app.clone();
-        let gen_task = tokio::spawn(async move {
-            gen_app
-                .oneshot(
-                    Request::post("/api/generate")
-                        .header("content-type", "application/json")
-                        .body(Body::from(generate_body("a cat", 512, 512)))
-                        .unwrap(),
-                )
-                .await
-        });
-        let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        let request: serde_json::Value =
+            serde_json::from_str(&generate_body("a cat", 512, 512)).unwrap();
+        let response = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [request],
+                }),
+            ))
             .await
-            .expect("submitted job")
-            .expect("open queue");
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = json_body(response).await;
+        let job_id = body["children"][0]["job_id"].as_str().unwrap().to_string();
 
         let listing = json_body(
             app.clone()
@@ -8107,7 +8045,7 @@ mod tests {
         )
         .await;
         let live = &listing["entries"][0];
-        assert_eq!(live["id"], serde_json::json!(job.id));
+        assert_eq!(live["id"], serde_json::json!(job_id));
         assert_eq!(live["durable"], true);
         assert_eq!(live["replayed"], false);
         assert_eq!(live["dispatch_attempts"], 0);
@@ -8115,10 +8053,8 @@ mod tests {
         // Park it the way an exhausted attempt cap would.
         state
             .queue_journal
-            .hold_id(&job.id, "dispatch attempts exhausted");
-        gen_task.abort();
-        let _ = gen_task.await;
-        state.job_registry.remove(&job.id);
+            .hold_id(&job_id, "dispatch attempts exhausted");
+        state.job_registry.remove(&job_id);
 
         let listing = json_body(
             app.oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
@@ -8127,7 +8063,7 @@ mod tests {
         )
         .await;
         let held = &listing["entries"][0];
-        assert_eq!(held["id"], serde_json::json!(job.id));
+        assert_eq!(held["id"], serde_json::json!(job_id));
         assert_eq!(held["state"], "held");
         assert_eq!(held["held_reason"], "dispatch attempts exhausted");
 
@@ -8136,7 +8072,7 @@ mod tests {
         // editing the database.
         let response = app_with_state(state.clone())
             .oneshot(
-                Request::delete(format!("/api/queue/{}", job.id))
+                Request::delete(format!("/api/queue/{job_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
