@@ -3645,7 +3645,7 @@ mod tests {
         .is_some());
         assert!(
             local_generation_profile(&Config::default(), mold_core::ltx25_manifest::DISTILLED)
-                .is_none()
+                .is_some()
         );
     }
 

@@ -94,7 +94,7 @@ struct NeighborhoodAttention {
 impl NeighborhoodAttention {
     fn new(dim: usize, kernel: [usize; 3], vb: VarBuilder<'_>) -> Result<Self> {
         ensure!(
-            dim % HEAD_DIM == 0,
+            dim.is_multiple_of(HEAD_DIM),
             "diffusion VAE attention width must divide by 64"
         );
         Ok(Self {

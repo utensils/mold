@@ -1082,6 +1082,10 @@ describe("useGenerateForm", () => {
     expect(form.toRequest(model).frames).toBeUndefined();
 
     expect(form.toRequest({ ...model, runtime_ready: false }).frames).toBe(97);
+
+    form.reconcileModelCapabilities({ ...model, runtime_ready: false });
+    expect(form.state.value.predictDuration).toBe(false);
+    expect(form.toRequest({ ...model, runtime_ready: false }).frames).toBe(97);
   });
 
   it("applyModelDefaults takes the model's advertised fps, like steps and guidance", () => {

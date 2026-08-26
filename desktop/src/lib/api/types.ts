@@ -783,6 +783,7 @@ export interface OutputMetadata {
   extend_overlap_frames?: number | null;
   pipeline?: Ltx2PipelineMode | null;
   pipeline_requested?: boolean | null;
+  duration_prediction_requested?: boolean | null;
   ic_lora_control?: string | null;
   retake_range?: TimeRange | null;
   spatial_upscale?: Ltx2SpatialUpscale | null;

@@ -13,10 +13,10 @@ fail() {
   exit 1
 }
 
-manifest_version() {
+manifest_package() {
   local dependency="$1"
   sed -nE \
-    "s/^${dependency} = \"([^\"]+)\".*$/\\1/p" \
+    "s/^${dependency} = \{ package = \"([^\"]+)\".*$/\\1/p" \
     "$manifest"
 }
 
@@ -41,22 +41,18 @@ lock_field() {
 }
 
 for dependency in candle-core candle-nn candle-transformers; do
-  required="$(manifest_version "$dependency")"
-  root_version="$(lock_field "$root_lock" "$dependency" version)"
-  desktop_version="$(lock_field "$desktop_lock" "$dependency" version)"
-  root_source="$(lock_field "$root_lock" "$dependency" source)"
-  desktop_source="$(lock_field "$desktop_lock" "$dependency" source)"
+  package="$(manifest_package "$dependency")"
+  root_version="$(lock_field "$root_lock" "$package" version)"
+  desktop_version="$(lock_field "$desktop_lock" "$package" version)"
+  root_source="$(lock_field "$root_lock" "$package" source)"
+  desktop_source="$(lock_field "$desktop_lock" "$package" source)"
 
-  test -n "$required" || fail "could not read $dependency requirement from mold-inference"
-  test -n "$desktop_version" || fail "desktop lockfile is missing $dependency"
-  case "$desktop_version" in
-    "$required" | "$required".*) ;;
-    *) fail "desktop lockfile has $dependency $desktop_version, but mold-inference requires $required" ;;
-  esac
+  test -n "$package" || fail "could not read $dependency package from mold-inference"
+  test -n "$desktop_version" || fail "desktop lockfile is missing $package"
   test "$desktop_version" = "$root_version" ||
-    fail "desktop lockfile has $dependency $desktop_version, but root lockfile has $root_version"
+    fail "desktop lockfile has $package $desktop_version, but root lockfile has $root_version"
   test "$desktop_source" = "$root_source" ||
-    fail "desktop and root lockfiles resolve $dependency from different sources; update both locks together"
+    fail "desktop and root lockfiles resolve $package from different sources; update both locks together"
 done
 
 echo "PASS: desktop Candle lockfile matches mold-inference"

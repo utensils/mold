@@ -2331,6 +2331,12 @@ pub struct OutputMetadata {
     /// override. Absent on legacy metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline_requested: Option<bool>,
+    /// Whether the authored request deliberately omitted `frames` so an
+    /// LTX-2.5 duration head could choose the clip length. `frames` is later
+    /// replaced with the realized output shape, so this additive bit keeps
+    /// request provenance available to Library reuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_prediction_requested: Option<bool>,
     /// Persisted terminal runtime provenance for pipelines that expose an
     /// exact additive SHA-256 identity. Absent for legacy and other outputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2558,6 +2564,10 @@ impl OutputMetadata {
                 .then_some(req.effective_extend_overlap_frames()),
             pipeline: req.pipeline,
             pipeline_requested: Some(req.pipeline.is_some()),
+            duration_prediction_requested: req
+                .model
+                .starts_with("ltx-2.5")
+                .then_some(req.frames.is_none()),
             pipeline_provenance_sha256: None,
             source_preprocessing: None,
             ic_lora_control: req.ic_lora_control.clone(),
@@ -4737,6 +4747,42 @@ mod tests {
         }))
         .unwrap();
         assert!(legacy.pipeline_provenance_sha256.is_none());
+    }
+
+    #[test]
+    fn predicted_duration_provenance_survives_video_finalization() {
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a drummer in rain","model":"ltx-2.5-22b-distilled:int8-conv","width":768,"height":512,"steps":8}"#,
+        )
+        .unwrap();
+        let video = VideoData {
+            data: vec![1],
+            format: OutputFormat::Mp4,
+            width: 768,
+            height: 512,
+            frames: 121,
+            fps: 24,
+            pipeline: Some(Ltx2PipelineMode::Distilled),
+            pipeline_provenance_sha256: None,
+            source_preprocessing: None,
+            thumbnail: vec![2],
+            gif_preview: Vec::new(),
+            has_audio: true,
+            duration_ms: Some(5_041),
+            audio_sample_rate: Some(48_000),
+            audio_channels: Some(2),
+        };
+        let mut metadata = OutputMetadata::from_generate_request(&request, 42, None, "test");
+
+        assert_eq!(metadata.frames, None);
+        assert_eq!(metadata.duration_prediction_requested, Some(true));
+
+        metadata.apply_video_output(&video);
+
+        assert_eq!(metadata.frames, Some(121));
+        assert_eq!(metadata.duration_prediction_requested, Some(true));
+        let encoded = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(encoded["duration_prediction_requested"], true);
     }
 
     // ── GET /api/queue wire types ────────────────────────────────────────

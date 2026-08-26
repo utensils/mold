@@ -1737,14 +1737,49 @@ describe("applyMetadataToForm", () => {
         guidance: 1,
         width: 768,
         height: 512,
+        frames: 121,
         fps: 24,
         enable_audio: true,
+        duration_prediction_requested: true,
       } as OutputMetadata,
       [model],
     );
     expect(form.predictDuration).toBe(true);
     expect(buildRequest(form).frames).toBeUndefined();
     expect(buildRequest(form).enable_audio).toBe(true);
+  });
+
+  it("preserves predicted-duration provenance until a late inventory row arrives", () => {
+    const model = {
+      ...ltx2Model(),
+      name: "ltx-2.5-22b-distilled:int8-conv",
+      supports_duration_prediction: true,
+      runtime_ready: true,
+    };
+    const form = newGenerateForm();
+    applyMetadataToForm(
+      form,
+      {
+        prompt: "a drummer in a rainstorm",
+        model: model.name,
+        seed: 42,
+        steps: 8,
+        guidance: 1,
+        width: 768,
+        height: 512,
+        frames: 121,
+        fps: 24,
+        duration_prediction_requested: true,
+      } as OutputMetadata,
+      [],
+    );
+
+    expect(form.predictDuration).toBe(true);
+    expect(form.durationPredictionSupported).toBe(false);
+
+    reconcileModelCapabilities(form, model);
+    expect(form.predictDuration).toBe(true);
+    expect(buildRequest(form).frames).toBeUndefined();
   });
 
   it("preserves canonical multiline prompts through desktop Library reuse", () => {

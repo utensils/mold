@@ -8257,6 +8257,10 @@ impl App {
                             extend_overlap_frames: None,
                             pipeline: response.video.as_ref().and_then(|video| video.pipeline),
                             pipeline_requested: Some(submitted_params.pipeline.is_some()),
+                            duration_prediction_requested: Some(
+                                submitted_params.predict_duration
+                                    && submitted_params.duration_prediction_supported,
+                            ),
                             source_preprocessing: response
                                 .video
                                 .as_ref()
@@ -8682,6 +8686,9 @@ impl App {
                             .and_then(|m| m.extend_overlap_frames),
                         pipeline: source_meta.as_ref().and_then(|m| m.pipeline),
                         pipeline_requested: source_meta.as_ref().and_then(|m| m.pipeline_requested),
+                        duration_prediction_requested: source_meta
+                            .as_ref()
+                            .and_then(|m| m.duration_prediction_requested),
                         source_preprocessing: source_meta
                             .as_ref()
                             .and_then(|m| m.source_preprocessing.clone()),
@@ -9897,6 +9904,7 @@ mod tests {
                 extend_overlap_frames: None,
                 pipeline: None,
                 pipeline_requested: None,
+                duration_prediction_requested: None,
                 pipeline_provenance_sha256: None,
                 source_preprocessing: None,
                 ic_lora_control: None,
@@ -9981,6 +9989,7 @@ mod tests {
                 extend_overlap_frames: None,
                 pipeline: None,
                 pipeline_requested: None,
+                duration_prediction_requested: None,
                 pipeline_provenance_sha256: None,
                 source_preprocessing: None,
                 ic_lora_control: None,
@@ -10131,6 +10140,7 @@ mod tests {
             extend_overlap_frames: None,
             pipeline: None,
             pipeline_requested: None,
+            duration_prediction_requested: None,
             pipeline_provenance_sha256: None,
             source_preprocessing: None,
             ic_lora_control: None,

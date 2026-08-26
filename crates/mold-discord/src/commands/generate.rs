@@ -2428,6 +2428,9 @@ mod tests {
             source_image: None,
             generation_profile: None,
             supports_identity: None,
+            supports_duration_prediction: None,
+            runtime_ready: None,
+            runtime_readiness_error: None,
         }
     }
 
@@ -2638,6 +2641,9 @@ mod tests {
             source_image: None,
             generation_profile: None,
             supports_identity: None,
+            supports_duration_prediction: None,
+            runtime_ready: None,
+            runtime_readiness_error: None,
         }];
         assert_eq!(
             family_for_model(&models, "ltx-2-19b-distilled:fp8"),
@@ -2678,6 +2684,9 @@ mod tests {
                 source_image: None,
                 generation_profile: None,
                 supports_identity: None,
+                supports_duration_prediction: None,
+                runtime_ready: None,
+                runtime_readiness_error: None,
             },
             ModelInfoExtended {
                 runtime_available: None,
@@ -2706,6 +2715,9 @@ mod tests {
                 source_image: None,
                 generation_profile: None,
                 supports_identity: None,
+                supports_duration_prediction: None,
+                runtime_ready: None,
+                runtime_readiness_error: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
@@ -2740,6 +2752,9 @@ mod tests {
             source_image: None,
             generation_profile: None,
             supports_identity: None,
+            supports_duration_prediction: None,
+            runtime_ready: None,
+            runtime_readiness_error: None,
         }];
         assert_eq!(resolve_default_model(&models), "flux-dev:q4");
     }
@@ -2796,6 +2811,9 @@ mod tests {
                 source_image: None,
                 generation_profile: None,
                 supports_identity: None,
+                supports_duration_prediction: None,
+                runtime_ready: None,
+                runtime_readiness_error: None,
             },
             ModelInfoExtended {
                 runtime_available: None,
@@ -2824,6 +2842,9 @@ mod tests {
                 source_image: None,
                 generation_profile: None,
                 supports_identity: None,
+                supports_duration_prediction: None,
+                runtime_ready: None,
+                runtime_readiness_error: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
@@ -2859,6 +2880,9 @@ mod tests {
                 source_image: None,
                 generation_profile: None,
                 supports_identity: None,
+                supports_duration_prediction: None,
+                runtime_ready: None,
+                runtime_readiness_error: None,
             },
             ModelInfoExtended {
                 runtime_available: None,
@@ -2887,6 +2911,9 @@ mod tests {
                 source_image: None,
                 generation_profile: None,
                 supports_identity: None,
+                supports_duration_prediction: None,
+                runtime_ready: None,
+                runtime_readiness_error: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");

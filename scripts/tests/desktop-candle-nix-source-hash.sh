@@ -18,7 +18,7 @@ command -v jq >/dev/null || fail "jq is required to read nix prefetch output"
 read_lock_field() {
   local field="$1"
   awk -v field="$field" '
-    $0 == "name = \"candle-core\"" {
+    $0 == "name = \"candle-core-mold\"" {
       found = 1
       next
     }
@@ -45,14 +45,15 @@ esac
 
 repository="${source#git+}"
 repository="${repository%%\?*}"
+repository="${repository%.git}"
 revision="${source##*#}"
 archive_url="$repository/archive/$revision.tar.gz"
 expected="$(
   sed -nE \
-    "s|^[[:space:]]*\"candle-core-${version}\" = \"([^\"]+)\";.*$|\\1|p" \
+    "s|^[[:space:]]*\"candle-core-mold-${version}\" = \"([^\"]+)\";.*$|\\1|p" \
     "$flake"
 )"
-test -n "$expected" || fail "flake.nix is missing the candle-core-${version} output hash"
+test -n "$expected" || fail "flake.nix is missing the candle-core-mold-${version} output hash"
 
 actual="$(nix store prefetch-file --unpack --json "$archive_url" | jq -r .hash)"
 test -n "$actual" && test "$actual" != "null" || fail "could not prefetch $archive_url"

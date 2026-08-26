@@ -1264,8 +1264,11 @@ export function applyMetadataToForm(
   // Video params (`video_frames`/`video_fps` are legacy desktop aliases).
   const frames = metadata.frames ?? metadata.video_frames;
   if (frames != null) form.frames = frames;
-  form.predictDuration =
-    frames == null && metadata.model.startsWith("ltx-2.5") && form.durationPredictionSupported;
+  // Preserve authored provenance even when Library reuse happens before the
+  // inventory row arrives. Request building remains fail-closed against
+  // `durationPredictionSupported`, and the later capability reconcile either
+  // validates this opt-in or clears it.
+  form.predictDuration = metadata.duration_prediction_requested === true;
   const fps = metadata.fps ?? metadata.video_fps;
   if (fps != null) form.fps = fps;
   if (metadata.enable_audio != null) form.enableAudio = metadata.enable_audio;
@@ -1419,7 +1422,9 @@ export function applyRequestToForm(
       .find((value): value is string => value !== null) ?? null;
   form.frames = request.frames ?? form.frames;
   form.predictDuration =
-    request.frames == null && request.model.startsWith("ltx-2.5") && form.durationPredictionSupported;
+    request.frames == null &&
+    request.model.startsWith("ltx-2.5") &&
+    form.durationPredictionSupported;
   form.fps = request.fps ?? form.fps;
   form.enableAudio = request.enable_audio ?? false;
   form.audioFile = request.audio_file
