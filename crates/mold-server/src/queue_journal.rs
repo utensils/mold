@@ -492,6 +492,8 @@ pub struct QueueJournal {
     #[cfg(test)]
     fail_completion_lookup: AtomicBool,
     #[cfg(test)]
+    fail_batch_lookup: AtomicUsize,
+    #[cfg(test)]
     fail_claim_release: AtomicBool,
     #[cfg(test)]
     fail_hold_transition: AtomicBool,
@@ -561,6 +563,8 @@ impl QueueJournal {
             #[cfg(test)]
             fail_completion_lookup: AtomicBool::new(false),
             #[cfg(test)]
+            fail_batch_lookup: AtomicUsize::new(0),
+            #[cfg(test)]
             fail_claim_release: AtomicBool::new(false),
             #[cfg(test)]
             fail_hold_transition: AtomicBool::new(false),
@@ -592,6 +596,8 @@ impl QueueJournal {
             _owner_claim: None,
             #[cfg(test)]
             fail_completion_lookup: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_batch_lookup: AtomicUsize::new(0),
             #[cfg(test)]
             fail_claim_release: AtomicBool::new(false),
             #[cfg(test)]
@@ -1108,6 +1114,18 @@ impl QueueJournal {
         &self,
         id: &str,
     ) -> Result<Option<mold_db::generation_batches::DurableGenerationBatchDetail>, String> {
+        #[cfg(test)]
+        if self
+            .fail_batch_lookup
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok_and(|previous| previous == 1)
+        {
+            return Err("injected durable batch lookup failure".to_string());
+        }
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
             return Ok(None);
         };
@@ -1530,6 +1548,12 @@ impl QueueJournal {
     pub(crate) fn fail_completion_lookup_for_tests(&self) {
         self.fail_completion_lookup
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_batch_lookup_after_for_tests(&self, successful_reads: usize) {
+        self.fail_batch_lookup
+            .store(successful_reads + 1, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam: make the next feeder claim release fail after the database
@@ -2200,6 +2224,9 @@ pub enum DispatchClaim {
 #[derive(Debug)]
 pub enum RetainOutcome {
     Released,
+    /// Durable cancellation won the exact transition race. Observer delivery
+    /// must report cancellation rather than the requested success or failure.
+    Cancelled,
     Stale,
     Retry {
         ticket: QueueTicket,
@@ -2309,7 +2336,11 @@ impl QueueTicket {
                     self.journal.publish_state_committed(&self.id);
                 }
                 self.settled = true;
-                RetainOutcome::Released
+                if commit.cancelled {
+                    RetainOutcome::Cancelled
+                } else {
+                    RetainOutcome::Released
+                }
             }
             Ok(commit) => {
                 if commit.batch_child_updated {
@@ -2566,9 +2597,17 @@ impl QueueTicket {
     /// drop semantics until the caller retries this same transition.
     pub(crate) fn hold_exact(mut self, reason: &str, retryable: bool) -> RetainOutcome {
         match self.hold_owned(reason, retryable, now_ms()) {
-            Ok(_) => {
+            Ok(generation_batches::OwnedHold::Held) => {
                 self.settled = true;
                 RetainOutcome::Released
+            }
+            Ok(generation_batches::OwnedHold::Cancelled) => {
+                self.settled = true;
+                RetainOutcome::Cancelled
+            }
+            Ok(generation_batches::OwnedHold::Fenced) => {
+                self.settled = true;
+                RetainOutcome::Stale
             }
             Err(error) => {
                 tracing::warn!(
@@ -2732,6 +2771,7 @@ mod tests {
             events: OnceLock::new(),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
+            fail_batch_lookup: AtomicUsize::new(0),
             fail_claim_release: AtomicBool::new(false),
             fail_hold_transition: AtomicBool::new(false),
             fail_completion_transition: AtomicUsize::new(0),
@@ -3130,6 +3170,47 @@ mod tests {
     }
 
     #[test]
+    fn exact_failure_settlement_reports_when_cancellation_won() {
+        let journal = journal_with_db();
+        let request = request();
+        journal
+            .record_batch(BatchJournalAdmission {
+                id: "exact-cancel-batch",
+                client_batch_id: "exact-cancel-client",
+                request_sha256: "exact-cancel-sha",
+                children: &[admission(
+                    "exact-cancel-child",
+                    &request,
+                    Path::new("/gallery"),
+                )],
+            })
+            .unwrap();
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+        assert_eq!(ticket.claim_dispatch(), DispatchClaim::Granted);
+
+        assert!(journal.cancel_id("exact-cancel-child").unwrap());
+        let mut ticket = Some(ticket);
+        let outcome = crate::durable_generation_settlement::settle_blocking(
+            &mut ticket,
+            crate::durable_generation_settlement::DurableDisposition::RetryableHold,
+            "inference failed",
+        );
+
+        assert_eq!(
+            outcome,
+            crate::durable_generation_settlement::SettlementOutcome::Cancelled
+        );
+        assert!(journal.list_all().is_empty());
+        let child = &journal
+            .generation_batch("exact-cancel-batch")
+            .unwrap()
+            .children[0];
+        assert_eq!(child.state, "cancelled");
+        assert_eq!(child.error.as_deref(), Some("Cancelled"));
+    }
+
+    #[test]
     fn failed_hold_transition_returns_the_exact_claim_to_replay() {
         let journal = journal_with_db();
         let request = request();
@@ -3362,6 +3443,7 @@ mod tests {
             events: OnceLock::new(),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
+            fail_batch_lookup: AtomicUsize::new(0),
             fail_claim_release: AtomicBool::new(false),
             fail_hold_transition: AtomicBool::new(false),
             fail_completion_transition: AtomicUsize::new(0),
@@ -3395,6 +3477,7 @@ mod tests {
             events: OnceLock::new(),
             _owner_claim: None,
             fail_completion_lookup: AtomicBool::new(false),
+            fail_batch_lookup: AtomicUsize::new(0),
             fail_claim_release: AtomicBool::new(false),
             fail_hold_transition: AtomicBool::new(false),
             fail_completion_transition: AtomicUsize::new(0),

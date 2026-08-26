@@ -2,7 +2,8 @@ use anyhow::Result;
 use base64::{engine::general_purpose, Engine as _};
 use image::GenericImageView;
 use mold_core::{
-    Config, GalleryImage, GenerateRequest, GenerateResponse, LoraInfo, LoraWeight, MoldClient,
+    Config, GalleryImage, GenerateRequest, GenerateResponse, GenerationBatchAuthority,
+    GenerationBatchChild, GenerationBatchChildState, LoraInfo, LoraWeight, MoldClient,
     OutputFormat, SseProgressEvent,
 };
 use serde::Deserialize;
@@ -16,7 +17,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Mutex;
 
-use crate::commands::durable_generation::try_canonical_singleton_artifact;
+use crate::commands::durable_generation::{
+    try_canonical_generation, try_canonical_singleton_artifact, CanonicalGenerationReport,
+};
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_ASYNC_JOBS: usize = 32;
@@ -46,8 +49,8 @@ async fn generate_with_canonical_fallback(
                 video: None,
                 audio: None,
                 generation_time_ms: 0,
-                model: artifact.request.model,
-                seed_used: artifact.request.seed.unwrap_or(0),
+                model: artifact.metadata.model,
+                seed_used: artifact.metadata.seed,
                 gpu: None,
                 request_warnings: Vec::new(),
             })
@@ -57,6 +60,258 @@ async fn generate_with_canonical_fallback(
             .await
             .map_err(|error| format!("mold generation failed: {error}")),
         Err(error) => Err(format!("mold durable generation failed: {error:#}")),
+    }
+}
+
+async fn hydrate_canonical_outcome(
+    client: &MoldClient,
+    child: &GenerationBatchChild,
+) -> std::result::Result<GenerateResponse, String> {
+    let result = child
+        .result
+        .as_ref()
+        .ok_or_else(|| "canonical generation completed without a gallery result".to_string())?;
+    let filename = result
+        .filename
+        .as_ref()
+        .or(result.original_filename.as_ref())
+        .ok_or_else(|| "canonical generation completed without a gallery filename".to_string())?;
+    let bytes = client
+        .get_gallery_image(filename)
+        .await
+        .map_err(|error| format!("could not hydrate accepted output {filename}: {error}"))?;
+    let metadata = client
+        .list_gallery()
+        .await
+        .map_err(|error| {
+            format!("could not read metadata for accepted output {filename}: {error}")
+        })?
+        .into_iter()
+        .find(|item| item.filename == *filename)
+        .ok_or_else(|| format!("accepted output {filename} is missing from the gallery index"))?
+        .metadata;
+    if metadata.job_id.as_deref() != Some(child.job_id.as_str()) {
+        return Err(format!(
+            "accepted output {filename} does not belong to durable job {}",
+            child.job_id
+        ));
+    }
+    let image = image::load_from_memory(&bytes)
+        .map_err(|error| format!("could not decode durable output: {error}"))?;
+    let (width, height) = image.dimensions();
+    let format = filename
+        .rsplit_once('.')
+        .and_then(|(_, extension)| extension.parse::<OutputFormat>().ok())
+        .ok_or_else(|| format!("accepted output {filename} has no supported file extension"))?;
+    Ok(GenerateResponse {
+        images: vec![mold_core::ImageData {
+            data: bytes,
+            format,
+            width,
+            height,
+            index: 0,
+        }],
+        video: None,
+        audio: None,
+        generation_time_ms: 0,
+        model: metadata.model,
+        seed_used: metadata.seed,
+        gpu: None,
+        request_warnings: Vec::new(),
+    })
+}
+
+async fn run_async_generation(
+    client: MoldClient,
+    jobs: AsyncJobRegistry,
+    local_job_id: String,
+    req: GenerateRequest,
+) {
+    match try_canonical_generation(&client, std::slice::from_ref(&req)).await {
+        Ok(Some(report)) => {
+            // The shared canonical helper currently returns only after an
+            // authoritative terminal child. Keep the local row truthfully
+            // queued while it waits rather than fabricating Running.
+            finish_canonical_async(&client, &jobs, &local_job_id, report).await;
+        }
+        Ok(None) => {
+            jobs.mark_running(&local_job_id, AsyncGenerationTransport::Legacy)
+                .await;
+            let (progress_tx, mut progress_rx) =
+                tokio::sync::mpsc::unbounded_channel::<SseProgressEvent>();
+            let progress_jobs = jobs.clone();
+            let progress_job_id = local_job_id.clone();
+            let progress_task = tokio::spawn(async move {
+                while let Some(event) = progress_rx.recv().await {
+                    progress_jobs.record_progress(&progress_job_id, event).await;
+                }
+            });
+            let result = match client.generate_stream(&req, progress_tx).await {
+                Ok(Some(response)) => Ok(response),
+                Ok(None) => client.generate(req).await.map_err(|error| {
+                    format!("mold generation failed after non-streaming fallback: {error}")
+                }),
+                Err(error) => Err(format!("mold generation failed: {error}")),
+            };
+            let _ = progress_task.await;
+            jobs.finish(&local_job_id, result).await;
+        }
+        Err(error) => {
+            jobs.finish(
+                &local_job_id,
+                Err(format!("mold durable generation failed: {error:#}")),
+            )
+            .await;
+        }
+    }
+}
+
+async fn finish_canonical_async(
+    client: &MoldClient,
+    jobs: &AsyncJobRegistry,
+    local_job_id: &str,
+    report: CanonicalGenerationReport,
+) {
+    let failure = (!report.failures.is_empty()).then(|| report.failures.join("; "));
+    let Some(outcome) = report.outcomes.into_iter().next() else {
+        jobs.finish_canonical(
+            local_job_id,
+            CanonicalAsyncSettlement {
+                status: AsyncJobStatus::Failed,
+                error: failure.or_else(|| Some("canonical generation returned no child".into())),
+                ..Default::default()
+            },
+        )
+        .await;
+        return;
+    };
+    finish_canonical_child(
+        client,
+        jobs,
+        local_job_id,
+        outcome.authority,
+        outcome.child,
+        failure,
+    )
+    .await;
+}
+
+async fn finish_canonical_child(
+    client: &MoldClient,
+    jobs: &AsyncJobRegistry,
+    local_job_id: &str,
+    authority: GenerationBatchAuthority,
+    child: GenerationBatchChild,
+    failure: Option<String>,
+) {
+    let status = match child.state {
+        GenerationBatchChildState::Complete => AsyncJobStatus::Succeeded,
+        GenerationBatchChildState::Held => AsyncJobStatus::Held,
+        GenerationBatchChildState::Cancelled => AsyncJobStatus::Cancelled,
+        GenerationBatchChildState::Failed => AsyncJobStatus::Failed,
+        GenerationBatchChildState::Accepted
+        | GenerationBatchChildState::Running
+        | GenerationBatchChildState::Cancelling => AsyncJobStatus::Failed,
+    };
+    let response = if status == AsyncJobStatus::Succeeded {
+        match hydrate_canonical_outcome(client, &child).await {
+            Ok(response) => Some(response),
+            Err(error) => {
+                jobs.finish_canonical(
+                    local_job_id,
+                    CanonicalAsyncSettlement {
+                        authority: Some(authority),
+                        durable_job_id: Some(child.job_id),
+                        status: AsyncJobStatus::Failed,
+                        error: Some(error),
+                        ..Default::default()
+                    },
+                )
+                .await;
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    jobs.finish_canonical(
+        local_job_id,
+        CanonicalAsyncSettlement {
+            authority: Some(authority),
+            durable_job_id: Some(child.job_id),
+            retryable: child.retryable,
+            status,
+            error: child.error.or(failure),
+            result: response,
+        },
+    )
+    .await;
+}
+
+async fn monitor_canonical_retry(
+    client: MoldClient,
+    jobs: AsyncJobRegistry,
+    local_job_id: String,
+    authority: GenerationBatchAuthority,
+    durable_job_id: String,
+) {
+    loop {
+        let status = match client.generation_batch(&authority.batch_id).await {
+            Ok(Some(status)) => status,
+            Ok(None) => {
+                jobs.record_reconciliation_error(
+                    &local_job_id,
+                    format!(
+                        "generation batch {} disappeared after retry",
+                        authority.batch_id
+                    ),
+                )
+                .await;
+                return;
+            }
+            Err(error) => {
+                jobs.record_reconciliation_error(
+                    &local_job_id,
+                    format!("could not reconcile retried generation: {error}"),
+                )
+                .await;
+                return;
+            }
+        };
+        if let Err(error) = authority.validate_status(&status) {
+            jobs.record_reconciliation_error(&local_job_id, error).await;
+            return;
+        }
+        let Some(child) = status
+            .children
+            .into_iter()
+            .find(|child| child.job_id == durable_job_id)
+        else {
+            jobs.record_reconciliation_error(
+                &local_job_id,
+                format!("generation batch lost durable job {durable_job_id} after retry"),
+            )
+            .await;
+            return;
+        };
+        match child.state {
+            GenerationBatchChildState::Accepted => {
+                jobs.mark_canonical_phase(&local_job_id, AsyncJobStatus::Queued)
+                    .await;
+            }
+            GenerationBatchChildState::Running | GenerationBatchChildState::Cancelling => {
+                jobs.mark_canonical_phase(&local_job_id, AsyncJobStatus::Running)
+                    .await;
+            }
+            GenerationBatchChildState::Complete
+            | GenerationBatchChildState::Failed
+            | GenerationBatchChildState::Cancelled
+            | GenerationBatchChildState::Held => {
+                finish_canonical_child(&client, &jobs, &local_job_id, authority, child, None).await;
+                return;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 }
 
@@ -249,6 +504,7 @@ impl McpServer {
             "generate_image" => self.tool_generate_image(arguments).await,
             "generate_image_async" => self.tool_generate_image_async(arguments).await,
             "generation_status" => self.tool_generation_status(arguments).await,
+            "generation_retry" => self.tool_generation_retry(arguments).await,
             "list_gallery" => self.tool_list_gallery(arguments).await,
             "get_gallery_image" => self.tool_get_gallery_image(arguments).await,
             "list_models" => self.tool_list_models(arguments).await,
@@ -281,14 +537,19 @@ impl McpServer {
             .ok_or_else(|| "mold did not return an image".to_string())?;
         let encoded = general_purpose::STANDARD.encode(&image.data);
         let mut details = format!(
-            "Generated {}x{} {} image with {} in {:.1}s; seed {}",
+            "Generated {}x{} {} image with {}; seed {}",
             image.width,
             image.height,
             image.format.extension(),
             response.model,
-            response.generation_time_ms as f64 / 1000.0,
             response.seed_used
         );
+        if response.generation_time_ms > 0 {
+            details.push_str(&format!(
+                "; generation time {:.1}s",
+                response.generation_time_ms as f64 / 1000.0
+            ));
+        }
         if let Some(gpu) = response.gpu {
             details.push_str(&format!("; gpu {gpu}"));
         }
@@ -319,10 +580,7 @@ impl McpServer {
         let task_job_id = job_id.clone();
 
         tokio::spawn(async move {
-            jobs.mark_running(&task_job_id).await;
-
-            let result = generate_with_canonical_fallback(&client, req).await;
-            jobs.finish(&task_job_id, result).await;
+            run_async_generation(client, jobs, task_job_id, req).await;
         });
 
         Ok(json!({
@@ -363,6 +621,86 @@ impl McpServer {
                 "jobs": jobs.iter().map(job_summary_json).collect::<Vec<_>>()
             }
         }))
+    }
+
+    async fn tool_generation_retry(&self, arguments: Value) -> std::result::Result<Value, String> {
+        let args: GenerationRetryArgs =
+            serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
+        let retry = self.jobs.begin_retry(&args.job_id).await?;
+
+        let retry_result = async {
+            let status = self
+                .client
+                .generation_batch(&retry.authority.batch_id)
+                .await
+                .map_err(|error| {
+                    format!("could not validate generation batch before retry: {error}")
+                })?
+                .ok_or_else(|| {
+                    format!(
+                        "generation batch {} disappeared before retry",
+                        retry.authority.batch_id
+                    )
+                })?;
+            retry.authority.validate_status(&status)?;
+            let child = status
+                .children
+                .iter()
+                .find(|child| child.job_id == retry.durable_job_id)
+                .ok_or_else(|| {
+                    format!(
+                        "generation batch {} no longer contains durable job {}",
+                        retry.authority.batch_id, retry.durable_job_id
+                    )
+                })?;
+            if child.state != GenerationBatchChildState::Held || child.retryable != Some(true) {
+                return Err(format!(
+                    "durable job {} is {} and is not currently retryable",
+                    retry.durable_job_id,
+                    match child.state {
+                        GenerationBatchChildState::Accepted => "queued",
+                        GenerationBatchChildState::Cancelling => "cancelling",
+                        GenerationBatchChildState::Running => "running",
+                        GenerationBatchChildState::Complete => "complete",
+                        GenerationBatchChildState::Failed => "failed",
+                        GenerationBatchChildState::Cancelled => "cancelled",
+                        GenerationBatchChildState::Held => "held",
+                    }
+                ));
+            }
+            self.client
+                .retry_queue_job(&retry.durable_job_id)
+                .await
+                .map_err(|error| format!("could not retry durable generation: {error}"))
+        }
+        .await;
+
+        if let Err(error) = retry_result {
+            self.jobs.abort_retry(&args.job_id, error.clone()).await;
+            return Err(error);
+        }
+
+        self.jobs.mark_retry_queued(&args.job_id).await;
+        let client = self.client.clone();
+        let jobs = self.jobs.clone();
+        let local_job_id = args.job_id.clone();
+        tokio::spawn(async move {
+            monitor_canonical_retry(
+                client,
+                jobs,
+                local_job_id,
+                retry.authority,
+                retry.durable_job_id,
+            )
+            .await;
+        });
+
+        let job = self
+            .jobs
+            .get(&args.job_id)
+            .await
+            .ok_or_else(|| format!("async generation job {} disappeared", args.job_id))?;
+        Ok(job_tool_result(&job, false))
     }
 
     async fn tool_list_gallery(&self, arguments: Value) -> std::result::Result<Value, String> {
@@ -718,6 +1056,11 @@ struct GenerationStatusArgs {
     include_result: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GenerationRetryArgs {
+    job_id: String,
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct ListGalleryArgs {
     query: Option<String>,
@@ -794,6 +1137,8 @@ struct GalleryFilter {
 enum AsyncJobStatus {
     Queued,
     Running,
+    Held,
+    Cancelled,
     Succeeded,
     Failed,
 }
@@ -803,13 +1148,54 @@ impl AsyncJobStatus {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
+            Self::Held => "held",
+            Self::Cancelled => "cancelled",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
         }
     }
 
     fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed)
+        matches!(self, Self::Cancelled | Self::Succeeded | Self::Failed)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AsyncGenerationTransport {
+    Probing,
+    Canonical,
+    Legacy,
+}
+
+struct CanonicalAsyncSettlement {
+    authority: Option<GenerationBatchAuthority>,
+    durable_job_id: Option<String>,
+    retryable: Option<bool>,
+    status: AsyncJobStatus,
+    error: Option<String>,
+    result: Option<GenerateResponse>,
+}
+
+impl Default for CanonicalAsyncSettlement {
+    fn default() -> Self {
+        Self {
+            authority: None,
+            durable_job_id: None,
+            retryable: None,
+            status: AsyncJobStatus::Failed,
+            error: None,
+            result: None,
+        }
+    }
+}
+
+impl AsyncGenerationTransport {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Probing => "probing",
+            Self::Canonical => "canonical",
+            Self::Legacy => "legacy",
+        }
     }
 }
 
@@ -826,6 +1212,11 @@ struct AsyncGenerationJob {
     latest_progress: Option<SseProgressEvent>,
     error: Option<String>,
     result: Option<GenerateResponse>,
+    transport: AsyncGenerationTransport,
+    authority: Option<GenerationBatchAuthority>,
+    durable_job_id: Option<String>,
+    retryable: Option<bool>,
+    retry_in_flight: bool,
 }
 
 impl AsyncGenerationJob {
@@ -843,8 +1234,19 @@ impl AsyncGenerationJob {
             latest_progress: None,
             error: None,
             result: None,
+            transport: AsyncGenerationTransport::Probing,
+            authority: None,
+            durable_job_id: None,
+            retryable: None,
+            retry_in_flight: false,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct CanonicalRetryClaim {
+    authority: GenerationBatchAuthority,
+    durable_job_id: String,
 }
 
 #[derive(Debug, Default)]
@@ -870,13 +1272,26 @@ impl AsyncJobRegistry {
         id
     }
 
-    async fn mark_running(&self, id: &str) {
+    async fn mark_running(&self, id: &str, transport: AsyncGenerationTransport) {
         let mut jobs = self.inner.jobs.lock().await;
         if let Some(job) = jobs.get_mut(id) {
             let now = now_ms();
             job.status = AsyncJobStatus::Running;
+            job.transport = transport;
             job.started_at_ms.get_or_insert(now);
             job.updated_at_ms = now;
+        }
+    }
+
+    async fn record_progress(&self, id: &str, event: SseProgressEvent) {
+        let mut jobs = self.inner.jobs.lock().await;
+        if let Some(job) = jobs.get_mut(id) {
+            job.status = match event {
+                SseProgressEvent::Queued { .. } => AsyncJobStatus::Queued,
+                _ => AsyncJobStatus::Running,
+            };
+            job.latest_progress = Some(event);
+            job.updated_at_ms = now_ms();
         }
     }
 
@@ -900,6 +1315,106 @@ impl AsyncJobRegistry {
             }
         }
         prune_completed_jobs(&mut jobs);
+    }
+
+    async fn finish_canonical(&self, id: &str, settlement: CanonicalAsyncSettlement) {
+        let mut jobs = self.inner.jobs.lock().await;
+        if let Some(job) = jobs.get_mut(id) {
+            let now = now_ms();
+            job.transport = AsyncGenerationTransport::Canonical;
+            job.authority = settlement.authority;
+            job.durable_job_id = settlement.durable_job_id;
+            job.retryable = settlement.retryable;
+            job.retry_in_flight = false;
+            job.status = settlement.status;
+            job.updated_at_ms = now;
+            job.finished_at_ms = settlement.status.is_terminal().then_some(now);
+            job.error = settlement.error;
+            job.result = settlement.result;
+        }
+        prune_completed_jobs(&mut jobs);
+    }
+
+    async fn begin_retry(&self, id: &str) -> std::result::Result<CanonicalRetryClaim, String> {
+        let mut jobs = self.inner.jobs.lock().await;
+        let job = jobs
+            .get_mut(id)
+            .ok_or_else(|| format!("unknown async generation job: {id}"))?;
+        if job.transport != AsyncGenerationTransport::Canonical
+            || job.status != AsyncJobStatus::Held
+            || job.retryable != Some(true)
+        {
+            return Err(format!("async generation job {id} is not retryable"));
+        }
+        if job.retry_in_flight {
+            return Err(format!(
+                "async generation job {id} already has a retry in progress"
+            ));
+        }
+        let authority = job
+            .authority
+            .clone()
+            .ok_or_else(|| format!("async generation job {id} has no durable batch authority"))?;
+        let durable_job_id = job
+            .durable_job_id
+            .clone()
+            .ok_or_else(|| format!("async generation job {id} has no durable job identity"))?;
+        job.retry_in_flight = true;
+        job.updated_at_ms = now_ms();
+        Ok(CanonicalRetryClaim {
+            authority,
+            durable_job_id,
+        })
+    }
+
+    async fn abort_retry(&self, id: &str, error: String) {
+        let mut jobs = self.inner.jobs.lock().await;
+        if let Some(job) = jobs.get_mut(id) {
+            job.retry_in_flight = false;
+            job.error = Some(error);
+            job.updated_at_ms = now_ms();
+        }
+    }
+
+    async fn mark_retry_queued(&self, id: &str) {
+        let mut jobs = self.inner.jobs.lock().await;
+        if let Some(job) = jobs.get_mut(id) {
+            let now = now_ms();
+            job.status = AsyncJobStatus::Queued;
+            job.retryable = Some(false);
+            job.retry_in_flight = false;
+            job.started_at_ms = None;
+            job.finished_at_ms = None;
+            job.latest_progress = None;
+            job.error = None;
+            job.result = None;
+            job.updated_at_ms = now;
+        }
+    }
+
+    async fn mark_canonical_phase(&self, id: &str, status: AsyncJobStatus) {
+        debug_assert!(matches!(
+            status,
+            AsyncJobStatus::Queued | AsyncJobStatus::Running
+        ));
+        let mut jobs = self.inner.jobs.lock().await;
+        if let Some(job) = jobs.get_mut(id) {
+            let now = now_ms();
+            job.status = status;
+            if status == AsyncJobStatus::Running {
+                job.started_at_ms.get_or_insert(now);
+            }
+            job.error = None;
+            job.updated_at_ms = now;
+        }
+    }
+
+    async fn record_reconciliation_error(&self, id: &str, error: String) {
+        let mut jobs = self.inner.jobs.lock().await;
+        if let Some(job) = jobs.get_mut(id) {
+            job.error = Some(error);
+            job.updated_at_ms = now_ms();
+        }
     }
 
     async fn get(&self, id: &str) -> Option<AsyncGenerationJob> {
@@ -966,6 +1481,12 @@ fn job_tool_result(job: &AsyncGenerationJob, include_result: bool) -> Value {
 fn job_status_line(job: &AsyncGenerationJob) -> String {
     let mut line = format!("{}: {} model {}", job.id, job.status.as_str(), job.model);
 
+    if let Some(durable_job_id) = &job.durable_job_id {
+        line.push_str(&format!("; durable job {durable_job_id}"));
+    }
+    if job.status == AsyncJobStatus::Held && job.retryable == Some(true) {
+        line.push_str("; retryable after correcting the cause");
+    }
     if let Some(progress) = &job.latest_progress {
         line.push_str(&format!("; {}", progress_summary(progress)));
     }
@@ -975,13 +1496,18 @@ fn job_status_line(job: &AsyncGenerationJob) -> String {
     if let Some(response) = &job.result {
         if let Some(image) = response.images.first() {
             line.push_str(&format!(
-                "; generated {}x{} {} in {:.1}s; seed {}",
+                "; generated {}x{} {}; seed {}",
                 image.width,
                 image.height,
                 image.format.extension(),
-                response.generation_time_ms as f64 / 1000.0,
                 response.seed_used
             ));
+            if response.generation_time_ms > 0 {
+                line.push_str(&format!(
+                    "; generation time {:.1}s",
+                    response.generation_time_ms as f64 / 1000.0
+                ));
+            }
             if let Some(gpu) = response.gpu {
                 line.push_str(&format!("; gpu {gpu}"));
             }
@@ -997,7 +1523,8 @@ fn job_summary_json(job: &AsyncGenerationJob) -> Value {
         json!({
             "model": response.model,
             "seed_used": response.seed_used,
-            "generation_time_ms": response.generation_time_ms,
+            "generation_time_ms": (response.generation_time_ms > 0)
+                .then_some(response.generation_time_ms),
             "gpu": response.gpu,
             "image": image.map(|image| json!({
                 "width": image.width,
@@ -1018,6 +1545,13 @@ fn job_summary_json(job: &AsyncGenerationJob) -> Value {
         "started_at_ms": job.started_at_ms,
         "finished_at_ms": job.finished_at_ms,
         "latest_progress": job.latest_progress,
+        "transport": job.transport.as_str(),
+        "expected_instance_id": job.authority.as_ref().map(|authority| &authority.instance_id),
+        "server_batch_id": job.authority.as_ref().map(|authority| &authority.batch_id),
+        "client_batch_id": job.authority.as_ref().map(|authority| &authority.client_batch_id),
+        "durable_job_id": job.durable_job_id,
+        "retryable": job.retryable,
+        "retry_in_flight": job.retry_in_flight,
         "error": job.error,
         "result": result,
     })
@@ -1725,6 +2259,21 @@ fn tool_definitions() -> Value {
             }
         },
         {
+            "name": "generation_retry",
+            "description": "Retry one exact held durable generation after correcting its reported cause. The server instance, batch, client id, and durable child are validated before retry.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "string",
+                        "description": "Async generation job id returned by generate_image_async. The job must be held and retryable."
+                    }
+                },
+                "required": ["job_id"],
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "list_gallery",
             "description": "List, search, filter, and sort saved mold gallery items.",
             "inputSchema": {
@@ -1902,6 +2451,299 @@ mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
     use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    struct HeldCanonicalAdmission;
+
+    impl Respond for HeldCanonicalAdmission {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            ResponseTemplate::new(202).set_body_json(json!({
+                "id": "batch-1",
+                "client_batch_id": body["client_batch_id"],
+                "instance_id": "instance-1",
+                "durable": true,
+                "children": [{
+                    "index": 1,
+                    "job_id": "durable-job-1",
+                    "state": "held",
+                    "error": "model dependency is unavailable",
+                    "retryable": true
+                }]
+            }))
+        }
+    }
+
+    fn transport_request() -> GenerateRequest {
+        serde_json::from_value(json!({
+            "prompt": "transport proof",
+            "model": "flux-dev:q4",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "guidance": 1.0
+        }))
+        .unwrap()
+    }
+
+    async fn mount_canonical_capabilities(server: &MockServer) {
+        let mut capabilities = mold_core::ServerCapabilities::default();
+        capabilities.queue.heterogeneous_batch = true;
+        capabilities.queue.durable_batch_outcomes = true;
+        capabilities.queue.admission_protocol_version = Some(2);
+        capabilities.queue.heterogeneous_batch_max_outputs = Some(64);
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(capabilities))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn async_mcp_uses_canonical_admission_and_preserves_held_authority() {
+        let server = MockServer::start().await;
+        mount_canonical_capabilities(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .respond_with(HeldCanonicalAdmission)
+            .mount(&server)
+            .await;
+
+        let jobs = AsyncJobRegistry::default();
+        let request = transport_request();
+        let local_id = jobs.create(&request).await;
+        run_async_generation(
+            MoldClient::new(&server.uri()),
+            jobs.clone(),
+            local_id.clone(),
+            request,
+        )
+        .await;
+
+        let job = jobs.get(&local_id).await.unwrap();
+        assert_eq!(job.status, AsyncJobStatus::Held);
+        assert_eq!(job.transport, AsyncGenerationTransport::Canonical);
+        assert_eq!(
+            job.authority
+                .as_ref()
+                .map(|authority| authority.instance_id.as_str()),
+            Some("instance-1")
+        );
+        assert_eq!(
+            job.authority
+                .as_ref()
+                .map(|authority| authority.batch_id.as_str()),
+            Some("batch-1")
+        );
+        assert_eq!(job.durable_job_id.as_deref(), Some("durable-job-1"));
+        assert_eq!(job.retryable, Some(true));
+        assert!(job.error.as_deref().unwrap().contains("dependency"));
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests
+            .iter()
+            .any(|request| request.url.path() == "/api/generation-batches"));
+        assert!(!requests.iter().any(|request| {
+            matches!(request.url.path(), "/api/generate" | "/api/generate/stream")
+        }));
+    }
+
+    #[tokio::test]
+    async fn async_mcp_retries_only_the_exact_held_canonical_child() {
+        let server = MockServer::start().await;
+        mount_canonical_capabilities(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .respond_with(HeldCanonicalAdmission)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer {
+            client: MoldClient::new(&server.uri()),
+            jobs: AsyncJobRegistry::default(),
+        };
+        let request = transport_request();
+        let local_id = mcp.jobs.create(&request).await;
+        run_async_generation(
+            mcp.client.clone(),
+            mcp.jobs.clone(),
+            local_id.clone(),
+            request,
+        )
+        .await;
+        let client_batch_id = mcp
+            .jobs
+            .get(&local_id)
+            .await
+            .unwrap()
+            .authority
+            .unwrap()
+            .client_batch_id;
+        let held = json!({
+            "id": "batch-1",
+            "client_batch_id": client_batch_id,
+            "instance_id": "instance-1",
+            "durable": true,
+            "children": [{
+                "index": 1,
+                "job_id": "durable-job-1",
+                "state": "held",
+                "error": "model dependency is unavailable",
+                "retryable": true
+            }]
+        });
+        Mock::given(method("GET"))
+            .and(path("/api/generation-batches/batch-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(held))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/queue/durable-job-1/retry"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = mcp
+            .tool_generation_retry(json!({ "job_id": local_id }))
+            .await
+            .unwrap();
+        assert!(matches!(
+            result["structuredContent"]["status"].as_str(),
+            Some("queued" | "held")
+        ));
+
+        tokio::task::yield_now().await;
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests
+            .iter()
+            .any(|request| request.url.path() == "/api/queue/durable-job-1/retry"));
+        assert!(!requests
+            .iter()
+            .any(|request| request.url.path() == "/api/generate"));
+    }
+
+    #[tokio::test]
+    async fn async_mcp_retry_refuses_a_replacement_server_instance() {
+        let server = MockServer::start().await;
+        mount_canonical_capabilities(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .respond_with(HeldCanonicalAdmission)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer {
+            client: MoldClient::new(&server.uri()),
+            jobs: AsyncJobRegistry::default(),
+        };
+        let request = transport_request();
+        let local_id = mcp.jobs.create(&request).await;
+        run_async_generation(
+            mcp.client.clone(),
+            mcp.jobs.clone(),
+            local_id.clone(),
+            request,
+        )
+        .await;
+        let client_batch_id = mcp
+            .jobs
+            .get(&local_id)
+            .await
+            .unwrap()
+            .authority
+            .unwrap()
+            .client_batch_id;
+        Mock::given(method("GET"))
+            .and(path("/api/generation-batches/batch-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "batch-1",
+                "client_batch_id": client_batch_id,
+                "instance_id": "replacement-instance",
+                "durable": true,
+                "children": [{
+                    "index": 1,
+                    "job_id": "durable-job-1",
+                    "state": "held",
+                    "retryable": true
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/queue/durable-job-1/retry"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let error = mcp
+            .tool_generation_retry(json!({ "job_id": local_id.clone() }))
+            .await
+            .unwrap_err();
+        assert!(error.contains("instance changed"));
+        let job = mcp.jobs.get(&local_id).await.unwrap();
+        assert_eq!(job.status, AsyncJobStatus::Held);
+        assert_eq!(job.retryable, Some(true));
+        assert!(!job.retry_in_flight);
+    }
+
+    #[tokio::test]
+    async fn async_mcp_uses_stream_only_after_explicit_legacy_fallback() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let complete = json!({
+            "image": general_purpose::STANDARD.encode([1_u8, 2, 3]),
+            "format": "png",
+            "width": 64,
+            "height": 64,
+            "seed_used": 7,
+            "generation_time_ms": 12,
+            "model": "flux-dev:q4"
+        });
+        Mock::given(method("POST"))
+            .and(path("/api/generate/stream"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!("event: complete\ndata: {complete}\n\n")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let jobs = AsyncJobRegistry::default();
+        let request = transport_request();
+        let local_id = jobs.create(&request).await;
+        run_async_generation(
+            MoldClient::new(&server.uri()),
+            jobs.clone(),
+            local_id.clone(),
+            request,
+        )
+        .await;
+
+        let job = jobs.get(&local_id).await.unwrap();
+        assert_eq!(job.status, AsyncJobStatus::Succeeded);
+        assert_eq!(job.transport, AsyncGenerationTransport::Legacy);
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests
+            .iter()
+            .any(|request| request.url.path() == "/api/generate/stream"));
+        assert!(!requests
+            .iter()
+            .any(|request| request.url.path() == "/api/generation-batches"));
+        assert!(!requests
+            .iter()
+            .any(|request| request.url.path() == "/api/generate"));
+    }
 
     #[test]
     fn async_status_summarizes_bounded_stage_progress() {
@@ -1957,6 +2799,7 @@ mod tests {
             .iter()
             .any(|tool| tool["name"] == "generate_image_async"));
         assert!(tools.iter().any(|tool| tool["name"] == "generation_status"));
+        assert!(tools.iter().any(|tool| tool["name"] == "generation_retry"));
     }
 
     #[test]
@@ -2444,7 +3287,8 @@ mod tests {
         };
 
         let id = jobs.create(&req).await;
-        jobs.mark_running(&id).await;
+        jobs.mark_running(&id, AsyncGenerationTransport::Legacy)
+            .await;
         jobs.finish(
             &id,
             Ok(GenerateResponse {

@@ -5271,6 +5271,70 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_after_completion_claim_cannot_cancel_during_gallery_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let blocker = Arc::new(GenerateBlocker::default());
+        let (mut state, rx) = durable_state_with_engine(
+            db,
+            root.path(),
+            MockEngine::blocking_generate_ignoring_cancellation(blocker.clone()),
+        );
+        state.queue_capacity = 1;
+        admit_one_durable_batch(&state, "complete-before-delete", "complete-batch");
+
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
+        let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
+        let app = app_with_state(state.clone());
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !blocker.entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("single-worker fallback must enter inference");
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
+
+        let gallery_guard = state.gallery_publication_gate.write().await;
+        blocker.release();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !state
+                .job_registry
+                .completion_claimed_for_tests("complete-before-delete")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("worker must close cancellation admission before gallery publication");
+
+        let rejected = app
+            .oneshot(
+                Request::delete("/api/queue/complete-before-delete")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::NOT_FOUND);
+        drop(gallery_guard);
+        wait_for_attempt_cleanup(&state, "complete-before-delete").await;
+
+        assert_eq!(published_gallery_file_count(root.path()), 1);
+        assert!(state.queue_journal.list_all().is_empty());
+        let detail = state
+            .queue_journal
+            .generation_batch("complete-batch")
+            .unwrap();
+        assert_eq!(detail.children[0].state, "complete");
+
+        worker.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_cancellation_retains_single_worker_attempt_without_publication() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
@@ -6455,6 +6519,47 @@ mod tests {
         assert!(body["children"][0]["error"]
             .as_str()
             .is_some_and(|error| error.contains("mock engine error")));
+
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
+        worker.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn durable_raw_failure_keeps_server_generated_identity_when_refresh_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, rx) = durable_state_with_engine(db, root.path(), MockEngine::failing());
+        install_authoritative_v2(&mut state);
+        state.queue_journal.fail_batch_lookup_after_for_tests(1);
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
+        let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            app_with_state(state).oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(durable_direct_media_body(
+                        "server generated reconciliation identity",
+                    )))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("accepted raw failure must return its original identity")
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = json_body(response).await;
+        assert!(body["id"].as_str().is_some_and(|id| !id.is_empty()));
+        assert!(body["client_batch_id"]
+            .as_str()
+            .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok()));
+        assert!(body["children"][0]["job_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()));
 
         feeder_shutdown.cancel();
         feeder.await.unwrap();

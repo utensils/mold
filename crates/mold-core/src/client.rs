@@ -2064,8 +2064,12 @@ fn should_fallback_loras_endpoint(err: &anyhow::Error) -> bool {
 /// must not turn authentication, transport, or server failures into a legacy
 /// fallback that could mutate state without a successful preflight.
 pub fn is_missing_endpoint_error(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<reqwest::Error>()
-        .and_then(reqwest::Error::status)
+    err.downcast_ref::<ServerResponseError>()
+        .map(|error| error.status)
+        .or_else(|| {
+            err.downcast_ref::<reqwest::Error>()
+                .and_then(reqwest::Error::status)
+        })
         .is_some_and(|status| {
             matches!(
                 status,
@@ -2074,11 +2078,25 @@ pub fn is_missing_endpoint_error(err: &anyhow::Error) -> bool {
         })
 }
 
+#[derive(Debug)]
+struct ServerResponseError {
+    status: StatusCode,
+    body: String,
+}
+
+impl std::fmt::Display for ServerResponseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "server error {}: {}", self.status, self.body)
+    }
+}
+
+impl std::error::Error for ServerResponseError {}
+
 async fn error_for_status_with_body(resp: reqwest::Response) -> Result<reqwest::Response> {
     if resp.status().is_client_error() || resp.status().is_server_error() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("server error {status}: {body}");
+        return Err(ServerResponseError { status, body }.into());
     }
     Ok(resp)
 }
@@ -4318,5 +4336,32 @@ mod tests {
             "job-1"
         );
         client.retry_queue_job("job-1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn generation_batch_missing_route_preserves_compatibility_status() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .respond_with(ResponseTemplate::new(405).set_body_string("old host"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"a cat","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        let error = MoldClient::new(&server.uri())
+            .admit_generation_batch(&GenerationBatchAdmissionRequest {
+                client_batch_id: "client-1".into(),
+                requests: vec![request],
+            })
+            .await
+            .unwrap_err();
+        assert!(super::is_missing_endpoint_error(&error));
+        assert!(error.to_string().contains("405 Method Not Allowed"));
     }
 }

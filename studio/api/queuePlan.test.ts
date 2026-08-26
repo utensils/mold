@@ -5,6 +5,7 @@ import {
   findQueueEntryById,
   listQueue,
   mergeQueueEntries,
+  mutateQueueJobOnExpectedInstance,
   parseQueueListing,
   predictedCompletionUnixMs,
   queuePageRequestForCapacity,
@@ -396,5 +397,62 @@ describe("queue plan contract", () => {
     expect(url).toBe("https://gpu.example/api/queue/job%2F1/retry");
     expect(init?.method).toBe("POST");
     expect((init?.headers as Headers).get("x-api-key")).toBe("secret");
+  });
+
+  it.each([
+    ["cancel" as const, "DELETE", "/api/queue/job%2F1"],
+    ["retry" as const, "POST", "/api/queue/job%2F1/retry"],
+  ])(
+    "fences a durable %s mutation to the admitting server instance",
+    async (mutation, method, mutationPath) => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(
+          Response.json({
+            instance_id: "instance-1",
+            hostname: "render-box",
+            queue_depth: 1,
+          }),
+        )
+        .mockResolvedValueOnce(new Response(null, { status: 204 }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      await mutateQueueJobOnExpectedInstance(
+        { baseUrl: "https://gpu.example", apiKey: "secret" },
+        "instance-1",
+        "job/1",
+        mutation,
+      );
+
+      expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+        "https://gpu.example/api/status",
+        `https://gpu.example${mutationPath}`,
+      ]);
+      expect(fetchMock.mock.calls[1]?.[1]?.method).toBe(method);
+      for (const [, init] of fetchMock.mock.calls) {
+        expect((init?.headers as Headers).get("x-api-key")).toBe("secret");
+      }
+    },
+  );
+
+  it("refuses a durable queue mutation when the URL now reaches a replacement instance", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      Response.json({
+        instance_id: "replacement",
+        hostname: "render-box",
+        queue_depth: 0,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      mutateQueueJobOnExpectedInstance(
+        { baseUrl: "https://gpu.example", apiKey: "secret" },
+        "instance-1",
+        "job/1",
+        "cancel",
+      ),
+    ).rejects.toThrow(/identity changed/i);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

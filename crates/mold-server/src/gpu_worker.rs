@@ -4841,6 +4841,15 @@ fn finish_generation_success(
             "the generated output could not be saved to the gallery",
         )
     };
+    job.registry.finish_completion(&job.id);
+    if settlement.is_cancelled() {
+        let message = "Cancelled".to_string();
+        if let Some(ref tx) = job.progress_tx {
+            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(message.clone())));
+        }
+        let _ = job.result_tx.send(Err(message));
+        return;
+    }
     if settlement.is_retained() {
         let message =
             "generation output is retained for durable reconciliation after restart".to_string();

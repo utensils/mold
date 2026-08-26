@@ -13,6 +13,9 @@ const reconcileGenerationBatches = vi.hoisted(() => vi.fn());
 const fetchEventSource = vi.hoisted(() => vi.fn(() => new Promise(() => {})));
 const generateStream = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const cancelQueueJob = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+const mutateQueueJobOnExpectedInstance = vi.hoisted(() =>
+  vi.fn().mockResolvedValue(undefined),
+);
 const listGalleryFrom = vi.hoisted(() => vi.fn());
 const fetchGalleryBlob = vi.hoisted(() => vi.fn());
 const fetchGalleryThumbnailBlob = vi.hoisted(() => vi.fn());
@@ -25,6 +28,11 @@ vi.mock("@studio/api/generationAdmission", async (importOriginal) => ({
 }));
 
 vi.mock("@microsoft/fetch-event-source", () => ({ fetchEventSource }));
+
+vi.mock("@studio/api/queuePlan", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/queuePlan")>()),
+  mutateQueueJobOnExpectedInstance,
+}));
 
 vi.mock("../api", () => ({
   cancelQueueJob,
@@ -101,7 +109,13 @@ const canonicalH3Route: HostRoute = {
 function batch(
   clientBatchId: string,
   states: Array<
-    "accepted" | "queued" | "running" | "complete" | "failed" | "cancelled"
+    | "accepted"
+    | "queued"
+    | "running"
+    | "held"
+    | "complete"
+    | "failed"
+    | "cancelled"
   > = ["queued"],
   overrides: Partial<GenerationBatchStatus> = {},
 ): GenerationBatchStatus {
@@ -196,6 +210,7 @@ beforeEach(() => {
   fetchEventSource.mockClear();
   generateStream.mockClear();
   cancelQueueJob.mockClear();
+  mutateQueueJobOnExpectedInstance.mockClear();
   listGalleryFrom.mockReset();
   fetchGalleryBlob.mockReset();
   fetchGalleryThumbnailBlob.mockReset();
@@ -485,16 +500,18 @@ describe("web durable generation lifecycle", () => {
     await stream.cancel(id);
     expect(job.state).toBe("running");
     expect(job.cancelRequested).toBe(true);
-    expect(cancelQueueJob).not.toHaveBeenCalled();
+    expect(mutateQueueJobOnExpectedInstance).not.toHaveBeenCalled();
     expect(
       localStorage.getItem(`mold.generate.jobs.recovery.${clientBatchId}`),
     ).toContain('"cancelRequested":true');
 
     confirmAdmission(batch(clientBatchId));
     await vi.waitFor(() =>
-      expect(cancelQueueJob).toHaveBeenCalledWith(
-        `job-${clientBatchId}-1`,
+      expect(mutateQueueJobOnExpectedInstance).toHaveBeenCalledWith(
         route.target,
+        route.instanceId,
+        `job-${clientBatchId}-1`,
+        "cancel",
       ),
     );
     await vi.waitFor(() => expect(job.state).toBe("canceled"));
@@ -528,12 +545,47 @@ describe("web durable generation lifecycle", () => {
     recover({ kind: "found", batch: batch(clientBatchId) });
 
     await vi.waitFor(() =>
-      expect(cancelQueueJob).toHaveBeenCalledWith(
-        `job-${clientBatchId}-1`,
+      expect(mutateQueueJobOnExpectedInstance).toHaveBeenCalledWith(
         route.target,
+        route.instanceId,
+        `job-${clientBatchId}-1`,
+        "cancel",
       ),
     );
     await vi.waitFor(() => expect(job.state).toBe("canceled"));
+  });
+
+  it("retries held durable work only through the admitting instance fence", async () => {
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(batch(body.client_batch_id)),
+    );
+    const stream = useGenerateStream();
+    const id = stream.submit(request("retry held"), { kind: "single" }, route);
+    await vi.waitFor(() =>
+      expect(
+        stream.jobs.value.find((job) => job.id === id)?.serverId,
+      ).toBeTruthy(),
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    const clientBatchId = job.durableBatch!.clientBatchId;
+    const held = batch(clientBatchId, ["held"]);
+    held.children[0] = {
+      ...held.children[0]!,
+      error: "model dependency is unavailable",
+      retryable: true,
+    };
+    reconcileGenerationBatches.mockResolvedValue(statusResponse([held]));
+    await __testing__.reconcileDurableHost(route.hostId);
+
+    await stream.retry(id);
+
+    expect(mutateQueueJobOnExpectedInstance).toHaveBeenCalledWith(
+      route.target,
+      route.instanceId,
+      `job-${clientBatchId}-1`,
+      "retry",
+    );
   });
 
   it("keeps recovery-record media redaction as defense in depth", () => {
@@ -792,7 +844,7 @@ describe("web durable generation lifecycle", () => {
     await __testing__.reconcileDurableHost(route.hostId);
     expect(stream.jobs.value.find((job) => job.id === id)?.state).toBe("done");
     await stream.cancel(id);
-    expect(cancelQueueJob).not.toHaveBeenCalled();
+    expect(mutateQueueJobOnExpectedInstance).not.toHaveBeenCalled();
     releaseMedia();
     await vi.waitFor(() => expect(complete).toHaveBeenCalledTimes(1));
 

@@ -2,6 +2,7 @@ import {
   IncompatibleHostError,
   apiFetchTo,
   apiJsonTo,
+  parseCurrentServerStatus,
   type ApiTarget,
 } from "./client";
 import { parseHostMemory, type HostMemorySnapshot } from "../lib/hostMemory";
@@ -335,11 +336,38 @@ export async function retryQueueJob(
   target: ApiTarget,
   workId: string,
 ): Promise<void> {
-  await apiFetchTo(
-    target,
-    `/api/queue/${encodeURIComponent(workId)}/retry`,
-    { method: "POST" },
+  await apiFetchTo(target, `/api/queue/${encodeURIComponent(workId)}/retry`, {
+    method: "POST",
+  });
+}
+
+export type QueueJobMutation = "cancel" | "retry";
+
+/** Mutate durable work only after the target proves it is still the server
+ * instance that admitted the job. URLs and credentials can outlive a server
+ * replacement, so neither is sufficient authority for a recovered job. */
+export async function mutateQueueJobOnExpectedInstance(
+  target: ApiTarget,
+  expectedInstanceId: string,
+  workId: string,
+  mutation: QueueJobMutation,
+): Promise<void> {
+  if (!expectedInstanceId.trim()) {
+    throw new TypeError("queue mutation requires an expected server instance");
+  }
+  const status = parseCurrentServerStatus(
+    await apiJsonTo<unknown>(target, "/api/status"),
   );
+  if (status.instance_id !== expectedInstanceId) {
+    throw new Error(
+      "The original machine identity changed; this queue action is unavailable.",
+    );
+  }
+  if (mutation === "cancel") {
+    await cancelQueueJob(target, workId);
+  } else {
+    await retryQueueJob(target, workId);
+  }
 }
 
 /** Set or clear a durable stable-device pin for queued work. */

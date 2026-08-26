@@ -19,6 +19,8 @@ pub(crate) enum SettlementOutcome {
     Untracked,
     /// SQLite committed the requested terminal/blocked transition.
     Settled,
+    /// User cancellation committed instead of the requested terminal result.
+    Cancelled,
     /// The claim is intentionally replayable, or its exact transition could
     /// not be committed within the bounded owner-thread retry budget.
     Retained,
@@ -27,6 +29,10 @@ pub(crate) enum SettlementOutcome {
 impl SettlementOutcome {
     pub(crate) fn is_retained(self) -> bool {
         self == Self::Retained
+    }
+
+    pub(crate) fn is_cancelled(self) -> bool {
+        self == Self::Cancelled
     }
 }
 
@@ -71,6 +77,7 @@ pub(crate) fn settle_blocking(
                     SettlementOutcome::Settled
                 };
             }
+            RetainOutcome::Cancelled => return SettlementOutcome::Cancelled,
             RetainOutcome::Retry { ticket, error } => {
                 tracing::warn!(
                     job = %job_id,
@@ -107,6 +114,7 @@ pub(crate) fn settle_completion_blocking(
         let job_id = owned.id().to_string();
         match owned.complete_exact_with_result(Some(result_json)) {
             RetainOutcome::Released | RetainOutcome::Stale => return SettlementOutcome::Settled,
+            RetainOutcome::Cancelled => return SettlementOutcome::Cancelled,
             RetainOutcome::Retry { ticket, error } => {
                 tracing::warn!(
                     job = %job_id,
