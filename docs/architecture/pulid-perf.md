@@ -51,6 +51,15 @@ stays load-bearing regardless, because `Cargo.toml` does not patch
 could add `candle-onnx` to the patch table and drop the mold-side
 normalization as redundant, but that is independent of this issue.
 
+> **Superseded 2026-08-26 (#1399).** #1393 retired the `[patch.crates-io]`
+> table for Candle entirely: every candle crate, `candle-onnx` included, is now
+> a direct git dependency on one `utensils/candle` revision
+> (`crates/mold-inference/Cargo.toml`). The prerequisite this section describes
+> as unmet is therefore met, and whether
+> `normalize_empty_optional_resize_inputs` is still load-bearing is now a
+> question about that revision's `candle-onnx`, not about where the crate comes
+> from. The rest of the section's reasoning is unchanged.
+
 **The measured 2.0 s p95 budget covers less than half of what one identity
 extraction actually does.** `pulid_face_probe bench` measures exactly
 `ScrfdDetector::detect` + `ArcFaceRecognizer::embed_crop`

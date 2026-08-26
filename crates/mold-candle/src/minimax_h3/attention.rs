@@ -35,10 +35,31 @@ pub const H3_METAL_DENSE_CHUNK_MAX_SCORE_ELEMENTS: u64 = 256 * 1024 * 1024;
 /// `CUDA_AUTO_QUERY_CHUNK` so short sequences behave like every other family.
 pub const H3_METAL_DENSE_MAX_QUERY_CHUNK_ROWS: usize = 512;
 pub const H3_FLASH_ATTN_PACKAGE_VERSION: &str = "0.11.0";
-pub const H3_FLASH_ATTN_CRATE_SHA256: &str =
-    "e5f1e2f29f5123d7a627171209fdaeb4ee91d076aefeac588922aa9842e30c2c";
+/// Provenance of the FlashAttention payload this build actually compiles.
+///
+/// This was the crates.io `.crate` archive's SHA-256 until #1399 moved the
+/// dependency onto the `utensils/candle` fork, at which point that checksum
+/// authenticated a file no build reads. A git dependency's honest identity is
+/// its source string, and the revision inside it is itself a content hash of
+/// the whole tree — so this is strictly stronger than the archive digest was,
+/// and it is directly comparable to what `Cargo.lock` records —
+/// `scripts/tests/candle-single-identity.sh` compares them, and holds every
+/// other candle crate in the repo to that same source. The comparison lives
+/// there rather than in a unit test because this crate is published, so its
+/// tests must not assume the monorepo directory layout.
+///
+/// Keep this in lockstep with `crates/mold-candle/Cargo.toml`. A qualification
+/// record naming a payload that was not compiled is worse than none.
+pub const H3_FLASH_ATTN_SOURCE: &str = concat!(
+    "git+https://github.com/utensils/candle.git",
+    "?rev=ad5fd432974913887f17b25c8ee863cfc54eb67c",
+    "#ad5fd432974913887f17b25c8ee863cfc54eb67c"
+);
 pub const H3_FLASH_ATTN_QUALIFIED_COMPUTE_CAPABILITY: (u16, u16) = (8, 9);
-pub const H3_ATTENTION_RC_SCHEMA: &str = "mold.minimax-h3.attention-rc.v1";
+/// v2 (#1399): the archive-checksum field became the source-identity field.
+/// A v1 record names a crates.io archive that is no longer what compiles, so
+/// it must not validate against this build.
+pub const H3_ATTENTION_RC_SCHEMA: &str = "mold.minimax-h3.attention-rc.v2";
 pub const H3_ATTENTION_RC_FEATURE: &str = "h3-flash-attn-rc";
 pub const H3_ATTENTION_RC_CLAIM_MARKER: &str = "mold.minimax-h3.attention-rc.kernel-compiled.v1";
 pub const H3_ATTENTION_RELEASE_PROVENANCE_PREFIX: &str =
@@ -300,7 +321,7 @@ pub struct H3AttentionReleaseCandidateBuild {
     pub kernel_compiled: bool,
     pub compiled_compute_capability: Option<(u16, u16)>,
     pub package_version: String,
-    pub package_sha256: String,
+    pub package_source: String,
     pub kernel: H3AttentionKernel,
     pub mask: H3AttentionMask,
     pub model_contract: H3AttentionModelContract,
@@ -328,7 +349,7 @@ impl H3AttentionReleaseCandidateBuild {
             kernel_compiled,
             compiled_compute_capability,
             package_version: H3_FLASH_ATTN_PACKAGE_VERSION.to_string(),
-            package_sha256: H3_FLASH_ATTN_CRATE_SHA256.to_string(),
+            package_source: H3_FLASH_ATTN_SOURCE.to_string(),
             kernel: H3AttentionKernel::CandleFlashFwdHdim128Bf16Sm80V011,
             mask: H3AttentionMask::FullNonCausalPacked,
             model_contract: H3AttentionModelContract::released_bf16(),
@@ -392,7 +413,7 @@ impl H3AttentionReleaseCandidateBuild {
         if self.schema != H3_ATTENTION_RC_SCHEMA
             || self.cargo_feature != H3_ATTENTION_RC_FEATURE
             || self.package_version != H3_FLASH_ATTN_PACKAGE_VERSION
-            || self.package_sha256 != H3_FLASH_ATTN_CRATE_SHA256
+            || self.package_source != H3_FLASH_ATTN_SOURCE
             || self.kernel != H3AttentionKernel::CandleFlashFwdHdim128Bf16Sm80V011
             || self.mask != H3AttentionMask::FullNonCausalPacked
             || self.model_contract != H3AttentionModelContract::released_bf16()
@@ -1450,7 +1471,7 @@ fn release_candidate_build_identity(build: &H3AttentionReleaseCandidateBuild) ->
         digest.update(marker.as_bytes());
     }
     digest.update(build.package_version.as_bytes());
-    digest.update(build.package_sha256.as_bytes());
+    digest.update(build.package_source.as_bytes());
     digest.update(build.kernel.stable_id().as_bytes());
     digest.update(build.mask.stable_id().as_bytes());
     digest.update((build.model_contract.heads as u64).to_le_bytes());
@@ -1486,7 +1507,7 @@ fn runtime_identity_fields(
     digest.update((contract.head_dim as u64).to_le_bytes());
     digest.update(contract.dtype.stable_id().as_bytes());
     digest.update(H3_FLASH_ATTN_PACKAGE_VERSION.as_bytes());
-    digest.update(H3_FLASH_ATTN_CRATE_SHA256.as_bytes());
+    digest.update(H3_FLASH_ATTN_SOURCE.as_bytes());
     hex_digest(digest.finalize())
 }
 
@@ -1526,7 +1547,7 @@ fn plan_identity(plan: &H3FrozenAttentionPlan) -> String {
         digest.update(value.to_le_bytes());
     }
     digest.update(H3_FLASH_ATTN_PACKAGE_VERSION.as_bytes());
-    digest.update(H3_FLASH_ATTN_CRATE_SHA256.as_bytes());
+    digest.update(H3_FLASH_ATTN_SOURCE.as_bytes());
     hex_digest(digest.finalize())
 }
 
@@ -1903,7 +1924,7 @@ mod tests {
             .unwrap()
         );
         assert_eq!(H3_FLASH_ATTN_PACKAGE_VERSION, "0.11.0");
-        assert_eq!(H3_FLASH_ATTN_CRATE_SHA256.len(), 64);
+        assert!(H3_FLASH_ATTN_SOURCE.starts_with("git+"));
         let rejection = authority.require_release_activation().unwrap_err();
         assert!(rejection
             .requirements

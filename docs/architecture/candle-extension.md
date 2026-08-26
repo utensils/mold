@@ -1,10 +1,16 @@
 # Candle extension boundary
 
-Mold depends on Candle through its official package identities. There must be
-only one `candle_core::Tensor` type in a build graph. Renaming a fork to
-`candle-core-mold`, `candle-nn-mold`, and `candle-transformers-mold` created a
-second type universe, prevented direct use of ecosystem crates such as
-`candle-flash-attn`, and made every upstream upgrade a three-crate republish.
+There must be only one `candle_core::Tensor` type in a build graph.
+`Tensor` and `Error` are nominal types: a second copy of Candle under any
+package name is a second, unrelated type universe, and every call site that
+hands a tensor across the boundary stops compiling.
+
+Mold satisfies that rule by pinning **every** Candle crate — `candle-core`,
+`candle-nn`, `candle-transformers`, `candle-flash-attn`, and `candle-onnx` — to
+one revision of the `utensils/candle` fork. Its published packages are renamed
+(`candle-core-mold`, `candle-nn-mold`, `candle-transformers-mold`); the
+ecosystem crates in the same tree keep their upstream names but depend on the
+renamed core, so the whole set is one identity.
 
 ## Ownership rule
 
@@ -40,10 +46,12 @@ targeted upstreamable fix.
 
 ## Dependency shape
 
-The workspace and desktop Cargo roots use a same-name `[patch.crates-io]` for
-`candle-core`, `candle-nn`, and `candle-transformers`. The patch branch is based
-directly on upstream Candle and keeps the official package names. Transitive
-consumers therefore resolve to that same source and type identity.
+Every Candle crate in the workspace and desktop Cargo roots is a direct git
+dependency on ONE `utensils/candle` revision. `[patch.crates-io]` cannot be
+used for this: a patch must keep the patched package's name, and the fork
+publishes the renamed `candle-*-mold` identities that carry the merged Metal
+kernels LTX-2.5 needs (#1393). The root `Cargo.toml` still patches `cudarc`,
+which is a same-name fork and therefore patchable.
 
 `mold-ai-inference` imports application extensions from `mold-ai-candle` and
 ordinary framework models from `candle-transformers`. Feature forwarding is:
@@ -54,9 +62,25 @@ mold-ai-inference cuda/metal
   -> candle-core + candle-nn + candle-transformers cuda/metal
 ```
 
-Do not add a renamed Candle package, duplicate git source, or local copy of a
-Candle backend. `cargo tree -d` should not report Candle packages from multiple
-sources, and Flash Attention must compile without a private cfg flag.
+**Moving the pin means moving all of it.** A Candle crate left on crates.io
+depends on the upstream-named `candle-core` and drags a second identity into
+the graph. That is exactly how #1399 broke every CUDA build for four
+consecutive `main` merges: #1393 moved `candle-core`/`-nn`/`-transformers` to
+the fork and left `crates/mold-candle`'s `candle-flash-attn` at
+`version = "=0.11.0"`, so `candle_flash_attn::flash_attn` was being handed
+`candle-core-mold` tensors it could not accept.
+
+`scripts/tests/candle-single-identity.sh` enforces this on the release-contract
+CI route (it runs on pull requests; the `--features flash-attn` compile job does
+not). It asserts that every declared Candle dependency names the same fork URL
+and revision, that none carries a crates.io version requirement, and — the
+assertion that actually holds, because a manifest audit cannot see a transitive
+consumer — that neither `Cargo.lock` resolves any `candle-*` package from a
+registry or from a second revision.
+
+Do not add a second Candle source, a duplicate git revision, or a local copy of
+a Candle backend. `cargo tree -d` should not report Candle packages from
+multiple sources, and Flash Attention must compile without a private cfg flag.
 
 ## crates.io boundary
 
