@@ -2386,9 +2386,22 @@ fn validate_direct_generation_request(
 
 pub(crate) async fn direct_durable_admission(
     state: &AppState,
-    request: &mold_core::GenerateRequest,
+    request: &mut mold_core::GenerateRequest,
     explicitly_requested: bool,
 ) -> Result<Option<Arc<crate::queue_media_admission::DurableMediaAdmission>>, ApiError> {
+    // Resolve the small, config-only control contracts before availability or
+    // encrypted-media gates. This preserves precise 422 diagnostics without
+    // doing model, placement, download, or device work before durable ack.
+    let _ = plan_builtin_ltx2_control(state, request).await?;
+    let _ = plan_builtin_ltx2_camera_controls(state, request).await?;
+    if let Err(error) = crate::queue_media_admission::durable_media_preflight(request) {
+        return if explicitly_requested {
+            Err(error)
+        } else {
+            Ok(None)
+        };
+    }
+    ensure_generation_available(state)?;
     let config = state.config.read().await;
     if state.is_output_disabled(&config) {
         return if explicitly_requested {
@@ -2410,13 +2423,6 @@ pub(crate) async fn direct_durable_admission(
             "DURABLE_MEDIA_UNAVAILABLE",
             StatusCode::SERVICE_UNAVAILABLE,
         ));
-    }
-    if let Err(error) = crate::queue_media_admission::durable_media_preflight(request) {
-        return if explicitly_requested {
-            Err(error)
-        } else {
-            Ok(None)
-        };
     }
     let admission = state.queue_journal.queue_media_admission();
     if admission.is_none() && explicitly_requested {
@@ -2743,9 +2749,8 @@ async fn generate(
     mold_core::minimax_h3::canonicalize_request_model(&mut req);
     validate_direct_generation_request(&req)?;
     let operation_id = requested_operation_id(&headers)?;
-    ensure_generation_available(&state)?;
     let canonical_admission =
-        direct_durable_admission(&state, &req, operation_id.is_some()).await?;
+        direct_durable_admission(&state, &mut req, operation_id.is_some()).await?;
     if let Some(admission) = canonical_admission {
         let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let outcome = admission
@@ -3950,9 +3955,8 @@ async fn generate_stream(
     let completion_payload = requested_sse_completion_payload(&headers)?;
     validate_direct_generation_request(&req)?;
     let operation_id = requested_operation_id(&headers)?;
-    ensure_generation_available(&state)?;
     let canonical_admission =
-        direct_durable_admission(&state, &req, operation_id.is_some()).await?;
+        direct_durable_admission(&state, &mut req, operation_id.is_some()).await?;
     if let Some(admission) = canonical_admission {
         let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let outcome = admission
