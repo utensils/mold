@@ -84,6 +84,28 @@ describe("MobileImagePickerSheet", () => {
     });
   });
 
+  it("supports ordered multi-image selection before fetching gallery bytes", async () => {
+    const wrapper = mount(MobileImagePickerSheet, {
+      props: { open: true, target, multiple: true },
+      global: { stubs: { AuthedMedia: true } },
+    });
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-image-picker-gallery-tab']").trigger("click");
+    const items = wrapper.findAll("[data-test='mobile-image-picker-gallery-item']");
+    await items[1]!.trigger("click");
+    await items[0]!.trigger("click");
+
+    expect(wrapper.emitted("pick-many")).toBeUndefined();
+    expect(wrapper.get("[data-test='mobile-image-picker-selection']").text()).toContain(
+      "2 selected",
+    );
+    await wrapper.get("[data-test='mobile-image-picker-confirm']").trigger("click");
+    await flushPromises();
+
+    const picked = wrapper.emitted("pick-many")?.[0]?.[0] as Array<{ filename: string }>;
+    expect(picked.map((entry) => entry.filename)).toEqual(["photo.jpg", "still.png"]);
+  });
+
   it("merges every available host and fetches a peer print from its own authenticated origin", async () => {
     apiJsonTo.mockImplementation((route: typeof target) =>
       Promise.resolve(

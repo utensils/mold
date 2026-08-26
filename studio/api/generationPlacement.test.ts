@@ -40,7 +40,7 @@ function planned(
 }
 
 describe("generation placement preview", () => {
-  test("requires authority whenever the references field is present", () => {
+  test("lets staged H3 Ref2VA reach host admission while keeping unknown reference wires strict", () => {
     expect(requiresAuthoritativePlacement({ model: "ordinary" })).toBe(false);
     expect(
       requiresAuthoritativePlacement({ model: "h3", references: null }),
@@ -48,6 +48,12 @@ describe("generation placement preview", () => {
     expect(
       requiresAuthoritativePlacement({ model: "h3", references: [] }),
     ).toBe(true);
+    expect(
+      requiresAuthoritativePlacement({
+        model: "minimax-h3-ref2va:comfy-pruned-int8",
+        references: [],
+      }),
+    ).toBe(false);
   });
 
   test("requires authority for an identity request so it never routes legacy", () => {

@@ -347,7 +347,7 @@ describe("SourceMediaPanel — MiniMax H3 FL2VA boundaries", () => {
     expect(wrapper.emitted("open-h3-last-frame-picker")).toHaveLength(1);
   });
 
-  it("exposes H3 Ref2VA ordered references in the primary form", () => {
+  it("exposes H3 Ref2VA ordered references through the shared picker event", async () => {
     const ref2va = {
       name: "minimax-h3-ref2va:comfy-pruned-int8",
       family: "minimax-h3",
@@ -365,6 +365,8 @@ describe("SourceMediaPanel — MiniMax H3 FL2VA boundaries", () => {
     expect(wrapper.find("[data-test='h3-reference-files']").exists()).toBe(
       true,
     );
+    await wrapper.get("[data-test='h3-reference-library']").trigger("click");
+    expect(wrapper.emitted("open-h3-reference-picker")).toHaveLength(1);
   });
 });
 

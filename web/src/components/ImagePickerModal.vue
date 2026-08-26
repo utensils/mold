@@ -15,11 +15,17 @@ import ModalPanel from "@ui/components/ModalPanel.vue";
 import SheetPanel from "@ui/components/SheetPanel.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import Icon from "@ui/components/Icon.vue";
-import { listGallery, thumbnailUrl, imageUrl } from "../api";
 import { blobToBase64 } from "../lib/base64";
 import { imageDimensionsFromBase64 } from "@studio/lib/imageDimensions";
 import { useOverlayFocus } from "../composables/useOverlayFocus";
-import type { GalleryImage, SourceImageState } from "../types";
+import { useThumbnailSources } from "../composables/useThumbnailSources";
+import {
+  fetchMergedGallery,
+  type HostGalleryImage,
+} from "../lib/multiHostGallery";
+import { getHost, HOSTS_CHANGED_EVENT, listHosts } from "../lib/hostRegistry";
+import { fetchGalleryBlob } from "../lib/galleryMedia";
+import type { SourceImageState } from "../types";
 
 const props = withDefaults(
   defineProps<{
@@ -41,7 +47,7 @@ const emit = defineEmits<{
 }>();
 
 const tab = ref<"upload" | "gallery">(props.galleryOnly ? "gallery" : "upload");
-const entries = ref<GalleryImage[]>([]);
+const entries = ref<HostGalleryImage[]>([]);
 const stillEntries = computed(() =>
   entries.value.filter((entry) =>
     /\.(png|jpe?g)$/i.test(entry.filename.trim()),
@@ -52,6 +58,10 @@ const error = ref<string | null>(null);
 const uploadError = ref<string | null>(null);
 const dragging = ref(false);
 const fileInput = ref<HTMLInputElement | null>(null);
+const selectedGallery = ref<HostGalleryImage[]>([]);
+const pickingGallery = ref(false);
+const showHostLabels = ref(false);
+const { srcFor } = useThumbnailSources(160);
 
 const host = ref<HTMLElement | null>(null);
 const isOpen = computed(() => props.open);
@@ -60,9 +70,13 @@ const { onKeydown } = useOverlayFocus(isOpen, host, () => emit("close"));
 watch(
   () => props.open,
   (open) => {
-    if (open) return;
+    if (open) {
+      void loadGallery();
+      return;
+    }
     uploadError.value = null;
     dragging.value = false;
+    selectedGallery.value = [];
     if (fileInput.value) fileInput.value.value = "";
   },
 );
@@ -95,17 +109,37 @@ onMounted(async () => {
     mq.addEventListener?.("change", onMediaChange);
   }
 
+  window.addEventListener(HOSTS_CHANGED_EVENT, onHostsChanged);
+  if (props.open) await loadGallery();
+});
+
+onBeforeUnmount(() => {
+  mq?.removeEventListener?.("change", onMediaChange);
+  window.removeEventListener(HOSTS_CHANGED_EVENT, onHostsChanged);
+});
+
+function onHostsChanged() {
+  if (props.open) void loadGallery();
+}
+
+async function loadGallery() {
   loading.value = true;
+  error.value = null;
+  selectedGallery.value = [];
   try {
-    entries.value = await listGallery();
+    const merged = await fetchMergedGallery(listHosts());
+    entries.value = merged.entries;
+    showHostLabels.value = merged.reachableHostIds.length > 1;
+    if (merged.unreachableHostIds.length && !entries.value.length) {
+      error.value = "No connected machine could load its Library.";
+    }
   } catch (e) {
+    entries.value = [];
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
     loading.value = false;
   }
-});
-
-onBeforeUnmount(() => mq?.removeEventListener?.("change", onMediaChange));
+}
 
 async function emitFiles(files: File[]) {
   if (!files.length) return;
@@ -170,26 +204,57 @@ function onDragLeave(event: DragEvent) {
   dragging.value = false;
 }
 
-async function pickFromGallery(item: GalleryImage) {
-  const res = await fetch(imageUrl(item.filename));
-  if (!res.ok) {
-    error.value = `Fetch failed: ${res.status}`;
+async function pickFromGallery(item: HostGalleryImage) {
+  if (props.multiple) {
+    const key = `${item.hostId}:${item.filename}`;
+    const index = selectedGallery.value.findIndex(
+      (selected) => `${selected.hostId}:${selected.filename}` === key,
+    );
+    selectedGallery.value =
+      index >= 0
+        ? selectedGallery.value.filter((_, entry) => entry !== index)
+        : [...selectedGallery.value, item];
     return;
   }
-  const blob = await res.blob();
-  const b64 = await blobToBase64(blob);
-  const dimensions = imageDimensionsFromBase64(b64);
-  emit("pick", [
-    {
-      kind: "gallery",
-      filename: item.filename,
-      base64: b64,
-      ...(dimensions
-        ? { width: dimensions.width, height: dimensions.height }
-        : {}),
-    },
-  ]);
-  emit("close");
+  await emitGallerySelection([item]);
+}
+
+function galleryEntrySelected(item: HostGalleryImage): boolean {
+  return selectedGallery.value.some(
+    (selected) =>
+      selected.hostId === item.hostId && selected.filename === item.filename,
+  );
+}
+
+async function emitGallerySelection(items: HostGalleryImage[]) {
+  if (!items.length || pickingGallery.value) return;
+  pickingGallery.value = true;
+  error.value = null;
+  try {
+    const picked = await Promise.all(
+      items.map(async (item) => {
+        const host = getHost(item.hostId);
+        if (!host) throw new Error(`${item.hostLabel} is no longer connected.`);
+        const blob = await fetchGalleryBlob(host, item.filename);
+        const b64 = await blobToBase64(blob);
+        const dimensions = imageDimensionsFromBase64(b64);
+        return {
+          kind: "gallery" as const,
+          filename: item.filename,
+          base64: b64,
+          ...(dimensions
+            ? { width: dimensions.width, height: dimensions.height }
+            : {}),
+        };
+      }),
+    );
+    emit("pick", picked);
+    emit("close");
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : String(cause);
+  } finally {
+    pickingGallery.value = false;
+  }
 }
 </script>
 
@@ -290,17 +355,56 @@ async function pickFromGallery(item: GalleryImage) {
               <button
                 type="button"
                 class="ip__tile"
+                :class="{ 'ip__tile--selected': galleryEntrySelected(item) }"
                 :title="item.filename"
+                :disabled="pickingGallery"
+                :aria-pressed="
+                  multiple ? galleryEntrySelected(item) : undefined
+                "
                 @click="pickFromGallery(item)"
               >
-                <img
-                  :src="thumbnailUrl(item.filename)"
-                  :alt="item.filename"
-                  loading="lazy"
-                />
+                <img :src="srcFor(item)" :alt="item.filename" loading="lazy" />
+                <span
+                  v-if="showHostLabels"
+                  class="ip__host"
+                  data-test="image-picker-host-label"
+                >
+                  {{ item.hostLabel }}
+                </span>
+                <span
+                  v-if="multiple && galleryEntrySelected(item)"
+                  class="ip__order"
+                  aria-hidden="true"
+                >
+                  {{
+                    selectedGallery.findIndex(
+                      (selected) =>
+                        selected.hostId === item.hostId &&
+                        selected.filename === item.filename,
+                    ) + 1
+                  }}
+                </span>
               </button>
             </li>
           </ul>
+          <div
+            v-if="multiple && selectedGallery.length"
+            class="ip__selection"
+            data-test="image-picker-selection"
+          >
+            <span
+              >{{ selectedGallery.length }} selected · kept in this order</span
+            >
+            <button
+              type="button"
+              class="ip__confirm"
+              data-test="image-picker-confirm"
+              :disabled="pickingGallery"
+              @click="emitGallerySelection(selectedGallery)"
+            >
+              Add selected
+            </button>
+          </div>
         </div>
       </div>
     </component>
@@ -480,6 +584,7 @@ async function pickFromGallery(item: GalleryImage) {
 }
 
 .ip__tile {
+  position: relative;
   display: block;
   width: 100%;
   padding: 0;
@@ -491,6 +596,11 @@ async function pickFromGallery(item: GalleryImage) {
   transition:
     border-color var(--dur-quick) var(--ease),
     opacity var(--dur-quick) var(--ease);
+}
+
+.ip__tile--selected {
+  border-color: var(--safelight);
+  box-shadow: inset 0 0 0 1px var(--safelight);
 }
 
 .ip__tile:hover {
@@ -508,5 +618,61 @@ async function pickFromGallery(item: GalleryImage) {
   width: 100%;
   height: 96px;
   object-fit: cover;
+}
+
+.ip__host {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  left: 4px;
+  overflow: hidden;
+  padding: 2px 5px;
+  border-radius: var(--radius-control);
+  background: rgb(0 0 0 / 68%);
+  color: var(--on-media);
+  font-family: var(--f-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ip__order {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--safelight);
+  color: var(--on-accent);
+  font-weight: 700;
+}
+
+.ip__selection {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--edge);
+  background: var(--bench);
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.ip__confirm {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: var(--safelight);
+  color: var(--on-accent);
+  font-weight: 700;
+  cursor: pointer;
 }
 </style>

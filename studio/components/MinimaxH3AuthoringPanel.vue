@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import {
   MINIMAX_H3_MAX_REFERENCE_AUDIOS,
   MINIMAX_H3_MAX_REFERENCE_IMAGES,
@@ -29,19 +29,25 @@ const props = withDefaults(
     modelValue: MinimaxH3AuthoringState;
     disabled?: boolean;
     touchFriendly?: boolean;
+    imagePickerAvailable?: boolean;
   }>(),
   {
     disabled: false,
     touchFriendly: false,
+    imagePickerAvailable: false,
   },
 );
 
 const emit = defineEmits<{
   "update:modelValue": [state: MinimaxH3AuthoringState];
+  "open-image-picker": [];
 }>();
 
 const error = ref("");
 const busy = ref(false);
+const imagePreviews = ref(
+  new Map<MinimaxH3ReferenceDraft["reference"], string>(),
+);
 const budget = computed(() =>
   minimaxH3ReferenceBudget(props.modelValue.references),
 );
@@ -256,6 +262,104 @@ function durationLabel(
   const duration = minimaxH3ReferenceDurationMs(reference);
   return duration == null ? null : `${(duration / 1_000).toFixed(1)}s`;
 }
+
+async function boundedImagePreview(
+  reference: MinimaxH3ReferenceDraft["reference"],
+): Promise<string | null> {
+  if (
+    reference.kind !== "image" ||
+    reference.media.authority !== "inline" ||
+    typeof createImageBitmap !== "function"
+  ) {
+    return null;
+  }
+  let bitmap: ImageBitmap | null = null;
+  try {
+    // Decode in bounded chunks so several-megabyte references never produce
+    // both a full binary string and a second full byte copy at once.
+    const parts: ArrayBuffer[] = [];
+    const chunkSize = 32_768;
+    for (let offset = 0; offset < reference.media.data.length;) {
+      let end = Math.min(offset + chunkSize, reference.media.data.length);
+      if (end < reference.media.data.length) end -= (end - offset) % 4;
+      const binary = atob(reference.media.data.slice(offset, end));
+      const buffer = new ArrayBuffer(binary.length);
+      const bytes = new Uint8Array(buffer);
+      for (let index = 0; index < binary.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index);
+      }
+      parts.push(buffer);
+      offset = end;
+    }
+    const blob = new Blob(parts, { type: reference.mime_type });
+    const scale = Math.min(
+      1,
+      112 / Math.max(reference.width, reference.height),
+    );
+    const width = Math.max(1, Math.round(reference.width * scale));
+    const height = Math.max(1, Math.round(reference.height * scale));
+    bitmap = await createImageBitmap(blob, {
+      resizeWidth: width,
+      resizeHeight: height,
+      resizeQuality: "high",
+    });
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", 0.78);
+  } catch {
+    return null;
+  } finally {
+    bitmap?.close();
+  }
+}
+
+// A phone can hold several large references. Decode only one thumbnail at a
+// time so their transient compressed/decode buffers cannot stack up.
+let previewQueue = Promise.resolve();
+
+watch(
+  () => props.modelValue.references.map((draft) => draft.reference),
+  (references) => {
+    const retained = new Map(
+      [...imagePreviews.value].filter(([reference]) =>
+        references.includes(reference),
+      ),
+    );
+    imagePreviews.value = retained;
+    for (const reference of references) {
+      if (
+        reference.kind !== "image" ||
+        reference.media.authority !== "inline" ||
+        retained.has(reference)
+      ) {
+        continue;
+      }
+      previewQueue = previewQueue.then(async () => {
+        const preview = await boundedImagePreview(reference);
+        if (!preview) return;
+        const current = props.modelValue.references.map(
+          (draft) => draft.reference,
+        );
+        if (!current.includes(reference)) return;
+        imagePreviews.value = new Map(imagePreviews.value).set(
+          reference,
+          preview,
+        );
+      });
+    }
+  },
+  { immediate: true },
+);
+
+function imagePreview(
+  reference: MinimaxH3ReferenceDraft["reference"],
+): string | null {
+  return imagePreviews.value.get(reference) ?? null;
+}
 </script>
 
 <template>
@@ -281,6 +385,20 @@ function durationLabel(
         <span class="h3-authoring__order" aria-hidden="true">{{
           index + 1
         }}</span>
+        <div class="h3-authoring__preview" :data-kind="draft.reference.kind">
+          <img
+            v-if="imagePreview(draft.reference)"
+            :src="imagePreview(draft.reference) ?? ''"
+            :alt="minimaxH3ReferenceName(draft.reference, index)"
+          />
+          <span v-else aria-hidden="true">{{
+            draft.reference.kind === "video"
+              ? "VID"
+              : draft.reference.kind === "audio"
+                ? "AUD"
+                : "IMG"
+          }}</span>
+        </div>
         <div class="h3-authoring__reference-copy">
           <strong>{{ minimaxH3ReferenceName(draft.reference, index) }}</strong>
           <span>
@@ -350,7 +468,7 @@ function durationLabel(
       </li>
     </ol>
 
-    <label class="h3-authoring__add">
+    <div class="h3-authoring__add">
       <span>Add references in semantic order</span>
       <small
         >Up to {{ MINIMAX_H3_MAX_REFERENCES }} total ·
@@ -358,19 +476,38 @@ function durationLabel(
         {{ MINIMAX_H3_MAX_REFERENCE_VIDEOS }} videos ·
         {{ MINIMAX_H3_MAX_REFERENCE_AUDIOS }} audio</small
       >
-      <input
-        type="file"
-        multiple
-        accept="image/*,.mp4,video/mp4,.wav,audio/wav,audio/x-wav,audio/wave"
-        :disabled="
-          disabled ||
-          busy ||
-          modelValue.references.length >= MINIMAX_H3_MAX_REFERENCES
-        "
-        data-test="h3-reference-files"
-        @change="addReferences"
-      />
-    </label>
+      <div class="h3-authoring__add-actions">
+        <label class="h3-authoring__choose-files">
+          Choose local files
+          <input
+            type="file"
+            multiple
+            accept="image/*,.mp4,video/mp4,.wav,audio/wav,audio/x-wav,audio/wave"
+            :disabled="
+              disabled ||
+              busy ||
+              modelValue.references.length >= MINIMAX_H3_MAX_REFERENCES
+            "
+            data-test="h3-reference-files"
+            @change="addReferences"
+          />
+        </label>
+        <button
+          v-if="imagePickerAvailable"
+          type="button"
+          class="h3-authoring__choose-library"
+          :disabled="
+            disabled ||
+            busy ||
+            modelValue.references.length >= MINIMAX_H3_MAX_REFERENCES
+          "
+          data-test="h3-reference-library"
+          @click="emit('open-image-picker')"
+        >
+          Choose from Library
+        </button>
+      </div>
+    </div>
 
     <p class="h3-authoring__budget" data-test="h3-reference-budget">
       {{ budget.total }}/{{ MINIMAX_H3_MAX_REFERENCES }} files ·
@@ -395,6 +532,8 @@ function durationLabel(
 <style scoped>
 .h3-authoring {
   display: grid;
+  min-width: 0;
+  max-width: 100%;
   gap: 12px;
   color: var(--ink, currentColor);
 }
@@ -421,18 +560,41 @@ function durationLabel(
   border-radius: 10px;
   padding: 12px;
 }
-.h3-authoring__add input {
-  max-width: 100%;
-  font-size: 16px;
-}
 .h3-authoring__actions button,
-.h3-authoring__reattach {
+.h3-authoring__reattach,
+.h3-authoring__choose-files,
+.h3-authoring__choose-library {
   min-width: 44px;
   min-height: 44px;
   border: 1px solid var(--edge, #bbb);
   border-radius: 8px;
   background: var(--bench, transparent);
   color: inherit;
+}
+.h3-authoring__add-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.h3-authoring__choose-files,
+.h3-authoring__choose-library {
+  display: inline-grid;
+  place-items: center;
+  box-sizing: border-box;
+  padding: 0 12px;
+  cursor: pointer;
+  font: inherit;
+}
+.h3-authoring__choose-files {
+  position: relative;
+  overflow: hidden;
+}
+.h3-authoring__choose-files input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  opacity: 0;
+  cursor: pointer;
 }
 .h3-authoring__reattach {
   position: relative;
@@ -460,12 +622,33 @@ function durationLabel(
 }
 .h3-authoring__reference {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
+  grid-template-columns: 28px 56px minmax(0, 1fr) auto;
+  min-width: 0;
+  max-width: 100%;
   align-items: center;
   gap: 9px;
   border: 1px solid var(--edge, #bbb);
   border-radius: 10px;
   padding: 8px;
+}
+.h3-authoring__preview {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  overflow: hidden;
+  border: 1px solid var(--edge, #bbb);
+  border-radius: 8px;
+  background: var(--well, rgba(128, 128, 128, 0.14));
+  color: var(--ink-3, #737373);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+.h3-authoring__preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 .h3-authoring__order {
   display: grid;
@@ -488,6 +671,7 @@ function durationLabel(
 }
 .h3-authoring__actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
 }
 .h3-authoring__errors {
@@ -502,10 +686,10 @@ function durationLabel(
 }
 @media (max-width: 520px) {
   .h3-authoring__reference {
-    grid-template-columns: 28px minmax(0, 1fr);
+    grid-template-columns: 28px 56px minmax(0, 1fr);
   }
   .h3-authoring__actions {
-    grid-column: 1 / -1;
+    grid-column: 2 / -1;
     justify-content: flex-end;
   }
 }

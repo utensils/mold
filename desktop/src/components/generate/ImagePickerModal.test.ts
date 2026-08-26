@@ -138,6 +138,60 @@ describe("ImagePickerModal", () => {
     expect(wrapper.emitted("close")).toBeTruthy();
   });
 
+  it("keeps multi-host gallery picks in the order selected until confirmation", async () => {
+    apiFetchTo.mockImplementation(() =>
+      Promise.resolve(
+        new Response(new Blob(["y"], { type: "image/jpeg" }), {
+          status: 200,
+        }),
+      ),
+    );
+    const gallery = seedTwoHostGallery();
+    gallery.buckets["hal9000-7680"] = loadedBucket([img("b.jpg", 3), img("c.png", 2)]);
+    const wrapper = mount(ImagePickerModal, {
+      props: { open: true, multiple: true },
+      global: { plugins: [pinia] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await bodyGet<HTMLButtonElement>("[data-test='picker-tab-gallery']").trigger("click");
+    const thumbs = document.body.querySelectorAll("[data-test='picker-gallery-item']");
+    await new DOMWrapper(thumbs[2] as HTMLElement).trigger("click");
+    await new DOMWrapper(thumbs[1] as HTMLElement).trigger("click");
+
+    expect(wrapper.emitted("pick")).toBeUndefined();
+    expect(bodyGet("[data-test='picker-gallery-selection']").text()).toContain("2 selected");
+    await bodyGet<HTMLButtonElement>("[data-test='picker-gallery-confirm']").trigger("click");
+    await vi.waitFor(() => expect(wrapper.emitted("pick")).toBeTruthy());
+
+    const picked = wrapper.emitted("pick")?.[0]?.[0] as Array<{ filename: string }>;
+    expect(picked.map((entry) => entry.filename)).toEqual(["c.png", "b.jpg"]);
+  });
+
+  it("admits one multi-image read when Add selected is clicked twice", async () => {
+    apiFetchTo.mockImplementation(() => new Promise(() => {}));
+    const gallery = seedTwoHostGallery();
+    gallery.buckets["hal9000-7680"] = loadedBucket([img("b.jpg", 3), img("c.png", 2)]);
+    const wrapper = mount(ImagePickerModal, {
+      props: { open: true, multiple: true },
+      global: { plugins: [pinia] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await bodyGet<HTMLButtonElement>("[data-test='picker-tab-gallery']").trigger("click");
+    const thumbs = document.body.querySelectorAll("[data-test='picker-gallery-item']");
+    await new DOMWrapper(thumbs[2] as HTMLElement).trigger("click");
+    await new DOMWrapper(thumbs[1] as HTMLElement).trigger("click");
+    const confirm = bodyGet<HTMLButtonElement>("[data-test='picker-gallery-confirm']");
+
+    await confirm.trigger("click");
+    await confirm.trigger("click");
+
+    expect(confirm.attributes("disabled")).toBeDefined();
+    expect(apiFetchTo).toHaveBeenCalledTimes(2);
+    expect(wrapper.emitted("pick")).toBeUndefined();
+  });
+
   it("opens straight onto the gallery with no redundant upload tab when gallery-only", async () => {
     seedTwoHostGallery();
     mount(ImagePickerModal, {

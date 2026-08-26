@@ -29,11 +29,13 @@ const props = withDefaults(
     target: ApiTarget | null;
     gallerySources?: MobileGallerySource[];
     title?: string;
+    multiple?: boolean;
     maxBytes?: number;
     oversizeMessage?: string;
   }>(),
   {
     title: "Opening image",
+    multiple: false,
     gallerySources: () => [],
     maxBytes: MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES,
     oversizeMessage: "The opening image must be 45 MiB or smaller on this phone.",
@@ -42,6 +44,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   pick: [image: MobilePickedImage];
+  "pick-many": [images: MobilePickedImage[]];
   close: [];
 }>();
 
@@ -51,6 +54,7 @@ const entries = ref<MobileGalleryEntry[]>([]);
 const loading = ref(false);
 const picking = ref(false);
 const error = ref("");
+const selectedGallery = ref<MobileGalleryEntry[]>([]);
 
 const sources = computed<MobileGallerySource[]>(() => {
   if (props.gallerySources.length) return props.gallerySources;
@@ -82,6 +86,7 @@ watch(
     });
     if (!open || sources.value.length === 0) {
       entries.value = [];
+      selectedGallery.value = [];
       loading.value = false;
       return;
     }
@@ -90,6 +95,7 @@ watch(
     // leave a tile with an old key/instance clickable while its replacement
     // fleet is loading.
     entries.value = [];
+    selectedGallery.value = [];
     error.value = "";
     loading.value = true;
     try {
@@ -139,56 +145,98 @@ watch(
 
 async function chooseFile(event: Event): Promise<void> {
   const element = event.target as HTMLInputElement;
-  const file = element.files?.[0];
+  const files = [...(element.files ?? [])];
   element.value = "";
-  if (!file) return;
-  if (!(
-    file.type === "image/png" ||
-    file.type === "image/jpeg" ||
-    (!file.type && isStillImageFile(file.name))
-  )) {
+  if (!files.length) return;
+  const selected = props.multiple ? files : files.slice(0, 1);
+  if (
+    selected.some(
+      (file) =>
+        !(
+          file.type === "image/png" ||
+          file.type === "image/jpeg" ||
+          (!file.type && isStillImageFile(file.name))
+        ),
+    )
+  ) {
     error.value = "Only PNG or JPEG photos can be used here.";
     return;
   }
-  if (file.size === 0) {
+  if (selected.some((file) => file.size === 0)) {
     error.value = "That image is empty.";
     return;
   }
-  if (file.size > props.maxBytes) {
+  if (selected.reduce((total, file) => total + file.size, 0) > props.maxBytes) {
     error.value = props.oversizeMessage;
     return;
   }
   error.value = "";
-  emit("pick", { filename: file.name, base64: await fileToBase64(file) });
+  const picked = await Promise.all(
+    selected.map(async (file) => ({
+      filename: file.name,
+      base64: await fileToBase64(file),
+    })),
+  );
+  if (props.multiple) emit("pick-many", picked);
+  else emit("pick", picked[0]!);
   emit("close");
 }
 
 async function chooseGallery(entry: MobileGalleryEntry): Promise<void> {
+  if (props.multiple) {
+    const key = `${entry.source.id}:${entry.image.filename}`;
+    const index = selectedGallery.value.findIndex(
+      (selected) => `${selected.source.id}:${selected.image.filename}` === key,
+    );
+    selectedGallery.value =
+      index >= 0
+        ? selectedGallery.value.filter((_, item) => item !== index)
+        : [...selectedGallery.value, entry];
+    return;
+  }
+  await emitGalleryEntries([entry]);
+}
+
+async function emitGalleryEntries(selected: MobileGalleryEntry[]): Promise<void> {
   if (picking.value) return;
   picking.value = true;
   error.value = "";
   try {
-    const response = await apiFetchTo(
-      entry.source.target,
-      galleryMediaPath(entry.image.filename, "host"),
-    );
-    const declared = Number(response.headers?.get("content-length") ?? Number.NaN);
-    if (Number.isFinite(declared) && declared > props.maxBytes) {
-      throw new Error(props.oversizeMessage);
+    let totalBytes = 0;
+    const picked: MobilePickedImage[] = [];
+    for (const entry of selected) {
+      const response = await apiFetchTo(
+        entry.source.target,
+        galleryMediaPath(entry.image.filename, "host"),
+      );
+      const declared = Number(response.headers?.get("content-length") ?? Number.NaN);
+      if (Number.isFinite(declared) && totalBytes + declared > props.maxBytes) {
+        throw new Error(props.oversizeMessage);
+      }
+      const blob = await response.blob();
+      if (blob.size === 0) throw new Error("That gallery image is empty.");
+      totalBytes += blob.size;
+      if (totalBytes > props.maxBytes) throw new Error(props.oversizeMessage);
+      picked.push({
+        filename: entry.image.filename,
+        base64: await blobToBase64(blob),
+      });
     }
-    const blob = await response.blob();
-    if (blob.size === 0) throw new Error("That gallery image is empty.");
-    if (blob.size > props.maxBytes) throw new Error(props.oversizeMessage);
-    emit("pick", {
-      filename: entry.image.filename,
-      base64: await blobToBase64(blob),
-    });
+    if (props.multiple) emit("pick-many", picked);
+    else emit("pick", picked[0]!);
     emit("close");
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause);
   } finally {
     picking.value = false;
   }
+}
+
+function galleryEntrySelected(entry: MobileGalleryEntry): boolean {
+  return selectedGallery.value.some(
+    (selected) =>
+      selected.source.id === entry.source.id && selected.image.filename === entry.image.filename,
+  );
 }
 </script>
 
@@ -250,6 +298,7 @@ async function chooseGallery(entry: MobileGalleryEntry): Promise<void> {
           hidden
           type="file"
           accept="image/png,image/jpeg"
+          :multiple="multiple"
           data-test="mobile-image-picker-input"
           @change="chooseFile"
         />
@@ -274,6 +323,8 @@ async function chooseGallery(entry: MobileGalleryEntry): Promise<void> {
             type="button"
             :aria-label="`Use ${entry.image.filename} from ${entry.source.label}`"
             :disabled="picking"
+            :aria-pressed="multiple ? galleryEntrySelected(entry) : undefined"
+            :class="{ 'is-selected': galleryEntrySelected(entry) }"
             data-test="mobile-image-picker-gallery-item"
             @click="chooseGallery(entry)"
           >
@@ -290,6 +341,35 @@ async function chooseGallery(entry: MobileGalleryEntry): Promise<void> {
             >
               {{ entry.source.label }}
             </span>
+            <span
+              v-if="multiple && galleryEntrySelected(entry)"
+              class="mobile-image-picker-order"
+              aria-hidden="true"
+            >
+              {{
+                selectedGallery.findIndex(
+                  (selected) =>
+                    selected.source.id === entry.source.id &&
+                    selected.image.filename === entry.image.filename,
+                ) + 1
+              }}
+            </span>
+          </button>
+        </div>
+        <div
+          v-if="multiple && selectedGallery.length"
+          class="mobile-image-picker-selection"
+          data-test="mobile-image-picker-selection"
+        >
+          <span>{{ selectedGallery.length }} selected · kept in this order</span>
+          <button
+            type="button"
+            class="primary-button"
+            data-test="mobile-image-picker-confirm"
+            :disabled="picking"
+            @click="emitGalleryEntries(selectedGallery)"
+          >
+            Add selected
           </button>
         </div>
       </div>
@@ -357,6 +437,37 @@ async function chooseGallery(entry: MobileGalleryEntry): Promise<void> {
 .mobile-image-picker-tabs button[aria-selected="true"] {
   background: var(--safelight);
   color: var(--on-accent);
+}
+
+.mobile-image-picker-grid button.is-selected {
+  outline: 2px solid var(--safelight);
+  outline-offset: -2px;
+}
+
+.mobile-image-picker-order {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--safelight);
+  color: var(--on-accent);
+  font-weight: 700;
+}
+
+.mobile-image-picker-selection {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--edge);
+  background: var(--bench);
 }
 
 .mobile-image-picker-file {

@@ -3,6 +3,7 @@ import {
   redactGenerationReference,
   type GenerationReference,
 } from "../lib/generationReferences";
+import { minimaxH3TaskForModel } from "../lib/minimaxH3Authoring";
 
 export interface GenerationPlacementCandidate {
   device_id: string;
@@ -56,9 +57,12 @@ export type PlacementPreviewClassification =
   | "temporarily_unavailable"
   | "invalid";
 
-/** Reference-conditioned requests require the v1 authoritative preview.
- * Property presence is deliberate: `references: null` and `references: []`
- * are still an H3/reference wire shape and must never reach legacy routing.
+/** Reference-conditioned requests ordinarily require the v1 authoritative
+ * preview. MiniMax H3 Ref2VA is the deliberate exception: its exact plan
+ * depends on normalized media that exists only after the chosen host stages
+ * the upload. The preview endpoint therefore returns `unsupported` by
+ * contract. Clients select a compatible model host, upload there, and let
+ * that host's admission path validate the staged media before queueing.
  *
  * A face-identity request (#1224) is held to the same rule for a different
  * reason: a server old enough to answer the preview with 404/405 predates the
@@ -68,8 +72,13 @@ export type PlacementPreviewClassification =
 export function requiresAuthoritativePlacement(
   request: Record<string, unknown>,
 ): boolean {
+  const model = typeof request.model === "string" ? request.model : null;
+  const stagedH3References =
+    Object.prototype.hasOwnProperty.call(request, "references") &&
+    minimaxH3TaskForModel(model) === "ref2va";
   return (
-    Object.prototype.hasOwnProperty.call(request, "references") ||
+    (Object.prototype.hasOwnProperty.call(request, "references") &&
+      !stagedH3References) ||
     Boolean(request.id_image)
   );
 }

@@ -577,7 +577,7 @@ describe("MobileSourceControls", () => {
 });
 
 describe("MobileSourceControls — MiniMax H3 FL2VA boundaries", () => {
-  it("exposes Ref2VA ordered references in the primary Create stack", () => {
+  it("exposes Ref2VA ordered references through the multi-image Library picker", async () => {
     const form = formFor("minimax-h3");
     form.model = "minimax-h3-ref2va:comfy-pruned-int8";
     const wrapper = mount(MobileSourceControls, {
@@ -587,6 +587,10 @@ describe("MobileSourceControls — MiniMax H3 FL2VA boundaries", () => {
     expect(wrapper.find("[data-test='mobile-h3-authoring']").exists()).toBe(true);
     expect(wrapper.find("[data-test='h3-reference-files']").exists()).toBe(true);
     expect(wrapper.text()).toContain("Add at least one image or video reference.");
+    await wrapper.get("[data-test='h3-reference-library']").trigger("click");
+    const picker = wrapper.getComponent(MobileImagePickerSheet);
+    expect(picker.props("open")).toBe(true);
+    expect(picker.props("multiple")).toBe(true);
   });
 
   it("renders the shared wells and applies a gallery pick to the first frame", async () => {

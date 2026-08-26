@@ -8,6 +8,7 @@ import {
   MINIMAX_H3_REF2VA_COMFY_NVFP4,
   MINIMAX_H3_RESYNTHESIS_GUIDANCE,
   appendMinimaxH3GalleryImageReference,
+  appendMinimaxH3PickedImageReferences,
   canonicalMinimaxH3ModelName,
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Family,
@@ -69,6 +70,27 @@ const audio = (name: string, duration_ms = 3_000): GenerationReference => ({
 });
 
 describe("MiniMax H3 Studio authority", () => {
+  it("appends picker images in one preserved semantic order", () => {
+    const result = appendMinimaxH3PickedImageReferences(
+      emptyMinimaxH3AuthoringState(),
+      [
+        { filename: "second.jpg", base64: "U0VDT05E", width: 8, height: 6 },
+        { filename: "first.png", base64: "RklSU1Q=", width: 6, height: 8 },
+      ],
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(
+      result.state.references.map((draft) => ({
+        name: draft.reference.provenance?.name,
+        mime: draft.reference.mime_type,
+      })),
+    ).toEqual([
+      { name: "second.jpg", mime: "image/jpeg" },
+      { name: "first.png", mime: "image/png" },
+    ]);
+  });
+
   it("resolves only the released explicit task partitions", () => {
     expect(isMinimaxH3Family(" MiniMax_H3 ")).toBe(true);
     expect(minimaxH3TaskForModel("minimax-h3-fl2va:official-bf16")).toBe(

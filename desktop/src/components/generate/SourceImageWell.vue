@@ -32,6 +32,7 @@ import {
   sourceFitHelp,
 } from "@studio/lib/sourceFit";
 import {
+  appendMinimaxH3PickedImageReferences,
   emptyMinimaxH3AuthoringState,
   setMinimaxH3BoundaryFile,
   setMinimaxH3PickedImageBoundary,
@@ -86,6 +87,7 @@ const sourceLimitLabel = computed(() =>
 const pickerOpen = ref(false);
 const endPickerOpen = ref(false);
 const maskOpen = ref(false);
+const h3ReferencePickerOpen = ref(false);
 
 function onSourcePicked(picked: PickedImage[]) {
   const first = picked[0];
@@ -97,6 +99,11 @@ function onEndFramePicked(picked: PickedImage[]) {
 }
 function onMaskApplied(mask: string) {
   props.form.maskImage = mask;
+}
+
+function onH3ReferenceImagesPicked(picked: PickedImage[]) {
+  const result = appendMinimaxH3PickedImageReferences(props.form.h3Authoring, picked);
+  applyH3(result);
 }
 
 // ── Qwen-edit Target + Reference strip ──────────────────────────────────────
@@ -353,7 +360,19 @@ function setSourceFitMode(e: Event) {
       <span class="edge-code">Ordered references</span>
       <div class="border-edge h-px flex-1 border-t" />
     </div>
-    <MinimaxH3AuthoringPanel :model-value="h3Authoring" @update:model-value="setH3Authoring" />
+    <MinimaxH3AuthoringPanel
+      :model-value="h3Authoring"
+      image-picker-available
+      @update:model-value="setH3Authoring"
+      @open-image-picker="h3ReferencePickerOpen = true"
+    />
+    <ImagePickerModal
+      :open="h3ReferencePickerOpen"
+      :multiple="true"
+      title="Add ordered reference images"
+      @pick="onH3ReferenceImagesPicked"
+      @close="h3ReferencePickerOpen = false"
+    />
   </div>
 
   <!-- Ordered Qwen edit pictures or FLUX.2 reference images. -->

@@ -1,5 +1,5 @@
 import { mount } from "@vue/test-utils";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import MinimaxH3AuthoringPanel from "./MinimaxH3AuthoringPanel.vue";
 import type { MinimaxH3AuthoringState } from "../lib/minimaxH3Authoring";
 import {
@@ -15,7 +15,7 @@ function state(): MinimaxH3AuthoringState {
       {
         reference: {
           kind: "image",
-          media: { authority: "inline", data: "IMAGE" },
+          media: { authority: "inline", data: "SU1BR0U=" },
           provenance: { name: "subject.png", sha256: "a".repeat(64) },
           mime_type: "image/png",
           width: 1024,
@@ -63,7 +63,25 @@ function fileBuffer(bytes: Uint8Array): ArrayBuffer {
 }
 
 describe("MinimaxH3AuthoringPanel", () => {
-  it("renders semantic resynthesis, one-based mixed order, soundtrack association, and budgets", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "createImageBitmap",
+      vi.fn(async () => ({ width: 1_024, height: 768, close: vi.fn() })),
+    );
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
+      drawImage: vi.fn(),
+    } as unknown as CanvasRenderingContext2D);
+    vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue(
+      "data:image/jpeg;base64,BOUNDED",
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("renders semantic resynthesis, one-based mixed order, bounded thumbnails, soundtrack association, and budgets", async () => {
     const wrapper = mount(MinimaxH3AuthoringPanel, {
       props: { modelValue: state() },
     });
@@ -73,9 +91,31 @@ describe("MinimaxH3AuthoringPanel", () => {
     expect(wrapper.text()).toContain("motion.mp4");
     expect(wrapper.text()).toContain("soundtrack attached");
     expect(wrapper.text()).toContain("Reattach original media");
+    await vi.waitFor(() => {
+      expect(wrapper.get(".h3-authoring__preview img").attributes("src")).toBe(
+        "data:image/jpeg;base64,BOUNDED",
+      );
+    });
+    expect(HTMLCanvasElement.prototype.toDataURL).toHaveBeenCalledWith(
+      "image/jpeg",
+      0.78,
+    );
+    expect(createImageBitmap).toHaveBeenCalledWith(expect.any(Blob), {
+      resizeWidth: 112,
+      resizeHeight: 84,
+      resizeQuality: "high",
+    });
     expect(wrapper.get('[data-test="h3-reference-budget"]').text()).toContain(
       "3/12",
     );
+  });
+
+  it("opens the established image picker without duplicating gallery logic", async () => {
+    const wrapper = mount(MinimaxH3AuthoringPanel, {
+      props: { modelValue: state(), imagePickerAvailable: true },
+    });
+    await wrapper.get('[data-test="h3-reference-library"]').trigger("click");
+    expect(wrapper.emitted("open-image-picker")).toHaveLength(1);
   });
 
   it("offers an explicit same-slot reattach control for redacted provenance", () => {

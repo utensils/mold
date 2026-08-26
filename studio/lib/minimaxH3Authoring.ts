@@ -296,6 +296,36 @@ export function setMinimaxH3PickedImageFirstFrame(
   return setMinimaxH3PickedImageBoundary(state, "firstFrame", image);
 }
 
+/** Normalize one or more images returned by the established surface picker
+ * into the Ref2VA semantic order. Keeping this beside the boundary adapter
+ * means desktop, web, and mobile never grow H3-specific gallery readers. */
+export function appendMinimaxH3PickedImageReferences(
+  state: MinimaxH3AuthoringState | null | undefined,
+  images: readonly MinimaxH3PickedImageSource[],
+): MinimaxH3GalleryImageResult {
+  let current = state ?? emptyMinimaxH3AuthoringState();
+  let lastReference: number | null = null;
+  for (const image of images) {
+    const decoded = imageDimensionsFromBase64(image.base64);
+    const extension = image.filename.trim().toLowerCase();
+    const result = appendMinimaxH3GalleryImageReference(current, {
+      filename: image.filename,
+      mimeType:
+        image.mimeType?.split(";", 1)[0]?.trim().toLowerCase() ||
+        (extension.endsWith(".jpg") || extension.endsWith(".jpeg")
+          ? "image/jpeg"
+          : "image/png"),
+      width: image.width ?? decoded?.width ?? 0,
+      height: image.height ?? decoded?.height ?? 0,
+      data: image.base64,
+    });
+    if (!result.ok) return result;
+    current = result.state;
+    lastReference = result.reference;
+  }
+  return { ok: true, state: current, reference: lastReference };
+}
+
 /** Read a picked or dropped File into an FL2VA boundary. All surfaces route
  * their file wells through this so a file and a gallery pick produce
  * identical boundary facts. */

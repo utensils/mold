@@ -380,7 +380,7 @@ describe("SourceImageWell — per-model source conditioning (#772, #779)", () =>
     });
   }
 
-  it("exposes Ref2VA ordered references in the primary source control", () => {
+  it("exposes Ref2VA ordered references through the multi-image Library picker", async () => {
     const form = reactive({
       ...newGenerateForm(),
       family: "minimax-h3",
@@ -390,6 +390,10 @@ describe("SourceImageWell — per-model source conditioning (#772, #779)", () =>
 
     expect(wrapper.find("[data-test='h3-reference-controls']").exists()).toBe(true);
     expect(wrapper.find("[data-test='h3-reference-files']").exists()).toBe(true);
+    await wrapper.get("[data-test='h3-reference-library']").trigger("click");
+    const picker = wrapper.getComponent(ImagePickerModal);
+    expect(picker.props("open")).toBe(true);
+    expect(picker.props("multiple")).toBe(true);
   });
 
   it("keeps today's well and offers no end frame when the server advertises nothing", () => {
