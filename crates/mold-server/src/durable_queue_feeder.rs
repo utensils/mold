@@ -502,12 +502,12 @@ enum ClaimWindow {
     OutsideRuntimeWindow,
 }
 
-/// Reject an exact attached hint before any deferred preparation when the row
-/// is not yet in the bounded runtime prefix. The authoritative registration
-/// below repeats this check after preparation because PATCH/cancellation may
-/// race the work; this first read exists to keep deep attached rows cheap and
-/// to preserve their observer for the later FIFO claim.
-async fn attached_claim_is_in_runtime_window(
+/// Validate every claim before deferred preparation. This closes cancellation
+/// that committed before the preparation token was installed; for an exact
+/// attached hint it also keeps deep rows out of the bounded runtime prefix.
+/// The authoritative registration repeats the check because PATCH and
+/// cancellation may still race preparation.
+async fn claimed_row_is_in_runtime_window(
     state: &AppState,
     row_id: &str,
     claim_token: &str,
@@ -668,38 +668,71 @@ async fn feed_available(
         let ticket = state
             .queue_journal
             .attach_claimed(&row.id, claim_token.clone());
-        if claim.claimed_as_attached {
-            match attached_claim_is_in_runtime_window(state, &row.id, &claim_token).await {
-                Ok(ClaimWindow::Eligible) => {}
-                Ok(ClaimWindow::Stale) => {
-                    if let Some(ingress) = ingress.as_deref() {
-                        ingress.discard_hint(&row.id);
+        // DELETE must be able to revoke a claim before deferred model/media
+        // preparation publishes it to the runtime registry. Register first,
+        // then validate SQLite so cancellation on either side of this point
+        // is observed without a gap.
+        let preparation_cancel = state.queue_journal.begin_preparation(&row.id);
+        // One cancellation seam covers every pre-runtime await. DELETE has
+        // already terminalized SQLite before signalling this token, so the
+        // reserved slot and observer can be released immediately even when a
+        // filesystem, catalog, or media operation is still unwinding.
+        macro_rules! await_preparation {
+            ($future:expr) => {{
+                tokio::select! {
+                    biased;
+                    _ = preparation_cancel.cancelled() => {
+                        drop(reservation);
+                        if let Some(ingress) = ingress.as_deref() {
+                            ingress.cancel(&row.id);
+                        }
+                        tokio::task::spawn_blocking(move || ticket.discard());
+                        continue 'feed;
                     }
-                    let _ = tokio::task::spawn_blocking(move || ticket.discard()).await;
-                    drop(reservation);
-                    continue;
+                    output = $future => output,
                 }
-                Ok(ClaimWindow::OutsideRuntimeWindow) => {
-                    if let Some(ingress) = ingress.as_deref() {
-                        ingress.defer_claimed_hint(&row.id);
-                    }
-                    drop(reservation);
-                    retain_for_retry(ticket, shutdown).await;
-                    continue;
+            }};
+        }
+        match await_preparation!(claimed_row_is_in_runtime_window(
+            state,
+            &row.id,
+            &claim_token
+        )) {
+            Ok(ClaimWindow::Eligible) => {}
+            Ok(ClaimWindow::Stale) => {
+                if let Some(ingress) = ingress.as_deref() {
+                    ingress.discard_hint(&row.id);
                 }
-                Err(error) => {
-                    drop(reservation);
-                    retain_for_retry(ticket, shutdown).await;
-                    tracing::error!(job = %row.id, %error, "durable feeder attached-order lookup failed");
-                    report.stop = FeederStop::RecoverableFailure;
-                    return report;
+                let _ = tokio::task::spawn_blocking(move || ticket.discard()).await;
+                drop(reservation);
+                continue;
+            }
+            Ok(ClaimWindow::OutsideRuntimeWindow) if claim.claimed_as_attached => {
+                if let Some(ingress) = ingress.as_deref() {
+                    ingress.defer_claimed_hint(&row.id);
                 }
+                drop(reservation);
+                retain_for_retry(ticket, shutdown).await;
+                continue;
+            }
+            // FIFO claims may sit beyond the bounded durable prefix while
+            // sibling preparation tasks own earlier runtime reservations.
+            // The exact owner/token lookup above is still the cancellation
+            // fence; only attached hints need the early position gate.
+            Ok(ClaimWindow::OutsideRuntimeWindow) => {}
+            Err(error) => {
+                drop(reservation);
+                retain_for_retry(ticket, shutdown).await;
+                tracing::error!(job = %row.id, %error, "durable feeder attached-order lookup failed");
+                report.stop = FeederStop::RecoverableFailure;
+                return report;
             }
         }
         let journal = state.queue_journal.clone();
         let completion_id = row.id.clone();
-        let db_completion =
-            tokio::task::spawn_blocking(move || journal.completed_output(&completion_id)).await;
+        let db_completion = await_preparation!(tokio::task::spawn_blocking(move || {
+            journal.completed_output(&completion_id)
+        }));
         let (mut completed_output, db_invalid_authority) = match db_completion {
             Ok(Ok(output)) => (output, None),
             Ok(Err(error)) if error.is_invalid_authority() => (None, Some(error.to_string())),
@@ -725,7 +758,9 @@ async fn feed_available(
             let gallery_gate = state.gallery_publication_gate.clone();
             let output_dir = row.output_dir.clone();
             let completion_id = row.id.clone();
-            let archive_completion = {
+            let archive_completion = await_preparation!(async {
+                #[cfg(test)]
+                state.queue_journal.mark_archive_lookup_started();
                 let _gallery_reader = state.gallery_publication_gate.read().await;
                 tokio::task::spawn_blocking(move || {
                     crate::batch_transaction::find_completed_output_in_committed_archive(
@@ -735,7 +770,7 @@ async fn feed_available(
                     )
                 })
                 .await
-            };
+            });
             match archive_completion {
                 Ok(Ok(output)) => completed_output = output,
                 Ok(Err(error)) if error.is_invalid_authority() => {
@@ -803,10 +838,9 @@ async fn feed_available(
                     let id = row.id.clone();
                     let replacement = replacement.to_path_buf();
                     let db_replacement = replacement.clone();
-                    let repointed = tokio::task::spawn_blocking(move || {
+                    let repointed = await_preparation!(tokio::task::spawn_blocking(move || {
                         journal.repoint_output(&id, &db_replacement)
-                    })
-                    .await;
+                    }));
                     if let Err(error) = repointed
                         .map_err(|error| anyhow::anyhow!(error))
                         .and_then(|result| result)
@@ -833,9 +867,9 @@ async fn feed_available(
                 }
                 Some(_) => {
                     let output_dir = row.output_dir.clone();
-                    let created =
-                        tokio::task::spawn_blocking(move || std::fs::create_dir_all(output_dir))
-                            .await;
+                    let created = await_preparation!(tokio::task::spawn_blocking(move || {
+                        std::fs::create_dir_all(output_dir)
+                    }));
                     if let Err(error) = created
                         .map_err(|error| anyhow::anyhow!(error))
                         .and_then(|result| result.map_err(anyhow::Error::from))
@@ -965,7 +999,7 @@ async fn feed_available(
             let request_for_authority = request.clone();
             let deferred_for_authority = deferred_media.clone();
             let instance_id = state.instance_id.clone();
-            match tokio::task::spawn_blocking(move || {
+            match await_preparation!(tokio::task::spawn_blocking(move || {
                 restore_admission_authority(
                     lifecycle.as_deref(),
                     &instance_id,
@@ -973,9 +1007,7 @@ async fn feed_available(
                     request_for_authority,
                     deferred_for_authority.as_ref(),
                 )
-            })
-            .await
-            {
+            })) {
                 Ok(Ok(authority)) => authority,
                 Ok(Err(crate::durable_admission_authority::Failure {
                     disposition: crate::durable_admission_authority::FailureDisposition::Hold,
@@ -1040,12 +1072,10 @@ async fn feed_available(
         let preparation_lease = if let Some(media) = deferred_media.as_ref() {
             let media = media.clone();
             let job_id = row.id.clone();
-            match tokio::task::spawn_blocking(move || {
+            match await_preparation!(tokio::task::spawn_blocking(move || {
                 let result = media.hydrate_into(&job_id, &mut preparation_request);
                 (preparation_request, result)
-            })
-            .await
-            {
+            })) {
                 Ok((hydrated, Ok(lease))) => {
                     preparation_request = hydrated;
                     Some(lease)
@@ -1090,12 +1120,12 @@ async fn feed_available(
         } else {
             None
         };
-        let prepared_route = crate::routes::prepare_generation_after_durable_ack(
-            state,
-            &mut preparation_request,
-            runtime_authority,
-        )
-        .await;
+        let prepared_route =
+            await_preparation!(crate::routes::prepare_generation_after_durable_ack(
+                state,
+                &mut preparation_request,
+                runtime_authority,
+            ));
         // Publish only a payload-free copy. Dropping the RAII owner before the
         // staging lease preserves scrub-before-release on success; unwind and
         // cancellation take the same order because locals drop in reverse.
@@ -1147,8 +1177,9 @@ async fn feed_available(
         // and cancels the submitted job through the ordinary live path.
         let journal = state.queue_journal.clone();
         let cancel_id = row.id.clone();
-        let cancel_requested =
-            tokio::task::spawn_blocking(move || journal.feeder_cancel_requested(&cancel_id)).await;
+        let cancel_requested = await_preparation!(tokio::task::spawn_blocking(move || {
+            journal.feeder_cancel_requested(&cancel_id)
+        }));
         match cancel_requested {
             Ok(Ok(true)) => {
                 let _ = tokio::task::spawn_blocking(move || ticket.discard()).await;
@@ -1179,12 +1210,20 @@ async fn feed_available(
         // cancellation before/during the check is observed in SQLite, while a
         // later cancellation observes and trips the registered live token.
         let (cancel, publication_guard) = loop {
+            if preparation_cancel.is_cancelled() {
+                let _ = tokio::task::spawn_blocking(move || ticket.discard()).await;
+                drop(reservation);
+                continue 'feed;
+            }
             let publication_wake = publication.notified();
             match register_claimed_runtime(state, &row, &claim_token, &mut request).await {
                 Ok(ClaimRegistration::Registered {
                     cancel,
                     publication_guard,
-                }) => break (cancel, publication_guard),
+                }) => {
+                    drop(preparation_cancel);
+                    break (cancel, publication_guard);
+                }
                 Ok(ClaimRegistration::WaitingForPredecessor) => {
                     // An attached hint may name any row in the bounded durable
                     // window. Do not let all preparation workers sit on deep
@@ -1206,6 +1245,11 @@ async fn feed_available(
                             retain_for_retry(ticket, shutdown).await;
                             report.stop = FeederStop::TransportClosed;
                             return report;
+                        }
+                        _ = preparation_cancel.cancelled() => {
+                            let _ = tokio::task::spawn_blocking(move || ticket.discard()).await;
+                            drop(reservation);
+                            continue 'feed;
                         }
                         _ = publication_wake => {}
                         _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
@@ -1716,7 +1760,7 @@ mod tests {
             .expect("the direct observer supplies an exact claim hint");
         assert!(selected.claimed_as_attached);
         assert!(matches!(
-            attached_claim_is_in_runtime_window(
+            claimed_row_is_in_runtime_window(
                 &state,
                 &selected.claim.row.id,
                 &selected.claim.claim_token,
@@ -2891,6 +2935,116 @@ mod tests {
             .iter()
             .all(|row| row.id != "job-0"));
 
+        state.queue_journal.retain_all();
+        shutdown.cancel();
+        handle.await.unwrap();
+        drop(next);
+    }
+
+    #[tokio::test]
+    async fn cancellation_revokes_claimed_preparation_immediately() {
+        let (state, _rx) = state(1);
+        admit(&state, 1);
+        let claimed = state.queue_journal.claim_next_feeder().unwrap().unwrap();
+        let preparation = state.queue_journal.begin_preparation(&claimed.row.id);
+
+        assert!(state.queue_journal.cancel_id(&claimed.row.id).unwrap());
+        tokio::time::timeout(Duration::from_millis(100), preparation.cancelled())
+            .await
+            .expect("DELETE must interrupt deferred preparation");
+
+        let detail = state.queue_journal.generation_batch("batch").unwrap();
+        assert_eq!(detail.children[0].state, "cancelled");
+        assert!(state
+            .queue_journal
+            .list_all()
+            .iter()
+            .all(|row| row.id != claimed.row.id));
+    }
+
+    #[tokio::test]
+    async fn cancellation_releases_capacity_while_archive_lookup_is_blocked() {
+        let (state, mut rx, home) = state_with_home(1);
+        let ids = admit(&state, 2);
+        state
+            .queue_journal
+            .repoint_output(&ids[1], &home.join("missing-second-output"))
+            .unwrap();
+        let publication_writer = state.gallery_publication_gate.write().await;
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            state.queue_journal.wait_for_archive_lookup(),
+        )
+        .await
+        .expect("the first row reaches its blocked archive lookup");
+
+        assert!(state.queue_journal.cancel_id(&ids[0]).unwrap());
+        let next = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("cancellation releases the only runtime slot")
+            .expect("the feeder transport remains open");
+        assert_eq!(next.id, ids[1]);
+        assert_eq!(state.queue.pending(), 1);
+
+        drop(publication_writer);
+        state.queue_journal.retain_all();
+        shutdown.cancel();
+        handle.await.unwrap();
+        drop(next);
+    }
+
+    #[tokio::test]
+    async fn bulk_cancellation_releases_capacity_while_archive_lookup_is_blocked() {
+        let (state, mut rx, home) = state_with_home(1);
+        let ids = admit(&state, 1);
+        let publication_writer = state.gallery_publication_gate.write().await;
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let handle = spawn(state.clone(), shutdown.clone());
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            state.queue_journal.wait_for_archive_lookup(),
+        )
+        .await
+        .expect("the first row reaches its blocked archive lookup");
+
+        assert_eq!(state.queue_journal.cancel_all_queued(&[]).unwrap(), 1);
+        let next_request = request("next job");
+        let next_output = home.join("missing-next-output");
+        state
+            .queue_journal
+            .record_batch(BatchJournalAdmission {
+                id: "next-batch",
+                client_batch_id: "next-client",
+                request_sha256: "next-sha",
+                children: &[JournalAdmission {
+                    id: "next-job",
+                    request: &next_request,
+                    output_dir: Some(&next_output),
+                    target_gpu: None,
+                    target_device_id: None,
+                    completion_payload: SseCompletionPayload::MetadataOnly,
+                    batch_child: false,
+                    carries_reference_authority: false,
+                }],
+            })
+            .unwrap();
+
+        let next = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("bulk cancellation releases the only runtime slot")
+            .expect("the feeder transport remains open");
+        assert_eq!(next.id, "next-job");
+        assert!(state
+            .queue_journal
+            .list_all()
+            .iter()
+            .all(|row| row.id != ids[0]));
+
+        drop(publication_writer);
         state.queue_journal.retain_all();
         shutdown.cancel();
         handle.await.unwrap();

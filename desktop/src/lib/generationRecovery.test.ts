@@ -651,6 +651,7 @@ describe("gallery recovery is bounded by submission time", () => {
 
     expect(job.status).toBe("complete");
     expect(job.result?.filename).toBe("resumed print.png");
+    expect(job.retainedByHost).toBe(false);
   });
 });
 

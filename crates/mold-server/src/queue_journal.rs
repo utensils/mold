@@ -18,12 +18,12 @@
 //! batch admission instead seals supported request media and journals only an
 //! opaque, owner/job/request-bound authority envelope for durable replay.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use mold_db::generation_batches::{
     self, GenerationBatchChildRow, GenerationBatchDetail, GenerationBatchMediaInsertOutcome,
@@ -507,6 +507,13 @@ pub struct QueueJournal {
     max_dispatch_attempts: u32,
     max_replay_seen: u32,
     feeder_notify: tokio::sync::Notify,
+    /// Cancellation authority for durable rows claimed by the feeder but not
+    /// yet published to the runtime registry. Deferred model preparation can
+    /// block for a long time, so DELETE must be able to revoke that work and
+    /// release its queue reservation before preparation returns.
+    preparing: Mutex<HashMap<String, Arc<tokio_util::sync::CancellationToken>>>,
+    #[cfg(test)]
+    archive_lookup_started: tokio::sync::Notify,
     /// Serializes durable queue transitions whose SQLite result is later
     /// projected into the bounded runtime registry.
     ///
@@ -578,6 +585,9 @@ impl QueueJournal {
             ),
             max_replay_seen: env_u32(MAX_REPLAY_SEEN_ENV, DEFAULT_MAX_REPLAY_SEEN),
             feeder_notify: tokio::sync::Notify::new(),
+            preparing: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            archive_lookup_started: tokio::sync::Notify::new(),
             durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -609,7 +619,51 @@ impl QueueJournal {
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
             feeder_notify: tokio::sync::Notify::new(),
+            preparing: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            archive_lookup_started: tokio::sync::Notify::new(),
             durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    /// Register cancellation for the claimed preparation window. The feeder
+    /// installs this before checking that its SQLite claim is still live, so
+    /// DELETE either removes the claim first or trips this token afterward.
+    pub(crate) fn begin_preparation(self: &Arc<Self>, id: &str) -> PreparationCancellation {
+        let token = Arc::new(tokio_util::sync::CancellationToken::new());
+        self.preparing
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(id.to_string(), Arc::clone(&token));
+        PreparationCancellation {
+            journal: Arc::clone(self),
+            id: id.to_string(),
+            token,
+        }
+    }
+
+    fn cancel_preparation(&self, id: &str) {
+        let token = self
+            .preparing
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(id)
+            .cloned();
+        if let Some(token) = token {
+            token.cancel();
+        }
+    }
+
+    fn cancel_all_preparations(&self) {
+        let tokens = self
+            .preparing
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for token in tokens {
+            token.cancel();
         }
     }
 
@@ -625,6 +679,16 @@ impl QueueJournal {
     #[cfg(test)]
     pub(crate) fn durable_transition_is_locked(&self) -> bool {
         self.durable_transition_gate.try_lock().is_err()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_archive_lookup_started(&self) {
+        self.archive_lookup_started.notify_one();
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_archive_lookup(&self) {
+        self.archive_lookup_started.notified().await;
     }
 
     /// Whether this server can promise that a queued job survives a restart.
@@ -1406,9 +1470,10 @@ impl QueueJournal {
         }
     }
 
-    /// Cancel an API-visible queue id without stealing a feeder claim.
-    /// Unhydrated batch children settle atomically; claimed children are left
-    /// for their token-bearing ticket, and legacy rows keep direct deletion.
+    /// Cancel an API-visible queue id through its durable owner fence.
+    /// Queued batch children settle atomically even after a feeder claim;
+    /// running children retain cooperative cancellation authority, and legacy
+    /// rows keep direct deletion.
     pub fn cancel_id(&self, id: &str) -> anyhow::Result<bool> {
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
             return Ok(false);
@@ -1423,6 +1488,9 @@ impl QueueJournal {
         };
         let candidate = self.media_candidate(id);
         let outcome = generation_batches::cancel_owned(db, owner, id, terminal)?;
+        if outcome != generation_batches::OwnedCancellation::NotOwned {
+            self.cancel_preparation(id);
+        }
         if outcome == generation_batches::OwnedCancellation::Settled {
             self.cleanup_media_candidate(candidate);
             if let Some(service) = self.queue_media_admission.get() {
@@ -1467,6 +1535,7 @@ impl QueueJournal {
         let candidates = self.active_media_candidates();
         let additional =
             generation_batches::cancel_all_queued(db, owner, already_counted_live, terminal)?;
+        self.cancel_all_preparations();
         self.cleanup_media_candidates(candidates);
         if additional > 0 || !already_counted_live.is_empty() {
             self.publish_states_committed();
@@ -1919,6 +1988,40 @@ impl QueueJournal {
                 updated_at_ms: now_ms(),
             },
         )
+    }
+}
+
+/// RAII scope for feeder work that has durable authority but has not reached
+/// the runtime registry. Dropping it cannot remove a newer attempt's token.
+pub(crate) struct PreparationCancellation {
+    journal: Arc<QueueJournal>,
+    id: String,
+    token: Arc<tokio_util::sync::CancellationToken>,
+}
+
+impl PreparationCancellation {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        self.token.cancelled().await;
+    }
+}
+
+impl Drop for PreparationCancellation {
+    fn drop(&mut self) {
+        let mut preparing = self
+            .journal
+            .preparing
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if preparing
+            .get(&self.id)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.token))
+        {
+            preparing.remove(&self.id);
+        }
     }
 }
 
@@ -2830,6 +2933,8 @@ mod tests {
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
             feeder_notify: tokio::sync::Notify::new(),
+            preparing: Mutex::new(HashMap::new()),
+            archive_lookup_started: tokio::sync::Notify::new(),
             durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
@@ -3422,7 +3527,7 @@ mod tests {
             .durable_generation_batch("bulk-event-batch")
             .unwrap()
             .unwrap();
-        assert_eq!(detail.children[0].state, "cancelling");
+        assert_eq!(detail.children[0].state, "cancelled");
         assert_eq!(detail.children[1].state, "cancelled");
 
         ticket.discard();
@@ -3538,6 +3643,8 @@ mod tests {
             max_dispatch_attempts: DEFAULT_MAX_DISPATCH_ATTEMPTS,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
             feeder_notify: tokio::sync::Notify::new(),
+            preparing: Mutex::new(HashMap::new()),
+            archive_lookup_started: tokio::sync::Notify::new(),
             durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
         });
         let mut request = request();
@@ -3572,6 +3679,8 @@ mod tests {
             max_dispatch_attempts: 2,
             max_replay_seen: DEFAULT_MAX_REPLAY_SEEN,
             feeder_notify: tokio::sync::Notify::new(),
+            preparing: Mutex::new(HashMap::new()),
+            archive_lookup_started: tokio::sync::Notify::new(),
             durable_transition_gate: Arc::new(tokio::sync::Mutex::new(())),
         });
         let request = request();
@@ -3632,7 +3741,7 @@ mod tests {
         let claim = journal.claim_next_feeder().unwrap().unwrap();
         let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
         assert!(journal.cancel_id("dispatch-cancel-child").unwrap());
-        assert_eq!(ticket.claim_dispatch(), DispatchClaim::Cancelled);
+        assert_eq!(ticket.claim_dispatch(), DispatchClaim::Fenced);
 
         assert!(journal.list_all().is_empty());
         let child = &journal

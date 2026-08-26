@@ -529,10 +529,11 @@ pub fn finish_claimed(
 /// Cancel exactly one durable row owned by `owner_uuid`.
 ///
 /// This is one immediate transaction because a feeder may claim or hold the
-/// row while the API request is in flight. Unclaimed queued and held work is
-/// terminalized immediately. A claimed batch child records cancellation
-/// intent while retaining its token-fenced execution authority; the worker's
-/// later settlement observes that intent and cannot overwrite it with success.
+/// row while the API request is in flight. Queued work is terminalized and
+/// removed immediately even when the feeder already claimed it: a queued
+/// claim is preparation authority, not permission to survive cancellation.
+/// Running work records cancellation intent while retaining its token-fenced
+/// execution authority until the worker acknowledges the cooperative stop.
 /// Legacy/singleton rows have no reconnect summary, so removing their owned
 /// queue row is the terminal cancellation record.
 pub fn cancel_owned(
@@ -547,7 +548,7 @@ pub fn cancel_owned(
     db.transact_immediate(|conn| {
         let row = conn
             .query_row(
-                "SELECT q.state, q.claim_token,
+                "SELECT q.state,
                         EXISTS (
                             SELECT 1 FROM generation_batch_children AS child
                              WHERE child.job_id = q.id
@@ -555,20 +556,14 @@ pub fn cancel_owned(
                    FROM generation_queue AS q
                   WHERE q.id = ?1 AND q.owner_uuid = ?2",
                 params![job_id, owner_uuid],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, i64>(2)? != 0,
-                    ))
-                },
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0)),
             )
             .optional()?;
-        let Some((state, claim_token, has_child)) = row else {
+        let Some((state, has_child)) = row else {
             return Ok(OwnedCancellation::NotOwned);
         };
 
-        let can_settle_now = state == "held" || (state == "queued" && claim_token.is_none());
+        let can_settle_now = state == "held" || state == "queued";
         if can_settle_now || !has_child {
             if has_child {
                 update_terminal_child(conn, job_id, terminal)?;
@@ -628,7 +623,22 @@ pub fn hold_owned(
             )
             .optional()?;
         let Some((queue_state, child_state)) = row else {
-            return Ok(OwnedHold::Fenced);
+            let cancelled = conn
+                .query_row(
+                    "SELECT child.state = 'cancelled'
+                       FROM generation_batch_children AS child
+                       JOIN generation_batches AS batch ON batch.id = child.batch_id
+                      WHERE child.job_id = ?1 AND batch.owner_uuid = ?2",
+                    params![job_id, owner_uuid],
+                    |row| row.get::<_, bool>(0),
+                )
+                .optional()?
+                .unwrap_or(false);
+            return Ok(if cancelled {
+                OwnedHold::Cancelled
+            } else {
+                OwnedHold::Fenced
+            });
         };
 
         if child_state.as_deref() == Some("cancelling") {
@@ -860,35 +870,16 @@ pub fn finish_all_unclaimed_queued(
     })
 }
 
-pub fn request_cancel_all_claimed_queued(
-    db: &MetadataDb,
-    owner_uuid: &str,
-    now_ms: i64,
-) -> Result<usize> {
-    db.with_conn(|conn| {
-        Ok(conn.execute(
-            "UPDATE generation_batch_children
-                SET state = 'cancelling', error = 'Cancelled', updated_at_ms = ?2
-              WHERE job_id IN (
-                    SELECT id FROM generation_queue
-                     WHERE owner_uuid = ?1 AND state = 'queued'
-                       AND claim_token IS NOT NULL
-              )",
-            params![owner_uuid, now_ms],
-        )?)
-    })
-}
-
 /// Cancel every still-queued durable row owned by this server in one
 /// transaction and return the number not already counted by the live
 /// registry.
 ///
-/// Unclaimed batch children become terminal with their queue rows removed.
-/// Claimed children retain their token-fenced authority in `cancelling` until
-/// the hydrated ticket settles. Legacy rows have no reconnect history and are
-/// deleted directly. `already_counted_live` is bounded by runtime queue
-/// capacity, so probing that intersection never materializes the deep durable
-/// backlog.
+/// Every queued batch child becomes terminal with its queue row removed,
+/// including feeder-claimed preparation that has not reached runtime. Running
+/// work is outside this operation and keeps cooperative cancellation authority.
+/// Legacy rows have no reconnect history and are deleted directly.
+/// `already_counted_live` is bounded by runtime queue capacity, so probing that
+/// intersection never materializes the deep durable backlog.
 pub fn cancel_all_queued(
     db: &MetadataDb,
     owner_uuid: &str,
@@ -933,11 +924,7 @@ pub fn cancel_all_queued(
         }
 
         let eligible_sql = "SELECT COUNT(*) FROM generation_queue AS q
-             WHERE q.owner_uuid = ?1 AND q.state = 'queued'
-               AND NOT EXISTS (
-                   SELECT 1 FROM generation_batch_children AS child
-                    WHERE child.job_id = q.id AND child.state = 'cancelling'
-               )";
+             WHERE q.owner_uuid = ?1 AND q.state = 'queued'";
         let total: i64 = conn.query_row(eligible_sql, params![owner_uuid], |row| row.get(0))?;
 
         let mut live_overlap = 0usize;
@@ -945,10 +932,6 @@ pub fn cancel_all_queued(
         let mut overlap_stmt = conn.prepare(
             "SELECT 1 FROM generation_queue AS q
               WHERE q.owner_uuid = ?1 AND q.id = ?2 AND q.state = 'queued'
-                AND NOT EXISTS (
-                    SELECT 1 FROM generation_batch_children AS child
-                     WHERE child.job_id = q.id AND child.state = 'cancelling'
-                )
               LIMIT 1",
         )?;
         for id in already_counted_live {
@@ -963,12 +946,11 @@ pub fn cancel_all_queued(
         }
         drop(overlap_stmt);
 
-        let unclaimed_children: i64 = conn.query_row(
+        let queued_children: i64 = conn.query_row(
             "SELECT COUNT(*)
                FROM generation_queue AS q
                JOIN generation_batch_children AS child ON child.job_id = q.id
-              WHERE q.owner_uuid = ?1 AND q.state = 'queued'
-                AND q.claim_token IS NULL",
+              WHERE q.owner_uuid = ?1 AND q.state = 'queued'",
             params![owner_uuid],
             |row| row.get(0),
         )?;
@@ -979,7 +961,6 @@ pub fn cancel_all_queued(
               WHERE job_id IN (
                     SELECT q.id FROM generation_queue AS q
                      WHERE q.owner_uuid = ?1 AND q.state = 'queued'
-                       AND q.claim_token IS NULL
                 )",
             params![
                 owner_uuid,
@@ -990,14 +971,14 @@ pub fn cancel_all_queued(
                 terminal.completed_at_ms,
             ],
         )?;
-        if i64::try_from(terminalized).ok() != Some(unclaimed_children) {
+        if i64::try_from(terminalized).ok() != Some(queued_children) {
             bail!(
-                "bulk cancellation terminalized {terminalized} of {unclaimed_children} unclaimed batch children"
+                "bulk cancellation terminalized {terminalized} of {queued_children} queued batch children"
             );
         }
         let deleted_children = conn.execute(
             "DELETE FROM generation_queue
-              WHERE owner_uuid = ?1 AND state = 'queued' AND claim_token IS NULL
+              WHERE owner_uuid = ?1 AND state = 'queued'
                 AND EXISTS (
                     SELECT 1 FROM generation_batch_children AS child
                      WHERE child.job_id = generation_queue.id
@@ -1006,35 +987,9 @@ pub fn cancel_all_queued(
                 )",
             params![owner_uuid, terminal.completed_at_ms],
         )?;
-        if i64::try_from(deleted_children).ok() != Some(unclaimed_children) {
+        if i64::try_from(deleted_children).ok() != Some(queued_children) {
             bail!(
-                "bulk cancellation removed {deleted_children} of {unclaimed_children} terminalized queue authorities"
-            );
-        }
-
-        let claimed_children: i64 = conn.query_row(
-            "SELECT COUNT(*)
-               FROM generation_queue AS q
-               JOIN generation_batch_children AS child ON child.job_id = q.id
-              WHERE q.owner_uuid = ?1 AND q.state = 'queued'
-                AND q.claim_token IS NOT NULL AND child.state != 'cancelling'",
-            params![owner_uuid],
-            |row| row.get(0),
-        )?;
-        let cancellation_requested = conn.execute(
-            "UPDATE generation_batch_children
-                SET state = 'cancelling', error = 'Cancelled', updated_at_ms = ?2
-              WHERE state != 'cancelling'
-                AND job_id IN (
-                    SELECT id FROM generation_queue
-                     WHERE owner_uuid = ?1 AND state = 'queued'
-                       AND claim_token IS NOT NULL
-                )",
-            params![owner_uuid, terminal.completed_at_ms],
-        )?;
-        if i64::try_from(cancellation_requested).ok() != Some(claimed_children) {
-            bail!(
-                "bulk cancellation marked {cancellation_requested} of {claimed_children} claimed batch children"
+                "bulk cancellation removed {deleted_children} of {queued_children} terminalized queue authorities"
             );
         }
         conn.execute(
@@ -2064,7 +2019,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_linearizes_before_claimed_completion() {
+    fn cancellation_revokes_claimed_queued_work_before_completion() {
         let db = MetadataDb::open_in_memory().unwrap();
         insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
         crate::generation_queue::claim_next(&db, "owner-1", "worker", 2)
@@ -2084,10 +2039,13 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(cancelled, OwnedCancellation::Requested);
+        assert_eq!(cancelled, OwnedCancellation::Settled);
+        assert!(crate::generation_queue::get(&db, "job-0")
+            .unwrap()
+            .is_none());
         assert!(
             !set_child_state(&db, "job-0", "running", None, 3).unwrap(),
-            "a late nonterminal mirror must not erase cancellation intent"
+            "a late nonterminal mirror must not erase cancellation"
         );
 
         let committed = finish_claimed(
@@ -2102,10 +2060,11 @@ mod tests {
                 result_json: Some(r#"{"filename":"too-late.png"}"#),
                 completed_at_ms: 4,
             },
-        )
-        .unwrap();
+        );
 
-        assert!(committed.queue_deleted);
+        let committed = committed.unwrap();
+        assert!(!committed.queue_deleted);
+        assert!(!committed.batch_child_updated);
         let child = &get_durable(&db, "owner-1", "batch-1")
             .unwrap()
             .unwrap()
@@ -2116,7 +2075,7 @@ mod tests {
     }
 
     #[test]
-    fn retaining_a_claim_cannot_erase_or_resurrect_cancellation() {
+    fn revoked_claim_cannot_erase_or_resurrect_cancellation() {
         let db = MetadataDb::open_in_memory().unwrap();
         insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
         crate::generation_queue::claim_next(&db, "owner-1", "worker", 2)
@@ -2136,14 +2095,14 @@ mod tests {
                 },
             )
             .unwrap(),
-            OwnedCancellation::Requested
+            OwnedCancellation::Settled
         );
-        crate::generation_queue::release_claim(&db, "job-0", "worker", 4).unwrap();
+        assert!(!crate::generation_queue::release_claim(&db, "job-0", "worker", 4).unwrap());
 
         assert!(!restore_child_after_retain(&db, "owner-1", "job-0", 4).unwrap());
         assert_eq!(
             get(&db, "owner-1", "batch-1").unwrap().unwrap().children[0].state,
-            "cancelling"
+            "cancelled"
         );
 
         assert_eq!(
@@ -2160,7 +2119,7 @@ mod tests {
                 },
             )
             .unwrap(),
-            OwnedCancellation::Settled
+            OwnedCancellation::NotOwned
         );
         assert!(!restore_child_after_retain(&db, "owner-1", "job-0", 6).unwrap());
         assert_eq!(
@@ -2190,7 +2149,7 @@ mod tests {
                 },
             )
             .unwrap(),
-            OwnedCancellation::Requested
+            OwnedCancellation::Settled
         );
 
         assert_eq!(
@@ -2214,7 +2173,7 @@ mod tests {
             .unwrap()
             .children[0];
         assert_eq!(child.state, "cancelled");
-        assert_eq!(child.completed_at_ms, Some(4));
+        assert_eq!(child.completed_at_ms, Some(3));
     }
 
     #[test]
@@ -2259,6 +2218,16 @@ mod tests {
         crate::generation_queue::claim_next(&db, "owner-1", "claimed", 2)
             .unwrap()
             .unwrap();
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE generation_batch_children
+                    SET state = 'cancelling', error = 'Cancelled', updated_at_ms = 2
+                  WHERE job_id = 'job-0'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
 
         for index in 0..3 {
             let mut legacy = rows(1).pop().unwrap().1;
@@ -2288,16 +2257,16 @@ mod tests {
 
         assert_eq!(
             additional, 6,
-            "eight durable queued rows minus two live rows"
+            "all eight durable queued rows, including legacy cancelling work, minus two live rows"
         );
         let detail = get_durable(&db, "owner-1", "batch-1").unwrap().unwrap();
-        assert_eq!(detail.children[0].state, "cancelling");
-        assert!(detail.children[1..]
+        assert!(detail
+            .children
             .iter()
             .all(|child| child.state == "cancelled"));
         assert!(crate::generation_queue::get(&db, "job-0")
             .unwrap()
-            .is_some());
+            .is_none());
         assert!(crate::generation_queue::get(&db, "legacy-running")
             .unwrap()
             .is_some());
@@ -2325,7 +2294,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_bulk_cancel_settles_a_released_cancelling_child_and_retires_media() {
+    fn bulk_cancel_settles_a_claimed_child_immediately_and_retires_media() {
         let db = MetadataDb::open_in_memory().unwrap();
         let children = media_rows("cancel", 1);
         let obligations = media_for_rows(&children);
@@ -2351,10 +2320,10 @@ mod tests {
                 .unwrap()
                 .children[0]
                 .state,
-            "cancelling"
+            "cancelled"
         );
         assert!(
-            crate::generation_queue::release_claim(&db, "cancel-job-0", "live-claim", 4).unwrap()
+            !crate::generation_queue::release_claim(&db, "cancel-job-0", "live-claim", 4).unwrap()
         );
 
         assert_eq!(
@@ -2376,7 +2345,7 @@ mod tests {
             .unwrap()
             .children[0];
         assert_eq!(child.state, "cancelled");
-        assert_eq!(child.completed_at_ms, Some(5));
+        assert_eq!(child.completed_at_ms, Some(3));
         assert!(crate::generation_queue::get(&db, "cancel-job-0")
             .unwrap()
             .is_none());

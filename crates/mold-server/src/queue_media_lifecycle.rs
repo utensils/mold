@@ -888,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    fn claimed_batch_cancellation_retains_media_until_token_settlement() {
+    fn claimed_batch_cancellation_retires_media_immediately() {
         let home = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
         let journal = Arc::new(QueueJournal::new(
@@ -937,19 +937,15 @@ mod tests {
         assert!(
             generation_queue::get(db.as_ref().as_ref().unwrap(), "batch-child")
                 .unwrap()
-                .is_some()
+                .is_none()
         );
-        assert_eq!(
-            generation_queue_media::obligation_by_id(
-                db.as_ref().as_ref().unwrap(),
-                &owner,
-                &set.set_id,
-            )
-            .unwrap()
-            .unwrap()
-            .state,
-            QueueMediaObligationState::Active
-        );
+        assert!(generation_queue_media::obligation_by_id(
+            db.as_ref().as_ref().unwrap(),
+            &owner,
+            &set.set_id,
+        )
+        .unwrap()
+        .is_none());
 
         journal
             .attach_claimed("batch-child", claim.claim_token)

@@ -854,9 +854,9 @@ describe("generation store multi-host routing", () => {
     expect(jobs[0]?.status).toBe("complete");
     expect(jobs[0]?.result?.filename).toBe("resumed.png");
     expect(notifyGenerationFailed).not.toHaveBeenCalled();
-    // The frame's marking survives the reconcile: it is what buys a restarting
-    // host a far longer wait than a merely unreachable one.
-    expect(jobs[0]?.retainedByHost).toBe(true);
+    // Retention extends recovery only while the outcome is unresolved. A
+    // definitive completion clears it so the settled row can be removed.
+    expect(jobs[0]?.retainedByHost).toBe(false);
   });
 
   it("keeps an ordinary server error a final failure", async () => {

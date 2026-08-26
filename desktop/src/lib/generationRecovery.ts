@@ -450,6 +450,7 @@ function settleFailure(job: Job, message: string): void {
   job.error = message;
   job.status = "error";
   job.interrupted = false;
+  job.retainedByHost = false;
 }
 
 /**
@@ -482,6 +483,7 @@ function settleCompleted(job: Job, complete: CompleteEvent, opts: GenerationReco
   job.error = null;
   job.status = "complete";
   job.interrupted = false;
+  job.retainedByHost = false;
   opts.refreshResultUrl(job.clientId);
 }
 

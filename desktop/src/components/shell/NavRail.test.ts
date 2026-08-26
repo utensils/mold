@@ -121,6 +121,44 @@ describe("NavRail developing jobs", () => {
     };
   }
 
+  it("shows cancellation progress, then offers to remove the cancelled row", async () => {
+    const wrapper = await mountAt("/create");
+    const generation = useGenerationStore();
+    generation.jobs = [
+      {
+        clientId: 7,
+        model: "ltx-2.5-22b-distilled:bf16-conv",
+        prompt: "cancel me",
+        status: "queued",
+        cancelling: true,
+      } as never,
+    ];
+    await flushPromises();
+
+    const row = wrapper.get("[data-test='developing-print']");
+    expect(row.text()).toContain("cancelling");
+    await row.trigger("contextmenu");
+    expect(useContextMenuStore().entries[0]).toMatchObject({
+      label: "Cancel",
+      disabled: true,
+    });
+
+    generation.jobs[0]!.status = "error";
+    generation.jobs[0]!.error = "Cancelled";
+    generation.jobs[0]!.cancelling = false;
+    await flushPromises();
+    expect(row.text()).toContain("cancelled");
+
+    await row.trigger("contextmenu");
+    const menu = useContextMenuStore();
+    expect(menu.entries[0]).toMatchObject({ label: "Remove from queue" });
+    menu.activate(menu.entries[0]!);
+    await flushPromises();
+
+    expect(generation.jobs).toEqual([]);
+    expect(wrapper.text()).toContain("nothing developing");
+  });
+
   it("cancels another client's running job from its context menu", async () => {
     const wrapper = await mountAt("/create");
     setLocalAuthority();
