@@ -84,6 +84,161 @@ describe("NotificationsCenter", () => {
     ).toContain("No notifications");
     wrapper.unmount();
   });
+
+  it("runs a recovery action from the message and reports its progress", async () => {
+    let resolve!: () => void;
+    const run = vi.fn(
+      () =>
+        new Promise<void>((done) => {
+          resolve = done;
+        }),
+    );
+    const store = useNotificationsStore();
+    store.record({
+      kind: "error",
+      text: "flux-dev:q4 failed to download",
+      atMs: 1,
+      action: {
+        label: "Retry",
+        pendingLabel: "Retrying…",
+        doneLabel: "Queued",
+        run,
+      },
+    });
+
+    const wrapper = mountCenter();
+    await wrapper.get('[data-test="notifications-bell"]').trigger("click");
+    await flushPromises();
+    const action = document.body.querySelector<HTMLButtonElement>(
+      '[data-test="notifications-action"]',
+    )!;
+
+    expect(
+      document.body
+        .querySelector('[data-test="notifications-panel"]')
+        ?.textContent?.match(/—/g),
+    ).toHaveLength(1);
+    expect(action.textContent?.trim()).toBe("Retry");
+    action.click();
+    await flushPromises();
+    expect(run).toHaveBeenCalledOnce();
+    expect(action.textContent?.trim()).toBe("Retrying…");
+    expect(action.disabled).toBe(true);
+
+    resolve();
+    await flushPromises();
+    expect(action.textContent?.trim()).toBe("Queued");
+    expect(action.disabled).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("leaves a failed recovery action available to try again", async () => {
+    const run = vi.fn().mockRejectedValue(new Error("offline"));
+    const store = useNotificationsStore();
+    store.record({
+      kind: "error",
+      text: "Download failed",
+      atMs: 1,
+      action: { label: "Retry", run },
+    });
+
+    const wrapper = mountCenter();
+    await wrapper.get('[data-test="notifications-bell"]').trigger("click");
+    await flushPromises();
+    const action = document.body.querySelector<HTMLButtonElement>(
+      '[data-test="notifications-action"]',
+    )!;
+    action.click();
+    await flushPromises();
+
+    expect(action.textContent?.trim()).toBe("Retry failed");
+    expect(action.disabled).toBe(false);
+    action.click();
+    await flushPromises();
+    expect(run).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+
+  it("lets separate failed downloads retry concurrently", async () => {
+    const pending = () => new Promise<void>(() => {});
+    const first = vi.fn(pending);
+    const second = vi.fn(pending);
+    const store = useNotificationsStore();
+    store.record({
+      kind: "error",
+      text: "First download failed",
+      atMs: 1,
+      action: { label: "Retry", run: first },
+    });
+    store.record({
+      kind: "error",
+      text: "Second download failed",
+      atMs: 2,
+      action: { label: "Retry", run: second },
+    });
+
+    const wrapper = mountCenter();
+    await wrapper.get('[data-test="notifications-bell"]').trigger("click");
+    await flushPromises();
+    const actions = [
+      ...document.body.querySelectorAll<HTMLButtonElement>(
+        '[data-test="notifications-action"]',
+      ),
+    ];
+
+    actions[0]!.click();
+    await flushPromises();
+    expect(actions[0]!.disabled).toBe(true);
+    expect(actions[1]!.disabled).toBe(false);
+
+    actions[1]!.click();
+    await flushPromises();
+    expect(first).toHaveBeenCalledOnce();
+    expect(second).toHaveBeenCalledOnce();
+    expect(actions.every((action) => action.disabled)).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("enables a new retry when the same download fails again", async () => {
+    const first = vi.fn().mockResolvedValue(undefined);
+    const second = vi.fn().mockResolvedValue(undefined);
+    const store = useNotificationsStore();
+    store.record({
+      kind: "error",
+      text: "Download failed",
+      atMs: 1,
+      action: { label: "Retry", doneLabel: "Queued", run: first },
+    });
+
+    const wrapper = mountCenter();
+    await wrapper.get('[data-test="notifications-bell"]').trigger("click");
+    await flushPromises();
+    const action = document.body.querySelector<HTMLButtonElement>(
+      '[data-test="notifications-action"]',
+    )!;
+    action.click();
+    await flushPromises();
+    expect(action.textContent?.trim()).toBe("Queued");
+    expect(action.disabled).toBe(true);
+
+    store.record({
+      kind: "error",
+      text: "Download failed",
+      atMs: 2,
+      action: { label: "Retry", doneLabel: "Queued", run: second },
+    });
+    await flushPromises();
+
+    expect(store.entries).toHaveLength(1);
+    expect(store.entries[0]!.repeat).toBe(2);
+    expect(action.textContent?.trim()).toBe("Retry");
+    expect(action.disabled).toBe(false);
+    action.click();
+    await flushPromises();
+    expect(first).toHaveBeenCalledOnce();
+    expect(second).toHaveBeenCalledOnce();
+    wrapper.unmount();
+  });
 });
 
 describe("NotificationsCenter severity colors", () => {

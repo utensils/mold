@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { useNotificationsStore } from "@studio/stores/notifications";
+import { useNotificationsStore, type NotificationAction } from "@studio/stores/notifications";
 
 /** A labeled affordance rendered as a button on the toast (e.g. Undo, View). */
 export interface ToastAction {
@@ -29,6 +29,8 @@ export interface ToastOptions {
   sticky?: boolean;
   /** Override the 4 s default lifetime (e.g. a 6 s undo window). Ignored when sticky. */
   durationMs?: number;
+  /** Recovery action retained in the notifications center after this toast leaves. */
+  notificationAction?: NotificationAction;
 }
 
 let nextId = 1;
@@ -52,6 +54,7 @@ export const useToastStore = defineStore("toasts", {
         kind,
         text: message,
         description: options.description ?? null,
+        action: options.notificationAction ?? null,
       });
       const toast: Toast = {
         id: nextId++,

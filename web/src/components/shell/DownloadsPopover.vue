@@ -180,7 +180,10 @@ onBeforeUnmount(() => {
   border: 0;
   background: color-mix(in srgb, var(--rebate) 9%, transparent);
   color: var(--ink-2);
-  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
   cursor: pointer;
   transition:
     background var(--dur-quick) var(--ease),

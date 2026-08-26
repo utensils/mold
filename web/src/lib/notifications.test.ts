@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick, ref } from "vue";
 import { flushPromises } from "@vue/test-utils";
+import { createPinia, setActivePinia } from "pinia";
 import {
   installNotifications,
   markGalleryVisited,
@@ -11,6 +12,7 @@ import { resetNotifications, useNotifications } from "./toasts";
 import type { Job } from "../composables/useGenerateStream";
 import type { UseDownloads } from "../composables/useDownloads";
 import type { DownloadJobWire } from "../types";
+import { useNotificationsStore } from "@studio/stores/notifications";
 
 const listStoredHosts = vi.hoisted(() => vi.fn());
 const hostStatus = vi.hoisted(() => vi.fn());
@@ -51,6 +53,7 @@ function fakeDownloads(history: DownloadJobWire[]): UseDownloads {
 const toasts = () => useNotifications().toasts;
 
 beforeEach(() => {
+  setActivePinia(createPinia());
   resetNotifications();
   __resetNotificationsForTest();
   listStoredHosts.mockReset();
@@ -135,6 +138,31 @@ describe("notifications — downloads (G11b)", () => {
     expect(texts.some((t) => t.includes("installed flux-dev:q4"))).toBe(true);
     expect(texts.some((t) => t.includes("sdxl:base failed"))).toBe(true);
     expect(texts.some((t) => t.includes("z-image:turbo"))).toBe(false);
+    stop();
+  });
+
+  it("retries a failed pull from the notification message", async () => {
+    const downloads = fakeDownloads([]);
+    downloads.enqueue = vi.fn().mockResolvedValue(null);
+    const stop = installNotifications({
+      jobs: ref<Job[]>([]),
+      downloads,
+      currentRouteName: () => "models",
+      hostPollMs: 1_000_000,
+    });
+
+    downloads.history.value = [dljob({ status: "failed" })];
+    await nextTick();
+
+    const failedToast = toasts().find((entry) =>
+      entry.text.includes("failed to download"),
+    );
+    expect(failedToast?.text).toBe("flux-dev:q4 failed to download");
+    expect(failedToast?.actionLabel).toBeUndefined();
+    await useNotificationsStore().entries[0]!.action?.run();
+
+    expect(downloads.enqueue).toHaveBeenCalledOnce();
+    expect(downloads.enqueue).toHaveBeenCalledWith("flux-dev:q4");
     stop();
   });
 

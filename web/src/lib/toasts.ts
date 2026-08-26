@@ -1,6 +1,7 @@
 import { reactive, readonly } from "vue";
 import { getActivePinia } from "pinia";
 import { useNotificationsStore } from "@studio/stores/notifications";
+import type { NotificationAction } from "@studio/stores/notifications";
 
 /*
  * Web-surface notification store feeding @ui ToastShelf, plus the shared
@@ -83,6 +84,8 @@ export interface ToastOptions {
   onDismiss?: () => void;
   /** ms; errors are sticky by default (0 = sticky). */
   timeout?: number;
+  /** Recovery action retained in the notifications center after this toast leaves. */
+  notificationAction?: NotificationAction;
 }
 
 export function toast(
@@ -99,6 +102,7 @@ export function toast(
       kind,
       text,
       description: options.description ?? null,
+      action: options.notificationAction ?? null,
     });
   }
   const entry: Toast = { id, kind, text };

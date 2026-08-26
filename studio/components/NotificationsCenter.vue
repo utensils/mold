@@ -4,6 +4,7 @@ import Icon from "@ui/components/Icon.vue";
 import Popover from "@ui/components/Popover.vue";
 import {
   useNotificationsStore,
+  type NotificationAction,
   type NotificationEntry,
 } from "../stores/notifications";
 import {
@@ -65,6 +66,12 @@ function toneLabel(entry: NotificationEntry): string {
  * origin or a denied permission is a normal case, not an edge.
  */
 const copyState = ref<{ id: number; ok: boolean } | null>(null);
+type ActionStatus = "pending" | "done" | "failed";
+interface EntryActionState {
+  action: NotificationAction;
+  status: ActionStatus;
+}
+const actionStates = ref<Record<number, EntryActionState>>({});
 let copyResetTimer: ReturnType<typeof setTimeout> | null = null;
 /** Rising token: only the newest click may paint the outcome. Clicking one row
  *  then another must not settle "Copied" on whichever promise resolves last. */
@@ -93,6 +100,45 @@ async function copyEntry(entry: NotificationEntry) {
 function copyLabel(entry: NotificationEntry): string {
   if (copyState.value?.id !== entry.id) return "Copy";
   return copyState.value.ok ? "Copied" : "Copy failed";
+}
+
+function actionLabel(entry: NotificationEntry): string {
+  if (!entry.action) return "";
+  const state = actionStates.value[entry.id];
+  const status = state?.action === entry.action ? state.status : undefined;
+  if (status === "pending") {
+    return entry.action.pendingLabel ?? "Working…";
+  }
+  if (status === "done") {
+    return entry.action.doneLabel ?? "Done";
+  }
+  return status === "failed"
+    ? `${entry.action.label} failed`
+    : entry.action.label;
+}
+
+function actionDisabled(entry: NotificationEntry): boolean {
+  const state = actionStates.value[entry.id];
+  return (
+    state?.action === entry.action &&
+    (state.status === "pending" || state.status === "done")
+  );
+}
+
+async function runEntryAction(entry: NotificationEntry) {
+  const action = entry.action;
+  if (!action || actionDisabled(entry)) return;
+  actionStates.value[entry.id] = { action, status: "pending" };
+  try {
+    await action.run();
+    if (actionStates.value[entry.id]?.action === action) {
+      actionStates.value[entry.id] = { action, status: "done" };
+    }
+  } catch {
+    if (actionStates.value[entry.id]?.action === action) {
+      actionStates.value[entry.id] = { action, status: "failed" };
+    }
+  }
 }
 
 /* The button's accessible name cannot change under the user's fingers, so the
@@ -192,6 +238,17 @@ function timeLabel(entry: NotificationEntry): string {
           <div class="notifications-panel__copy">
             <p class="notifications-panel__text">
               {{ entry.text }}
+              <span v-if="entry.action" aria-hidden="true"> — </span>
+              <button
+                v-if="entry.action"
+                type="button"
+                class="notifications-panel__inline-action"
+                data-test="notifications-action"
+                :disabled="actionDisabled(entry)"
+                @click="runEntryAction(entry)"
+              >
+                {{ actionLabel(entry) }}
+              </button>
               <span v-if="entry.repeat > 1" class="notifications-panel__repeat">
                 ×{{ entry.repeat }}
               </span>
@@ -364,6 +421,34 @@ function timeLabel(entry: NotificationEntry): string {
 .notifications-panel__repeat {
   color: var(--ink-3, #98a2b3);
   font-size: 11px;
+}
+
+.notifications-panel__inline-action {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--link, var(--rebate, #2563eb));
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.notifications-panel__inline-action:hover:not(:disabled) {
+  text-decoration-thickness: 2px;
+}
+
+.notifications-panel__inline-action:focus-visible {
+  border-radius: 2px;
+  outline: 2px solid var(--safelight, currentColor);
+  outline-offset: 2px;
+}
+
+.notifications-panel__inline-action:disabled {
+  color: var(--ink-3, #98a2b3);
+  cursor: default;
 }
 
 .notifications-panel__detail {

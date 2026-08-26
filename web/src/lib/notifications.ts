@@ -103,10 +103,17 @@ export function installNotifications(deps: NotificationDeps): () => void {
         if (job.status === "completed") {
           toast("success", `installed ${job.model}`);
         } else if (job.status === "failed") {
-          toast(
-            "error",
-            `${job.model} failed to download — retry from downloads`,
-          );
+          const retry = async () => {
+            await deps.downloads.enqueue(job.model);
+          };
+          toast("error", `${job.model} failed to download`, {
+            notificationAction: {
+              label: "Retry",
+              pendingLabel: "Retrying…",
+              doneLabel: "Queued",
+              run: retry,
+            },
+          });
         }
         // cancelled → silent; the user asked for it.
       }
