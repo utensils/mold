@@ -12,11 +12,11 @@
 //! on exactly that path. The three call sites are `begin_runtime_shutdown`,
 //! the fatal-CUDA notifier, and `quarantine_poisoned_worker`.
 //!
-//! Rows never carry a secret. Reference-upload handles and resolved reference
-//! paths are excluded at admission rather than redacted here, which is why
-//! [`QueueJournal::record`] refuses any request carrying them. MiniMax H3
-//! requests are excluded too: replay cannot reconstruct their authenticated
-//! ingress grant, so claiming they are durable would be false.
+//! Rows never carry a secret. The legacy [`QueueJournal::record`] path refuses
+//! reference-upload handles, resolved paths, and MiniMax H3 requests because
+//! it cannot reconstruct their authenticated ingress authority. Canonical
+//! batch admission instead seals supported request media and journals only an
+//! opaque, owner/job/request-bound authority envelope for durable replay.
 
 use std::collections::HashSet;
 use std::path::Path;

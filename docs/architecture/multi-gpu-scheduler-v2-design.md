@@ -164,9 +164,10 @@ chains, utilities, telemetry, placement, and clients.
 - Sibling seeds use `base_seed.wrapping_add(index)`.
 - `batch_id`, one-based `batch_index`, and `batch_count` already flow through
   request and output metadata.
-- Inference pipelines still return one result per engine call. The live F1
-  server route implements raw `batch_size > 1` by scheduling ordered singleton
-  children rather than pretending the engines have native tensor batching.
+- Inference pipelines still return one result per engine call. Live direct
+  generation is singleton-only; Batch N is admitted as ordered singleton
+  siblings through `/api/generation-batches`. Legacy multi-output journal rows
+  remain recovery input only rather than a public execution route.
 - Server-owned parent children stage privately and publish through one gallery
   barrier plus metadata transaction. Existing client-owned sibling requests
   retain their independent per-output publication contract.

@@ -19,6 +19,7 @@ pub(crate) enum ObserverMode {
 pub(crate) enum AttachedObserver {
     Raw {
         outcome: tokio::sync::oneshot::Receiver<SupervisedOutcome>,
+        warnings: crate::routes::RequestWarnings,
     },
     Sse {
         messages: tokio::sync::mpsc::UnboundedReceiver<SseMessage>,
@@ -170,7 +171,10 @@ impl QueueMediaIngress {
             ObserverMode::Raw => {
                 let (send, receive) = tokio::sync::oneshot::channel();
                 let _ = send.send(SupervisedOutcome::Cancelled);
-                claim.deliver(AttachedObserver::Raw { outcome: receive });
+                claim.deliver(AttachedObserver::Raw {
+                    outcome: receive,
+                    warnings: crate::routes::RequestWarnings::default(),
+                });
             }
             ObserverMode::Sse(_) => {
                 let (send, receive) = tokio::sync::mpsc::unbounded_channel();
@@ -193,7 +197,10 @@ impl QueueMediaIngress {
             ObserverMode::Raw => {
                 let (send, receive) = tokio::sync::oneshot::channel();
                 let _ = send.send(SupervisedOutcome::Finished(Box::new(Err(message))));
-                claim.deliver(AttachedObserver::Raw { outcome: receive });
+                claim.deliver(AttachedObserver::Raw {
+                    outcome: receive,
+                    warnings: crate::routes::RequestWarnings::default(),
+                });
             }
             ObserverMode::Sse(_) => {
                 let (send, receive) = tokio::sync::mpsc::unbounded_channel();
@@ -302,6 +309,7 @@ mod tests {
         let (_outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
         claimed.deliver(AttachedObserver::Raw {
             outcome: outcome_rx,
+            warnings: crate::routes::RequestWarnings::default(),
         });
         assert!(matches!(
             registration.attached().await.unwrap(),
@@ -315,7 +323,7 @@ mod tests {
         let raw = ingress.reserve("raw", ObserverMode::Raw).unwrap();
         ingress.publish_committed("raw");
         ingress.fail_claimed("raw", "model unavailable; retry from queue".into());
-        let AttachedObserver::Raw { outcome } = raw.attached().await.unwrap() else {
+        let AttachedObserver::Raw { outcome, .. } = raw.attached().await.unwrap() else {
             panic!("raw registration received the wrong observer type");
         };
         let SupervisedOutcome::Finished(result) = outcome.await.unwrap() else {
@@ -340,7 +348,7 @@ mod tests {
         let raw = ingress.reserve("raw", ObserverMode::Raw).unwrap();
         ingress.publish_committed("raw");
         ingress.cancel("raw");
-        let AttachedObserver::Raw { outcome } = raw.attached().await.unwrap() else {
+        let AttachedObserver::Raw { outcome, .. } = raw.attached().await.unwrap() else {
             panic!("raw registration received the wrong observer type");
         };
         assert!(matches!(

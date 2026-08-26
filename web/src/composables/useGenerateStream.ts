@@ -36,7 +36,7 @@ import {
 import { blobToBase64 } from "../lib/base64";
 import { inferFormatFromName, type OutputFormat } from "../types";
 import { ApiError, apiHeaders, type ApiTarget } from "@studio/api/client";
-import { mergeQueueEntries } from "@studio/api/queuePlan";
+import { mergeQueueEntries, retryQueueJob } from "@studio/api/queuePlan";
 import {
   admitGenerationBatch,
   canonicalGenerationBatchLimit,
@@ -47,6 +47,7 @@ import {
 } from "@studio/api/generationAdmission";
 import {
   buildGenerationBatchStatusRequest,
+  chunkGenerationBatchTrackers,
   createGenerationBatchTracker,
   mergeBulkGenerationBatchResponse,
   reduceGenerationLifecycle,
@@ -88,6 +89,11 @@ export interface Job {
    * terminal outcome wins. This survives ambiguous admission, where the
    * client UUID is known before the server job UUID is. */
   cancelRequested?: boolean;
+  /** Durable hold details remain visible without turning the live job into a
+   * terminal canvas error. Retry is offered only when the host owns it. */
+  holdError?: string | null;
+  retryable?: boolean;
+  retrying?: boolean;
   /** Wall clock when the job stopped moving; `null` while it is running.
    * The Create activity strip expires settled-but-failed rows against this
    * (shared @studio partition rule) instead of keeping them forever. */
@@ -597,6 +603,7 @@ export interface UseGenerateStream {
     route?: HostRoute | null,
   ) => string[];
   cancel: (id: string) => Promise<void>;
+  retry: (id: string) => Promise<void>;
   /** Settle a still-running job as failed. Used by external liveness
    * authorities such as queue reconciliation so every failure updates the
    * canvas owner and terminal metadata through the same path. */
@@ -1131,6 +1138,9 @@ function createJobRecord(
     state: "running",
     cancelling: false,
     cancelRequested: false,
+    holdError: null,
+    retryable: false,
+    retrying: false,
     settledAt: null,
     chain:
       decision.kind === "chain"
@@ -1533,10 +1543,19 @@ function applyDurableTracker(tracker: GenerationBatchTracker): void {
       markWorkStarted(job);
       job.progress.stage = "Developing";
     } else if (lifecycle.phase === "held") {
-      job.progress.stage = "Queued · waiting for an available lane";
+      job.progress.stage = "Held by host · action required";
+      job.holdError = lifecycle.error;
+      job.retryable = lifecycle.retryable === true;
+      job.workStarted = false;
+    } else if (lifecycle.phase === "cancelling") {
+      job.progress.stage = "Cancellation pending";
+      job.cancelling = true;
       job.workStarted = false;
     } else if (lifecycle.phase === "accepted" || lifecycle.phase === "queued") {
       job.progress.stage = "Queued";
+      job.holdError = null;
+      job.retryable = false;
+      job.retrying = false;
       job.workStarted = false;
     } else {
       settleDurableTerminal(job, lifecycle);
@@ -1742,17 +1761,23 @@ async function runDurableReconciliation(
       tracker.hostId === hostId &&
       (!clientBatchIds || clientBatchIds.has(tracker.clientBatchId)),
   );
-  const request = buildGenerationBatchStatusRequest(current, hostId);
-  if (request.client_batch_ids.length === 0 && !request.batch_ids?.length)
-    return;
-  const response = await reconcileGenerationBatches(
-    routeApiTarget(route),
-    request,
-  );
-  const merged = mergeBulkGenerationBatchResponse(current, hostId, response);
-  for (const tracker of merged.trackers) {
-    durableTrackers.set(tracker.clientBatchId, tracker);
-    if (tracker.hostId === hostId) applyDurableTracker(tracker);
+  for (const trackerChunk of chunkGenerationBatchTrackers(current, hostId)) {
+    const request = buildGenerationBatchStatusRequest(trackerChunk, hostId);
+    if (request.client_batch_ids.length === 0 && !request.batch_ids?.length)
+      continue;
+    const response = await reconcileGenerationBatches(
+      routeApiTarget(route),
+      request,
+    );
+    const merged = mergeBulkGenerationBatchResponse(
+      trackerChunk,
+      hostId,
+      response,
+    );
+    for (const tracker of merged.trackers) {
+      durableTrackers.set(tracker.clientBatchId, tracker);
+      applyDurableTracker(tracker);
+    }
   }
 }
 
@@ -2342,6 +2367,29 @@ async function cancelJob(id: string): Promise<void> {
   markCancellationConfirmed(job);
 }
 
+async function retryJob(id: string): Promise<void> {
+  const job = jobs.value.find((candidate) => candidate.id === id);
+  if (!job?.durableBatch || !job.serverId || !job.retryable || job.retrying) {
+    throw new Error("This held generation is not retryable yet.");
+  }
+  const route = durableRoutes.get(job.hostId ?? "");
+  const target = job.target ?? route?.target ?? null;
+  if (!target) throw new Error("The original machine is not connected.");
+  job.retrying = true;
+  try {
+    await retryQueueJob(
+      { baseUrl: target.baseUrl, apiKey: target.apiKey ?? null },
+      job.serverId,
+    );
+    job.retryable = false;
+    job.holdError = null;
+    job.progress.stage = "Queued";
+    void reconcileDurableHost(job.hostId ?? route?.hostId ?? "");
+  } finally {
+    job.retrying = false;
+  }
+}
+
 function clearDoneJobs() {
   jobs.value = jobs.value.filter((j) => j.state === "running");
   canvasErrorJobId.value = null;
@@ -2392,6 +2440,7 @@ export function useGenerateStream(
     submit: submitJob,
     submitBatch: submitJobs,
     cancel: cancelJob,
+    retry: retryJob,
     failRunning: failRunningJob,
     settleDetached: settleDetachedJob,
     clearDone: clearDoneJobs,

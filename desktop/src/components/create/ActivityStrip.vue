@@ -143,6 +143,14 @@ function cancel(job: Job) {
     .catch((error) => toasts.push(error instanceof Error ? error.message : String(error), "error"));
 }
 
+function retry(job: Job) {
+  if (!job.retryable || job.retrying) return;
+  void generation
+    .retryHeld(job.clientId)
+    .then(() => toasts.push(`Retry queued on ${job.hostLabel ?? "this machine"}.`))
+    .catch((error) => toasts.push(error instanceof Error ? error.message : String(error), "error"));
+}
+
 // ── Sequences via the shared activity merge ──────────────────────────────────
 const hostLabel = (hostId: string) => hosts.all.find((h) => h.id === hostId)?.label ?? hostId;
 const modelLabel = (name: string) => modelDisplayNameForId(name, hostModels.unionInstalled);
@@ -368,7 +376,18 @@ function deleteConfirmed() {
             queuedLabel(job)
           }}</span>
           · {{ job.prompt }}
+          <span v-if="job.holdError" class="ms-activity__seq-error"> · {{ job.holdError }}</span>
         </span>
+        <button
+          v-if="job.retryable"
+          type="button"
+          class="ms-activity__seq-action"
+          data-test="activity-held-retry"
+          :disabled="job.retrying"
+          @click.stop="retry(job)"
+        >
+          {{ job.retrying ? "Retrying…" : "Retry" }}
+        </button>
         <button
           type="button"
           class="ms-activity__cancel"

@@ -533,7 +533,8 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/generation-batches/status",
-            post(reconcile_generation_batches),
+            post(reconcile_generation_batches)
+                .layer(DefaultBodyLimit::max(GENERATION_BATCH_STATUS_BODY_BYTES)),
         )
         .route("/api/generation-batches/:id", get(get_generation_batch))
         .route(
@@ -901,7 +902,7 @@ impl RequestWarnings {
     }
 
     /// Every advisory, request-specific ones first.
-    fn all(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn all(&self) -> impl Iterator<Item = &str> {
         self.other
             .iter()
             .map(String::as_str)
@@ -927,6 +928,25 @@ fn merge_render_warnings(mut warnings: RequestWarnings, from_render: &[String]) 
         }
     }
     warnings
+}
+
+fn merge_request_warnings(
+    mut admitted: RequestWarnings,
+    deferred: RequestWarnings,
+) -> RequestWarnings {
+    if admitted.dimension.is_none() {
+        admitted.dimension = deferred.dimension;
+    } else if let Some(dimension) = deferred.dimension {
+        if !admitted.other.iter().any(|warning| warning == &dimension) {
+            admitted.other.push(dimension);
+        }
+    }
+    for warning in deferred.other {
+        if !admitted.other.iter().any(|held| held == &warning) {
+            admitted.other.push(warning);
+        }
+    }
+    admitted
 }
 
 async fn require_server_model_activation(
@@ -2426,6 +2446,8 @@ fn durable_reconciliation_response(
 }
 
 const MAX_HETEROGENEOUS_BATCH_OUTPUTS: usize = 64;
+const MAX_GENERATION_BATCH_STATUS_IDENTITIES: usize = 256;
+const GENERATION_BATCH_STATUS_BODY_BYTES: usize = 64 * 1024;
 
 pub(crate) fn generation_batch_status(
     instance_id: &str,
@@ -2442,6 +2464,19 @@ pub(crate) fn generation_batch_status(
             .children
             .into_iter()
             .map(|child| {
+                let (state, corrupt_state_error) = match child.state.as_str() {
+                    "accepted" | "queued" => (State::Accepted, None),
+                    "cancelling" => (State::Cancelling, None),
+                    "running" => (State::Running, None),
+                    "complete" => (State::Complete, None),
+                    "failed" => (State::Failed, None),
+                    "cancelled" => (State::Cancelled, None),
+                    "held" => (State::Held, None),
+                    unknown => (
+                        State::Failed,
+                        Some(format!("invalid durable child state '{unknown}'")),
+                    ),
+                };
                 let terminal_error = child
                     .terminal_error_json
                     .as_deref()
@@ -2452,6 +2487,11 @@ pub(crate) fn generation_batch_status(
                             .error
                             .as_deref()
                             .map(|message| serde_json::json!({ "message": message }))
+                    })
+                    .or_else(|| {
+                        corrupt_state_error
+                            .as_deref()
+                            .map(|message| serde_json::json!({ "message": message }))
                     });
                 let result = child
                     .result_json
@@ -2460,15 +2500,8 @@ pub(crate) fn generation_batch_status(
                 mold_core::GenerationBatchChild {
                     index: child.batch_index,
                     job_id: child.job_id,
-                    state: match child.state.as_str() {
-                        "running" => State::Running,
-                        "complete" => State::Complete,
-                        "failed" => State::Failed,
-                        "cancelled" => State::Cancelled,
-                        "held" => State::Held,
-                        _ => State::Accepted,
-                    },
-                    error: child.error,
+                    state,
+                    error: child.error.or(corrupt_state_error),
                     retryable: (child.state == "held").then_some(child.retryable),
                     created_at_ms,
                     updated_at_ms: child.updated_at_ms,
@@ -2610,21 +2643,18 @@ async fn reconcile_generation_batches(
     State(state): State<AppState>,
     Json(body): Json<mold_core::GenerationBatchStatusRequest>,
 ) -> Result<Json<mold_core::GenerationBatchStatusResponse>, ApiError> {
-    // The router's HTTP body limit is the authoritative request bound. Do not
-    // add a second guessed item quota: every requested identity is resolved
-    // without scanning unrelated rows, on the blocking pool.
-    let client_batch_ids = body
-        .client_batch_ids
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            canonical_client_batch_id(value).map_err(|mut error| {
-                error.error = format!("client_batch_ids[{index}]: {}", error.error);
-                error
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let batch_ids = body.batch_ids;
+    let client_batch_ids =
+        canonical_generation_batch_status_ids(body.client_batch_ids, "client_batch_ids")?;
+    let batch_ids = canonical_generation_batch_status_ids(body.batch_ids, "batch_ids")?;
+    if client_batch_ids.len() + batch_ids.len() > MAX_GENERATION_BATCH_STATUS_IDENTITIES {
+        return Err(ApiError::with_code(
+            format!(
+                "generation batch status accepts at most {MAX_GENERATION_BATCH_STATUS_IDENTITIES} unique identities"
+            ),
+            "GENERATION_BATCH_STATUS_LIMIT_EXCEEDED",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    }
     let journal = state.queue_journal.clone();
     let lookup = spawn_queue_read(move || {
         journal
@@ -2645,6 +2675,24 @@ async fn reconcile_generation_batches(
             batch_ids: lookup.missing_batch_ids,
         },
     }))
+}
+
+fn canonical_generation_batch_status_ids(
+    values: Vec<String>,
+    field: &str,
+) -> Result<Vec<String>, ApiError> {
+    let mut seen = std::collections::HashSet::with_capacity(values.len());
+    let mut canonical = Vec::with_capacity(values.len());
+    for (index, value) in values.into_iter().enumerate() {
+        let id = canonical_client_batch_id(&value).map_err(|mut error| {
+            error.error = format!("{field}[{index}]: must be a UUID");
+            error
+        })?;
+        if seen.insert(id.clone()) {
+            canonical.push(id);
+        }
+    }
+    Ok(canonical)
 }
 
 #[utoipa::path(
@@ -2717,7 +2765,11 @@ async fn generate(
                 ));
             }
         };
-        let crate::queue_media_ingress::AttachedObserver::Raw { outcome } = attached else {
+        let crate::queue_media_ingress::AttachedObserver::Raw {
+            outcome,
+            warnings: deferred_warnings,
+        } = attached
+        else {
             return Err(ApiError::internal(
                 "durable raw observer received an SSE delivery",
             ));
@@ -2737,7 +2789,10 @@ async fn generate(
                 ));
             }
         };
-        return generation_result_response(result, warnings);
+        return generation_result_response(
+            result,
+            merge_request_warnings(warnings, deferred_warnings),
+        );
     }
     // Capture before prepare_generation: prompt expansion mutates req.prompt,
     // and history should hold what the user typed.
@@ -10397,6 +10452,65 @@ mod tests {
              3 faces were detected in the identity image; conditioning on the largest one; \
              rounded 1023 up to 1024"
         );
+    }
+
+    #[test]
+    fn deferred_preparation_advisories_join_direct_admission_warnings() {
+        let admission = super::RequestWarnings {
+            dimension: Some("rounded 1023 up to 1024".to_string()),
+            other: vec!["the requested collection was dropped".to_string()],
+        };
+        let deferred = super::RequestWarnings {
+            dimension: None,
+            other: vec![
+                "lip-dub takes its length from the reference video".to_string(),
+                "the requested collection was dropped".to_string(),
+            ],
+        };
+
+        let merged = super::merge_request_warnings(admission, deferred);
+        assert_eq!(
+            merged.all().collect::<Vec<_>>(),
+            vec![
+                "the requested collection was dropped",
+                "lip-dub takes its length from the reference video",
+                "rounded 1023 up to 1024",
+            ]
+        );
+    }
+
+    #[test]
+    fn durable_status_exposes_claimed_cancellation_without_regressing_to_accepted() {
+        let detail = mold_db::generation_batches::DurableGenerationBatchDetail {
+            batch: mold_db::generation_batches::GenerationBatchRow {
+                id: "batch-id".to_string(),
+                client_batch_id: "client-id".to_string(),
+                owner_uuid: "owner-id".to_string(),
+                request_sha256: "receipt".to_string(),
+                created_at_ms: 10,
+            },
+            children: vec![
+                mold_db::generation_batches::DurableGenerationBatchChildRow {
+                    batch_id: "batch-id".to_string(),
+                    job_id: "job-id".to_string(),
+                    batch_index: 1,
+                    state: "cancelling".to_string(),
+                    error: Some("Cancelled".to_string()),
+                    retryable: false,
+                    updated_at_ms: 20,
+                    terminal_error_json: None,
+                    result_json: None,
+                    completed_at_ms: None,
+                },
+            ],
+        };
+
+        let status = super::generation_batch_status("instance-id", detail);
+        assert_eq!(
+            status.children[0].state,
+            mold_core::GenerationBatchChildState::Cancelling
+        );
+        assert_eq!(status.children[0].completed_at_ms, None);
     }
 
     /// A batch child carries its parent's identity advisory, so the same text

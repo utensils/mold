@@ -5,7 +5,8 @@
 //! for rows admitted through `/api/generation-batches`; legacy singleton rows
 //! are deliberately excluded by the batch-child ownership join.
 
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 
 use crate::state::{AppState, GenerationJob, SubmitError};
 
@@ -42,6 +43,126 @@ struct FeederArbiter {
     /// Process/restart begins with ordinary FIFO. The bit flips only after a
     /// successful DB claim, never after a vanished attached hint.
     prefer_attached: bool,
+}
+
+/// Serializes only the final runtime publication of concurrently prepared
+/// durable rows. Claims enroll under `claim_gate`, so a fast later prepare
+/// cannot overtake an older claimed predecessor at scheduler handoff.
+struct PublicationSequencer {
+    capacity: usize,
+    claim_gate: Mutex<()>,
+    state: Mutex<PublicationState>,
+    changed: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct PublicationState {
+    pending: BTreeSet<(i64, u64)>,
+    /// Claims form one bounded cohort. Publication starts only once every
+    /// available runtime reservation enrolled, or a scan proved the durable
+    /// prefix drained, so the first claimant cannot publish before an older
+    /// predecessor has even enrolled.
+    sealed: bool,
+}
+
+impl PublicationSequencer {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            claim_gate: Mutex::new(()),
+            state: Mutex::new(PublicationState::default()),
+            changed: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn enroll(
+        self: &Arc<Self>,
+        created_at_ms: i64,
+        rank: u64,
+        runtime_saturated: bool,
+    ) -> PublicationPermit {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let order = (created_at_ms, rank);
+        state.pending.insert(order);
+        if runtime_saturated || state.pending.len() >= self.capacity {
+            state.sealed = true;
+            self.changed.notify_waiters();
+        }
+        PublicationPermit {
+            sequencer: Arc::clone(self),
+            order,
+            released: false,
+        }
+    }
+
+    fn seal_current(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.pending.is_empty() {
+            state.sealed = true;
+            self.changed.notify_waiters();
+        }
+    }
+
+    fn release(&self, order: (i64, u64)) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.pending.remove(&order);
+        if state.pending.is_empty() {
+            state.sealed = false;
+        }
+        self.changed.notify_waiters();
+    }
+}
+
+struct PublicationPermit {
+    sequencer: Arc<PublicationSequencer>,
+    order: (i64, u64),
+    released: bool,
+}
+
+impl PublicationPermit {
+    async fn wait_turn(&self) {
+        loop {
+            let changed = self.sequencer.changed.notified();
+            let can_publish = {
+                let state = self
+                    .sequencer
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.sealed
+                    && state
+                        .pending
+                        .first()
+                        .is_some_and(|order| *order == self.order)
+            };
+            if can_publish {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    fn release(&mut self) {
+        if !self.released {
+            self.sequencer.release(self.order);
+            self.released = true;
+        }
+    }
+}
+
+impl Drop for PublicationPermit {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 /// Clear ownership tokens left by the prior runtime before any new HTTP
@@ -81,11 +202,13 @@ pub(crate) fn spawn(
         // ownership unique and scheduler ordering stable.
         let worker_count = state.queue_capacity.clamp(1, 8);
         let mut workers = tokio::task::JoinSet::new();
+        let publication = Arc::new(PublicationSequencer::new(state.queue_capacity));
         for _ in 0..worker_count {
             workers.spawn(run_with_retry_delay(
                 state.clone(),
                 shutdown.clone(),
                 mold_db::METADATA_DB_BUSY_TIMEOUT,
+                Arc::clone(&publication),
             ));
         }
         while let Some(result) = workers.join_next().await {
@@ -101,6 +224,7 @@ async fn run_with_retry_delay(
     state: AppState,
     shutdown: tokio_util::sync::CancellationToken,
     retry_delay: std::time::Duration,
+    publication: Arc<PublicationSequencer>,
 ) {
     tracing::info!(
         capacity = state.queue_capacity,
@@ -125,6 +249,7 @@ async fn run_with_retry_delay(
             current_output_dir.as_deref(),
             &shutdown,
             &mut arbiter,
+            &publication,
         )
         .await;
         if report.submitted > 0 || report.held > 0 {
@@ -567,20 +692,24 @@ async fn feed_available(
     current_output_dir: Option<&std::path::Path>,
     shutdown: &tokio_util::sync::CancellationToken,
     arbiter: &mut FeederArbiter,
+    publication: &Arc<PublicationSequencer>,
 ) -> FeederReport {
     let mut report = FeederReport::default();
     loop {
         let reservation = match state.queue.try_reserve(state.queue_capacity) {
             Ok(reservation) => reservation,
             Err(SubmitError::Full { .. }) => {
+                publication.seal_current();
                 report.stop = FeederStop::AtCapacity;
                 return report;
             }
             Err(SubmitError::Cancelled) => {
+                publication.seal_current();
                 report.stop = FeederStop::RecoverableFailure;
                 return report;
             }
             Err(SubmitError::Shutdown) => {
+                publication.seal_current();
                 report.stop = FeederStop::TransportClosed;
                 return report;
             }
@@ -591,30 +720,49 @@ async fn feed_available(
             .map(|admission| admission.ingress().clone());
         let claim_ingress = ingress.clone();
         let prefer_attached = arbiter.prefer_attached;
+        let runtime_saturated = state.queue.pending() >= state.queue_capacity;
+        let publication_for_claim = Arc::clone(publication);
         let claim = match tokio::task::spawn_blocking(move || {
-            claim_next(&journal, claim_ingress.as_deref(), prefer_attached)
+            let _claim_gate = publication_for_claim
+                .claim_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            claim_next(&journal, claim_ingress.as_deref(), prefer_attached).map(|selected| {
+                selected.map(|selected| {
+                    let permit = publication_for_claim.enroll(
+                        selected.claim.row.created_at_ms,
+                        selected.claim.queue_rank,
+                        runtime_saturated,
+                    );
+                    (selected, permit)
+                })
+            })
         })
         .await
         {
             Ok(Ok(Some(claim))) => claim,
             Ok(Ok(None)) => {
+                publication.seal_current();
                 drop(reservation);
                 report.stop = FeederStop::Drained;
                 return report;
             }
             Ok(Err(error)) => {
+                publication.seal_current();
                 drop(reservation);
                 tracing::warn!(error = %format!("{error:#}"), "durable feeder could not claim the next row");
                 report.stop = FeederStop::RecoverableFailure;
                 return report;
             }
             Err(error) => {
+                publication.seal_current();
                 drop(reservation);
                 tracing::warn!(%error, "durable feeder claim task failed");
                 report.stop = FeederStop::RecoverableFailure;
                 return report;
             }
         };
+        let (claim, mut publication_permit) = claim;
         arbiter.prefer_attached = !claim.claimed_as_attached;
 
         let mold_db::generation_queue::QueueClaim {
@@ -1095,6 +1243,7 @@ async fn feed_available(
                 continue;
             }
         };
+        let preparation_warnings = prepared_route.warnings;
         let resolved_references = prepared_route.resolved_references;
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         let h3_private_ingress_grant = prepared_route.h3_private_ingress_grant;
@@ -1105,6 +1254,7 @@ async fn feed_available(
         // runtime queue does not receive this job until the check completes:
         // cancellation before/during the check is observed in SQLite, while a
         // later cancellation observes and trips the registered live token.
+        publication_permit.wait_turn().await;
         let cancel = match register_claimed_runtime(state, &row, &claim_token, &mut request).await {
             Ok(ClaimRegistration::Registered(cancel)) => cancel,
             Ok(ClaimRegistration::Stale) => {
@@ -1169,11 +1319,19 @@ async fn feed_available(
                 crate::queue_media_ingress::ObserverMode::Raw => {
                     observer.deliver(crate::queue_media_ingress::AttachedObserver::Raw {
                         outcome: outcome_rx,
+                        warnings: preparation_warnings,
                     });
                     None
                 }
                 crate::queue_media_ingress::ObserverMode::Sse(_) => {
                     let (progress_tx, messages) = tokio::sync::mpsc::unbounded_channel();
+                    for warning in preparation_warnings.all() {
+                        let _ = progress_tx.send(crate::state::SseMessage::Progress(
+                            mold_core::SseProgressEvent::Info {
+                                message: warning.to_string(),
+                            },
+                        ));
+                    }
                     let cancellation_tx = progress_tx.clone();
                     tokio::spawn(async move {
                         if let Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) =
@@ -1213,7 +1371,10 @@ async fn feed_available(
             h3_private_ingress_grant,
         };
         match reservation.submit(job).await {
-            Ok(_) => report.submitted += 1,
+            Ok(_) => {
+                publication_permit.release();
+                report.submitted += 1;
+            }
             Err(returned) => {
                 let (error, mut job) = *returned;
                 if let Some(ticket) = job.journal.take() {
@@ -1897,7 +2058,15 @@ mod tests {
         let shutdown = tokio_util::sync::CancellationToken::new();
         let current_output = state.config.try_read().unwrap().effective_output_dir();
         let mut arbiter = FeederArbiter::default();
-        let report = feed_available(&state, Some(&current_output), &shutdown, &mut arbiter).await;
+        let publication = Arc::new(PublicationSequencer::new(state.queue_capacity));
+        let report = feed_available(
+            &state,
+            Some(&current_output),
+            &shutdown,
+            &mut arbiter,
+            &publication,
+        )
+        .await;
         assert_eq!(report.held, 1);
         assert_eq!(report.submitted, 1);
         assert_eq!(report.stop, FeederStop::AtCapacity);
@@ -1920,7 +2089,14 @@ mod tests {
         later.journal.take().unwrap().complete_before_dispatch();
         state.job_registry.remove(&later.id);
         state.queue.decrement();
-        let drained = feed_available(&state, Some(&current_output), &shutdown, &mut arbiter).await;
+        let drained = feed_available(
+            &state,
+            Some(&current_output),
+            &shutdown,
+            &mut arbiter,
+            &publication,
+        )
+        .await;
         assert_eq!(drained, FeederReport::default());
         let rows = state.queue_journal.list_all();
         assert_eq!(rows.len(), 1);
@@ -2711,6 +2887,7 @@ mod tests {
             state.clone(),
             shutdown.clone(),
             Duration::ZERO,
+            Arc::new(PublicationSequencer::new(state.queue_capacity)),
         ));
         let job = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
@@ -2740,6 +2917,7 @@ mod tests {
             state.clone(),
             shutdown.clone(),
             Duration::ZERO,
+            Arc::new(PublicationSequencer::new(state.queue_capacity)),
         ));
         while state
             .queue_journal
@@ -2786,6 +2964,7 @@ mod tests {
             state.clone(),
             shutdown.clone(),
             Duration::ZERO,
+            Arc::new(PublicationSequencer::new(state.queue_capacity)),
         ));
         let claimed_token = loop {
             let token = state

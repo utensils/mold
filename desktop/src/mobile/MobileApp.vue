@@ -426,6 +426,7 @@ import {
   type FileUnderCollectionLike,
 } from "@studio/lib/fileUnder";
 import { truthfulGenerationPhase } from "@studio/lib/generationSubmissionPolicy";
+import { chunkGenerationBatchTrackers } from "@studio/lib/generationLifecycle";
 import {
   loadMobileSettings,
   updateMobileSettings as persistMobileSettings,
@@ -2060,7 +2061,9 @@ function syncDurableGenerationJobs(): void {
             ? "Accepted"
             : truthfulPhase === "held"
               ? "Held by host — action required"
-              : null;
+              : truthfulPhase === "cancelling"
+                ? "Cancellation pending"
+                : null;
       } else if (lifecycle.phase === "complete") {
         job.status = "complete";
         job.cancelling = false;
@@ -3017,23 +3020,30 @@ async function reconcileMobileDurableHost(
     if (records.length === 0) return;
     const host = resolveMobileDurableHost(records[0]!, connectedHosts.value);
     if (!host) return;
-    const request = buildMobileDurableHostStatusRequest(records, hostId);
-    if (request.client_batch_ids.length === 0 && (request.batch_ids?.length ?? 0) === 0) return;
     try {
-      const response = await reconcileGenerationBatches(mobileHostTarget(host), request);
-      const requestedClients = new Set(records.map((recovery) => recovery.tracker.clientBatchId));
-      const latestRequested = durableGenerationRecoveries.value.filter((recovery) =>
-        requestedClients.has(recovery.tracker.clientBatchId),
-      );
-      const merged = new Map(
-        mergeMobileDurableHostStatus(latestRequested, hostId, response).map((recovery) => [
-          recovery.tracker.clientBatchId,
-          recovery,
-        ]),
-      );
-      durableGenerationRecoveries.value = durableGenerationRecoveries.value.map(
-        (recovery) => merged.get(recovery.tracker.clientBatchId) ?? recovery,
-      );
+      for (const trackerChunk of chunkGenerationBatchTrackers(
+        records.map((recovery) => recovery.tracker),
+        hostId,
+      )) {
+        const requestedClients = new Set(trackerChunk.map((tracker) => tracker.clientBatchId));
+        const latestRequested = durableGenerationRecoveries.value.filter((recovery) =>
+          requestedClients.has(recovery.tracker.clientBatchId),
+        );
+        const request = buildMobileDurableHostStatusRequest(latestRequested, hostId);
+        if (request.client_batch_ids.length === 0 && (request.batch_ids?.length ?? 0) === 0) {
+          continue;
+        }
+        const response = await reconcileGenerationBatches(mobileHostTarget(host), request);
+        const merged = new Map(
+          mergeMobileDurableHostStatus(latestRequested, hostId, response).map((recovery) => [
+            recovery.tracker.clientBatchId,
+            recovery,
+          ]),
+        );
+        durableGenerationRecoveries.value = durableGenerationRecoveries.value.map(
+          (recovery) => merged.get(recovery.tracker.clientBatchId) ?? recovery,
+        );
+      }
       persistDurableGenerationRecoveries();
       syncDurableGenerationJobs();
       scheduleMobileDurableCancelIntents();

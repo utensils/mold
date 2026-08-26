@@ -50,6 +50,7 @@ const props = withDefaults(
  * iPhone describe the same waiting row the same way; a server that lists
  * nothing degrades to the plain "Queued" pill. */
 function queueLabel(job: Job): string {
+  if (job.holdError) return job.progress.stage;
   if (job.detached && job.durableBatch && !job.serverId) {
     return "Confirming durable admission";
   }
@@ -73,6 +74,7 @@ function hostBadge(job: Job): string | null {
 
 const emit = defineEmits<{
   cancel: [id: string];
+  retry: [id: string];
   dismiss: [id: string];
   open: [job: Job];
   "sequence-action": [action: ActivityAction, vm: ActivityJobVM];
@@ -420,7 +422,20 @@ const active = computed(
             >{{ queueLabel(nextQueued) }}</span
           >
           {{ promptFor(nextQueued) }}
+          <span v-if="nextQueued.holdError" class="activity__hold-error">
+            · {{ nextQueued.holdError }}
+          </span>
         </span>
+        <button
+          v-if="nextQueued.retryable"
+          type="button"
+          class="activity__seq-action"
+          :disabled="nextQueued.retrying"
+          :data-test="`activity-retry-${nextQueued.id}`"
+          @click.stop="emit('retry', nextQueued.id)"
+        >
+          {{ nextQueued.retrying ? "Retrying…" : "Retry" }}
+        </button>
         <button
           type="button"
           class="activity__cancel"

@@ -429,18 +429,33 @@ async fn admit_generation_batch_recovering_ambiguity(
     match client.admit_generation_batch(request).await {
         Ok(status) => Ok(status),
         Err(error) if generation_admission_may_have_committed(&error) => {
-            match client
-                .generation_batch_by_client_id(&request.client_batch_id)
-                .await
-            {
-                Ok(Some(status)) => Ok(status),
-                Ok(None) => Err(error.context(
-                    "generation-batch admission response was lost and the host did not retain the idempotency key",
-                )),
-                Err(lookup) => Err(error.context(format!(
-                    "generation-batch admission response was lost; idempotency lookup also failed: {lookup}"
-                ))),
+            const LOOKUP_ATTEMPTS: u32 = 5;
+            let mut last_lookup_error = None;
+            for attempt in 0..LOOKUP_ATTEMPTS {
+                match client
+                    .generation_batch_by_client_id(&request.client_batch_id)
+                    .await
+                {
+                    Ok(Some(status)) => return Ok(status),
+                    Ok(None) => {
+                        return Err(error.context(format!(
+                            "generation-batch admission is uncertain for client id {}; the host did not retain that idempotency key",
+                            request.client_batch_id
+                        )));
+                    }
+                    Err(lookup) => last_lookup_error = Some(lookup),
+                }
+                if attempt + 1 < LOOKUP_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_millis(250 * u64::from(attempt + 1))).await;
+                }
             }
+            Err(error.context(format!(
+                "generation-batch admission is uncertain for client id {}; idempotency lookup failed after {LOOKUP_ATTEMPTS} attempts: {}",
+                request.client_batch_id,
+                last_lookup_error
+                    .map(|lookup| lookup.to_string())
+                    .unwrap_or_else(|| "unknown lookup error".to_string())
+            )))
         }
         Err(error) => Err(error),
     }
@@ -490,6 +505,7 @@ async fn wait_for_generation_batch(
                     child.index,
                     match child.state {
                         GenerationBatchChildState::Accepted => "accepted",
+                        GenerationBatchChildState::Cancelling => "cancelling",
                         GenerationBatchChildState::Running => "running",
                         GenerationBatchChildState::Complete => "complete",
                         GenerationBatchChildState::Failed => "failed",
@@ -507,41 +523,68 @@ async fn wait_for_generation_batch(
     }
 }
 
-fn save_durable_batch_download(
-    bytes: &[u8],
+fn durable_batch_download_destination(
     server_filename: &str,
     request: &GenerateRequest,
     output: &Option<String>,
     batch: u32,
     index: u32,
-    preview: bool,
-) -> Result<()> {
-    let format = request.resolved_output_format();
-    let destination = if output.is_some() {
-        batch_media_filename(
-            output,
-            &request.model,
-            format.extension(),
-            batch,
-            index,
-            request
-                .title
-                .as_deref()
-                .and_then(mold_core::title_slug)
-                .as_deref(),
-        )
-    } else {
-        std::path::Path::new(server_filename)
+    original_sibling: bool,
+) -> Result<String> {
+    if output.is_none() {
+        return std::path::Path::new(server_filename)
             .file_name()
             .and_then(|name| name.to_str())
             .filter(|name| !name.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("server returned an invalid gallery filename"))?
-            .to_string()
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("server returned an invalid gallery filename"));
+    }
+    let format = request.resolved_output_format();
+    let destination = batch_media_filename(
+        output,
+        &request.model,
+        format.extension(),
+        batch,
+        index,
+        request
+            .title
+            .as_deref()
+            .and_then(mold_core::title_slug)
+            .as_deref(),
+    );
+    if !original_sibling {
+        return Ok(destination);
+    }
+    let path = std::path::Path::new(&destination);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("output");
+    let extension = path.extension().and_then(|value| value.to_str());
+    let leaf = match extension {
+        Some(extension) if !extension.is_empty() => format!("{stem}-original.{extension}"),
+        _ => format!("{stem}-original"),
     };
-    if std::path::Path::new(&destination).exists() {
+    Ok(path
+        .parent()
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .map(|directory| directory.join(&leaf))
+        .unwrap_or_else(|| std::path::PathBuf::from(&leaf))
+        .to_string_lossy()
+        .into_owned())
+}
+
+fn save_durable_batch_download(
+    bytes: &[u8],
+    destination: &str,
+    format: OutputFormat,
+    preview: bool,
+) -> Result<()> {
+    if std::path::Path::new(destination).exists() {
         status!("{} Overwriting: {}", theme::icon_alert(), destination);
     }
-    std::fs::write(&destination, bytes)?;
+    std::fs::write(destination, bytes)?;
     status!("{} Saved: {}", theme::icon_done(), destination.bold());
     if preview && !format.is_video() && !format.is_audio() {
         preview_image(bytes);
@@ -554,6 +597,7 @@ async fn run_canonical_remote_batch(
     requests: &[GenerateRequest],
     max_outputs: usize,
     output: &Option<String>,
+    piped: bool,
     preview: bool,
 ) -> Result<()> {
     let total = u32::try_from(requests.len()).context("batch is too large")?;
@@ -580,27 +624,70 @@ async fn run_canonical_remote_batch(
             let request = chunk
                 .get(child.index.saturating_sub(1) as usize)
                 .ok_or_else(|| anyhow::anyhow!("server returned an invalid batch child index"))?;
-            let filename = child
-                .result
-                .as_ref()
-                .and_then(|result| result.filename.as_deref())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "completed generation batch child {} has no gallery filename",
-                        child.index
-                    )
-                })?;
-            let bytes = client.get_gallery_image(filename).await?;
+            let result = child.result.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "completed generation batch child {} has no gallery result",
+                    child.index
+                )
+            })?;
+            let filename = result.filename.as_deref();
+            let original_filename = result
+                .original_filename
+                .as_deref()
+                .filter(|original| Some(*original) != filename);
+            if filename.is_none() && original_filename.is_none() {
+                anyhow::bail!(
+                    "completed generation batch child {} has no gallery filename",
+                    child.index
+                );
+            }
             let global_index = request.batch_index.unwrap_or(child.index).saturating_sub(1);
-            save_durable_batch_download(
-                &bytes,
-                filename,
-                request,
-                output,
-                total,
-                global_index,
-                preview,
-            )?;
+            let stdout_output = (piped && output.is_none()) || output.as_deref() == Some("-");
+            if stdout_output {
+                // A byte stream can carry one artifact only. Match the attached
+                // contract by preferring the final/upscaled result and falling
+                // back to the original only when it is the sole durable output.
+                let stdout_filename = filename.or(original_filename).expect("checked above");
+                let bytes = client.get_gallery_image(stdout_filename).await?;
+                let mut stdout = std::io::stdout().lock();
+                stdout.write_all(&bytes)?;
+                stdout.flush()?;
+                continue;
+            }
+            if let Some(original_filename) = original_filename {
+                let bytes = client.get_gallery_image(original_filename).await?;
+                let destination = durable_batch_download_destination(
+                    original_filename,
+                    request,
+                    output,
+                    total,
+                    global_index,
+                    filename.is_some(),
+                )?;
+                save_durable_batch_download(
+                    &bytes,
+                    &destination,
+                    request.resolved_output_format(),
+                    preview && filename.is_none(),
+                )?;
+            }
+            if let Some(filename) = filename {
+                let bytes = client.get_gallery_image(filename).await?;
+                let destination = durable_batch_download_destination(
+                    filename,
+                    request,
+                    output,
+                    total,
+                    global_index,
+                    false,
+                )?;
+                save_durable_batch_download(
+                    &bytes,
+                    &destination,
+                    request.resolved_output_format(),
+                    preview,
+                )?;
+            }
         }
         if let Some(child) = status.children.iter().find(|child| {
             matches!(
@@ -1616,8 +1703,12 @@ pub async fn run(
         };
         let mut collected = BatchOutputs::new(batch, base_seed);
 
-        let legacy_requests = if batch > 1 {
-            let requests = remote_batch_requests(&req, batch, base_seed, batch_prompts.as_deref());
+        let legacy_requests = {
+            let requests = if batch > 1 {
+                remote_batch_requests(&req, batch, base_seed, batch_prompts.as_deref())
+            } else {
+                vec![req.clone()]
+            };
             let capabilities = match ctx.client().server_capabilities().await {
                 Ok(capabilities) => Some(capabilities),
                 Err(error) if mold_core::client::is_missing_endpoint_error(&error) => None,
@@ -1631,6 +1722,7 @@ pub async fn run(
                         &requests,
                         max_outputs,
                         &output,
+                        piped,
                         preview,
                     )
                     .await
@@ -1642,8 +1734,6 @@ pub async fn run(
                 }
             }
             requests
-        } else {
-            vec![req.clone()]
         };
 
         for (i, iter_req) in legacy_requests.into_iter().enumerate() {
@@ -6373,6 +6463,110 @@ mod audio_batch_passthrough_tests {
         assert!(children
             .iter()
             .all(|child| child.batch_id == children[0].batch_id));
+    }
+
+    #[tokio::test]
+    async fn canonical_singleton_downloads_final_and_distinct_original_without_attached_generate() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "id": "batch-1",
+                "client_batch_id": "client-1",
+                "instance_id": "instance-1",
+                "durable": true,
+                "children": [{
+                    "index": 1,
+                    "job_id": "job-1",
+                    "state": "complete",
+                    "result": {
+                        "filename": "finished.png",
+                        "original_filename": "original.png"
+                    }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        for (filename, bytes) in [
+            ("original.png", b"original".as_slice()),
+            ("finished.png", b"final".as_slice()),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!("/api/gallery/image/{filename}")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("result.png");
+        let output = Some(destination.to_string_lossy().into_owned());
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"print","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        run_canonical_remote_batch(
+            &MoldClient::new(&server.uri()),
+            &[request],
+            64,
+            &output,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"final");
+        assert_eq!(
+            std::fs::read(dir.path().join("result-original.png")).unwrap(),
+            b"original"
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert!(!requests.iter().any(|request| matches!(
+            request.url.path(),
+            "/api/generate" | "/api/generate/stream" | "/api/generate/placement-preview"
+        )));
+    }
+
+    #[tokio::test]
+    async fn ambiguous_admission_retries_lookup_and_always_names_client_id() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/generation-batches/by-client/recovery-key"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(5)
+            .mount(&server)
+            .await;
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"print","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        let error = admit_generation_batch_recovering_ambiguity(
+            &MoldClient::new(&server.uri()),
+            &GenerationBatchAdmissionRequest {
+                client_batch_id: "recovery-key".into(),
+                requests: vec![request],
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("recovery-key"));
+        assert!(error.to_string().contains("after 5 attempts"));
     }
 
     #[test]

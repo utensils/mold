@@ -50,6 +50,10 @@ export interface Job {
   /** Total clips reported by the chain stream. */
   chainStageCount: number | null;
   error: string | null;
+  /** Nonterminal durable hold details and host-owned retry fence. */
+  holdError: string | null;
+  retryable: boolean;
+  retrying: boolean;
   /** Advisories from an accepted request; each header value stays whole. */
   requestWarnings: string[];
   /** Structured transport-close marker used by resume reconciliation. */
@@ -127,6 +131,9 @@ export function newJob(req: GenerateRequest): Job {
     chainStageIndex: null,
     chainStageCount: null,
     error: null,
+    holdError: null,
+    retryable: false,
+    retrying: false,
     requestWarnings: [],
     interrupted: false,
     retainedByHost: false,

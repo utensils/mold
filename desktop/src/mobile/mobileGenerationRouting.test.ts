@@ -47,6 +47,7 @@ function canonicalRouteForHost(candidate: MobileHost): HostRoute {
   return {
     ...routeForHost(candidate),
     heterogeneousBatch: true,
+    heterogeneousBatchMaxOutputs: 64,
     durableBatchOutcomes: true,
     admissionProtocolVersion: 2,
     durableMedia: {
@@ -171,10 +172,7 @@ describe("mobile automatic generation routing", () => {
     const studio = host("studio");
     const render = host("render");
     const result = await routeAutomaticMobileGeneration({
-      ...options([
-        candidate(studio, { queueDepth: 4 }),
-        candidate(render, { queueDepth: 1 }),
-      ]),
+      ...options([candidate(studio, { queueDepth: 4 }), candidate(render, { queueDepth: 1 })]),
       routeForHost: canonicalRouteForHost,
     });
 

@@ -5,6 +5,7 @@ import { isMinimaxH3Identity } from "../lib/minimaxH3Identity";
 export type GenerationLifecyclePhase =
   | "accepted"
   | "queued"
+  | "cancelling"
   | "running"
   | "held"
   | "complete"
@@ -210,6 +211,7 @@ function isLifecyclePhase(value: unknown): value is GenerationLifecyclePhase {
   return (
     value === "accepted" ||
     value === "queued" ||
+    value === "cancelling" ||
     value === "running" ||
     value === "held" ||
     value === "complete" ||

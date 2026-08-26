@@ -300,7 +300,9 @@ describe("submitBatch connection cap", () => {
         target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
         instanceId: "instance-1",
         heterogeneousBatch: true,
+        heterogeneousBatchMaxOutputs: 64,
         durableBatchOutcomes: true,
+        admissionProtocolVersion: 2,
         mirrorRemoteOutput: false,
       });
       await flushPromises();
@@ -434,7 +436,9 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatch: true,
+      heterogeneousBatchMaxOutputs: 64,
       durableBatchOutcomes: true,
+      admissionProtocolVersion: 2,
       mirrorRemoteOutput: false,
     });
     await flushPromises();
@@ -502,7 +506,9 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatch: true,
+      heterogeneousBatchMaxOutputs: 64,
       durableBatchOutcomes: true,
+      admissionProtocolVersion: 2,
       mirrorRemoteOutput: true,
     });
     await flushPromises();
@@ -608,7 +614,9 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatch: true,
+      heterogeneousBatchMaxOutputs: 64,
       durableBatchOutcomes: true,
+      admissionProtocolVersion: 2,
       mirrorRemoteOutput: false,
     };
     store.submitBatch(req, 1, route);
@@ -683,7 +691,9 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatch: true,
+      heterogeneousBatchMaxOutputs: 64,
       durableBatchOutcomes: true,
+      admissionProtocolVersion: 2,
       mirrorRemoteOutput: false,
     });
     await flushPromises();
@@ -762,7 +772,9 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatch: true,
+      heterogeneousBatchMaxOutputs: 64,
       durableBatchOutcomes: true,
+      admissionProtocolVersion: 2,
       mirrorRemoteOutput: false,
     });
     await flushPromises();
@@ -1116,7 +1128,9 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatch: true,
+      heterogeneousBatchMaxOutputs: 64,
       durableBatchOutcomes: true,
+      admissionProtocolVersion: 2,
       mirrorRemoteOutput: false,
     });
     await flushPromises();
@@ -1171,7 +1185,9 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatch: true,
+      heterogeneousBatchMaxOutputs: 64,
       durableBatchOutcomes: true,
+      admissionProtocolVersion: 2,
       mirrorRemoteOutput: false,
     };
 
@@ -1230,14 +1246,16 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatch: true,
+      heterogeneousBatchMaxOutputs: 64,
       durableBatchOutcomes: true,
+      admissionProtocolVersion: 2,
       durableMedia: {
-        protocol_version: 1,
+        protocol_version: 2,
         encrypted_at_rest: true,
         generate_request_media: true,
         identity: true,
         h3_references: false,
-        private_h3: false,
+        private_h3: true,
       },
       mirrorRemoteOutput: false,
     });
@@ -1304,6 +1322,7 @@ describe("submitBatch connection cap", () => {
         target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
         instanceId: "instance-1",
         heterogeneousBatch: true,
+        heterogeneousBatchMaxOutputs: 64,
         durableBatchOutcomes: true,
         admissionProtocolVersion: 2,
         durableMedia: {
