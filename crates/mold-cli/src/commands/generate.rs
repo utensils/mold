@@ -602,20 +602,49 @@ async fn run_canonical_remote_batch(
 ) -> Result<()> {
     let total = u32::try_from(requests.len()).context("batch is too large")?;
     let mut admitted = Vec::new();
+    let mut failures = Vec::new();
     for chunk in requests.chunks(max_outputs.max(1)) {
+        let client_batch_id = new_client_batch_id();
         let admission = GenerationBatchAdmissionRequest {
-            client_batch_id: new_client_batch_id(),
+            client_batch_id: client_batch_id.clone(),
             requests: chunk.to_vec(),
         };
-        let status = admit_generation_batch_recovering_ambiguity(client, &admission).await?;
-        admitted.push((admission.requests, status));
+        match admit_generation_batch_recovering_ambiguity(client, &admission).await {
+            Ok(status) => admitted.push((admission.requests, status)),
+            Err(error) => {
+                failures.push(format!(
+                    "generation-batch admission failed for client id {client_batch_id}: {error:#}"
+                ));
+                break;
+            }
+        }
+    }
+
+    let admitted_client_ids = admitted
+        .iter()
+        .map(|(_, status)| status.client_batch_id.clone())
+        .collect::<Vec<_>>();
+    if !failures.is_empty() && !admitted_client_ids.is_empty() {
+        failures.push(format!(
+            "already accepted client ids were reconciled: {}",
+            admitted_client_ids.join(", ")
+        ));
     }
 
     // Every chunk is durable before waiting for the first result. Large CLI
     // batches therefore retain the same fast queue-delivery property as one
     // endpoint-sized batch instead of serializing admission behind inference.
     for (chunk, initial_status) in admitted {
-        let status = wait_for_generation_batch(client, initial_status).await?;
+        let client_batch_id = initial_status.client_batch_id.clone();
+        let status = match wait_for_generation_batch(client, initial_status).await {
+            Ok(status) => status,
+            Err(error) => {
+                failures.push(format!(
+                    "could not reconcile accepted client id {client_batch_id}: {error:#}"
+                ));
+                continue;
+            }
+        };
         for child in status
             .children
             .iter()
@@ -712,16 +741,20 @@ async fn run_canonical_remote_batch(
             } else {
                 String::new()
             };
-            anyhow::bail!(
-                "generation batch child {} is {}: {detail}{retry}",
+            failures.push(format!(
+                "generation batch child {} for client id {} is {}: {detail}{retry}",
                 child.index,
+                status.client_batch_id,
                 match child.state {
                     GenerationBatchChildState::Held => "held",
                     GenerationBatchChildState::Cancelled => "cancelled",
                     _ => "failed",
                 }
-            );
+            ));
         }
+    }
+    if !failures.is_empty() {
+        anyhow::bail!(failures.join("; "));
     }
     Ok(())
 }
@@ -6531,6 +6564,95 @@ mod audio_batch_passthrough_tests {
             request.url.path(),
             "/api/generate" | "/api/generate/stream" | "/api/generate/placement-preview"
         )));
+    }
+
+    #[tokio::test]
+    async fn later_chunk_failure_still_reconciles_and_downloads_accepted_chunks() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
+
+        #[derive(Debug)]
+        struct ChildIndex(u64);
+
+        impl Match for ChildIndex {
+            fn matches(&self, request: &Request) -> bool {
+                serde_json::from_slice::<serde_json::Value>(&request.body)
+                    .ok()
+                    .and_then(|body| body["requests"][0]["batch_index"].as_u64())
+                    == Some(self.0)
+            }
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .and(ChildIndex(1))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "id": "batch-1",
+                "client_batch_id": "accepted-client",
+                "instance_id": "instance-1",
+                "durable": true,
+                "children": [{
+                    "index": 1,
+                    "job_id": "job-1",
+                    "state": "complete",
+                    "result": { "filename": "first.png" }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .and(ChildIndex(2))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "error": "second chunk refused"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/gallery/image/first.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"first"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let output = Some(dir.path().join("result.png").to_string_lossy().into_owned());
+        let base: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"print","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        let requests = remote_batch_requests(&base, 2, 7, None);
+        let error = run_canonical_remote_batch(
+            &MoldClient::new(&server.uri()),
+            &requests,
+            1,
+            &output,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            std::fs::read(dir.path().join("result-0.png")).unwrap(),
+            b"first"
+        );
+        assert!(error.to_string().contains("accepted-client"));
+        assert!(error.to_string().contains("already accepted"));
+        let submitted = server.received_requests().await.unwrap();
+        let failed_client_id = submitted
+            .iter()
+            .filter(|request| request.url.path() == "/api/generation-batches")
+            .find_map(|request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).ok()?;
+                (body["requests"][0]["batch_index"].as_u64() == Some(2))
+                    .then(|| body["client_batch_id"].as_str().unwrap().to_string())
+            })
+            .unwrap();
+        assert!(error.to_string().contains(&failed_client_id));
     }
 
     #[tokio::test]

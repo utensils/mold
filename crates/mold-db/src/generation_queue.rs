@@ -277,6 +277,10 @@ pub struct QueueClaim {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimedQueueRuntimePosition {
     pub position: Option<usize>,
+    /// Durable queued predecessors from the same bounded snapshot. A feeder
+    /// may publish only after each is already represented in the live
+    /// registry (or has left the queued set).
+    pub predecessor_ids: Vec<String>,
     pub target_gpu: Option<usize>,
     pub target_device_id: Option<String>,
 }
@@ -840,8 +844,13 @@ pub fn claimed_runtime_position(
                 row.get::<_, String>(0)
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let position = ids.iter().position(|id| id == job_id);
+        let predecessor_ids = position
+            .map(|position| ids[..position].to_vec())
+            .unwrap_or_default();
         Ok(Some(ClaimedQueueRuntimePosition {
-            position: ids.iter().position(|id| id == job_id),
+            position,
+            predecessor_ids,
             target_gpu,
             target_device_id,
         }))
@@ -2497,6 +2506,7 @@ mod tests {
             claimed_runtime_position(&db, "owner-a", "deep", &deep.claim_token, 3).unwrap(),
             Some(ClaimedQueueRuntimePosition {
                 position: Some(2),
+                predecessor_ids: vec!["first".to_string(), "second".to_string()],
                 target_gpu: Some(3),
                 target_device_id: Some("cuda:stable".to_string()),
             })
@@ -2505,6 +2515,7 @@ mod tests {
             claimed_runtime_position(&db, "owner-a", "deep", &deep.claim_token, 2).unwrap(),
             Some(ClaimedQueueRuntimePosition {
                 position: None,
+                predecessor_ids: vec![],
                 target_gpu: Some(3),
                 target_device_id: Some("cuda:stable".to_string()),
             }),

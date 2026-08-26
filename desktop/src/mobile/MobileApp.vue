@@ -4043,13 +4043,14 @@ function provisionalAutomaticHost(
 }
 
 /**
- * Ask every candidate machine for a placement plan and choose one.
+ * Freeze one automatic destination using the shared submission policy.
  *
- * Auto takes the soonest predicted completion (round trip included); Most
- * capable takes the strongest GPU among the machines that answered `planned`,
- * using each machine's own `gpu_info.backend`. The winner is returned as a
- * complete route so the caller can freeze it — host id, URL, Keychain key, and
- * instance id — exactly as the pinned path does.
+ * Canonical protocol-v2 requests use cached model/queue/GPU telemetry and do
+ * not wait for a placement preview. Legacy requests retain authoritative
+ * preview fan-out: Auto compares predicted completion (round trip included),
+ * while Most capable compares the GPUs that answered `planned`. Either path
+ * returns the same complete route — host id, URL, Keychain key, and instance
+ * id — that the pinned path freezes.
  */
 async function routeAutomaticGeneration(options: {
   request: Record<string, unknown>;
@@ -4084,9 +4085,10 @@ async function submitMobileSequence(): Promise<void> {
   clearSelectedQueueRender();
   fileUnderDropNotice.value = "";
   const automatic = automaticRouting.value;
-  // Under an automatic policy the machine is provisional until the placement
-  // fan-out answers; source fitting only ever uses it for an optional upscale,
-  // so the built request stays machine-independent.
+  // Under an automatic policy the machine is provisional until shared routing
+  // freezes either the canonical telemetry choice or the legacy preview winner;
+  // source fitting only ever uses it for an optional upscale, so the built
+  // request stays machine-independent.
   const initialHost = automatic
     ? provisionalAutomaticHost(form.model, form.family)
     : selectedHost.value;
@@ -4121,8 +4123,8 @@ async function submitMobileSequence(): Promise<void> {
     instanceId: host.instanceId ?? null,
   };
   // Freeze all request-affecting values at the tap boundary. Source fitting
-  // and placement preview are asynchronous; edits during either await belong
-  // to the next submission.
+  // and routing are asynchronous; edits during either await belong to the next
+  // submission.
   const requestForm = applyFileUnderPolicy(cloneGenerateForm(form));
   const clips = JSON.parse(JSON.stringify(draft.clips)) as typeof draft.clips;
   // The opening image obeys the checkpoint's own source-image contract: a

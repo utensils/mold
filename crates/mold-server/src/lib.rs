@@ -10,6 +10,7 @@ pub mod chain_job_runner;
 pub mod chain_limits;
 pub(crate) mod dir_sync;
 mod durable_admission_authority;
+mod durable_generation_settlement;
 mod gallery_authority;
 #[allow(dead_code)]
 mod h3_admission;

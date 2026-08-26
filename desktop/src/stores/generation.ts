@@ -340,6 +340,14 @@ const sharedDurableEventHosts = new Set<string>();
 let durableRecoveryLoaded = false;
 let durableRecoveryStorageUnavailable = false;
 
+function durableRecordForClientId(clientId: number): DurableGenerationRecoveryRecord | null {
+  return (
+    [...durableRecords.values()].find((record) =>
+      [...(durableJobIds.get(record.tracker.clientBatchId)?.values() ?? [])].includes(clientId),
+    ) ?? null
+  );
+}
+
 const DURABLE_RECOVERY_STORAGE_WARNING =
   "Recovery storage is unavailable. This generation is still being submitted, but reloading before Mold confirms it may hide it from Create.";
 
@@ -781,6 +789,8 @@ export const useGenerationStore = defineStore("generation", {
           if (!job || jobHasSettled(job)) continue;
           job.stage = "Original machine identity changed — outcome unknown";
           job.interrupted = true;
+          job.retryable = false;
+          job.retrying = false;
         }
         return;
       }
@@ -843,30 +853,30 @@ export const useGenerationStore = defineStore("generation", {
       if (!job || !job.id || !job.retryable || job.retrying) {
         throw new Error("This held generation is not retryable yet.");
       }
-      const target =
-        targets.get(clientId) ??
-        (() => {
-          const host = useHostsStore().all.find((candidate) => candidate.id === job.hostId);
-          return host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null;
-        })();
-      if (!target) throw new Error("The original machine is not connected.");
+      const record = durableRecordForClientId(clientId);
+      if (!record || record.tracker.reconciliation.reason === "instance_mismatch") {
+        throw new Error("The original machine identity changed; Retry is unavailable.");
+      }
+      const host = useHostsStore().all.find((candidate) => candidate.id === record.tracker.hostId);
+      if (
+        !host?.baseUrl ||
+        host.status !== "ready" ||
+        host.instanceId !== record.tracker.expectedInstanceId
+      ) {
+        job.retryable = false;
+        throw new Error("The original machine is not connected with the same identity.");
+      }
+      const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
       job.retrying = true;
       try {
         await retryQueueJob(target, job.id);
         job.retryable = false;
         job.holdError = null;
         job.stage = null;
-        const record = [...durableRecords.values()].find((candidate) =>
-          [...(durableJobIds.get(candidate.tracker.clientBatchId)?.values() ?? [])].includes(
-            clientId,
-          ),
+        void this.reconcileDurableHost(
+          record.tracker.hostId,
+          new Set([record.tracker.clientBatchId]),
         );
-        if (record) {
-          void this.reconcileDurableHost(
-            record.tracker.hostId,
-            new Set([record.tracker.clientBatchId]),
-          );
-        }
       } finally {
         job.retrying = false;
       }

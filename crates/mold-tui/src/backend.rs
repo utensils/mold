@@ -640,6 +640,24 @@ fn build_batch_requests(
     batch: u32,
     base_seed: Option<u64>,
 ) -> Result<Vec<GenerateRequest>, String> {
+    // Admission ids belong to transport chunks; this id belongs to the user's
+    // logical Batch N and must remain stable when a host advertises a smaller
+    // canonical admission limit. A restored singleton keeps its exact saved
+    // provenance, while an ordinary or prepared multi-output submission gets
+    // one fresh identity and global positions rather than inheriting a source
+    // print's older batch group.
+    let preserve_exact_provenance = batch == 1
+        && params.batch_id.is_some()
+        && params.batch_index.is_some()
+        && params.batch_count.is_some();
+    let logical_batch_id = if preserve_exact_provenance {
+        params
+            .batch_id
+            .clone()
+            .expect("complete provenance has an id")
+    } else {
+        new_client_batch_id()
+    };
     let mut requests = Vec::with_capacity(batch as usize);
     for index in 0..batch {
         let mut child = params.clone();
@@ -656,9 +674,28 @@ fn build_batch_requests(
         }
         let mut request = build_request(&child, child_prompt, negative_prompt)?;
         request.batch_size = 1;
+        request.batch_id = Some(logical_batch_id.clone());
+        if !preserve_exact_provenance {
+            request.batch_index = Some(index + 1);
+            request.batch_count = Some(batch);
+        }
         requests.push(request);
     }
     Ok(requests)
+}
+
+fn partial_batch_admission_error(
+    failed_client_id: &str,
+    error: &str,
+    admitted_client_ids: &[String],
+) -> String {
+    if admitted_client_ids.is_empty() {
+        return format!("durable batch admission failed for client id {failed_client_id}: {error}");
+    }
+    format!(
+        "durable batch admission failed for client id {failed_client_id}: {error}; already accepted client ids were reconciled: {}",
+        admitted_client_ids.join(", ")
+    )
 }
 
 async fn admit_or_recover_batch(
@@ -751,14 +788,19 @@ async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> Canonical
     };
 
     let mut admitted = Vec::new();
+    let mut admission_failure = None;
     for (chunk_index, chunk) in requests.chunks(chunk_limit).enumerate() {
+        let client_batch_id = new_client_batch_id();
         let request = GenerationBatchAdmissionRequest {
-            client_batch_id: new_client_batch_id(),
+            client_batch_id: client_batch_id.clone(),
             requests: chunk.to_vec(),
         };
         let status = match admit_or_recover_batch(input.client, &request).await {
             Ok(status) => status,
-            Err(error) => return CanonicalBatchResult::Error(error),
+            Err(error) => {
+                admission_failure = Some((client_batch_id, error));
+                break;
+            }
         };
         let first = chunk_index * chunk_limit + 1;
         let last = first + chunk.len() - 1;
@@ -768,6 +810,15 @@ async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> Canonical
                 message: format!("Durably accepted batch {first}-{last}"),
             }));
         admitted.push((first as u32 - 1, status));
+    }
+
+    if admitted.is_empty() {
+        let (failed_client_id, error) = admission_failure.expect("an empty admission set failed");
+        return CanonicalBatchResult::Error(partial_batch_admission_error(
+            &failed_client_id,
+            &error,
+            &[],
+        ));
     }
 
     let client_batch_ids = admitted
@@ -873,6 +924,13 @@ async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> Canonical
     let _ = input
         .tx
         .send(BackgroundEvent::DurableGenerationBatchComplete { outcomes });
+    if let Some((failed_client_id, error)) = admission_failure {
+        return CanonicalBatchResult::Error(partial_batch_admission_error(
+            &failed_client_id,
+            &error,
+            &client_batch_ids,
+        ));
+    }
     CanonicalBatchResult::Done
 }
 
@@ -1806,6 +1864,32 @@ mod tests {
             vec![Some(u64::MAX - 1), Some(u64::MAX), Some(0)]
         );
         assert!(requests.iter().all(|request| request.batch_size == 1));
+        assert!(requests
+            .iter()
+            .all(|request| request.batch_id == requests[0].batch_id));
+        assert_eq!(requests[0].batch_index, Some(1));
+        assert_eq!(requests[2].batch_index, Some(3));
+        assert!(requests
+            .iter()
+            .all(|request| request.batch_count == Some(3)));
+        let chunks = requests.chunks(2).collect::<Vec<_>>();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0][0].batch_id, chunks[1][0].batch_id);
+        assert_eq!(chunks[1][0].batch_index, Some(3));
+    }
+
+    #[test]
+    fn partial_admission_error_names_failed_and_reconciled_recovery_ids() {
+        let message = partial_batch_admission_error(
+            "failed-client",
+            "lookup remained ambiguous",
+            &["accepted-one".into(), "accepted-two".into()],
+        );
+
+        assert!(message.contains("failed-client"));
+        assert!(message.contains("lookup remained ambiguous"));
+        assert!(message.contains("accepted-one, accepted-two"));
+        assert!(message.contains("were reconciled"));
     }
 
     #[test]
