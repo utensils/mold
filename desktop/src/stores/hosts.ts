@@ -260,8 +260,7 @@ function hostRoute(host: HostView, capabilities?: ServerCapabilities): HostRoute
     ...(capabilities?.queue?.durable_batch_outcomes === true ? { durableBatchOutcomes: true } : {}),
     ...(capabilities?.queue?.admission_protocol_version != null
       ? {
-          admissionProtocolVersion:
-            capabilities.queue.admission_protocol_version,
+          admissionProtocolVersion: capabilities.queue.admission_protocol_version,
         }
       : {}),
   };
@@ -1093,15 +1092,13 @@ export const useHostsStore = defineStore("hosts", {
             selection === "capable"
               ? pickMostCapableHost(routable, modelHostIds.length > 0 ? modelHostIds : null)
               : selection !== null
-                ? routable.find((host) => host.id === selection) ?? null
+                ? (routable.find((host) => host.id === selection) ?? null)
                 : pickAutoHost(
                     modelHostIds.length > 0
                       ? routable.filter((host) => modelHostIds.includes(host.id))
                       : routable,
                   );
-          const observation = chosen
-            ? usable.find((probe) => probe.host.id === chosen.id)
-            : null;
+          const observation = chosen ? usable.find((probe) => probe.host.id === chosen.id) : null;
           const route = chosen ? hostRoute(chosen, this.capabilities[chosen.id]) : null;
           if (route) return { kind: "route", route, preview: observation?.preview ?? null };
         }
