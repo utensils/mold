@@ -5526,10 +5526,6 @@ async function generate(): Promise<void> {
   clearSelectedQueueRender();
   fileUnderDropNotice.value = "";
   const prepared = preparedBatch.value;
-  if (effectiveBatchSize.value > 1 && !prepared) {
-    await expandForCurrentBatch();
-    return;
-  }
   if (
     prepared &&
     (preparedStaleReasons.value.length > 0 ||
