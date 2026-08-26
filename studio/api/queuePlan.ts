@@ -413,6 +413,7 @@ export async function retryQueueJobRecoveringAmbiguity(
   } catch (error) {
     if (isDefiniteGenerationAdmissionRejection(error)) throw error;
     const detail = error instanceof Error ? error.message : String(error);
+    let pendingDetail = detail;
     for (
       let attempt = 0;
       attempt < AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS;
@@ -422,20 +423,27 @@ export async function retryQueueJobRecoveringAmbiguity(
       try {
         lookup = await getGenerationBatch(target, authority.batchId);
       } catch (lookupError) {
-        return {
-          kind: "uncertain",
-          error: `${detail}; exact retry reconciliation failed: ${
-            lookupError instanceof Error
-              ? lookupError.message
-              : String(lookupError)
-          }`,
-        };
+        const lookupDetail =
+          lookupError instanceof Error
+            ? lookupError.message
+            : String(lookupError);
+        pendingDetail = `${detail}; exact retry reconciliation failed: ${lookupDetail}`;
+        if (
+          isDefiniteGenerationAdmissionRejection(lookupError) ||
+          attempt + 1 === AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS
+        ) {
+          return { kind: "uncertain", error: pendingDetail };
+        }
+        await retryConfirmationDelay();
+        continue;
       }
       if (lookup.kind === "missing") {
-        return {
-          kind: "uncertain",
-          error: `${detail}; the durable batch lookup is still missing`,
-        };
+        pendingDetail = `${detail}; the durable batch lookup is still missing`;
+        if (attempt + 1 === AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS) {
+          return { kind: "uncertain", error: pendingDetail };
+        }
+        await retryConfirmationDelay();
+        continue;
       }
       const batch = lookup.batch;
       const child = validatedRetryChild(batch, authority);
@@ -447,7 +455,7 @@ export async function retryQueueJobRecoveringAmbiguity(
       }
       await retryConfirmationDelay();
     }
-    throw new Error("The bounded retry confirmation loop did not terminate.");
+    return { kind: "uncertain", error: pendingDetail };
   }
 }
 

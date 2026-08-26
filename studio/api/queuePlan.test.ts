@@ -480,6 +480,81 @@ describe("queue plan contract", () => {
     },
   );
 
+  it.each([
+    [
+      "HTTP 500",
+      () => Promise.resolve(new Response("failed", { status: 500 })),
+    ],
+    ["HTTP 429", () => Promise.resolve(new Response("busy", { status: 429 }))],
+    [
+      "transport loss",
+      () => Promise.reject(new TypeError("read disconnected")),
+    ],
+    [
+      "temporary 404",
+      () => Promise.resolve(new Response("missing", { status: 404 })),
+    ],
+  ])(
+    "consumes transient retry reconciliation %s before Held advances to Accepted",
+    async (_case, failFirstRead) => {
+      vi.useFakeTimers();
+      let reads = 0;
+      const fetchMock = vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/queue/job%2F1/retry")) {
+          return Promise.reject(new TypeError("retry response disconnected"));
+        }
+        if (!url.endsWith("/api/generation-batches/batch-1")) {
+          return Promise.reject(new Error(`unexpected URL: ${url}`));
+        }
+        reads += 1;
+        if (reads === 1) return failFirstRead();
+        const state = reads === 2 ? "held" : "accepted";
+        return Promise.resolve(
+          Response.json({
+            id: "batch-1",
+            client_batch_id: "client-1",
+            instance_id: "instance-1",
+            durable: true,
+            children: [
+              {
+                index: 1,
+                job_id: "job/1",
+                state,
+                retryable: state === "held",
+                created_at_ms: 1,
+                updated_at_ms: reads,
+              },
+            ],
+          }),
+        );
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const outcomePromise = retryQueueJobRecoveringAmbiguity(
+        { baseUrl: "https://gpu.example", apiKey: "secret" },
+        {
+          instanceId: "instance-1",
+          batchId: "batch-1",
+          clientBatchId: "client-1",
+          jobId: "job/1",
+        },
+      );
+      await vi.runAllTimersAsync();
+
+      await expect(outcomePromise).resolves.toMatchObject({
+        kind: "reconciled",
+        batch: { children: [{ job_id: "job/1", state: "accepted" }] },
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+      expect(
+        fetchMock.mock.calls.filter(([input]) =>
+          String(input).endsWith("/api/queue/job%2F1/retry"),
+        ),
+      ).toHaveLength(1);
+    },
+  );
+
   it("returns an unchanged Held snapshot only after the full confirmation window", async () => {
     vi.useFakeTimers();
     let calls = 0;

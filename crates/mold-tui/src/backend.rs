@@ -783,6 +783,13 @@ async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> Canonical
         Err(error) => return CanonicalBatchResult::Error(format!("{error:#}")),
     };
 
+    finish_canonical_batch(report, input.tx)
+}
+
+fn finish_canonical_batch(
+    report: mold_core::durable_generation::CanonicalGenerationReport,
+    tx: &mpsc::UnboundedSender<BackgroundEvent>,
+) -> CanonicalBatchResult {
     let mut outcomes = report
         .outcomes
         .into_iter()
@@ -814,14 +821,12 @@ async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> Canonical
         })
         .collect::<Vec<_>>();
     outcomes.sort_by_key(|outcome| outcome.index);
-    let _ = input
-        .tx
-        .send(BackgroundEvent::DurableGenerationBatchComplete { outcomes });
+    let _ = tx.send(BackgroundEvent::DurableGenerationBatchComplete { outcomes });
 
-    if report.failures.is_empty() {
+    if report.orchestration_failures.is_empty() {
         CanonicalBatchResult::Done
     } else {
-        CanonicalBatchResult::Error(report.failures.join("; "))
+        CanonicalBatchResult::Error(report.orchestration_failures.join("; "))
     }
 }
 
@@ -1684,6 +1689,54 @@ mod tests {
             canonical_batch_capabilities(64).canonical_generation_batch_limit(&requests),
             Some(64)
         );
+    }
+
+    #[test]
+    fn held_child_emits_one_structured_completion_without_global_error() {
+        let authority = mold_core::GenerationBatchAuthority {
+            instance_id: "instance-1".into(),
+            batch_id: "batch-1".into(),
+            client_batch_id: "client-1".into(),
+        };
+        let report = mold_core::durable_generation::CanonicalGenerationReport {
+            authorities: vec![authority.clone()],
+            admitted_client_ids: vec!["client-1".into()],
+            outcomes: vec![mold_core::durable_generation::CanonicalGenerationOutcome {
+                authority,
+                client_batch_id: "client-1".into(),
+                request_offset: 0,
+                request: ordinary_request(),
+                child: mold_core::GenerationBatchChild {
+                    index: 1,
+                    job_id: "job-1".into(),
+                    state: GenerationBatchChildState::Held,
+                    error: Some("dependency unavailable".into()),
+                    retryable: Some(true),
+                    created_at_ms: 0,
+                    updated_at_ms: 0,
+                    completed_at_ms: None,
+                    terminal_error: None,
+                    result: None,
+                },
+            }],
+            orchestration_failures: Vec::new(),
+            failures: vec!["terminal held child".into()],
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        assert_eq!(
+            finish_canonical_batch(report, &tx),
+            CanonicalBatchResult::Done
+        );
+        match rx.try_recv().unwrap() {
+            BackgroundEvent::DurableGenerationBatchComplete { outcomes } => {
+                assert_eq!(outcomes.len(), 1);
+                assert_eq!(outcomes[0].error.as_deref(), Some("dependency unavailable"));
+                assert!(outcomes[0].retryable);
+            }
+            _ => panic!("unexpected non-completion event"),
+        }
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
