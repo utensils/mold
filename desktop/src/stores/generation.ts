@@ -857,6 +857,9 @@ export const useGenerationStore = defineStore("generation", {
       if (!record || record.tracker.reconciliation.reason === "instance_mismatch") {
         throw new Error("The original machine identity changed; Retry is unavailable.");
       }
+      if (!record.tracker.serverBatchId) {
+        throw new Error("The durable batch identity is unavailable; Retry is unavailable.");
+      }
       const host = useHostsStore().all.find((candidate) => candidate.id === record.tracker.hostId);
       if (
         !host?.baseUrl ||
@@ -869,7 +872,12 @@ export const useGenerationStore = defineStore("generation", {
       const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
       job.retrying = true;
       try {
-        await retryQueueJob(target, job.id);
+        await retryQueueJob(target, {
+          instanceId: record.tracker.expectedInstanceId,
+          batchId: record.tracker.serverBatchId,
+          clientBatchId: record.tracker.clientBatchId,
+          jobId: job.id,
+        });
         job.retryable = false;
         job.holdError = null;
         job.stage = null;

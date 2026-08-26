@@ -3836,6 +3836,10 @@ fn process_job_with_sink(
                 let _ = job.result_tx.send(Err(err_msg));
                 return false;
             }
+            crate::queue_journal::DispatchClaim::Cancelled => {
+                finish_generation_cancelled(job, true);
+                return false;
+            }
             crate::queue_journal::DispatchClaim::Granted
             | crate::queue_journal::DispatchClaim::Untracked => {}
         }
@@ -8678,6 +8682,30 @@ mod tests {
             height: 512,
             index: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn gpu_worker_user_cancellation_emits_canonical_cancelled_observer() {
+        let mut job = fake_upscale_job(Config::default(), "unused");
+        job.id = "gpu-dispatch-cancelled".to_string();
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        job.progress_tx = Some(progress_tx);
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        job.result_tx = result_tx;
+
+        finish_generation_cancelled(job, true);
+
+        let SseMessage::Error(error) = progress_rx.recv().await.unwrap() else {
+            panic!("user cancellation must emit a terminal SSE error frame");
+        };
+        assert_eq!(
+            error.code.as_deref(),
+            Some(mold_core::SSE_ERROR_CODE_QUEUED_CANCELLED)
+        );
+        assert!(matches!(
+            result_rx.await.unwrap(),
+            Err(ref message) if message == "Cancelled"
+        ));
     }
 
     fn protocol_worker(

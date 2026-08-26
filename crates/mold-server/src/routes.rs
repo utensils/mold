@@ -6450,7 +6450,9 @@ async fn retry_queue_job(
     }
     let _durable_transition = state.queue_journal.lock_durable_transition().await;
     let journal = state.queue_journal.clone();
-    match spawn_queue_mutation(move || journal.retry_held(&authority)).await? {
+    let serving_instance_id = state.instance_id.as_ref().clone();
+    match spawn_queue_mutation(move || journal.retry_held(&serving_instance_id, &authority)).await?
+    {
         mold_db::generation_batches::OwnedRetry::Retried => Ok(StatusCode::ACCEPTED),
         mold_db::generation_batches::OwnedRetry::NotOwned => Err(ApiError::queue_job_not_found(
             format!("queue job {id} not found"),

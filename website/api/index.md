@@ -509,7 +509,11 @@ chunk larger recovery sets. Children expose `accepted`, `held`, `running`,
 `cancelling`, `complete`, `failed`, or `cancelled`; completed
 children name their gallery `result.filename`. Held retryable work remains in
 the durable queue with its error and can be resumed with
-`POST /api/queue/{job_id}/retry`; cancel queued work with
+`POST /api/queue/{job_id}/retry`. Its JSON body must repeat the complete
+authority captured from the admitted batch status:
+`{ "instance_id": "...", "batch_id": "...", "client_batch_id": "...", "job_id": "..." }`.
+The path and body job IDs must match; the server transactionally fences the
+serving instance and batch/client/job identity before returning HTTP 202. Cancel queued work with
 `DELETE /api/queue/{job_id}`.
 
 Important fields:

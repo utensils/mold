@@ -1360,7 +1360,9 @@ the server exits within `MOLD_SHUTDOWN_ABORT_SECS` (45 s) — a hard deadline th
 ends the process if the drain overruns, since a cold model load cannot be
 interrupted. A job that keeps
 failing to finish is **held** — listed as `state: "held"` with a reason, never
-started automatically. Clear one with `DELETE /api/queue/{id}`.
+started automatically. A retryable durable batch child may be resumed through
+the fenced retry endpoint described below; clear any held row with
+`DELETE /api/queue/{id}`.
 
 Never delete a queued job just because its stream died. Accepted work still
 runs in the current server process; per-job `durable` only controls whether it
@@ -1395,6 +1397,7 @@ Core endpoints exposed by `mold serve` (full list + schemas at `/api/docs`):
 - `POST /api/upscale` · `POST /api/upscale/stream`
 - `GET /api/queue` — authoritative server-side listing plus additive scheduler `plan` (per-device lanes, timing estimates, blocked reasons, plan/replan versions). The plan is advisory until the worker revalidates its exact execution fingerprint and frozen artifacts.
 - `PATCH /api/queue/:id` — re-lane and/or reorder a queued job (`target_gpu?`, queued-only 0-based `position?`); omitted fields stay unchanged
+- `POST /api/queue/:id/retry` — resume an explicitly retryable held durable child. Send the complete authority captured from its admitted batch status as `{ "instance_id": "...", "batch_id": "...", "client_batch_id": "...", "job_id": "..." }`; the path and body job IDs must match. The server transactionally fences the serving instance and batch/client/job identity before returning 202. This is the unversioned canonical retry route; do not invent a versioned or bodyless variant.
 - `DELETE /api/queue/:id` — cancel a still-queued generation job (204; 404 unknown; 409 once running)
 - Durable chain summaries expose additive `cancelling: true` after a running cancellation is accepted. Keep the UI in Cancelling until the runner settles `cancelled`; do not infer completion from a finalized file alone.
 - `GET /api/events` — one server-wide SSE stream of `job_queued`/`job_started`/`job_ended`, `gallery_added`/`gallery_removed`, `queue_paused`/`queue_resumed`, plus the additive durable-sequence lifecycle `chain_job_queued` (`id`, `model`, `stage_count`), `chain_job_started` (`id`, `model`), and `chain_job_ended` (`id`, `state`). Deltas only — subscribe first, then bootstrap from `/api/queue` + `/api/gallery`. Ephemeral legacy-shim chain jobs stay silent

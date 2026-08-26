@@ -664,11 +664,12 @@ pub fn hold_owned(
 pub fn retry_held_owned(
     db: &MetadataDb,
     owner_uuid: &str,
+    serving_instance_id: &str,
     authority: &mold_core::GenerationRetryRequest,
     now_ms: i64,
 ) -> Result<OwnedRetry> {
     db.transact_immediate(|conn| {
-        if authority.instance_id != owner_uuid {
+        if authority.instance_id != serving_instance_id {
             return Ok(OwnedRetry::AuthorityMismatch);
         }
         let row = conn
@@ -2481,7 +2482,7 @@ mod tests {
         let db = MetadataDb::open_in_memory().unwrap();
         insert_or_get(&db, &batch("same"), &rows(2)).unwrap();
         let authority = |job_id: &str| mold_core::GenerationRetryRequest {
-            instance_id: "owner-1".into(),
+            instance_id: "instance-1".into(),
             batch_id: "batch-1".into(),
             client_batch_id: "client-1".into(),
             job_id: job_id.into(),
@@ -2496,11 +2497,11 @@ mod tests {
             OwnedHold::Held
         );
         assert_eq!(
-            retry_held_owned(&db, "owner-1", &authority("job-1"), 3).unwrap(),
+            retry_held_owned(&db, "owner-1", "instance-1", &authority("job-1"), 3).unwrap(),
             OwnedRetry::NotRetryable
         );
         assert_eq!(
-            retry_held_owned(&db, "owner-1", &authority("job-0"), 3).unwrap(),
+            retry_held_owned(&db, "owner-1", "instance-1", &authority("job-0"), 3).unwrap(),
             OwnedRetry::Retried
         );
 
@@ -2525,19 +2526,19 @@ mod tests {
             job_id: "job-0".into(),
         };
         assert_eq!(
-            retry_held_owned(&db, "owner-1", &authority, 3).unwrap(),
+            retry_held_owned(&db, "owner-1", "instance-1", &authority, 3).unwrap(),
             OwnedRetry::AuthorityMismatch
         );
-        authority.instance_id = "owner-1".into();
+        authority.instance_id = "instance-1".into();
         authority.batch_id = "foreign-batch".into();
         assert_eq!(
-            retry_held_owned(&db, "owner-1", &authority, 3).unwrap(),
+            retry_held_owned(&db, "owner-1", "instance-1", &authority, 3).unwrap(),
             OwnedRetry::AuthorityMismatch
         );
         authority.batch_id = "batch-1".into();
         authority.client_batch_id = "foreign-client".into();
         assert_eq!(
-            retry_held_owned(&db, "owner-1", &authority, 3).unwrap(),
+            retry_held_owned(&db, "owner-1", "instance-1", &authority, 3).unwrap(),
             OwnedRetry::AuthorityMismatch
         );
         let queue = crate::generation_queue::get(&db, "job-0").unwrap().unwrap();
@@ -2557,7 +2558,7 @@ mod tests {
         insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
         hold_owned(&db, "owner-1", "job-0", None, "dependency failed", true, 2).unwrap();
         let authority = Arc::new(mold_core::GenerationRetryRequest {
-            instance_id: "owner-1".into(),
+            instance_id: "instance-1".into(),
             batch_id: "batch-1".into(),
             client_batch_id: "client-1".into(),
             job_id: "job-0".into(),
@@ -2570,7 +2571,7 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    retry_held_owned(&db, "owner-1", &authority, 3 + offset).unwrap()
+                    retry_held_owned(&db, "owner-1", "instance-1", &authority, 3 + offset).unwrap()
                 })
             })
             .collect::<Vec<_>>();
