@@ -2301,7 +2301,7 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("two durable variations");
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
     await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
     await flushPromises();
@@ -2783,7 +2783,7 @@ describe("MobileApp generation queue", () => {
 
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("two pinned storms");
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
     await wrapper.get("[data-test='mobile-generate-host']").setValue("render-id");
     await flushPromises();
@@ -2872,7 +2872,7 @@ describe("MobileApp generation queue", () => {
     await fieldControl("Prompt").setValue("three storm studies");
     await wrapper.get("[data-test='mobile-style-toggle']").trigger("click");
     await wrapper.get("[data-test='mobile-style-cinematic']").trigger("click");
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
 
     expect(expandPrompt).toHaveBeenCalledWith(
@@ -2914,7 +2914,7 @@ describe("MobileApp generation queue", () => {
     await fieldControl("Negative prompt").setValue("text");
     await wrapper.get("[data-test='mobile-style-toggle']").trigger("click");
     await wrapper.get("[data-test='mobile-style-cinematic']").trigger("click");
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
 
     await wrapper.findAll("[data-test='mobile-prepared-remove']")[0]!.trigger("click");
@@ -3432,7 +3432,7 @@ describe("MobileApp generation queue", () => {
     ).toBe(false);
   });
 
-  it("prepares Batch for review, then queues edited siblings with provenance", async () => {
+  it("queues Batch N directly without implicitly expanding the prompt", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
 
@@ -3443,22 +3443,8 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
 
-    expect(expandPrompt).toHaveBeenCalledWith(
-      "three variations of a storm",
-      { variations: 3, modelFamily: model.family, task: "text-to-video" },
-      target,
-    );
-    expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(0);
-    expect(wrapper.get("[data-test='mobile-prepared-expansion']").text()).toContain(
-      "Review 3 variations",
-    );
-    const editors = wrapper.findAll(".mobile-prepared-editor");
-    await editors[1]?.setValue("an edited middle storm");
-    const developPrepared = wrapper.get("[data-test='mobile-develop-prepared']");
-    (developPrepared.element as HTMLButtonElement).focus();
-    await developPrepared.trigger("click");
-    await flushPromises();
-
+    expect(expandPrompt).not.toHaveBeenCalled();
+    expect(wrapper.find("[data-test='mobile-prepared-expansion']").exists()).toBe(false);
     expect(previewGenerationPlacement).toHaveBeenCalledWith(
       target,
       expect.objectContaining({ batch_size: 1 }),
@@ -3466,7 +3452,6 @@ describe("MobileApp generation queue", () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(3);
-    expect(document.activeElement).toBe(fieldControl("Prompt").element);
     expect(wrapper.get("[data-test='mobile-develop-button']").text()).toBe(
       "Develop 3 prints (+3 queued)",
     );
@@ -3479,18 +3464,46 @@ describe("MobileApp generation queue", () => {
       firstSeed + 2,
     ]);
     expect(openStreams.map((stream) => stream.options.body.prompt)).toEqual([
-      "three variations of a storm · prepared 1",
-      "an edited middle storm",
-      "three variations of a storm · prepared 3",
+      "three variations of a storm",
+      "three variations of a storm",
+      "three variations of a storm",
+    ]);
+    expect(openStreams.map((stream) => stream.options.body.expand)).toEqual([
+      undefined,
+      undefined,
+      undefined,
     ]);
     expect(openStreams.map((stream) => stream.options.body.original_prompt)).toEqual([
-      "three variations of a storm",
-      "three variations of a storm",
-      "three variations of a storm",
+      undefined,
+      undefined,
+      undefined,
     ]);
-    expect(openStreams[0]?.options.body.batch_id).toEqual(expect.any(String));
-    expect(openStreams.map((stream) => stream.options.body.batch_index)).toEqual([1, 2, 3]);
-    expect(openStreams.map((stream) => stream.options.body.batch_count)).toEqual([3, 3, 3]);
+    expect(openStreams.map((stream) => stream.options.body.batch_id)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
+  });
+
+  it("prepares Batch N only from the explicit Expand action", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("three variations of a storm");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+
+    expect(expandPrompt).toHaveBeenCalledWith(
+      "three variations of a storm",
+      { variations: 3, modelFamily: model.family, task: "text-to-video" },
+      target,
+    );
+    expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(0);
+    expect(wrapper.get("[data-test='mobile-prepared-expansion']").text()).toContain(
+      "Review 3 variations",
+    );
   });
 
   it.each([
@@ -3507,7 +3520,7 @@ describe("MobileApp generation queue", () => {
         await flushPromises();
       } else {
         await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
-        await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+        await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
         await flushPromises();
       }
 
@@ -3580,7 +3593,7 @@ describe("MobileApp generation queue", () => {
       await flushPromises();
       await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
       await fieldControl("Prompt").setValue("preserved storm pair");
-      await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+      await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
       await flushPromises();
       if (result instanceof Error) {
         previewGenerationPlacement.mockRejectedValueOnce(result);
@@ -3661,7 +3674,7 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("preserved storm pair");
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
     previewGenerationPlacement.mockResolvedValueOnce(result);
 
@@ -3679,7 +3692,7 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("three weather studies");
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
     const editors = wrapper.findAll(".mobile-prepared-editor");
     await editors[0]!.setValue("clear dawn");
@@ -3734,7 +3747,7 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("three mixed outcomes");
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
     const editors = wrapper.findAll(".mobile-prepared-editor");
     await editors[0]!.setValue("successful dawn");
@@ -3805,7 +3818,7 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("original source");
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     await fieldControl("Prompt").setValue("newer source");
     resolveExpansion({ expanded: ["one", "two", "three"] });
     await flushPromises();
@@ -3817,7 +3830,7 @@ describe("MobileApp generation queue", () => {
     expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe("newer source");
 
     expandPrompt.mockResolvedValueOnce({ expanded: ["one", "  ", "three"] });
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
     expect(wrapper.find("[data-test='mobile-prepared-expansion']").exists()).toBe(false);
     expect(wrapper.get("[data-test='mobile-expansion-error']").text()).toContain(
@@ -3886,7 +3899,7 @@ describe("MobileApp generation queue", () => {
     liveForm.sourceImageName = "source.png";
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("two wet-plate portraits");
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
     await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
     await flushPromises();
@@ -3917,7 +3930,7 @@ describe("MobileApp generation queue", () => {
     liveForm.sourceImageName = "source.png";
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("two preserved portraits");
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
     await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
     await flushPromises();
@@ -3962,7 +3975,7 @@ describe("MobileApp generation queue", () => {
     liveForm.sourceImageName = "source.png";
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("two quiet portraits");
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
     const developPrepared = wrapper.get("[data-test='mobile-develop-prepared']");
     (developPrepared.element as HTMLButtonElement).focus();
@@ -4263,7 +4276,7 @@ describe("MobileApp generation queue", () => {
       await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
       await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
       await fieldControl("Prompt").setValue("three preserved studies");
-      await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+      await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
       await flushPromises();
 
       expandPrompt.mockRejectedValueOnce(
@@ -4451,7 +4464,7 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("two studies");
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
     await wrapper.get("[data-test='mobile-batch-decrement']").trigger("click");
     const refresh = wrapper.get("[data-test='mobile-refresh-prepared']");
@@ -4469,7 +4482,7 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("two delayed studies");
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
     await wrapper.get("[data-test='mobile-batch-decrement']").trigger("click");
     expandPrompt.mockImplementationOnce(
@@ -4502,7 +4515,7 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("late expansion");
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     wrapper.unmount();
     wrapper = null;
     resolveExpansion({ expanded: ["late one", "late two"] });
@@ -4531,7 +4544,7 @@ describe("MobileApp generation queue", () => {
     liveForm.sourceImageName = "source.png";
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("late preprocess");
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
     await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
     wrapper.unmount();
@@ -11191,7 +11204,7 @@ describe("MobileApp Create File under", () => {
     await wrapper!.get("[data-test='mobile-batch-increment']").trigger("click");
     await wrapper!.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("three variations of a storm");
-    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper!.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
     await wrapper!.get("[data-test='mobile-develop-prepared']").trigger("click");
     await flushPromises();
@@ -11662,7 +11675,7 @@ describe("MobileApp Create File under", () => {
     await wrapper!.get("[data-test='mobile-batch-increment']").trigger("click");
     await wrapper!.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("three variations of a storm");
-    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper!.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
     await wrapper!.get("[data-test='mobile-develop-prepared']").trigger("click");
     await flushPromises();
@@ -12120,7 +12133,7 @@ describe("MobileApp identity photo", () => {
     await wrapper.get("[data-test='mobile-identity-weight']").setValue("0.6");
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("two portrait studies");
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
 
     const editors = wrapper.findAll(".mobile-prepared-editor");
@@ -12269,7 +12282,7 @@ describe("MobileApp identity photo", () => {
     await wrapper.get("[data-test='mobile-identity-weight']").setValue("0.6");
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("two portrait studies");
-    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
     const preparedDevelop = wrapper.get("[data-test='mobile-develop-prepared']");
     expect(preparedDevelop.attributes("disabled")).toBeUndefined();
