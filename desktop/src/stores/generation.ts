@@ -329,6 +329,10 @@ interface DurableHostStream {
  * render state and must never make API keys serializable through devtools. */
 const durableRecords = new Map<string, DurableGenerationRecoveryRecord>();
 const durableJobIds = new Map<string, Map<number, number>>();
+/** Stable batch membership survives presentation-row dismissal. */
+const durableBatchJobs = new Map<string, Map<number, Job>>();
+/** Effect-only recovered jobs participate in settlement but never load UI media. */
+const durableHiddenJobIds = new Set<number>();
 const durableSettlements = new Map<string, DurableSettlement>();
 const durableHostStreams = new Map<string, DurableHostStream>();
 const durableReconciles = new Map<string, Promise<void>>();
@@ -377,6 +381,12 @@ function createDurableSettlement(): DurableSettlement {
   return { promise, resolve };
 }
 
+function createStoreJob(req: GenerateRequest, clientId: number): Job {
+  const job = reactive(newJob(req));
+  job.clientId = clientId;
+  return job;
+}
+
 function recordIsTerminal(record: DurableGenerationRecoveryRecord): boolean {
   const jobs = Object.values(record.tracker.jobs);
   return (
@@ -405,6 +415,37 @@ function requestFormat(
 
 function jobHasSettled(job: Job): boolean {
   return job.status === "complete" || job.status === "error";
+}
+
+export function jobCanBeRemoved(job: Job): boolean {
+  return jobHasSettled(job) && !job.interrupted && !job.retainedByHost;
+}
+
+function dismissalReceipt(childIndex: number): string {
+  return `dismissed:${childIndex}`;
+}
+
+function recordIsFullyDismissed(record: DurableGenerationRecoveryRecord): boolean {
+  return record.children.every((child) =>
+    record.effectReceipts.includes(dismissalReceipt(child.index)),
+  );
+}
+
+/** Release every client-local resource owned by one settled activity row. */
+function releaseSettledJob(job: Job): void {
+  if (job.resultUrl && job.resultUrlIsObjectUrl) {
+    if (job.result?.filename) {
+      evictMedia(
+        galleryMediaPath(job.result.filename, "host"),
+        job.hostId ?? `job-${job.clientId}`,
+      );
+    }
+    URL.revokeObjectURL(job.resultUrl);
+  }
+  if (job.previewUrl) URL.revokeObjectURL(job.previewUrl);
+  targets.delete(job.clientId);
+  referenceUploadAuthorities.delete(job.clientId);
+  chainRoutes.delete(job.clientId);
 }
 
 /** Move a job to a terminal status and stamp when it got there. Every
@@ -499,6 +540,7 @@ export const useGenerationStore = defineStore("generation", {
       for (const record of durableRecords.values()) {
         if (durableJobIds.has(record.tracker.clientBatchId)) continue;
         const mapping = new Map<number, number>();
+        const batchJobs = new Map<number, Job>();
         const localBatchId = this.nextBatchId++;
         const recoveredHost = useHostsStore().all.find(
           (candidate) =>
@@ -507,16 +549,22 @@ export const useGenerationStore = defineStore("generation", {
             candidate.baseUrl,
         );
         for (const summary of record.children) {
-          const job = this.startJob({
-            prompt: "Recovered generation",
-            model: summary.model,
-            width: summary.width,
-            height: summary.height,
-            steps: summary.steps,
-            guidance: summary.guidance,
-            ...(summary.seed === null ? {} : { seed: summary.seed }),
-            output_format: summary.format,
-          });
+          const dismissed = record.effectReceipts.includes(dismissalReceipt(summary.index));
+          const job = createStoreJob(
+            {
+              prompt: "Recovered generation",
+              model: summary.model,
+              width: summary.width,
+              height: summary.height,
+              steps: summary.steps,
+              guidance: summary.guidance,
+              ...(summary.seed === null ? {} : { seed: summary.seed }),
+              output_format: summary.format,
+            },
+            this.nextClientId++,
+          );
+          if (dismissed) durableHiddenJobIds.add(job.clientId);
+          else this.jobs.push(job);
           job.batchId = localBatchId;
           job.hostId = record.tracker.hostId;
           job.hostLabel = record.hostLabel;
@@ -531,6 +579,7 @@ export const useGenerationStore = defineStore("generation", {
             : false;
           job.cancelling = record.cancelRequestedChildIndexes.includes(summary.index);
           mapping.set(summary.index, job.clientId);
+          batchJobs.set(summary.index, job);
           summary.clientId = job.clientId;
           if (recoveredHost?.baseUrl) {
             targets.set(job.clientId, {
@@ -540,6 +589,7 @@ export const useGenerationStore = defineStore("generation", {
           }
         }
         durableJobIds.set(record.tracker.clientBatchId, mapping);
+        durableBatchJobs.set(record.tracker.clientBatchId, batchJobs);
         durableSettlements.set(record.tracker.clientBatchId, createDurableSettlement());
         this.applyDurableRecord(record);
         this.ensureDurableHostStream(record.tracker.hostId);
@@ -702,10 +752,7 @@ export const useGenerationStore = defineStore("generation", {
       await Promise.all([...hostIds].map((hostId) => this.reconcileDurableHost(hostId)));
       await Promise.all(
         [...durableRecords.values()].filter(recordIsTerminal).map((record) => {
-          const mapping = durableJobIds.get(record.tracker.clientBatchId);
-          const jobs = [...(mapping?.values() ?? [])]
-            .map((clientId) => this.jobs.find((candidate) => candidate.clientId === clientId))
-            .filter((job): job is Job => !!job);
+          const jobs = [...(durableBatchJobs.get(record.tracker.clientBatchId)?.values() ?? [])];
           return this.finishDurableBatchEffects(record, jobs);
         }),
       );
@@ -796,8 +843,7 @@ export const useGenerationStore = defineStore("generation", {
         return;
       }
       for (const lifecycle of Object.values(record.tracker.jobs)) {
-        const clientId = mapping.get(lifecycle.childIndex);
-        const job = this.jobs.find((candidate) => candidate.clientId === clientId);
+        const job = durableBatchJobs.get(record.tracker.clientBatchId)?.get(lifecycle.childIndex);
         if (!job) continue;
         job.id = lifecycle.authority.jobId;
         job.streamStarted = true;
@@ -842,9 +888,7 @@ export const useGenerationStore = defineStore("generation", {
       }
       this.scheduleDurableCancelIntents(record);
       if (!recordIsTerminal(record)) return;
-      const jobs = [...mapping.values()]
-        .map((clientId) => this.jobs.find((candidate) => candidate.clientId === clientId))
-        .filter((job): job is Job => !!job);
+      const jobs = [...(durableBatchJobs.get(record.tracker.clientBatchId)?.values() ?? [])];
       durableSettlements.get(record.tracker.clientBatchId)?.resolve(jobs);
       durableSettlements.delete(record.tracker.clientBatchId);
       void this.finishDurableBatchEffects(record, jobs);
@@ -996,7 +1040,9 @@ export const useGenerationStore = defineStore("generation", {
         };
         job.visualSeed = String(summary.seed ?? 0);
         settleJob(job, "complete");
-        void this.refreshRemoteResultUrl(job.clientId).catch(() => undefined);
+        if (!durableHiddenJobIds.has(job.clientId)) {
+          void this.refreshRemoteResultUrl(job.clientId).catch(() => undefined);
+        }
       } else {
         settleJob(job, "error");
         job.error =
@@ -1076,11 +1122,26 @@ export const useGenerationStore = defineStore("generation", {
         }
       }
       if (completed.length > 0) void useGalleryStore().refreshHost(record.tracker.hostId);
+      // Terminal recovery records double as persistent activity history. They
+      // are execution-inert, but remain restorable until every child has been
+      // explicitly dismissed (or aged out through the same removal action).
+      if (!recordIsFullyDismissed(record)) {
+        persistDurableRecords();
+        return;
+      }
       durableRecords.delete(record.tracker.clientBatchId);
       durableJobIds.delete(record.tracker.clientBatchId);
+      const retiredJobs = durableBatchJobs.get(record.tracker.clientBatchId);
+      durableBatchJobs.delete(record.tracker.clientBatchId);
+      for (const job of retiredJobs?.values() ?? []) {
+        targets.delete(job.clientId);
+        if (durableHiddenJobIds.delete(job.clientId)) releaseSettledJob(job);
+      }
       persistDurableRecords();
       if (
-        ![...durableRecords.values()].some((item) => item.tracker.hostId === record.tracker.hostId)
+        ![...durableRecords.values()].some(
+          (item) => item.tracker.hostId === record.tracker.hostId && !recordIsTerminal(item),
+        )
       ) {
         durableHostStreams.get(record.tracker.hostId)?.abort.abort();
         durableHostStreams.delete(record.tracker.hostId);
@@ -1295,6 +1356,10 @@ export const useGenerationStore = defineStore("generation", {
             durableJobIds.set(
               clientBatchId,
               new Map(jobChunk.map((job, index) => [index + 1, job.clientId])),
+            );
+            durableBatchJobs.set(
+              clientBatchId,
+              new Map(jobChunk.map((job, index) => [index + 1, job])),
             );
             const settlement = createDurableSettlement();
             durableSettlements.set(clientBatchId, settlement);
@@ -1531,7 +1596,6 @@ export const useGenerationStore = defineStore("generation", {
           // the by-client reconciliation and any id-keyed DELETE.
           persistDurableRecords();
         }
-        await this.reconcileDurableHost(durableRecord.tracker.hostId);
         try {
           return await this.fulfillDurableCancelIntent(durableRecord, childIndex);
         } catch (error) {
@@ -1574,12 +1638,38 @@ export const useGenerationStore = defineStore("generation", {
       settleJob(job, "error");
       job.error = "Cancelled";
       job.cancelling = false;
+      job.retainedByHost = false;
       return true;
     },
     /** Single generation — a batch of one. */
     async generate(req: GenerateRequest): Promise<Job> {
       const [job] = await this.generateBatch(req, 1);
       return job!;
+    },
+    /** Dismiss one terminal activity row without mutating server queue authority. */
+    removeSettled(clientId: number): boolean {
+      const index = this.jobs.findIndex((job) => job.clientId === clientId);
+      const job = this.jobs[index];
+      if (!job || !jobCanBeRemoved(job)) return false;
+      const record = durableRecordForClientId(clientId);
+      if (record) {
+        const childIndex = [
+          ...(durableJobIds.get(record.tracker.clientBatchId)?.entries() ?? []),
+        ].find(([, mappedClientId]) => mappedClientId === clientId)?.[0];
+        if (childIndex !== undefined) {
+          const receipt = dismissalReceipt(childIndex);
+          if (!record.effectReceipts.includes(receipt)) record.effectReceipts.push(receipt);
+          persistDurableRecords();
+        }
+      }
+      releaseSettledJob(job);
+      this.jobs.splice(index, 1);
+      if (this.selectedClientId === clientId) this.selectedClientId = null;
+      if (record && recordIsTerminal(record)) {
+        const jobs = [...(durableBatchJobs.get(record.tracker.clientBatchId)?.values() ?? [])];
+        void this.finishDurableBatchEffects(record, jobs);
+      }
+      return true;
     },
     /** Drop finished jobs beyond the most recent few, releasing their URLs. */
     prune(
@@ -1625,15 +1715,7 @@ export const useGenerationStore = defineStore("generation", {
           .slice(0, excess)
           .map((job) => job.clientId),
       );
-      for (const job of this.jobs) {
-        if (!drop.has(job.clientId)) continue;
-        if (job.resultUrl && job.resultUrlIsObjectUrl) URL.revokeObjectURL(job.resultUrl);
-        if (job.previewUrl) URL.revokeObjectURL(job.previewUrl);
-        targets.delete(job.clientId);
-        referenceUploadAuthorities.delete(job.clientId);
-        chainRoutes.delete(job.clientId);
-      }
-      this.jobs = this.jobs.filter((j) => !drop.has(j.clientId));
+      for (const clientId of drop) this.removeSettled(clientId);
       if (
         this.selectedClientId !== null &&
         !this.jobs.some((job) => job.clientId === this.selectedClientId)
@@ -1728,6 +1810,8 @@ export const useGenerationStore = defineStore("generation", {
       durablePostCommitInstances.clear();
       durableCancelAttempts.clear();
       durableJobIds.clear();
+      durableBatchJobs.clear();
+      durableHiddenJobIds.clear();
       durableSettlements.clear();
       durableRecords.clear();
       durableRecoveryStorageUnavailable = false;
@@ -1745,8 +1829,7 @@ export const useGenerationStore = defineStore("generation", {
       // returned reference from a closure. A raw object would update the
       // data without firing Vue's proxy traps — the canvas, edge code, and
       // job chips would sit frozen at "Queued 0/N" for the whole run.
-      const job = reactive(newJob(req));
-      job.clientId = this.nextClientId++;
+      const job = createStoreJob(req, this.nextClientId++);
       this.jobs.push(job);
       return job;
     },

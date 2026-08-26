@@ -177,6 +177,23 @@ describe("generation queueing", () => {
     expect(store.jobs[0]!.error).toBe("Cancelled");
   });
 
+  it("removes exactly one settled row and refuses live or interrupted work", () => {
+    const store = useGenerationStore();
+    const cancelled = store.startJob({ ...req, prompt: "cancelled" });
+    const live = store.startJob({ ...req, prompt: "live" });
+    cancelled.status = "error";
+    cancelled.error = "Cancelled";
+    store.select(cancelled.clientId);
+
+    expect(store.removeSettled(live.clientId)).toBe(false);
+    cancelled.interrupted = true;
+    expect(store.removeSettled(cancelled.clientId)).toBe(false);
+    cancelled.interrupted = false;
+    expect(store.removeSettled(cancelled.clientId)).toBe(true);
+    expect(store.jobs.map((job) => job.clientId)).toEqual([live.clientId]);
+    expect(store.selectedClientId).toBeNull();
+  });
+
   it("repaints as cancelling before a running Wan request is acknowledged", async () => {
     const store = useGenerationStore();
     const { jobs } = store.submitBatch({ ...req, model: "wan22-i2v-a14b:q4" }, 1);

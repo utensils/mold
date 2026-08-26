@@ -1052,6 +1052,20 @@ pub(crate) async fn ensure_post_upscale_model_downloaded(
     Ok(())
 }
 
+async fn ensure_legacy_post_upscale_model_downloaded(
+    state: &AppState,
+    req: &mold_core::GenerateRequest,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+    #[cfg(test)] hook: Option<&LegacyUpscalePreparationHook>,
+) -> Result<(), String> {
+    #[cfg(test)]
+    if let Some(hook) = hook {
+        hook.started.notify_one();
+        hook.resume.notified().await;
+    }
+    ensure_post_upscale_model_downloaded(state, req, progress_tx).await
+}
+
 pub(crate) fn apply_output_dimensions_to_metadata(metadata: &mut OutputMetadata, img: &ImageData) {
     metadata.apply_output_dimensions(img.width, img.height);
 }
@@ -2604,6 +2618,7 @@ pub async fn run_queue_dispatcher_until_cancelled(
 
 const LEGACY_UNAVAILABLE_INITIAL_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 const LEGACY_UNAVAILABLE_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+const LEGACY_GENERATION_AUTHORITY_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 struct LegacyUnavailableBackoff {
     next_wait: std::time::Duration,
@@ -2641,6 +2656,23 @@ async fn wait_for_legacy_worker_retry(
     tokio::select! {
         biased;
         _ = shutdown.cancelled() => false,
+        _ = tokio::time::sleep(wait) => true,
+    }
+}
+
+async fn wait_for_legacy_generation_retry(
+    shutdown: &tokio_util::sync::CancellationToken,
+    registry_mutation: &tokio::sync::Notify,
+    wait: std::time::Duration,
+) -> bool {
+    // Notify is shared with the scheduler and dependency waiters. Bound the
+    // fallback so another legitimate subscriber consuming the permit cannot
+    // delay cancellation authority behind the worker backoff.
+    let wait = wait.min(LEGACY_GENERATION_AUTHORITY_POLL);
+    tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => false,
+        _ = registry_mutation.notified() => true,
         _ = tokio::time::sleep(wait) => true,
     }
 }
@@ -2977,6 +3009,13 @@ async fn run_queue_dispatcher_with_tuning(
 pub(crate) struct LegacyGenerationDispatchHook {
     pub(crate) selected: Arc<tokio::sync::Notify>,
     pub(crate) resume: Arc<tokio::sync::Notify>,
+    pub(crate) upscale_preparation: Option<LegacyUpscalePreparationHook>,
+}
+
+#[cfg(test)]
+pub(crate) struct LegacyUpscalePreparationHook {
+    pub(crate) started: Arc<tokio::sync::Notify>,
+    pub(crate) resume: Arc<tokio::sync::Notify>,
 }
 
 async fn run_queue_dispatcher_with_tuning_inner(
@@ -3056,6 +3095,16 @@ async fn run_queue_dispatcher_with_tuning_inner(
         let job_id = job.id.clone();
         let model_name = job.request.model.clone();
         let estimated_vram = estimate_model_vram(&model_name);
+        let tracked = selected_target.is_some();
+        if !job_id.is_empty() && !tracked {
+            // Every real generation id is registry-authoritative. A buffered
+            // row missing from the snapshot was cancelled after entering the
+            // transport; treating it like an old id-less test job can execute
+            // work after DELETE already returned 204.
+            let _durable_transition = state.queue_journal.lock_durable_transition().await;
+            reject_cancelled_generation_job(&state, job);
+            continue;
+        }
 
         let shape_bucket = crate::gpu_pool::oom_shape_bucket_with_projection(
             &job.request,
@@ -3130,10 +3179,67 @@ async fn run_queue_dispatcher_with_tuning_inner(
         // assets themselves. Resolve a first-use post-generation upscaler at
         // this async boundary, on the server/host that accepted the job,
         // before handing it to the selected GPU.
-        if let Err(err_msg) =
-            ensure_post_upscale_model_downloaded(&state, &job.request, job.progress_tx.as_ref())
-                .await
+        let registry_mutation = state.job_registry.mutation_notifier();
+        let mut upscale_download = Box::pin(ensure_legacy_post_upscale_model_downloaded(
+            &state,
+            &job.request,
+            job.progress_tx.as_ref(),
+            #[cfg(test)]
+            before_final_dispatch
+                .as_ref()
+                .and_then(|hook| hook.upscale_preparation.as_ref()),
+        ));
+        let upscale_result = loop {
+            let mutation = registry_mutation.notified();
+            tokio::pin!(mutation);
+            if tracked
+                && state.job_registry.scheduler_lifecycle(&job_id)
+                    != Some(crate::job_registry::JobLifecycle::Queued)
+            {
+                drop(upscale_download);
+                let _durable_transition = state.queue_journal.lock_durable_transition().await;
+                if state.job_registry.scheduler_lifecycle(&job_id)
+                    != Some(crate::job_registry::JobLifecycle::Queued)
+                {
+                    reject_cancelled_generation_job(&state, job);
+                    continue 'dispatcher;
+                }
+                upscale_download = Box::pin(ensure_legacy_post_upscale_model_downloaded(
+                    &state,
+                    &job.request,
+                    job.progress_tx.as_ref(),
+                    #[cfg(test)]
+                    before_final_dispatch
+                        .as_ref()
+                        .and_then(|hook| hook.upscale_preparation.as_ref()),
+                ));
+            }
+            tokio::select! {
+                biased;
+                result = &mut upscale_download => break result,
+                _ = shutdown.cancelled() => {
+                    drop(upscale_download);
+                    reject_generation_job(&state, job, legacy_dispatch_stop_message(&state));
+                    break 'dispatcher;
+                }
+                _ = &mut mutation => {}
+                _ = tokio::time::sleep(LEGACY_GENERATION_AUTHORITY_POLL) => {}
+            }
+        };
+        drop(upscale_download);
+        if tracked
+            && state.job_registry.scheduler_lifecycle(&job_id)
+                != Some(crate::job_registry::JobLifecycle::Queued)
         {
+            let _durable_transition = state.queue_journal.lock_durable_transition().await;
+            if state.job_registry.scheduler_lifecycle(&job_id)
+                != Some(crate::job_registry::JobLifecycle::Queued)
+            {
+                reject_cancelled_generation_job(&state, job);
+                continue 'dispatcher;
+            }
+        }
+        if let Err(err_msg) = upscale_result {
             tracing::warn!(
                 model = %model_name,
                 upscaler = ?job.request.upscale_model,
@@ -3234,6 +3340,28 @@ async fn run_queue_dispatcher_with_tuning_inner(
                 break;
             }
 
+            if tracked
+                && state.job_registry.scheduler_lifecycle(&job_id)
+                    != Some(crate::job_registry::JobLifecycle::Queued)
+            {
+                // Cancellation removes the registry row before its durable
+                // transaction finishes. Wait for that transaction boundary,
+                // then release runtime capacity and settle the observer.
+                let _durable_transition = state.queue_journal.lock_durable_transition().await;
+                if state.job_registry.scheduler_lifecycle(&job_id)
+                    != Some(crate::job_registry::JobLifecycle::Queued)
+                {
+                    let pending = gpu_job
+                        .take()
+                        .expect("cancelled selected job remains pending");
+                    reject_cancelled_generation_job(
+                        &state,
+                        generation_from_legacy_gpu_job(pending),
+                    );
+                    continue 'dispatcher;
+                }
+            }
+
             let worker = if let Some(ordinal) = preferred_gpu {
                 state.gpu_pool.worker_by_ordinal(ordinal)
             } else {
@@ -3250,7 +3378,14 @@ async fn run_queue_dispatcher_with_tuning_inner(
                             "all GPU workers are temporarily unavailable; keeping job queued"
                         );
                     }
-                    if !wait_for_legacy_worker_retry(&shutdown, unavailable.take_wait()).await {
+                    let registry_mutation = state.job_registry.mutation_notifier();
+                    if !wait_for_legacy_generation_retry(
+                        &shutdown,
+                        &registry_mutation,
+                        unavailable.take_wait(),
+                    )
+                    .await
+                    {
                         if let Some(job) = gpu_job.take() {
                             crate::gpu_pool::OwnerWork::Generation(Box::new(job))
                                 .reject(legacy_dispatch_stop_message(&state));
@@ -3310,7 +3445,6 @@ async fn run_queue_dispatcher_with_tuning_inner(
                 .iter()
                 .find(|entry| entry.id == job_id)
                 .map(|entry| entry.target_gpu);
-            let tracked = selected_target.is_some();
             if tracked
                 && (current_order != selected_order
                     || current_target != selected_target
@@ -3531,6 +3665,19 @@ fn reject_generation_job(state: &AppState, mut job: GenerationJob, message: Stri
     }
     let job_id = job.id.clone();
     let _ = job.result_tx.send(Err(message));
+    state.queue.decrement();
+    state.job_registry.remove(&job_id);
+}
+
+fn reject_cancelled_generation_job(state: &AppState, mut job: GenerationJob) {
+    if let Some(ticket) = job.journal.take() {
+        ticket.discard();
+    }
+    if let Some(progress) = &job.progress_tx {
+        let _ = progress.send(SseMessage::Error(SseErrorEvent::cancelled("Cancelled")));
+    }
+    let job_id = job.id.clone();
+    let _ = job.result_tx.send(Err("Cancelled".to_string()));
     state.queue.decrement();
     state.job_registry.remove(&job_id);
 }
@@ -4211,6 +4358,23 @@ mod tests {
         let shutdown = tokio_util::sync::CancellationToken::new();
         shutdown.cancel();
         assert!(!wait_for_legacy_worker_retry(&shutdown, std::time::Duration::from_secs(60)).await);
+    }
+
+    #[tokio::test]
+    async fn legacy_generation_unavailable_wait_wakes_for_registry_cancellation() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mutation = tokio::sync::Notify::new();
+        mutation.notify_one();
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            wait_for_legacy_generation_retry(
+                &shutdown,
+                &mutation,
+                std::time::Duration::from_secs(60),
+            ),
+        )
+        .await
+        .expect("registry cancellation must bypass worker backoff");
     }
 
     /// A `GenerateRequest` with the bare minimum fields populated — enough to
@@ -7902,6 +8066,7 @@ mod tests {
             Some(LegacyGenerationDispatchHook {
                 selected: selected.clone(),
                 resume: resume.clone(),
+                upscale_preparation: None,
             }),
         ));
         selected.notified().await;
@@ -8072,6 +8237,7 @@ mod tests {
             Some(LegacyGenerationDispatchHook {
                 selected: selected.clone(),
                 resume: resume.clone(),
+                upscale_preparation: None,
             }),
         ));
         selected.notified().await;
@@ -8111,6 +8277,134 @@ mod tests {
         }
     }
 
+    async fn legacy_upscale_preparation_outcome(cancel: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("gallery");
+        std::fs::create_dir_all(&output).unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let (worker, worker_rx) = test_worker(0, 1);
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(job_tx.clone());
+        let mut state = crate::state::AppState::empty(
+            mold_core::Config::default(),
+            queue.clone(),
+            Arc::new(GpuPool {
+                workers: vec![worker].into(),
+            }),
+            1,
+        );
+        state.metadata_db = db.clone();
+        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            db,
+            Some(root.path()),
+            "legacy-upscale-preparation",
+        ));
+
+        let id = if cancel {
+            "cancel-upscale-preparation"
+        } else {
+            "shutdown-upscale-preparation"
+        };
+        let mut request = fake_request("flux-dev:q4");
+        request.upscale_model = Some("real-esrgan-x4plus:fp16".to_string());
+        state
+            .job_registry
+            .register_with_target_gpu(id, &request.model, Some(0));
+        let ticket = state
+            .queue_journal
+            .record(crate::queue_journal::JournalAdmission {
+                id,
+                request: &request,
+                output_dir: Some(&output),
+                target_gpu: Some(0),
+                target_device_id: None,
+                completion_payload: SseCompletionPayload::Full,
+                batch_child: false,
+                carries_reference_authority: false,
+            })
+            .expect("durable test job");
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        queue
+            .submit(
+                GenerationJob {
+                    id: id.to_string(),
+                    durable_queue_rank: None,
+                    request,
+                    deferred_media: None,
+                    resolved_references: None,
+                    completion_payload: SseCompletionPayload::Full,
+                    progress_tx: None,
+                    result_tx,
+                    output_dir: Some(output),
+                    batch_child: None,
+                    journal: Some(ticket),
+                    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+                    h3_private_ingress_grant: None,
+                },
+                1,
+            )
+            .await
+            .unwrap();
+
+        let upscale_started = Arc::new(tokio::sync::Notify::new());
+        let upscale_resume = Arc::new(tokio::sync::Notify::new());
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let dispatcher = tokio::spawn(run_queue_dispatcher_with_tuning_inner(
+            job_rx,
+            state.clone(),
+            1,
+            DEFAULT_MAX_DEFERRALS,
+            shutdown.clone(),
+            Some(LegacyGenerationDispatchHook {
+                selected: Arc::new(tokio::sync::Notify::new()),
+                resume: Arc::new(tokio::sync::Notify::new()),
+                upscale_preparation: Some(LegacyUpscalePreparationHook {
+                    started: upscale_started.clone(),
+                    resume: upscale_resume,
+                }),
+            }),
+        ));
+        upscale_started.notified().await;
+
+        if cancel {
+            assert!(state.queue_journal.cancel_id(id).unwrap());
+            let _scheduler = state.scheduler_mutation_fence.lock().await;
+            assert!(state.job_registry.cancel_queued(id).is_ok());
+        } else {
+            shutdown.cancel();
+        }
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), result_rx)
+            .await
+            .expect("the blocked upscaler preparation settles promptly")
+            .unwrap();
+        shutdown.cancel();
+        dispatcher.await.unwrap();
+        assert!(worker_rx.try_recv().is_err());
+        if cancel {
+            assert!(matches!(result, Err(message) if message == "Cancelled"));
+            assert!(state
+                .queue_journal
+                .list_all()
+                .iter()
+                .all(|row| row.id != id));
+        } else {
+            assert!(matches!(result, Err(message) if message.contains("shutting down")));
+            assert!(state
+                .queue_journal
+                .list_all()
+                .iter()
+                .any(|row| row.id == id));
+        }
+        drop(job_tx);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_upscale_preparation_distinguishes_cancel_from_shutdown_retention() {
+        legacy_upscale_preparation_outcome(true).await;
+        legacy_upscale_preparation_outcome(false).await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn paused_dispatcher_holds_new_jobs_until_resumed() {
         let (worker0, rx0) = test_worker(0, 1);
@@ -8129,6 +8423,7 @@ mod tests {
         assert!(state.queue_pause.pause());
         let dispatcher = tokio::spawn(run_queue_dispatcher(job_rx, state.clone()));
 
+        state.job_registry.register("paused-job", "flux-dev:q4");
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         let job = crate::state::GenerationJob {
             id: "paused-job".to_string(),
@@ -8257,6 +8552,7 @@ mod tests {
 
         // Pause lands while it is parked, then a job arrives.
         assert!(state.queue_pause.pause());
+        state.job_registry.register("parked-job", "flux-dev:q4");
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         let job = crate::state::GenerationJob {
             id: "parked-job".to_string(),
