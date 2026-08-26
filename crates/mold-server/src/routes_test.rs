@@ -5162,7 +5162,8 @@ mod tests {
             let admission = crate::queue_media_admission::DurableMediaAdmission::new(
                 lifecycle,
                 state.queue_capacity,
-            );
+            )
+            .unwrap();
             state
                 .queue_journal
                 .install_queue_media_admission(admission)
@@ -6001,6 +6002,131 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn legacy_receipt_migrates_before_media_key_loss_and_replays_after_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let client_id = uuid::Uuid::new_v4().to_string();
+        let body = serde_json::json!({
+            "client_batch_id": client_id,
+            "requests": [serde_json::from_str::<serde_json::Value>(
+                &generate_body("legacy receipt migration", 64, 64)
+            ).unwrap()],
+        });
+        let (mut state, rx) = durable_state(db.clone(), root.path());
+        install_authoritative_v2(&mut state);
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        let app = app_with_state(state);
+        let admitted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+        let admitted = json_body(admitted).await;
+
+        let current_receipt = db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT request_sha256 FROM generation_batches WHERE client_batch_id = ?1",
+                    [&client_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        let parts = current_receipt.split('.').collect::<Vec<_>>();
+        assert_eq!(parts[0], "generation-v2");
+        let fingerprint = crate::queue_media_store::QueueMediaOperationFingerprint::from_parts(
+            u16::from_str_radix(parts[2], 16).unwrap(),
+            parts[3].to_string(),
+        )
+        .unwrap();
+        let store = crate::queue_media_store::QueueMediaStore::open_existing(root.path()).unwrap();
+        let legacy = store
+            .seal_operation_receipt_v1(&owner, &client_id, &fingerprint)
+            .unwrap();
+        store
+            .seal(
+                "orphan-owner",
+                "orphan-job",
+                vec![crate::queue_media_store::SealMedia::bytes(
+                    "source",
+                    "orphan.bin",
+                    vec![1],
+                )],
+            )
+            .unwrap();
+        drop(store);
+        db.as_ref()
+            .as_ref()
+            .unwrap()
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE generation_batches SET request_sha256 = ?1
+                      WHERE client_batch_id = ?2",
+                    (legacy.as_str(), &client_id),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let migrated = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(migrated.status(), StatusCode::OK);
+        assert_eq!(json_body(migrated).await["id"], admitted["id"]);
+        let migrated_receipt = db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT request_sha256 FROM generation_batches WHERE client_batch_id = ?1",
+                    [&client_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert!(migrated_receipt.starts_with("generation-v2."));
+        assert_ne!(migrated_receipt, legacy.as_str());
+
+        drop(app);
+        drop(rx);
+        std::fs::remove_file(root.path().join("queue-media/master.key")).unwrap();
+        let (mut restarted, _rx) = durable_state_with_engine_and_media_readiness(
+            db,
+            root.path(),
+            MockEngine::ready(),
+            false,
+        );
+        install_authoritative_v2(&mut restarted);
+        assert!(restarted
+            .queue_journal
+            .durable_media_capabilities()
+            .is_none());
+        let replay = app_with_state(restarted)
+            .oneshot(json_request("POST", "/api/generation-batches", body))
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        assert_eq!(json_body(replay).await["id"], admitted["id"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn output_disabled_batch_admission_is_a_typed_unavailable_response() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
@@ -6260,14 +6386,31 @@ mod tests {
             "GENERATION_BATCH_IDEMPOTENCY_CONFLICT"
         );
 
+        let receipt = db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT request_sha256 FROM generation_batches WHERE client_batch_id = ?1",
+                    [&client_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        let mut tampered = receipt.into_bytes();
+        let last = tampered.last_mut().unwrap();
+        *last = if *last == b'a' { b'b' } else { b'a' };
+        let tampered = String::from_utf8(tampered).unwrap();
         db.as_ref()
             .as_ref()
             .unwrap()
             .with_conn(|conn| {
                 conn.execute(
-                    "UPDATE generation_batches SET request_sha256 = 'tampered'\
-                      WHERE client_batch_id = ?1",
-                    [client_id],
+                    "UPDATE generation_batches SET request_sha256 = ?1
+                      WHERE client_batch_id = ?2",
+                    (&tampered, client_id),
                 )?;
                 Ok(())
             })

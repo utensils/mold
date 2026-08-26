@@ -151,6 +151,26 @@ pub enum OwnedRetry {
     NotRetryable,
 }
 
+/// Replace one opaque admission receipt only while the exact previously
+/// verified value still owns the row. This is the rolling-upgrade fence from
+/// legacy encrypted receipts to the store-independent receipt authority.
+pub fn replace_request_receipt(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    batch_id: &str,
+    expected: &str,
+    replacement: &str,
+) -> Result<bool> {
+    db.with_conn(|conn| {
+        Ok(conn.execute(
+            "UPDATE generation_batches
+                SET request_sha256 = ?1
+              WHERE id = ?2 AND owner_uuid = ?3 AND request_sha256 = ?4",
+            params![replacement, batch_id, owner_uuid, expected],
+        )? == 1)
+    })
+}
+
 /// Insert the grouping rows and every ordinary durable queue row atomically.
 /// A retry with the same client id returns the existing detail; a different
 /// payload using that id is rejected.

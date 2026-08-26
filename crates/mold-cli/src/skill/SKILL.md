@@ -41,7 +41,13 @@ mold skill install --detected                       # Install this skill for det
 ```
 
 `mold mcp` exposes synchronous image generation, async generation with status
-polling, gallery search/fetch, model and LoRA listing, and server status tools.
+polling and exact-job retry, gallery search/fetch, model and LoRA listing, and
+server status tools. For durable async work, retain the MCP job id and poll
+`generation_status` until it settles. If the job is held and explicitly
+retryable, correct the reported cause, call `generation_retry` once with that
+same job id, and continue polling. Status polling reconciles interrupted retry
+responses against the captured server instance, batch, client-batch, and job
+authority; never issue another retry while that confirmation is pending.
 
 ## How to Use This Skill
 

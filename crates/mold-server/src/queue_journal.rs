@@ -1110,6 +1110,19 @@ impl QueueJournal {
             .flatten()
     }
 
+    pub(crate) fn replace_generation_batch_receipt(
+        &self,
+        batch_id: &str,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<bool, String> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Err("durable generation database is unavailable".to_string());
+        };
+        generation_batches::replace_request_receipt(db, owner, batch_id, expected, replacement)
+            .map_err(|error| format!("could not migrate generation receipt: {error:#}"))
+    }
+
     pub fn durable_generation_batch(
         &self,
         id: &str,

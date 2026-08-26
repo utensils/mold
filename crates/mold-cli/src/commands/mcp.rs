@@ -28,6 +28,8 @@ const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_ASYNC_JOBS: usize = 32;
 const RECONCILE_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const RECONCILE_MAX_BACKOFF: Duration = Duration::from_secs(30);
+const AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS: usize = 5;
+const MAX_LIST_STATUS_RECONCILIATIONS: usize = 4;
 
 fn reconciliation_initial_backoff() -> Duration {
     if cfg!(test) {
@@ -578,6 +580,13 @@ impl McpServer {
             return Ok(job_tool_result(&job, include_result));
         }
 
+        for job_id in self
+            .jobs
+            .eligible_pending_reconciliations(MAX_LIST_STATUS_RECONCILIATIONS)
+            .await
+        {
+            self.jobs.reconcile_pending_job(&self.client, &job_id).await;
+        }
         let jobs = self.jobs.list().await;
         if jobs.is_empty() {
             return Ok(text_result("No async generation jobs are tracked."));
@@ -612,9 +621,11 @@ impl McpServer {
             }
         };
 
-        self.jobs.mark_retry_queued(&args.job_id).await;
         let retry_was_ambiguous =
             matches!(retry_result, CanonicalRetrySubmission::Ambiguous { .. });
+        self.jobs
+            .mark_retry_queued(&args.job_id, retry_was_ambiguous)
+            .await;
         if let CanonicalRetrySubmission::Ambiguous { error } = &retry_result {
             self.jobs
                 .record_reconciliation_error(
@@ -1193,6 +1204,7 @@ struct ReconciliationAttempt {
     in_flight: bool,
     next_attempt: Instant,
     backoff: Duration,
+    ambiguous_confirmation_attempts: Option<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -1358,9 +1370,12 @@ impl AsyncJobRegistry {
         }
     }
 
-    async fn mark_retry_queued(&self, id: &str) {
-        let mut jobs = self.inner.jobs.lock().await;
-        if let Some(job) = jobs.get_mut(id) {
+    async fn mark_retry_queued(&self, id: &str, ambiguous: bool) {
+        let reconciliation = {
+            let mut jobs = self.inner.jobs.lock().await;
+            let Some(job) = jobs.get_mut(id) else {
+                return;
+            };
             let now = now_ms();
             job.status = AsyncJobStatus::Queued;
             job.retryable = Some(false);
@@ -1372,6 +1387,21 @@ impl AsyncJobRegistry {
             job.result = None;
             job.reconciliation_pending = true;
             job.updated_at_ms = now;
+            job.authority
+                .as_ref()
+                .zip(job.durable_job_id.as_deref())
+                .map(|(authority, durable_job_id)| reconciliation_key(authority, durable_job_id))
+        };
+        if let Some(key) = reconciliation {
+            self.inner.reconciliations.lock().await.insert(
+                key,
+                ReconciliationAttempt {
+                    in_flight: false,
+                    next_attempt: Instant::now(),
+                    backoff: reconciliation_initial_backoff(),
+                    ambiguous_confirmation_attempts: ambiguous.then_some(0),
+                },
+            );
         }
     }
 
@@ -1390,7 +1420,7 @@ impl AsyncJobRegistry {
             return;
         };
         let key = reconciliation_key(&authority, &durable_job_id);
-        {
+        let confirmation_attempt = {
             let mut attempts = self.inner.reconciliations.lock().await;
             let attempt = attempts
                 .entry(key.clone())
@@ -1398,12 +1428,20 @@ impl AsyncJobRegistry {
                     in_flight: false,
                     next_attempt: Instant::now(),
                     backoff: reconciliation_initial_backoff(),
+                    ambiguous_confirmation_attempts: None,
                 });
             if attempt.in_flight || Instant::now() < attempt.next_attempt {
                 return;
             }
             attempt.in_flight = true;
-        }
+            attempt
+                .ambiguous_confirmation_attempts
+                .as_mut()
+                .map(|count| {
+                    *count += 1;
+                    *count
+                })
+        };
 
         enum ReadOutcome {
             Found(GenerationBatchChild),
@@ -1435,14 +1473,30 @@ impl AsyncJobRegistry {
             Err(error) => ReadOutcome::Stop(error.to_string()),
         };
 
+        let mut confirmation_finished = false;
         let keep_polling = match outcome {
             ReadOutcome::Found(child) => {
-                if matches!(
+                if child.state == GenerationBatchChildState::Held
+                    && confirmation_attempt
+                        .is_some_and(|attempt| attempt < AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS)
+                {
+                    self.record_reconciliation_error(
+                        id,
+                        format!(
+                            "retry remains locked; confirmation attempt {}/{} still sees the pre-commit held state",
+                            confirmation_attempt.expect("checked above"),
+                            AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS
+                        ),
+                    )
+                    .await;
+                    true
+                } else if matches!(
                     child.state,
                     GenerationBatchChildState::Accepted
                         | GenerationBatchChildState::Running
                         | GenerationBatchChildState::Cancelling
                 ) {
+                    confirmation_finished = confirmation_attempt.is_some();
                     let mut jobs = self.inner.jobs.lock().await;
                     if let Some(job) = jobs.get_mut(id) {
                         apply_canonical_child_to_job(job, authority.clone(), &child);
@@ -1450,14 +1504,24 @@ impl AsyncJobRegistry {
                     }
                     true
                 } else {
+                    confirmation_finished = confirmation_attempt.is_some();
                     finish_canonical_child(client, self, id, authority, child, None).await;
                     false
                 }
             }
             ReadOutcome::Retry(error) => {
+                let confirmation_expired = confirmation_attempt
+                    .is_some_and(|attempt| attempt >= AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS);
+                confirmation_finished = confirmation_expired;
                 self.record_reconciliation_error(
                     id,
-                    format!("retry remains locked; exact reconciliation delayed: {error}"),
+                    if confirmation_expired {
+                        format!(
+                            "ambiguous retry remains unconfirmed after {AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS} bounded attempts; retry lock retained while exact reconciliation continues: {error}"
+                        )
+                    } else {
+                        format!("retry remains locked; exact reconciliation delayed: {error}")
+                    },
                 )
                 .await;
                 true
@@ -1482,11 +1546,19 @@ impl AsyncJobRegistry {
         };
         attempt.in_flight = false;
         if keep_polling {
-            attempt.next_attempt = Instant::now() + attempt.backoff;
-            attempt.backoff = attempt
-                .backoff
-                .saturating_mul(2)
-                .min(reconciliation_max_backoff());
+            if confirmation_attempt.is_some() && !confirmation_finished {
+                attempt.next_attempt = Instant::now() + reconciliation_initial_backoff();
+            } else {
+                if confirmation_finished {
+                    attempt.ambiguous_confirmation_attempts = None;
+                    attempt.backoff = reconciliation_initial_backoff();
+                }
+                attempt.next_attempt = Instant::now() + attempt.backoff;
+                attempt.backoff = attempt
+                    .backoff
+                    .saturating_mul(2)
+                    .min(reconciliation_max_backoff());
+            }
         } else {
             attempts.remove(&key);
         }
@@ -1498,6 +1570,37 @@ impl AsyncJobRegistry {
             job.error = Some(error);
             job.updated_at_ms = now_ms();
         }
+    }
+
+    async fn eligible_pending_reconciliations(&self, limit: usize) -> Vec<String> {
+        let mut candidates = {
+            let jobs = self.inner.jobs.lock().await;
+            jobs.values()
+                .filter(|job| job.reconciliation_pending)
+                .filter_map(|job| {
+                    let authority = job.authority.as_ref()?;
+                    let durable_job_id = job.durable_job_id.as_deref()?;
+                    Some((
+                        job.updated_at_ms,
+                        job.id.clone(),
+                        reconciliation_key(authority, durable_job_id),
+                    ))
+                })
+                .collect::<Vec<_>>()
+        };
+        candidates.sort_by_key(|(updated_at_ms, _, _)| *updated_at_ms);
+        let now = Instant::now();
+        let attempts = self.inner.reconciliations.lock().await;
+        candidates
+            .into_iter()
+            .filter(|(_, _, key)| {
+                attempts
+                    .get(key)
+                    .is_none_or(|attempt| !attempt.in_flight && now >= attempt.next_attempt)
+            })
+            .take(limit)
+            .map(|(_, id, _)| id)
+            .collect()
     }
 
     async fn get(&self, id: &str) -> Option<AsyncGenerationJob> {
@@ -2568,6 +2671,7 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
+    use tokio::io::AsyncReadExt;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
@@ -2889,6 +2993,169 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ambiguous_retry_ignores_stale_held_until_delayed_active_state() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let retry_posts = Arc::new(AtomicUsize::new(0));
+        let retry_posts_for_server = retry_posts.clone();
+        let status_reads = Arc::new(AtomicUsize::new(0));
+        let status_reads_for_server = status_reads.clone();
+        let server = tokio::spawn(async move {
+            for _ in 0..4 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 2048];
+                loop {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = String::from_utf8_lossy(&request);
+                if head.starts_with("POST /api/queue/durable-job-1/retry") {
+                    retry_posts_for_server.fetch_add(1, Ordering::SeqCst);
+                    socket.shutdown().await.unwrap();
+                    continue;
+                }
+                assert!(head.starts_with("GET /api/generation-batches/batch-1"));
+                let read = status_reads_for_server.fetch_add(1, Ordering::SeqCst);
+                let child = match read {
+                    0 => json!({
+                        "index": 1,
+                        "job_id": "durable-job-1",
+                        "state": "held",
+                        "error": "old dependency failure",
+                        "retryable": true
+                    }),
+                    1 => json!({
+                        "index": 1,
+                        "job_id": "durable-job-1",
+                        "state": "accepted"
+                    }),
+                    _ => json!({
+                        "index": 1,
+                        "job_id": "durable-job-1",
+                        "state": "running"
+                    }),
+                };
+                let body = json!({
+                    "id": "batch-1",
+                    "client_batch_id": "client-batch-1",
+                    "instance_id": "instance-1",
+                    "durable": true,
+                    "children": [child]
+                })
+                .to_string();
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let mcp = McpServer {
+            client: MoldClient::new(&base_url),
+            jobs: AsyncJobRegistry::default(),
+        };
+        let local_id = seed_retryable_canonical_job(&mcp.jobs).await;
+
+        let retry = mcp
+            .tool_generation_retry(json!({ "job_id": local_id }))
+            .await
+            .unwrap();
+        assert_eq!(retry["structuredContent"]["status"], "queued");
+        let stale = mcp
+            .tool_generation_status(json!({ "job_id": local_id, "include_result": false }))
+            .await
+            .unwrap();
+        assert_eq!(stale["structuredContent"]["status"], "queued");
+        assert_eq!(stale["structuredContent"]["retryable"], false);
+        assert!(stale["structuredContent"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("pre-commit held state"));
+
+        tokio::time::sleep(reconciliation_initial_backoff()).await;
+        let accepted = mcp
+            .tool_generation_status(json!({ "job_id": local_id, "include_result": false }))
+            .await
+            .unwrap();
+        assert_eq!(accepted["structuredContent"]["status"], "queued");
+        assert_ne!(accepted["structuredContent"]["retryable"], true);
+
+        tokio::time::sleep(reconciliation_initial_backoff()).await;
+        let running = mcp
+            .tool_generation_status(json!({ "job_id": local_id, "include_result": false }))
+            .await
+            .unwrap();
+        assert_eq!(running["structuredContent"]["status"], "running");
+        assert_eq!(retry_posts.load(Ordering::SeqCst), 1);
+        assert_eq!(status_reads.load(Ordering::SeqCst), 3);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_status_poll_recovers_ambiguous_retry_without_a_job_filter() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/queue/durable-job-1/retry"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/generation-batches/batch-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "batch-1",
+                "client_batch_id": "client-batch-1",
+                "instance_id": "instance-1",
+                "durable": true,
+                "children": [{
+                    "index": 1,
+                    "job_id": "durable-job-1",
+                    "state": "held",
+                    "error": "dependency remains unavailable",
+                    "retryable": true
+                }]
+            })))
+            .expect(AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS as u64)
+            .mount(&server)
+            .await;
+        let mcp = McpServer {
+            client: MoldClient::new(&server.uri()),
+            jobs: AsyncJobRegistry::default(),
+        };
+        let local_id = seed_retryable_canonical_job(&mcp.jobs).await;
+        mcp.tool_generation_retry(json!({ "job_id": local_id }))
+            .await
+            .unwrap();
+
+        for attempt in 0..AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(reconciliation_initial_backoff()).await;
+            }
+            let result = mcp.tool_generation_status(json!({})).await.unwrap();
+            let job = &result["structuredContent"]["jobs"][0];
+            if attempt + 1 < AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS {
+                assert_eq!(job["status"], "queued");
+                assert_eq!(job["retryable"], false);
+            } else {
+                assert_eq!(job["status"], "held");
+                assert_eq!(job["retryable"], true);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn concurrent_status_reads_coalesce_exact_retry_reconciliation() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -2980,6 +3247,39 @@ mod tests {
         assert!(error.contains("registry is full"));
         assert_eq!(jobs.inner.jobs.lock().await.len(), MAX_ASYNC_JOBS);
         assert!(jobs.inner.reconciliations.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_status_bounds_eligible_reconciliation_work() {
+        let jobs = AsyncJobRegistry::default();
+        let request = transport_request();
+        for index in 0..(MAX_LIST_STATUS_RECONCILIATIONS + 1) {
+            let id = jobs.create(&request).await.unwrap();
+            jobs.finish_canonical(
+                &id,
+                CanonicalAsyncSettlement {
+                    authority: Some(GenerationBatchAuthority {
+                        instance_id: "instance-1".into(),
+                        batch_id: format!("batch-{index}"),
+                        client_batch_id: format!("client-batch-{index}"),
+                    }),
+                    durable_job_id: Some(format!("durable-job-{index}")),
+                    retryable: Some(true),
+                    status: AsyncJobStatus::Held,
+                    error: Some("dependency unavailable".into()),
+                    result: None,
+                },
+            )
+            .await;
+            jobs.mark_retry_queued(&id, false).await;
+        }
+
+        assert_eq!(
+            jobs.eligible_pending_reconciliations(MAX_LIST_STATUS_RECONCILIATIONS)
+                .await
+                .len(),
+            MAX_LIST_STATUS_RECONCILIATIONS
+        );
     }
 
     #[tokio::test]
