@@ -928,7 +928,7 @@ export function requestNeedsReferenceUpload(
  * validation refuses the unknown protocol instead of disclosing media inline. */
 export function requestShouldUseReferenceUploads(
   request: ReferenceUploadRequest,
-  target: Pick<ApiTarget, "apiKey"> | null | undefined,
+  target: { apiKey?: ApiTarget["apiKey"] } | null | undefined,
   capabilities:
     Pick<ReferenceUploadCapabilities, "authless_inline"> | null | undefined,
 ): boolean {
