@@ -415,16 +415,16 @@ fn restore_admission_authority(
     crate::durable_admission_authority::RuntimeAuthority,
     crate::durable_admission_authority::Failure,
 > {
-    use crate::durable_admission_authority::{Failure, FailureDisposition};
+    use crate::durable_admission_authority::{Failure, PreparationDisposition};
     let envelope = match row.admission_authority.as_deref() {
         Some(encoded) => {
             let authority = crate::queue_media_store::QueueMediaAdmissionAuthority::parse(encoded)
                 .map_err(|error| Failure {
-                    disposition: FailureDisposition::Hold,
+                    disposition: PreparationDisposition::Hold,
                     message: error.to_string(),
                 })?;
             let lifecycle = lifecycle.ok_or_else(|| Failure {
-                disposition: FailureDisposition::Retain,
+                disposition: PreparationDisposition::Retain,
                 message: "durable admission authority storage is unavailable".into(),
             })?;
             Some(
@@ -432,9 +432,9 @@ fn restore_admission_authority(
                     .open_admission_authority(&row.id, &authority)
                     .map_err(|error| Failure {
                         disposition: if projection_failure_holds(&error) {
-                            FailureDisposition::Hold
+                            PreparationDisposition::Hold
                         } else {
-                            FailureDisposition::Retain
+                            PreparationDisposition::Retain
                         },
                         message: error.to_string(),
                     })?,
@@ -448,11 +448,11 @@ fn restore_admission_authority(
             Some(media.hydrate_into(&row.id, &mut request).map_err(|error| {
                 match error.disposition() {
                     crate::queue_media_runtime::DeferredHydrationDisposition::Hold => Failure {
-                        disposition: FailureDisposition::Hold,
+                        disposition: PreparationDisposition::Hold,
                         message: error.to_string(),
                     },
                     crate::queue_media_runtime::DeferredHydrationDisposition::Retain => Failure {
-                        disposition: FailureDisposition::Retain,
+                        disposition: PreparationDisposition::Retain,
                         message: error.to_string(),
                     },
                 }
@@ -1010,7 +1010,7 @@ async fn feed_available(
             })) {
                 Ok(Ok(authority)) => authority,
                 Ok(Err(crate::durable_admission_authority::Failure {
-                    disposition: crate::durable_admission_authority::FailureDisposition::Hold,
+                    disposition: crate::durable_admission_authority::PreparationDisposition::Hold,
                     message: reason,
                 })) => {
                     let logged_reason = reason.clone();
@@ -1028,7 +1028,7 @@ async fn feed_available(
                 }
                 Ok(Err(crate::durable_admission_authority::Failure {
                     disposition:
-                        crate::durable_admission_authority::FailureDisposition::HoldRetryable,
+                        crate::durable_admission_authority::PreparationDisposition::HoldRetryable,
                     message: reason,
                 })) => {
                     let logged_reason = reason.clone();
@@ -1045,7 +1045,7 @@ async fn feed_available(
                     continue;
                 }
                 Ok(Err(crate::durable_admission_authority::Failure {
-                    disposition: crate::durable_admission_authority::FailureDisposition::Retain,
+                    disposition: crate::durable_admission_authority::PreparationDisposition::Retain,
                     message: reason,
                 })) => {
                     drop(reservation);
