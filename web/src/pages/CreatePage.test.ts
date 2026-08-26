@@ -4669,6 +4669,8 @@ describe("CreatePage host routing", () => {
 
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
+    await wrapper.get("[data-test='install-target-option']").trigger("click");
+    await flushPromises();
 
     expect(submitMock).not.toHaveBeenCalled();
     expect(postDownloadMock).toHaveBeenCalledWith("z-image-turbo:q6");
@@ -4729,6 +4731,8 @@ describe("CreatePage host routing", () => {
 
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
+    await wrapper.get("[data-test='install-target-option']").trigger("click");
+    await flushPromises();
     const pending = usePullResume().pending.value;
     expect(pending).not.toBeNull();
 
@@ -4779,6 +4783,8 @@ describe("CreatePage host routing", () => {
     await nextTick();
 
     await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='install-target-option']").trigger("click");
     await vi.waitFor(() => expect(finishDownload).toBeTypeOf("function"));
     const cancel = wrapper.get("[data-test='composer-submit']");
     expect(cancel.text()).toContain("Cancel");
@@ -4846,6 +4852,8 @@ describe("CreatePage host routing", () => {
 
     await wrapper.get("[data-test='composer-submit']").trigger("click");
     await flushPromises();
+    await wrapper.get("[data-test='install-target-option']").trigger("click");
+    await flushPromises();
 
     // Only the origin lacks it, so no picker: the download lands there and
     // Studio (which has it and cannot fit it) is never touched.
@@ -4893,6 +4901,8 @@ describe("CreatePage host routing", () => {
     await nextTick();
 
     await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='install-target-option']").trigger("click");
     await flushPromises();
 
     expect(postDownloadMock).toHaveBeenCalledWith("flux-dev:q8");

@@ -507,6 +507,41 @@ describe("hosts store", () => {
     expect(previewGenerationPlacement).not.toHaveBeenCalled();
   });
 
+  it("returns a missing-model recovery for a canonical pinned host with a known absence", async () => {
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: "host-key",
+      status: "ready",
+      error: null,
+      instanceId: "hal-instance",
+    });
+    hosts.telemetry[hal.id] = { queueDepth: 0, queueCapacity: 8, version: "0.25.0" };
+    hosts.capabilities[hal.id] = {
+      gallery: { can_delete: true },
+      queue: {
+        heterogeneous_batch: true,
+        heterogeneous_batch_max_outputs: 64,
+        durable_batch_outcomes: true,
+        admission_protocol_version: 2,
+      },
+    };
+    useHostModelsStore().byHost[hal.id] = { entries: [], fetchedAt: Date.now(), error: null };
+
+    await expect(hosts.resolveFeasible(hal.id, placementRequest)).resolves.toMatchObject({
+      kind: "infeasible",
+      perHost: [
+        {
+          hostId: hal.id,
+          missingModel: { model: placementRequest.model },
+        },
+      ],
+    });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+  });
+
   it("allows Auto across differing profiles on the same Mold major version", () => {
     const hosts = useHostsStore();
     hosts.extras.push({

@@ -181,6 +181,24 @@ describe("mobile automatic generation routing", () => {
     expect(previewChainPlacement).not.toHaveBeenCalled();
   });
 
+  it("returns a download recovery when canonical telemetry knows every candidate is missing", async () => {
+    const studio = host("studio");
+    const result = await routeAutomaticMobileGeneration({
+      ...options([candidate(studio)]),
+      routeForHost: canonicalRouteForHost,
+      model: "test-model",
+      modelOwnerIds: [],
+      inventoryKnown: () => true,
+    });
+
+    expect(result).toMatchObject({
+      kind: "missing_model",
+      host: { id: "studio" },
+      model: "test-model",
+    });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+  });
+
   it("routes Most capable from cached v2 GPU facts without opening probes", async () => {
     const studio = host("studio");
     const render = host("render");
@@ -326,6 +344,19 @@ describe("mobile pinned generation placement", () => {
     }
     expect(previewGenerationPlacement).not.toHaveBeenCalled();
     expect(previewChainPlacement).not.toHaveBeenCalled();
+  });
+
+  it("returns a download recovery for a canonical pinned host with a known absence", async () => {
+    await expect(
+      previewPinnedMobileGeneration({
+        ...pinnedOptions(),
+        route: canonicalRouteForHost(host("studio")),
+        model: "test-model",
+        modelOwnerIds: [],
+        inventoryKnown: true,
+      }),
+    ).resolves.toEqual({ kind: "missing_model", model: "test-model" });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
   });
 
   it("keeps pinned sequences on the legacy placement contract", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planModelInstall } from "./modelInstallTargets";
+import { modelPresenceOnHost, planModelInstall } from "./modelInstallTargets";
 
 interface TestHost {
   id: string;
@@ -9,6 +9,14 @@ interface TestHost {
 const local: TestHost = { id: "local", label: "This device" };
 const bender: TestHost = { id: "bender", label: "bender" };
 const hal: TestHost = { id: "hal9000", label: "hal9000" };
+
+describe("modelPresenceOnHost", () => {
+  it("distinguishes installed, known missing, and unread inventories", () => {
+    expect(modelPresenceOnHost("render", ["render"], true)).toBe("installed");
+    expect(modelPresenceOnHost("render", ["studio"], true)).toBe("missing");
+    expect(modelPresenceOnHost("render", ["studio"], false)).toBe("unknown");
+  });
+});
 
 describe("planModelInstall", () => {
   it("offers an install on every machine that does not have the model", () => {

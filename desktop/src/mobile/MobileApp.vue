@@ -93,6 +93,7 @@ import {
 } from "@studio/lib/galleryMutationOutbox";
 import {
   defaultClipFrames,
+  modelSupportsSequence,
   modelsForOutput,
   sequenceMotionTailFrames,
   type OutputMode,
@@ -108,7 +109,9 @@ import {
   setMinimaxH3PickedImageBoundary,
 } from "@studio/lib/minimaxH3Authoring";
 import { h3BoundariesNeedingMedia } from "@studio/lib/h3BoundaryRestore";
+import { modelPresenceOnHost } from "@studio/lib/modelInstallTargets";
 import {
+  classifyMissingModel,
   classifyPlacementPreview,
   previewChainPlacement,
   previewRequestForSiblingFanout,
@@ -437,6 +440,13 @@ import {
 import { useMobileDownloadsStore } from "./mobileDownloads";
 import { isNativeAndroidRuntime, isNativeIOSRuntime } from "./platform";
 import {
+  accountForConfirmedInventory,
+  confirmedModelHostIds,
+  confirmModelInstall,
+  retireConfirmedModelAuthority,
+  type ConfirmedModelInstalls,
+} from "./confirmedModelInstalls";
+import {
   createMobileExpansionRecovery,
   mobileExpansionRecoveryStaleReason,
   type MobileRemixRecoveryPayload,
@@ -541,9 +551,8 @@ type LibrarySheet =
   | { kind: "rename-collection"; slug: string; name: string }
   | { kind: "more-tags" };
 
-interface MobileExpansionPullAttempt {
+interface MobileExactPullAttempt {
   id: number;
-  recoveryId: number;
   phase: Exclude<ExpansionPullPhase, "missing">;
   jobId: string | null;
   observedJobId: string | null;
@@ -551,6 +560,27 @@ interface MobileExpansionPullAttempt {
   allowExistingInFlight: boolean;
   requestError: string | null;
   terminalJob: DownloadJob | null;
+}
+
+interface MobileExpansionPullAttempt extends MobileExactPullAttempt {
+  recoveryId: number;
+}
+
+type MobileMissingGenerationPullAttempt = MobileExactPullAttempt;
+
+function newMobileExactPullAttempt(id: number, bucket: DownloadsState): MobileExactPullAttempt {
+  return {
+    id,
+    phase: "connecting",
+    jobId: null,
+    observedJobId: null,
+    baselineJobIds: [...bucket.activeJobs, ...bucket.queued, ...bucket.history].map(
+      (job) => job.id,
+    ),
+    allowExistingInFlight: false,
+    requestError: null,
+    terminalJob: null,
+  };
 }
 
 interface MobileRemixReviewState {
@@ -899,6 +929,18 @@ const NON_KEYBOARD_INPUT_TYPES = new Set([
   "submit",
 ]);
 const downloadConsumerId = `mobile-generate-${createUuid()}`;
+const missingModelConsumerId = `mobile-missing-model-${createUuid()}`;
+const missingGenerationModel = ref<{
+  model: string;
+  host: MobileHost;
+  route: HostRoute;
+} | null>(null);
+const missingGenerationModelBusy = ref(false);
+const missingGenerationModelError = ref("");
+const missingGenerationPullAttempt = ref<MobileMissingGenerationPullAttempt | null>(null);
+const confirmedInstalledModels = ref<ConfirmedModelInstalls>({});
+let missingGenerationPullRequestId = 0;
+let missingGenerationModelLeaseId: string | null = null;
 const progress = ref("Ready");
 /** Whether the status line under Develop currently shows a failure. Set with
  * `setGenerationStatus` so error styling never depends on string sniffing. */
@@ -1001,6 +1043,7 @@ let pendingGallery: PendingGalleryPrint[] = [];
 /** Every concrete device copy behind the deduplicated Library tiles. */
 let galleryCopies: PendingGalleryPrint[] = [];
 let modelLoadEpoch = 0;
+let routingModelsEpoch = 0;
 let reusePrintEpoch = 0;
 let reusePrintController: AbortController | null = null;
 let sourceUseEpoch = 0;
@@ -1535,11 +1578,18 @@ const generationModels = computed(() => {
 });
 /** Which reachable machines hold a model, for the picker's availability tag. */
 function modelHostIds(name: string): string[] {
-  return hostIdsForModel(
-    modelsByHost.value,
-    name,
-    routingHosts.value.map((host) => host.id),
-  );
+  const reachable = new Set(routingHosts.value.map((host) => host.id));
+  return [
+    ...new Set([
+      ...hostIdsForModel(modelsByHost.value, name, [...reachable]),
+      ...confirmedModelHostIds(
+        confirmedInstalledModels.value,
+        name,
+        routingHosts.value.filter((host) => reachable.has(host.id)),
+        sameFrozenHost,
+      ),
+    ]),
+  ];
 }
 function modelAvailabilityTag(name: string): string | null {
   if (!automaticRouting.value) return null;
@@ -1547,6 +1597,9 @@ function modelAvailabilityTag(name: string): string | null {
 }
 const isSequence = computed(() => draft.output === "sequence");
 const sequenceModels = computed(() => modelsForOutput(generationModels.value, "sequence"));
+const selectedModelCanSequence = computed(() =>
+  modelSupportsSequence(selectedGenerationModel.value ?? { name: form.model, family: form.family }),
+);
 /** Sequence output narrows the picker to chain-capable video models. */
 const pickerModels = computed(() => modelsForOutput(generationModels.value, draft.output));
 const sequenceMotionTail = computed(() => sequenceMotionTailFrames(selectedGenerationModel.value));
@@ -1595,7 +1648,7 @@ const sourceSectionSummary = computed(() => {
 const outputFormats = computed(
   () => caps.value.outputFormats as ReturnType<typeof outputFormatsForFamily>,
 );
-const selectedModelAvailable = computed(
+const selectedModelInstalled = computed(
   () =>
     (automaticRouting.value || modelsHostId.value === selectedHostId.value) &&
     generationModels.value.some((model) => model.name === form.model),
@@ -1872,7 +1925,7 @@ const developBlockerReason = computed<string | null>(() => {
   // An empty prompt is self-evident beside the composer and does not warrant
   // a persistent banner. Everything outside the visible composer names the
   // exact correction beside the pinned action.
-  if (!selectedModelAvailable.value) return "Choose an installed model before generating.";
+  if (!form.model.trim()) return "Choose a model before generating.";
   if (quickExpansionSnapshot.value && quickStaleReasons.value.length > 0) {
     return "The prepared rewrite no longer matches these settings. Use a recovery action above.";
   }
@@ -2578,6 +2631,30 @@ const expansionPullBucket = computed<DownloadsState>(() => {
       })
     : { activeJobs: [], queued: [], history: [] };
 });
+
+function mobileExactPullStatus(
+  model: string,
+  hostId: string,
+  attempt: MobileExactPullAttempt,
+  bucket: DownloadsState,
+): ExpansionPullView {
+  const pending = mobileDownloads.pendingPulls.get(`${hostId}:${model}`);
+  return resolveExpansionPullStatus({
+    model,
+    phase: pending?.phase ?? attempt.phase,
+    jobId: attempt.jobId,
+    observedJobId: attempt.observedJobId,
+    baselineJobIds: attempt.baselineJobIds,
+    allowExistingInFlight: attempt.allowExistingInFlight,
+    activeJobs: bucket.activeJobs,
+    queued: bucket.queued,
+    history: attempt.terminalJob
+      ? [attempt.terminalJob, ...bucket.history.filter((job) => job.id !== attempt.terminalJob?.id)]
+      : bucket.history,
+    requestError: attempt.requestError,
+  });
+}
+
 const expansionPullStatus = computed<ExpansionPullView | null>(() => {
   const missing = expansionMissingModel.value;
   if (!missing) return null;
@@ -2586,30 +2663,44 @@ const expansionPullStatus = computed<ExpansionPullView | null>(() => {
   if (!attempt || !recovery || attempt.recoveryId !== recovery.id) {
     return { kind: "missing", job: null };
   }
-  const pending = mobileDownloads.pendingPulls.get(`${recovery.route.hostId}:${recovery.model}`);
-  return resolveExpansionPullStatus({
-    model: recovery.model,
-    phase: pending?.phase ?? attempt.phase,
-    jobId: attempt.jobId,
-    observedJobId: attempt.observedJobId,
-    baselineJobIds: attempt.baselineJobIds,
-    allowExistingInFlight: attempt.allowExistingInFlight,
-    activeJobs: expansionPullBucket.value.activeJobs,
-    queued: expansionPullBucket.value.queued,
-    history: attempt.terminalJob
-      ? [
-          attempt.terminalJob,
-          ...expansionPullBucket.value.history.filter((job) => job.id !== attempt.terminalJob?.id),
-        ]
-      : expansionPullBucket.value.history,
-    requestError: attempt.requestError,
-  });
+  return mobileExactPullStatus(
+    recovery.model,
+    recovery.route.hostId,
+    attempt,
+    expansionPullBucket.value,
+  );
 });
 const expansionPullEtaSeconds = computed(() => {
   const attempt = expansionPullAttempt.value;
   const recovery = expansionRecovery.value;
   const job = expansionPullStatus.value?.job;
   return attempt && recovery && job ? mobileDownloads.etaFor(recovery.route.hostId, job.id) : null;
+});
+const missingGenerationPullBucket = computed<DownloadsState>(() => {
+  const pending = missingGenerationModel.value;
+  return pending
+    ? (mobileDownloads.downloadsByHost[pending.route.hostId] ?? {
+        activeJobs: [],
+        queued: [],
+        history: [],
+      })
+    : { activeJobs: [], queued: [], history: [] };
+});
+const missingGenerationPullStatus = computed<ExpansionPullView>(() => {
+  const pending = missingGenerationModel.value;
+  const attempt = missingGenerationPullAttempt.value;
+  if (!pending || !attempt) return { kind: "missing", job: null };
+  return mobileExactPullStatus(
+    pending.model,
+    pending.route.hostId,
+    attempt,
+    missingGenerationPullBucket.value,
+  );
+});
+const missingGenerationPullEtaSeconds = computed(() => {
+  const pending = missingGenerationModel.value;
+  const job = missingGenerationPullStatus.value.job;
+  return pending && job ? mobileDownloads.etaFor(pending.route.hostId, job.id) : null;
 });
 const queueAnnouncement = computed(() => activityAnnouncement(activityCounts.value));
 const generationStatus = computed(() => {
@@ -3427,6 +3518,10 @@ function retireMobileHostAuthority(id: string): void {
   delete hostTelemetry[id];
   delete expandCapabilities[id];
   delete serverCapabilities[id];
+  confirmedInstalledModels.value = retireConfirmedModelAuthority(
+    confirmedInstalledModels.value,
+    id,
+  );
   const nextModels = { ...modelsByHost.value };
   delete nextModels[id];
   modelsByHost.value = nextModels;
@@ -3726,6 +3821,11 @@ async function refreshModels(): Promise<boolean> {
     models.value = filterRestrictedModels(entries, capabilities);
     modelsHostId.value = hostId;
     modelsByHost.value = { ...modelsByHost.value, [hostId]: models.value };
+    confirmedInstalledModels.value = accountForConfirmedInventory(
+      confirmedInstalledModels.value,
+      hostId,
+      models.value,
+    );
     modelSnapshotIdentities.value = {
       ...modelSnapshotIdentities.value,
       [hostId]: {
@@ -3742,7 +3842,7 @@ async function refreshModels(): Promise<boolean> {
       models: models.value,
       capabilities,
     });
-    const selectedEntry = generationModels.value.find((model) => model.name === form.model);
+    const selectedEntry = selectedGenerationModel.value;
     if (selectedEntry) {
       reconcileModelCapabilities(form, selectedEntry);
     } else if (generationModels.value[0]) {
@@ -3774,6 +3874,7 @@ async function refreshModels(): Promise<boolean> {
  * dropping out of routing on one bad poll; a forgotten machine is pruned.
  */
 async function refreshRoutingModels(): Promise<void> {
+  const epoch = ++routingModelsEpoch;
   const peers = routingHosts.value.filter((host) => host.id !== selectedHostId.value);
   const snapshots = await Promise.all(
     peers.map(async (host) => {
@@ -3809,7 +3910,7 @@ async function refreshRoutingModels(): Promise<void> {
       }
     }),
   );
-  if (unmounted) return;
+  if (unmounted || epoch !== routingModelsEpoch) return;
   const next: Record<string, ModelEntry[]> = {};
   const nextIdentities: Record<string, ModelSnapshotIdentity> = {};
   for (const [id, entries] of Object.entries(modelsByHost.value)) {
@@ -3824,6 +3925,11 @@ async function refreshRoutingModels(): Promise<void> {
     if (snapshot) {
       next[snapshot[0]] = snapshot[2];
       nextIdentities[snapshot[0]] = snapshot[1];
+      confirmedInstalledModels.value = accountForConfirmedInventory(
+        confirmedInstalledModels.value,
+        snapshot[0],
+        snapshot[2],
+      );
     }
   }
   modelsByHost.value = next;
@@ -4093,11 +4199,160 @@ async function routeAutomaticGeneration(options: {
   if (error) return { kind: "error", message: error };
   return routeAutomaticMobileGeneration({
     ...routingOptions,
+    model,
+    modelOwnerIds: modelHostIds(model),
+    inventoryKnown: (hostId) => Object.prototype.hasOwnProperty.call(modelsByHost.value, hostId),
     candidates: candidates.map((host) => ({ host, view: routingHostView(host) })),
     routeForHost: routeForMobileHost,
     policy: generateTarget.value,
     isCurrent: () => !unmounted && isCurrent(),
   });
+}
+
+function promptForMissingGenerationModel(model: string, host: MobileHost, route: HostRoute): void {
+  missingGenerationPullRequestId += 1;
+  missingGenerationPullAttempt.value = null;
+  missingGenerationModelError.value = "";
+  missingGenerationModel.value = { model, host: { ...host }, route };
+}
+
+function closeMissingGenerationModel(): void {
+  if (
+    missingGenerationModelBusy.value ||
+    ["connecting", "starting", "queued", "pulling"].includes(missingGenerationPullStatus.value.kind)
+  )
+    return;
+  missingGenerationModel.value = null;
+  missingGenerationPullAttempt.value = null;
+  missingGenerationModelError.value = "";
+}
+
+async function pullMissingGenerationModel(): Promise<void> {
+  const pending = missingGenerationModel.value;
+  if (!pending || missingGenerationModelBusy.value) return;
+  missingGenerationModelBusy.value = true;
+  missingGenerationModelError.value = "";
+  const bucket = missingGenerationPullBucket.value;
+  const attempt: MobileMissingGenerationPullAttempt = {
+    ...newMobileExactPullAttempt(++missingGenerationPullRequestId, bucket),
+  };
+  missingGenerationPullAttempt.value = attempt;
+  const leaseId = `${missingModelConsumerId}:${pending.route.hostId}:${pending.model}`;
+  missingGenerationModelLeaseId = leaseId;
+  const release = () => {
+    mobileDownloads.releaseFrozenPull(leaseId);
+    if (missingGenerationModelLeaseId === leaseId) missingGenerationModelLeaseId = null;
+    mobileDownloads.unregisterConsumer(missingModelConsumerId);
+  };
+  const finish = (job: DownloadJob) => {
+    if (missingGenerationPullAttempt.value?.id !== attempt.id) return;
+    if (job.status === "completed") {
+      attempt.terminalJob = job;
+      confirmedInstalledModels.value = confirmModelInstall(
+        confirmedInstalledModels.value,
+        pending.route,
+        pending.model,
+      );
+      catalogModelsChanged(pending.route.hostId);
+      setGenerationStatus(`${pending.model} is ready on ${pending.route.label}.`);
+      generationAnnouncement.value = `${pending.model} is ready. Press Develop to continue.`;
+    } else {
+      attempt.terminalJob = job;
+      const message =
+        job.status === "cancelled"
+          ? `Download cancelled on ${pending.route.label}.`
+          : (job.error ?? `Download failed on ${pending.route.label}.`);
+      missingGenerationModelError.value = message;
+      setGenerationStatus(message, true);
+      generationAnnouncement.value = message;
+    }
+    release();
+  };
+  mobileDownloads.registerConsumer(missingModelConsumerId, [{ ...pending.host }], {
+    onEvent: ({ event }) => {
+      const current = missingGenerationPullAttempt.value;
+      if (
+        event.type === "enqueued" &&
+        current?.id === attempt.id &&
+        !current.jobId &&
+        !current.observedJobId
+      ) {
+        const queued = mobileDownloads.downloadsByHost[pending.route.hostId]?.queued.find(
+          (job) => job.id === event.id,
+        );
+        if (
+          queued &&
+          expansionPullJobMatchesModel(queued, pending.model) &&
+          !current.baselineJobIds.includes(queued.id)
+        ) {
+          current.observedJobId = queued.id;
+        }
+      }
+      if (
+        event.type !== "job_done" &&
+        event.type !== "job_failed" &&
+        event.type !== "job_cancelled"
+      )
+        return;
+      if (
+        current?.id !== attempt.id ||
+        (current.jobId !== event.id && current.observedJobId !== event.id)
+      )
+        return;
+      const terminal = mobileDownloads.downloadsByHost[pending.route.hostId]?.history.find(
+        (job) => job.id === event.id,
+      );
+      if (terminal) finish(terminal);
+    },
+    onStreamError: (_host, error) => {
+      if (missingGenerationPullAttempt.value?.id !== attempt.id) return;
+      attempt.requestError = describeTransportError(error, pending.route.label);
+      missingGenerationModelError.value = attempt.requestError;
+      release();
+    },
+  });
+  try {
+    const result = await mobileDownloads.startPullFrozen(
+      { id: pending.model, name: pending.model },
+      { ...pending.host },
+      leaseId,
+    );
+    if (missingGenerationPullAttempt.value?.id !== attempt.id) return;
+    if (result.kind === "started" || result.kind === "conflict") {
+      attempt.jobId = result.jobId;
+    } else {
+      attempt.allowExistingInFlight = true;
+      const state = mobileDownloads.downloadsByHost[pending.route.hostId];
+      attempt.observedJobId =
+        [...(state?.activeJobs ?? []), ...(state?.queued ?? [])].find((job) =>
+          expansionPullJobMatchesModel(job, pending.model),
+        )?.id ?? null;
+    }
+    attempt.phase = "starting";
+    const terminalId = attempt.jobId ?? attempt.observedJobId;
+    const terminal = terminalId
+      ? mobileDownloads.terminalJobFor(
+          { id: pending.model, name: pending.model },
+          pending.route.hostId,
+          terminalId,
+        )
+      : null;
+    if (terminal) {
+      finish(terminal);
+      return;
+    }
+    setGenerationStatus(
+      `Downloading ${pending.model} on ${pending.route.label}. Press Develop again once it is ready.`,
+    );
+    generationAnnouncement.value = `Download queued on ${pending.route.label}.`;
+  } catch (error) {
+    if (missingGenerationPullAttempt.value?.id !== attempt.id) return;
+    attempt.requestError = describeTransportError(error, pending.route.label);
+    missingGenerationModelError.value = attempt.requestError;
+    release();
+  } finally {
+    missingGenerationModelBusy.value = false;
+  }
 }
 
 async function submitMobileSequence(): Promise<void> {
@@ -4128,7 +4383,18 @@ async function submitMobileSequence(): Promise<void> {
     return;
   }
   const entry = selectedGenerationModel.value;
-  if (!initialHost || !entry) return;
+  if (!initialHost || !form.model.trim()) return;
+  if (
+    !automatic &&
+    modelPresenceOnHost(
+      initialHost.id,
+      modelHostIds(form.model),
+      Object.prototype.hasOwnProperty.call(modelsByHost.value, initialHost.id),
+    ) === "missing"
+  ) {
+    promptForMissingGenerationModel(form.model, initialHost, routeForMobileHost(initialHost));
+    return;
+  }
   // Same contract as the one-shot path: a title the server would reject is an
   // inline refusal, never a silently dropped name.
   const titleCheck = requestTitle(printTitle.value);
@@ -4154,7 +4420,7 @@ async function submitMobileSequence(): Promise<void> {
   // checkpoint that reads none shows no well, so a retained image is parked
   // out of the request rather than shipped as conditioning admission refuses.
   const openingImageSupported =
-    parseSourceImageCapability(entry.source_image ?? form.sourceImageCapability) !== "unsupported";
+    parseSourceImageCapability(entry?.source_image ?? form.sourceImageCapability) !== "unsupported";
   const openingSnapshot =
     openingImageSupported && draft.openingImage ? { ...draft.openingImage } : null;
   const enableAudio = draft.enableAudio;
@@ -4168,7 +4434,9 @@ async function submitMobileSequence(): Promise<void> {
   const backgroundTask = await beginMobileBackgroundTask("Preparing remote sequence");
   try {
     // Stale limits would mis-gate audio and frame caps for the routed host.
-    if (!chainLimits.value || chainLimits.value.model !== entry.name) await loadChainLimits();
+    if (entry && (!chainLimits.value || chainLimits.value.model !== requestForm.model)) {
+      await loadChainLimits();
+    }
     if (!isCurrent()) return;
     requestForm.sourceImage = openingSnapshot?.base64 ?? null;
     requestForm.maskImage = null;
@@ -4213,7 +4481,7 @@ async function submitMobileSequence(): Promise<void> {
         request: request as unknown as Record<string, unknown>,
         chain: true,
         copies: 1,
-        model: entry.name,
+        model: requestForm.model,
         family: form.family,
         subject: "sequence",
         requireAuthoritative: false,
@@ -4222,6 +4490,10 @@ async function submitMobileSequence(): Promise<void> {
       });
       if (routed.kind === "abandoned") return;
       if (routed.kind === "error") throw new Error(routed.message);
+      if (routed.kind === "missing_model") {
+        promptForMissingGenerationModel(routed.model, routed.host, routed.route);
+        return;
+      }
       // Freeze the machine the fan-out chose: this exact route is what the
       // durable sequence is recovered against.
       host = routed.host;
@@ -4247,6 +4519,11 @@ async function submitMobileSequence(): Promise<void> {
     }
     const classification: string = classifyPlacementPreview(preview);
     if (!isCurrent()) return;
+    const missingModel = classifyMissingModel(preview, requestForm.model);
+    if (missingModel) {
+      promptForMissingGenerationModel(missingModel.model, host, frozenRoute);
+      return;
+    }
     if (!legacyUnsupported && classification !== "unsupported" && classification !== "planned") {
       throw new Error(mobilePlacementFailure(preview, host.name, "sequence"));
     }
@@ -4286,7 +4563,7 @@ async function submitMobileSequence(): Promise<void> {
     }
     persistSequenceRecovery(host, response.job_id);
     watchSequenceJob(host.id, target, response.job_id, {
-      model: entry.name,
+      model: requestForm.model,
       stageCount: clips.length,
     });
   } catch (error) {
@@ -5338,17 +5615,8 @@ async function pullExpansionModel(): Promise<void> {
     history: [],
   };
   const attempt: MobileExpansionPullAttempt = {
-    id: ++expansionPullRequestId,
+    ...newMobileExactPullAttempt(++expansionPullRequestId, bucket),
     recoveryId: recovery.id,
-    phase: "connecting",
-    jobId: null,
-    observedJobId: null,
-    baselineJobIds: [...bucket.activeJobs, ...bucket.queued, ...bucket.history].map(
-      (job) => job.id,
-    ),
-    allowExistingInFlight: false,
-    requestError: null,
-    terminalJob: null,
   };
   expansionPullAttempt.value = attempt;
   syncExpansionDownloadConsumer(recovery);
@@ -5678,7 +5946,7 @@ async function generate(): Promise<void> {
     !initialRoute ||
     !target ||
     promptMissing.value ||
-    !selectedModelAvailable.value ||
+    !form.model.trim() ||
     !seedValid.value ||
     !parameterValid.value ||
     // Refused at the tap, beside every other inline error, rather than thrown
@@ -5916,6 +6184,11 @@ async function generate(): Promise<void> {
       releasePreparedSubmission();
       return;
     }
+    if (routed.kind === "missing_model") {
+      promptForMissingGenerationModel(routed.model, routed.host, routed.route);
+      releasePreparedSubmission();
+      return;
+    }
     // The chosen machine is frozen here: every later step — submission,
     // recovery, and the connection fence — reads this exact route.
     route = routed.route;
@@ -5931,6 +6204,9 @@ async function generate(): Promise<void> {
       requireAuthoritative: requireAuthoritativePlacement,
       isCurrent: () => submissionAttempt.isCurrent(),
       signal: submitSignal,
+      model: request.model,
+      modelOwnerIds: modelHostIds(request.model),
+      inventoryKnown: Object.prototype.hasOwnProperty.call(modelsByHost.value, route.hostId),
     });
     if (preview.kind === "abandoned") {
       releasePreparedSubmission();
@@ -5938,6 +6214,12 @@ async function generate(): Promise<void> {
     }
     if (preview.kind === "error") {
       setGenerationStatus(preview.message, true);
+      releasePreparedSubmission();
+      return;
+    }
+    if (preview.kind === "missing_model") {
+      const pullHost = hosts.value.find((candidate) => candidate.id === route.hostId);
+      if (pullHost) promptForMissingGenerationModel(preview.model, pullHost, route);
       releasePreparedSubmission();
       return;
     }
@@ -9546,6 +9828,11 @@ onBeforeUnmount(() => {
   recoveryRetryId += 1;
   expansionPullRequestId += 1;
   clearExpansionRecovery();
+  if (missingGenerationModelLeaseId) {
+    mobileDownloads.releaseFrozenPull(missingGenerationModelLeaseId);
+    missingGenerationModelLeaseId = null;
+  }
+  mobileDownloads.unregisterConsumer(missingModelConsumerId);
   document.removeEventListener("visibilitychange", handleForegroundResume);
   document.removeEventListener("focusin", handleKeyboardFocusIn, true);
   document.removeEventListener("focusout", handleKeyboardFocusOut, true);
@@ -9772,7 +10059,7 @@ onBeforeUnmount(() => {
               <option v-if="!form.model" value="" disabled>
                 {{ loadingModels ? "Loading models…" : "No generation models available" }}
               </option>
-              <option v-if="form.model && !selectedModelAvailable" :value="form.model" disabled>
+              <option v-if="form.model && !selectedModelInstalled" :value="form.model" disabled>
                 {{ modelLabel(form.model) }} · not installed
               </option>
               <option v-for="model in pickerModels" :key="model.name" :value="model.name">
@@ -9882,7 +10169,7 @@ onBeforeUnmount(() => {
 
           <template v-if="isSequence">
             <div
-              v-if="sequenceModels.length === 0"
+              v-if="sequenceModels.length === 0 && !selectedModelCanSequence"
               class="mobile-sequence-empty"
               data-test="mobile-sequence-empty"
             >
@@ -11563,6 +11850,42 @@ onBeforeUnmount(() => {
       @close="generatedViewerOpen = false"
       @reuse="generatedViewerOpen = false"
     />
+
+    <MobileLibrarySheet
+      :open="missingGenerationModel !== null"
+      title="Model not on machine"
+      :done-label="
+        ['connecting', 'starting', 'queued', 'pulling'].includes(missingGenerationPullStatus.kind)
+          ? 'Downloading…'
+          : missingGenerationPullStatus.kind === 'missing'
+            ? 'Cancel'
+            : 'Done'
+      "
+      :focus-first-control="false"
+      test-id="mobile-missing-model-sheet"
+      @close="closeMissingGenerationModel"
+    >
+      <template v-if="missingGenerationModel">
+        <p class="section-note">
+          <span class="data-mono">{{ missingGenerationModel.model }}</span> isn't installed on
+          {{ missingGenerationModel.route.label }}. Download it there before developing?
+        </p>
+        <MobileExpansionPullStatus
+          :model="missingGenerationModel.model"
+          :host-label="missingGenerationModel.route.label"
+          :error="missingGenerationModelError"
+          :status="missingGenerationPullStatus"
+          :eta-seconds="missingGenerationPullEtaSeconds"
+          :models="models"
+          pull-label="Download model"
+          ready-label="Done"
+          retry-label="Retry download"
+          data-test="mobile-missing-model-progress"
+          @pull="pullMissingGenerationModel"
+          @retry-expansion="closeMissingGenerationModel"
+        />
+      </template>
+    </MobileLibrarySheet>
 
     <LicenseAcceptanceDialog :open-external="openExternal" />
 
