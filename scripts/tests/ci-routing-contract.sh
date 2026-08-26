@@ -441,6 +441,9 @@ fi
 desktop_linux="$(extract_job "$desktop" desktop-linux)"
 grep -Fq "if: github.event_name != 'pull_request'" <<< "$desktop_linux" \
   || fail "Desktop Linux still runs on pull requests"
+desktop_windows="$(extract_job "$desktop" desktop-windows)"
+grep -Fq "if: github.event_name != 'pull_request'" <<< "$desktop_windows" \
+  || fail "Desktop Windows still runs on pull requests"
 if grep -Fq 'bunx vue-tsc -b' "$desktop"; then
   fail "desktop frontend still typechecks once explicitly and again during build"
 fi
