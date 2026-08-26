@@ -150,8 +150,8 @@ function onH3Picked(image: MobilePickedImage): void {
   if (!endpoint) return;
   applyH3(setMinimaxH3PickedImageBoundary(props.form.h3Authoring, endpoint, image));
 }
-function onH3ReferenceImagesPicked(images: MobilePickedImage[]): void {
-  applyH3(appendMinimaxH3PickedImageReferences(props.form.h3Authoring, images));
+async function onH3ReferenceImagesPicked(images: MobilePickedImage[]): Promise<void> {
+  applyH3(await appendMinimaxH3PickedImageReferences(props.form.h3Authoring, images));
 }
 const h3ReferencePickerMaxBytes = computed(() =>
   Math.max(0, MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES - inlineGenerationMediaBytes(props.form)),
