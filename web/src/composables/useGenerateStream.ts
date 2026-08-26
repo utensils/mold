@@ -2298,11 +2298,7 @@ function markCancellationConfirmed(job: Job): void {
 
 async function confirmDurableCancellation(job: Job): Promise<void> {
   const durable = job.durableBatch;
-  if (
-    job.state !== "running" ||
-    !job.serverId ||
-    !durable?.serverBatchId
-  )
+  if (job.state !== "running" || !job.serverId || !durable?.serverBatchId)
     return;
   const active = durableCancellations.get(job.id);
   if (active) return active;

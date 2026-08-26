@@ -6225,6 +6225,36 @@ mod hdr_chain_guard_tests {
 #[cfg(test)]
 mod audio_batch_passthrough_tests {
     use super::*;
+    use wiremock::{Request, Respond, ResponseTemplate};
+
+    struct CompleteCanonicalAdmission {
+        batch_id: &'static str,
+        job_id: &'static str,
+        filename: &'static str,
+        original_filename: Option<&'static str>,
+    }
+
+    impl Respond for CompleteCanonicalAdmission {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let mut result = serde_json::json!({ "filename": self.filename });
+            if let Some(original) = self.original_filename {
+                result["original_filename"] = original.into();
+            }
+            ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "id": self.batch_id,
+                "client_batch_id": body["client_batch_id"],
+                "instance_id": "instance-1",
+                "durable": true,
+                "children": [{
+                    "index": 1,
+                    "job_id": self.job_id,
+                    "state": "complete",
+                    "result": result
+                }]
+            }))
+        }
+    }
 
     async fn mount_canonical_capabilities(server: &wiremock::MockServer, limit: u32) {
         use wiremock::matchers::{method, path};
@@ -6385,21 +6415,12 @@ mod audio_batch_passthrough_tests {
         mount_canonical_capabilities(&server, 64).await;
         Mock::given(method("POST"))
             .and(path("/api/generation-batches"))
-            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
-                "id": "batch-1",
-                "client_batch_id": "client-1",
-                "instance_id": "instance-1",
-                "durable": true,
-                "children": [{
-                    "index": 1,
-                    "job_id": "job-1",
-                    "state": "complete",
-                    "result": {
-                        "filename": "finished.png",
-                        "original_filename": "original.png"
-                    }
-                }]
-            })))
+            .respond_with(CompleteCanonicalAdmission {
+                batch_id: "batch-1",
+                job_id: "job-1",
+                filename: "finished.png",
+                original_filename: Some("original.png"),
+            })
             .expect(1)
             .mount(&server)
             .await;
@@ -6466,18 +6487,12 @@ mod audio_batch_passthrough_tests {
         Mock::given(method("POST"))
             .and(path("/api/generation-batches"))
             .and(ChildIndex(1))
-            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
-                "id": "batch-1",
-                "client_batch_id": "accepted-client",
-                "instance_id": "instance-1",
-                "durable": true,
-                "children": [{
-                    "index": 1,
-                    "job_id": "job-1",
-                    "state": "complete",
-                    "result": { "filename": "first.png" }
-                }]
-            })))
+            .respond_with(CompleteCanonicalAdmission {
+                batch_id: "batch-1",
+                job_id: "job-1",
+                filename: "first.png",
+                original_filename: None,
+            })
             .expect(1)
             .mount(&server)
             .await;
@@ -6518,9 +6533,17 @@ mod audio_batch_passthrough_tests {
             std::fs::read(dir.path().join("result-0.png")).unwrap(),
             b"first"
         );
-        assert!(error.to_string().contains("accepted-client"));
         assert!(error.to_string().contains("accepted client ids"));
         let submitted = server.received_requests().await.unwrap();
+        let accepted_client_id = submitted
+            .iter()
+            .filter(|request| request.url.path() == "/api/generation-batches")
+            .find_map(|request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).ok()?;
+                (body["requests"][0]["batch_index"].as_u64() == Some(1))
+                    .then(|| body["client_batch_id"].as_str().unwrap().to_string())
+            })
+            .unwrap();
         let failed_client_id = submitted
             .iter()
             .filter(|request| request.url.path() == "/api/generation-batches")
@@ -6530,6 +6553,7 @@ mod audio_batch_passthrough_tests {
                     .then(|| body["client_batch_id"].as_str().unwrap().to_string())
             })
             .unwrap();
+        assert!(error.to_string().contains(&accepted_client_id));
         assert!(error.to_string().contains(&failed_client_id));
     }
 
