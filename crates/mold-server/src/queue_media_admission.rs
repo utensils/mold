@@ -26,6 +26,7 @@ pub(crate) struct DurableMediaAdmission {
     lifecycle: Arc<QueueMediaLifecycle>,
     ingress: Arc<QueueMediaIngress>,
     receipt_key: Arc<Zeroizing<[u8; 32]>>,
+    owner_uuid: String,
 }
 
 pub(crate) struct DurableAdmissionOutcome {
@@ -56,38 +57,71 @@ enum DurableReceiptVerification {
 
 fn durable_operation_receipt(
     key: &[u8; 32],
+    owner_uuid: &str,
     operation_id: &str,
     fingerprint: &QueueMediaOperationFingerprint,
 ) -> String {
     let nonce = uuid::Uuid::new_v4().simple().to_string();
-    let digest = durable_operation_receipt_mac(key, operation_id, fingerprint, &nonce);
+    let opaque_fingerprint =
+        opaque_operation_fingerprint(key, owner_uuid, operation_id, fingerprint);
+    let digest = durable_operation_receipt_mac(
+        key,
+        owner_uuid,
+        operation_id,
+        fingerprint.version(),
+        &opaque_fingerprint,
+        &nonce,
+    );
     format!(
         "{DURABLE_OPERATION_RECEIPT_PREFIX}.{nonce}.{:04x}.{}.{}",
         fingerprint.version(),
-        fingerprint.sha256_hex(),
+        opaque_fingerprint,
         hex_bytes(&digest)
     )
 }
 
-fn durable_operation_receipt_mac(
+fn opaque_operation_fingerprint(
     key: &[u8; 32],
+    owner_uuid: &str,
     operation_id: &str,
     fingerprint: &QueueMediaOperationFingerprint,
+) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts a 32-byte key");
+    mac.update(b"mold durable generation opaque fingerprint\0");
+    update_length_delimited(&mut mac, owner_uuid.as_bytes());
+    update_length_delimited(&mut mac, operation_id.as_bytes());
+    mac.update(&fingerprint.version().to_be_bytes());
+    update_length_delimited(&mut mac, fingerprint.sha256_hex().as_bytes());
+    hex_bytes(&mac.finalize().into_bytes())
+}
+
+fn update_length_delimited(mac: &mut Hmac<Sha256>, value: &[u8]) {
+    mac.update(&(value.len() as u64).to_be_bytes());
+    mac.update(value);
+}
+
+fn durable_operation_receipt_mac(
+    key: &[u8; 32],
+    owner_uuid: &str,
+    operation_id: &str,
+    fingerprint_version: u16,
+    opaque_fingerprint: &str,
     nonce: &str,
 ) -> [u8; 32] {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts a 32-byte key");
     mac.update(b"mold durable generation operation receipt\0");
-    mac.update(&(operation_id.len() as u64).to_be_bytes());
-    mac.update(operation_id.as_bytes());
-    mac.update(nonce.as_bytes());
-    mac.update(&fingerprint.version().to_be_bytes());
-    mac.update(fingerprint.sha256_hex().as_bytes());
+    update_length_delimited(&mut mac, owner_uuid.as_bytes());
+    update_length_delimited(&mut mac, operation_id.as_bytes());
+    update_length_delimited(&mut mac, nonce.as_bytes());
+    mac.update(&fingerprint_version.to_be_bytes());
+    update_length_delimited(&mut mac, opaque_fingerprint.as_bytes());
     mac.finalize().into_bytes().into()
 }
 
 fn verify_durable_operation_receipt(
     key: &[u8; 32],
     receipt: &str,
+    owner_uuid: &str,
     operation_id: &str,
     fingerprint: &QueueMediaOperationFingerprint,
 ) -> Option<DurableReceiptVerification> {
@@ -97,15 +131,15 @@ fn verify_durable_operation_receipt(
     }
     let nonce = parts.next()?;
     let stored_version = parts.next()?;
-    let stored_fingerprint = parts.next()?;
+    let stored_fingerprint_token = parts.next()?;
     let received_mac = parts.next()?;
     if parts.next().is_some()
         || nonce.len() != 32
         || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
         || stored_version.len() != 4
         || !stored_version.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || stored_fingerprint.len() != 64
-        || !stored_fingerprint
+        || stored_fingerprint_token.len() != 64
+        || !stored_fingerprint_token
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
         || received_mac.len() != 64
@@ -116,24 +150,31 @@ fn verify_durable_operation_receipt(
     let Ok(version) = u16::from_str_radix(stored_version, 16) else {
         return Some(DurableReceiptVerification::Invalid);
     };
-    let stored = QueueMediaOperationFingerprint::from_parts(version, stored_fingerprint.to_owned());
-    let Ok(stored) = stored else {
-        return Some(DurableReceiptVerification::Invalid);
-    };
     let expected = hex_bytes(&durable_operation_receipt_mac(
         key,
+        owner_uuid,
         operation_id,
-        &stored,
+        version,
+        stored_fingerprint_token,
         nonce,
     ));
     if !bool::from(expected.as_bytes().ct_eq(received_mac.as_bytes())) {
         return Some(DurableReceiptVerification::Invalid);
     }
-    Some(if stored.constant_time_eq(fingerprint) {
-        DurableReceiptVerification::Match
-    } else {
-        DurableReceiptVerification::Conflict
-    })
+    let incoming_token = opaque_operation_fingerprint(key, owner_uuid, operation_id, fingerprint);
+    Some(
+        if version == fingerprint.version()
+            && bool::from(
+                stored_fingerprint_token
+                    .as_bytes()
+                    .ct_eq(incoming_token.as_bytes()),
+            )
+        {
+            DurableReceiptVerification::Match
+        } else {
+            DurableReceiptVerification::Conflict
+        },
+    )
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
@@ -164,6 +205,20 @@ impl std::io::Write for FingerprintWriter {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_operation_fingerprint(
+    operation_id: &str,
+    mut requests: Vec<mold_core::GenerateRequest>,
+) -> QueueMediaOperationFingerprint {
+    for request in &mut requests {
+        mold_core::minimax_h3::canonicalize_request_model(request);
+    }
+    normalize_batch_provenance(&mut requests, operation_id).unwrap();
+    let mut writer = FingerprintWriter::new();
+    serde_json::to_writer(&mut writer, &requests).unwrap();
+    writer.finish()
 }
 
 struct SealInput {
@@ -258,14 +313,18 @@ impl DurableMediaAdmission {
     pub(crate) fn new(
         lifecycle: Arc<QueueMediaLifecycle>,
         queue_capacity: usize,
+        receipt_evidence_exists: bool,
     ) -> Result<Arc<Self>, crate::queue_media_store::QueueMediaError> {
         let receipt_key = crate::queue_media_store::QueueMediaStore::generation_admission_key(
             lifecycle.mold_home(),
+            receipt_evidence_exists,
         )?;
+        let owner_uuid = lifecycle.owner_uuid().to_string();
         Ok(Arc::new(Self {
             lifecycle,
             ingress: QueueMediaIngress::new(queue_capacity),
             receipt_key: Arc::new(receipt_key),
+            owner_uuid,
         }))
     }
 
@@ -459,6 +518,7 @@ impl DurableMediaAdmission {
             .filter_map(|(observer, job_id)| observer.as_ref().map(|_| job_id.clone()))
             .collect::<Vec<_>>();
         let journal = state.queue_journal.clone();
+        let owner_uuid = self.owner_uuid.clone();
         let batch_id_for_db = batch_id.clone();
         let client_id_for_db = body.client_batch_id.clone();
         let observers_for_db = observer_job_ids;
@@ -471,6 +531,7 @@ impl DurableMediaAdmission {
                 let mut sealed = seal_batch_blocking(
                     lifecycle,
                     receipt_key.as_ref(),
+                    &owner_uuid,
                     &operation_id,
                     &fingerprint_for_seal,
                     seal_inputs,
@@ -590,6 +651,7 @@ impl DurableMediaAdmission {
         if let Some(result) = verify_durable_operation_receipt(
             self.receipt_key.as_ref(),
             &detail.batch.request_sha256,
+            &self.owner_uuid,
             operation_id,
             fingerprint,
         ) {
@@ -626,8 +688,12 @@ impl DurableMediaAdmission {
         })
         .await??;
 
-        let replacement =
-            durable_operation_receipt(self.receipt_key.as_ref(), &operation_id, &fingerprint);
+        let replacement = durable_operation_receipt(
+            self.receipt_key.as_ref(),
+            &self.owner_uuid,
+            &operation_id,
+            &fingerprint,
+        );
         let journal = state.queue_journal.clone();
         let batch_id = detail.batch.id.clone();
         let expected = detail.batch.request_sha256.clone();
@@ -647,6 +713,7 @@ impl DurableMediaAdmission {
         match verify_durable_operation_receipt(
             self.receipt_key.as_ref(),
             &current.batch.request_sha256,
+            &self.owner_uuid,
             &operation_id,
             &fingerprint,
         ) {
@@ -801,6 +868,7 @@ fn durable_media_batch_preflight(requests: &[mold_core::GenerateRequest]) -> Res
 fn seal_batch_blocking(
     lifecycle: Arc<QueueMediaLifecycle>,
     receipt_key: &[u8; 32],
+    owner_uuid: &str,
     operation_id: &str,
     fingerprint: &QueueMediaOperationFingerprint,
     inputs: Vec<SealInput>,
@@ -886,6 +954,7 @@ fn seal_batch_blocking(
     }
     batch.receipt = Some(durable_operation_receipt(
         receipt_key,
+        owner_uuid,
         operation_id,
         fingerprint,
     ));
@@ -949,6 +1018,41 @@ async fn existing_by_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v2_receipt_hides_raw_fingerprint_and_is_owner_bound() {
+        let key = [7_u8; 32];
+        let fingerprint = QueueMediaOperationFingerprint::sha256_v1(b"private request bytes");
+        let receipt = durable_operation_receipt(&key, "owner-a", "operation-a", &fingerprint);
+        let parts = receipt.split('.').collect::<Vec<_>>();
+        assert_eq!(parts.len(), 5);
+        assert_eq!(parts[0], DURABLE_OPERATION_RECEIPT_PREFIX);
+        assert_eq!(parts[1].len(), 32);
+        assert_eq!(parts[2].len(), 4);
+        assert_eq!(parts[3].len(), 64);
+        assert_eq!(parts[4].len(), 64);
+        assert!(!receipt.contains(fingerprint.sha256_hex()));
+        assert!(matches!(
+            verify_durable_operation_receipt(
+                &key,
+                &receipt,
+                "owner-a",
+                "operation-a",
+                &fingerprint
+            ),
+            Some(DurableReceiptVerification::Match)
+        ));
+        assert!(matches!(
+            verify_durable_operation_receipt(
+                &key,
+                &receipt,
+                "owner-b",
+                "operation-a",
+                &fingerprint
+            ),
+            Some(DurableReceiptVerification::Invalid)
+        ));
+    }
 
     fn request() -> mold_core::GenerateRequest {
         serde_json::from_value(serde_json::json!({

@@ -5133,6 +5133,19 @@ mod tests {
         AppState,
         tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
     ) {
+        durable_state_with_admission_policy(db, root, engine, require_media_ready, true)
+    }
+
+    fn durable_state_with_admission_policy(
+        db: Arc<Option<mold_db::MetadataDb>>,
+        root: &std::path::Path,
+        engine: MockEngine,
+        require_media_ready: bool,
+        install_admission: bool,
+    ) -> (
+        AppState,
+        tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
+    ) {
         let gallery = durable_gallery_dir(root);
         std::fs::create_dir_all(&gallery).unwrap();
         let (mut state, rx) = AppState::with_engine_and_queue(engine);
@@ -5159,15 +5172,18 @@ mod tests {
             )
             .unwrap();
             assert!(!require_media_ready || report.durable_media_ready);
-            let admission = crate::queue_media_admission::DurableMediaAdmission::new(
-                lifecycle,
-                state.queue_capacity,
-            )
-            .unwrap();
-            state
-                .queue_journal
-                .install_queue_media_admission(admission)
+            if install_admission {
+                let admission = crate::queue_media_admission::DurableMediaAdmission::new(
+                    lifecycle,
+                    state.queue_capacity,
+                    false,
+                )
                 .unwrap();
+                state
+                    .queue_journal
+                    .install_queue_media_admission(admission)
+                    .unwrap();
+            }
         }
         state
             .config
@@ -6041,13 +6057,10 @@ mod tests {
                 .map_err(Into::into)
             })
             .unwrap();
-        let parts = current_receipt.split('.').collect::<Vec<_>>();
-        assert_eq!(parts[0], "generation-v2");
-        let fingerprint = crate::queue_media_store::QueueMediaOperationFingerprint::from_parts(
-            u16::from_str_radix(parts[2], 16).unwrap(),
-            parts[3].to_string(),
-        )
-        .unwrap();
+        assert!(current_receipt.starts_with("generation-v2."));
+        let requests = serde_json::from_value(body["requests"].clone()).unwrap();
+        let fingerprint =
+            crate::queue_media_admission::test_operation_fingerprint(&client_id, requests);
         let store = crate::queue_media_store::QueueMediaStore::open_existing(root.path()).unwrap();
         let legacy = store
             .seal_operation_receipt_v1(&owner, &client_id, &fingerprint)
@@ -6124,6 +6137,75 @@ mod tests {
             .unwrap();
         assert_eq!(replay.status(), StatusCode::OK);
         assert_eq!(json_body(replay).await["id"], admitted["id"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_or_corrupt_admission_key_degrades_capability_without_stopping_service() {
+        for corrupt in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+            let body = serde_json::json!({
+                "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                "requests": [serde_json::from_str::<serde_json::Value>(
+                    &generate_body("receipt-key evidence", 64, 64)
+                ).unwrap()],
+            });
+            let (mut state, rx) = durable_state(db.clone(), root.path());
+            install_authoritative_v2(&mut state);
+            let admitted = app_with_state(state)
+                .oneshot(json_request(
+                    "POST",
+                    "/api/generation-batches",
+                    body.clone(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+            drop(rx);
+
+            let key = root.path().join("queue-media/generation-admission.key");
+            if corrupt {
+                std::fs::write(&key, [3_u8; 11]).unwrap();
+            } else {
+                std::fs::remove_file(&key).unwrap();
+            }
+
+            let (mut restarted, _rx) = durable_state_with_admission_policy(
+                db,
+                root.path(),
+                MockEngine::ready(),
+                true,
+                false,
+            );
+            install_authoritative_v2(&mut restarted);
+            let lifecycle = restarted.queue_journal.queue_media_lifecycle().unwrap();
+            assert!(!crate::install_durable_admission_if_available(
+                &restarted.queue_journal,
+                lifecycle,
+                restarted.queue_capacity,
+            ));
+            let app = app_with_state(restarted);
+            let status = app
+                .clone()
+                .oneshot(empty_request("GET", "/api/status"))
+                .await
+                .unwrap();
+            assert_eq!(status.status(), StatusCode::OK);
+            let capabilities = app
+                .clone()
+                .oneshot(empty_request("GET", "/api/capabilities"))
+                .await
+                .unwrap();
+            assert_eq!(capabilities.status(), StatusCode::OK);
+            let capabilities = json_body(capabilities).await;
+            assert_eq!(capabilities["queue"]["heterogeneous_batch"], false);
+            assert!(capabilities["queue"]["admission_protocol_version"].is_null());
+            let rejected = app
+                .oneshot(json_request("POST", "/api/generation-batches", body))
+                .await
+                .unwrap();
+            assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

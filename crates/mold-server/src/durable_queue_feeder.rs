@@ -1541,7 +1541,8 @@ mod tests {
             .install_queue_media_lifecycle(lifecycle.clone())
             .unwrap();
         let admission =
-            crate::queue_media_admission::DurableMediaAdmission::new(lifecycle, 200).unwrap();
+            crate::queue_media_admission::DurableMediaAdmission::new(lifecycle, 200, false)
+                .unwrap();
         state
             .queue_journal
             .install_queue_media_admission(admission.clone())

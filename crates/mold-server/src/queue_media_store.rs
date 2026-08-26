@@ -156,6 +156,8 @@ pub enum QueueMediaError {
     MissingKeyWithExistingStore,
     #[error("queue-media master key does not exist")]
     MissingKey,
+    #[error("durable-generation admission key is missing while authenticated receipts exist")]
+    MissingAdmissionKeyWithReceipts,
     #[error("queue-media set already exists for owner {owner_id} job {job_id}")]
     JobAlreadySealed { owner_id: String, job_id: String },
     #[error("queue-media set was not found")]
@@ -453,17 +455,6 @@ impl QueueMediaOperationFingerprint {
             version: OPERATION_FINGERPRINT_VERSION_SHA256_V1,
             sha256_hex: hex_encode(&digest),
         }
-    }
-
-    pub(crate) fn from_parts(version: u16, sha256_hex: String) -> Result<Self, QueueMediaError> {
-        validate_operation_fingerprint(WireOperationFingerprint {
-            version,
-            sha256_hex: sha256_hex.clone(),
-        })?;
-        Ok(Self {
-            version,
-            sha256_hex,
-        })
     }
 
     pub fn version(&self) -> u16 {
@@ -1052,6 +1043,7 @@ impl QueueMediaStore {
     /// request media, so media-free admission survives a damaged media key.
     pub(crate) fn generation_admission_key(
         mold_home: impl AsRef<Path>,
+        receipt_evidence_exists: bool,
     ) -> Result<Zeroizing<[u8; KEY_BYTES]>, QueueMediaError> {
         let mold_home = mold_home.as_ref();
         ensure_existing_directory(mold_home)?;
@@ -1060,6 +1052,8 @@ impl QueueMediaStore {
         let key_path = container.join(GENERATION_ADMISSION_KEY_FILE);
         if symlink_metadata_optional(&key_path)?.is_some() {
             load_master_key(&key_path)
+        } else if receipt_evidence_exists {
+            Err(QueueMediaError::MissingAdmissionKeyWithReceipts)
         } else {
             initialize_master_key(&key_path).map(|(key, _)| key)
         }
@@ -4160,6 +4154,43 @@ fn open_or_create_private_file(path: &Path) -> Result<File, QueueMediaError> {
 mod tests {
     use super::*;
     use std::io::{Seek, SeekFrom};
+
+    #[test]
+    fn admission_key_is_created_only_without_receipt_evidence() {
+        let home = tempfile::tempdir().unwrap();
+        let first = QueueMediaStore::generation_admission_key(home.path(), false).unwrap();
+        let loaded = QueueMediaStore::generation_admission_key(home.path(), true).unwrap();
+        assert_eq!(first.as_ref(), loaded.as_ref());
+
+        std::fs::remove_file(
+            home.path()
+                .join(STORE_DIR)
+                .join(GENERATION_ADMISSION_KEY_FILE),
+        )
+        .unwrap();
+        assert!(matches!(
+            QueueMediaStore::generation_admission_key(home.path(), true),
+            Err(QueueMediaError::MissingAdmissionKeyWithReceipts)
+        ));
+        assert!(!home
+            .path()
+            .join(STORE_DIR)
+            .join(GENERATION_ADMISSION_KEY_FILE)
+            .exists());
+    }
+
+    #[test]
+    fn corrupt_admission_key_is_never_regenerated() {
+        let home = tempfile::tempdir().unwrap();
+        QueueMediaStore::generation_admission_key(home.path(), false).unwrap();
+        let key_path = home
+            .path()
+            .join(STORE_DIR)
+            .join(GENERATION_ADMISSION_KEY_FILE);
+        std::fs::write(&key_path, [9_u8; 7]).unwrap();
+        assert!(QueueMediaStore::generation_admission_key(home.path(), true).is_err());
+        assert_eq!(std::fs::read(key_path).unwrap(), [9_u8; 7]);
+    }
 
     struct CountingReader<R> {
         inner: R,
