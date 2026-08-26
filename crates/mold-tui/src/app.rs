@@ -2907,6 +2907,7 @@ impl App {
                             | mold_core::SseProgressEvent::DownloadDone { .. }
                             | mold_core::SseProgressEvent::PullComplete { .. }
                             | mold_core::SseProgressEvent::StageStart { .. }
+                            | mold_core::SseProgressEvent::StageProgress { .. }
                             | mold_core::SseProgressEvent::Info { .. } => {
                                 let _ =
                                     tx_sse.send(BackgroundEvent::UpscaleDownloadProgress(event));
@@ -9039,6 +9040,13 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
                 style: ProgressStyle::Done,
             });
         }
+        SseProgressEvent::StageProgress {
+            name,
+            current,
+            total,
+        } => {
+            progress.current_stage = Some(format!("{name} {current}/{total}"));
+        }
         SseProgressEvent::Info { message } => {
             // Download status messages go to the stage spinner only (not the log)
             // to avoid duplicate display.
@@ -9481,6 +9489,25 @@ mod tests {
         assert!(state.stage_started_at.is_none());
         assert!(state.download_filename.is_empty());
         assert!(state.weight_component.is_empty());
+    }
+
+    #[test]
+    fn bounded_stage_progress_keeps_inner_work_visible() {
+        let mut state = ProgressState::default();
+        reduce_progress_state(
+            &mut state,
+            SseProgressEvent::StageProgress {
+                name: "Encoding prompt (Gemma, conditional)".to_string(),
+                current: 17,
+                total: 48,
+            },
+        );
+
+        assert_eq!(
+            state.current_stage.as_deref(),
+            Some("Encoding prompt (Gemma, conditional) 17/48")
+        );
+        assert_eq!(state.denoise_step, 0);
     }
 
     #[test]

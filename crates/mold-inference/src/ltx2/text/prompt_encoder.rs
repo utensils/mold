@@ -17,6 +17,7 @@ use super::gemma3_gguf::GgufGemmaEncoder;
 use super::gemma4::Gemma4HiddenStateEncoder;
 use crate::ltx2::model::LtxRopeType;
 use crate::ltx2::preset::{GemmaArchitecture, GemmaFeatureExtractorKind, Ltx2ModelPreset};
+use crate::progress::ProgressCallback;
 
 /// Backend for the Gemma 3 12B prompt encoder. The two variants both produce
 /// `Vec<Tensor>` of hidden states with `len() == num_hidden_layers + 1`, so
@@ -53,11 +54,21 @@ impl GemmaHiddenStateBackend {
         }
     }
 
-    fn encode_prompt_tokens(&mut self, tokens: &PromptTokens) -> Result<GemmaHiddenStates> {
+    fn encode_prompt_tokens(
+        &mut self,
+        tokens: &PromptTokens,
+        progress: Option<&ProgressCallback>,
+        stage_name: &str,
+    ) -> Result<GemmaHiddenStates> {
         match self {
             Self::Safetensors(encoder) => encoder.encode_prompt_tokens(tokens),
             Self::Gguf(encoder) => encoder.encode_prompt_tokens(tokens),
-            Self::Gemma4(encoder) => encoder.encode_prompt_tokens(tokens),
+            Self::Gemma4(encoder) => match progress {
+                Some(progress) => {
+                    encoder.encode_prompt_tokens_with_progress(tokens, Some(progress), stage_name)
+                }
+                None => encoder.encode_prompt_tokens(tokens),
+            },
         }
     }
 }
@@ -227,12 +238,29 @@ impl NativePromptEncoder {
         pair: &EncodedPromptPair,
         encode_unconditional: bool,
     ) -> Result<NativePromptEncoding> {
+        self.encode_prompt_pair_with_progress(pair, encode_unconditional, None)
+    }
+
+    pub fn encode_prompt_pair_with_progress(
+        &mut self,
+        pair: &EncodedPromptPair,
+        encode_unconditional: bool,
+        progress: Option<&ProgressCallback>,
+    ) -> Result<NativePromptEncoding> {
         let conditional = self
-            .encode_prompt_tokens(&pair.conditional)
+            .encode_prompt_tokens(
+                &pair.conditional,
+                progress,
+                "Encoding prompt (Gemma, conditional)",
+            )
             .context("failed to build conditional native LTX-2 embeddings")?;
         let unconditional = if encode_unconditional {
-            self.encode_prompt_tokens(&pair.unconditional)
-                .context("failed to build unconditional native LTX-2 embeddings")?
+            self.encode_prompt_tokens(
+                &pair.unconditional,
+                progress,
+                "Encoding prompt (Gemma, unconditional)",
+            )
+            .context("failed to build unconditional native LTX-2 embeddings")?
         } else {
             conditional.clone()
         };
@@ -247,10 +275,15 @@ impl NativePromptEncoder {
         self.gemma_backend.device()
     }
 
-    fn encode_prompt_tokens(&mut self, tokens: &PromptTokens) -> Result<EmbeddingsProcessorOutput> {
+    fn encode_prompt_tokens(
+        &mut self,
+        tokens: &PromptTokens,
+        progress: Option<&ProgressCallback>,
+        stage_name: &str,
+    ) -> Result<EmbeddingsProcessorOutput> {
         let encoded = self
             .gemma_backend
-            .encode_prompt_tokens(tokens)
+            .encode_prompt_tokens(tokens, progress, stage_name)
             .context("failed to encode Gemma prompt tokens")?;
         self.embeddings_processor
             .process_hidden_states(

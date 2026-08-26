@@ -11,6 +11,7 @@ use candle_nn::{linear_b as linear, Activation, Embedding, Linear, Module, VarBu
 
 use super::encoder::{build_attention_mask, build_position_ids, GemmaHiddenStates};
 use super::gemma::{GemmaAssets, PromptTokens};
+use crate::progress::{ProgressCallback, ProgressEvent};
 
 const HIDDEN_SIZE: usize = 3_840;
 const INTERMEDIATE_SIZE: usize = 15_360;
@@ -421,17 +422,43 @@ impl Gemma4HiddenStateEncoder {
     }
 
     pub fn encode_prompt_tokens(&mut self, tokens: &PromptTokens) -> Result<GemmaHiddenStates> {
+        self.encode_prompt_tokens_with_progress(tokens, None, "Encoding prompt (Gemma)")
+    }
+
+    pub fn encode_prompt_tokens_with_progress(
+        &mut self,
+        tokens: &PromptTokens,
+        progress: Option<&ProgressCallback>,
+        stage_name: &str,
+    ) -> Result<GemmaHiddenStates> {
         let ids = Tensor::new(tokens.input_ids.as_slice(), &self.device)?.unsqueeze(0)?;
         let attention_mask =
             Tensor::new(tokens.attention_mask.as_slice(), &self.device)?.unsqueeze(0)?;
-        let hidden_states = self.forward_hidden_states(&ids, &attention_mask)?;
+        let hidden_states =
+            self.forward_hidden_states_with_progress(&ids, &attention_mask, progress, stage_name)?;
         Ok(GemmaHiddenStates {
             hidden_states,
             attention_mask,
         })
     }
 
+    #[cfg(test)]
     fn forward_hidden_states(&self, ids: &Tensor, attention_mask: &Tensor) -> Result<Vec<Tensor>> {
+        self.forward_hidden_states_with_progress(
+            ids,
+            attention_mask,
+            None,
+            "Encoding prompt (Gemma)",
+        )
+    }
+
+    fn forward_hidden_states_with_progress(
+        &self,
+        ids: &Tensor,
+        attention_mask: &Tensor,
+        progress: Option<&ProgressCallback>,
+        stage_name: &str,
+    ) -> Result<Vec<Tensor>> {
         let (batch, seq) = ids.dims2()?;
         if seq > self.cfg.sliding_window {
             bail!(
@@ -463,6 +490,13 @@ impl Gemma4HiddenStateEncoder {
             if index + 1 < self.cfg.num_layers {
                 hidden_states.push(xs.clone());
             }
+            if let Some(progress) = progress {
+                progress(ProgressEvent::StageProgress {
+                    name: stage_name.to_string(),
+                    current: index + 1,
+                    total: self.cfg.num_layers,
+                });
+            }
         }
         hidden_states.push(self.norm.forward(&xs)?);
         if hidden_states
@@ -478,6 +512,7 @@ impl Gemma4HiddenStateEncoder {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
     use candle_core::{DType, Device, Tensor};
     use candle_nn::VarBuilder;
@@ -642,5 +677,42 @@ mod tests {
         for (actual, expected) in final_values.iter().zip(expected) {
             assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
         }
+    }
+
+    #[test]
+    fn streaming_layers_emit_bounded_stage_progress() {
+        let cfg = tiny_config();
+        let encoder = Gemma4HiddenStateEncoder::new_streaming(cfg, tiny_var_builder(cfg)).unwrap();
+        let ids = Tensor::new(&[[3u32]], &Device::Cpu).unwrap();
+        let mask = Tensor::new(&[[1u8]], &Device::Cpu).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&seen);
+        let progress: crate::progress::ProgressCallback = Box::new(move |event| {
+            if let crate::progress::ProgressEvent::StageProgress {
+                name,
+                current,
+                total,
+            } = event
+            {
+                captured.lock().unwrap().push((name, current, total));
+            }
+        });
+
+        encoder
+            .forward_hidden_states_with_progress(
+                &ids,
+                &mask,
+                Some(&progress),
+                "Encoding prompt (Gemma, conditional)",
+            )
+            .unwrap();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                ("Encoding prompt (Gemma, conditional)".to_string(), 1, 2),
+                ("Encoding prompt (Gemma, conditional)".to_string(), 2, 2),
+            ]
+        );
     }
 }

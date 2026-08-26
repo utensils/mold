@@ -100,7 +100,7 @@ validate_graph() {
     and .["11"].inputs.noise_seed == 25026
     and .["13"].inputs.sigmas == "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
     and .["20"].inputs.noise_seed == 42
-    and .["22"].inputs.sigmas == "0.85, 0.7250, 0.4219, 0.0"
+    and .["22"].inputs.sigmas == "0.909375, 0.7250, 0.421875, 0.0"
     and .["26"].inputs.tile_size == 256
     and .["28"].inputs.fps == 24
     and .["29"].inputs.filename_prefix == "ltx25-comfy-int8-mps-seed-25026"

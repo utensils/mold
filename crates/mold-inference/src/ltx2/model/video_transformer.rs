@@ -4039,6 +4039,34 @@ impl Ltx2AvTransformer3DModel {
         static_inputs: &LtxPreparedStaticInputs,
         perturbations: Option<&BatchedPerturbationConfig>,
     ) -> Result<(Tensor, Option<Tensor>)> {
+        self.forward_with_static_inputs_and_progress(
+            video_hidden_states,
+            audio_hidden_states,
+            video_sigma,
+            video_timestep,
+            audio_sigma,
+            audio_timestep,
+            static_inputs,
+            perturbations,
+            "Evaluating transformer",
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_with_static_inputs_and_progress(
+        &self,
+        video_hidden_states: &Tensor,
+        audio_hidden_states: Option<&Tensor>,
+        video_sigma: &Tensor,
+        video_timestep: &Tensor,
+        audio_sigma: Option<&Tensor>,
+        audio_timestep: Option<&Tensor>,
+        static_inputs: &LtxPreparedStaticInputs,
+        perturbations: Option<&BatchedPerturbationConfig>,
+        progress_name: &str,
+        progress: Option<&crate::progress::ProgressCallback>,
+    ) -> Result<(Tensor, Option<Tensor>)> {
         let compute_dtype = match self.patchify_proj.weight().dtype() {
             DType::F8E4M3 => DType::BF16,
             other => other,
@@ -4135,6 +4163,12 @@ impl Ltx2AvTransformer3DModel {
                     if let (Some(audio), Some(ax)) = (audio.as_mut(), ax) {
                         audio.x = ax;
                     }
+                    emit_transformer_block_progress(
+                        progress,
+                        progress_name,
+                        index,
+                        self.config.num_layers,
+                    );
                     if ltx2_block_debug_enabled() {
                         let (v_mean, v_abs_mean, v_abs_max) = tensor_debug_stats(&video.x)?;
                         if let Some(audio) = audio.as_ref() {
@@ -4164,6 +4198,12 @@ impl Ltx2AvTransformer3DModel {
                     if let (Some(audio), Some(ax)) = (audio.as_mut(), ax) {
                         audio.x = ax;
                     }
+                    emit_transformer_block_progress(
+                        progress,
+                        progress_name,
+                        index,
+                        self.config.num_layers,
+                    );
                     if ltx2_block_debug_enabled() {
                         let (v_mean, v_abs_mean, v_abs_max) = tensor_debug_stats(&video.x)?;
                         if let Some(audio) = audio.as_ref() {
@@ -4219,6 +4259,12 @@ impl Ltx2AvTransformer3DModel {
                     if let (Some(audio), Some(ax)) = (audio.as_mut(), ax) {
                         audio.x = ax;
                     }
+                    emit_transformer_block_progress(
+                        progress,
+                        progress_name,
+                        index,
+                        self.config.num_layers,
+                    );
                     if ltx2_block_debug_enabled() {
                         let (v_mean, v_abs_mean, v_abs_max) = tensor_debug_stats(&video.x)?;
                         if let Some(audio) = audio.as_ref() {
@@ -4306,6 +4352,21 @@ impl Ltx2AvTransformer3DModel {
             &static_inputs,
             perturbations,
         )
+    }
+}
+
+fn emit_transformer_block_progress(
+    progress: Option<&crate::progress::ProgressCallback>,
+    name: &str,
+    index: usize,
+    total: usize,
+) {
+    if let Some(progress) = progress {
+        progress(crate::progress::ProgressEvent::StageProgress {
+            name: name.to_string(),
+            current: index + 1,
+            total,
+        });
     }
 }
 

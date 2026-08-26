@@ -230,6 +230,11 @@ export function applyProgress(job: Job, event: ProgressEvent): Job {
         job.stage = event.type === "stage_start" ? event.name : "Loading weights";
       }
       break;
+    case "stage_progress":
+      if (job.status !== "denoising" && job.status !== "finishing") job.status = "loading";
+      job.queuePosition = null;
+      job.stage = `${event.name} ${event.current}/${event.total}`;
+      break;
     case "denoise_step":
       job.status = "denoising";
       job.queuePosition = null;

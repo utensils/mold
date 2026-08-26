@@ -406,6 +406,7 @@ impl Ltx2AudioTransformerModel {
         })
     }
 
+    #[allow(dead_code)]
     pub fn forward_with_static_inputs(
         &self,
         audio_hidden_states: &Tensor,
@@ -413,6 +414,28 @@ impl Ltx2AudioTransformerModel {
         audio_timestep: &Tensor,
         static_inputs: &LtxPreparedModalityStatic,
         perturbations: Option<&BatchedPerturbationConfig>,
+    ) -> Result<Tensor> {
+        self.forward_with_static_inputs_and_progress(
+            audio_hidden_states,
+            audio_sigma,
+            audio_timestep,
+            static_inputs,
+            perturbations,
+            "Evaluating audio transformer",
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_with_static_inputs_and_progress(
+        &self,
+        audio_hidden_states: &Tensor,
+        audio_sigma: &Tensor,
+        audio_timestep: &Tensor,
+        static_inputs: &LtxPreparedModalityStatic,
+        perturbations: Option<&BatchedPerturbationConfig>,
+        progress_name: &str,
+        progress: Option<&crate::progress::ProgressCallback>,
     ) -> Result<Tensor> {
         let compute_dtype = self.compute_dtype();
         let audio_sigma = audio_sigma.to_dtype(compute_dtype)?.affine(1000.0, 0.0)?;
@@ -465,6 +488,13 @@ impl Ltx2AudioTransformerModel {
                 eprintln!("[ltx2-block-debug] enter audio block={index}");
             }
             audio.x = block.forward(index, &audio, &perturbations)?;
+            if let Some(progress) = progress {
+                progress(crate::progress::ProgressEvent::StageProgress {
+                    name: progress_name.to_string(),
+                    current: index + 1,
+                    total: self.transformer_blocks.len(),
+                });
+            }
             if ltx2_block_debug_enabled() {
                 let (a_mean, a_abs_mean, a_abs_max) = tensor_debug_stats(&audio.x)?;
                 eprintln!(

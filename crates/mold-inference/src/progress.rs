@@ -106,6 +106,14 @@ pub enum ProgressEvent {
     StageStart { name: String },
     /// The most recent stage completed, with its elapsed time
     StageDone { name: String, elapsed: Duration },
+    /// Bounded work inside a stage, such as one streaming transformer layer.
+    /// This remains separate from `DenoiseStep` so setup and inner evaluations
+    /// never masquerade as completed sampler steps.
+    StageProgress {
+        name: String,
+        current: usize,
+        total: usize,
+    },
     /// A scheduler-observable phase completed. This maps to the same
     /// StageDone SSE shape as a display-only stage but retains typed identity
     /// inside the inference/server boundary.
@@ -169,6 +177,14 @@ impl ProgressReporter {
         self.emit(ProgressEvent::StageDone {
             name: name.to_string(),
             elapsed,
+        });
+    }
+
+    pub fn stage_progress(&self, name: &str, current: usize, total: usize) {
+        self.emit(ProgressEvent::StageProgress {
+            name: name.to_string(),
+            current,
+            total,
         });
     }
 
@@ -262,6 +278,15 @@ impl From<ProgressEvent> for mold_core::SseProgressEvent {
             ProgressEvent::StageDone { name, elapsed } => mold_core::SseProgressEvent::StageDone {
                 name,
                 elapsed_ms: elapsed.as_millis() as u64,
+            },
+            ProgressEvent::StageProgress {
+                name,
+                current,
+                total,
+            } => mold_core::SseProgressEvent::StageProgress {
+                name,
+                current,
+                total,
             },
             ProgressEvent::PhaseDone {
                 name,

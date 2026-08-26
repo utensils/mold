@@ -622,6 +622,7 @@ export type SseProgressEvent =
   | { type: "dependency_wait"; dependency: string; reason: string }
   | { type: "stage_start"; name: string }
   | { type: "stage_done"; name: string; elapsed_ms: number }
+  | { type: "stage_progress"; name: string; current: number; total: number }
   | { type: "info"; message: string }
   | { type: "cache_hit"; resource: string }
   | { type: "denoise_step"; step: number; total: number; elapsed_ms: number }

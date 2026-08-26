@@ -36,6 +36,16 @@ pub fn audio_output_supported(paths: &mold_core::ModelPaths) -> bool {
     audio_output_gap(paths).is_none()
 }
 
+/// Whether a resolved LTX-2 checkpoint set plus an optional split-pack audio
+/// component contains every tensor required for native synchronized audio.
+/// LTX-2.5 keeps that component outside legacy [`mold_core::ModelPaths`].
+pub(crate) fn audio_output_supported_with_components(
+    paths: &mold_core::ModelPaths,
+    audio_components_path: Option<&std::path::Path>,
+) -> bool {
+    audio_output_gap_with_components(paths, audio_components_path).is_none()
+}
+
 /// Why native LTX-2 audio output is unavailable for this checkpoint set, or
 /// `None` when it is available.
 ///

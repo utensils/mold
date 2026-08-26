@@ -366,6 +366,10 @@ function applyProgress(job: Job, evt: SseProgressEvent) {
       p.stage = `${evt.name} (done)`;
       p.elapsedMs = evt.elapsed_ms;
       break;
+    case "stage_progress":
+      markWorkStarted(job);
+      p.stage = `${evt.name} ${evt.current}/${evt.total}`;
+      break;
     case "info":
       // Dimension warnings are emitted before the server queues the job, so
       // an info event only proves real work has started if the job has
