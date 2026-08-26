@@ -83,7 +83,7 @@ clients, and custom integrations on one generation contract.
 | `DELETE` | `/api/config/model/:name/placement`           | Clear model-specific device placement defaults                                                                    |
 | `POST`   | `/api/shutdown`                               | Trigger graceful server shutdown                                                                                  |
 | `GET`    | `/api/status`                                 | Server health + status                                                                                            |
-| `GET`    | `/health`                                     | Simple 200 OK health check                                                                                        |
+| `GET`    | `/health`                                     | Always-200 liveness check; names degraded subsystems                                                              |
 | `GET`    | `/api/openapi.json`                           | OpenAPI spec                                                                                                      |
 | `GET`    | `/api/docs`                                   | Interactive API docs (Scalar)                                                                                     |
 | `GET`    | `/metrics`                                    | Prometheus metrics (feature-gated)                                                                                |
@@ -1354,12 +1354,47 @@ Example response:
   "queue_depth": 1,
   "queue_capacity": 200,
   "uptime_secs": 3600,
-  "hostname": "gpu-box"
+  "hostname": "gpu-box",
+  "durable_media": {
+    "available": false,
+    "reasons": [
+      "owner media store unavailable: /srv/mold/queue-media must be a current-user-owned 0700 directory: found mode 0770 (expected 0700); repair with: chmod -- 0700 '/srv/mold/queue-media'"
+    ]
+  }
 }
 ```
 
 Older single-GPU clients can still read `gpu_info`; multi-GPU-aware clients
 should prefer `gpus[]`, `queue_depth`, and `queue_capacity`.
+
+`durable_media` explains restart-safe encrypted request media to an operator.
+It is absent whenever this server never offers the feature — no durable
+generation queue, gallery output disabled, a non-authoritative scheduler —
+which is a configuration rather than a degradation. When present, `available`
+mirrors the presence of `capabilities.durable_media` exactly; `reasons` is
+empty while available and otherwise lists every reason the feature is off,
+retained for the life of the process so the startup log is not the only record.
+A large held backlog is summarized with a count and a short sample rather than
+enumerated. Reasons name host filesystem paths, so they appear only here,
+behind authentication.
+
+## `/health`
+
+`GET /health` is auth-exempt and **always answers `200` while the process is
+serving**, including when a subsystem is degraded: a health check that failed
+here would pull a server out of a load balancer over a degradation that
+generation survives. The additive body names which subsystems are off, never
+why.
+
+```json
+{ "status": "degraded", "degraded": ["durable_media"] }
+```
+
+A healthy server answers `{ "status": "ok" }`. Read `/api/status`
+`durable_media.reasons` for the diagnosis and the repair command. The probe
+never waits on a lock: if it lands during a `/api/config` write it reports
+healthy rather than blocking, so `/api/status` is the authority for the
+degraded state.
 
 `GET /api/resources` and `GET /api/resources/stream` expose only the GPU
 inventory that CUDA made visible when the server started. CUDA builds sample

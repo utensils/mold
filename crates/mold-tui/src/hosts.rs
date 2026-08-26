@@ -1292,6 +1292,7 @@ mod tests {
             instance_id: instance_id.map(String::from),
             models_disk: None,
             host_memory: None,
+            durable_media: None,
         })
     }
 

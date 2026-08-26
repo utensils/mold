@@ -1358,6 +1358,7 @@ mod tests {
             instance_id: None,
             models_disk: None,
             host_memory: None,
+            durable_media: None,
         };
         let embed = format_server_status(&status);
         assert_eq!(embed.title, "Server Status");
@@ -1396,6 +1397,7 @@ mod tests {
             instance_id: None,
             models_disk: None,
             host_memory: None,
+            durable_media: None,
         };
         let embed = format_server_status(&status);
         assert!(embed
@@ -1429,6 +1431,7 @@ mod tests {
             instance_id: None,
             models_disk: None,
             host_memory: None,
+            durable_media: None,
         };
         let mut inventory = mold_core::DeviceState {
             devices: (0..64)
@@ -1546,6 +1549,7 @@ mod tests {
             instance_id: None,
             models_disk: None,
             host_memory: None,
+            durable_media: None,
         };
         let queue = mold_core::QueueListingWire {
             entries: vec![],
@@ -1608,6 +1612,7 @@ mod tests {
             instance_id: None,
             models_disk: None,
             host_memory: None,
+            durable_media: None,
         };
         let queue = mold_core::QueueListingWire {
             entries: vec![],
@@ -1678,6 +1683,7 @@ mod tests {
             instance_id: None,
             models_disk: None,
             host_memory: None,
+            durable_media: None,
         };
         let row = mold_core::QueueJobEntryWire {
             id: "job".into(),

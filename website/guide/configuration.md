@@ -279,6 +279,35 @@ A **held** job is listed by `GET /api/queue` with `state: "held"` and a reason,
 and is never started automatically — it is waiting for you to look at it.
 Clear one with `DELETE /api/queue/{id}`.
 
+### When restart-safe request media turns itself off
+
+A request that carries bytes — a source image, an identity photo — only
+survives a restart if the encrypted store under `$MOLD_HOME/queue-media` is
+usable. That directory holds the master key, so Mold refuses it unless it is
+owned by the service user with mode `0700`, and a refusal switches the feature
+off for the life of the process while ordinary media-free durability keeps
+working. Anything that walks the Mold data root widens it: an ACL pass, a
+`chmod -R`, a restore that does not preserve modes, an `rsync` without `-p`.
+
+The degradation is reported in three places, so a missed startup log is not the
+end of it:
+
+```bash
+curl http://localhost:7680/health
+# {"status":"degraded","degraded":["durable_media"]}
+
+curl -H "X-Api-Key: $MOLD_API_KEY" http://localhost:7680/api/status | jq .durable_media
+# { "available": false, "reasons": [
+#   "owner media store unavailable: /srv/mold/queue-media must be a current-user-owned
+#    0700 directory: found mode 0770 (expected 0700); repair with: chmod -- 0700 '/srv/mold/queue-media'" ] }
+```
+
+`/health` always answers `200` while the server is serving — a degraded
+subsystem does not stop it rendering — so alert on the `degraded` array rather
+than the status code. Run the repair the reason names and restart the server;
+Mold never widens or narrows these modes on your behalf, so a permission change
+you did not make stays visible.
+
 ### Sharing one MOLD_HOME between servers
 
 Each server owns its queue through a record under

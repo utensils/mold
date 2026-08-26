@@ -3556,14 +3556,21 @@ fn verify_private_lock_file(path: &Path, file: &File) -> Result<(), QueueMediaEr
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.permissions().mode() & 0o077 != 0
-            || metadata.nlink() != 1
-        {
+        if metadata.nlink() != 1 {
             return Err(QueueMediaError::InsecurePath(format!(
-                "{} is not a singly-linked current-user 0600 lock file",
+                "{} is not a singly-linked lock file",
                 path.display()
             )));
+        }
+        if metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err(insecure_private_path(
+                path,
+                &metadata,
+                0o600,
+                "a current-user-owned 0600 lock file",
+            ));
         }
     }
     Ok(())
@@ -3583,6 +3590,61 @@ fn create_directory_owner_only(path: &Path) -> Result<(), QueueMediaError> {
     Ok(())
 }
 
+/// POSIX single-quoting: everything inside `'...'` is literal, and an embedded
+/// quote is closed, escaped, and reopened.
+#[cfg(unix)]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Describe a refused private path in terms an operator can act on.
+///
+/// The required state alone ("must be owned by the current user with mode
+/// 0700") sends the reader to the source to work out what is actually wrong.
+/// Anything that walks the mold data root — an ACL pass, `chmod -R`, a restore
+/// that drops modes, `rsync` without `-p` — widens these paths, so the message
+/// names the observed owner and mode beside the expected ones and prints the
+/// exact repair for whichever half diverged.
+#[cfg(unix)]
+fn insecure_private_path(
+    path: &Path,
+    metadata: &fs::Metadata,
+    expected_mode: u32,
+    subject: &str,
+) -> QueueMediaError {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let euid = unsafe { libc::geteuid() };
+    let uid = metadata.uid();
+    let mode = metadata.permissions().mode() & 0o7777;
+    let mut observed = Vec::new();
+    let mut repairs = Vec::new();
+    // The path is interpolated into a command an operator is invited to paste,
+    // and MOLD_HOME may legitimately contain a space or a shell metacharacter,
+    // so it is quoted and the argument list is terminated. An unquoted
+    // `/srv/Mold Data` is two operands and the "exact repair" would be wrong.
+    let quoted = shell_quote(&path.display().to_string());
+    if uid != euid {
+        observed.push(format!("uid {uid} (expected {euid})"));
+        repairs.push(format!("chown -- {euid} {quoted}"));
+    }
+    if mode & 0o077 != 0 {
+        observed.push(format!("mode {mode:04o} (expected {expected_mode:04o})"));
+        repairs.push(format!("chmod -- {expected_mode:04o} {quoted}"));
+    }
+    if observed.is_empty() {
+        observed.push("an unexpected file type".to_string());
+    }
+    let mut message = format!(
+        "{} must be {subject}: found {}",
+        path.display(),
+        observed.join(", ")
+    );
+    if !repairs.is_empty() {
+        message.push_str(&format!("; repair with: {}", repairs.join(" && ")));
+    }
+    QueueMediaError::InsecurePath(message)
+}
+
 fn verify_private_directory_metadata(
     path: &Path,
     metadata: &fs::Metadata,
@@ -3596,10 +3658,12 @@ fn verify_private_directory_metadata(
         if metadata.uid() != unsafe { libc::geteuid() }
             || metadata.permissions().mode() & 0o077 != 0
         {
-            return Err(QueueMediaError::InsecurePath(format!(
-                "{} is not owned by the current user with mode 0700",
-                path.display()
-            )));
+            return Err(insecure_private_path(
+                path,
+                metadata,
+                0o700,
+                "a current-user-owned 0700 directory",
+            ));
         }
     }
     Ok(())
@@ -3728,15 +3792,19 @@ fn load_master_key(path: &Path) -> Result<Zeroizing<[u8; KEY_BYTES]>, QueueMedia
 fn verify_private_key_path(path: &Path) -> Result<(), QueueMediaError> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.permissions().mode() & 0o077 != 0
-    {
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(QueueMediaError::InsecurePath(format!(
-            "{} must be a current-user-owned 0600 regular file",
+            "{} must be a regular file",
             path.display()
         )));
+    }
+    if metadata.uid() != unsafe { libc::geteuid() } || metadata.permissions().mode() & 0o077 != 0 {
+        return Err(insecure_private_path(
+            path,
+            &metadata,
+            0o600,
+            "a current-user-owned 0600 regular file",
+        ));
     }
     Ok(())
 }
@@ -3894,14 +3962,19 @@ fn open_or_create_private_file(path: &Path) -> Result<File, QueueMediaError> {
         return Err(QueueMediaError::InsecurePath(path.display().to_string()));
     }
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    if metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.permissions().mode() & 0o077 != 0
-        || metadata.nlink() != 1
-    {
+    if metadata.nlink() != 1 {
         return Err(QueueMediaError::InsecurePath(format!(
-            "{} is not a singly-linked current-user 0600 private file",
+            "{} is not a singly-linked private file",
             path.display()
         )));
+    }
+    if metadata.uid() != unsafe { libc::geteuid() } || metadata.permissions().mode() & 0o077 != 0 {
+        return Err(insecure_private_path(
+            path,
+            &metadata,
+            0o600,
+            "a current-user-owned 0600 private file",
+        ));
     }
     Ok(file)
 }
@@ -5447,6 +5520,84 @@ mod tests {
             .unrecognized
             .iter()
             .any(|entry| entry.set_id_hint.as_deref() == Some(second_set_id.as_str())));
+    }
+
+    /// A widened queue-media directory is the single most likely way this
+    /// store turns itself off in the field: anything that walks the mold data
+    /// root (an ACL pass, `chmod -R`, a restore that drops modes, `rsync`
+    /// without `-p`) hits it. The refusal must therefore carry the observed
+    /// state and the exact repair, not only the required state.
+    #[cfg(unix)]
+    #[test]
+    fn a_widened_store_directory_names_the_observed_mode_and_its_repair() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        drop(open_store(home.path()));
+        let store_dir = home.path().join(STORE_DIR);
+        fs::set_permissions(&store_dir, fs::Permissions::from_mode(0o770)).unwrap();
+
+        let Err(QueueMediaError::InsecurePath(message)) = QueueMediaStore::open(home.path()) else {
+            panic!("a group-writable store directory must be refused");
+        };
+        assert!(
+            message.contains(&store_dir.display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains("mode 0770"), "{message}");
+        assert!(message.contains("expected 0700"), "{message}");
+        assert!(
+            message.contains(&format!("chmod -- 0700 '{}'", store_dir.display())),
+            "{message}"
+        );
+        assert!(!message.contains("chown"), "{message}");
+    }
+
+    /// The repair is meant to be pasted, and `MOLD_HOME` may legitimately hold
+    /// a space or a quote. An unquoted path turns one operand into two and the
+    /// "exact repair" silently becomes the wrong command.
+    #[cfg(unix)]
+    #[test]
+    fn a_repair_command_quotes_a_path_holding_shell_metacharacters() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let awkward = home.path().join("Mold Data; rm -rf $HOME");
+        fs::create_dir_all(&awkward).unwrap();
+        drop(open_store(&awkward));
+        let store_dir = awkward.join(STORE_DIR);
+        fs::set_permissions(&store_dir, fs::Permissions::from_mode(0o770)).unwrap();
+
+        let Err(QueueMediaError::InsecurePath(message)) = QueueMediaStore::open(&awkward) else {
+            panic!("a group-writable store directory must be refused");
+        };
+        assert!(
+            message.contains(&format!("chmod -- 0700 '{}'", store_dir.display())),
+            "{message}"
+        );
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_widened_master_key_names_the_observed_mode_and_its_repair() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        drop(open_store(home.path()));
+        let key_path = home.path().join(STORE_DIR).join(KEY_FILE);
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        let Err(QueueMediaError::InsecurePath(message)) = QueueMediaStore::open(home.path()) else {
+            panic!("a group-readable master key must be refused");
+        };
+        assert!(
+            message.contains(&key_path.display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains("mode 0640"), "{message}");
+        assert!(message.contains("expected 0600"), "{message}");
+        assert!(
+            message.contains(&format!("chmod -- 0600 '{}'", key_path.display())),
+            "{message}"
+        );
     }
 
     #[cfg(unix)]

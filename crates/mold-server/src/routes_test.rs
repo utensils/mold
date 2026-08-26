@@ -1138,6 +1138,191 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    /// A default fixture has no durable queue owner at all, so media
+    /// durability is not applicable rather than degraded. Reporting every
+    /// `MOLD_DB_DISABLE` host as degraded would make the field useless.
+    #[tokio::test]
+    async fn health_reports_ok_when_no_durable_queue_owner_exists() {
+        let app = app_with(MockEngine::ready());
+        let resp = app
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["status"], "ok");
+        assert!(body.get("degraded").is_none(), "{body}");
+    }
+
+    /// A server that actually offers restart-safe request media: gallery
+    /// output on, an authoritative V2 scheduler, and a claimed queue owner.
+    /// Applicability is deliberately a precondition of the degraded state, so
+    /// a fixture missing any of it would report "not applicable" and pass a
+    /// degradation test for the wrong reason.
+    fn durable_media_applicable_state(
+        root: &std::path::Path,
+    ) -> (
+        AppState,
+        tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
+    ) {
+        let db = std::sync::Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.output_disabled_override = false;
+        state
+            .config
+            .try_write()
+            .expect("fresh test config")
+            .output_dir = Some(root.join("gallery").to_string_lossy().into_owned());
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_runtime(
+            tokio::sync::mpsc::channel(1).0,
+            crate::dispatch_mode::DispatchMode::V2,
+            true,
+            false,
+        );
+        state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
+            db,
+            Some(root),
+            "test-instance",
+        ));
+        assert!(
+            state.queue_journal.is_enabled(),
+            "the fixture must claim a durable queue owner"
+        );
+        (state, rx)
+    }
+
+    /// The whole point of #1402: a widened `queue-media` mode turned durable
+    /// admission off for the life of the process with a single startup log
+    /// line as the only evidence. `/health` must keep saying so, and must
+    /// still answer 200 — generation is unaffected, so failing the check would
+    /// pull a working server out of a load balancer.
+    #[tokio::test]
+    async fn health_names_durable_media_while_it_is_degraded() {
+        let root = tempfile::tempdir().unwrap();
+        let (state, _rx) = durable_media_applicable_state(root.path());
+        let app = app_with_state(state);
+
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["status"], "degraded");
+        assert_eq!(body["degraded"], serde_json::json!(["durable_media"]));
+    }
+
+    /// `/health` is auth-exempt, so the reasons — which name host filesystem
+    /// paths — belong on authenticated `/api/status` and nowhere else.
+    #[tokio::test]
+    async fn status_carries_the_durable_media_reasons_that_health_withholds() {
+        let root = tempfile::tempdir().unwrap();
+        let (state, _rx) = durable_media_applicable_state(root.path());
+        state.queue_journal.set_durable_media_status(
+            false,
+            vec!["owner media store unavailable: /srv/mold/queue-media has mode 0770".to_string()],
+        );
+        let app = app_with_state(state);
+
+        let health = json_body(
+            app.clone()
+                .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            !health.to_string().contains("queue-media"),
+            "an auth-exempt surface must not disclose host paths: {health}"
+        );
+
+        let status = json_body(
+            app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status["durable_media"]["available"], false);
+        let reasons = status["durable_media"]["reasons"].as_array().unwrap();
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.as_str().unwrap().contains("mode 0770")),
+            "{status}"
+        );
+    }
+
+    /// `DurableMediaStatus.available` promises to mirror the presence of
+    /// `capabilities.durable_media`. That capability carries a second runtime
+    /// gate beyond the journal's own readiness, so the two must read the same
+    /// applicability question or a client and its operator get contradictory
+    /// answers on the same server.
+    #[tokio::test]
+    async fn status_availability_tracks_the_advertised_durable_media_capability() {
+        let root = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state_with_engine(db, root.path(), MockEngine::ready());
+        let app = app_with_state(state);
+
+        let capabilities = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get("/api/capabilities")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let status = json_body(
+            app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+
+        let advertised = capabilities
+            .get("durable_media")
+            .is_some_and(|entry| !entry.is_null());
+        match status.get("durable_media") {
+            Some(reported) if !reported.is_null() => {
+                assert_eq!(
+                    reported["available"], advertised,
+                    "{capabilities}\n{status}"
+                );
+            }
+            // Not applicable on this runtime, which is exactly when the
+            // capability must be absent too.
+            _ => assert!(!advertised, "{capabilities}"),
+        }
+    }
+
+    /// A host that never advertises restart-safe media is configured that
+    /// way, not broken: an observe-mode or output-disabled server must not
+    /// read as degraded, or the field is noise on every such host.
+    #[tokio::test]
+    async fn health_stays_ok_where_durable_media_is_not_applicable() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut state, _rx) = durable_media_applicable_state(root.path());
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_runtime(
+            tokio::sync::mpsc::channel(1).0,
+            crate::dispatch_mode::DispatchMode::Observe,
+            false,
+            true,
+        );
+        let app = app_with_state(state);
+
+        let body = json_body(
+            app.oneshot(Request::get("/health").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(body["status"], "ok", "{body}");
+    }
+
     #[tokio::test]
     async fn health_when_no_model() {
         let app = app_empty();

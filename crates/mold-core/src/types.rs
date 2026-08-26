@@ -3190,6 +3190,68 @@ pub struct ActiveGenerationStatus {
     pub elapsed_ms: u64,
 }
 
+/// Why restart-safe encrypted queue media is unavailable, for an operator
+/// rather than a client feature check.
+///
+/// [`DurableMediaCapabilities`] answers "may I submit a request whose replay
+/// depends on captured bytes"; this answers "why can't I". The two are
+/// deliberately separate surfaces: the capability is a contract clients
+/// branch on, while these reasons are free prose that names host paths and
+/// therefore only ever travels on the authenticated `/api/status`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DurableMediaStatus {
+    /// True exactly when [`ServerCapabilities::durable_media`] is present.
+    pub available: bool,
+    /// Empty while available. Each entry is one operator-actionable reason,
+    /// retained for the life of the process so a startup log that has aged
+    /// out is not the only record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+}
+
+/// The subsystem name `/health` reports for [`DurableMediaStatus`].
+pub const HEALTH_SUBSYSTEM_DURABLE_MEDIA: &str = "durable_media";
+
+/// Whether an otherwise serving process has a subsystem switched off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthState {
+    #[default]
+    Ok,
+    Degraded,
+}
+
+/// Body of `GET /health`.
+///
+/// `/health` is auth-exempt, so it names only which subsystems are degraded —
+/// never why. Reasons name host filesystem paths and stay on the
+/// authenticated `/api/status` as [`DurableMediaStatus::reasons`].
+///
+/// The status code stays `200` while degraded: a subsystem being off does not
+/// make the process unable to serve, and failing the check would pull a
+/// still-working server out of a load balancer. Callers that only read the
+/// status code keep their existing behaviour; the body is additive.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct HealthStatus {
+    pub status: HealthState,
+    /// Subsystem names only, sorted. Empty while `status` is `ok`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub degraded: Vec<String>,
+}
+
+impl HealthStatus {
+    pub fn from_degraded(degraded: Vec<String>) -> Self {
+        Self {
+            status: if degraded.is_empty() {
+                HealthState::Ok
+            } else {
+                HealthState::Degraded
+            },
+            degraded,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ServerStatus {
     #[schema(example = "0.2.0")]
@@ -3248,6 +3310,11 @@ pub struct ServerStatus {
     /// older servers and wherever that ledger does not run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_memory: Option<HostMemorySnapshot>,
+    /// Why restart-safe queue media is on or off. Absent on older servers and
+    /// wherever the durable generation queue itself is disabled, which is a
+    /// configuration rather than a degradation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_media: Option<DurableMediaStatus>,
 }
 
 /// Total/free bytes for the filesystem backing a directory (currently the
@@ -7314,10 +7381,25 @@ mod tests {
             instance_id: None,
             models_disk: None,
             host_memory: None,
+            durable_media: Some(DurableMediaStatus {
+                available: false,
+                reasons: vec!["owner media store unavailable".to_string()],
+            }),
         };
         let json = serde_json::to_string(&status).unwrap();
         let parsed: super::ServerStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.hostname.as_deref(), Some("bender"));
+        assert_eq!(
+            parsed.durable_media.as_ref().map(|media| media.available),
+            Some(false)
+        );
+        assert_eq!(
+            parsed
+                .durable_media
+                .as_ref()
+                .map(|media| media.reasons.as_slice()),
+            Some(["owner media store unavailable".to_string()].as_slice())
+        );
         assert_eq!(
             parsed.memory_status.as_deref(),
             Some("Memory: 64.0 GB free, 96.0 GB available")

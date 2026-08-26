@@ -370,6 +370,16 @@ pub async fn run_server(
             unclaimed_owner_roots = media_report.unclaimed_owner_roots.len(),
             "durable queue-media startup reconciliation complete"
         );
+        // A count is not a diagnosis. Each reason is logged in full, once per
+        // reason, so the operator gets the remedy without a source dive; the
+        // same text is retained on `/api/status` for after this line ages out.
+        for reason in media_report.degradation_reasons() {
+            tracing::warn!(
+                reason,
+                "restart-safe queue media is unavailable; durable generations without \
+                 request media are unaffected"
+            );
+        }
     }
     let generation_cancel = std::sync::Arc::new(generation_cancel::CancelRegistry::new());
     if queue_journal.is_enabled() {

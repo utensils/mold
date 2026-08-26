@@ -2015,6 +2015,7 @@ mod tests {
                     instance_id: None,
                     models_disk: None,
                     host_memory: None,
+                    durable_media: None,
                 }),
             )
             .expect(1)
