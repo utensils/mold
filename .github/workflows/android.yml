@@ -17,10 +17,13 @@ on:
         "desktop/src/stores/**",
         "desktop/src/styles/**",
         "desktop/src/assets/**",
+        "desktop/icon-master.png",
         "desktop/package.json",
         "desktop/vite.mobile.config.ts",
         "desktop/index.mobile.html",
         "scripts/android.sh",
+        "scripts/generate-android-icons.sh",
+        "scripts/tests/android-release-assets.sh",
         "flake.nix",
         ".github/workflows/android.yml",
       ]
@@ -39,10 +42,13 @@ on:
         "desktop/src/stores/**",
         "desktop/src/styles/**",
         "desktop/src/assets/**",
+        "desktop/icon-master.png",
         "desktop/package.json",
         "desktop/vite.mobile.config.ts",
         "desktop/index.mobile.html",
         "scripts/android.sh",
+        "scripts/generate-android-icons.sh",
+        "scripts/tests/android-release-assets.sh",
         "flake.nix",
         ".github/workflows/android.yml",
       ]
@@ -93,10 +99,13 @@ jobs:
               - 'desktop/src/stores/**'
               - 'desktop/src/styles/**'
               - 'desktop/src/assets/**'
+              - 'desktop/icon-master.png'
               - 'desktop/package.json'
               - 'desktop/vite.mobile.config.ts'
               - 'desktop/index.mobile.html'
               - 'scripts/android.sh'
+              - 'scripts/generate-android-icons.sh'
+              - 'scripts/tests/android-release-assets.sh'
               - 'flake.nix'
               - '.github/workflows/android.yml'
             native_tests:
@@ -146,6 +155,8 @@ jobs:
         run: cargo tauri --version | grep -F '2.11.4'
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
+      - name: Verify Android launcher assets
+        run: bash scripts/tests/android-release-assets.sh
       - name: Build Android validation APK
         working-directory: apps/mobile/src-tauri
         run: cargo tauri android build --debug --apk --target aarch64 --ci
