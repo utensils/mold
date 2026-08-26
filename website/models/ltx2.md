@@ -1,4 +1,4 @@
-# LTX-2 / LTX-2.3
+# LTX-2 / LTX-2.3 / LTX-2.5
 
 LTX-2 is Lightricks' joint audio-video family. In mold it is exposed as a
 separate `ltx2` family from the older `ltx-video` checkpoints, with defaults
@@ -16,6 +16,13 @@ fitting a 19B-22B model in unified memory. The
 native CUDA workflow matrix is validated across 19B/22B text+audio-video,
 image-to-video, audio-to-video, keyframe, retake, lip dub, public IC-LoRA,
 spatial upscale (`x1.5` / `x2` where published), and temporal upscale (`x2`).
+
+LTX-2.5 adds a 22B split-pack architecture with a Gemma 4 Unified encoder,
+separate audio and video VAEs, duration prediction, and latent upscalers. On
+Apple Silicon, mold defaults bare LTX-2.5 names to the compact distilled INT8
+ConvRot + convolutional-VAE pack. That exact-weight route is Metal-qualified;
+the approximately 71 GB BF16 pack remains downloadable but operator-deferred,
+and CUDA qualification is intentionally tracked on a separate host.
 :::
 
 ::: info Implementation provenance
@@ -33,14 +40,20 @@ so those two files retain Apache-2.0 portions — see the repository's
 
 ## Supported Models
 
-| Model                        | Path      | Notes                                         |
-| ---------------------------- | --------- | --------------------------------------------- |
-| `ltx-2-19b-dev:fp8`          | Two-stage | Highest-quality published 19B FP8 checkpoint  |
-| `ltx-2-19b-distilled:fp8`    | Distilled | Fastest 19B path, recommended default         |
-| `ltx-2.3-22b-dev:fp8`        | Two-stage | High-quality 22B FP8 checkpoint               |
-| `ltx-2.3-22b-distilled:fp8`  | Distilled | Fastest 22B path                              |
-| `ltx-2.3-22b-dev:bf16`       | Two-stage | Full-quality, trainable 22B reference weights |
-| `ltx-2.3-22b-distilled:bf16` | Distilled | Full-precision eight-step 22B checkpoint      |
+| Model                                  | Path      | Notes                                         |
+| -------------------------------------- | --------- | --------------------------------------------- |
+| `ltx-2-19b-dev:fp8`                    | Two-stage | Highest-quality published 19B FP8 checkpoint  |
+| `ltx-2-19b-distilled:fp8`              | Distilled | Fastest 19B path, recommended default         |
+| `ltx-2.3-22b-dev:fp8`                  | Two-stage | High-quality 22B FP8 checkpoint               |
+| `ltx-2.3-22b-distilled:fp8`            | Distilled | Fastest 22B path                              |
+| `ltx-2.3-22b-dev:bf16`                 | Two-stage | Full-quality, trainable 22B reference weights |
+| `ltx-2.3-22b-distilled:bf16`           | Distilled | Full-precision eight-step 22B checkpoint      |
+| `ltx-2.5-22b-dev:int8-conv`            | Two-stage | Compact 22B dev split pack                    |
+| `ltx-2.5-22b-distilled:int8-conv`      | Distilled | Recommended compact LTX-2.5 Metal default     |
+| `ltx-2.5-22b-dev:bf16-conv`            | Two-stage | Full-precision Conv-VAE split pack; deferred  |
+| `ltx-2.5-22b-distilled:bf16-conv`      | Distilled | Full-precision Conv-VAE pack; deferred        |
+| `ltx-2.5-22b-dev:bf16-diffusion`       | Two-stage | Diffusion-VAE reference pack; deferred        |
+| `ltx-2.5-22b-distilled:bf16-diffusion` | Distilled | Diffusion-VAE reference; deferred             |
 
 Bare `ltx-2.3-22b-dev` and `ltx-2.3-22b-distilled` names continue to select
 FP8. Choose `:bf16` explicitly for the upstream reference precision used for
@@ -51,6 +64,27 @@ transformer blocks from host memory, trading speed and substantial system RAM
 for lower VRAM use — see [Memory on 24 GB cards](#memory-on-24-gb-cards). The
 shared gated Gemma encoder and optional upscaler/LoRA assets add to download and
 disk requirements.
+
+Bare `ltx-2.5-22b-dev` and `ltx-2.5-22b-distilled` names select `:int8-conv`.
+The compact distilled split pack is roughly 40 GB on disk (37.2 GiB); all
+selected files are pinned by SHA-256 and retained under `MOLD_HOME`. The BF16
+split pack is roughly 71 GB. Every LTX-2.5 variant is gated by the upstream
+[LTX-2 Community License](https://huggingface.co/Lightricks/LTX-2.5), so accept
+the repository terms and configure a Hugging Face token before pulling.
+
+## LTX-2.5 Metal quick start
+
+```bash
+export MOLD_HOME=/Volumes/ExternalStorage/mold2
+mold pull ltx-2.5-22b-distilled:int8-conv
+mold run ltx-2.5-22b-distilled:int8-conv \
+  "a brass automaton drummer performing in gentle rain" \
+  --width 256 --height 256 --frames 9 --fps 24 --steps 1 --guidance 1
+```
+
+The small dimensions and one step above are a smoke test, not recommended
+quality settings. Downloaded models and completed clips remain in `MOLD_HOME`;
+mold does not require moving them into the source checkout.
 
 ## Implemented Request Surface
 
@@ -96,6 +130,19 @@ matrix therefore validates routing and configuration, while manual parity runs
 should compare generated contact sheets or clips from that fixed seed.
 
 ## Current Constraints
+
+- LTX-2.5 text-to-audio+video and silent text-to-video are qualified on Apple
+  Metal with the distilled INT8 ConvRot + Conv-VAE pack. Image conditioning,
+  automatic duration, and the published spatial/temporal upscalers are wired
+  to the 2.5 split-pack contract and covered by deterministic planning tests.
+- LTX-2.5 BF16 execution is operator-deferred on Metal. The assets remain
+  downloadable and checksum-qualified; mold fails closed instead of claiming
+  a completed BF16 runtime qualification.
+- LTX-2.5 CUDA qualification is outside the Apple Metal campaign and is being
+  completed on a separate CUDA host.
+- LTX-2.5 IC-LoRA, retake, lip dub, and HDR/EXR are deferred until their 2.5
+  adapter contracts are validated. Mold will not silently apply LTX-2.3
+  control weights to a 2.5 request.
 
 - Default output is `mp4` for this family. `gif`, `apng`, and `webp` are also
   supported, but they are treated as silent exports.

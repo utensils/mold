@@ -1441,6 +1441,15 @@ const DISTILLED_STAGE1_SIGMAS_NO_TERMINAL: &[f32] = &[
 ];
 
 const DISTILLED_STAGE2_SIGMAS_NO_TERMINAL: &[f32] = &[0.909375, 0.725, 0.421875];
+const LTX25_DISTILLED_STAGE2_SIGMAS_NO_TERMINAL: &[f32] = &[0.85, 0.725, 0.4219];
+
+fn distilled_stage2_sigmas_no_terminal(plan: &Ltx2GeneratePlan) -> &'static [f32] {
+    if plan.preset.name == "ltx-2.5-22b" {
+        LTX25_DISTILLED_STAGE2_SIGMAS_NO_TERMINAL
+    } else {
+        DISTILLED_STAGE2_SIGMAS_NO_TERMINAL
+    }
+}
 
 /// Refuse a resolution past the trained RoPE span on a pipeline that denoises
 /// the requested shape once.
@@ -1898,12 +1907,12 @@ fn stage_sigmas_no_terminal(
             PipelineKind::TwoStage | PipelineKind::TwoStageHq
         )
     {
-        return Ok(DISTILLED_STAGE2_SIGMAS_NO_TERMINAL.to_vec());
+        return Ok(distilled_stage2_sigmas_no_terminal(plan).to_vec());
     }
     if pass.uses_distilled_checkpoint {
         return Ok(match stage_index {
             0 => DISTILLED_STAGE1_SIGMAS_NO_TERMINAL.to_vec(),
-            1 => DISTILLED_STAGE2_SIGMAS_NO_TERMINAL.to_vec(),
+            1 => distilled_stage2_sigmas_no_terminal(plan).to_vec(),
             _ => anyhow::bail!("unsupported distilled denoise stage {}", stage_index + 1),
         });
     }
@@ -3088,7 +3097,8 @@ fn render_real_distilled_av(
         )?),
         None => None,
     };
-    let stage2_sigma = DISTILLED_STAGE2_SIGMAS_NO_TERMINAL[0];
+    let stage2_sigmas = distilled_stage2_sigmas_no_terminal(plan);
+    let stage2_sigma = stage2_sigmas[0];
     let stage2_clean_video_latents_f32 = stage2_clean_video_latents.to_dtype(DType::F32)?;
     let stage2_audio_start = match (stage1_audio_latents.as_ref(), stage2_audio_noise.as_ref()) {
         (Some(stage1_audio_latents), Some(stage2_audio_noise)) => {
@@ -3192,7 +3202,7 @@ fn render_real_distilled_av(
                     alt_mask,
                     None,
                     stage_guidance_scale(plan, 1)?,
-                    DISTILLED_STAGE2_SIGMAS_NO_TERMINAL,
+                    stage2_sigmas,
                     stage_sampler_mode(plan, 1)?,
                     Some(&request.sampler_noise),
                     stage2_audio.noise,
@@ -9148,6 +9158,39 @@ mod tests {
         let conditioning = conditioning::stage_conditioning(&request, temp_dir.path()).unwrap();
         let preset = preset_for_model(&request.model).unwrap();
         build_plan(&request, preset, conditioning)
+    }
+
+    #[test]
+    fn ltx25_stage2_sigmas_match_the_official_workflow_without_changing_ltx23() {
+        let ltx25 = req(
+            "ltx-2.5-22b-distilled:int8-conv",
+            OutputFormat::Mp4,
+            Some(false),
+        );
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&ltx25, temp_dir.path()).unwrap();
+        let ltx25_plan = build_plan(
+            &ltx25,
+            preset_for_model(&ltx25.model).unwrap(),
+            conditioning,
+        );
+        assert_eq!(
+            super::distilled_stage2_sigmas_no_terminal(&ltx25_plan),
+            &[0.85, 0.725, 0.4219]
+        );
+
+        let ltx23 = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let conditioning = conditioning::stage_conditioning(&ltx23, temp_dir.path()).unwrap();
+        let ltx23_plan = build_plan(
+            &ltx23,
+            preset_for_model(&ltx23.model).unwrap(),
+            conditioning,
+        );
+        assert_eq!(
+            super::distilled_stage2_sigmas_no_terminal(&ltx23_plan),
+            &[0.909375, 0.725, 0.421875]
+        );
     }
 
     /// The engine's backstop for a resolution admission should already have

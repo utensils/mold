@@ -12,6 +12,7 @@ report="${LTX25_REPORT:-$verification_root/ltx25-metal-int8-verification-$timest
 skip_gates="${LTX25_SKIP_GATES:-0}"
 contract_test="${LTX25_CONTRACT_TEST:-0}"
 database="${MOLD_DB_PATH:-$mold_home/mold.db}"
+comfy_manifest="${LTX25_COMFY_MANIFEST:-}"
 
 fail() {
   echo "LTX-2.5 Metal verification failed: $*" >&2
@@ -34,6 +35,8 @@ else
     || fail "MOLD_HOME must be /Volumes/ExternalStorage/mold2"
   [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] \
     || fail "runtime capture is restricted to Apple Silicon Metal"
+  [[ -z "$(git -C "$repo_root" status --porcelain --untracked-files=normal)" ]] \
+    || fail "qualification requires a clean source tree; commit the exact code before capture"
 fi
 
 mkdir -p "$verification_root" "$(dirname "$report")"
@@ -182,6 +185,109 @@ record_media audio_video "$audio_video" 25026 \
 record_media silent_video "$silent_video" 25025 \
   'A red fox walking through sunlit desert grass, cinematic natural motion' false
 
+if [[ -z "$comfy_manifest" && "$contract_test" != 1 ]]; then
+  shopt -s nullglob
+  comfy_manifests=("$verification_root"/comfyui/reference-*/manifest.json)
+  shopt -u nullglob
+  for candidate in "${comfy_manifests[@]}"; do
+    if [[ -z "$comfy_manifest" || "$candidate" -nt "$comfy_manifest" ]]; then
+      comfy_manifest="$candidate"
+    fi
+  done
+fi
+[[ -n "$comfy_manifest" && -s "$comfy_manifest" ]] \
+  || fail "missing retained ComfyUI Metal reference manifest; run capture-ltx25-comfy-metal-reference.sh"
+comfy_graph="$(jq -er '.graph.path' "$comfy_manifest")"
+[[ -s "$comfy_graph" ]] || fail "missing retained ComfyUI graph: $comfy_graph"
+comfy_status="$(jq -er '.status' "$comfy_manifest")"
+if [[ "$contract_test" != 1 ]]; then
+  [[ "$(file_sha256 "$comfy_graph")" == "$(jq -er '.graph.sha256' "$comfy_manifest")" ]] \
+    || fail "ComfyUI retained graph hash does not match its manifest"
+fi
+jq -e '
+  .schema_version == "mold.ltx25.comfy-metal-reference.v1"
+  and (.status == "passed" or .status == "operator_deferred")
+  and .implementation == "ComfyUI" and .backend == "MPS"
+  and .checkpoint == "distilled INT8 ConvRot"
+  and .settings == {width:256,height:256,frames:9,fps:24,stage1_seed:25026,
+    stage2_seed:42,video_cfg:1,audio_cfg:1}
+  and (if .status == "passed" then
+    .retained_in_library == true
+    and (.video.ffprobe.streams[] | select(.codec_type == "video" and .width == 256
+      and .height == 256 and .r_frame_rate == "24/1"
+      and ((.nb_frames // .nb_read_frames) | tonumber) == 9))
+    and (.video.ffprobe.streams[] | select(.codec_type == "audio"
+      and .sample_rate == "48000" and .channels == 2))
+  else
+    .video == null and .retained_in_library == false
+    and .preservation.downloaded_models_deleted == false
+    and .preservation.rendered_media_deleted == false
+  end)
+' "$comfy_manifest" >/dev/null || fail "ComfyUI reference manifest contract mismatch"
+if [[ "$comfy_status" == passed ]]; then
+  comfy_video="$(jq -er '.video.path' "$comfy_manifest")"
+  [[ -s "$comfy_video" ]] || fail "missing retained ComfyUI video: $comfy_video"
+  if [[ "$contract_test" != 1 ]]; then
+    [[ "$(file_sha256 "$comfy_video")" == "$(jq -er '.video.sha256' "$comfy_manifest")" ]] \
+      || fail "ComfyUI retained video hash does not match its manifest"
+  fi
+else
+  guard_marker="$(jq -er '.deferred.resource_guard_marker' "$comfy_manifest")"
+  [[ -s "$guard_marker" ]] || fail "missing retained ComfyUI resource-guard evidence: $guard_marker"
+  server_log="$(jq -er '.server_log_path' "$comfy_manifest")"
+  [[ -f "$server_log" ]] || fail "missing retained ComfyUI server log: $server_log"
+  attestation='null'
+  if jq -e '.deferred.guard_cause and .deferred.resource_guard_marker_sha256
+    and .server_log_sha256' "$comfy_manifest" >/dev/null; then
+    guard_cause="$(jq -er '.deferred.guard_cause' "$comfy_manifest")"
+    marker_sha="$(jq -er '.deferred.resource_guard_marker_sha256' "$comfy_manifest")"
+    log_sha="$(jq -er '.server_log_sha256' "$comfy_manifest")"
+    blocking_operator="$(jq -r '.deferred.blocking_operator // empty' "$comfy_manifest")"
+    upstream_progress="$(jq -r '.deferred.upstream_progress // empty' "$comfy_manifest")"
+    [[ "$(jq -er '.cause' "$guard_marker")" == "$guard_cause" ]] \
+      || fail "ComfyUI guard cause does not match its retained marker"
+  else
+    attestation_path="$(dirname "$comfy_manifest")/resource-guard-attestation.json"
+    [[ -s "$attestation_path" ]] \
+      || fail "legacy ComfyUI evidence requires a separate resource-guard attestation"
+    jq -e '
+      .schema_version == "mold.ltx25.comfy-metal-legacy-attestation.v1"
+      and (.guard.cause | IN("pressure_unreadable","memory_pressure","server_rss","timeout"))
+      and (.resource_guard_marker_sha256 | test("^[0-9a-f]{64}$"))
+      and (.server_log_sha256 | test("^[0-9a-f]{64}$"))
+      and .preservation.source_evidence_restored_to_original_content == true
+    ' "$attestation_path" >/dev/null || fail "legacy ComfyUI attestation contract mismatch"
+    [[ "$(file_sha256 "$comfy_manifest")" == "$(jq -er '.source_manifest_sha256' "$attestation_path")" ]] \
+      || fail "legacy ComfyUI manifest hash does not match its attestation"
+    guard_cause="$(jq -er '.guard.cause' "$attestation_path")"
+    marker_sha="$(jq -er '.resource_guard_marker_sha256' "$attestation_path")"
+    log_sha="$(jq -er '.server_log_sha256' "$attestation_path")"
+    blocking_operator="$(jq -r '.observed_log_evidence.blocking_operator // empty' "$attestation_path")"
+    upstream_progress="$(jq -r '.observed_log_evidence.upstream_progress // empty' "$attestation_path")"
+    attestation="$(jq -c --arg path "$attestation_path" '. + {path:$path}' "$attestation_path")"
+  fi
+  [[ "$guard_cause" =~ ^(pressure_unreadable|memory_pressure|server_rss|timeout)$ ]] \
+    || fail "unknown ComfyUI guard cause: $guard_cause"
+  [[ "$(file_sha256 "$guard_marker")" == "$marker_sha" ]] \
+    || fail "ComfyUI resource-guard marker hash does not match its evidence seal"
+  [[ "$(file_sha256 "$server_log")" == "$log_sha" ]] \
+    || fail "ComfyUI server log hash does not match its evidence seal"
+  if [[ "$blocking_operator" == "aten::_int_mm fell back from MPS to CPU" ]]; then
+    if ! grep -Fq "aten::_int_mm" "$server_log" \
+      || ! grep -Eq 'not currently (implemented for the MPS device|supported on the MPS backend)' "$server_log"; then
+      fail "ComfyUI blocking operator is not present in its retained log"
+    fi
+  fi
+  if [[ "$upstream_progress" == "official sampler reached 0/8 after model load" ]]; then
+    grep -Eq '0%.*0/8' "$server_log" \
+      || fail "ComfyUI sampler progress is not present in its retained log"
+  fi
+fi
+comfy_reference="$(jq -c --arg manifest_path "$comfy_manifest" --argjson attestation "${attestation:-null}" \
+  '. + {manifest_path:$manifest_path}
+    + (if $attestation == null then {} else {verification_attestation:$attestation} end)' \
+  "$comfy_manifest")"
+
 gates='[]'
 run_gate() {
   local label="$1"
@@ -225,24 +331,39 @@ fi
 
 source_commit="$(git -C "$repo_root" rev-parse HEAD)"
 qualification_status=passed
-[[ "$contract_test" != 1 ]] || qualification_status=not_qualified_contract_test
+source_tree_state=clean
+if [[ "$contract_test" == 1 ]]; then
+  qualification_status=not_qualified_contract_test
+  source_tree_state=contract_test
+fi
+comfy_evidence="retained exact-weight API graph, history, decoded audio-video, and manifest"
+if [[ "$comfy_status" == operator_deferred ]]; then
+  comfy_evidence="resource guard cause: $guard_cause"
+  [[ -z "$upstream_progress" ]] || comfy_evidence="$comfy_evidence; $upstream_progress"
+  [[ -z "$blocking_operator" ]] || comfy_evidence="$comfy_evidence; $blocking_operator"
+fi
 tmp_report="$report.tmp.$$"
 jq -n \
   --arg captured_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg source_commit "$source_commit" --arg mold_home "$mold_home" \
-  --arg qualification_status "$qualification_status" \
+  --arg source_tree_state "$source_tree_state" --arg comfy_evidence "$comfy_evidence" \
+  --arg qualification_status "$qualification_status" --arg comfy_status "$comfy_status" \
   --argjson host "$host" --argjson assets "$assets" --argjson references "$references" \
-  --argjson media "$media" --argjson gates "$gates" \
+  --argjson media "$media" --argjson gates "$gates" --argjson comfy_reference "$comfy_reference" \
   '{schema_version: "mold.ltx25.metal-int8.verification.v1", captured_at: $captured_at,
-    source_commit: $source_commit, mold_home: $mold_home, backend_scope: "metal",
+    source_commit: $source_commit, source_tree_state: $source_tree_state,
+    mold_home: $mold_home, backend_scope: "metal",
     default_model: "ltx-2.5-22b-distilled:int8-conv", host: $host,
     assets: $assets, references: $references, gates: $gates, media: $media,
+    comfy_reference: $comfy_reference,
     comparison_matrix: [
       {implementation: "Mold", checkpoint: "distilled INT8 ConvRot", backend: "Metal",
         status: $qualification_status,
         evidence: "database-bound retained decoded audio and silent media"},
       {implementation: "ComfyUI", checkpoint: "distilled INT8 ConvRot", backend: "MPS",
-        status: "pending", evidence: "exact-weight executable A/B remains required"},
+        status: (if $qualification_status == "not_qualified_contract_test" then
+          $qualification_status else $comfy_status end),
+        evidence: $comfy_evidence},
       {implementation: "official PyTorch", checkpoint: "BF16", backend: "Metal",
         status: "static_oracle_only", evidence: "compact Comfy INT8 is not directly executable"},
       {implementation: "Diffusers", checkpoint: "BF16", backend: "Metal",

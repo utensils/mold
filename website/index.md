@@ -40,7 +40,8 @@ features:
       src: /icons/grid.svg
     title: Broad Model Support
     details: FLUX.1, SDXL, SD 1.5, SD 3.5, Z-Image, Flux.2 Klein, Qwen-Image,
-      Qwen-Image-Edit, Wuerstchen v2, LTX Video, LTX-2 / LTX-2.3, Wan 2.1/2.2,
+      Qwen-Image-Edit, Wuerstchen v2, LTX Video, LTX-2 / LTX-2.3 / LTX-2.5,
+      Wan 2.1/2.2,
       and MiniMax H3 (compact FL2VA + Ref2VA on SM89 CUDA; Metal
       correctness-only). Images, native joint audio-video, and quantized
       variants that fit a wide range of GPUs.
