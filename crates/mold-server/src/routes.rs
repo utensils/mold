@@ -315,6 +315,7 @@ use crate::queue::clean_error_message;
         crate::gallery_trash::delete_gallery_files_forever,
         crate::gallery_trash::empty_gallery_trash,
         crate::gallery_trash::sweep_gallery_trash,
+        crate::queue_retention::sweep_held_queue,
         server_status,
         list_devices,
         patch_device,

@@ -57,93 +57,105 @@ pub(crate) async fn sweep_held_queue(
 ///
 /// Reads `queue.held_retention_days` fresh from the live config every pass
 /// (`0` keeps held rows forever), exactly as the trash sweeper reads its own.
+///
+/// The whole loop runs on the blocking pool, like `sweep_trash_once`: every
+/// step is synchronous SQLite plus filesystem work, and a backlog of expired
+/// rows would otherwise hold a Tokio worker for the length of the sweep — on
+/// the startup pass and on every manual `POST /api/queue/held/sweep`.
 pub(crate) async fn sweep_held_once(state: &AppState) -> anyhow::Result<HeldSweepResult> {
     let retention = {
         let config = state.config.read().await;
         config.queue.effective_held_retention_days()
     };
-    let Some(db) = state.metadata_db.as_ref().as_ref() else {
+    if state.metadata_db.as_ref().is_none() {
         return Ok(HeldSweepResult::default());
-    };
+    }
     let Some(owner_uuid) = state.queue_journal.owner_uuid().map(str::to_string) else {
         // No claimed queue owner: nothing durable was written this boot.
         return Ok(HeldSweepResult::default());
     };
-    let expired = mold_db::generation_queue::expired_held(
-        db,
-        &owner_uuid,
-        retention,
-        mold_core::time::now_epoch_ms(),
-    )?;
+    let db = state.metadata_db.clone();
+    let lifecycle = state.queue_journal.queue_media_lifecycle();
 
-    let mut purged = 0_u64;
-    let mut media_deferred = 0_u64;
-    for row in expired {
-        // Resolve the GC candidate BEFORE deleting the queue row: the
-        // lifecycle resolves it by job id, and the row is what carries the
-        // association. Afterwards there is nothing left to ask.
-        //
-        // A LOOKUP FAILURE IS NOT "no media". Collapsing the error into
-        // `None` would purge the row, leave its bytes `gc_pending`, and
-        // still report `media_deferred: 0` — the one number that tells an
-        // operator startup reconciliation has work left to do.
-        let mut candidate = None;
-        let mut candidate_unresolved = false;
-        if let Some(lifecycle) = state.queue_journal.queue_media_lifecycle() {
-            match lifecycle.candidate_for_job(&row.id) {
-                Ok(found) => candidate = found,
-                Err(error) => {
-                    candidate_unresolved = true;
+    tokio::task::spawn_blocking(move || -> anyhow::Result<HeldSweepResult> {
+        let Some(db) = db.as_ref().as_ref() else {
+            return Ok(HeldSweepResult::default());
+        };
+        let expired = mold_db::generation_queue::expired_held(
+            db,
+            &owner_uuid,
+            retention,
+            mold_core::time::now_epoch_ms(),
+        )?;
+
+        let mut purged = 0_u64;
+        let mut media_deferred = 0_u64;
+        for row in expired {
+            // Resolve the GC candidate BEFORE deleting the queue row: the
+            // lifecycle resolves it by job id, and the row is what carries
+            // the association. Afterwards there is nothing left to ask.
+            //
+            // A LOOKUP FAILURE IS NOT "no media". Collapsing the error into
+            // `None` would purge the row, leave its bytes `gc_pending`, and
+            // still report `media_deferred: 0` — the one number that tells
+            // an operator startup reconciliation has work left to do.
+            let mut candidate = None;
+            let mut candidate_unresolved = false;
+            if let Some(lifecycle) = lifecycle.as_ref() {
+                match lifecycle.candidate_for_job(&row.id) {
+                    Ok(found) => candidate = found,
+                    Err(error) => {
+                        candidate_unresolved = true;
+                        tracing::warn!(
+                            job = %row.id,
+                            %error,
+                            "could not resolve expired held media before purge"
+                        );
+                    }
+                }
+            }
+
+            let deleted = mold_db::generation_queue::purge_held(
+                db,
+                &owner_uuid,
+                &row.id,
+                mold_core::time::now_epoch_ms(),
+            )?;
+            if !deleted {
+                // A retry or cancel won the race between listing and purge.
+                // That caller's decision outranks retention.
+                continue;
+            }
+            purged += 1;
+            if candidate_unresolved {
+                // The row is gone and the retire trigger has marked its
+                // obligation, but we never learned which set to collect.
+                media_deferred += 1;
+                continue;
+            }
+            // The row is gone, so the retire trigger has already moved the
+            // obligation to `gc_pending`. Collect the bytes now; if that
+            // fails, startup reconciliation still owns it.
+            if let (Some(lifecycle), Some(candidate)) = (lifecycle.as_ref(), candidate) {
+                if let Err(error) = lifecycle.cleanup_after_committed_delete(&candidate) {
+                    media_deferred += 1;
                     tracing::warn!(
                         job = %row.id,
                         %error,
-                        "could not resolve expired held media before purge"
+                        "expired held media remains GC-pending until startup reconciliation"
                     );
                 }
             }
         }
 
-        let deleted = mold_db::generation_queue::purge_held(
-            db,
-            &owner_uuid,
-            &row.id,
-            mold_core::time::now_epoch_ms(),
-        )?;
-        if !deleted {
-            // A retry or cancel won the race between listing and purge.
-            // That caller's decision outranks retention.
-            continue;
-        }
-        purged += 1;
-        if candidate_unresolved {
-            // The row is gone and the retire trigger has marked its
-            // obligation, but we never learned which set to collect.
-            media_deferred += 1;
-            continue;
-        }
-        // The row is gone, so the retire trigger has already moved the
-        // obligation to `gc_pending`. Collect the bytes now; if that fails,
-        // startup reconciliation still owns it.
-        if let (Some(lifecycle), Some(candidate)) =
-            (state.queue_journal.queue_media_lifecycle(), candidate)
-        {
-            if let Err(error) = lifecycle.cleanup_after_committed_delete(&candidate) {
-                media_deferred += 1;
-                tracing::warn!(
-                    job = %row.id,
-                    %error,
-                    "expired held media remains GC-pending until startup reconciliation"
-                );
-            }
-        }
-    }
-
-    let remaining = mold_db::generation_queue::held_count(db, &owner_uuid)?;
-    Ok(HeldSweepResult {
-        purged,
-        remaining,
-        media_deferred,
+        let remaining = mold_db::generation_queue::held_count(db, &owner_uuid)?;
+        Ok(HeldSweepResult {
+            purged,
+            remaining,
+            media_deferred,
+        })
     })
+    .await?
 }
 
 /// Background retention sweeper: one pass at startup, then hourly, until
