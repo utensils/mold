@@ -64,56 +64,6 @@ pub(crate) async fn retry_canonical_child(
     mold_core::durable_generation::retry_canonical_child(client, authority, job_id).await
 }
 
-pub(crate) async fn reconcile_canonical_authority_observed(
-    client: &MoldClient,
-    authority: &GenerationBatchAuthority,
-    events: Option<&tokio::sync::mpsc::UnboundedSender<CanonicalGenerationEvent>>,
-) -> Result<mold_core::GenerationBatchStatus> {
-    match events {
-        Some(events) => {
-            let observer = channel_observer(events);
-            mold_core::durable_generation::reconcile_canonical_authority_observed(
-                client,
-                authority,
-                Some(&observer),
-            )
-            .await
-        }
-        None => {
-            mold_core::durable_generation::reconcile_canonical_authority_observed(
-                client, authority, None,
-            )
-            .await
-        }
-    }
-}
-
-pub(crate) async fn reconcile_ambiguous_retry_observed(
-    client: &MoldClient,
-    authority: &GenerationBatchAuthority,
-    job_id: &str,
-    events: Option<&tokio::sync::mpsc::UnboundedSender<CanonicalGenerationEvent>>,
-) -> Result<mold_core::GenerationBatchStatus> {
-    match events {
-        Some(events) => {
-            let observer = channel_observer(events);
-            mold_core::durable_generation::reconcile_ambiguous_retry_observed(
-                client,
-                authority,
-                job_id,
-                Some(&observer),
-            )
-            .await
-        }
-        None => {
-            mold_core::durable_generation::reconcile_ambiguous_retry_observed(
-                client, authority, job_id, None,
-            )
-            .await
-        }
-    }
-}
-
 pub(crate) async fn hydrate_canonical_artifact(
     client: &MoldClient,
     child: &GenerationBatchChild,

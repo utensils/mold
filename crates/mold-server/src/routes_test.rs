@@ -5121,6 +5121,18 @@ mod tests {
         AppState,
         tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
     ) {
+        durable_state_with_engine_and_media_readiness(db, root, engine, true)
+    }
+
+    fn durable_state_with_engine_and_media_readiness(
+        db: Arc<Option<mold_db::MetadataDb>>,
+        root: &std::path::Path,
+        engine: MockEngine,
+        require_media_ready: bool,
+    ) -> (
+        AppState,
+        tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
+    ) {
         let gallery = durable_gallery_dir(root);
         std::fs::create_dir_all(&gallery).unwrap();
         let (mut state, rx) = AppState::with_engine_and_queue(engine);
@@ -5146,7 +5158,7 @@ mod tests {
                 lifecycle.as_ref(),
             )
             .unwrap();
-            assert!(report.durable_media_ready);
+            assert!(!require_media_ready || report.durable_media_ready);
             let admission = crate::queue_media_admission::DurableMediaAdmission::new(
                 lifecycle,
                 state.queue_capacity,
@@ -5899,6 +5911,120 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         assert_eq!(journal.list_all().len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn media_free_batch_replays_after_missing_or_corrupt_media_key_restart() {
+        for corrupt in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+            let body = serde_json::json!({
+                "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                "requests": [serde_json::from_str::<serde_json::Value>(
+                    &generate_body("store-independent replay", 64, 64)
+                ).unwrap()],
+            });
+            let (mut state, rx) = durable_state(db.clone(), root.path());
+            install_authoritative_v2(&mut state);
+            let admitted = app_with_state(state)
+                .oneshot(json_request(
+                    "POST",
+                    "/api/generation-batches",
+                    body.clone(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+            let admitted = json_body(admitted).await;
+            drop(rx);
+
+            // Leave undeniable encrypted-store evidence behind so a missing
+            // key cannot be silently regenerated during restart.
+            let store = crate::queue_media_store::QueueMediaStore::open(root.path())
+                .unwrap()
+                .store;
+            store
+                .seal(
+                    "orphan-owner",
+                    "orphan-job",
+                    vec![crate::queue_media_store::SealMedia::bytes(
+                        "source",
+                        "orphan.bin",
+                        vec![1],
+                    )],
+                )
+                .unwrap();
+            drop(store);
+            let key = root.path().join("queue-media/master.key");
+            if corrupt {
+                std::fs::write(&key, [7_u8; 31]).unwrap();
+            } else {
+                std::fs::remove_file(&key).unwrap();
+            }
+
+            let (mut restarted, _rx) = durable_state_with_engine_and_media_readiness(
+                db.clone(),
+                root.path(),
+                MockEngine::ready(),
+                false,
+            );
+            install_authoritative_v2(&mut restarted);
+            assert!(restarted
+                .queue_journal
+                .durable_media_capabilities()
+                .is_none());
+            let app = app_with_state(restarted);
+            let replay = app
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/api/generation-batches",
+                    body.clone(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(replay.status(), StatusCode::OK);
+            assert_eq!(json_body(replay).await["id"], admitted["id"]);
+
+            let mut changed = body.clone();
+            changed["requests"][0]["prompt"] = serde_json::json!("changed after restart");
+            let conflict = app
+                .oneshot(json_request("POST", "/api/generation-batches", changed))
+                .await
+                .unwrap();
+            assert_eq!(conflict.status(), StatusCode::CONFLICT);
+            assert_eq!(
+                json_body(conflict).await["code"],
+                "GENERATION_BATCH_IDEMPOTENCY_CONFLICT"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn output_disabled_batch_admission_is_a_typed_unavailable_response() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        state.output_disabled_override = true;
+        let response = app_with_state(state)
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [serde_json::from_str::<serde_json::Value>(
+                        &generate_body("no gallery authority", 64, 64)
+                    ).unwrap()],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json_body(response).await["code"],
+            "DURABLE_ADMISSION_UNAVAILABLE"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

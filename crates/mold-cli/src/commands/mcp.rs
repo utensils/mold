@@ -2,9 +2,9 @@ use anyhow::Result;
 use base64::{engine::general_purpose, Engine as _};
 use image::GenericImageView;
 use mold_core::{
-    Config, GalleryImage, GenerateRequest, GenerateResponse, GenerationBatchAuthority,
-    GenerationBatchChild, GenerationBatchChildState, LoraInfo, LoraWeight, MoldClient,
-    OutputFormat, SseProgressEvent,
+    client::is_transient_request_error, Config, GalleryImage, GenerateRequest, GenerateResponse,
+    GenerationBatchAuthority, GenerationBatchChild, GenerationBatchChildState, LoraInfo,
+    LoraWeight, MoldClient, OutputFormat, SseProgressEvent,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -13,19 +13,50 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 
 use crate::commands::durable_generation::{
-    hydrate_canonical_artifact, reconcile_ambiguous_retry_observed,
-    reconcile_canonical_authority_observed, retry_canonical_child,
-    try_canonical_generation_observed, try_canonical_singleton_artifact, CanonicalGenerationEvent,
-    CanonicalGenerationReport, CanonicalRetrySubmission,
+    hydrate_canonical_artifact, retry_canonical_child, try_canonical_generation_observed,
+    try_canonical_singleton_artifact, CanonicalGenerationEvent, CanonicalGenerationReport,
+    CanonicalRetrySubmission,
 };
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_ASYNC_JOBS: usize = 32;
+const RECONCILE_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+const RECONCILE_MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+fn reconciliation_initial_backoff() -> Duration {
+    if cfg!(test) {
+        Duration::from_millis(10)
+    } else {
+        RECONCILE_INITIAL_BACKOFF
+    }
+}
+
+fn reconciliation_max_backoff() -> Duration {
+    if cfg!(test) {
+        Duration::from_millis(80)
+    } else {
+        RECONCILE_MAX_BACKOFF
+    }
+}
+
+fn reconciliation_key(authority: &GenerationBatchAuthority, job_id: &str) -> String {
+    [
+        &authority.instance_id,
+        &authority.batch_id,
+        &authority.client_batch_id,
+        job_id,
+    ]
+    .into_iter()
+    .map(|part| format!("{}:{part}", part.len()))
+    .collect::<Vec<_>>()
+    .join("|")
+}
 
 async fn generate_with_canonical_fallback(
     client: &MoldClient,
@@ -511,7 +542,7 @@ impl McpServer {
             serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
         let loras = self.resolve_loras(args.loras.take()).await?;
         let req = build_generate_request(args, loras)?;
-        let job_id = self.jobs.create(&req).await;
+        let job_id = self.jobs.create(&req).await?;
         let client = self.client.clone();
         let jobs = self.jobs.clone();
         let task_job_id = job_id.clone();
@@ -540,6 +571,7 @@ impl McpServer {
         let include_result = args.include_result.unwrap_or(true);
 
         if let Some(job_id) = args.job_id {
+            self.jobs.reconcile_pending_job(&self.client, &job_id).await;
             let Some(job) = self.jobs.get(&job_id).await else {
                 return Err(format!("unknown async generation job: {job_id}"));
             };
@@ -591,86 +623,14 @@ impl McpServer {
                 )
                 .await;
         }
-        let client = self.client.clone();
-        let jobs = self.jobs.clone();
-        let local_job_id = args.job_id.clone();
-        tokio::spawn(async move {
-            let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-            let event_jobs = jobs.clone();
-            let event_job_id = local_job_id.clone();
-            let event_task = tokio::spawn(async move {
-                while let Some(event) = event_rx.recv().await {
-                    event_jobs.apply_canonical_event(&event_job_id, event).await;
-                }
-            });
-            let status = if retry_was_ambiguous {
-                match reconcile_ambiguous_retry_observed(
-                    &client,
-                    &retry.authority,
-                    &retry.durable_job_id,
-                    Some(&event_tx),
+        if !retry_was_ambiguous {
+            self.jobs
+                .record_reconciliation_error(
+                    &args.job_id,
+                    "retry accepted; exact status will reconcile on generation_status".into(),
                 )
-                .await
-                {
-                    Ok(status) => Ok(status),
-                    Err(error) => {
-                        jobs.record_reconciliation_error(
-                            &local_job_id,
-                            format!(
-                                "bounded retry confirmation expired; retry remains locked while exact reconciliation continues: {error:#}"
-                            ),
-                        )
-                        .await;
-                        reconcile_canonical_authority_observed(
-                            &client,
-                            &retry.authority,
-                            Some(&event_tx),
-                        )
-                        .await
-                    }
-                }
-            } else {
-                reconcile_canonical_authority_observed(&client, &retry.authority, Some(&event_tx))
-                    .await
-            };
-            drop(event_tx);
-            let _ = event_task.await;
-            match status {
-                Ok(status) => {
-                    if let Some(child) = status
-                        .children
-                        .into_iter()
-                        .find(|child| child.job_id == retry.durable_job_id)
-                    {
-                        finish_canonical_child(
-                            &client,
-                            &jobs,
-                            &local_job_id,
-                            retry.authority,
-                            child,
-                            None,
-                        )
-                        .await;
-                    } else {
-                        jobs.record_reconciliation_error(
-                            &local_job_id,
-                            format!(
-                                "generation batch lost durable job {} after retry",
-                                retry.durable_job_id
-                            ),
-                        )
-                        .await;
-                    }
-                }
-                Err(error) => {
-                    jobs.record_reconciliation_error(
-                        &local_job_id,
-                        format!("could not reconcile retried generation: {error:#}"),
-                    )
-                    .await;
-                }
-            }
-        });
+                .await;
+        }
 
         let job = self
             .jobs
@@ -1194,6 +1154,7 @@ struct AsyncGenerationJob {
     durable_job_id: Option<String>,
     retryable: Option<bool>,
     retry_in_flight: bool,
+    reconciliation_pending: bool,
 }
 
 impl AsyncGenerationJob {
@@ -1216,6 +1177,7 @@ impl AsyncGenerationJob {
             durable_job_id: None,
             retryable: None,
             retry_in_flight: false,
+            reconciliation_pending: false,
         }
     }
 }
@@ -1226,10 +1188,18 @@ struct CanonicalRetryClaim {
     durable_job_id: String,
 }
 
+#[derive(Debug)]
+struct ReconciliationAttempt {
+    in_flight: bool,
+    next_attempt: Instant,
+    backoff: Duration,
+}
+
 #[derive(Debug, Default)]
 struct AsyncJobRegistryInner {
     next_id: AtomicU64,
     jobs: Mutex<HashMap<String, AsyncGenerationJob>>,
+    reconciliations: Mutex<HashMap<String, ReconciliationAttempt>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1238,7 +1208,7 @@ struct AsyncJobRegistry {
 }
 
 impl AsyncJobRegistry {
-    async fn create(&self, req: &GenerateRequest) -> String {
+    async fn create(&self, req: &GenerateRequest) -> std::result::Result<String, String> {
         let id = format!(
             "gen-{}",
             self.inner.next_id.fetch_add(1, Ordering::Relaxed) + 1
@@ -1246,7 +1216,13 @@ impl AsyncJobRegistry {
         let mut jobs = self.inner.jobs.lock().await;
         jobs.insert(id.clone(), AsyncGenerationJob::new(id.clone(), req));
         prune_completed_jobs(&mut jobs);
-        id
+        if jobs.len() > MAX_ASYNC_JOBS {
+            jobs.remove(&id);
+            return Err(format!(
+                "async generation registry is full ({MAX_ASYNC_JOBS} unresolved jobs); wait for existing work to settle"
+            ));
+        }
+        Ok(id)
     }
 
     async fn mark_running(&self, id: &str, transport: AsyncGenerationTransport) {
@@ -1303,6 +1279,7 @@ impl AsyncJobRegistry {
             job.durable_job_id = settlement.durable_job_id;
             job.retryable = settlement.retryable;
             job.retry_in_flight = false;
+            job.reconciliation_pending = false;
             job.status = settlement.status;
             job.updated_at_ms = now;
             job.finished_at_ms = settlement.status.is_terminal().then_some(now);
@@ -1337,18 +1314,7 @@ impl AsyncJobRegistry {
             job.updated_at_ms = now_ms();
             return;
         };
-        let now = now_ms();
-        job.transport = AsyncGenerationTransport::Canonical;
-        job.authority = Some(authority);
-        job.durable_job_id = Some(child.job_id.clone());
-        job.retryable = child.retryable;
-        job.status = async_status_from_child(&child.state);
-        job.error = child.error.clone();
-        job.updated_at_ms = now;
-        if job.status == AsyncJobStatus::Running {
-            job.started_at_ms.get_or_insert(now);
-        }
-        job.finished_at_ms = job.status.is_terminal().then_some(now);
+        apply_canonical_child_to_job(job, authority, child);
     }
 
     async fn begin_retry(&self, id: &str) -> std::result::Result<CanonicalRetryClaim, String> {
@@ -1404,7 +1370,125 @@ impl AsyncJobRegistry {
             job.latest_progress = None;
             job.error = None;
             job.result = None;
+            job.reconciliation_pending = true;
             job.updated_at_ms = now;
+        }
+    }
+
+    async fn reconcile_pending_job(&self, client: &MoldClient, id: &str) {
+        let pending = {
+            let jobs = self.inner.jobs.lock().await;
+            let Some(job) = jobs.get(id) else {
+                return;
+            };
+            if !job.reconciliation_pending {
+                return;
+            }
+            job.authority.clone().zip(job.durable_job_id.clone())
+        };
+        let Some((authority, durable_job_id)) = pending else {
+            return;
+        };
+        let key = reconciliation_key(&authority, &durable_job_id);
+        {
+            let mut attempts = self.inner.reconciliations.lock().await;
+            let attempt = attempts
+                .entry(key.clone())
+                .or_insert_with(|| ReconciliationAttempt {
+                    in_flight: false,
+                    next_attempt: Instant::now(),
+                    backoff: reconciliation_initial_backoff(),
+                });
+            if attempt.in_flight || Instant::now() < attempt.next_attempt {
+                return;
+            }
+            attempt.in_flight = true;
+        }
+
+        enum ReadOutcome {
+            Found(GenerationBatchChild),
+            Retry(String),
+            Stop(String),
+        }
+        let outcome = match client.generation_batch(&authority.batch_id).await {
+            Ok(Some(status)) => match authority.validate_status(&status) {
+                Ok(()) => match status
+                    .children
+                    .iter()
+                    .find(|child| child.job_id == durable_job_id)
+                    .cloned()
+                {
+                    Some(child) => ReadOutcome::Found(child),
+                    None => ReadOutcome::Stop(format!(
+                        "generation batch lost durable job {durable_job_id} during retry reconciliation"
+                    )),
+                },
+                Err(error) => ReadOutcome::Stop(error),
+            },
+            Ok(None) => ReadOutcome::Retry(format!(
+                "generation batch {} is not visible yet",
+                authority.batch_id
+            )),
+            Err(error) if is_transient_request_error(&error) => {
+                ReadOutcome::Retry(error.to_string())
+            }
+            Err(error) => ReadOutcome::Stop(error.to_string()),
+        };
+
+        let keep_polling = match outcome {
+            ReadOutcome::Found(child) => {
+                if matches!(
+                    child.state,
+                    GenerationBatchChildState::Accepted
+                        | GenerationBatchChildState::Running
+                        | GenerationBatchChildState::Cancelling
+                ) {
+                    let mut jobs = self.inner.jobs.lock().await;
+                    if let Some(job) = jobs.get_mut(id) {
+                        apply_canonical_child_to_job(job, authority.clone(), &child);
+                        job.reconciliation_pending = true;
+                    }
+                    true
+                } else {
+                    finish_canonical_child(client, self, id, authority, child, None).await;
+                    false
+                }
+            }
+            ReadOutcome::Retry(error) => {
+                self.record_reconciliation_error(
+                    id,
+                    format!("retry remains locked; exact reconciliation delayed: {error}"),
+                )
+                .await;
+                true
+            }
+            ReadOutcome::Stop(error) => {
+                self.record_reconciliation_error(
+                    id,
+                    format!("retry remains locked; exact reconciliation stopped: {error}"),
+                )
+                .await;
+                let mut jobs = self.inner.jobs.lock().await;
+                if let Some(job) = jobs.get_mut(id) {
+                    job.reconciliation_pending = false;
+                }
+                false
+            }
+        };
+
+        let mut attempts = self.inner.reconciliations.lock().await;
+        let Some(attempt) = attempts.get_mut(&key) else {
+            return;
+        };
+        attempt.in_flight = false;
+        if keep_polling {
+            attempt.next_attempt = Instant::now() + attempt.backoff;
+            attempt.backoff = attempt
+                .backoff
+                .saturating_mul(2)
+                .min(reconciliation_max_backoff());
+        } else {
+            attempts.remove(&key);
         }
     }
 
@@ -1445,6 +1529,25 @@ fn async_status_from_child(state: &GenerationBatchChildState) -> AsyncJobStatus 
         GenerationBatchChildState::Complete => AsyncJobStatus::Succeeded,
         GenerationBatchChildState::Failed => AsyncJobStatus::Failed,
     }
+}
+
+fn apply_canonical_child_to_job(
+    job: &mut AsyncGenerationJob,
+    authority: GenerationBatchAuthority,
+    child: &GenerationBatchChild,
+) {
+    let now = now_ms();
+    job.transport = AsyncGenerationTransport::Canonical;
+    job.authority = Some(authority);
+    job.durable_job_id = Some(child.job_id.clone());
+    job.retryable = child.retryable;
+    job.status = async_status_from_child(&child.state);
+    job.error = child.error.clone();
+    job.updated_at_ms = now;
+    if job.status == AsyncJobStatus::Running {
+        job.started_at_ms.get_or_insert(now);
+    }
+    job.finished_at_ms = job.status.is_terminal().then_some(now);
 }
 
 fn prune_completed_jobs(jobs: &mut HashMap<String, AsyncGenerationJob>) {
@@ -2501,6 +2604,28 @@ mod tests {
         .unwrap()
     }
 
+    async fn seed_retryable_canonical_job(jobs: &AsyncJobRegistry) -> String {
+        let request = transport_request();
+        let id = jobs.create(&request).await.unwrap();
+        jobs.finish_canonical(
+            &id,
+            CanonicalAsyncSettlement {
+                authority: Some(GenerationBatchAuthority {
+                    instance_id: "instance-1".into(),
+                    batch_id: "batch-1".into(),
+                    client_batch_id: "client-batch-1".into(),
+                }),
+                durable_job_id: Some("durable-job-1".into()),
+                retryable: Some(true),
+                status: AsyncJobStatus::Held,
+                error: Some("model dependency is unavailable".into()),
+                result: None,
+            },
+        )
+        .await;
+        id
+    }
+
     async fn mount_canonical_capabilities(server: &MockServer) {
         let mut capabilities = mold_core::ServerCapabilities::default();
         capabilities.queue.heterogeneous_batch = true;
@@ -2527,7 +2652,7 @@ mod tests {
 
         let jobs = AsyncJobRegistry::default();
         let request = transport_request();
-        let local_id = jobs.create(&request).await;
+        let local_id = jobs.create(&request).await.unwrap();
         run_async_generation(
             MoldClient::new(&server.uri()),
             jobs.clone(),
@@ -2578,7 +2703,7 @@ mod tests {
             jobs: AsyncJobRegistry::default(),
         };
         let request = transport_request();
-        let local_id = mcp.jobs.create(&request).await;
+        let local_id = mcp.jobs.create(&request).await.unwrap();
         run_async_generation(
             mcp.client.clone(),
             mcp.jobs.clone(),
@@ -2677,7 +2802,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_mcp_continues_exact_reconciliation_after_bounded_retry_expiry() {
+    async fn async_mcp_lazily_reconciles_exact_retry_after_host_recovers() {
         let server = MockServer::start().await;
         mount_canonical_capabilities(&server).await;
         Mock::given(method("POST"))
@@ -2691,7 +2816,7 @@ mod tests {
             jobs: AsyncJobRegistry::default(),
         };
         let request = transport_request();
-        let local_id = mcp.jobs.create(&request).await;
+        let local_id = mcp.jobs.create(&request).await.unwrap();
         run_async_generation(
             mcp.client.clone(),
             mcp.jobs.clone(),
@@ -2730,14 +2855,23 @@ mod tests {
             .unwrap();
         assert_eq!(immediate["structuredContent"]["status"], "queued");
 
-        tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::timeout(Duration::from_secs(3), async {
             loop {
-                let job = mcp.jobs.get(&local_id).await.unwrap();
-                if job.status == AsyncJobStatus::Held && job.retryable == Some(true) {
-                    assert_eq!(job.error.as_deref(), Some("dependency remains unavailable"));
+                let result = mcp
+                    .tool_generation_status(json!({
+                        "job_id": local_id,
+                        "include_result": false
+                    }))
+                    .await
+                    .unwrap();
+                if result["structuredContent"]["status"] == "held" {
+                    assert_eq!(
+                        result["structuredContent"]["error"],
+                        "dependency remains unavailable"
+                    );
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(25)).await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
@@ -2752,6 +2886,100 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_status_reads_coalesce_exact_retry_reconciliation() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/queue/durable-job-1/retry"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/generation-batches/batch-1"))
+            .respond_with(ResponseTemplate::new(503).set_delay(Duration::from_millis(75)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mcp = McpServer {
+            client: MoldClient::new(&server.uri()),
+            jobs: AsyncJobRegistry::default(),
+        };
+        let local_id = seed_retryable_canonical_job(&mcp.jobs).await;
+        mcp.tool_generation_retry(json!({ "job_id": local_id }))
+            .await
+            .unwrap();
+
+        let arguments = json!({ "job_id": local_id, "include_result": false });
+        let (first, second) = tokio::join!(
+            mcp.tool_generation_status(arguments.clone()),
+            mcp.tool_generation_status(arguments)
+        );
+        assert_eq!(first.unwrap()["structuredContent"]["status"], "queued");
+        assert_eq!(second.unwrap()["structuredContent"]["status"], "queued");
+        assert_eq!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| request.url.path() == "/api/generation-batches/batch-1")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_shutdown_leaves_no_detached_reconciliation() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/queue/durable-job-1/retry"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mcp = McpServer {
+            client: MoldClient::new(&server.uri()),
+            jobs: AsyncJobRegistry::default(),
+        };
+        let local_id = seed_retryable_canonical_job(&mcp.jobs).await;
+        mcp.tool_generation_retry(json!({ "job_id": local_id }))
+            .await
+            .unwrap();
+        drop(mcp);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.url.path().starts_with("/api/generation-batches/"))
+                .count(),
+            0
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.url.path() == "/api/queue/durable-job-1/retry")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolved_job_registry_is_hard_capped_without_pollers() {
+        let jobs = AsyncJobRegistry::default();
+        let request = transport_request();
+        for _ in 0..MAX_ASYNC_JOBS {
+            jobs.create(&request).await.unwrap();
+        }
+
+        let error = jobs.create(&request).await.unwrap_err();
+        assert!(error.contains("registry is full"));
+        assert_eq!(jobs.inner.jobs.lock().await.len(), MAX_ASYNC_JOBS);
+        assert!(jobs.inner.reconciliations.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -2785,7 +3013,7 @@ mod tests {
 
         let jobs = AsyncJobRegistry::default();
         let request = transport_request();
-        let local_id = jobs.create(&request).await;
+        let local_id = jobs.create(&request).await.unwrap();
         run_async_generation(
             MoldClient::new(&server.uri()),
             jobs.clone(),
@@ -3350,7 +3578,7 @@ mod tests {
             cfg_start_step: None,
         };
 
-        let id = jobs.create(&req).await;
+        let id = jobs.create(&req).await.unwrap();
         jobs.mark_running(&id, AsyncGenerationTransport::Legacy)
             .await;
         jobs.finish(
