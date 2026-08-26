@@ -13,6 +13,14 @@ import { computed, ref } from "vue";
  *  plain info stays neutral. See `lib/notificationTone.ts`. */
 export type NotificationKind = "info" | "success" | "warning" | "error";
 
+/** A durable, session-scoped action rendered inline with a notification. */
+export interface NotificationAction {
+  label: string;
+  pendingLabel?: string;
+  doneLabel?: string;
+  run: () => void | Promise<void>;
+}
+
 export interface NotificationEntry {
   id: number;
   kind: NotificationKind;
@@ -26,6 +34,8 @@ export interface NotificationEntry {
   read: boolean;
   /** Consecutive identical messages collapse into one row with a count. */
   repeat: number;
+  /** Optional recovery action, such as retrying a failed model download. */
+  action: NotificationAction | null;
 }
 
 export interface NotificationInput {
@@ -33,6 +43,7 @@ export interface NotificationInput {
   text: string;
   description?: string | null;
   hostLabel?: string | null;
+  action?: NotificationAction | null;
   /** Wall-clock stamp; callers pass Date.now() (kept injectable for tests). */
   atMs?: number;
 }
@@ -63,6 +74,7 @@ export const useNotificationsStore = defineStore("studio-notifications", () => {
       newest.repeat += 1;
       newest.atMs = atMs;
       newest.read = false;
+      newest.action = input.action ?? null;
       return;
     }
     entries.value.unshift({
@@ -74,6 +86,7 @@ export const useNotificationsStore = defineStore("studio-notifications", () => {
       atMs,
       read: false,
       repeat: 1,
+      action: input.action ?? null,
     });
     if (entries.value.length > NOTIFICATION_CAP) {
       entries.value.length = NOTIFICATION_CAP;

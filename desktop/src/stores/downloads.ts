@@ -464,7 +464,20 @@ export const useDownloadsStore = defineStore("downloads", {
       const model = job?.model ?? "the model";
       const suffix = host ? ` on ${host.label}` : "";
       const detail = job?.error ? ` — ${job.error}` : "";
-      useToastStore().push(`Couldn't pull ${model}${suffix}${detail}`, "error");
+      const failedJob = job;
+      const failedHostId = hostId ?? this.primaryHostId;
+      useToastStore().push(`Couldn't pull ${model}${suffix}${detail}`, "error", {
+        ...(failedJob
+          ? {
+              notificationAction: {
+                label: "Retry",
+                pendingLabel: "Retrying…",
+                doneLabel: "Queued",
+                run: () => this.retry(failedHostId, failedJob),
+              },
+            }
+          : {}),
+      });
       notifyPullFailed(
         model,
         job?.error ?? undefined,

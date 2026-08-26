@@ -4,6 +4,7 @@ import { useDownloadsStore } from "./downloads";
 import { useToastStore } from "./toasts";
 import { notifyPulled, notifyPullFailed } from "../lib/notify";
 import { emptyDownloadsState } from "../lib/downloads";
+import { useNotificationsStore } from "@studio/stores/notifications";
 import type { DownloadJob } from "../lib/api/types";
 
 vi.mock("../lib/api/catalog", () => ({ startCatalogDownload: vi.fn() }));
@@ -41,6 +42,27 @@ describe("pull failure notifications (G11)", () => {
     expect(notifyPullFailed).toHaveBeenCalledWith("flux2-klein:q4", "disk full", {
       kind: "models",
     });
+  });
+
+  it("retries a failed pull from its notification on the original host", async () => {
+    const store = useDownloadsStore();
+    const failedJob = failed({ id: "remote-failure" });
+    store.hostStates.hal9000 = {
+      ...emptyDownloadsState(),
+      label: "hal9000",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "remote-key" },
+      subscribed: true,
+      abort: null,
+      cancelling: [],
+      ready: null,
+      history: [failedJob],
+    };
+    const retry = vi.spyOn(store, "retry").mockResolvedValue(undefined);
+
+    store.onJobFailed("remote-failure", "hal9000");
+    await useNotificationsStore().entries[0]!.action?.run();
+
+    expect(retry).toHaveBeenCalledWith("hal9000", failedJob);
   });
 
   it("routes an ordinary completed pull to Models", () => {
