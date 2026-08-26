@@ -63,6 +63,7 @@ const emit = defineEmits<{
   "open-mask": [];
   "open-h3-first-frame-picker": [];
   "open-h3-last-frame-picker": [];
+  "open-h3-reference-picker": [];
 }>();
 
 function patch(next: Partial<GenerateFormState>) {
@@ -293,7 +294,9 @@ function clearControl() {
     <MinimaxH3AuthoringPanel
       v-if="plan.kind === 'h3-references'"
       :model-value="h3Authoring"
+      image-picker-available
       @update:model-value="setH3Authoring"
+      @open-image-picker="emit('open-h3-reference-picker')"
     />
 
     <!-- Ordered picture strip (Qwen edit / FLUX.2 references). -->

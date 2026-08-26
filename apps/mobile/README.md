@@ -345,6 +345,13 @@ installed catalog IDs remain valid across server model-list refreshes. Only a
 strictly valid version-1
 non-authoritative `unsupported` result or a missing legacy endpoint
 (`404`/`405`) may retain compatible routing without an authoritative plan.
+MiniMax H3 Ref2VA is the staged-media exception: Create first freezes a host
+that advertises the selected model, uploads the ordered references there, and
+relies on that host's exact admission validation before queueing because an
+authoritative plan cannot exist until those media bytes are staged. The shared
+image picker supports an ordered multi-select from every connected host plus
+local files for Ref2VA, while ordinary source and keyframe wells keep their
+single-image mode.
 Create generation queues and stale reasons resolve opaque catalog IDs through
 the selected host's inventory for display, while requests and saved provenance
 retain the stable ID.

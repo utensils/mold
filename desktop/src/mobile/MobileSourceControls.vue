@@ -33,6 +33,7 @@ import SourceMediaWells, { type SourceMediaSlot } from "@studio/components/Sourc
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
 import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import {
+  appendMinimaxH3PickedImageReferences,
   emptyMinimaxH3AuthoringState,
   setMinimaxH3BoundaryFile,
   setMinimaxH3PickedImageBoundary,
@@ -96,6 +97,7 @@ function setH3Authoring(value: typeof h3Authoring.value): void {
   props.form.h3Authoring = value;
 }
 const h3PickerTarget = ref<MinimaxH3BoundaryEndpoint | null>(null);
+const h3ReferencePickerOpen = ref(false);
 const h3Error = ref<string | null>(null);
 const h3PickerMaxBytes = computed(() =>
   Math.max(
@@ -148,6 +150,12 @@ function onH3Picked(image: MobilePickedImage): void {
   if (!endpoint) return;
   applyH3(setMinimaxH3PickedImageBoundary(props.form.h3Authoring, endpoint, image));
 }
+function onH3ReferenceImagesPicked(images: MobilePickedImage[]): void {
+  applyH3(appendMinimaxH3PickedImageReferences(props.form.h3Authoring, images));
+}
+const h3ReferencePickerMaxBytes = computed(() =>
+  Math.max(0, MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES - inlineGenerationMediaBytes(props.form)),
+);
 const flux2Dev = computed(() => isFlux2DevModel(props.form.model));
 const error = ref("");
 const maskOpen = ref(false);
@@ -464,18 +472,29 @@ function applyMask(mask: string): void {
 </script>
 
 <template>
-  <fieldset
-    v-if="plan.kind === 'h3-references'"
-    class="mobile-source-controls"
-    data-test="mobile-h3-authoring"
-  >
-    <legend class="mobile-source-legend">Ordered references · Required</legend>
-    <MinimaxH3AuthoringPanel
-      :model-value="h3Authoring"
-      touch-friendly
-      @update:model-value="setH3Authoring"
+  <template v-if="plan.kind === 'h3-references'">
+    <fieldset class="mobile-source-controls" data-test="mobile-h3-authoring">
+      <legend class="mobile-source-legend">Ordered references · Required</legend>
+      <MinimaxH3AuthoringPanel
+        :model-value="h3Authoring"
+        touch-friendly
+        image-picker-available
+        @update:model-value="setH3Authoring"
+        @open-image-picker="h3ReferencePickerOpen = true"
+      />
+    </fieldset>
+    <MobileImagePickerSheet
+      :open="h3ReferencePickerOpen"
+      :target="target"
+      :gallery-sources="gallerySources"
+      title="Add ordered reference images"
+      multiple
+      :max-bytes="h3ReferencePickerMaxBytes"
+      :oversize-message="MOBILE_MEDIA_BUDGET_ERROR"
+      @pick-many="onH3ReferenceImagesPicked"
+      @close="h3ReferencePickerOpen = false"
     />
-  </fieldset>
+  </template>
 
   <!-- MiniMax H3 FL2VA boundaries: the exact same wells, H3-owned state. -->
   <template v-else-if="plan.kind === 'h3-boundaries'">

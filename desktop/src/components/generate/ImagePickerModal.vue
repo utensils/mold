@@ -35,6 +35,8 @@ const dragOver = ref(false);
 // so the dialog is keyboard-operable and doesn't strand focus (matches Lightbox).
 const closeBtn = ref<HTMLButtonElement | null>(null);
 const fallbackFileInput = ref<HTMLInputElement | null>(null);
+const selectedGallery = ref<MergedPrint[]>([]);
+const pickingGallery = ref(false);
 let restoreFocusEl: HTMLElement | null = null;
 
 // The gallery tab is the same unified multi-host view as the Gallery's All
@@ -47,6 +49,7 @@ const gallery = useGalleryStore();
 // previous session's pick/upload error is stale by now — clear it.
 function loadGallery() {
   error.value = null;
+  selectedGallery.value = [];
   if (props.galleryOnly) tab.value = "gallery";
   void gallery.fetchAll();
 }
@@ -143,13 +146,48 @@ async function chooseFiles() {
 }
 
 async function pickFromGallery(entry: MergedPrint) {
+  if (props.multiple) {
+    const key = `${entry.sourceKey}:${entry.item.filename}`;
+    const index = selectedGallery.value.findIndex(
+      (selected) => `${selected.sourceKey}:${selected.item.filename}` === key,
+    );
+    selectedGallery.value =
+      index >= 0
+        ? selectedGallery.value.filter((_, item) => item !== index)
+        : [...selectedGallery.value, entry];
+    return;
+  }
+  await emitGallerySelection([entry]);
+}
+
+function galleryEntrySelected(entry: MergedPrint): boolean {
+  const key = `${entry.sourceKey}:${entry.item.filename}`;
+  return selectedGallery.value.some(
+    (selected) => `${selected.sourceKey}:${selected.item.filename}` === key,
+  );
+}
+
+async function confirmGallerySelection() {
+  await emitGallerySelection(selectedGallery.value);
+}
+
+async function emitGallerySelection(entries: readonly MergedPrint[]) {
+  if (!entries.length || pickingGallery.value) return;
+  pickingGallery.value = true;
+  error.value = null;
   try {
-    emit("pick", [
-      { filename: entry.item.filename, base64: await readGalleryMediaBase64(entry, gallery) },
-    ]);
+    const picked = await Promise.all(
+      entries.map(async (entry) => ({
+        filename: entry.item.filename,
+        base64: await readGalleryMediaBase64(entry, gallery),
+      })),
+    );
+    emit("pick", picked);
     emit("close");
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    pickingGallery.value = false;
   }
 }
 </script>
@@ -259,8 +297,15 @@ async function pickFromGallery(entry: MergedPrint) {
               <button
                 type="button"
                 class="border-edge relative aspect-square w-full overflow-hidden rounded-media border transition hover:brightness-110"
+                :class="
+                  galleryEntrySelected(entry)
+                    ? 'ring-2 ring-safelight ring-offset-2 ring-offset-bench'
+                    : ''
+                "
                 data-test="picker-gallery-item"
                 :aria-label="entry.item.filename"
+                :disabled="pickingGallery"
+                :aria-pressed="multiple ? galleryEntrySelected(entry) : undefined"
                 @click="pickFromGallery(entry)"
               >
                 <AuthedMedia
@@ -282,9 +327,40 @@ async function pickFromGallery(entry: MergedPrint) {
                 >
                   {{ entry.hostLabel }}
                 </span>
+                <span
+                  v-if="multiple && galleryEntrySelected(entry)"
+                  class="absolute top-1 right-1 grid h-6 w-6 place-items-center rounded-full bg-safelight text-caption font-bold text-on-accent"
+                  aria-hidden="true"
+                >
+                  {{
+                    selectedGallery.findIndex(
+                      (selected) =>
+                        selected.sourceKey === entry.sourceKey &&
+                        selected.item.filename === entry.item.filename,
+                    ) + 1
+                  }}
+                </span>
               </button>
             </li>
           </ul>
+          <div
+            v-if="multiple && selectedGallery.length"
+            class="border-edge sticky bottom-0 mt-3 flex items-center justify-between gap-3 border-t bg-bench pt-3"
+            data-test="picker-gallery-selection"
+          >
+            <span class="text-caption text-ink-2">
+              {{ selectedGallery.length }} selected · kept in this order
+            </span>
+            <button
+              type="button"
+              class="rounded-control bg-safelight px-3 py-2 text-body font-semibold text-on-accent"
+              data-test="picker-gallery-confirm"
+              :disabled="pickingGallery"
+              @click="confirmGallerySelection"
+            >
+              Add selected
+            </button>
+          </div>
         </div>
       </div>
     </div>

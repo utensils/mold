@@ -1,13 +1,22 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, h, nextTick, ref } from "vue";
 import ImagePickerModal from "./ImagePickerModal.vue";
-import * as api from "../api";
 
-vi.mock("../api", () => ({
-  listGallery: vi.fn(async () => []),
-  thumbnailUrl: vi.fn((filename: string) => `/thumb/${filename}`),
-  imageUrl: vi.fn((filename: string) => `/image/${filename}`),
+const fetchMergedGallery = vi.hoisted(() => vi.fn());
+const fetchGalleryBlob = vi.hoisted(() => vi.fn());
+
+vi.mock("../lib/multiHostGallery", () => ({ fetchMergedGallery }));
+vi.mock("../lib/hostRegistry", () => ({
+  HOSTS_CHANGED_EVENT: "mold:hosts-changed",
+  listHosts: () => [{ id: "origin", name: "this server", url: "" }],
+  getHost: () => ({ id: "origin", name: "this server", url: "" }),
+}));
+vi.mock("../lib/galleryMedia", () => ({ fetchGalleryBlob }));
+vi.mock("../composables/useThumbnailSources", () => ({
+  useThumbnailSources: () => ({
+    srcFor: (item: { filename: string }) => `/thumb/${item.filename}`,
+  }),
 }));
 
 vi.mock("../lib/base64", () => ({
@@ -30,6 +39,16 @@ function dialog(): HTMLElement {
 }
 
 describe("ImagePickerModal", () => {
+  beforeEach(() => {
+    fetchMergedGallery.mockReset().mockResolvedValue({
+      entries: [],
+      rawEntries: [],
+      reachableHostIds: ["origin"],
+      unreachableHostIds: [],
+      remoteHostCount: 0,
+    });
+    fetchGalleryBlob.mockReset();
+  });
   afterEach(() => {
     document.body.innerHTML = "";
   });
@@ -88,23 +107,35 @@ describe("ImagePickerModal", () => {
   });
 
   it("filters local files and gallery rows to PNG and JPEG", async () => {
-    vi.mocked(api.listGallery).mockResolvedValueOnce([
-      {
-        filename: "still.png",
-        metadata: {} as never,
-        timestamp: 3,
-      },
-      {
-        filename: "clip.mp4",
-        metadata: {} as never,
-        timestamp: 2,
-      },
-      {
-        filename: "loop.webp",
-        metadata: {} as never,
-        timestamp: 1,
-      },
-    ]);
+    fetchMergedGallery.mockResolvedValue({
+      entries: [
+        {
+          filename: "still.png",
+          metadata: {} as never,
+          timestamp: 3,
+          hostId: "origin",
+          hostLabel: "this server",
+        },
+        {
+          filename: "clip.mp4",
+          metadata: {} as never,
+          timestamp: 2,
+          hostId: "origin",
+          hostLabel: "this server",
+        },
+        {
+          filename: "loop.webp",
+          metadata: {} as never,
+          timestamp: 1,
+          hostId: "origin",
+          hostLabel: "this server",
+        },
+      ],
+      rawEntries: [],
+      reachableHostIds: ["origin"],
+      unreachableHostIds: [],
+      remoteHostCount: 0,
+    });
     const w = mount(ImagePickerModal, {
       props: { open: true, multiple: false },
       attachTo: document.body,
@@ -144,13 +175,21 @@ describe("ImagePickerModal", () => {
   });
 
   it("explains when the gallery has no compatible still images", async () => {
-    vi.mocked(api.listGallery).mockResolvedValueOnce([
-      {
-        filename: "clip.mp4",
-        metadata: {} as never,
-        timestamp: 1,
-      },
-    ]);
+    fetchMergedGallery.mockResolvedValue({
+      entries: [
+        {
+          filename: "clip.mp4",
+          metadata: {} as never,
+          timestamp: 1,
+          hostId: "origin",
+          hostLabel: "this server",
+        },
+      ],
+      rawEntries: [],
+      reachableHostIds: ["origin"],
+      unreachableHostIds: [],
+      remoteHostCount: 0,
+    });
     const w = mount(ImagePickerModal, {
       props: { open: true, multiple: false },
       attachTo: document.body,
@@ -166,6 +205,105 @@ describe("ImagePickerModal", () => {
     expect(document.body.textContent).toContain(
       "no PNG or JPEG images available",
     );
+  });
+
+  it("selects ordered images across connected hosts before emitting", async () => {
+    fetchMergedGallery.mockResolvedValue({
+      entries: [
+        {
+          filename: "origin.png",
+          metadata: {} as never,
+          timestamp: 2,
+          hostId: "origin",
+          hostLabel: "this server",
+        },
+        {
+          filename: "hal.png",
+          metadata: {} as never,
+          timestamp: 1,
+          hostId: "hal9000",
+          hostLabel: "hal9000",
+        },
+      ],
+      rawEntries: [],
+      reachableHostIds: ["origin", "hal9000"],
+      unreachableHostIds: [],
+      remoteHostCount: 1,
+    });
+    fetchGalleryBlob.mockResolvedValue(
+      new Blob(["image"], { type: "image/png" }),
+    );
+    const wrapper = mount(ImagePickerModal, {
+      props: { open: true, multiple: true },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await wrapper
+      .get("[aria-label='Image source']")
+      .findAll("button")[1]!
+      .trigger("click");
+    const tiles = wrapper.findAll(".ip__tile");
+    await tiles[1]!.trigger("click");
+    await tiles[0]!.trigger("click");
+
+    expect(wrapper.emitted("pick")).toBeUndefined();
+    expect(
+      wrapper.get("[data-test='image-picker-selection']").text(),
+    ).toContain("2 selected");
+    await wrapper.get("[data-test='image-picker-confirm']").trigger("click");
+    await flushPromises();
+
+    const picked = wrapper.emitted("pick")?.[0]?.[0] as Array<{
+      filename: string;
+    }>;
+    expect(picked.map((entry) => entry.filename)).toEqual([
+      "hal.png",
+      "origin.png",
+    ]);
+  });
+
+  it("admits one multi-image read when Add selected is clicked twice", async () => {
+    fetchMergedGallery.mockResolvedValue({
+      entries: [
+        {
+          filename: "origin.png",
+          metadata: {} as never,
+          timestamp: 2,
+          hostId: "origin",
+          hostLabel: "this server",
+        },
+        {
+          filename: "hal.png",
+          metadata: {} as never,
+          timestamp: 1,
+          hostId: "hal9000",
+          hostLabel: "hal9000",
+        },
+      ],
+      rawEntries: [],
+      reachableHostIds: ["origin", "hal9000"],
+      unreachableHostIds: [],
+      remoteHostCount: 1,
+    });
+    fetchGalleryBlob.mockImplementation(() => new Promise(() => {}));
+    const wrapper = mount(ImagePickerModal, {
+      props: { open: true, multiple: true, galleryOnly: true },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    const tiles = wrapper.findAll(".ip__tile");
+    await tiles[0]!.trigger("click");
+    await tiles[1]!.trigger("click");
+    const confirm = wrapper.get<HTMLButtonElement>(
+      "[data-test='image-picker-confirm']",
+    );
+
+    await confirm.trigger("click");
+    await confirm.trigger("click");
+
+    expect(confirm.attributes("disabled")).toBeDefined();
+    expect(fetchGalleryBlob).toHaveBeenCalledTimes(2);
+    expect(wrapper.emitted("pick")).toBeUndefined();
   });
 
   it("is a labelled modal dialog", () => {

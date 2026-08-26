@@ -238,6 +238,7 @@ import {
 } from "@studio/lib/extend";
 import { promptOptional, promptRequired } from "@studio/lib/promptRequirement";
 import {
+  appendMinimaxH3PickedImageReferences,
   appendMinimaxH3GalleryImageReference,
   MINIMAX_H3_PROMPT_PLACEHOLDER,
   emptyMinimaxH3AuthoringState,
@@ -329,6 +330,7 @@ function openTargetPicker() {
 }
 // One picker serves both FL2VA boundaries; the target names the slot.
 const h3BoundaryPickerTarget = ref<MinimaxH3BoundaryEndpoint | null>(null);
+const h3ReferencePickerOpen = ref(false);
 /** Wan's closing still gets its own picker (#779) so attaching one can never
  * overwrite the opening frame the source well holds. */
 const showEndFramePicker = ref(false);
@@ -4511,6 +4513,25 @@ function onPickH3Boundary(images: SourceImageState[]): void {
   composerError.value = null;
 }
 
+function onPickH3References(images: SourceImageState[]): void {
+  const result = appendMinimaxH3PickedImageReferences(
+    form.state.value.h3Authoring,
+    images.map((image) => ({
+      filename: image.filename,
+      base64: image.base64,
+      mimeType: image.mime,
+      width: image.width,
+      height: image.height,
+    })),
+  );
+  if (!result.ok) {
+    composerError.value = result.error;
+    return;
+  }
+  form.state.value.h3Authoring = result.state;
+  composerError.value = null;
+}
+
 async function resolveMaskSourceConflict(): Promise<boolean> {
   const choice = await requestChoice({
     title: "Source image has a mask",
@@ -5412,6 +5433,7 @@ onBeforeUnmount(() => {
                   @open-h3-last-frame-picker="
                     h3BoundaryPickerTarget = 'lastFrame'
                   "
+                  @open-h3-reference-picker="h3ReferencePickerOpen = true"
                 />
                 <IdentityPanel
                   v-if="!sequenceMode"
@@ -5664,6 +5686,7 @@ onBeforeUnmount(() => {
           @open-mask="showMask = true"
           @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
           @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
+          @open-h3-reference-picker="h3ReferencePickerOpen = true"
         />
         <!-- The identity photo is media the user attaches, not a setting, so
              it sits with the source wells; only its two knobs are Advanced. -->
@@ -5804,6 +5827,13 @@ onBeforeUnmount(() => {
       gallery-only
       @pick="onPickH3Boundary"
       @close="h3BoundaryPickerTarget = null"
+    />
+    <ImagePickerModal
+      :open="h3ReferencePickerOpen"
+      title="Add ordered reference images"
+      :multiple="true"
+      @pick="onPickH3References"
+      @close="h3ReferencePickerOpen = false"
     />
     <ImagePickerModal
       :open="showEndFramePicker"

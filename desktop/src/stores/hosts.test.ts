@@ -1202,7 +1202,7 @@ describe("hosts store", () => {
   );
 
   it.each([404, 405])(
-    "fails closed for reference requests when placement HTTP %s is unsupported",
+    "routes staged H3 references to host admission when placement HTTP %s is unsupported",
     async (status) => {
       previewGenerationPlacement.mockRejectedValueOnce(new ApiError("unsupported", status));
       const hosts = useHostsStore();
@@ -1213,18 +1213,14 @@ describe("hosts store", () => {
       } as GenerateRequest;
 
       await expect(hosts.resolveFeasible("local", request)).resolves.toMatchObject({
-        kind: "unreachable",
-        perHost: [
-          expect.objectContaining({
-            error:
-              "does not provide the authoritative placement preview required for reference media",
-          }),
-        ],
+        kind: "route",
+        route: { hostId: "local" },
+        preview: null,
       });
     },
   );
 
-  it("fails closed for an explicit unsupported reference preview", async () => {
+  it("routes staged H3 references to host admission after an explicit unsupported preview", async () => {
     previewGenerationPlacement.mockResolvedValueOnce({
       ...plannedPlacement(),
       authoritative: false,
@@ -1239,13 +1235,9 @@ describe("hosts store", () => {
     } as GenerateRequest;
 
     await expect(hosts.resolveFeasible("local", request)).resolves.toMatchObject({
-      kind: "unreachable",
-      perHost: [
-        expect.objectContaining({
-          error:
-            "does not provide the authoritative placement preview required for reference media",
-        }),
-      ],
+      kind: "route",
+      route: { hostId: "local" },
+      preview: null,
     });
   });
 

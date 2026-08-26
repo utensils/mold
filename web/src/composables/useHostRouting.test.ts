@@ -780,7 +780,7 @@ describe("useHostRouting", () => {
   );
 
   it.each([404, 405])(
-    "fails closed for reference requests when placement HTTP %s is unsupported",
+    "routes staged H3 references to host admission when placement HTTP %s is unsupported",
     async (statusCode) => {
       statuses.set(ORIGIN_HOST_ID, status());
       models.set(ORIGIN_HOST_ID, [
@@ -805,18 +805,14 @@ describe("useHostRouting", () => {
           references: [],
         }),
       ).resolves.toMatchObject({
-        kind: "unreachable",
-        perHost: [
-          expect.objectContaining({
-            error:
-              "does not provide the authoritative placement preview required for reference media",
-          }),
-        ],
+        kind: "route",
+        route: { hostId: ORIGIN_HOST_ID },
+        preview: null,
       });
     },
   );
 
-  it("fails closed for an explicit unsupported reference preview", async () => {
+  it("routes staged H3 references to host admission after an explicit unsupported preview", async () => {
     statuses.set(ORIGIN_HOST_ID, status());
     models.set(ORIGIN_HOST_ID, [model("minimax-h3-ref2va:comfy-pruned-int8")]);
     placementCall.mockResolvedValue(
@@ -842,13 +838,9 @@ describe("useHostRouting", () => {
         references: [],
       }),
     ).resolves.toMatchObject({
-      kind: "unreachable",
-      perHost: [
-        expect.objectContaining({
-          error:
-            "does not provide the authoritative placement preview required for reference media",
-        }),
-      ],
+      kind: "route",
+      route: { hostId: ORIGIN_HOST_ID },
+      preview: null,
     });
   });
 
