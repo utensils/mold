@@ -5878,7 +5878,16 @@ impl DurableAdmissionReadiness {
         if !self.authoritative {
             return Some(DurableAdmissionUnready::SchedulerNotAuthoritative);
         }
-        self.unready_for_direct()
+        if !self.journal_enabled {
+            return Some(DurableAdmissionUnready::QueueJournalDisabled);
+        }
+        if self.admission.is_none() {
+            return Some(DurableAdmissionUnready::AdmissionServiceMissing);
+        }
+        if !self.output_enabled {
+            return Some(DurableAdmissionUnready::GalleryOutputDisabled);
+        }
+        None
     }
 
     /// The first unmet conjunct of DIRECT durable admission.
@@ -5894,14 +5903,21 @@ impl DurableAdmissionReadiness {
     /// The batch PROTOCOL is what needs V2, because that is what
     /// `capabilities.queue.heterogeneous_batch` advertises.
     pub(crate) fn unready_for_direct(&self) -> Option<DurableAdmissionUnready> {
+        // Gallery output FIRST, which is the direct path's own precedence and
+        // deliberately the opposite of the batch route's. A direct request on a
+        // host that is both output-disabled and missing its admission service
+        // has always answered `DURABLE_ADMISSION_UNAVAILABLE`; the batch route
+        // has always answered `HETEROGENEOUS_BATCH_UNAVAILABLE` for the same
+        // pair, because it checks scheduler/journal/admission first. Two
+        // routes, two documented precedences — not an inconsistency to unify.
+        if !self.output_enabled {
+            return Some(DurableAdmissionUnready::GalleryOutputDisabled);
+        }
         if !self.journal_enabled {
             return Some(DurableAdmissionUnready::QueueJournalDisabled);
         }
         if self.admission.is_none() {
             return Some(DurableAdmissionUnready::AdmissionServiceMissing);
-        }
-        if !self.output_enabled {
-            return Some(DurableAdmissionUnready::GalleryOutputDisabled);
         }
         None
     }

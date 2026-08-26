@@ -18364,6 +18364,55 @@ mod tests {
         );
     }
 
+    /// The direct and batch routes keep OPPOSITE refusal precedence, and a host
+    /// failing more than one conjunct is where that becomes observable. Direct
+    /// has always answered `DURABLE_ADMISSION_UNAVAILABLE` for disabled gallery
+    /// output; batch has always answered `HETEROGENEOUS_BATCH_UNAVAILABLE`
+    /// because it tests scheduler/journal/admission first. Resolving both from
+    /// one value must not collapse them onto a single order.
+    #[tokio::test(flavor = "current_thread")]
+    async fn direct_and_batch_keep_their_own_refusal_precedence() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        // Output disabled AND no admission service: both conjuncts unmet, so
+        // each route's own precedence decides which code it reports.
+        let (mut state, _rx) = durable_state_with_admission_policy(
+            db,
+            root.path(),
+            MockEngine::ready(),
+            false,
+            false,
+            "precedence-test",
+        );
+        install_authoritative_v2(&mut state);
+        state.output_disabled_override = true;
+
+        let mut request = readiness_request();
+        match crate::routes::direct_durable_admission(&state, &mut request, true).await {
+            Ok(_) => panic!("an explicit durable direct request must be refused"),
+            Err(refusal) => assert_eq!(refusal.code, "DURABLE_ADMISSION_UNAVAILABLE"),
+        }
+
+        let refused = app_with_state(state)
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [serde_json::from_str::<serde_json::Value>(
+                        &generate_body("a cat", 64, 64)
+                    ).unwrap()],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json_body(refused).await["code"],
+            "HETEROGENEOUS_BATCH_UNAVAILABLE"
+        );
+    }
+
     /// N1. A degraded encrypted-media store must route a media-carrying request
     /// to the attached path, not refuse it. This gate ignored
     /// `explicitly_requested` while the gate six lines below it consulted it, so
