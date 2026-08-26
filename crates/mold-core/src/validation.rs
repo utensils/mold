@@ -74,8 +74,9 @@ pub fn family_supports_lora(family: &str) -> bool {
 /// and mold's own RoPE path convert the temporal axis to *seconds* before
 /// normalizing by it: `ltx2/model/rope.rs`'s `scale_video_time_to_seconds`
 /// divides the pixel-frame coordinate by the request's fps. So `20` bounds
-/// twenty seconds of runtime, not twenty latent frames — which is exactly the
-/// ~20 s single-generation duration Lightricks advertises for LTX-2.3.
+/// twenty seconds of runtime, not twenty latent frames. Current upstream
+/// LTX-2.5 expresses the same authority as `AutoDuration { min_seconds: 1,
+/// max_seconds: 20 }`; the frame count remains derived from the request FPS.
 pub const LTX2_MAX_RUNTIME_SECONDS: u32 = 20;
 
 /// fps assumed for LTX-2 when a caller must name a frame ceiling without a
@@ -85,7 +86,7 @@ pub const LTX2_DEFAULT_FPS: u32 = 24;
 
 /// Absolute pixel-frame ceiling for LTX-2 regardless of fps.
 ///
-/// This is a resource guard, not a model limit: the seconds budget alone would
+/// This is Mold's resource guard, not an upstream model limit: the seconds budget alone would
 /// admit 2404 frames at the maximum allowed 120 fps, which no current GPU can
 /// denoise in one pass. 604 is `LTX2_MAX_RUNTIME_SECONDS` at 30 fps — the point
 /// where a practical frame budget meets the model's real duration budget.

@@ -40,6 +40,11 @@ pub fn format_progress(event: &SseProgressEvent) -> String {
         SseProgressEvent::StageDone { name, elapsed_ms } => {
             format!("{name} ({elapsed_ms}ms)")
         }
+        SseProgressEvent::StageProgress {
+            name,
+            current,
+            total,
+        } => format!("{name} {current}/{total}"),
         SseProgressEvent::Info { message } => message.clone(),
         SseProgressEvent::CacheHit { resource } => {
             format!("Cache hit: {resource}")

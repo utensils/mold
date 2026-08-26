@@ -4163,6 +4163,14 @@ pub enum SseProgressEvent {
         name: String,
         elapsed_ms: u64,
     },
+    /// Bounded work inside a named stage. Unlike `DenoiseStep`, this does not
+    /// claim that a generation step has completed; it keeps long model-layer
+    /// evaluations visibly alive without inflating denoise percentage.
+    StageProgress {
+        name: String,
+        current: usize,
+        total: usize,
+    },
     Info {
         message: String,
     },
@@ -6476,6 +6484,26 @@ mod tests {
         assert!(
             matches!(back, SseProgressEvent::StageStart { name } if name == "Loading T5 encoder")
         );
+    }
+
+    #[test]
+    fn sse_progress_stage_progress_roundtrip() {
+        let event = SseProgressEvent::StageProgress {
+            name: "Encoding prompt (Gemma)".to_string(),
+            current: 17,
+            total: 48,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"stage_progress""#));
+        let back: SseProgressEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            SseProgressEvent::StageProgress {
+                name,
+                current: 17,
+                total: 48,
+            } if name == "Encoding prompt (Gemma)"
+        ));
     }
 
     #[test]

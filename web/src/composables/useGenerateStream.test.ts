@@ -448,6 +448,16 @@ describe("workStarted tracking", () => {
     lastSingleHandlers!.onProgress({ type: "stage_start", name: "Loading" });
     expect(job.workStarted).toBe(true);
     expect(job.progress.queuePosition).toBeNull();
+
+    lastSingleHandlers!.onProgress({
+      type: "stage_progress",
+      name: "Encoding prompt (Gemma, conditional)",
+      current: 8,
+      total: 48,
+    });
+    expect(job.progress.stage).toBe(
+      "Encoding prompt (Gemma, conditional) 8/48",
+    );
   });
 
   it("keeps a chain queued until a stage starts and between durable stages", () => {

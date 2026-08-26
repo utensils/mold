@@ -1934,6 +1934,11 @@ fn format_progress_event(ev: &mold_core::types::SseProgressEvent) -> String {
         }
         E::Preview { step, total, .. } => format!("denoise preview {step}/{total}"),
         E::StageStart { name } => format!("stage: {name}"),
+        E::StageProgress {
+            name,
+            current,
+            total,
+        } => format!("{name} {current}/{total}"),
         E::StageDone { name, elapsed_ms } => format!("done: {name} ({elapsed_ms}ms)"),
         E::Info { message } => message.clone(),
         E::CacheHit { resource } => format!("cached: {resource}"),
@@ -3297,6 +3302,14 @@ mod tests {
                 name: "denoise".into()
             }),
             "stage: denoise"
+        );
+        assert_eq!(
+            format_progress_event(&E::StageProgress {
+                name: "denoise blocks".into(),
+                current: 7,
+                total: 48,
+            }),
+            "denoise blocks 7/48"
         );
         assert_eq!(
             format_progress_event(&E::StageDone {

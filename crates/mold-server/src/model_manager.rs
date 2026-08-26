@@ -313,8 +313,14 @@ fn annotate_audio_capabilities(catalog: &mut [ModelInfoExtended], config: &Confi
         {
             continue;
         }
-        entry.supports_audio = ModelPaths::resolve(&entry.info.name, config)
-            .and_then(|paths| mold_inference::audio::output_supported(&entry.info.family, &paths));
+        entry.supports_audio = ModelPaths::resolve(&entry.info.name, config).and_then(|paths| {
+            mold_inference::audio::output_supported(
+                &entry.info.family,
+                &entry.info.name,
+                config,
+                &paths,
+            )
+        });
     }
 }
 
@@ -3267,6 +3273,58 @@ mod tests {
         );
         let combined = installed_catalog_models(&state, &config, dir.path(), None, false);
         assert_eq!(combined[0].supports_audio, Some(true));
+    }
+
+    #[test]
+    fn downloaded_ltx25_uses_split_audio_component_for_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            models_dir: dir.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let model = mold_core::ltx25_manifest::DISTILLED_INT8_CONV;
+        let split = mold_core::ltx25_manifest::Ltx25ModelPaths::resolve(&config, model).unwrap();
+        config.models.insert(
+            model.to_string(),
+            mold_core::ModelConfig {
+                transformer: Some(split.transformer.to_string_lossy().into_owned()),
+                vae: Some(split.video_vae.to_string_lossy().into_owned()),
+                family: Some("ltx2".to_string()),
+                ..Default::default()
+            },
+        );
+        std::fs::create_dir_all(split.audio_vae.parent().unwrap()).unwrap();
+        write_safetensors_with_keys(
+            &split.audio_vae,
+            &[
+                "audio_vae.per_channel_statistics.mean-of-means",
+                "vocoder.vocoder.conv_pre.weight",
+            ],
+        );
+
+        let mut catalog = mold_core::catalog::build_model_catalog(&config, None, false);
+        let row = catalog
+            .iter_mut()
+            .find(|entry| entry.info.name == model)
+            .unwrap();
+        row.downloaded = true;
+        row.supports_audio = None;
+
+        annotate_audio_capabilities(&mut catalog, &config);
+        synchronize_generation_profile_capabilities(&mut catalog);
+
+        let row = catalog
+            .iter()
+            .find(|entry| entry.info.name == model)
+            .unwrap();
+        assert_eq!(row.supports_audio, Some(true));
+        assert!(row
+            .generation_profile
+            .as_ref()
+            .unwrap()
+            .recipes
+            .iter()
+            .any(|recipe| recipe.capabilities.supports_audio));
     }
 
     /// `/api/models` must advertise H3's synchronized audio for every

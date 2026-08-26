@@ -756,13 +756,19 @@ impl Ltx2RuntimeSession {
             };
             let prompt_encode_start = Instant::now();
             let prompt_probe = PhaseVramProbe::enter_if("prompt_encode", prompt_device_is_cuda);
+            if let Some(progress) = progress {
+                progress(ProgressEvent::StageStart {
+                    name: "Encoding prompt (Gemma)".to_string(),
+                });
+            }
             // Closure so an encode that dies of OOM is still reported before
             // the error leaves `prepare`.
             let encoded = (|| -> Result<NativePromptEncoding> {
                 move_prompt_encoding_to_device(
-                    prompt_encoder.encode_prompt_pair_with_unconditional(
+                    prompt_encoder.encode_prompt_pair_with_progress(
                         &plan.prompt_tokens,
                         encode_unconditional_prompt,
+                        progress,
                     )?,
                     &prepared_device,
                 )
@@ -1441,14 +1447,13 @@ const DISTILLED_STAGE1_SIGMAS_NO_TERMINAL: &[f32] = &[
 ];
 
 const DISTILLED_STAGE2_SIGMAS_NO_TERMINAL: &[f32] = &[0.909375, 0.725, 0.421875];
-const LTX25_DISTILLED_STAGE2_SIGMAS_NO_TERMINAL: &[f32] = &[0.85, 0.725, 0.4219];
 
-fn distilled_stage2_sigmas_no_terminal(plan: &Ltx2GeneratePlan) -> &'static [f32] {
-    if plan.preset.name == "ltx-2.5-22b" {
-        LTX25_DISTILLED_STAGE2_SIGMAS_NO_TERMINAL
-    } else {
-        DISTILLED_STAGE2_SIGMAS_NO_TERMINAL
-    }
+fn distilled_stage2_sigmas_no_terminal(_plan: &Ltx2GeneratePlan) -> &'static [f32] {
+    // One authority for every distilled LTX-2 generation: current upstream
+    // `STAGE_2_DISTILLED_SIGMA_VALUES` is the fixed subset beginning at
+    // 0.909375. A ComfyUI fixture briefly introduced a model-name fork at
+    // 0.85, but the official pipeline does not version this schedule.
+    DISTILLED_STAGE2_SIGMAS_NO_TERMINAL
 }
 
 /// Refuse a resolution past the trained RoPE span on a pipeline that denoises
@@ -4726,6 +4731,11 @@ fn run_real_distilled_stage(
     );
     let mut run_sigmas = sigmas_no_terminal.to_vec();
     run_sigmas.push(0.0);
+    if let Some(progress) = progress {
+        progress(ProgressEvent::StageStart {
+            name: format!("Denoising ({} steps)", run_sigmas.len().saturating_sub(1)),
+        });
+    }
     let base_video_token_count = video_patchifier.get_token_count(video_shape);
     let clean_video_override = video_clean_latents
         .map(|latents| video_patchifier.patchify(latents))
@@ -4970,6 +4980,7 @@ fn run_real_distilled_stage(
                 video_guider,
                 audio_guider,
                 step_idx,
+                progress,
             )?;
             (video_denoised, audio_denoised, None)
         } else if let Some(audio_latents_ref) = audio_latents.as_ref() {
@@ -4981,7 +4992,7 @@ fn run_real_distilled_stage(
                     .as_ref()
                     .context("missing conditional static inputs for multimodal stage")?;
                 let (uncond_video_velocity, uncond_audio_velocity) = transformer
-                    .forward_with_static_inputs(
+                    .forward_with_static_inputs_and_progress(
                         &video_latents,
                         Some(audio_latents_ref),
                         &video_sigma,
@@ -4990,9 +5001,11 @@ fn run_real_distilled_stage(
                         audio_timestep.as_ref(),
                         uncond_static_inputs,
                         None,
+                        "Evaluating transformer (unconditional)",
+                        progress,
                     )?;
                 let (cond_video_velocity, cond_audio_velocity) = transformer
-                    .forward_with_static_inputs(
+                    .forward_with_static_inputs_and_progress(
                         &video_latents,
                         Some(audio_latents_ref),
                         &video_sigma,
@@ -5001,6 +5014,8 @@ fn run_real_distilled_stage(
                         audio_timestep.as_ref(),
                         cond_static_inputs,
                         None,
+                        "Evaluating transformer (conditional)",
+                        progress,
                     )?;
                 let uncond_audio_velocity = uncond_audio_velocity
                     .context("audio branch unexpectedly returned no unconditional output")?;
@@ -5036,7 +5051,7 @@ fn run_real_distilled_stage(
                     .as_ref()
                     .context("missing conditional static inputs for multimodal stage")?;
                 let (cond_video_velocity, cond_audio_velocity) = transformer
-                    .forward_with_static_inputs(
+                    .forward_with_static_inputs_and_progress(
                         &video_latents,
                         Some(audio_latents_ref),
                         &video_sigma,
@@ -5045,11 +5060,13 @@ fn run_real_distilled_stage(
                         audio_timestep.as_ref(),
                         cond_static_inputs,
                         None,
+                        "Evaluating transformer (conditional)",
+                        progress,
                     )?;
                 if ltx_debug_compare_uncond_enabled() && step_idx == 0 {
                     if let Some(uncond_static_inputs) = uncond_static_inputs.as_ref() {
                         let (uncond_video_velocity, uncond_audio_velocity) = transformer
-                            .forward_with_static_inputs(
+                            .forward_with_static_inputs_and_progress(
                                 &video_latents,
                                 Some(audio_latents_ref),
                                 &video_sigma,
@@ -5058,6 +5075,8 @@ fn run_real_distilled_stage(
                                 audio_timestep.as_ref(),
                                 uncond_static_inputs,
                                 None,
+                                "Evaluating transformer (debug unconditional)",
+                                progress,
                             )?;
                         log_distilled_prompt_sensitivity(
                             debug_stage,
@@ -5075,7 +5094,7 @@ fn run_real_distilled_stage(
                 if step_idx == 0 {
                     if let Some(alt_static_inputs) = alt_static_inputs.as_ref() {
                         let (alt_video_velocity, alt_audio_velocity) = transformer
-                            .forward_with_static_inputs(
+                            .forward_with_static_inputs_and_progress(
                                 &video_latents,
                                 Some(audio_latents_ref),
                                 &video_sigma,
@@ -5084,6 +5103,8 @@ fn run_real_distilled_stage(
                                 audio_timestep.as_ref(),
                                 alt_static_inputs,
                                 None,
+                                "Evaluating transformer (debug alternate prompt)",
+                                progress,
                             )?;
                         log_distilled_alternate_prompt_sensitivity(
                             debug_stage,
@@ -5114,7 +5135,7 @@ fn run_real_distilled_stage(
             let cond_static_inputs = cond_static_inputs
                 .as_ref()
                 .context("missing conditional static inputs for video stage")?;
-            let (uncond_video_velocity, _) = transformer.forward_with_static_inputs(
+            let (uncond_video_velocity, _) = transformer.forward_with_static_inputs_and_progress(
                 &video_latents,
                 None,
                 &video_sigma,
@@ -5123,8 +5144,10 @@ fn run_real_distilled_stage(
                 None,
                 uncond_static_inputs,
                 None,
+                "Evaluating transformer (unconditional)",
+                progress,
             )?;
-            let (cond_video_velocity, _) = transformer.forward_with_static_inputs(
+            let (cond_video_velocity, _) = transformer.forward_with_static_inputs_and_progress(
                 &video_latents,
                 None,
                 &video_sigma,
@@ -5133,6 +5156,8 @@ fn run_real_distilled_stage(
                 None,
                 cond_static_inputs,
                 None,
+                "Evaluating transformer (conditional)",
+                progress,
             )?;
             (
                 denoised_from_velocity(
@@ -5154,7 +5179,7 @@ fn run_real_distilled_stage(
                 .as_ref()
                 .context("missing conditional static inputs for video stage")?;
             let (cond_video_velocity, _cond_audio_velocity) = transformer
-                .forward_with_static_inputs(
+                .forward_with_static_inputs_and_progress(
                     &video_latents,
                     None,
                     &video_sigma,
@@ -5163,19 +5188,24 @@ fn run_real_distilled_stage(
                     None,
                     cond_static_inputs,
                     None,
+                    "Evaluating transformer (conditional)",
+                    progress,
                 )?;
             if ltx_debug_compare_uncond_enabled() && step_idx == 0 {
                 if let Some(uncond_static_inputs) = uncond_static_inputs.as_ref() {
-                    let (uncond_video_velocity, _) = transformer.forward_with_static_inputs(
-                        &video_latents,
-                        None,
-                        &video_sigma,
-                        &video_timestep,
-                        None,
-                        None,
-                        uncond_static_inputs,
-                        None,
-                    )?;
+                    let (uncond_video_velocity, _) = transformer
+                        .forward_with_static_inputs_and_progress(
+                            &video_latents,
+                            None,
+                            &video_sigma,
+                            &video_timestep,
+                            None,
+                            None,
+                            uncond_static_inputs,
+                            None,
+                            "Evaluating transformer (debug unconditional)",
+                            progress,
+                        )?;
                     log_distilled_prompt_sensitivity(
                         debug_stage,
                         step_idx,
@@ -5191,16 +5221,19 @@ fn run_real_distilled_stage(
             }
             if step_idx == 0 {
                 if let Some(alt_static_inputs) = alt_static_inputs.as_ref() {
-                    let (alt_video_velocity, _) = transformer.forward_with_static_inputs(
-                        &video_latents,
-                        None,
-                        &video_sigma,
-                        &video_timestep,
-                        None,
-                        None,
-                        alt_static_inputs,
-                        None,
-                    )?;
+                    let (alt_video_velocity, _) = transformer
+                        .forward_with_static_inputs_and_progress(
+                            &video_latents,
+                            None,
+                            &video_sigma,
+                            &video_timestep,
+                            None,
+                            None,
+                            alt_static_inputs,
+                            None,
+                            "Evaluating transformer (debug alternate prompt)",
+                            progress,
+                        )?;
                     log_distilled_alternate_prompt_sensitivity(
                         debug_stage,
                         step_idx,
@@ -5455,18 +5488,21 @@ fn audio_guided_denoise_step(
     audio_timestep: &Tensor,
     audio_guider: &MultiModalGuider,
     step_idx: usize,
+    progress: Option<&ProgressCallback>,
 ) -> Result<Tensor> {
     let batch = audio_latents.dim(0)?;
     let batched_latents = repeat_batch(audio_latents, static_batch.repeat_count)?;
     let batched_sigma = repeat_batch(audio_sigma, static_batch.repeat_count)?;
     let batched_timestep = repeat_batch(audio_timestep, static_batch.repeat_count)?;
 
-    let all_velocity = transformer.forward_with_static_inputs(
+    let all_velocity = transformer.forward_with_static_inputs_and_progress(
         &batched_latents,
         &batched_sigma,
         &batched_timestep,
         &static_batch.static_inputs,
         Some(&static_batch.perturbations),
+        "Evaluating audio transformer",
+        progress,
     )?;
 
     let cond = denoised_from_velocity_with_sigma(
@@ -5530,6 +5566,11 @@ fn run_real_audio_only_stage(
     );
     let mut run_sigmas = sigmas_no_terminal.to_vec();
     run_sigmas.push(0.0);
+    if let Some(progress) = progress {
+        progress(ProgressEvent::StageStart {
+            name: format!("Denoising ({} steps)", run_sigmas.len().saturating_sub(1)),
+        });
+    }
 
     let mut audio_latents = audio_patchifier.patchify(audio_start_latents)?;
     let audio_sampler_noise = audio_sampler_noise
@@ -5574,6 +5615,7 @@ fn run_real_audio_only_stage(
             &audio_timestep,
             &audio_guider,
             step_idx,
+            progress,
         )?;
         transformer_secs += transformer_start.elapsed().as_secs_f64();
 
@@ -6625,6 +6667,7 @@ fn multimodal_guided_denoise_step(
     video_guider: &MultiModalGuider,
     audio_guider: &MultiModalGuider,
     step_idx: usize,
+    progress: Option<&ProgressCallback>,
 ) -> Result<(Tensor, Option<Tensor>)> {
     let video_skip = video_guider.should_skip_step(step_idx);
     let audio_skip = audio_guider.should_skip_step(step_idx);
@@ -6647,16 +6690,19 @@ fn multimodal_guided_denoise_step(
         .as_ref()
         .context("missing prepared static multimodal guidance inputs")?;
 
-    let (all_video_velocity, all_audio_velocity) = transformer.forward_with_static_inputs(
-        &batched_video_latents,
-        batched_audio_latents.as_ref(),
-        &batched_video_sigma,
-        &batched_video_timestep,
-        batched_audio_sigma.as_ref(),
-        batched_audio_timestep.as_ref(),
-        static_inputs,
-        Some(&static_batch.perturbations),
-    )?;
+    let (all_video_velocity, all_audio_velocity) = transformer
+        .forward_with_static_inputs_and_progress(
+            &batched_video_latents,
+            batched_audio_latents.as_ref(),
+            &batched_video_sigma,
+            &batched_video_timestep,
+            batched_audio_sigma.as_ref(),
+            batched_audio_timestep.as_ref(),
+            static_inputs,
+            Some(&static_batch.perturbations),
+            "Evaluating transformer",
+            progress,
+        )?;
 
     let cond_video = denoised_from_velocity_with_sigma(
         video_latents,
@@ -9161,7 +9207,7 @@ mod tests {
     }
 
     #[test]
-    fn ltx25_stage2_sigmas_match_the_official_workflow_without_changing_ltx23() {
+    fn distilled_stage2_sigmas_share_the_upstream_authority() {
         let ltx25 = req(
             "ltx-2.5-22b-distilled:int8-conv",
             OutputFormat::Mp4,
@@ -9176,7 +9222,7 @@ mod tests {
         );
         assert_eq!(
             super::distilled_stage2_sigmas_no_terminal(&ltx25_plan),
-            &[0.85, 0.725, 0.4219]
+            &[0.909375, 0.725, 0.421875]
         );
 
         let ltx23 = req("ltx-2.3-22b-distilled:fp8", OutputFormat::Mp4, Some(false));

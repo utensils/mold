@@ -14,7 +14,7 @@ jq -e '
   and .["8"].inputs == {width:128,height:128,length:9,batch_size:1}
   and .["11"].inputs.noise_seed == 25026
   and .["20"].inputs.noise_seed == 42
-  and .["22"].inputs.sigmas == "0.85, 0.7250, 0.4219, 0.0"
+  and .["22"].inputs.sigmas == "0.909375, 0.7250, 0.421875, 0.0"
   and .["28"].inputs.fps == 24
   and .["29"].inputs.filename_prefix == "ltx25-comfy-int8-mps-seed-25026"
 ' "$fixture" >/dev/null

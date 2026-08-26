@@ -105,6 +105,22 @@ describe("generation SSE reducer", () => {
     expect(jobProgressCopy(job)).toBe("Developing 4/20 — Streaming MiniMax H3 transformer blocks");
   });
 
+  it("shows bounded inner progress without advancing the denoise step", () => {
+    const job = newJob({ ...req, steps: 4 });
+    applyProgress(job, { type: "denoise_step", step: 1, total: 4, elapsed_ms: 1 });
+    applyProgress(job, {
+      type: "stage_progress",
+      name: "Evaluating transformer",
+      current: 17,
+      total: 48,
+    });
+
+    expect(job.status).toBe("denoising");
+    expect(job.step).toBe(1);
+    expect(job.stage).toBe("Evaluating transformer 17/48");
+    expect(jobProgress(job)).toBe(0.25);
+  });
+
   it("uses the requested seed for the grain, or a stable stand-in", () => {
     expect(newJob({ ...req, seed: 42 }).visualSeed).toBe("42");
     const a = newJob(req).visualSeed;

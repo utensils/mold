@@ -990,6 +990,24 @@ mod tests {
         assert!(!flux.defaults.recommended_dimensions.is_empty());
     }
 
+    #[test]
+    fn ltx25_catalog_uses_the_shared_duration_and_frame_grid_authority() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let catalog = build_model_catalog(&Config::default(), None, false);
+        let model = catalog
+            .iter()
+            .find(|model| model.name == crate::ltx25_manifest::DISTILLED_INT8_CONV)
+            .expect("LTX-2.5 distilled INT8 manifest row");
+
+        assert_eq!(model.defaults.default_frames, Some(121));
+        assert_eq!(model.defaults.default_fps, Some(24));
+        assert_eq!(model.defaults.max_runtime_seconds, Some(20));
+        assert_eq!(model.defaults.max_frames, Some(481));
+        assert_eq!(model.defaults.max_frames_absolute, Some(604));
+        assert_eq!(model.defaults.frame_step, Some(8));
+        assert_eq!(model.defaults.frame_offset, Some(1));
+    }
+
     /// `/api/models` is the single source Studio surfaces read the grid from:
     /// the 5B must advertise its 2.2 VAE's 32px grid while the 2.1-VAE
     /// checkpoints keep the family's 16, and every advertised bucket must sit

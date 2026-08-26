@@ -277,6 +277,19 @@ pub(crate) async fn render_progress(
                     );
                 });
             }
+            SseProgressEvent::StageProgress {
+                name,
+                current,
+                total,
+            } => {
+                let message = format!("{name} {current}/{total}");
+                if let Some(db) = denoise_bar.as_ref() {
+                    db.set_message(message);
+                } else {
+                    pb.set_message(message);
+                    pb.tick();
+                }
+            }
             SseProgressEvent::Info { message } => {
                 pb.suspend(|| {
                     status!("  {} {}", theme::icon_bullet(), message.dimmed());

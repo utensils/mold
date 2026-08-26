@@ -1,6 +1,6 @@
 //! Shared audio primitives, independent of any model family.
 
-use mold_core::ModelPaths;
+use mold_core::{Config, ModelPaths};
 
 #[derive(Debug, Clone)]
 pub struct NativeAudioTrack {
@@ -33,9 +33,28 @@ pub fn output_probe_registered(family: &str) -> bool {
 /// `None` means the family has no registered capability probe. This keeps the
 /// server annotation generic: adding a future audio/video family requires one
 /// registry arm here, not another server-side family special case.
-pub fn output_supported(family: &str, paths: &ModelPaths) -> Option<bool> {
+pub fn output_supported(
+    family: &str,
+    model_name: &str,
+    config: &Config,
+    paths: &ModelPaths,
+) -> Option<bool> {
     match output_probe(family)? {
-        AudioOutputProbe::Ltx2 => Some(crate::ltx2::audio_output_supported(paths)),
+        AudioOutputProbe::Ltx2 => {
+            // LTX-2.5 is a split pack whose audio VAE/vocoder is deliberately
+            // absent from legacy `ModelPaths`. Resolve the lossless manifest
+            // graph here, inside the inference-owned family registry, so the
+            // generic server annotation cannot accidentally probe only the
+            // video assets. Older monolithic LTX-2 checkpoints retain their
+            // header-only transformer/VAE path.
+            let audio_components =
+                mold_core::ltx25_manifest::Ltx25ModelPaths::resolve(config, model_name)
+                    .map(|split| split.audio_vae);
+            Some(crate::ltx2::audio_output_supported_with_components(
+                paths,
+                audio_components.as_deref(),
+            ))
+        }
     }
 }
 

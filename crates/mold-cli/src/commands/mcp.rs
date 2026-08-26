@@ -1025,6 +1025,11 @@ fn progress_summary(event: &SseProgressEvent) -> String {
         SseProgressEvent::StageDone { name, elapsed_ms } => {
             format!("stage done: {name} in {:.1}s", *elapsed_ms as f64 / 1000.0)
         }
+        SseProgressEvent::StageProgress {
+            name,
+            current,
+            total,
+        } => format!("{name} {current}/{total}"),
         SseProgressEvent::Info { message } => message.clone(),
         SseProgressEvent::CacheHit { resource } => format!("cache hit: {resource}"),
         SseProgressEvent::DenoiseStep {
@@ -1889,6 +1894,18 @@ mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
     use serde_json::json;
+
+    #[test]
+    fn async_status_summarizes_bounded_stage_progress() {
+        assert_eq!(
+            progress_summary(&SseProgressEvent::StageProgress {
+                name: "Evaluating transformer (conditional)".to_string(),
+                current: 9,
+                total: 48,
+            }),
+            "Evaluating transformer (conditional) 9/48"
+        );
+    }
 
     #[test]
     fn initialize_declares_tools_capability() {
