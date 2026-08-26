@@ -202,7 +202,7 @@ pub fn validate_ltx25_audio_components(path: &Path) -> std::io::Result<()> {
     let has_vocoder = header
         .tensor_names
         .iter()
-        .any(|name| name == "vocoder.generator.conv_pre.weight");
+        .any(|name| name == "vocoder.vocoder.conv_pre.weight");
     let has_bwe = header
         .tensor_names
         .iter()
@@ -503,7 +503,7 @@ mod tests {
             &audio,
             &[
                 "audio_vae.decoder.conv_in.conv.weight",
-                "vocoder.generator.conv_pre.weight",
+                "vocoder.vocoder.conv_pre.weight",
                 "vocoder.bwe_generator.conv_pre.weight",
             ],
             serde_json::Map::from_iter([("model_version".into(), Value::String("2.5.0".into()))]),

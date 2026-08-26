@@ -538,7 +538,12 @@ impl Ltx2Engine {
                 "LTX-2.5 IC-LoRA, retake, and lip-dub adapters are not yet individually validated; this runtime fails closed instead of applying LTX-2.3 control weights"
             );
         }
-        validate_audio_output_request(req, || super::audio_output_gap(&self.paths))?;
+        validate_audio_output_request(req, || {
+            super::audio_output_gap_with_components(
+                &self.paths,
+                self.audio_components_path.as_deref(),
+            )
+        })?;
         let gemma_root = self.gemma_root()?;
         let preset =
             preset::preset_for_model_with_hint(&self.model_name, self.preset_hint.as_deref())?;
@@ -1308,7 +1313,10 @@ impl Ltx2Engine {
         // Ahead of `materialize_request`, whose shared audio guard advises
         // "set enable_audio=false" — advice a text-to-audio request cannot
         // take, because audio is the only thing it produces.
-        if let Some(gap) = super::audio_output_gap(&self.paths) {
+        if let Some(gap) = super::audio_output_gap_with_components(
+            &self.paths,
+            self.audio_components_path.as_deref(),
+        ) {
             bail!(
                 "LTX-2 text-to-audio is unavailable for model '{}': the resolved checkpoint set \
                  is missing {gap}. Choose a checkpoint that ships them; this request was \
@@ -2429,6 +2437,17 @@ mod tests {
         );
         let gap = super::super::audio_output_gap(&paths_for(&no_vocoder)).unwrap();
         assert_eq!(gap, "the vocoder", "got: {gap}");
+
+        // LTX-2.5 keeps the same namespaces in a dedicated auxiliary file.
+        // The engine must qualify that file rather than looking only at the
+        // transformer/video-VAE projection carried by legacy `ModelPaths`.
+        assert_eq!(
+            super::super::audio_output_gap_with_components(
+                &paths_for(&no_vocoder),
+                Some(flat.as_path()),
+            ),
+            None
+        );
 
         // Vocoder tensors present but under a spelling this build cannot read.
         let odd_vocoder = fixture(
