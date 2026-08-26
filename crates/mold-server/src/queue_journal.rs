@@ -471,6 +471,13 @@ pub struct QueueJournal {
     /// independent from `owner_uuid`: a broken media store must not disable
     /// ordinary media-free queue durability.
     durable_media_ready: AtomicBool,
+    /// Why `durable_media_ready` is false, retained for the life of the
+    /// process. A single startup log line is not a diagnosability surface: it
+    /// is easy to miss on a busy server and gone once the log ages out, so the
+    /// reasons stay readable on `/api/status` for as long as the degradation
+    /// lasts. Empty whenever startup reconciliation reached a clean fixed
+    /// point.
+    durable_media_issues: std::sync::RwLock<Vec<String>>,
     /// One concrete DB/store authority shared by startup, terminal cleanup,
     /// and the later admission/feeder integration. Default-empty keeps the
     /// existing media-free journal behavior unchanged.
@@ -539,6 +546,7 @@ impl QueueJournal {
             db,
             owner_uuid: claim.as_ref().map(|claim| claim.owner_uuid.clone()),
             durable_media_ready: AtomicBool::new(false),
+            durable_media_issues: std::sync::RwLock::new(Vec::new()),
             queue_media_lifecycle: OnceLock::new(),
             queue_media_admission: OnceLock::new(),
             events: OnceLock::new(),
@@ -566,6 +574,7 @@ impl QueueJournal {
             db: Arc::new(None),
             owner_uuid: None,
             durable_media_ready: AtomicBool::new(false),
+            durable_media_issues: std::sync::RwLock::new(Vec::new()),
             queue_media_lifecycle: OnceLock::new(),
             queue_media_admission: OnceLock::new(),
             events: OnceLock::new(),
@@ -616,6 +625,58 @@ impl QueueJournal {
             && self.queue_media_lifecycle.get().is_some()
             && self.queue_media_admission.get().is_some())
         .then_some(mold_core::DurableMediaCapabilities::v1())
+    }
+
+    /// The operator-facing counterpart of [`Self::durable_media_capabilities`].
+    ///
+    /// `applicable` is the runtime half of the same conjunction that gates
+    /// `capabilities.durable_media` — gallery output and an authoritative
+    /// scheduler — supplied by the caller because it reads config and the
+    /// scheduler rather than the journal. `None` therefore means this server
+    /// never offers restart-safe media at all, which is a configuration rather
+    /// than a degradation: reporting it as degraded would make every
+    /// `MOLD_DB_DISABLE`, output-disabled, or observe-mode host look broken.
+    /// Where it IS applicable, `available` is true exactly when the capability
+    /// is advertised, and the conjuncts behind a false are reported
+    /// separately, because a widened store directory and a never-installed
+    /// admission service need different repairs.
+    pub fn durable_media_status(&self, applicable: bool) -> Option<mold_core::DurableMediaStatus> {
+        if !applicable || !self.is_enabled() {
+            return None;
+        }
+        if self.durable_media_capabilities().is_some() {
+            return Some(mold_core::DurableMediaStatus {
+                available: true,
+                reasons: Vec::new(),
+            });
+        }
+        let mut reasons = match self.durable_media_issues.read() {
+            Ok(issues) => issues.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        if self.queue_media_lifecycle.get().is_none() {
+            reasons.push(
+                "no queue-media lifecycle was installed for the claimed queue owner".to_string(),
+            );
+        } else if self.queue_media_admission.get().is_none() {
+            reasons.push("the queue-media admission service was not installed".to_string());
+        }
+        if reasons.is_empty() {
+            reasons.push("queue-media startup reconciliation did not complete".to_string());
+        }
+        Some(mold_core::DurableMediaStatus {
+            available: false,
+            reasons,
+        })
+    }
+
+    /// Whether restart-safe media is applicable here and switched off, without
+    /// composing the reason prose. `/health` answers this on every liveness
+    /// poll and needs only the yes/no; the reasons live behind authentication
+    /// on `/api/status`, and cloning them per probe would charge every poll for
+    /// a list whose length is the held-job backlog.
+    pub fn durable_media_is_degraded(&self, applicable: bool) -> bool {
+        applicable && self.is_enabled() && self.durable_media_capabilities().is_none()
     }
 
     pub(crate) fn install_queue_media_lifecycle(
@@ -676,6 +737,18 @@ impl QueueJournal {
     // reviewed concrete DB/store adapter is integrated.
     #[allow(dead_code)]
     pub(crate) fn set_durable_media_ready(&self, ready: bool) {
+        self.set_durable_media_status(ready, Vec::new());
+    }
+
+    /// Record readiness together with the reasons it was withheld. Readiness
+    /// and its explanation are set by one call so a later reader can never see
+    /// "unavailable" beside a stale empty reason list.
+    pub(crate) fn set_durable_media_status(&self, ready: bool, issues: Vec<String>) {
+        let issues = if ready { Vec::new() } else { issues };
+        match self.durable_media_issues.write() {
+            Ok(mut retained) => *retained = issues,
+            Err(poisoned) => *poisoned.into_inner() = issues,
+        }
         self.durable_media_ready.store(ready, Ordering::Release);
     }
 
@@ -2459,6 +2532,7 @@ mod tests {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
             durable_media_ready: AtomicBool::new(false),
+            durable_media_issues: std::sync::RwLock::new(Vec::new()),
             queue_media_lifecycle: OnceLock::new(),
             queue_media_admission: OnceLock::new(),
             events: OnceLock::new(),
@@ -3049,6 +3123,7 @@ mod tests {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
             durable_media_ready: AtomicBool::new(false),
+            durable_media_issues: std::sync::RwLock::new(Vec::new()),
             queue_media_lifecycle: OnceLock::new(),
             queue_media_admission: OnceLock::new(),
             events: OnceLock::new(),
@@ -3079,6 +3154,7 @@ mod tests {
             db: Arc::new(Some(db)),
             owner_uuid: Some(owner),
             durable_media_ready: AtomicBool::new(false),
+            durable_media_issues: std::sync::RwLock::new(Vec::new()),
             queue_media_lifecycle: OnceLock::new(),
             queue_media_admission: OnceLock::new(),
             events: OnceLock::new(),

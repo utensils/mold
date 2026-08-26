@@ -207,6 +207,7 @@ mod tests {
             instance_id: None,
             models_disk: None,
             host_memory: None,
+            durable_media: None,
         };
         ri.update_from_server_status(status);
         assert_eq!(ri.memory_line.as_deref(), Some("VRAM: 16.0 GB free"));
@@ -237,6 +238,7 @@ mod tests {
                 instance_id: None,
                 models_disk: None,
                 host_memory: None,
+                durable_media: None,
             }),
             ..Default::default()
         };

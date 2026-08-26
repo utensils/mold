@@ -10736,6 +10736,7 @@ mod tests {
             instance_id: None,
             models_disk: None,
             host_memory: None,
+            durable_media: None,
         };
 
         // A server too old to report the field is the baseline: whatever the
@@ -10807,6 +10808,7 @@ mod tests {
             instance_id: None,
             models_disk: None,
             host_memory: None,
+            durable_media: None,
         });
         let (state, text) = host_chip(&app);
         assert_eq!(state, ChipState::Ready);
@@ -15481,6 +15483,7 @@ mod tests {
             instance_id: None,
             models_disk: None,
             host_memory: None,
+            durable_media: None,
         };
         ri.update_from_server_status(status);
         assert_eq!(ri.memory_line.as_deref(), Some("VRAM: 16.0 GB free"));
@@ -15512,6 +15515,7 @@ mod tests {
                 instance_id: None,
                 models_disk: None,
                 host_memory: None,
+                durable_media: None,
             }),
             ..Default::default()
         };
@@ -15543,6 +15547,7 @@ mod tests {
             instance_id: None,
             models_disk: None,
             host_memory: None,
+            durable_media: None,
         };
         let _event = BackgroundEvent::ServerStatusUpdate(Some(Box::new(status)));
         // None variant for server-unreachable
@@ -16942,6 +16947,7 @@ mod tests {
             instance_id: None,
             models_disk: None,
             host_memory: None,
+            durable_media: None,
         });
 
         app.sync_resource_info_mode();
@@ -17012,6 +17018,7 @@ mod tests {
             instance_id: None,
             models_disk: None,
             host_memory: None,
+            durable_media: None,
         };
 
         let _ = app
@@ -17052,6 +17059,7 @@ mod tests {
                 instance_id: None,
                 models_disk: None,
                 host_memory: None,
+                durable_media: None,
             });
         assert!(app.resource_info.server_status.is_some());
 
@@ -17480,6 +17488,7 @@ mod tests {
                 instance_id: Some("instance-64".into()),
                 models_disk: None,
                 host_memory: None,
+                durable_media: None,
             })),
         );
         let devices = (0..64)
@@ -17724,6 +17733,7 @@ mod tests {
                 instance_id: Some("uuid-a".into()),
                 models_disk: None,
                 host_memory: None,
+                durable_media: None,
             };
             let _ = app.bg_tx.send(BackgroundEvent::MachineConnectTested {
                 url: "http://hal9000:7680".into(),

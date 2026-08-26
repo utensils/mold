@@ -409,6 +409,9 @@ use crate::queue::clean_error_message;
         mold_core::ProvenanceKind,
         mold_core::LoraInfo,
         mold_core::ServerStatus,
+        mold_core::HealthStatus,
+        mold_core::HealthState,
+        mold_core::DurableMediaStatus,
         PairingSessionResponse,
         PairingClaimRequest,
         PairingClaimResponse,
@@ -5377,9 +5380,15 @@ async fn server_status(State(state): State<AppState>) -> Result<Json<ServerStatu
     // stale, the single winning request kicks a background refresh. The first
     // poll after boot reports no disk stats — pollers pick them up next round.
     let (models_disk, needs_disk_refresh) = state.models_disk_cache.read();
+    let (durable_media_applicable, models_dir) = {
+        let config = state.config.read().await;
+        (
+            durable_media_is_applicable(&state, &config),
+            config.resolved_models_dir(),
+        )
+    };
     if needs_disk_refresh {
         let cache = state.models_disk_cache.clone();
-        let models_dir = state.config.read().await.resolved_models_dir();
         tokio::task::spawn_blocking(move || cache.store(models_disk_usage(&models_dir)));
     }
 
@@ -5486,6 +5495,9 @@ async fn server_status(State(state): State<AppState>) -> Result<Json<ServerStatu
         instance_id: Some(state.instance_id.as_ref().clone()),
         models_disk,
         host_memory: state.scheduled_work.host_memory(),
+        durable_media: state
+            .queue_journal
+            .durable_media_status(durable_media_applicable),
     }))
 }
 
@@ -5805,16 +5817,58 @@ async fn patch_device(
 
 // ── /health ───────────────────────────────────────────────────────────────────
 
+/// The runtime half of the conjunction that gates
+/// `capabilities.durable_media`, read by capability discovery, `/api/status`,
+/// and `/health` so the three can never disagree about whether this server
+/// offers restart-safe request media at all.
+///
+/// It deliberately excludes the journal's own readiness: this answers "would
+/// this server ever advertise it", and `QueueJournal::durable_media_status`
+/// answers "is it actually on".
+fn durable_media_is_applicable(state: &AppState, config: &mold_core::Config) -> bool {
+    !state.is_output_disabled(config) && state.scheduled_work.v2_authoritative()
+}
+
+/// Which subsystems this process has switched off, by name.
+///
+/// `/health` is auth-exempt, so it must not carry the reasons: they name host
+/// filesystem paths. `GET /api/status` carries those behind authentication as
+/// `durable_media.reasons`.
+fn degraded_subsystems(state: &AppState, applicable: bool) -> Vec<String> {
+    let mut degraded = Vec::new();
+    if state.queue_journal.durable_media_is_degraded(applicable) {
+        degraded.push(mold_core::HEALTH_SUBSYSTEM_DURABLE_MEDIA.to_string());
+    }
+    degraded.sort();
+    degraded
+}
+
 #[utoipa::path(
     get,
     path = "/health",
     tag = "server",
     responses(
-        (status = 200, description = "Server is healthy"),
+        (status = 200, description = "Server is serving", body = mold_core::HealthStatus),
     )
 )]
-async fn health() -> impl IntoResponse {
-    StatusCode::OK
+async fn health(State(state): State<AppState>) -> impl IntoResponse {
+    // A liveness probe must never wait on anything, so the config lock is
+    // sampled rather than awaited: a probe landing during a `/api/config`
+    // write reports healthy instead of blocking behind it. `/api/status` is
+    // the authority for the degraded state and does await the lock.
+    let degraded = match state.config.try_read() {
+        Ok(config) => degraded_subsystems(&state, durable_media_is_applicable(&state, &config)),
+        Err(_) => Vec::new(),
+    };
+    // Deliberately still 200 while degraded. A subsystem being off does not
+    // stop this process serving, and failing the check would pull a working
+    // server out of a load balancer over a degradation that generation
+    // survives. Callers reading only the status code are unaffected; the body
+    // is what makes the degradation visible long after the startup log.
+    (
+        StatusCode::OK,
+        Json(mold_core::HealthStatus::from_degraded(degraded)),
+    )
 }
 
 // ── /api/queue ───────────────────────────────────────────────────────────────
@@ -6705,7 +6759,7 @@ async fn server_capabilities(
     // makes it a systematic over-promise rather than an edge case, and clients
     // read this to decide whether to keep polling a job whose stream died.
     let durable_queue = state.queue_journal.is_enabled() && !state.is_output_disabled(&config);
-    let heterogeneous_batch = durable_queue && state.scheduled_work.v2_authoritative();
+    let heterogeneous_batch = durable_queue && durable_media_is_applicable(&state, &config);
     // Trash and organization both live in the metadata DB; trash additionally
     // needs somewhere to move bytes to. With the DB disabled, DELETE stays a
     // hard delete and the organization routes answer 501.

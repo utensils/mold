@@ -10,6 +10,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::queue_journal::QueueJournal;
 
+/// How many held job ids one retained degradation reason names before it
+/// switches to a count. Enough to start a `GET /api/queue` lookup by hand.
+const HELD_JOB_REASON_SAMPLE: usize = 5;
+
+/// How many reconciliation issues are retained verbatim before the rest become
+/// a count. `issues` carries one entry per inconsistent obligation, and the
+/// durable backlog is deliberately not capped by `queue_capacity`, so an
+/// unbounded copy would be logged, retained for the life of the process, and
+/// re-serialized on every `/api/status` poll.
+const ISSUE_REASON_SAMPLE: usize = 5;
+
 const MEDIA_HOLD_REASON: &str =
     "durable request media is unavailable or failed startup reconciliation";
 
@@ -185,6 +196,63 @@ pub(crate) struct StartupReport {
     pub issues: Vec<String>,
 }
 
+impl StartupReport {
+    /// Every reason this reconciliation withheld media durability, phrased for
+    /// an operator reading `/api/status` rather than for a log grep.
+    ///
+    /// Held jobs are included because they are the half a bare issue list
+    /// misses: a run can end with no issue at all and still quarantine work
+    /// whose media never came back.
+    ///
+    /// Both halves are bounded. Every entry here is logged once, retained for
+    /// the life of the process, and re-serialized on every `/api/status` poll,
+    /// while `issues` carries one string per inconsistent obligation and the
+    /// durable backlog has no `queue_capacity` ceiling — so a fleet-wide
+    /// inconsistency would otherwise be an unbounded response and an unbounded
+    /// log. The full detail stays in `GET /api/queue`, which pages.
+    pub(crate) fn degradation_reasons(&self) -> Vec<String> {
+        if self.durable_media_ready {
+            return Vec::new();
+        }
+        let mut reasons: Vec<String> = self
+            .issues
+            .iter()
+            .take(ISSUE_REASON_SAMPLE)
+            .cloned()
+            .collect();
+        let unlisted_issues = self.issues.len().saturating_sub(reasons.len());
+        if unlisted_issues > 0 {
+            reasons.push(format!(
+                "and {unlisted_issues} further queue-media startup issue(s) not listed"
+            ));
+        }
+        if !self.held_jobs.is_empty() {
+            // The durable backlog is deliberately not bounded by
+            // `queue_capacity`, so naming every held job would let one
+            // unusable store put an unbounded string on `/api/status` for the
+            // life of the process. The count is the actionable number; the
+            // sample is only there to start a `GET /api/queue` lookup.
+            let sample: Vec<&str> = self
+                .held_jobs
+                .iter()
+                .take(HELD_JOB_REASON_SAMPLE)
+                .map(String::as_str)
+                .collect();
+            let remainder = self.held_jobs.len().saturating_sub(sample.len());
+            let mut reason = format!(
+                "{} queued job(s) are held because their request media is unavailable: {}",
+                self.held_jobs.len(),
+                sample.join(", ")
+            );
+            if remainder > 0 {
+                reason.push_str(&format!(" and {remainder} more"));
+            }
+            reasons.push(reason);
+        }
+        reasons
+    }
+}
+
 /// Reconcile encrypted request media under the already-claimed queue owner.
 ///
 /// Call this after [`QueueJournal::new`] and before runtime-claim recovery,
@@ -197,6 +265,19 @@ pub(crate) fn reconcile_claimed_owner(
     adapter: &impl QueueMediaStartupAdapter,
 ) -> Result<StartupReport, AdapterError> {
     journal.set_durable_media_ready(false);
+    // Readiness and its explanation are published from exactly one place. The
+    // body has several early returns for a refused or unreadable store, and
+    // those are precisely the cases whose reason an operator needs — publishing
+    // per return is how they came to be dropped.
+    let report = reconcile_claimed_owner_inner(journal, adapter)?;
+    journal.set_durable_media_status(report.durable_media_ready, report.degradation_reasons());
+    Ok(report)
+}
+
+fn reconcile_claimed_owner_inner(
+    journal: &QueueJournal,
+    adapter: &impl QueueMediaStartupAdapter,
+) -> Result<StartupReport, AdapterError> {
     let Some(owner_uuid) = journal.owner_uuid() else {
         return Ok(StartupReport {
             issues: vec!["durable queue owner is unavailable".to_string()],
@@ -489,7 +570,6 @@ pub(crate) fn reconcile_claimed_owner(
     }
 
     report.durable_media_ready = report.issues.is_empty() && report.held_jobs.is_empty();
-    journal.set_durable_media_ready(report.durable_media_ready);
     Ok(report)
 }
 
@@ -678,6 +758,104 @@ mod tests {
             )]
         );
         assert_eq!(journal.durable_media_capabilities(), None);
+    }
+
+    /// The reason a store refused to open is the operator's whole diagnosis.
+    /// It must survive the startup log line that reports it, so it is retained
+    /// on the journal for `/api/status` to serve for the life of the process.
+    #[test]
+    fn a_refused_store_retains_its_reason_for_the_life_of_the_process() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let journal = journal(home.path(), db, "instance-a");
+        let owner = journal.owner_uuid().unwrap().to_string();
+        let adapter = FakeAdapter::default();
+        adapter.set_open_error(
+            &owner,
+            "/srv/mold/queue-media must be a current-user-owned 0700 directory: found mode 0770 \
+             (expected 0700); repair with: chmod 0700 /srv/mold/queue-media",
+        );
+
+        let report = reconcile_claimed_owner(&journal, &adapter).unwrap();
+        assert!(!report.durable_media_ready);
+
+        let status = journal.durable_media_status(true).expect("a claimed owner");
+        assert!(!status.available);
+        assert!(
+            status
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("chmod 0700 /srv/mold/queue-media")),
+            "{:?}",
+            status.reasons
+        );
+    }
+
+    /// Held jobs are the half a bare issue list misses: reconciliation can end
+    /// with no issue at all and still quarantine work whose media is gone.
+    #[test]
+    fn held_media_jobs_are_reported_as_a_reason_even_with_no_issue() {
+        let mut report = StartupReport {
+            durable_media_ready: false,
+            held_jobs: vec!["job-a".to_string()],
+            ..StartupReport::default()
+        };
+        let reasons = report.degradation_reasons();
+        assert_eq!(reasons.len(), 1);
+        assert!(reasons[0].contains("job-a"), "{reasons:?}");
+
+        report.durable_media_ready = true;
+        assert!(report.degradation_reasons().is_empty());
+    }
+
+    /// The durable backlog is deliberately not bounded by `queue_capacity`, so
+    /// a reason retained for the life of the process must not name every held
+    /// job: one unusable store would otherwise put an unbounded string on
+    /// every `/api/status` response.
+    #[test]
+    fn a_large_held_backlog_is_summarized_rather_than_enumerated() {
+        let report = StartupReport {
+            durable_media_ready: false,
+            held_jobs: (0..500).map(|index| format!("job-{index}")).collect(),
+            ..StartupReport::default()
+        };
+        let reasons = report.degradation_reasons();
+        assert_eq!(reasons.len(), 1);
+        assert!(
+            reasons[0].starts_with("500 queued job(s) are held"),
+            "{reasons:?}"
+        );
+        assert!(
+            reasons[0].contains("job-0, job-1, job-2, job-3, job-4 and 495 more"),
+            "{reasons:?}"
+        );
+        assert!(!reasons[0].contains("job-499"), "{reasons:?}");
+        assert!(reasons[0].len() < 256, "{reasons:?}");
+    }
+
+    /// `issues` carries one entry per inconsistent obligation, so a fleet-wide
+    /// problem must not become one retained log line and one serialized string
+    /// per queued row.
+    #[test]
+    fn a_per_obligation_issue_storm_is_summarized_rather_than_retained_whole() {
+        let report = StartupReport {
+            durable_media_ready: false,
+            issues: (0..400)
+                .map(|index| format!("media set set-{index} has conflicting DB obligations"))
+                .collect(),
+            ..StartupReport::default()
+        };
+        let reasons = report.degradation_reasons();
+        assert_eq!(reasons.len(), ISSUE_REASON_SAMPLE + 1, "{reasons:?}");
+        assert!(reasons[0].contains("set-0"), "{reasons:?}");
+        assert_eq!(
+            reasons[ISSUE_REASON_SAMPLE],
+            "and 395 further queue-media startup issue(s) not listed"
+        );
+        assert!(
+            !reasons.iter().any(|reason| reason.contains("set-399")),
+            "{reasons:?}"
+        );
     }
 
     #[test]
