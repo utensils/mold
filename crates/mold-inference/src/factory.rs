@@ -462,14 +462,13 @@ fn boxed_inference_engine(engine: impl InferenceEngine + 'static) -> Box<dyn Inf
 fn validate_ltx25_runtime_paths(model_name: &str, paths: &ModelPaths) -> Result<()> {
     match model_name {
         name if mold_core::ltx25_manifest::is_runtime_manifest(name) => {}
-        mold_core::ltx25_manifest::DEV | mold_core::ltx25_manifest::DISTILLED => anyhow::bail!(
-            "LTX-2.5 Phase 2 supports the convolutional video VAE only; use '{model_name}-conv'. The diffusion decoder is tracked for Phase 3"
-        ),
         _ => anyhow::bail!(
-            "unsupported LTX-2.5 Phase 2 checkpoint '{model_name}'; use '{}', '{}', '{}', or '{}'. NVFP4 LTX-2.5 packs require a Blackwell CUDA kernel and are not supported by this runtime",
+            "unsupported LTX-2.5 checkpoint '{model_name}'; supported packs: {}, {}, {}, {}, {}, {}. NVFP4 LTX-2.5 packs require a Blackwell CUDA kernel and are not supported by this runtime",
+            mold_core::ltx25_manifest::DEV,
             mold_core::ltx25_manifest::DEV_CONV,
-            mold_core::ltx25_manifest::DISTILLED_CONV,
             mold_core::ltx25_manifest::DEV_INT8_CONV,
+            mold_core::ltx25_manifest::DISTILLED,
+            mold_core::ltx25_manifest::DISTILLED_CONV,
             mold_core::ltx25_manifest::DISTILLED_INT8_CONV,
         ),
     }
@@ -478,14 +477,9 @@ fn validate_ltx25_runtime_paths(model_name: &str, paths: &ModelPaths) -> Result<
     })?;
     mold_core::ltx25_probe::validate_ltx25_transformer_gemma(&paths.transformer, gemma)
         .map_err(anyhow::Error::from)?;
-    match mold_core::ltx25_probe::probe_ltx25_video_vae(&paths.vae)
-        .map_err(anyhow::Error::from)?
-    {
-        mold_core::ltx25_probe::Ltx25VideoVaeKind::Convolutional => Ok(()),
-        mold_core::ltx25_probe::Ltx25VideoVaeKind::Diffusion => anyhow::bail!(
-            "LTX-2.5 Phase 2 cannot use the diffusion video VAE; select the matching :bf16-conv model"
-        ),
-    }
+    mold_core::ltx25_probe::probe_ltx25_video_vae(&paths.vae)
+        .map(|_| ())
+        .map_err(anyhow::Error::from)
 }
 
 /// Create an engine from scheduler-frozen construction inputs.
@@ -809,13 +803,27 @@ where
         "ltx2" | "ltx-2" | "ltx2.3" => {
             if mold_core::ltx25_manifest::is_contract_manifest(&model_name) {
                 validate_ltx25_runtime_paths(&model_name, &paths)?;
-                return Ok(boxed_inference_engine(Ltx2Engine::new_with_gemma_variant(
-                    model_name,
-                    paths,
-                    load_strategy,
-                    gpu_ordinal,
-                    frozen.ltx2_gemma_variant.clone(),
-                )));
+                let split_pack = mold_core::ltx25_manifest::Ltx25ModelPaths::resolve_in(
+                    &frozen.artifact_root,
+                    &model_name,
+                )
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "LTX-2.5 split-pack paths are incomplete for '{model_name}'"
+                    )
+                })?;
+                split_pack.qualify().map_err(anyhow::Error::from)?;
+                return Ok(boxed_inference_engine(
+                    Ltx2Engine::new_with_gemma_variant(
+                        model_name,
+                        paths,
+                        load_strategy,
+                        gpu_ordinal,
+                        frozen.ltx2_gemma_variant.clone(),
+                    )
+                    .with_duration_head_path(split_pack.duration_head)
+                    .with_audio_components_path(split_pack.audio_vae),
+                ));
             }
             if is_ltx2_native_single_file(&paths) {
                 // Civitai single-file dispatch. Combined checkpoints use
@@ -1066,16 +1074,11 @@ mod tests {
     }
 
     #[test]
-    fn ltx25_diffusion_vae_variant_fails_with_phase3_direction() {
+    fn ltx25_diffusion_vae_variant_reaches_component_validation() {
         let error =
             validate_ltx25_runtime_paths(mold_core::ltx25_manifest::DISTILLED, &dummy_paths())
-                .expect_err("the Phase 3 diffusion decoder must remain fail-closed");
-        assert!(
-            error
-                .to_string()
-                .contains("use 'ltx-2.5-22b-distilled:bf16-conv'"),
-            "{error}"
-        );
+                .expect_err("dummy paths must fail component validation");
+        assert!(error.to_string().contains("packed Gemma 4"), "{error}");
     }
 
     #[test]

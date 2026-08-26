@@ -94,10 +94,20 @@ impl Ltx2ShapeHint {
         req: &mold_core::GenerateRequest,
         projection: Option<&crate::queue_media_store::QueueMediaProjection>,
     ) -> Self {
+        let frames = req.frames.unwrap_or_else(|| {
+            if matches!(
+                mold_core::ltx2_preprocess::ltx2_generation(&req.model, None),
+                Some(mold_core::ltx2_preprocess::Ltx2Generation::V2_5)
+            ) {
+                mold_core::ltx2_duration::admission_frames(req.fps.unwrap_or(24)).unwrap_or(1)
+            } else {
+                1
+            }
+        });
         Self {
             width: req.width,
             height: req.height,
-            frames: req.frames.unwrap_or(1),
+            frames,
             conditioned: req.source_image.is_some()
                 || req.source_video.is_some()
                 || req.source_video_path.is_some()
@@ -704,6 +714,25 @@ mod tests {
             Ltx2ShapeHint::from_request_with_projection(&hydrated_path, None),
             Ltx2ShapeHint::from_request_with_projection(&sanitized, Some(&path_projection)),
         );
+    }
+
+    #[test]
+    fn ltx25_auto_duration_reserves_the_shared_maximum() {
+        let automatic: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a slow establishing shot",
+            "model": "ltx-2.5-22b-distilled:int8-conv",
+            "width": 768,
+            "height": 512,
+            "steps": 8,
+            "guidance": 0.0,
+            "fps": 24
+        }))
+        .unwrap();
+        let mut explicit = automatic.clone();
+        explicit.frames = Some(97);
+
+        assert_eq!(Ltx2ShapeHint::from_request(&automatic).frames, 473);
+        assert_eq!(Ltx2ShapeHint::from_request(&explicit).frames, 97);
     }
 
     /// LTX-2.3's 22B ships nine AdaLN components (`[36864, 4096]`) where the

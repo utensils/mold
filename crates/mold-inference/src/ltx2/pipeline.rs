@@ -91,6 +91,12 @@ pub struct Ltx2Engine {
     /// Separate LTX-2.3 Gemma hidden-state projection used by diffusion-only
     /// and quantized checkpoints. Combined checkpoints leave this unset.
     text_projection_path: Option<PathBuf>,
+    /// LTX-2.5 split-pack caption duration predictor. `None` for older
+    /// generations and catalog checkpoints that do not ship the head.
+    duration_head_path: Option<PathBuf>,
+    /// LTX-2.5 split checkpoint containing both `audio_vae.*` and
+    /// `vocoder.*`. Older combined checkpoints keep those in the transformer.
+    audio_components_path: Option<PathBuf>,
     gemma_variant: Option<String>,
 }
 
@@ -207,8 +213,20 @@ impl Ltx2Engine {
             gpu_ordinal,
             preset_hint: None,
             text_projection_path,
+            duration_head_path: None,
+            audio_components_path: None,
             gemma_variant,
         }
+    }
+
+    pub(crate) fn with_duration_head_path(mut self, path: PathBuf) -> Self {
+        self.duration_head_path = Some(path);
+        self
+    }
+
+    pub(crate) fn with_audio_components_path(mut self, path: PathBuf) -> Self {
+        self.audio_components_path = Some(path);
+        self
     }
 
     /// Construct an LTX-2 engine from a Civitai single-file safetensors
@@ -350,6 +368,8 @@ impl Ltx2Engine {
             gpu_ordinal: 0,
             preset_hint: None,
             text_projection_path: None,
+            duration_head_path: None,
+            audio_components_path: None,
             gemma_variant: None,
         }
     }
@@ -465,7 +485,7 @@ impl Ltx2Engine {
     /// `mold_core::ltx2_preprocess` authority from the model name and the
     /// safetensors `model_version` header hint. Errors — naming both —
     /// when the generation is unknown: upstream's conditioning CRF is a
-    /// per-generation training property (33 for LTX-2/2.3, 18 for 2.4),
+    /// per-generation training property (33 for LTX-2/2.3, 18 for 2.5),
     /// so guessing one for an unrecognised checkpoint silently degrades
     /// I2V instead of failing actionably.
     pub(crate) fn image_preprocessing_profile(
@@ -494,8 +514,31 @@ impl Ltx2Engine {
         work_dir: &Path,
         output_path: &Path,
     ) -> Result<Ltx2GeneratePlan> {
-        validate_audio_output_request(req, || super::audio_output_gap(&self.paths))?;
         let pipeline = self.select_pipeline(req)?;
+        let is_ltx25 = matches!(
+            mold_core::ltx2_preprocess::ltx2_generation(
+                &self.model_name,
+                self.preset_hint.as_deref(),
+            ),
+            Some(mold_core::ltx2_preprocess::Ltx2Generation::V2_5)
+        );
+        if is_ltx25 && (req.hdr_exr_dir.is_some() || req.hdr_exr_full_float) {
+            anyhow::bail!(
+                "LTX-2.5 HDR/EXR is deferred until its IC-LoRA and linear-output contract is validated"
+            );
+        }
+        if is_ltx25
+            && (req.ic_lora_control.is_some()
+                || matches!(
+                    pipeline,
+                    PipelineKind::IcLora | PipelineKind::Retake | PipelineKind::LipDub
+                ))
+        {
+            anyhow::bail!(
+                "LTX-2.5 IC-LoRA, retake, and lip-dub adapters are not yet individually validated; this runtime fails closed instead of applying LTX-2.3 control weights"
+            );
+        }
+        validate_audio_output_request(req, || super::audio_output_gap(&self.paths))?;
         let gemma_root = self.gemma_root()?;
         let preset =
             preset::preset_for_model_with_hint(&self.model_name, self.preset_hint.as_deref())?;
@@ -533,7 +576,7 @@ impl Ltx2Engine {
         // numbers so validation and VRAM admission see the truth; deriving
         // them here from the same helper keeps a forced-local run — which
         // never passes through the server — on the identical timeline.
-        let (num_frames, frame_rate) = match pipeline {
+        let (num_frames, frame_rate, auto_duration) = match pipeline {
             PipelineKind::LipDub => {
                 let reference = conditioning.video_path.as_deref().context(
                     "the LTX-2 lip-dub pipeline requires a reference video (source_video)",
@@ -560,9 +603,37 @@ impl Ltx2Engine {
                 for warning in &timing.warnings {
                     self.info(warning);
                 }
-                (timing.frames, timing.fps)
+                (timing.frames, timing.fps, None)
             }
-            _ => (req.frames.unwrap_or(97), req.fps.unwrap_or(24)),
+            _ => {
+                let frame_rate = req.fps.unwrap_or(24);
+                let auto_duration = (req.frames.is_none()
+                    && matches!(
+                        mold_core::ltx2_preprocess::ltx2_generation(
+                            &self.model_name,
+                            self.preset_hint.as_deref(),
+                        ),
+                        Some(mold_core::ltx2_preprocess::Ltx2Generation::V2_5)
+                    ))
+                .then_some(mold_core::ltx2_duration::AutoDurationBounds::default());
+                let frames = match auto_duration {
+                    Some(_) => mold_core::ltx2_duration::admission_frames(frame_rate)?,
+                    None => req.frames.unwrap_or(97),
+                };
+                (frames, frame_rate, auto_duration)
+            }
+        };
+        let duration_head_path = match auto_duration {
+            Some(_) => Some(
+                self.duration_head_path
+                    .as_ref()
+                    .context(
+                        "LTX-2.5 automatic duration requires the split-pack duration head; pass frames explicitly or pull the complete model",
+                    )?
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            None => None,
         };
 
         Ok(Ltx2GeneratePlan {
@@ -585,6 +656,10 @@ impl Ltx2Engine {
             },
             vae_in_checkpoint: self.paths.vae.as_os_str().is_empty()
                 || self.paths.vae == self.paths.transformer,
+            audio_components_path: self
+                .audio_components_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
             text_projection_path: self
                 .text_projection_path
                 .as_ref()
@@ -599,6 +674,8 @@ impl Ltx2Engine {
                 .map(|path| path.to_string_lossy().to_string()),
             spatial_upsampler_path,
             temporal_upsampler_path,
+            duration_head_path,
+            auto_duration,
             gemma_root: gemma_root.to_string_lossy().to_string(),
             output_path: output_path.to_string_lossy().to_string(),
             prompt: req.prompt.clone(),
@@ -1058,7 +1135,7 @@ impl Ltx2Engine {
         let work_dir = tempfile::tempdir().context("failed to create LTX-2 temp directory")?;
         let native_output = work_dir.path().join("ltx2-native-output.mp4");
         let materialize_start = Instant::now();
-        let plan = self.materialize_request(req, work_dir.path(), &native_output)?;
+        let mut plan = self.materialize_request(req, work_dir.path(), &native_output)?;
         self.checkpoint()?;
         Self::log_timing("pipeline.materialize_request", materialize_start);
         let planned_stage_count = plan.execution_graph.denoise_passes.len();
@@ -1086,7 +1163,7 @@ impl Ltx2Engine {
 
         self.emit("Encoding prompt and preparing native LTX-2 runtime state");
         let prepare_start = Instant::now();
-        let prepared = runtime.prepare_with_progress(&plan, self.on_progress.as_ref())?;
+        let prepared = runtime.prepare_with_progress(&mut plan, self.on_progress.as_ref())?;
         self.checkpoint()?;
         Self::log_timing("pipeline.prepare_runtime", prepare_start);
         self.emit("Executing native LTX-2 runtime");
@@ -1242,7 +1319,7 @@ impl Ltx2Engine {
 
         let work_dir = tempfile::tempdir().context("failed to create LTX-2 temp directory")?;
         let native_output = work_dir.path().join("ltx2-native-output.wav");
-        let plan = self.materialize_request(req, work_dir.path(), &native_output)?;
+        let mut plan = self.materialize_request(req, work_dir.path(), &native_output)?;
         self.checkpoint()?;
 
         let mut runtime = match self.native_runtime.take() {
@@ -1250,7 +1327,7 @@ impl Ltx2Engine {
             _ => self.create_runtime_session(&plan)?,
         };
         self.emit("Encoding prompt and preparing native LTX-2 runtime state");
-        let prepared = match runtime.prepare_with_progress(&plan, self.on_progress.as_ref()) {
+        let prepared = match runtime.prepare_with_progress(&mut plan, self.on_progress.as_ref()) {
             Ok(prepared) => prepared,
             Err(err) => {
                 self.native_runtime = Some(runtime);
@@ -1429,7 +1506,7 @@ impl Ltx2Engine {
         if let Some(token) = self.cancellation.as_ref() {
             token.checkpoint()?;
         }
-        let prepared = match runtime.prepare_with_progress(&plan, self.on_progress.as_ref()) {
+        let prepared = match runtime.prepare_with_progress(&mut plan, self.on_progress.as_ref()) {
             Ok(prepared) => prepared,
             Err(err) => {
                 self.native_runtime = Some(runtime);
@@ -2164,6 +2241,31 @@ mod tests {
             PipelineKind::OneStage,
             "distilled name + missing spatial upsampler → OneStage fallback"
         );
+    }
+
+    #[test]
+    fn ltx25_deferred_ic_lora_and_hdr_paths_fail_before_asset_loading() {
+        let engine = Ltx2Engine::new(
+            mold_core::ltx25_manifest::DISTILLED_INT8_CONV.to_string(),
+            dummy_paths(),
+            LoadStrategy::Sequential,
+            0,
+        );
+        let mut control = request(OutputFormat::Mp4, Some(true));
+        control.model = mold_core::ltx25_manifest::DISTILLED_INT8_CONV.to_string();
+        control.ic_lora_control = Some("union".to_string());
+        let error = engine
+            .materialize_request(&control, Path::new("/tmp"), Path::new("/tmp/out.mp4"))
+            .unwrap_err();
+        assert!(error.to_string().contains("not yet individually validated"));
+
+        let mut hdr = request(OutputFormat::Mp4, Some(true));
+        hdr.model = mold_core::ltx25_manifest::DISTILLED_INT8_CONV.to_string();
+        hdr.hdr_exr_dir = Some("/tmp/hdr".to_string());
+        let error = engine
+            .materialize_request(&hdr, Path::new("/tmp"), Path::new("/tmp/out.mp4"))
+            .unwrap_err();
+        assert!(error.to_string().contains("HDR/EXR is deferred"));
     }
 
     #[test]
@@ -3045,10 +3147,10 @@ mod tests {
             dummy_paths_with_gemma_root(gemma_dir.path()),
             runtime_session(),
         );
-        // Upstream 2.4 maps to CRF 18, which this build has no runnable
-        // checkpoint to verify — the generation resolver refuses it while
+        // A future 2.6 has no reviewed preprocessing profile — the generation
+        // resolver refuses it while
         // the architecture preset keeps its historical 19B fall-through.
-        engine.preset_hint = Some("2.4.0".to_string());
+        engine.preset_hint = Some("2.6.0".to_string());
 
         let work_dir = tempfile::tempdir().unwrap();
         let output = work_dir.path().join("out.mp4");
@@ -3068,7 +3170,7 @@ mod tests {
             .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("cv:12345"), "got: {msg}");
-        assert!(msg.contains("model_version=\"2.4.0\""), "got: {msg}");
+        assert!(msg.contains("model_version=\"2.6.0\""), "got: {msg}");
         assert!(
             msg.contains("text-to-video remains available"),
             "got: {msg}"
@@ -3097,6 +3199,30 @@ mod tests {
             mold_core::ltx2_preprocess::Ltx2Generation::V2_3
         );
         assert_eq!(profile.image_crf, 33);
+    }
+
+    #[test]
+    fn i2v_on_ltx25_resolves_crf_18_profile() {
+        let gemma_dir = tempfile::tempdir().unwrap();
+        write_test_gemma_assets(gemma_dir.path());
+        let engine = Ltx2Engine::with_runtime_session(
+            "ltx-2.5-22b-distilled:int8-conv".to_string(),
+            dummy_paths_with_gemma_root(gemma_dir.path()),
+            runtime_session(),
+        );
+        let work_dir = tempfile::tempdir().unwrap();
+        let output = work_dir.path().join("out.mp4");
+        let mut i2v = request(OutputFormat::Mp4, Some(false));
+        i2v.source_image = Some(vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']);
+        let plan = engine
+            .materialize_request(&i2v, work_dir.path(), &output)
+            .unwrap();
+        let profile = plan.image_preprocessing.expect("profile for staged image");
+        assert_eq!(
+            profile.generation,
+            mold_core::ltx2_preprocess::Ltx2Generation::V2_5
+        );
+        assert_eq!(profile.image_crf, 18);
     }
 
     #[test]

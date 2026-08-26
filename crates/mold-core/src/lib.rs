@@ -22,6 +22,7 @@ pub mod license_acceptance;
 pub mod ltx2_camera;
 pub use ltx2_camera::{Ltx2CameraControlAvailability, Ltx2CameraControlInfo};
 pub mod ltx2_control;
+pub mod ltx2_duration;
 pub mod ltx2_preprocess;
 pub use ltx2_control::Ltx2ControlAdapterInfo;
 pub mod ltx25_manifest;

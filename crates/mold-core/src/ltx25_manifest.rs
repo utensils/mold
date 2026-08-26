@@ -216,13 +216,9 @@ pub fn is_contract_manifest(name: &str) -> bool {
     ALL.contains(&name)
 }
 
-/// True for the split packs whose complete native Phase 2 path is available.
-///
-/// The diffusion-VAE siblings remain downloadable contracts until Phase 3;
-/// keeping that distinction here prevents catalog, config, and execution code
-/// from independently guessing from a suffix.
+/// True for split packs whose complete native runtime path is available.
 pub fn is_runtime_manifest(name: &str) -> bool {
-    CONV_VAE_VARIANTS.contains(&name)
+    ALL.contains(&name)
 }
 
 /// Keep decoder variants on one physical transformer graph.
@@ -288,6 +284,16 @@ impl Ltx25ModelPaths {
         })
     }
 
+    /// Recover the lossless split graph from the transformer path carried by
+    /// legacy `ModelPaths`. Decoder siblings may share that transformer; all
+    /// such siblings share these auxiliary audio/duration assets too.
+    pub fn resolve_for_transformer_in(models_root: &Path, transformer: &Path) -> Option<Self> {
+        manifests().into_iter().find_map(|manifest| {
+            let paths = Self::resolve_in(models_root, &manifest.name)?;
+            (paths.transformer == transformer).then_some(paths)
+        })
+    }
+
     pub fn all_file_paths(&self) -> impl Iterator<Item = &Path> {
         [
             Some(self.transformer.as_path()),
@@ -306,6 +312,19 @@ impl Ltx25ModelPaths {
     pub fn qualify(&self) -> std::io::Result<()> {
         crate::ltx25_probe::validate_ltx25_transformer_gemma(&self.transformer, &self.gemma)?;
         crate::ltx25_probe::probe_ltx25_video_vae(&self.video_vae)?;
+        crate::ltx25_probe::validate_ltx25_audio_components(&self.audio_vae)?;
+        crate::ltx25_probe::validate_ltx25_duration_head(&self.duration_head)?;
+        crate::ltx25_probe::validate_ltx25_upscaler(
+            &self.spatial_upscaler,
+            crate::ltx25_probe::Ltx25UpscalerKind::Spatial,
+        )?;
+        crate::ltx25_probe::validate_ltx25_upscaler(
+            &self.temporal_upscaler,
+            crate::ltx25_probe::Ltx25UpscalerKind::Temporal,
+        )?;
+        if let Some(lora) = self.distilled_lora.as_ref() {
+            crate::safetensors_probe::read_safetensors_header(lora)?;
+        }
         Ok(())
     }
 }
@@ -333,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn manifests_have_every_split_runtime_role_and_only_conv_variants_run() {
+    fn manifests_have_every_split_runtime_role() {
         for manifest in manifests() {
             assert_eq!(manifest.hidden, !is_runtime_manifest(&manifest.name));
             assert_eq!(manifest.family, FAMILY);

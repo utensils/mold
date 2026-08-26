@@ -261,6 +261,7 @@ pub(crate) fn preset_for_model_with_hint(
     // `model_version: "2.4"`, which for *architecture* selection keeps
     // its historical 19B mapping).
     match mold_core::ltx2_preprocess::ltx2_generation(model_name, hint) {
+        Some(mold_core::ltx2_preprocess::Ltx2Generation::V2_5) => return Ok(PRESET_25_22B),
         Some(mold_core::ltx2_preprocess::Ltx2Generation::V2_3) => return Ok(PRESET_22B),
         Some(mold_core::ltx2_preprocess::Ltx2Generation::V2) => return Ok(PRESET_19B),
         None => {}
@@ -350,7 +351,8 @@ mod tests {
     fn preset_and_generation_resolvers_agree_for_shipped_names() {
         // Contract: wherever the shared `mold_core::ltx2_preprocess`
         // resolver recognises a generation, the architecture preset must
-        // match — V2 → 19B, V2_3 → 22B. Divergence would let admission
+        // match — V2 → 19B, V2_3 → 22B, V2_5 → the dedicated 2.5 preset.
+        // Divergence would let admission
         // preprocess for one generation while the engine loads the other.
         use mold_core::ltx2_preprocess::{ltx2_generation, Ltx2Generation};
         let cases: &[(&str, Option<&str>)] = &[
@@ -358,7 +360,9 @@ mod tests {
             ("ltx-2-19b-distilled:fp8", None),
             ("ltx-2.3-22b-dev:fp8", None),
             ("ltx-2.3-22b-distilled:bf16", None),
+            ("ltx-2.5-22b-distilled:int8-conv", None),
             ("cv:2752735", Some("2.3.0")),
+            ("hf:Lightricks/LTX-2.5", Some("2.5.0")),
             ("cv:9999", Some("2.0.0")),
             ("hf:someone/repo", Some("2.1.0")),
         ];
@@ -369,6 +373,7 @@ mod tests {
             let expected = match generation {
                 Ltx2Generation::V2 => "ltx-2-19b",
                 Ltx2Generation::V2_3 => "ltx-2.3-22b",
+                Ltx2Generation::V2_5 => "ltx-2.5-22b",
             };
             assert_eq!(preset.name, expected, "for model {name} hint {hint:?}");
         }

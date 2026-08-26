@@ -69,7 +69,7 @@ with prompt, model, seed, and generation metadata.
 ## What it supports
 
 - **Models**: FLUX.1, Flux.2 Klein/Dev, SD 1.5, SDXL, SD 3.5, Z-Image,
-  Qwen-Image, Qwen-Image-Edit, Wuerstchen v2, LTX Video, LTX-2 / LTX-2.3,
+  Qwen-Image, Qwen-Image-Edit, Wuerstchen v2, LTX Video, LTX-2 / LTX-2.3 / LTX-2.5,
   Wan 2.1/2.2, and MiniMax H3 — see the
   [model catalog](https://utensils.io/mold/models/) for sizes, VRAM needs, and
   settings

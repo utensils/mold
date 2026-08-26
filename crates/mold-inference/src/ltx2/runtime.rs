@@ -680,40 +680,17 @@ impl Ltx2RuntimeSession {
 
     #[cfg(test)]
     pub fn prepare(&mut self, plan: &Ltx2GeneratePlan) -> Result<NativePreparedRun> {
-        self.prepare_with_progress(plan, None)
+        let mut plan = plan.clone();
+        self.prepare_with_progress(&mut plan, None)
     }
 
     pub fn prepare_with_progress(
         &mut self,
-        plan: &Ltx2GeneratePlan,
+        plan: &mut Ltx2GeneratePlan,
         progress: Option<&ProgressCallback>,
     ) -> Result<NativePreparedRun> {
         let prepare_total_start = Instant::now();
         reject_oversized_axis_without_composition(plan)?;
-        let mut stage1_shape = derive_stage1_render_shape(
-            plan.width,
-            plan.height,
-            plan.num_frames,
-            plan.frame_rate,
-            plan.spatial_upscale,
-            plan.temporal_upscale,
-        );
-        if pipeline_uses_two_stage_spatial_refinement(plan.pipeline)
-            && plan.spatial_upscale.is_none()
-            && stage1_shape.width > 16
-            && stage1_shape.height > 16
-        {
-            let implicit_x2_shape = derive_stage1_render_shape(
-                plan.width,
-                plan.height,
-                plan.num_frames,
-                plan.frame_rate,
-                Some(Ltx2SpatialUpscale::X2),
-                plan.temporal_upscale,
-            );
-            stage1_shape.width = implicit_x2_shape.width;
-            stage1_shape.height = implicit_x2_shape.height;
-        }
         let encode_unconditional_prompt = prompt_requires_unconditional_context(plan)?;
         if plan.scene_embeddings_path.is_some()
             && prompt_requires_unconditional_context_for_plan(plan)?
@@ -850,6 +827,59 @@ impl Ltx2RuntimeSession {
                 debug_alt_prompt,
             )
         };
+        if let Some(bounds) = plan.auto_duration {
+            let path = plan
+                .duration_head_path
+                .as_deref()
+                .context("automatic duration was planned without a duration-head checkpoint")?;
+            let duration_dtype = if prepared_device.is_cpu() {
+                DType::F32
+            } else {
+                compute_dtype(&prepared_device)
+            };
+            let head = super::model::Ltx2DurationHead::from_checkpoint(
+                Path::new(path),
+                duration_dtype,
+                &prepared_device,
+            )?;
+            plan.num_frames = head.predict_frames(
+                Some(&prompt.conditional.video_encoding),
+                prompt.conditional.audio_encoding.as_ref(),
+                plan.frame_rate,
+                bounds,
+            )?;
+            emit_info(
+                progress,
+                format!(
+                    "Predicted caption duration: {} frames at {} fps",
+                    plan.num_frames, plan.frame_rate
+                ),
+            );
+        }
+        let mut stage1_shape = derive_stage1_render_shape(
+            plan.width,
+            plan.height,
+            plan.num_frames,
+            plan.frame_rate,
+            plan.spatial_upscale,
+            plan.temporal_upscale,
+        );
+        if pipeline_uses_two_stage_spatial_refinement(plan.pipeline)
+            && plan.spatial_upscale.is_none()
+            && stage1_shape.width > 16
+            && stage1_shape.height > 16
+        {
+            let implicit_x2_shape = derive_stage1_render_shape(
+                plan.width,
+                plan.height,
+                plan.num_frames,
+                plan.frame_rate,
+                Some(Ltx2SpatialUpscale::X2),
+                plan.temporal_upscale,
+            );
+            stage1_shape.width = implicit_x2_shape.width;
+            stage1_shape.height = implicit_x2_shape.height;
+        }
         let device_handoff_start = Instant::now();
         if prompt_device_is_cuda {
             // The conditioning handoff: the encoder's device is released and
@@ -5934,16 +5964,19 @@ fn render_native_audio_track(
     device: &candle_core::Device,
     dtype: DType,
 ) -> Result<Option<NativeAudioTrack>> {
+    let audio_checkpoint = plan
+        .audio_components_path
+        .as_deref()
+        .unwrap_or(&plan.checkpoint_path);
     let decoder =
-        Ltx2AudioDecoder::load_from_checkpoint(Path::new(&plan.checkpoint_path), dtype, device)?;
+        Ltx2AudioDecoder::load_from_checkpoint(Path::new(audio_checkpoint), dtype, device)?;
     let mel_spec = decoder.decode(&audio_latents.to_dtype(dtype)?)?;
     drop(decoder);
     if device.is_cuda() {
         device.synchronize()?;
     }
 
-    let vocoder =
-        Ltx2VocoderWithBwe::load_from_checkpoint(Path::new(&plan.checkpoint_path), device)?;
+    let vocoder = Ltx2VocoderWithBwe::load_from_checkpoint(Path::new(audio_checkpoint), device)?;
     let output_sample_rate = vocoder.config.output_sample_rate as u32;
     let waveform = vocoder.forward(&mel_spec.to_dtype(DType::F32)?)?;
     drop(vocoder);
@@ -7342,10 +7375,17 @@ fn load_ltx2_video_vae_inner(
     } else {
         vb
     };
-    Ok(AutoencoderKLLtx2Video::new(
-        ltx2_video_vae_config(plan),
-        vb,
-    )?)
+    let config = ltx2_video_vae_config(plan);
+    let is_diffusion_decoder = !plan.vae_in_checkpoint
+        && matches!(
+            mold_core::ltx25_probe::probe_ltx25_video_vae(Path::new(&plan.vae_checkpoint_path)),
+            Ok(mold_core::ltx25_probe::Ltx25VideoVaeKind::Diffusion)
+        );
+    if is_diffusion_decoder {
+        Ok(AutoencoderKLLtx2Video::new_diffusion(config, vb)?)
+    } else {
+        Ok(AutoencoderKLLtx2Video::new(config, vb)?)
+    }
 }
 
 /// Decode video latents to frames as one measured, reported VAE phase.
@@ -8785,11 +8825,14 @@ mod tests {
             checkpoint_path: "/tmp/ltx2.safetensors".to_string(),
             vae_checkpoint_path: "/tmp/ltx2.safetensors".to_string(),
             vae_in_checkpoint: true,
+            audio_components_path: None,
             text_projection_path: None,
             distilled_checkpoint_path: None,
             distilled_lora_path: None,
             spatial_upsampler_path: None,
             temporal_upsampler_path: None,
+            duration_head_path: None,
+            auto_duration: None,
             gemma_root: "/tmp/gemma".to_string(),
             output_path: "/tmp/output.mp4".to_string(),
             prompt: req.prompt.clone(),
@@ -9486,7 +9529,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let conditioning = conditioning::stage_conditioning(&req, temp_dir.path()).unwrap();
         let preset = preset_for_model(&req.model).unwrap();
-        let plan = build_plan(&req, preset, conditioning);
+        let mut plan = build_plan(&req, preset, conditioning);
 
         let mut session = runtime_session();
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -9495,7 +9538,7 @@ mod tests {
             captured.lock().unwrap().push(event);
         });
         let prepared = session
-            .prepare_with_progress(&plan, Some(&progress))
+            .prepare_with_progress(&mut plan, Some(&progress))
             .unwrap();
 
         assert_eq!(prepared.video_pixel_shape.frames, 97);

@@ -1,5 +1,7 @@
 pub mod audio_transformer;
 pub mod audio_vae;
+pub mod diffusion_video_vae;
+pub mod duration_head;
 pub mod patchifiers;
 pub mod rope;
 pub mod shapes;
@@ -14,6 +16,7 @@ pub use audio_vae::{
     AudioCausalityAxis, AudioNormType, DecodedAudio, Ltx2AudioDecoder, Ltx2AudioDecoderConfig,
     Ltx2AudioEncoder, Ltx2AudioEncoderConfig,
 };
+pub use duration_head::Ltx2DurationHead;
 #[allow(unused_imports)]
 pub use patchifiers::{AudioPatchifier, VideoLatentPatchifier};
 #[allow(unused_imports)]

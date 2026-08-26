@@ -49,6 +49,10 @@ pub enum ComponentRole {
     Lora(usize),
     SpatialUpscaler,
     TemporalUpscaler,
+    /// Split LTX-2.5 checkpoint containing both audio VAE and vocoder.
+    AudioVae,
+    /// Split LTX-2.5 caption-conditioned duration predictor.
+    DurationHead,
     Decoder,
     DistilledLora,
     /// The distill belonging to [`ComponentRole::LowNoiseTransformer`]. Each
@@ -2317,6 +2321,15 @@ fn concrete_artifacts_for_family(
     }
     if let Some(path) = &paths.temporal_upscaler {
         artifacts.insert(ComponentRole::TemporalUpscaler, path.clone());
+    }
+    if matches!(family, "ltx2" | "ltx-2" | "ltx2.3") {
+        if let Some(split) = mold_core::ltx25_manifest::Ltx25ModelPaths::resolve_for_transformer_in(
+            &engine_config.artifact_root,
+            &paths.transformer,
+        ) {
+            artifacts.insert(ComponentRole::AudioVae, split.audio_vae);
+            artifacts.insert(ComponentRole::DurationHead, split.duration_head);
+        }
     }
     if let Some(path) = &paths.decoder {
         artifacts.insert(ComponentRole::Decoder, path.clone());
@@ -5994,6 +6007,49 @@ mod tests {
             role,
             ComponentRole::T5 | ComponentRole::ClipL | ComponentRole::ClipG
         )));
+    }
+
+    #[test]
+    fn ltx25_execution_topology_keeps_split_audio_and_duration_components() {
+        let root = TempDir::new().unwrap();
+        let split = mold_core::ltx25_manifest::Ltx25ModelPaths::resolve_in(
+            root.path(),
+            mold_core::ltx25_manifest::DISTILLED_INT8_CONV,
+        )
+        .unwrap();
+        let paths = ModelPaths {
+            low_noise_transformer: None,
+            low_noise_distilled_lora: None,
+            transformer: split.transformer.clone(),
+            transformer_shards: Vec::new(),
+            vae: split.video_vae.clone(),
+            spatial_upscaler: Some(split.spatial_upscaler.clone()),
+            temporal_upscaler: Some(split.temporal_upscaler.clone()),
+            distilled_lora: split.distilled_lora.clone(),
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![split.gemma.clone()],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let mut frozen = mold_inference::FrozenEngineConfig::resolve(
+            mold_core::ltx25_manifest::DISTILLED_INT8_CONV,
+            &Config::default(),
+        );
+        frozen.artifact_root = root.path().to_path_buf();
+        let artifacts = concrete_artifacts_for_family(&paths, "ltx2", &[], &frozen);
+        assert_eq!(
+            artifacts.get(&ComponentRole::AudioVae),
+            Some(&split.audio_vae)
+        );
+        assert_eq!(
+            artifacts.get(&ComponentRole::DurationHead),
+            Some(&split.duration_head)
+        );
     }
 
     /// Selecting the Q4 Gemma must replace the BF16 shards, not join them.
