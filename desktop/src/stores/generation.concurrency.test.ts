@@ -14,10 +14,11 @@ const effectMocks = vi.hoisted(() => ({
   fetchGalleryMediaBytes: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3])),
   saveOutputBytes: vi.fn().mockResolvedValue("saved.png"),
 }));
-const queueApi = vi.hoisted(() => ({ retryQueueJob: vi.fn() }));
+const queueApi = vi.hoisted(() => ({ retryQueueJobRecoveringAmbiguity: vi.fn() }));
 vi.mock("@studio/api/queuePlan", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@studio/api/queuePlan")>()),
-  retryQueueJob: (...args: unknown[]) => queueApi.retryQueueJob(...args),
+  retryQueueJobRecoveringAmbiguity: (...args: unknown[]) =>
+    queueApi.retryQueueJobRecoveringAmbiguity(...args),
 }));
 vi.mock("../lib/notify", () => ({
   notifyGenerated: effectMocks.notifyGenerated,
@@ -44,7 +45,7 @@ vi.mock("@studio/api/generationAdmission", async (importOriginal) => ({
 }));
 
 import { sseStream } from "../lib/api/sse";
-import { apiFetchTo, apiJsonTo } from "../lib/api/client";
+import { ApiError, apiFetchTo, apiJsonTo } from "../lib/api/client";
 import { runWithConcurrency, useGenerationStore } from "./generation";
 import { useHostsStore } from "./hosts";
 import { useToastStore } from "./toasts";
@@ -166,8 +167,8 @@ describe("submitBatch connection cap", () => {
     durableApi.admit.mockReset();
     durableApi.lookup.mockReset();
     durableApi.reconcile.mockReset();
-    queueApi.retryQueueJob.mockReset();
-    queueApi.retryQueueJob.mockResolvedValue(undefined);
+    queueApi.retryQueueJobRecoveringAmbiguity.mockReset();
+    queueApi.retryQueueJobRecoveringAmbiguity.mockResolvedValue({ kind: "accepted" });
     effectMocks.notifyGenerated.mockClear();
     effectMocks.notifyGenerationFailed.mockClear();
     effectMocks.fetchGalleryMediaBytes.mockClear();
@@ -384,7 +385,7 @@ describe("submitBatch connection cap", () => {
       stage: "Original machine identity changed — outcome unknown",
     });
     await expect(store.retryHeld(submitted.jobs[0]!.clientId)).rejects.toThrow("not retryable");
-    expect(queueApi.retryQueueJob).not.toHaveBeenCalled();
+    expect(queueApi.retryQueueJobRecoveringAmbiguity).not.toHaveBeenCalled();
   });
 
   it("retries a held child with its complete durable admission authority", async () => {
@@ -432,9 +433,18 @@ describe("submitBatch connection cap", () => {
     });
     await flushPromises();
 
-    await store.retryHeld(submitted.jobs[0]!.clientId);
+    const confirmation = deferred<{ kind: "accepted" }>();
+    queueApi.retryQueueJobRecoveringAmbiguity.mockReturnValue(confirmation.promise);
+    const retry = store.retryHeld(submitted.jobs[0]!.clientId);
 
-    expect(queueApi.retryQueueJob).toHaveBeenCalledWith(
+    expect(submitted.jobs[0]).toMatchObject({
+      retryable: false,
+      retrying: true,
+    });
+    confirmation.resolve({ kind: "accepted" });
+    await retry;
+
+    expect(queueApi.retryQueueJobRecoveringAmbiguity).toHaveBeenCalledWith(
       { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       {
         instanceId: "instance-1",
@@ -512,68 +522,74 @@ describe("submitBatch connection cap", () => {
     expect(mockSse).not.toHaveBeenCalled();
   });
 
-  it("recovers an ambiguous durable POST by client id without legacy fallback", async () => {
-    const store = useGenerationStore();
-    const hosts = useHostsStore();
-    hosts.extras = [
-      {
-        id: "hal9000",
+  it.each([
+    ["commit-then-500", new ApiError("response lost", 500)],
+    ["disconnect", new TypeError("response lost")],
+  ])(
+    "recovers an ambiguous durable %s POST by client id without fallback",
+    async (_case, failure) => {
+      const store = useGenerationStore();
+      const hosts = useHostsStore();
+      hosts.extras = [
+        {
+          id: "hal9000",
+          label: "hal9000",
+          url: "http://hal9000:7680",
+          apiKey: "fresh-key",
+          status: "ready",
+          error: null,
+          instanceId: "instance-1",
+        },
+      ];
+      store.attachSharedDurableEventHost("hal9000");
+      let clientBatchId = "";
+      durableApi.admit.mockImplementation(async (_target, body) => {
+        clientBatchId = (body as { client_batch_id: string }).client_batch_id;
+        throw failure;
+      });
+      durableApi.lookup.mockImplementation(async () => ({
+        kind: "found",
+        batch: {
+          id: "batch-recovered",
+          client_batch_id: clientBatchId,
+          instance_id: "instance-1",
+          durable: true,
+          children: [
+            {
+              index: 1,
+              job_id: "job-recovered",
+              state: "queued",
+              created_at_ms: 1,
+              updated_at_ms: 1,
+            },
+          ],
+        },
+      }));
+
+      const submitted = store.submitBatch(req, 1, {
+        hostId: "hal9000",
         label: "hal9000",
-        url: "http://hal9000:7680",
-        apiKey: "fresh-key",
-        status: "ready",
-        error: null,
+        kind: "remote",
+        target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
         instanceId: "instance-1",
-      },
-    ];
-    store.attachSharedDurableEventHost("hal9000");
-    let clientBatchId = "";
-    durableApi.admit.mockImplementation(async (_target, body) => {
-      clientBatchId = (body as { client_batch_id: string }).client_batch_id;
-      throw new TypeError("response lost");
-    });
-    durableApi.lookup.mockImplementation(async () => ({
-      kind: "found",
-      batch: {
-        id: "batch-recovered",
-        client_batch_id: clientBatchId,
-        instance_id: "instance-1",
-        durable: true,
-        children: [
-          {
-            index: 1,
-            job_id: "job-recovered",
-            state: "queued",
-            created_at_ms: 1,
-            updated_at_ms: 1,
-          },
-        ],
-      },
-    }));
+        heterogeneousBatch: true,
+        heterogeneousBatchMaxOutputs: 64,
+        durableBatchOutcomes: true,
+        admissionProtocolVersion: 2,
+        mirrorRemoteOutput: false,
+      });
+      await flushPromises();
+      await flushPromises();
 
-    const submitted = store.submitBatch(req, 1, {
-      hostId: "hal9000",
-      label: "hal9000",
-      kind: "remote",
-      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
-      instanceId: "instance-1",
-      heterogeneousBatch: true,
-      heterogeneousBatchMaxOutputs: 64,
-      durableBatchOutcomes: true,
-      admissionProtocolVersion: 2,
-      mirrorRemoteOutput: false,
-    });
-    await flushPromises();
-    await flushPromises();
-
-    expect(submitted.jobs[0]!.id).toBe("job-recovered");
-    expect(mockSse).not.toHaveBeenCalled();
-    expect(durableApi.admit).toHaveBeenCalledTimes(1);
-    expect(durableApi.lookup).toHaveBeenCalledWith(
-      expect.objectContaining({ baseUrl: "http://hal9000:7680" }),
-      clientBatchId,
-    );
-  });
+      expect(submitted.jobs[0]!.id).toBe("job-recovered");
+      expect(mockSse).not.toHaveBeenCalled();
+      expect(durableApi.admit).toHaveBeenCalledTimes(1);
+      expect(durableApi.lookup).toHaveBeenCalledWith(
+        expect.objectContaining({ baseUrl: "http://hal9000:7680" }),
+        clientBatchId,
+      );
+    },
+  );
 
   it("uses host events as hints and bulk status as the only terminal authority", async () => {
     const store = useGenerationStore();

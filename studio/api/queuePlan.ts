@@ -6,6 +6,11 @@ import {
   type ApiTarget,
 } from "./client";
 import { parseHostMemory, type HostMemorySnapshot } from "../lib/hostMemory";
+import {
+  getGenerationBatch,
+  isDefiniteGenerationAdmissionRejection,
+  type GenerationBatchStatus,
+} from "./generationAdmission";
 
 export type EstimateConfidence = "low" | "medium" | "high" | (string & {});
 export type QueueLaneKind = "device" | "host_utility" | (string & {});
@@ -359,6 +364,91 @@ export async function retryQueueJob(
       }),
     },
   );
+}
+
+export type RetryQueueJobOutcome =
+  | { kind: "accepted" }
+  | { kind: "reconciled"; batch: GenerationBatchStatus }
+  | { kind: "uncertain"; error: string };
+
+const AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS = 5;
+const AMBIGUOUS_RETRY_CONFIRM_DELAY_MS = 1_000;
+
+function validatedRetryChild(
+  batch: GenerationBatchStatus,
+  authority: QueueJobAuthority,
+) {
+  const child = batch.children.find(
+    (candidate) => candidate.job_id === authority.jobId,
+  );
+  if (
+    batch.instance_id !== authority.instanceId ||
+    batch.id !== authority.batchId ||
+    batch.client_batch_id !== authority.clientBatchId ||
+    !child
+  ) {
+    throw new Error(
+      "The retry reconciliation response did not match its captured authority.",
+    );
+  }
+  return child;
+}
+
+function retryConfirmationDelay(): Promise<void> {
+  return new Promise((resolve) =>
+    setTimeout(resolve, AMBIGUOUS_RETRY_CONFIRM_DELAY_MS),
+  );
+}
+
+/** Retry once, then recover a lost/invalid response only through the captured
+ * batch authority. An uncertain mutation is never permission to send a second
+ * retry POST. */
+export async function retryQueueJobRecoveringAmbiguity(
+  target: ApiTarget,
+  authority: QueueJobAuthority,
+): Promise<RetryQueueJobOutcome> {
+  try {
+    await retryQueueJob(target, authority);
+    return { kind: "accepted" };
+  } catch (error) {
+    if (isDefiniteGenerationAdmissionRejection(error)) throw error;
+    const detail = error instanceof Error ? error.message : String(error);
+    for (
+      let attempt = 0;
+      attempt < AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS;
+      attempt += 1
+    ) {
+      let lookup;
+      try {
+        lookup = await getGenerationBatch(target, authority.batchId);
+      } catch (lookupError) {
+        return {
+          kind: "uncertain",
+          error: `${detail}; exact retry reconciliation failed: ${
+            lookupError instanceof Error
+              ? lookupError.message
+              : String(lookupError)
+          }`,
+        };
+      }
+      if (lookup.kind === "missing") {
+        return {
+          kind: "uncertain",
+          error: `${detail}; the durable batch lookup is still missing`,
+        };
+      }
+      const batch = lookup.batch;
+      const child = validatedRetryChild(batch, authority);
+      if (
+        child.state !== "held" ||
+        attempt + 1 === AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS
+      ) {
+        return { kind: "reconciled", batch };
+      }
+      await retryConfirmationDelay();
+    }
+    throw new Error("The bounded retry confirmation loop did not terminate.");
+  }
 }
 
 export type QueueJobMutation = "cancel" | "retry";

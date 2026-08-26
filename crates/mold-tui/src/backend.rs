@@ -4,10 +4,9 @@ use std::sync::Arc;
 use mold_core::ServerCapabilities;
 use mold_core::{
     classify_generate_error, download::DownloadProgressEvent, ChainRequest, GenerateRequest,
-    GenerateResponse, GenerateServerAction, GenerationBatchAdmissionRequest,
-    GenerationBatchAuthority, GenerationBatchChildState, GenerationBatchStatus,
-    GenerationBatchStatusRequest, LoraWeight, MoldClient, PromptExpander, PromptTransformOperation,
-    RemixRequest, RemixResponse, RemixVariant, SseProgressEvent,
+    GenerateResponse, GenerateServerAction, GenerationBatchChildState, LoraWeight, MoldClient,
+    PromptExpander, PromptTransformOperation, RemixRequest, RemixResponse, RemixVariant,
+    SseProgressEvent,
 };
 use tokio::sync::mpsc;
 
@@ -684,72 +683,6 @@ fn build_batch_requests(
     Ok(requests)
 }
 
-fn partial_batch_admission_error(
-    failed_client_id: &str,
-    error: &str,
-    admitted_client_ids: &[String],
-) -> String {
-    if admitted_client_ids.is_empty() {
-        return format!("durable batch admission failed for client id {failed_client_id}: {error}");
-    }
-    format!(
-        "durable batch admission failed for client id {failed_client_id}: {error}; already accepted client ids were reconciled: {}",
-        admitted_client_ids.join(", ")
-    )
-}
-
-async fn admit_or_recover_batch(
-    client: &MoldClient,
-    request: &GenerationBatchAdmissionRequest,
-) -> Result<TuiCanonicalAdmission, String> {
-    match client.admit_generation_batch(request).await {
-        Ok(status) => Ok(TuiCanonicalAdmission::Admitted(status)),
-        Err(error) if mold_core::client::is_missing_endpoint_error(&error) => {
-            Ok(TuiCanonicalAdmission::MissingEndpoint)
-        }
-        Err(admit_error) => {
-            let mut last_lookup_error = None;
-            for attempt in 0..5 {
-                match client
-                    .generation_batch_by_client_id(&request.client_batch_id)
-                    .await
-                {
-                    Ok(Some(status)) => return Ok(TuiCanonicalAdmission::Admitted(status)),
-                    Ok(None) => {
-                        return Err(format!(
-                            "durable batch admission failed before acceptance: {admit_error}"
-                        ));
-                    }
-                    Err(error) => last_lookup_error = Some(error),
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(250 * (attempt + 1))).await;
-            }
-            Err(format!(
-                "durable batch admission is uncertain for {}: {admit_error}; recovery lookup failed: {}",
-                request.client_batch_id,
-                last_lookup_error
-                    .map(|error| error.to_string())
-                    .unwrap_or_else(|| "unknown lookup error".to_string())
-            ))
-        }
-    }
-}
-
-enum TuiCanonicalAdmission {
-    Admitted(GenerationBatchStatus),
-    MissingEndpoint,
-}
-
-fn batch_child_is_settled(state: &GenerationBatchChildState) -> bool {
-    matches!(
-        state,
-        GenerationBatchChildState::Complete
-            | GenerationBatchChildState::Failed
-            | GenerationBatchChildState::Cancelled
-            | GenerationBatchChildState::Held
-    )
-}
-
 fn batch_child_state_label(state: &GenerationBatchChildState) -> &'static str {
     match state {
         GenerationBatchChildState::Accepted => "accepted",
@@ -787,158 +720,74 @@ async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> Canonical
         Ok(requests) => requests,
         Err(error) => return CanonicalBatchResult::Error(error),
     };
-    let capabilities = match input.client.capabilities().await {
-        Ok(capabilities) => capabilities,
-        Err(error) if mold_core::client::is_missing_endpoint_error(&error) => {
-            return CanonicalBatchResult::Unsupported;
+
+    let observed = std::sync::Mutex::new(std::collections::HashMap::<
+        String,
+        GenerationBatchChildState,
+    >::new());
+    let observer = |event: mold_core::durable_generation::CanonicalGenerationEvent| match event {
+        mold_core::durable_generation::CanonicalGenerationEvent::Admitted {
+            status,
+            request_offset,
+            ..
+        } => {
+            let first = request_offset + 1;
+            let last = request_offset + status.children.len() as u32;
+            let _ = input
+                .tx
+                .send(BackgroundEvent::Progress(SseProgressEvent::Info {
+                    message: format!("Durably accepted batch {first}-{last}"),
+                }));
         }
-        Err(error) => {
-            return CanonicalBatchResult::Error(format!(
-                "could not read generation admission capabilities: {error}"
-            ));
+        mold_core::durable_generation::CanonicalGenerationEvent::Snapshot {
+            status,
+            request_offset,
+            ..
+        } => {
+            let mut observed = observed.lock().unwrap_or_else(|poison| poison.into_inner());
+            for child in status.children {
+                if observed.get(&child.job_id) != Some(&child.state) {
+                    observed.insert(child.job_id, child.state.clone());
+                    let _ = input
+                        .tx
+                        .send(BackgroundEvent::Progress(SseProgressEvent::Info {
+                            message: format!(
+                                "Batch {} {}",
+                                request_offset + child.index,
+                                batch_child_state_label(&child.state)
+                            ),
+                        }));
+                }
+            }
+        }
+        mold_core::durable_generation::CanonicalGenerationEvent::ReconcileDelayed {
+            error, ..
+        } => {
+            let _ = input
+                .tx
+                .send(BackgroundEvent::Progress(SseProgressEvent::Info {
+                    message: format!("Durable queue reconciliation delayed: {error}"),
+                }));
         }
     };
-    let Some(chunk_limit) = capabilities.canonical_generation_batch_limit(&requests) else {
-        return CanonicalBatchResult::Unsupported;
+
+    let report = match mold_core::durable_generation::try_canonical_generation_observed(
+        input.client,
+        &requests,
+        Some(&observer),
+    )
+    .await
+    {
+        Ok(Some(report)) => report,
+        Ok(None) => return CanonicalBatchResult::Unsupported,
+        Err(error) => return CanonicalBatchResult::Error(format!("{error:#}")),
     };
 
-    let mut admitted = Vec::new();
-    let mut admission_failure = None;
-    for (chunk_index, chunk) in requests.chunks(chunk_limit).enumerate() {
-        let client_batch_id = new_client_batch_id();
-        let request = GenerationBatchAdmissionRequest {
-            client_batch_id: client_batch_id.clone(),
-            requests: chunk.to_vec(),
-        };
-        let status = match admit_or_recover_batch(input.client, &request).await {
-            Ok(TuiCanonicalAdmission::Admitted(status)) => status,
-            Ok(TuiCanonicalAdmission::MissingEndpoint) if admitted.is_empty() => {
-                return CanonicalBatchResult::Unsupported;
-            }
-            Ok(TuiCanonicalAdmission::MissingEndpoint) => {
-                admission_failure = Some((
-                    client_batch_id,
-                    "generation-batch endpoint disappeared after partial acceptance".to_string(),
-                ));
-                break;
-            }
-            Err(error) => {
-                admission_failure = Some((client_batch_id, error));
-                break;
-            }
-        };
-        let authority = match GenerationBatchAuthority::from_admission(&status, &client_batch_id) {
-            Ok(authority) => authority,
-            Err(error) => {
-                admission_failure = Some((client_batch_id, error));
-                break;
-            }
-        };
-        let first = chunk_index * chunk_limit + 1;
-        let last = first + chunk.len() - 1;
-        let _ = input
-            .tx
-            .send(BackgroundEvent::Progress(SseProgressEvent::Info {
-                message: format!("Durably accepted batch {first}-{last}"),
-            }));
-        admitted.push((first as u32 - 1, status, authority));
-    }
-
-    if admitted.is_empty() {
-        let (failed_client_id, error) = admission_failure.expect("an empty admission set failed");
-        return CanonicalBatchResult::Error(partial_batch_admission_error(
-            &failed_client_id,
-            &error,
-            &[],
-        ));
-    }
-
-    let client_batch_ids = admitted
-        .iter()
-        .map(|(_, status, _)| status.client_batch_id.clone())
-        .collect::<Vec<_>>();
-    let offsets = admitted
-        .iter()
-        .map(|(offset, status, _)| (status.client_batch_id.clone(), *offset))
-        .collect::<std::collections::HashMap<_, _>>();
-    let authorities = admitted
-        .iter()
-        .map(|(_, _, authority)| authority.clone())
-        .collect::<Vec<_>>();
-    let mut statuses = admitted
+    let mut outcomes = report
+        .outcomes
         .into_iter()
-        .map(|(_, status, _)| (status.client_batch_id.clone(), status))
-        .collect::<std::collections::HashMap<_, _>>();
-    let mut observed = std::collections::HashMap::<String, GenerationBatchChildState>::new();
-    let mut consecutive_errors = 0u8;
-
-    loop {
-        if statuses
-            .values()
-            .flat_map(|status| &status.children)
-            .all(|child| batch_child_is_settled(&child.state))
-        {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-        let request = GenerationBatchStatusRequest {
-            client_batch_ids: client_batch_ids.clone(),
-            batch_ids: Vec::new(),
-        };
-        match input.client.generation_batch_statuses(&request).await {
-            Ok(response) => {
-                consecutive_errors = 0;
-                if let Err(error) =
-                    mold_core::validate_generation_batch_status_response(&response, &authorities)
-                {
-                    return CanonicalBatchResult::Error(format!(
-                        "durable batch identity check failed: {error}; client ids: {}",
-                        client_batch_ids.join(", ")
-                    ));
-                }
-                if !response.missing.client_batch_ids.is_empty() {
-                    return CanonicalBatchResult::Error(format!(
-                        "server lost durable batch identities: {}",
-                        response.missing.client_batch_ids.join(", ")
-                    ));
-                }
-                for status in response.batches {
-                    for child in &status.children {
-                        let changed = observed.get(&child.job_id) != Some(&child.state);
-                        if changed {
-                            observed.insert(child.job_id.clone(), child.state.clone());
-                            let offset = offsets.get(&status.client_batch_id).copied().unwrap_or(0);
-                            let _ =
-                                input
-                                    .tx
-                                    .send(BackgroundEvent::Progress(SseProgressEvent::Info {
-                                        message: format!(
-                                            "Batch {} {}",
-                                            offset + child.index,
-                                            batch_child_state_label(&child.state)
-                                        ),
-                                    }));
-                        }
-                    }
-                    statuses.insert(status.client_batch_id.clone(), status);
-                }
-            }
-            Err(error) => {
-                consecutive_errors = consecutive_errors.saturating_add(1);
-                if consecutive_errors >= 5 {
-                    return CanonicalBatchResult::Error(format!(
-                        "durable batch remains queued but reconciliation failed: {error}; client ids: {}",
-                        client_batch_ids.join(", ")
-                    ));
-                }
-            }
-        }
-    }
-
-    let mut outcomes = Vec::new();
-    for (client_batch_id, status) in statuses {
-        let offset = offsets.get(&client_batch_id).copied().unwrap_or(0);
-        for child in status.children {
+        .map(|outcome| {
+            let child = outcome.child;
             let result = child.result.unwrap_or(mold_core::GenerationBatchResult {
                 filename: None,
                 original_filename: None,
@@ -954,28 +803,26 @@ async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> Canonical
                     format!("generation {}", batch_child_state_label(&child.state))
                 })),
             };
-            outcomes.push(DurableGenerationChildOutcome {
-                index: offset + child.index,
+            DurableGenerationChildOutcome {
+                index: outcome.request_offset + child.index,
                 job_id: child.job_id,
                 filename: result.filename,
                 original_filename: result.original_filename,
                 error,
                 retryable: child.retryable.unwrap_or(false),
-            });
-        }
-    }
+            }
+        })
+        .collect::<Vec<_>>();
     outcomes.sort_by_key(|outcome| outcome.index);
     let _ = input
         .tx
         .send(BackgroundEvent::DurableGenerationBatchComplete { outcomes });
-    if let Some((failed_client_id, error)) = admission_failure {
-        return CanonicalBatchResult::Error(partial_batch_admission_error(
-            &failed_client_id,
-            &error,
-            &client_batch_ids,
-        ));
+
+    if report.failures.is_empty() {
+        CanonicalBatchResult::Done
+    } else {
+        CanonicalBatchResult::Error(report.failures.join("; "))
     }
-    CanonicalBatchResult::Done
 }
 
 fn requires_secure_generation_stream(req: &GenerateRequest) -> bool {
@@ -1920,20 +1767,6 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0][0].batch_id, chunks[1][0].batch_id);
         assert_eq!(chunks[1][0].batch_index, Some(3));
-    }
-
-    #[test]
-    fn partial_admission_error_names_failed_and_reconciled_recovery_ids() {
-        let message = partial_batch_admission_error(
-            "failed-client",
-            "lookup remained ambiguous",
-            &["accepted-one".into(), "accepted-two".into()],
-        );
-
-        assert!(message.contains("failed-client"));
-        assert!(message.contains("lookup remained ambiguous"));
-        assert!(message.contains("accepted-one, accepted-two"));
-        assert!(message.contains("were reconciled"));
     }
 
     #[test]

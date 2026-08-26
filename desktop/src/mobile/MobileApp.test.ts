@@ -2014,74 +2014,86 @@ describe("MobileApp generation queue", () => {
     );
   });
 
-  it("recovers an ambiguous durable POST by client UUID without retrying or streaming", async () => {
-    let clientBatchId = "";
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
-      if (path === "/api/status") return Promise.resolve(status);
-      if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/gallery") return Promise.resolve([print]);
-      if (path === "/api/capabilities") {
-        return Promise.resolve({
-          events: { available: true },
-          queue: {
-            heterogeneous_batch: true,
-            heterogeneous_batch_max_outputs: 64,
-            durable_batch_outcomes: true,
-            admission_protocol_version: 2,
+  it.each([
+    ["commit-then-500", new ApiError("response lost after commit", 500)],
+    ["disconnect", new TypeError("response lost after commit")],
+  ])(
+    "recovers an ambiguous durable %s POST by client UUID without retrying or streaming",
+    async (_case, failure) => {
+      let clientBatchId = "";
+      const recoveredBatch = () => ({
+        id: "recovered-batch",
+        client_batch_id: clientBatchId,
+        instance_id: "studio-id",
+        durable: true,
+        children: [
+          {
+            index: 1,
+            job_id: "recovered-job",
+            state: "queued",
+            created_at_ms: 10,
+            updated_at_ms: 11,
           },
-        });
-      }
-      if (path === "/api/activity") {
-        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
-      }
-      if (path === "/api/generation-batches" && init?.method === "POST") {
-        clientBatchId = JSON.parse(String(init.body)).client_batch_id;
-        return Promise.reject(new Error("response lost after commit"));
-      }
-      if (path === "/api/generation-batches/status" && init?.method === "POST") {
-        expect(JSON.parse(String(init.body))).toEqual({ client_batch_ids: [clientBatchId] });
-        return Promise.resolve({
-          instance_id: "studio-id",
-          batches: [
-            {
-              id: "recovered-batch",
-              client_batch_id: clientBatchId,
-              instance_id: "studio-id",
-              durable: true,
-              children: [
-                {
-                  index: 1,
-                  job_id: "recovered-job",
-                  state: "queued",
-                  created_at_ms: 10,
-                  updated_at_ms: 11,
-                },
-              ],
+        ],
+      });
+      apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+        if (path === "/api/status") return Promise.resolve(status);
+        if (path === "/api/models") return Promise.resolve([model]);
+        if (path === "/api/gallery") return Promise.resolve([print]);
+        if (path === "/api/capabilities") {
+          return Promise.resolve({
+            events: { available: true },
+            queue: {
+              heterogeneous_batch: true,
+              heterogeneous_batch_max_outputs: 64,
+              durable_batch_outcomes: true,
+              admission_protocol_version: 2,
             },
-          ],
-          missing: { client_batch_ids: [], batch_ids: [] },
-        });
-      }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
-    });
+          });
+        }
+        if (path === "/api/activity") {
+          return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+        }
+        if (path === "/api/generation-batches" && init?.method === "POST") {
+          clientBatchId = JSON.parse(String(init.body)).client_batch_id;
+          return Promise.reject(failure);
+        }
+        if (path === `/api/generation-batches/by-client/${clientBatchId}`) {
+          return Promise.resolve(recoveredBatch());
+        }
+        if (path === "/api/generation-batches/status" && init?.method === "POST") {
+          expect(JSON.parse(String(init.body))).toEqual({ client_batch_ids: [clientBatchId] });
+          return Promise.resolve({
+            instance_id: "studio-id",
+            batches: [recoveredBatch()],
+            missing: { client_batch_ids: [], batch_ids: [] },
+          });
+        }
+        return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      });
 
-    wrapper = mountMobileApp();
-    await flushPromises();
-    await submitPrompt("ambiguous durable print");
-    await vi.waitFor(() =>
+      wrapper = mountMobileApp();
+      await flushPromises();
+      await submitPrompt("ambiguous durable print");
+      await vi.waitFor(() =>
+        expect(
+          apiJsonTo.mock.calls.filter(([, path]) =>
+            String(path).startsWith("/api/generation-batches/by-client/"),
+          ),
+        ).toHaveLength(1),
+      );
+
       expect(
-        apiJsonTo.mock.calls.filter(([, path]) => path === "/api/generation-batches/status"),
-      ).toHaveLength(1),
-    );
-
-    expect(
-      apiJsonTo.mock.calls.filter(([, path]) => path === "/api/generation-batches"),
-    ).toHaveLength(1);
-    expect(openStreams.filter((stream) => stream.path === "/api/generate/stream")).toHaveLength(0);
-    expect(wrapper.get("[data-test='mobile-generation-job']").text()).toContain(
-      "ambiguous durable print",
-    );
-  });
+        apiJsonTo.mock.calls.filter(([, path]) => path === "/api/generation-batches"),
+      ).toHaveLength(1);
+      expect(openStreams.filter((stream) => stream.path === "/api/generate/stream")).toHaveLength(
+        0,
+      );
+      expect(wrapper.get("[data-test='mobile-generation-job']").text()).toContain(
+        "ambiguous durable print",
+      );
+    },
+  );
 
   it("persists one pre-admission cancel tap until the exact server job id is reconciled", async () => {
     const admission = deferred<Record<string, unknown>>();
@@ -2338,7 +2350,17 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.get("[data-test='mobile-generation-held-error']").text()).toBe(
       "artifact digest mismatch",
     );
-    await retry.trigger("click");
+    const confirmation = deferred<Response>();
+    apiFetchTo.mockImplementation((_target: unknown, path: string) =>
+      path === "/api/queue/retry%2Fjob/retry"
+        ? confirmation.promise
+        : Promise.resolve(new Response(null, { status: 204 })),
+    );
+    const retryClick = retry.trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-generation-retry']").attributes("disabled")).toBe("");
+    confirmation.resolve(new Response(null, { status: 202 }));
+    await retryClick;
     await flushPromises();
 
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/retry%2Fjob/retry", {

@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ApiTarget } from "./client";
+import { ApiError, type ApiTarget } from "./client";
 import {
   canonicalGenerationBatchLimit,
   chunkGenerationBatchRequests,
   admitGenerationBatch,
   getGenerationBatch,
+  isDefiniteGenerationAdmissionRejection,
   lookupGenerationBatchByClientId,
   parseGenerationBatchStatus,
   parseGenerationBatchStatusResponse,
@@ -40,6 +41,31 @@ function batch(overrides: Record<string, unknown> = {}) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("durable generation admission API", () => {
+  it("distinguishes definite rejection from ambiguous delivery failures", () => {
+    for (const status of [400, 401, 404, 409, 422, 426]) {
+      expect(
+        isDefiniteGenerationAdmissionRejection(
+          new ApiError("rejected", status),
+        ),
+      ).toBe(true);
+    }
+    for (const status of [408, 425, 429, 500, 503]) {
+      expect(
+        isDefiniteGenerationAdmissionRejection(
+          new ApiError("uncertain", status),
+        ),
+      ).toBe(false);
+    }
+    expect(
+      isDefiniteGenerationAdmissionRejection(
+        new TypeError("connection closed"),
+      ),
+    ).toBe(false);
+    expect(
+      isDefiniteGenerationAdmissionRejection(new SyntaxError("invalid JSON")),
+    ).toBe(false);
+  });
+
   it("requires both capability bits so older batch hosts keep their legacy path", () => {
     expect(supportsDurableGenerationLifecycle(undefined)).toBe(false);
     expect(

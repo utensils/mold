@@ -35,15 +35,17 @@ import {
 } from "../lib/galleryMedia";
 import { blobToBase64 } from "../lib/base64";
 import { inferFormatFromName, type OutputFormat } from "../types";
-import { ApiError, apiHeaders, type ApiTarget } from "@studio/api/client";
+import { apiHeaders, type ApiTarget } from "@studio/api/client";
 import {
   mergeQueueEntries,
   mutateQueueJobOnExpectedInstance,
+  retryQueueJobRecoveringAmbiguity,
 } from "@studio/api/queuePlan";
 import {
   admitGenerationBatch,
   canonicalGenerationBatchLimit,
   chunkGenerationBatchRequests,
+  isDefiniteGenerationAdmissionRejection,
   lookupGenerationBatchByClientId,
   reconcileGenerationBatches,
   type GenerationBatchStatus,
@@ -1668,6 +1670,23 @@ async function admitDurableBatch(
     applyDurableBatchStatus(clientBatchId, batch);
   } catch (error) {
     const tracker = durableTrackers.get(clientBatchId);
+    if (isDefiniteGenerationAdmissionRejection(error)) {
+      if (tracker) {
+        durableTrackers.set(
+          clientBatchId,
+          reduceGenerationLifecycle(tracker, {
+            type: "admission_rejected",
+            error: errorText(error),
+          }),
+        );
+      }
+      for (const job of jobsForClientBatch(clientBatchId)) {
+        if (job.state !== "running") continue;
+        job.error = errorText(error);
+        recordFailedSettlement(job);
+      }
+      return;
+    }
     if (tracker) {
       durableTrackers.set(
         clientBatchId,
@@ -1683,24 +1702,6 @@ async function admitDurableBatch(
     ).catch(() => null);
     if (lookup?.kind === "found") {
       applyDurableBatchStatus(clientBatchId, lookup.batch);
-      return;
-    }
-    if (error instanceof ApiError && lookup?.kind === "missing") {
-      const current = durableTrackers.get(clientBatchId);
-      if (current) {
-        durableTrackers.set(
-          clientBatchId,
-          reduceGenerationLifecycle(current, {
-            type: "admission_rejected",
-            error: error.message,
-          }),
-        );
-      }
-      for (const job of jobsForClientBatch(clientBatchId)) {
-        if (job.state !== "running") continue;
-        job.error = error.message;
-        recordFailedSettlement(job);
-      }
       return;
     }
     await recoverAmbiguousAdmission(route, clientBatchId);
@@ -2400,8 +2401,9 @@ async function retryJob(id: string): Promise<void> {
   const target = job.target ?? route?.target ?? null;
   if (!target) throw new Error("The original machine is not connected.");
   job.retrying = true;
+  job.retryable = false;
   try {
-    await mutateQueueJobOnExpectedInstance(
+    const outcome = await retryQueueJobRecoveringAmbiguity(
       { baseUrl: target.baseUrl, apiKey: target.apiKey ?? null },
       {
         instanceId: job.durableBatch.expectedInstanceId,
@@ -2409,12 +2411,22 @@ async function retryJob(id: string): Promise<void> {
         clientBatchId: job.durableBatch.clientBatchId,
         jobId: job.serverId,
       },
-      "retry",
     );
-    job.retryable = false;
+    if (outcome.kind === "reconciled") {
+      applyDurableBatchStatus(job.durableBatch.clientBatchId, outcome.batch);
+      return;
+    }
+    if (outcome.kind === "uncertain") {
+      job.holdError = outcome.error;
+      void reconcileDurableHost(job.hostId ?? route?.hostId ?? "");
+      throw new Error(outcome.error);
+    }
     job.holdError = null;
     job.progress.stage = "Queued";
     void reconcileDurableHost(job.hostId ?? route?.hostId ?? "");
+  } catch (error) {
+    void reconcileDurableHost(job.hostId ?? route?.hostId ?? "");
+    throw error;
   } finally {
     job.retrying = false;
   }

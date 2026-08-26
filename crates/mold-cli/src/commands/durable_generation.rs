@@ -1,26 +1,11 @@
+//! CLI adapters for the shared durable-generation state machine.
+
 use anyhow::{Context, Result};
-use mold_core::{
-    GenerateRequest, GenerationBatchAdmissionRequest, GenerationBatchAuthority,
-    GenerationBatchChild, GenerationBatchChildState, GenerationBatchStatus, GenerationRetryRequest,
-    MoldClient,
+use mold_core::{GenerateRequest, GenerationBatchAuthority, GenerationBatchChild, MoldClient};
+
+pub(crate) use mold_core::durable_generation::{
+    CanonicalGenerationEvent, CanonicalGenerationReport, CanonicalRetrySubmission,
 };
-use std::time::Duration;
-
-#[derive(Debug)]
-pub(crate) struct CanonicalGenerationOutcome {
-    pub authority: GenerationBatchAuthority,
-    pub client_batch_id: String,
-    pub request: GenerateRequest,
-    pub child: GenerationBatchChild,
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct CanonicalGenerationReport {
-    pub authorities: Vec<GenerationBatchAuthority>,
-    pub admitted_client_ids: Vec<String>,
-    pub outcomes: Vec<CanonicalGenerationOutcome>,
-    pub failures: Vec<String>,
-}
 
 #[derive(Debug)]
 pub(crate) struct CanonicalGenerationArtifact {
@@ -30,22 +15,6 @@ pub(crate) struct CanonicalGenerationArtifact {
     pub metadata: mold_core::OutputMetadata,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) enum CanonicalGenerationEvent {
-    Admitted {
-        authority: GenerationBatchAuthority,
-        status: GenerationBatchStatus,
-    },
-    Snapshot {
-        authority: GenerationBatchAuthority,
-        status: GenerationBatchStatus,
-    },
-    ReconcileDelayed {
-        authority: GenerationBatchAuthority,
-        error: String,
-    },
-}
-
 #[derive(Debug)]
 pub(crate) struct CanonicalHydratedArtifact {
     pub bytes: Vec<u8>,
@@ -53,127 +22,37 @@ pub(crate) struct CanonicalHydratedArtifact {
     pub metadata: mold_core::OutputMetadata,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum CanonicalRetrySubmission {
-    Accepted,
-    Ambiguous { error: String },
-}
-
-fn new_client_batch_id() -> String {
-    let bytes = rand::random::<u128>().to_be_bytes();
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-4{:01x}{:02x}-{:01x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6] & 0x0f,
-        bytes[7], (bytes[8] & 0x3f) | 0x80, bytes[9], bytes[10], bytes[11], bytes[12],
-        bytes[13], bytes[14], bytes[15]
-    )
-}
-
-enum CanonicalAdmission {
-    Admitted(GenerationBatchStatus),
-    MissingEndpoint,
-}
-
-async fn admit_recovering_ambiguity(
-    client: &MoldClient,
-    request: &GenerationBatchAdmissionRequest,
-) -> Result<CanonicalAdmission> {
-    match client.admit_generation_batch(request).await {
-        Ok(status) => Ok(CanonicalAdmission::Admitted(status)),
-        Err(error) if mold_core::client::is_missing_endpoint_error(&error) => {
-            Ok(CanonicalAdmission::MissingEndpoint)
-        }
-        Err(error) if mold_core::client::is_transient_request_error(&error) => {
-            const LOOKUP_ATTEMPTS: u32 = 5;
-            let mut last_lookup_error = None;
-            for attempt in 0..LOOKUP_ATTEMPTS {
-                match client
-                    .generation_batch_by_client_id(&request.client_batch_id)
-                    .await
-                {
-                    Ok(Some(status)) => return Ok(CanonicalAdmission::Admitted(status)),
-                    Ok(None) => {
-                        return Err(error.context(format!(
-                            "generation-batch admission is uncertain for client id {}; the host did not retain that idempotency key",
-                            request.client_batch_id
-                        )));
-                    }
-                    Err(lookup) => last_lookup_error = Some(lookup),
-                }
-                if attempt + 1 < LOOKUP_ATTEMPTS {
-                    tokio::time::sleep(Duration::from_millis(250 * u64::from(attempt + 1))).await;
-                }
-            }
-            Err(error.context(format!(
-                "generation-batch admission is uncertain for client id {}; idempotency lookup failed after {LOOKUP_ATTEMPTS} attempts: {}",
-                request.client_batch_id,
-                last_lookup_error
-                    .map(|lookup| lookup.to_string())
-                    .unwrap_or_else(|| "unknown lookup error".to_string())
-            )))
-        }
-        Err(error) => Err(error),
+fn channel_observer(
+    events: &tokio::sync::mpsc::UnboundedSender<CanonicalGenerationEvent>,
+) -> impl Fn(CanonicalGenerationEvent) + Send + Sync + '_ {
+    |event| {
+        let _ = events.send(event);
     }
 }
 
-fn child_is_settled(state: &GenerationBatchChildState) -> bool {
-    matches!(
-        state,
-        GenerationBatchChildState::Complete
-            | GenerationBatchChildState::Failed
-            | GenerationBatchChildState::Cancelled
-            | GenerationBatchChildState::Held
-    )
+pub(crate) async fn try_canonical_generation(
+    client: &MoldClient,
+    requests: &[GenerateRequest],
+) -> Result<Option<CanonicalGenerationReport>> {
+    mold_core::durable_generation::try_canonical_generation(client, requests).await
 }
 
-async fn wait_for_batch(
+pub(crate) async fn try_canonical_generation_observed(
     client: &MoldClient,
-    mut status: GenerationBatchStatus,
-    authority: &GenerationBatchAuthority,
+    requests: &[GenerateRequest],
     events: Option<&tokio::sync::mpsc::UnboundedSender<CanonicalGenerationEvent>>,
-) -> Result<GenerationBatchStatus> {
-    authority
-        .validate_status(&status)
-        .map_err(anyhow::Error::msg)?;
-    loop {
-        if status
-            .children
-            .iter()
-            .all(|child| child_is_settled(&child.state))
-        {
-            return Ok(status);
+) -> Result<Option<CanonicalGenerationReport>> {
+    match events {
+        Some(events) => {
+            let observer = channel_observer(events);
+            mold_core::durable_generation::try_canonical_generation_observed(
+                client,
+                requests,
+                Some(&observer),
+            )
+            .await
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let next = loop {
-            match client.generation_batch(&status.id).await {
-                Ok(Some(next)) => break next,
-                Ok(None) => {
-                    anyhow::bail!("generation batch {} disappeared", status.id)
-                }
-                Err(error) if mold_core::client::is_transient_request_error(&error) => {
-                    send_event(
-                        events,
-                        CanonicalGenerationEvent::ReconcileDelayed {
-                            authority: authority.clone(),
-                            error: error.to_string(),
-                        },
-                    );
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-                Err(error) => return Err(error),
-            }
-        };
-        authority
-            .validate_status(&next)
-            .map_err(anyhow::Error::msg)?;
-        send_event(
-            events,
-            CanonicalGenerationEvent::Snapshot {
-                authority: authority.clone(),
-                status: next.clone(),
-            },
-        );
-        status = next;
+        None => mold_core::durable_generation::try_canonical_generation(client, requests).await,
     }
 }
 
@@ -182,197 +61,57 @@ pub(crate) async fn retry_canonical_child(
     authority: &GenerationBatchAuthority,
     job_id: &str,
 ) -> Result<CanonicalRetrySubmission> {
-    match client
-        .retry_queue_job(&GenerationRetryRequest::from_authority(authority, job_id))
-        .await
-    {
-        Ok(()) => Ok(CanonicalRetrySubmission::Accepted),
-        Err(error) if mold_core::client::is_transient_request_error(&error) => {
-            Ok(CanonicalRetrySubmission::Ambiguous {
-                error: error.to_string(),
-            })
-        }
-        Err(error) => Err(error),
-    }
+    mold_core::durable_generation::retry_canonical_child(client, authority, job_id).await
 }
 
 pub(crate) async fn reconcile_canonical_authority_observed(
     client: &MoldClient,
     authority: &GenerationBatchAuthority,
     events: Option<&tokio::sync::mpsc::UnboundedSender<CanonicalGenerationEvent>>,
-) -> Result<GenerationBatchStatus> {
-    let status = loop {
-        match client.generation_batch(&authority.batch_id).await {
-            Ok(Some(status)) => break status,
-            Ok(None) => anyhow::bail!("generation batch {} disappeared", authority.batch_id),
-            Err(error) if mold_core::client::is_transient_request_error(&error) => {
-                send_event(
-                    events,
-                    CanonicalGenerationEvent::ReconcileDelayed {
-                        authority: authority.clone(),
-                        error: error.to_string(),
-                    },
-                );
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-            Err(error) => return Err(error),
+) -> Result<mold_core::GenerationBatchStatus> {
+    match events {
+        Some(events) => {
+            let observer = channel_observer(events);
+            mold_core::durable_generation::reconcile_canonical_authority_observed(
+                client,
+                authority,
+                Some(&observer),
+            )
+            .await
         }
-    };
-    authority
-        .validate_status(&status)
-        .map_err(anyhow::Error::msg)?;
-    send_event(
-        events,
-        CanonicalGenerationEvent::Snapshot {
-            authority: authority.clone(),
-            status: status.clone(),
-        },
-    );
-    wait_for_batch(client, status, authority, events).await
-}
-
-fn send_event(
-    events: Option<&tokio::sync::mpsc::UnboundedSender<CanonicalGenerationEvent>>,
-    event: CanonicalGenerationEvent,
-) {
-    if let Some(events) = events {
-        let _ = events.send(event);
+        None => {
+            mold_core::durable_generation::reconcile_canonical_authority_observed(
+                client, authority, None,
+            )
+            .await
+        }
     }
 }
 
-fn terminal_failure(client_batch_id: &str, child: &GenerationBatchChild) -> Option<String> {
-    if child.state == GenerationBatchChildState::Complete {
-        return None;
-    }
-    let detail = child.error.as_deref().unwrap_or(match child.state {
-        GenerationBatchChildState::Held => "dependency preparation stopped",
-        GenerationBatchChildState::Cancelled => "cancelled without server detail",
-        _ => "failed without server detail",
-    });
-    let retry = if child.state == GenerationBatchChildState::Held && child.retryable == Some(true) {
-        format!(
-            "; durable job {} is retryable after correcting the cause",
-            child.job_id
-        )
-    } else {
-        String::new()
-    };
-    Some(format!(
-        "generation batch child {} for client id {client_batch_id} is {}: {detail}{retry}",
-        child.index,
-        match child.state {
-            GenerationBatchChildState::Held => "held",
-            GenerationBatchChildState::Cancelled => "cancelled",
-            _ => "failed",
-        }
-    ))
-}
-
-/// Try the canonical protocol-v2 transport. `Ok(None)` is reserved for an
-/// explicitly old or request-ineligible host; transient capability failures
-/// fail closed and never silently select the attached endpoint.
-pub(crate) async fn try_canonical_generation(
+pub(crate) async fn reconcile_ambiguous_retry_observed(
     client: &MoldClient,
-    requests: &[GenerateRequest],
-) -> Result<Option<CanonicalGenerationReport>> {
-    try_canonical_generation_observed(client, requests, None).await
-}
-
-pub(crate) async fn try_canonical_generation_observed(
-    client: &MoldClient,
-    requests: &[GenerateRequest],
+    authority: &GenerationBatchAuthority,
+    job_id: &str,
     events: Option<&tokio::sync::mpsc::UnboundedSender<CanonicalGenerationEvent>>,
-) -> Result<Option<CanonicalGenerationReport>> {
-    let capabilities = match client.server_capabilities().await {
-        Ok(capabilities) => capabilities,
-        Err(error) if mold_core::client::is_missing_endpoint_error(&error) => return Ok(None),
-        Err(error) => {
-            return Err(error).context("could not read generation admission capabilities")
+) -> Result<mold_core::GenerationBatchStatus> {
+    match events {
+        Some(events) => {
+            let observer = channel_observer(events);
+            mold_core::durable_generation::reconcile_ambiguous_retry_observed(
+                client,
+                authority,
+                job_id,
+                Some(&observer),
+            )
+            .await
         }
-    };
-    let Some(limit) = capabilities.canonical_generation_batch_limit(requests) else {
-        return Ok(None);
-    };
-
-    let mut report = CanonicalGenerationReport::default();
-    let mut admitted = Vec::new();
-    for chunk in requests.chunks(limit) {
-        let client_batch_id = new_client_batch_id();
-        let admission = GenerationBatchAdmissionRequest {
-            client_batch_id: client_batch_id.clone(),
-            requests: chunk.to_vec(),
-        };
-        match admit_recovering_ambiguity(client, &admission).await {
-            Ok(CanonicalAdmission::Admitted(status)) => {
-                let authority =
-                    match GenerationBatchAuthority::from_admission(&status, &client_batch_id) {
-                        Ok(authority) => authority,
-                        Err(error) => {
-                            report.failures.push(error);
-                            break;
-                        }
-                    };
-                report
-                    .admitted_client_ids
-                    .push(status.client_batch_id.clone());
-                report.authorities.push(authority.clone());
-                send_event(
-                    events,
-                    CanonicalGenerationEvent::Admitted {
-                        authority: authority.clone(),
-                        status: status.clone(),
-                    },
-                );
-                admitted.push((admission.requests, status, authority));
-            }
-            Ok(CanonicalAdmission::MissingEndpoint) if admitted.is_empty() => return Ok(None),
-            Ok(CanonicalAdmission::MissingEndpoint) => {
-                report.failures.push(format!(
-                    "generation-batch endpoint disappeared after accepting client ids: {}",
-                    report.admitted_client_ids.join(", ")
-                ));
-                break;
-            }
-            Err(error) => {
-                report.failures.push(format!(
-                    "generation-batch admission failed for client id {client_batch_id}: {error:#}"
-                ));
-                break;
-            }
+        None => {
+            mold_core::durable_generation::reconcile_ambiguous_retry_observed(
+                client, authority, job_id, None,
+            )
+            .await
         }
     }
-
-    for (chunk, initial_status, authority) in admitted {
-        let client_batch_id = initial_status.client_batch_id.clone();
-        let status = match wait_for_batch(client, initial_status, &authority, events).await {
-            Ok(status) => status,
-            Err(error) => {
-                report.failures.push(format!(
-                    "could not reconcile accepted client id {client_batch_id}: {error:#}"
-                ));
-                continue;
-            }
-        };
-        for child in status.children {
-            let Some(request) = chunk.get(child.index.saturating_sub(1) as usize) else {
-                report.failures.push(format!(
-                    "accepted client id {client_batch_id} returned invalid child index {}",
-                    child.index
-                ));
-                continue;
-            };
-            if let Some(error) = terminal_failure(&client_batch_id, &child) {
-                report.failures.push(error);
-            }
-            report.outcomes.push(CanonicalGenerationOutcome {
-                authority: authority.clone(),
-                client_batch_id: client_batch_id.clone(),
-                request: request.clone(),
-                child,
-            });
-        }
-    }
-    Ok(Some(report))
 }
 
 pub(crate) async fn hydrate_canonical_artifact(
@@ -410,8 +149,6 @@ pub(crate) async fn hydrate_canonical_artifact(
     })
 }
 
-/// Canonical singleton transport shared by callers that need the rendered
-/// bytes rather than the full durable reconciliation report.
 pub(crate) async fn try_canonical_singleton_artifact(
     client: &MoldClient,
     request: &GenerateRequest,
@@ -433,7 +170,7 @@ pub(crate) async fn try_canonical_singleton_artifact(
     let outcome = report
         .outcomes
         .into_iter()
-        .find(|outcome| outcome.child.state == GenerationBatchChildState::Complete)
+        .find(|outcome| outcome.child.state == mold_core::GenerationBatchChildState::Complete)
         .context("canonical singleton completed without a successful child")?;
     if outcome.authority.client_batch_id != outcome.client_batch_id {
         anyhow::bail!("canonical singleton outcome lost its admission authority");
@@ -450,333 +187,7 @@ pub(crate) async fn try_canonical_singleton_artifact(
 #[cfg(test)]
 pub(crate) async fn admit_for_test(
     client: &MoldClient,
-    request: &GenerationBatchAdmissionRequest,
-) -> Result<GenerationBatchStatus> {
-    match admit_recovering_ambiguity(client, request).await? {
-        CanonicalAdmission::Admitted(status) => Ok(status),
-        CanonicalAdmission::MissingEndpoint => {
-            anyhow::bail!("generation-batch endpoint is unavailable")
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
-
-    fn request(prompt: &str) -> GenerateRequest {
-        serde_json::from_value(serde_json::json!({
-            "prompt": prompt,
-            "model": "flux-dev:q4",
-            "width": 64,
-            "height": 64,
-            "steps": 1,
-            "guidance": 1.0
-        }))
-        .unwrap()
-    }
-
-    async fn mount_capabilities(server: &MockServer) {
-        let mut capabilities = mold_core::ServerCapabilities::default();
-        capabilities.queue.heterogeneous_batch = true;
-        capabilities.queue.durable_batch_outcomes = true;
-        capabilities.queue.admission_protocol_version = Some(2);
-        capabilities.queue.heterogeneous_batch_max_outputs = Some(64);
-        Mock::given(method("GET"))
-            .and(path("/api/capabilities"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(capabilities))
-            .mount(server)
-            .await;
-    }
-
-    #[tokio::test]
-    async fn transient_capability_failure_never_selects_legacy_transport() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/capabilities"))
-            .respond_with(ResponseTemplate::new(503))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let error = try_canonical_generation(&MoldClient::new(&server.uri()), &[request("one")])
-            .await
-            .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("could not read generation admission capabilities"));
-    }
-
-    #[tokio::test]
-    async fn definite_first_admission_404_selects_legacy_transport() {
-        let server = MockServer::start().await;
-        mount_capabilities(&server).await;
-        Mock::given(method("POST"))
-            .and(path("/api/generation-batches"))
-            .respond_with(ResponseTemplate::new(404))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let result = try_canonical_generation(&MoldClient::new(&server.uri()), &[request("one")])
-            .await
-            .unwrap();
-        assert!(result.is_none());
-        let requests = server.received_requests().await.unwrap();
-        assert!(!requests
-            .iter()
-            .any(|request| request.url.path().contains("/by-client/")));
-    }
-
-    #[tokio::test]
-    async fn polling_rejects_a_replacement_server_instance() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/generation-batches/batch-1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "batch-1",
-                "client_batch_id": "accepted-id",
-                "instance_id": "instance-2",
-                "durable": true,
-                "children": [{"index": 1, "job_id": "job-1", "state": "complete", "result": {"filename": "wrong.png"}}]
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let initial = GenerationBatchStatus {
-            id: "batch-1".into(),
-            client_batch_id: "accepted-id".into(),
-            instance_id: "instance-1".into(),
-            durable: true,
-            children: vec![GenerationBatchChild {
-                index: 1,
-                job_id: "job-1".into(),
-                state: GenerationBatchChildState::Accepted,
-                error: None,
-                retryable: None,
-                created_at_ms: 0,
-                updated_at_ms: 0,
-                completed_at_ms: None,
-                terminal_error: None,
-                result: None,
-            }],
-        };
-        let authority = GenerationBatchAuthority::from_admission(&initial, "accepted-id").unwrap();
-        let error = wait_for_batch(&MoldClient::new(&server.uri()), initial, &authority, None)
-            .await
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("instance changed from instance-1 to instance-2"),
-            "unexpected error: {error:#}"
-        );
-    }
-
-    struct TransientThenSettled {
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl Respond for TransientThenSettled {
-        fn respond(&self, _request: &Request) -> ResponseTemplate {
-            match self.calls.fetch_add(1, Ordering::SeqCst) {
-                0 => ResponseTemplate::new(500),
-                1 => ResponseTemplate::new(429),
-                2 => ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "id": "batch-1",
-                    "client_batch_id": "accepted-id",
-                    "instance_id": "instance-1",
-                    "durable": true,
-                    "children": [{"index": 1, "job_id": "job-1", "state": "accepted"}]
-                })),
-                _ => ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "id": "batch-1",
-                    "client_batch_id": "accepted-id",
-                    "instance_id": "instance-1",
-                    "durable": true,
-                    "children": [{"index": 1, "job_id": "job-1", "state": "complete", "result": {"filename": "settled.png"}}]
-                })),
-            }
-        }
-    }
-
-    fn authority() -> GenerationBatchAuthority {
-        GenerationBatchAuthority {
-            instance_id: "instance-1".into(),
-            batch_id: "batch-1".into(),
-            client_batch_id: "accepted-id".into(),
-        }
-    }
-
-    #[tokio::test]
-    async fn polling_recovers_wrapped_500_and_429_in_event_order() {
-        let server = MockServer::start().await;
-        let calls = Arc::new(AtomicUsize::new(0));
-        Mock::given(method("GET"))
-            .and(path("/api/generation-batches/batch-1"))
-            .respond_with(TransientThenSettled {
-                calls: calls.clone(),
-            })
-            .expect(4)
-            .mount(&server)
-            .await;
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let status = reconcile_canonical_authority_observed(
-            &MoldClient::new(&server.uri()),
-            &authority(),
-            Some(&tx),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            status.children[0].state,
-            GenerationBatchChildState::Complete
-        );
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(CanonicalGenerationEvent::ReconcileDelayed { ref error, .. })
-                if error.contains("500")
-        ));
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(CanonicalGenerationEvent::ReconcileDelayed { ref error, .. })
-                if error.contains("429")
-        ));
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(CanonicalGenerationEvent::Snapshot { ref status, .. })
-                if status.children[0].state == GenerationBatchChildState::Accepted
-        ));
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(CanonicalGenerationEvent::Snapshot { ref status, .. })
-                if status.children[0].state == GenerationBatchChildState::Complete
-        ));
-        assert!(rx.try_recv().is_err());
-        assert_eq!(calls.load(Ordering::SeqCst), 4);
-    }
-
-    #[tokio::test]
-    async fn committed_retry_survives_a_disconnected_response_and_reconciles() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            for _ in 0..2 {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                let mut buffer = [0_u8; 2048];
-                loop {
-                    let read = socket.read(&mut buffer).await.unwrap();
-                    if read == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&buffer[..read]);
-                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                let head = String::from_utf8_lossy(&request);
-                if head.starts_with("POST /api/queue/job-1/retry") {
-                    // The durable transition committed, but the observer lost
-                    // the response before it could distinguish 202 from loss.
-                    socket.shutdown().await.unwrap();
-                    continue;
-                }
-                assert!(head.starts_with("GET /api/generation-batches/batch-1"));
-                let body = serde_json::json!({
-                    "id": "batch-1",
-                    "client_batch_id": "accepted-id",
-                    "instance_id": "instance-1",
-                    "durable": true,
-                    "children": [{"index": 1, "job_id": "job-1", "state": "complete", "result": {"filename": "settled.png"}}]
-                })
-                .to_string();
-                socket
-                    .write_all(
-                        format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                            body.len()
-                        )
-                        .as_bytes(),
-                    )
-                    .await
-                    .unwrap();
-            }
-        });
-        let client = MoldClient::new(&base);
-
-        let submission = retry_canonical_child(&client, &authority(), "job-1")
-            .await
-            .unwrap();
-        assert!(matches!(
-            submission,
-            CanonicalRetrySubmission::Ambiguous { .. }
-        ));
-        let status = reconcile_canonical_authority_observed(&client, &authority(), None)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            status.children[0].state,
-            GenerationBatchChildState::Complete
-        );
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn reports_every_terminal_child_error() {
-        let server = MockServer::start().await;
-        mount_capabilities(&server).await;
-        Mock::given(method("POST"))
-            .and(path("/api/generation-batches"))
-            .respond_with(|request: &wiremock::Request| {
-                let admission = request
-                    .body_json::<GenerationBatchAdmissionRequest>()
-                    .unwrap();
-                ResponseTemplate::new(202).set_body_json(serde_json::json!({
-                    "id": "batch-1",
-                    "client_batch_id": admission.client_batch_id,
-                    "instance_id": "instance-1",
-                    "durable": true,
-                    "children": [
-                        {"index": 1, "job_id": "job-1", "state": "held", "error": "missing license", "retryable": true},
-                        {"index": 2, "job_id": "job-2", "state": "failed", "error": "bad weights"}
-                    ]
-                }))
-            })
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let report = try_canonical_generation(
-            &MoldClient::new(&server.uri()),
-            &[request("one"), request("two")],
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(report.failures.len(), 2);
-        assert!(report
-            .failures
-            .iter()
-            .any(|error| error.contains("missing license")));
-        assert!(report
-            .failures
-            .iter()
-            .any(|error| error.contains("bad weights")));
-        assert!(report
-            .failures
-            .iter()
-            .any(|error| error.contains("retryable")));
-    }
+    request: &mold_core::GenerationBatchAdmissionRequest,
+) -> Result<mold_core::GenerationBatchStatus> {
+    mold_core::durable_generation::admit_canonical_batch(client, request).await
 }

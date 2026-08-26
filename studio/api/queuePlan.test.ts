@@ -11,12 +11,16 @@ import {
   queuePageRequestForCapacity,
   reduceQueuePlanEvent,
   retryQueueJob,
+  retryQueueJobRecoveringAmbiguity,
   setQueueDevicePin,
   type QueuePlan,
   type QueueListing,
 } from "./queuePlan";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("queue plan contract", () => {
   it("derives queue page size only from a positive host capacity", () => {
@@ -408,6 +412,117 @@ describe("queue plan contract", () => {
       client_batch_id: "client-1",
       job_id: "job/1",
     });
+  });
+
+  it.each([
+    [
+      "commit-then-500",
+      () => Promise.resolve(new Response("failed", { status: 500 })),
+      "accepted",
+    ],
+    [
+      "disconnect",
+      () => Promise.reject(new TypeError("connection closed")),
+      "running",
+    ],
+  ])(
+    "holds an ambiguous retry %s fence until exact authority advances",
+    async (_case, failRetry, transitionedState) => {
+      vi.useFakeTimers();
+      let reads = 0;
+      const fetchMock = vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/queue/job%2F1/retry")) return failRetry();
+        if (url.endsWith("/api/generation-batches/batch-1")) {
+          const state = reads++ === 0 ? "held" : transitionedState;
+          return Promise.resolve(
+            Response.json({
+              id: "batch-1",
+              client_batch_id: "client-1",
+              instance_id: "instance-1",
+              durable: true,
+              children: [
+                {
+                  index: 1,
+                  job_id: "job/1",
+                  state,
+                  created_at_ms: 1,
+                  updated_at_ms: 2,
+                },
+              ],
+            }),
+          );
+        }
+        return Promise.reject(new Error(`unexpected URL: ${url}`));
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const outcomePromise = retryQueueJobRecoveringAmbiguity(
+        { baseUrl: "https://gpu.example", apiKey: "secret" },
+        {
+          instanceId: "instance-1",
+          batchId: "batch-1",
+          clientBatchId: "client-1",
+          jobId: "job/1",
+        },
+      );
+      await vi.runAllTimersAsync();
+      const outcome = await outcomePromise;
+
+      expect(outcome).toMatchObject({
+        kind: "reconciled",
+        batch: {
+          id: "batch-1",
+          children: [{ job_id: "job/1", state: transitionedState }],
+        },
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    },
+  );
+
+  it("returns an unchanged Held snapshot only after the full confirmation window", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const fetchMock = vi.fn(() => {
+      if (calls++ === 0)
+        return Promise.reject(new TypeError("connection closed"));
+      return Promise.resolve(
+        Response.json({
+          id: "batch-1",
+          client_batch_id: "client-1",
+          instance_id: "instance-1",
+          durable: true,
+          children: [
+            {
+              index: 1,
+              job_id: "job/1",
+              state: "held",
+              retryable: true,
+              created_at_ms: 1,
+              updated_at_ms: 2,
+            },
+          ],
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcomePromise = retryQueueJobRecoveringAmbiguity(
+      { baseUrl: "https://gpu.example", apiKey: "secret" },
+      {
+        instanceId: "instance-1",
+        batchId: "batch-1",
+        clientBatchId: "client-1",
+        jobId: "job/1",
+      },
+    );
+    await vi.runAllTimersAsync();
+
+    await expect(outcomePromise).resolves.toMatchObject({
+      kind: "reconciled",
+      batch: { children: [{ state: "held", retryable: true }] },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 
   it.each([
