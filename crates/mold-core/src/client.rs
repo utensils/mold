@@ -1574,6 +1574,25 @@ impl MoldClient {
         Ok(resp)
     }
 
+    /// Read one gallery row's metadata without transferring the whole index.
+    ///
+    /// Falls back to a full listing for a host that predates `?filename=`:
+    /// an older server ignores the unknown query parameter and returns
+    /// everything, which is exactly the pre-filter behaviour, so the local
+    /// `find` below stays correct either way.
+    pub async fn gallery_item(&self, filename: &str) -> Result<Option<GalleryImage>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/gallery", self.base_url))
+            .query(&[("filename", filename)])
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Vec<GalleryImage>>()
+            .await?;
+        Ok(resp.into_iter().find(|item| item.filename == filename))
+    }
+
     /// Download a gallery image by filename.
     pub async fn get_gallery_image(&self, filename: &str) -> Result<Vec<u8>> {
         let resp = self

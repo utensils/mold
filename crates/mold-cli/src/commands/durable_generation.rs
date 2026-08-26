@@ -60,8 +60,15 @@ pub(crate) async fn retry_canonical_child(
     client: &MoldClient,
     authority: &GenerationBatchAuthority,
     job_id: &str,
+    observed_revision: u64,
 ) -> Result<CanonicalRetrySubmission> {
-    mold_core::durable_generation::retry_canonical_child(client, authority, job_id).await
+    mold_core::durable_generation::retry_canonical_child(
+        client,
+        authority,
+        job_id,
+        observed_revision,
+    )
+    .await
 }
 
 pub(crate) async fn hydrate_canonical_artifact(
@@ -82,11 +89,9 @@ pub(crate) async fn hydrate_canonical_artifact(
         .await
         .with_context(|| format!("could not hydrate accepted output {filename}"))?;
     let metadata = client
-        .list_gallery()
+        .gallery_item(&filename)
         .await
         .with_context(|| format!("could not read metadata for accepted output {filename}"))?
-        .into_iter()
-        .find(|item| item.filename == filename)
         .with_context(|| format!("accepted output {filename} is missing from the gallery index"))?
         .metadata;
     if metadata.job_id.as_deref() != Some(job_id.as_str()) {

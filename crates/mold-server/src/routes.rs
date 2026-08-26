@@ -760,6 +760,10 @@ pub fn create_router(state: AppState) -> Router {
             patch(patch_queue_job).delete(cancel_queue_job),
         )
         .route("/api/queue/:id/retry", post(retry_queue_job))
+        .route(
+            "/api/queue/held/sweep",
+            post(crate::queue_retention::sweep_held_queue),
+        )
         .route("/api/queue/:id/preview", get(get_queue_job_preview))
         .route("/api/history", get(list_history).delete(delete_history))
         .route("/api/capabilities", get(server_capabilities))
@@ -2520,6 +2524,7 @@ pub(crate) fn generation_batch_status(
                     retryable: (child.state == "held").then_some(child.retryable),
                     created_at_ms,
                     updated_at_ms: child.updated_at_ms,
+                    revision: child.revision.max(0) as u64,
                     completed_at_ms: child.completed_at_ms,
                     terminal_error,
                     result,
@@ -8638,6 +8643,20 @@ async fn export_gallery_video(
 pub(crate) struct GalleryListQuery {
     #[serde(default)]
     pub(crate) view: Option<String>,
+    /// Narrow the listing to one print.
+    ///
+    /// Deliberately a filter on this endpoint rather than a second
+    /// `GET /api/gallery/item/:filename` route: the listing's DB read,
+    /// committed-archive overlay, organization overlay, and filesystem
+    /// fallback are one pipeline with several exits, and a dedicated handler
+    /// would have to restate all of it — a second authority that can disagree
+    /// with the first about what a print's metadata is.
+    ///
+    /// It removes the response transfer, not the server-side query: reading
+    /// one row's metadata used to mean serializing and shipping the entire
+    /// gallery, per artifact.
+    #[serde(default)]
+    pub(crate) filename: Option<String>,
 }
 
 /// Which gallery listing a client asked for.
@@ -8685,16 +8704,33 @@ async fn list_gallery(
     // needlessly serializing ordinary listings and media reads.
     let _gallery_reader = state.gallery_publication_gate.read().await;
     let view = GalleryView::parse(query.view.as_deref())?;
+    // Reject a path-shaped filter rather than silently matching nothing: it
+    // is a caller bug, and a quiet empty listing reads as "the print is gone".
+    let only = match query.filename.as_deref() {
+        None => None,
+        Some(name)
+            if name.is_empty()
+                || std::path::Path::new(name)
+                    .file_name()
+                    .map(|part| part.to_string_lossy().into_owned())
+                    .as_deref()
+                    != Some(name) =>
+        {
+            return Err(ApiError::validation("invalid filename"));
+        }
+        Some(name) => Some(name.to_string()),
+    };
+    let only = only.as_deref();
     let config = state.config.read().await;
     if state.is_output_disabled(&config) {
-        return gallery_list_response(&headers, Vec::new());
+        return gallery_list_response(&headers, Vec::new(), only);
     }
     let output_dir = config.effective_output_dir();
     let retention_days = config.gallery.effective_trash_retention_days();
     drop(config);
 
     if !output_dir.is_dir() {
-        return gallery_list_response(&headers, Vec::new());
+        return gallery_list_response(&headers, Vec::new(), only);
     }
 
     if state.metadata_db.is_some() {
@@ -8747,13 +8783,13 @@ async fn list_gallery(
         .map_err(|e| ApiError::internal(format!("gallery DB query failed: {e}")))?
         .map_err(|e| ApiError::internal(format!("gallery DB query failed: {e:#}")))?;
         if let Some(images) = listed {
-            return gallery_list_response(&headers, images);
+            return gallery_list_response(&headers, images, only);
         }
     }
 
     if view == GalleryView::Trash {
         // No trash index without the metadata DB.
-        return gallery_list_response(&headers, Vec::new());
+        return gallery_list_response(&headers, Vec::new(), only);
     }
 
     let gallery_archive = state.gallery_publication_gate.clone();
@@ -8765,13 +8801,24 @@ async fn list_gallery(
     .map_err(|e| ApiError::internal(format!("gallery scan failed: {e}")))?
     .map_err(|e| ApiError::internal(format!("gallery archive validation failed: {e:#}")))?;
 
-    gallery_list_response(&headers, images)
+    gallery_list_response(&headers, images, only)
 }
 
+/// Every listing exit funnels through here, so `?filename=` is applied once
+/// and cannot miss a path (the DB view, the archive overlay, the filesystem
+/// fallback, and both output-disabled short circuits).
 fn gallery_list_response(
     request_headers: &HeaderMap,
     images: Vec<mold_core::GalleryImage>,
+    only: Option<&str>,
 ) -> Result<Response, ApiError> {
+    let images = match only {
+        Some(filename) => images
+            .into_iter()
+            .filter(|image| image.filename == filename)
+            .collect(),
+        None => images,
+    };
     let body = serde_json::to_vec(&images)
         .map_err(|error| ApiError::internal(format!("gallery serialization failed: {error}")))?;
     let etag = format!("\"{:x}\"", Sha256::digest(&body));
@@ -10746,6 +10793,7 @@ mod tests {
                     error: Some("Cancelled".to_string()),
                     retryable: false,
                     updated_at_ms: 20,
+                    revision: 3,
                     terminal_error_json: None,
                     result_json: None,
                     completed_at_ms: None,
@@ -11326,13 +11374,13 @@ mod tests {
 
     #[tokio::test]
     async fn gallery_list_etag_returns_unchanged_without_a_body() {
-        let first = gallery_list_response(&HeaderMap::new(), Vec::new()).unwrap();
+        let first = gallery_list_response(&HeaderMap::new(), Vec::new(), None).unwrap();
         let etag = first.headers().get(header::ETAG).unwrap().clone();
         assert_eq!(first.status(), StatusCode::OK);
 
         let mut headers = HeaderMap::new();
         headers.insert(header::IF_NONE_MATCH, etag);
-        let second = gallery_list_response(&headers, Vec::new()).unwrap();
+        let second = gallery_list_response(&headers, Vec::new(), None).unwrap();
         assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
         let bytes = axum::body::to_bytes(second.into_body(), usize::MAX)
             .await

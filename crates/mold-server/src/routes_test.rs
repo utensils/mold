@@ -18477,4 +18477,237 @@ mod tests {
                 .is_some()
         );
     }
+
+    // ── Single-print gallery reads ────────────────────────────────────────────
+    // Reading one row's metadata used to mean serializing and transferring the
+    // whole gallery index, once per artifact.
+
+    #[tokio::test]
+    async fn a_filename_filter_narrows_the_listing_to_one_print() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two valid PNGs so the filesystem fallback lists both.
+        for name in ["first.png", "second.png"] {
+            let img = image::ImageBuffer::from_fn(64u32, 64u32, |x, y| {
+                image::Rgb([(x % 256) as u8, (y % 256) as u8, 128u8])
+            });
+            img.save(dir.path().join(name)).unwrap();
+        }
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
+        let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new().into(),
+        });
+        let state = AppState::empty(config, queue, gpu_pool, 200);
+
+        let all = json_body(
+            app_with_state(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/gallery")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(all.as_array().unwrap().len(), 2, "both prints list");
+
+        let one = json_body(
+            app_with_state(state)
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/gallery?filename=second.png")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let rows = one.as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["filename"], "second.png");
+    }
+
+    #[tokio::test]
+    async fn a_path_shaped_filename_filter_is_refused_not_silently_empty() {
+        // An empty listing reads as "the print is gone". A caller bug must
+        // say so instead.
+        let dir = tempfile::tempdir().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
+        let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new().into(),
+        });
+        let state = AppState::empty(config, queue, gpu_pool, 200);
+
+        for probe in [
+            "/api/gallery?filename=../etc/passwd",
+            "/api/gallery?filename=",
+        ] {
+            let resp = app_with_state(state.clone())
+                .oneshot(Request::builder().uri(probe).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{probe} must be refused"
+            );
+        }
+    }
+
+    // ── Held-row retention ────────────────────────────────────────────────────
+    // A held row is durable so a human can come back to it; one nobody comes
+    // back to pinned a queue row and its encrypted media forever.
+
+    /// Commit one durable child straight through the DB and hold it. The
+    /// sweeper's subject is a held ROW, so building one directly keeps this
+    /// test about retention rather than about the admission path.
+    async fn hold_one_durable_job(state: &AppState, index: usize, held_at_ms: i64) -> String {
+        let db = state.metadata_db.clone();
+        let owner = state
+            .queue_journal
+            .owner_uuid()
+            .expect("claimed owner")
+            .to_string();
+        let job_id = format!("held-job-{index}");
+        let batch_id = format!("held-batch-{index}");
+        let returned = job_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let db = db.as_ref().as_ref().expect("db");
+            let batch = mold_db::generation_batches::GenerationBatchRow {
+                id: batch_id.clone(),
+                client_batch_id: format!("client-{index}"),
+                owner_uuid: owner.clone(),
+                request_sha256: format!("hash-{index}"),
+                created_at_ms: 1,
+            };
+            let child = mold_db::generation_batches::GenerationBatchChildRow {
+                batch_id,
+                job_id: job_id.clone(),
+                batch_index: 1,
+                state: "accepted".into(),
+                error: None,
+                updated_at_ms: 1,
+            };
+            let queue_row = mold_db::generation_queue::GenerationQueueRow {
+                id: job_id.clone(),
+                owner_uuid: owner.clone(),
+                state: mold_db::generation_queue::QueueRowState::Queued,
+                model: "flux-dev".into(),
+                request_json: r#"{"prompt":"a cat"}"#.into(),
+                output_dir: std::path::PathBuf::from("/gallery"),
+                target_gpu: None,
+                target_device_id: None,
+                completion_payload: "metadata_only".into(),
+                seed_pinned: false,
+                dispatch_attempts: 0,
+                replay_seen: 0,
+                held_reason: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                started_at_ms: None,
+                media_set_id: None,
+                admission_authority: None,
+            };
+            mold_db::generation_batches::insert_or_get(db, &batch, &[(child, queue_row)])
+                .expect("admit");
+            mold_db::generation_batches::hold_owned(
+                db,
+                &owner,
+                &job_id,
+                None,
+                "dependency failed",
+                true,
+                held_at_ms,
+            )
+            .expect("hold");
+        })
+        .await
+        .unwrap();
+        returned
+    }
+
+    #[tokio::test]
+    async fn retention_purges_an_abandoned_hold_and_keeps_a_fresh_one() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_dispatch_mode(&mut state, crate::dispatch_mode::DispatchMode::V2);
+
+        let day = 86_400_000_i64;
+        let now = mold_core::time::now_epoch_ms();
+        let stale = hold_one_durable_job(&state, 0, now - 45 * day).await;
+        let fresh = hold_one_durable_job(&state, 1, now - day).await;
+
+        state.config.write().await.queue.held_retention_days = 30;
+        let result = crate::queue_retention::sweep_held_once(&state)
+            .await
+            .expect("sweep runs");
+
+        assert_eq!(result.purged, 1, "only the abandoned hold is purged");
+        assert_eq!(result.remaining, 1);
+
+        let db = state.metadata_db.clone();
+        let (stale_row, fresh_row) = tokio::task::spawn_blocking(move || {
+            let db = db.as_ref().as_ref().expect("db");
+            (
+                mold_db::generation_queue::get(db, &stale).unwrap(),
+                mold_db::generation_queue::get(db, &fresh).unwrap(),
+            )
+        })
+        .await
+        .unwrap();
+        assert!(stale_row.is_none(), "the abandoned hold is gone");
+        assert!(fresh_row.is_some(), "a hold inside its window survives");
+    }
+
+    #[tokio::test]
+    async fn retention_zero_keeps_held_work_forever() {
+        // `0` is the documented "keep forever" value on both retention keys.
+        // Getting this backwards deletes a user's parked work on first boot.
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_dispatch_mode(&mut state, crate::dispatch_mode::DispatchMode::V2);
+
+        let job = hold_one_durable_job(&state, 0, 0).await;
+        state.config.write().await.queue.held_retention_days = 0;
+
+        let result = crate::queue_retention::sweep_held_once(&state)
+            .await
+            .expect("sweep runs");
+        assert_eq!(result.purged, 0);
+        assert_eq!(result.remaining, 1);
+
+        let db = state.metadata_db.clone();
+        let row = tokio::task::spawn_blocking(move || {
+            mold_db::generation_queue::get(db.as_ref().as_ref().unwrap(), &job).unwrap()
+        })
+        .await
+        .unwrap();
+        assert!(row.is_some());
+    }
+
+    #[tokio::test]
+    async fn retention_is_inert_without_a_metadata_db() {
+        // `MOLD_DB_DISABLE` hosts have no durable queue at all; the sweeper
+        // must be a no-op rather than an error every hour.
+        let root = tempfile::tempdir().unwrap();
+        let (state, _rx) = durable_state(Arc::new(None), root.path());
+        let result = crate::queue_retention::sweep_held_once(&state)
+            .await
+            .expect("sweep runs");
+        assert_eq!(result, mold_core::HeldSweepResult::default());
+    }
 }

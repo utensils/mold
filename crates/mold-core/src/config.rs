@@ -609,6 +609,12 @@ pub struct Config {
     #[serde(default)]
     pub gallery: GallerySettings,
 
+    /// Profile-scoped durable-queue behavior (held-row retention). Persisted
+    /// in `mold.db` like `gallery`; the serialized field exists only for
+    /// one-shot import of a hand-written `[queue]` TOML section.
+    #[serde(default)]
+    pub queue: QueueSettings,
+
     /// Profile-scoped generation behavior that has no flat legacy key name
     /// (currently just `generate.auto_tag_title`). Persisted in `mold.db`
     /// like `gallery`; the serialized field exists only for one-shot import
@@ -748,6 +754,62 @@ impl GallerySettings {
                 }
             },
             Err(_) => self.trash_retention_days,
+        }
+    }
+}
+
+/// Durable-queue behaviour that is a user preference rather than bootstrap
+/// state.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub struct QueueSettings {
+    /// Days a HELD durable queue row survives before the retention sweeper
+    /// purges it and releases its encrypted request media. `0` keeps held
+    /// rows forever. Default 30. Env: `MOLD_QUEUE_HELD_RETENTION_DAYS`.
+    ///
+    /// A hold is deliberately durable — it is work parked for a human, and
+    /// the whole point of the durable queue is that a restart does not lose
+    /// it. But a hold that nobody ever returns to is not waiting for
+    /// anything: it keeps a `GET /api/queue` row forever AND pins its
+    /// encrypted media set, because `hold_claimed` retains `media_set_id` on
+    /// purpose so a retry still has its source images. Without a sweep, a
+    /// deterministically-failing request grows the queue and the media store
+    /// without bound.
+    #[serde(default = "default_held_retention_days")]
+    pub held_retention_days: u32,
+}
+
+const fn default_held_retention_days() -> u32 {
+    30
+}
+
+impl Default for QueueSettings {
+    fn default() -> Self {
+        Self {
+            held_retention_days: default_held_retention_days(),
+        }
+    }
+}
+
+impl QueueSettings {
+    /// Name of the env var that overrides `held_retention_days`.
+    pub const HELD_RETENTION_DAYS_ENV: &'static str = "MOLD_QUEUE_HELD_RETENTION_DAYS";
+
+    /// Effective retention in days, with the same env-overlay contract as
+    /// `GallerySettings::effective_trash_retention_days`.
+    pub fn effective_held_retention_days(&self) -> u32 {
+        match std::env::var(Self::HELD_RETENTION_DAYS_ENV) {
+            Ok(value) => match value.trim().parse::<u32>() {
+                Ok(days) if days <= GALLERY_TRASH_RETENTION_MAX_DAYS => days,
+                _ => {
+                    eprintln!(
+                        "warning: invalid {} value '{value}' (expected 0..={}) — using config/default",
+                        Self::HELD_RETENTION_DAYS_ENV,
+                        GALLERY_TRASH_RETENTION_MAX_DAYS
+                    );
+                    self.held_retention_days
+                }
+            },
+            Err(_) => self.held_retention_days,
         }
     }
 }
@@ -899,6 +961,7 @@ impl Default for Config {
             expand: ExpandSettings::default(),
             scheduler: SchedulerSettings::default(),
             gallery: GallerySettings::default(),
+            queue: QueueSettings::default(),
             generate: GenerateSettings::default(),
             logging: LoggingConfig::default(),
             runpod: crate::runpod::RunPodSettings::default(),

@@ -416,6 +416,119 @@ pub fn delete(db: &MetadataDb, id: &str) -> Result<bool> {
     })
 }
 
+/// One expired held row, payload-free.
+///
+/// Deliberately not a [`GenerationQueueRow`]: the retention sweeper needs an
+/// identity and a media reference, and must never pull `request_json` — the
+/// prompts and staged-media handles of every abandoned hold — into a
+/// periodic background task's memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpiredHeldRow {
+    pub id: String,
+    pub media_set_id: Option<String>,
+    pub held_reason: Option<String>,
+    pub updated_at_ms: i64,
+}
+
+/// List this owner's held rows whose retention has elapsed.
+///
+/// `retention_days == 0` keeps held rows forever and returns nothing, the
+/// same contract `gallery.trash_retention_days` keeps. Age is measured from
+/// `updated_at_ms` — the moment the row was held — not from admission, so
+/// work that queued for a week and held yesterday gets its full window.
+pub fn expired_held(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    retention_days: u32,
+    now_ms: i64,
+) -> Result<Vec<ExpiredHeldRow>> {
+    if retention_days == 0 {
+        return Ok(Vec::new());
+    }
+    let cutoff = now_ms.saturating_sub(i64::from(retention_days) * 86_400_000);
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT id, media_set_id, held_reason, updated_at
+               FROM generation_queue
+              WHERE owner_uuid = ?1 AND state = 'held' AND updated_at <= ?2
+              ORDER BY updated_at",
+        )?;
+        let rows = stmt
+            .query_map(params![owner_uuid, cutoff], |row| {
+                Ok(ExpiredHeldRow {
+                    id: row.get(0)?,
+                    media_set_id: row.get(1)?,
+                    held_reason: row.get(2)?,
+                    updated_at_ms: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    })
+}
+
+/// Count this owner's held rows, for the sweep's "remaining" report.
+pub fn held_count(db: &MetadataDb, owner_uuid: &str) -> Result<u64> {
+    db.with_conn(|conn| {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM generation_queue WHERE owner_uuid = ?1 AND state = 'held'",
+            params![owner_uuid],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as u64)
+    })
+}
+
+/// Purge one expired held row and settle its batch child in the same
+/// transaction.
+///
+/// The row must still be held and still owned: a retry or a cancel between
+/// the listing and this call wins, and this returns `false` without touching
+/// anything. Deleting the queue row fires the `generation_queue_media_retire`
+/// trigger, which is the singular authority that moves the media obligation
+/// to `gc_pending` — the sweeper never writes that table itself.
+///
+/// The child becomes `failed` rather than being deleted: a batch's terminal
+/// summary is what a reconnecting client reads after the queue row is gone,
+/// and silently dropping the child would report the print as never admitted.
+pub fn purge_held(db: &MetadataDb, owner_uuid: &str, id: &str, now_ms: i64) -> Result<bool> {
+    db.transact_immediate(|conn| {
+        let held_reason: Option<Option<String>> = conn
+            .query_row(
+                "SELECT held_reason FROM generation_queue
+                  WHERE id = ?1 AND owner_uuid = ?2 AND state = 'held'",
+                params![id, owner_uuid],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(held_reason) = held_reason else {
+            return Ok(false);
+        };
+        let reason = held_reason.unwrap_or_else(|| "held".to_string());
+        let error = format!("held work expired before it was retried: {reason}");
+        conn.execute(
+            "UPDATE generation_batch_children
+                SET state = 'failed', error = ?2,
+                    terminal_error_json = ?3,
+                    completed_at_ms = ?4, updated_at_ms = ?4,
+                    revision = revision + 1
+              WHERE job_id = ?1 AND state = 'held'",
+            params![
+                id,
+                error,
+                serde_json::json!({ "message": error }).to_string(),
+                now_ms
+            ],
+        )?;
+        let removed = conn.execute(
+            "DELETE FROM generation_queue
+              WHERE id = ?1 AND owner_uuid = ?2 AND state = 'held'",
+            params![id, owner_uuid],
+        )?;
+        Ok(removed == 1)
+    })
+}
+
 /// Remove every row this installation owns that has not yet been claimed.
 /// Backs `DELETE /api/queue`, whose registry side cancels the same rows.
 pub fn delete_all_queued(db: &MetadataDb, owner_uuid: &str) -> Result<usize> {
@@ -1037,7 +1150,8 @@ pub fn hold_media_jobs(
         let mut held = 0;
         let mut update_child = conn.prepare(
             "UPDATE generation_batch_children
-                SET state = 'held', error = ?2, updated_at_ms = ?3
+                SET state = 'held', error = ?2, updated_at_ms = ?3,
+                    revision = revision + 1
               WHERE job_id = ?1 AND state = ?4",
         )?;
         for job_id in job_ids {
@@ -1172,7 +1286,8 @@ fn recover_runtime_claims_inner(
                     )?;
                     conn.execute(
                         "UPDATE generation_batch_children
-                            SET state = 'held', error = ?3, updated_at_ms = ?4
+                            SET state = 'held', error = ?3, updated_at_ms = ?4,
+                                revision = revision + 1
                           WHERE job_id = ?1
                             AND EXISTS (
                                 SELECT 1 FROM generation_batches AS batch

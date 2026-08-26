@@ -632,6 +632,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 28,
         kind: MigrationKind::Sql(V28_GENERATION_QUEUE_RETRYABLE),
     },
+    Migration {
+        version: 29,
+        kind: MigrationKind::Sql(V29_GENERATION_BATCH_CHILD_REVISION),
+    },
 ];
 
 /// #1227 phase 2 moved face-identity extraction from admission onto the
@@ -709,7 +713,7 @@ ALTER TABLE generation_batch_children ADD COLUMN completed_at_ms INTEGER;
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 28;
+pub const SCHEMA_VERSION: i64 = 29;
 
 /// Opaque staged-media ownership for durable queue rows.
 ///
@@ -814,6 +818,33 @@ ALTER TABLE generation_queue ADD COLUMN admission_authority TEXT
             length(admission_authority) BETWEEN 56 AND 2048
         )
     );
+"#;
+
+/// A monotonic per-child version, because a wall-clock millisecond is not one.
+///
+/// `updated_at_ms` was carrying two jobs at once: an honest human-facing
+/// timestamp, and the ordering token every client reducer compares to decide
+/// whether an incoming snapshot supersedes the one it holds. Those are
+/// different concerns, and the timestamp is the weaker of the two — SQLite
+/// commits several transitions inside one millisecond routinely, and
+/// `POST /api/queue/:id/retry` is the first route that moves a child
+/// BACKWARD through the browser's `FORWARD_PHASE_RANK` (held -> accepted),
+/// so a same-millisecond collision there is not a tie to be broken
+/// arbitrarily: it decides whether the retry is visible at all.
+///
+/// `revision` is that ordering token, incremented by every authoritative
+/// state transition and by nothing else. It also answers a question no
+/// timestamp can: after an ambiguous retry POST whose response was lost,
+/// "did my retry land?" is exactly "is the child's revision above the one I
+/// captured before the POST" — a still-`held` child at a HIGHER revision
+/// was retried and re-held, which is a different fact from a retry that
+/// never arrived.
+///
+/// Existing rows start at 0 and take their first increment on their next
+/// transition. `updated_at_ms` keeps its own monotonic bump on retry for
+/// clients that predate this column and still order by it.
+const V29_GENERATION_BATCH_CHILD_REVISION: &str = r#"
+ALTER TABLE generation_batch_children ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
 "#;
 
 /// Build a serde-compatible reverse lookup for durable publication recovery.
@@ -1272,7 +1303,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 28);
+        assert_eq!(SCHEMA_VERSION, 29);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1426,7 +1457,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 28);
+        assert_eq!(SCHEMA_VERSION, 29);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1563,7 +1594,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 28);
+        assert_eq!(SCHEMA_VERSION, 29);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -1824,7 +1855,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 28);
+        assert_eq!(SCHEMA_VERSION, 29);
     }
 
     #[test]

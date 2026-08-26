@@ -192,6 +192,10 @@ pub fn classify_route(path: &str, method: &axum::http::Method) -> Option<RouteTi
         ("POST", path) if path.starts_with("/api/queue/") && path.ends_with("/retry") => {
             Some(RouteTier::Generation)
         }
+        // A retention sweep walks the held rows and unlinks encrypted media.
+        // Cheap per call, but it takes DB write transactions and filesystem
+        // work, so it does not belong in the read bucket.
+        ("POST", "/api/queue/held/sweep") => Some(RouteTier::Generation),
         // Read-only bulk reconciliation. Every Studio surface polls it on event
         // gaps, reconnects and wakes; on the generation tier it drains the
         // bucket new admissions need.

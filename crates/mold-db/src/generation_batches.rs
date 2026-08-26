@@ -67,6 +67,11 @@ pub struct DurableGenerationBatchChildRow {
     pub error: Option<String>,
     pub retryable: bool,
     pub updated_at_ms: i64,
+    /// Monotonic per-child version. Every authoritative state transition
+    /// increments it; nothing else writes it. Clients order snapshots by
+    /// this rather than by `updated_at_ms`, which collides within a
+    /// millisecond. See migration v29.
+    pub revision: i64,
     pub terminal_error_json: Option<String>,
     pub result_json: Option<String>,
     pub completed_at_ms: Option<i64>,
@@ -467,7 +472,8 @@ pub fn set_child_state(
     db.with_conn(|conn| {
         Ok(conn.execute(
             "UPDATE generation_batch_children
-                SET state = ?2, error = ?3, updated_at_ms = ?4
+                SET state = ?2, error = ?3, updated_at_ms = ?4,
+                    revision = revision + 1
               WHERE job_id = ?1
                 AND state NOT IN ('cancelling', 'complete', 'failed', 'cancelled')",
             params![job_id, state, error, updated_at_ms],
@@ -580,7 +586,8 @@ pub fn cancel_owned(
 
         let requested = conn.execute(
             "UPDATE generation_batch_children
-                SET state = 'cancelling', error = 'Cancelled', updated_at_ms = ?2
+                SET state = 'cancelling', error = 'Cancelled', updated_at_ms = ?2,
+                    revision = revision + 1
               WHERE job_id = ?1
                 AND state NOT IN ('complete', 'failed', 'cancelled')",
             params![job_id, terminal.completed_at_ms],
@@ -689,7 +696,8 @@ pub fn hold_owned(
         }
         let child_updated = conn.execute(
             "UPDATE generation_batch_children
-                SET state = 'held', error = ?2, updated_at_ms = ?3
+                SET state = 'held', error = ?2, updated_at_ms = ?3,
+                    revision = revision + 1
               WHERE job_id = ?1
                 AND state NOT IN ('cancelling', 'complete', 'failed', 'cancelled')",
             params![job_id, reason, now_ms],
@@ -800,7 +808,8 @@ pub fn retry_held_owned(
             let child_updated = conn.execute(
                 "UPDATE generation_batch_children
                     SET state = 'accepted', error = NULL,
-                        updated_at_ms = MAX(?2, updated_at_ms + 1)
+                        updated_at_ms = MAX(?2, updated_at_ms + 1),
+                        revision = revision + 1
                   WHERE job_id = ?1 AND state = 'held'",
                 params![authority.job_id, now_ms],
             )?;
@@ -862,7 +871,8 @@ pub fn finish_all_unclaimed_queued(
         let updated = conn.execute(
             "UPDATE generation_batch_children
                 SET state = ?2, error = ?3, terminal_error_json = ?4,
-                    result_json = ?5, completed_at_ms = ?6, updated_at_ms = ?6
+                    result_json = ?5, completed_at_ms = ?6, updated_at_ms = ?6,
+                    revision = revision + 1
               WHERE job_id IN (
                     SELECT q.id FROM generation_queue AS q
                      WHERE q.owner_uuid = ?1 AND q.state = 'queued'
@@ -977,7 +987,8 @@ pub fn cancel_all_queued(
         let terminalized = conn.execute(
             "UPDATE generation_batch_children
                 SET state = ?2, error = ?3, terminal_error_json = ?4,
-                    result_json = ?5, completed_at_ms = ?6, updated_at_ms = ?6
+                    result_json = ?5, completed_at_ms = ?6, updated_at_ms = ?6,
+                    revision = revision + 1
               WHERE job_id IN (
                     SELECT q.id FROM generation_queue AS q
                      WHERE q.owner_uuid = ?1 AND q.state = 'queued'
@@ -1078,7 +1089,8 @@ pub fn restore_child_after_retain(
     db.with_conn(|conn| {
         Ok(conn.execute(
             "UPDATE generation_batch_children
-                SET state = 'accepted', error = NULL, updated_at_ms = ?3
+                SET state = 'accepted', error = NULL, updated_at_ms = ?3,
+                    revision = revision + 1
               WHERE job_id = ?1
                 AND state IN ('accepted', 'running')
                 AND EXISTS (
@@ -1106,7 +1118,8 @@ fn update_terminal_child(
                 END,
                 result_json = CASE WHEN state = 'cancelling' THEN NULL ELSE ?5 END,
                 completed_at_ms = ?6,
-                updated_at_ms = ?6
+                updated_at_ms = ?6,
+                revision = revision + 1
           WHERE job_id = ?1",
         params![
             job_id,
@@ -1166,7 +1179,7 @@ fn durable_detail_on_conn(
         "SELECT child.batch_id, child.job_id, child.batch_index, child.state,
                 child.error, child.updated_at_ms, child.terminal_error_json,
                 child.result_json, child.completed_at_ms,
-                COALESCE(queue.retryable, 0)
+                COALESCE(queue.retryable, 0), child.revision
            FROM generation_batch_children child
            LEFT JOIN generation_queue queue ON queue.id = child.job_id
           WHERE child.batch_id = ?1 ORDER BY child.batch_index",
@@ -1184,6 +1197,7 @@ fn durable_detail_on_conn(
                 result_json: row.get(7)?,
                 completed_at_ms: row.get(8)?,
                 retryable: row.get::<_, i64>(9)? != 0,
+                revision: row.get(10)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2613,6 +2627,195 @@ mod tests {
         assert!(
             child_ms > held_child_ms,
             "child row must advance: held {held_child_ms} -> accepted {child_ms}"
+        );
+    }
+
+    // ── Held-row retention ────────────────────────────────────────────────
+    // A hold is durable so a human can return to it. One nobody returns to
+    // pins a queue row and its encrypted media forever.
+
+    #[test]
+    fn retention_lists_only_held_rows_past_their_window() {
+        use crate::generation_queue::{expired_held, held_count};
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(3)).unwrap();
+        let day = 86_400_000_i64;
+        let now = 40 * day;
+
+        hold_owned(&db, "owner-1", "job-0", None, "old", true, now - 31 * day).unwrap();
+        hold_owned(&db, "owner-1", "job-1", None, "recent", true, now - 3 * day).unwrap();
+        // job-2 stays queued.
+
+        let expired = expired_held(&db, "owner-1", 30, now).unwrap();
+        assert_eq!(
+            expired
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["job-0"],
+            "only the hold past its window expires; a queued row is never swept"
+        );
+        assert_eq!(held_count(&db, "owner-1").unwrap(), 2);
+
+        assert!(
+            expired_held(&db, "owner-1", 0, now).unwrap().is_empty(),
+            "0 keeps held rows forever, exactly as gallery trash retention does"
+        );
+        assert!(
+            expired_held(&db, "other-owner", 30, now)
+                .unwrap()
+                .is_empty(),
+            "another installation's holds are not ours to purge"
+        );
+    }
+
+    #[test]
+    fn purging_a_held_row_settles_its_child_instead_of_dropping_it() {
+        use crate::generation_queue::purge_held;
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
+        hold_owned(&db, "owner-1", "job-0", None, "model went missing", true, 5).unwrap();
+
+        assert!(purge_held(&db, "owner-1", "job-0", 9).unwrap());
+        assert!(
+            crate::generation_queue::get(&db, "job-0")
+                .unwrap()
+                .is_none(),
+            "the queue row is gone, which is what retires its media obligation"
+        );
+
+        // The batch child survives as a terminal summary: a reconnecting
+        // client reads it after the queue row is gone, and deleting it would
+        // report the print as never admitted.
+        let child = &get_durable(&db, "owner-1", "batch-1")
+            .unwrap()
+            .unwrap()
+            .children[0];
+        assert_eq!(child.state, "failed");
+        assert!(
+            child
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("model went missing"),
+            "the settled child must keep the reason the work was held: {:?}",
+            child.error
+        );
+        assert!(child.completed_at_ms.is_some());
+        assert!(
+            child.revision > 0,
+            "settlement is an authoritative transition"
+        );
+    }
+
+    #[test]
+    fn a_retried_row_wins_the_race_against_its_own_expiry() {
+        // The sweeper lists, then purges. A retry landing in between is a
+        // human's explicit decision and outranks retention.
+        use crate::generation_queue::purge_held;
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
+        hold_owned(&db, "owner-1", "job-0", None, "dependency failed", true, 5).unwrap();
+        let authority = mold_core::GenerationRetryRequest {
+            instance_id: "instance-1".into(),
+            batch_id: "batch-1".into(),
+            client_batch_id: "client-1".into(),
+            job_id: "job-0".into(),
+        };
+        assert_eq!(
+            retry_held_owned(&db, "owner-1", "instance-1", &authority, 6).unwrap(),
+            OwnedRetry::Retried
+        );
+
+        assert!(
+            !purge_held(&db, "owner-1", "job-0", 9).unwrap(),
+            "a row that is no longer held must not be purged"
+        );
+        assert!(crate::generation_queue::get(&db, "job-0")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn purging_never_reaches_another_installations_row() {
+        use crate::generation_queue::purge_held;
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
+        hold_owned(&db, "owner-1", "job-0", None, "held", true, 5).unwrap();
+        assert!(!purge_held(&db, "other-owner", "job-0", 9).unwrap());
+        assert!(crate::generation_queue::get(&db, "job-0")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn every_state_transition_advances_the_child_revision() {
+        // The revision is the ordering token clients compare. A transition
+        // that does not advance it is invisible to a reducer whose snapshot
+        // landed in the same millisecond, which is exactly the retry case.
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
+        let revision = |db: &MetadataDb| {
+            get_durable(db, "owner-1", "batch-1")
+                .unwrap()
+                .unwrap()
+                .children[0]
+                .revision
+        };
+        let admitted = revision(&db);
+        assert_eq!(admitted, 0, "an admitted child starts unversioned");
+
+        hold_owned(&db, "owner-1", "job-0", None, "dependency failed", true, 7).unwrap();
+        let held = revision(&db);
+        assert!(held > admitted, "hold must advance: {admitted} -> {held}");
+
+        let authority = mold_core::GenerationRetryRequest {
+            instance_id: "instance-1".into(),
+            batch_id: "batch-1".into(),
+            client_batch_id: "client-1".into(),
+            job_id: "job-0".into(),
+        };
+        // Same millisecond as the hold: the timestamp cannot separate these.
+        assert_eq!(
+            retry_held_owned(&db, "owner-1", "instance-1", &authority, 7).unwrap(),
+            OwnedRetry::Retried
+        );
+        let retried = revision(&db);
+        assert!(retried > held, "retry must advance: {held} -> {retried}");
+    }
+
+    #[test]
+    fn a_refused_transition_leaves_the_revision_alone() {
+        // Only an authoritative transition may spend a revision. A refused
+        // retry that still bumped it would look, to a reconciling client,
+        // exactly like a retry that landed.
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
+        hold_owned(&db, "owner-1", "job-0", None, "dependency failed", true, 2).unwrap();
+        let held = get_durable(&db, "owner-1", "batch-1")
+            .unwrap()
+            .unwrap()
+            .children[0]
+            .revision;
+
+        let foreign = mold_core::GenerationRetryRequest {
+            instance_id: "replacement".into(),
+            batch_id: "batch-1".into(),
+            client_batch_id: "client-1".into(),
+            job_id: "job-0".into(),
+        };
+        assert_eq!(
+            retry_held_owned(&db, "owner-1", "instance-1", &foreign, 3).unwrap(),
+            OwnedRetry::AuthorityMismatch
+        );
+        assert_eq!(
+            get_durable(&db, "owner-1", "batch-1")
+                .unwrap()
+                .unwrap()
+                .children[0]
+                .revision,
+            held,
+            "a refused retry must not spend a revision"
         );
     }
 

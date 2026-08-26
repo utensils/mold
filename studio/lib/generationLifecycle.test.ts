@@ -398,3 +398,73 @@ describe("canonical durable generation lifecycle", () => {
     }
   });
 });
+
+// ── Per-child revision ordering ───────────────────────────────────────────────
+// `POST /api/queue/{id}/retry` is the only route that moves a child BACKWARD
+// through FORWARD_PHASE_RANK (held -> accepted). Before the server carried a
+// revision, that transition was ordered by `updated_at_ms` alone, so a retry
+// committed inside the same millisecond as the hold it replaced was dropped by
+// the reducer and the retry was invisible in the UI.
+
+describe("generation child revision ordering", () => {
+  function held(updatedAtMs: number, revision?: number): GenerationBatchChild {
+    return child("held", updatedAtMs, {
+      retryable: true,
+      ...(revision === undefined ? {} : { revision }),
+    });
+  }
+  function retried(updatedAtMs: number, revision?: number) {
+    return child("accepted", updatedAtMs, {
+      ...(revision === undefined ? {} : { revision }),
+    });
+  }
+  function snapshot(children: GenerationBatchChild[]): GenerationBatchStatus {
+    return {
+      id: "batch-1",
+      client_batch_id: "client-1",
+      instance_id: "instance-1",
+      durable: true,
+      children,
+    };
+  }
+  function afterRetry(
+    before: GenerationBatchChild,
+    after: GenerationBatchChild,
+  ) {
+    const start = reduceGenerationLifecycle(tracker(), {
+      type: "batch_snapshot",
+      batch: snapshot([before]),
+    });
+    return reduceGenerationLifecycle(start, {
+      type: "batch_snapshot",
+      batch: snapshot([after]),
+    });
+  }
+
+  it("accepts a same-millisecond retry when the revision advanced", () => {
+    const state = afterRetry(held(20, 4), retried(20, 5));
+    expect(onlyJob(state).phase).toBe("accepted");
+    expect(onlyJob(state).version.revision).toBe(5);
+  });
+
+  it("still drops a same-millisecond backward move at an unchanged revision", () => {
+    // Not a retry: a stale re-read of the pre-retry row must not un-hold the
+    // job. The revision is what separates the two.
+    const state = afterRetry(held(20, 4), retried(20, 4));
+    expect(onlyJob(state).phase).toBe("held");
+  });
+
+  it("reads revision 0 and an absent revision as no authority", () => {
+    // Rows admitted before the column exists sit at 0. Treating that as a real
+    // revision would let a pre-migration snapshot win ties it should lose.
+    expect(onlyJob(afterRetry(held(20, 0), retried(20, 0))).phase).toBe("held");
+    expect(onlyJob(afterRetry(held(20), retried(20))).phase).toBe("held");
+    expect(onlyJob(afterRetry(held(20), retried(21))).phase).toBe("accepted");
+  });
+
+  it("prefers the revision over the timestamp when both are present", () => {
+    // A server whose clock stepped backward must not reorder committed work.
+    const state = afterRetry(held(30, 4), retried(20, 5));
+    expect(onlyJob(state).phase).toBe("accepted");
+  });
+});

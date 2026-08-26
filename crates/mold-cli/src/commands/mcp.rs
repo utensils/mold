@@ -600,6 +600,7 @@ impl McpServer {
             &self.client,
             &retry.authority,
             &retry.durable_job_id,
+            retry.observed_revision,
         )
         .await
         {
@@ -616,7 +617,7 @@ impl McpServer {
         self.jobs
             .mark_retry_queued(&args.job_id, retry_was_ambiguous)
             .await;
-        if let CanonicalRetrySubmission::Ambiguous { error } = &retry_result {
+        if let CanonicalRetrySubmission::Ambiguous { error, .. } = &retry_result {
             self.jobs
                 .record_reconciliation_error(
                     &args.job_id,
@@ -1193,6 +1194,9 @@ impl AsyncGenerationJob {
 struct CanonicalRetryClaim {
     authority: GenerationBatchAuthority,
     durable_job_id: String,
+    /// The child revision this retry is submitted against. `0` when the host
+    /// predates the column, which reconciliation reads as "no authority".
+    observed_revision: u64,
 }
 
 #[derive(Debug)]
@@ -1353,9 +1357,17 @@ impl AsyncJobRegistry {
             .ok_or_else(|| format!("async generation job {id} has no durable job identity"))?;
         job.retry_in_flight = true;
         job.updated_at_ms = now_ms();
+        // The registry already holds the child; its revision is the fence
+        // an interrupted retry response reconciles against.
+        let observed_revision = job
+            .canonical_child
+            .as_ref()
+            .map(|child| child.revision)
+            .unwrap_or(0);
         Ok(CanonicalRetryClaim {
             authority,
             durable_job_id,
+            observed_revision,
         })
     }
 
@@ -2911,7 +2923,14 @@ mod tests {
                 {
                     ("image/png", png.as_slice())
                 } else {
-                    assert!(head.starts_with("GET /api/gallery "));
+                    // Deliberate contract change: hydration now narrows the
+                    // listing with `?filename=` instead of transferring the
+                    // whole gallery index once per artifact.
+                    assert!(
+                        head.starts_with("GET /api/gallery?filename=result.png "),
+                        "unexpected gallery request: {}",
+                        head.lines().next().unwrap_or_default()
+                    );
                     ("application/json", gallery.as_slice())
                 };
                 socket

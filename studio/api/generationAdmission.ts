@@ -27,6 +27,18 @@ export interface GenerationBatchChild {
   error?: string | null;
   created_at_ms: number;
   updated_at_ms: number;
+  /**
+   * Monotonic per-child version, incremented by every authoritative state
+   * transition. This is the ordering authority reducers compare;
+   * `updated_at_ms` collides within a millisecond, and the retry route moves
+   * a child backward through the forward-phase order, so a collision there
+   * decides whether the retry is visible at all.
+   *
+   * Absent on hosts predating the column, and `0` also means "not yet
+   * transitioned since the migration" — treat both as no revision authority
+   * and fall back to the timestamp.
+   */
+  revision?: number | null;
   completed_at_ms?: number | null;
   /** Structured terminal error. Its schema is intentionally server-owned. */
   terminal_error?: unknown;
@@ -295,7 +307,10 @@ export function parseGenerationBatchStatus(
         typeof raw.error !== "string") ||
       (raw.retryable !== undefined &&
         raw.retryable !== null &&
-        typeof raw.retryable !== "boolean")
+        typeof raw.retryable !== "boolean") ||
+      (raw.revision !== undefined &&
+        raw.revision !== null &&
+        (!finiteNumber(raw.revision) || (raw.revision as number) < 0))
     ) {
       throw new Error(`${childPath} is incompatible`);
     }
@@ -313,6 +328,9 @@ export function parseGenerationBatchStatus(
         : { retryable: raw.retryable as boolean | null }),
       created_at_ms: raw.created_at_ms,
       updated_at_ms: raw.updated_at_ms,
+      ...(raw.revision === undefined
+        ? {}
+        : { revision: raw.revision as number | null }),
       ...(raw.completed_at_ms === undefined
         ? {}
         : { completed_at_ms: raw.completed_at_ms as number | null }),
