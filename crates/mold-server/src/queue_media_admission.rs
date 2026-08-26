@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 use sha2::{Digest as _, Sha256};
+use subtle::ConstantTimeEq as _;
 
 use crate::queue_journal::{MediaBatchJournalAdmission, MediaJournalAdmission};
 use crate::queue_media_ingress::{ObserverMode, ObserverRegistration, QueueMediaIngress};
@@ -41,6 +42,71 @@ struct PreparedChild {
 }
 
 struct FingerprintWriter(Sha256);
+
+const DURABLE_OPERATION_RECEIPT_PREFIX: &str = "generation-v1";
+
+fn durable_operation_receipt(
+    operation_id: &str,
+    fingerprint: &QueueMediaOperationFingerprint,
+) -> String {
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let digest = durable_operation_receipt_digest(operation_id, fingerprint, &nonce);
+    format!(
+        "{DURABLE_OPERATION_RECEIPT_PREFIX}.{nonce}.{}",
+        hex_bytes(&digest)
+    )
+}
+
+fn durable_operation_receipt_digest(
+    operation_id: &str,
+    fingerprint: &QueueMediaOperationFingerprint,
+    nonce: &str,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"mold durable generation operation receipt\0");
+    digest.update((operation_id.len() as u64).to_be_bytes());
+    digest.update(operation_id.as_bytes());
+    digest.update(nonce.as_bytes());
+    digest.update(fingerprint.version().to_be_bytes());
+    digest.update(fingerprint.sha256_hex().as_bytes());
+    digest.finalize().into()
+}
+
+fn verify_durable_operation_receipt(
+    receipt: &str,
+    operation_id: &str,
+    fingerprint: &QueueMediaOperationFingerprint,
+) -> Option<bool> {
+    let mut parts = receipt.split('.');
+    if parts.next()? != DURABLE_OPERATION_RECEIPT_PREFIX {
+        return None;
+    }
+    let nonce = parts.next()?;
+    let received = parts.next()?;
+    if parts.next().is_some()
+        || nonce.len() != 32
+        || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || received.len() != 64
+        || !received.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Some(false);
+    }
+    let expected = hex_bytes(&durable_operation_receipt_digest(
+        operation_id,
+        fingerprint,
+        nonce,
+    ));
+    Some(bool::from(expected.as_bytes().ct_eq(received.as_bytes())))
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
+}
 
 impl FingerprintWriter {
     fn new() -> Self {
@@ -92,7 +158,7 @@ struct BlockingSealedBatch {
     lifecycle: Arc<QueueMediaLifecycle>,
     children: Vec<SealedChild>,
     media_sets: Vec<MediaSetRef>,
-    receipt: Option<QueueMediaOperationReceipt>,
+    receipt: Option<String>,
     cleanup_armed: bool,
 }
 
@@ -474,6 +540,21 @@ impl DurableMediaAdmission {
         fingerprint: &QueueMediaOperationFingerprint,
         detail: &mold_db::generation_batches::DurableGenerationBatchDetail,
     ) -> Result<(), ApiError> {
+        if let Some(matches) = verify_durable_operation_receipt(
+            &detail.batch.request_sha256,
+            operation_id,
+            fingerprint,
+        ) {
+            return if matches {
+                Ok(())
+            } else {
+                Err(ApiError::with_code(
+                    "client_batch_id was already used for a different request",
+                    "GENERATION_BATCH_IDEMPOTENCY_CONFLICT",
+                    StatusCode::CONFLICT,
+                ))
+            };
+        }
         let lifecycle = Arc::clone(&self.lifecycle);
         let operation_id = operation_id.to_string();
         let fingerprint = fingerprint.clone();
@@ -719,16 +800,7 @@ fn seal_batch_blocking(
             admission_authority,
         });
     }
-    batch.receipt = Some(
-        batch
-            .lifecycle
-            .seal_operation_receipt(operation_id, fingerprint)
-            .map_err(|error| {
-                ApiError::internal(format!(
-                    "durable media operation receipt could not be sealed: {error}"
-                ))
-            })?,
-    );
+    batch.receipt = Some(durable_operation_receipt(operation_id, fingerprint));
     Ok(batch)
 }
 

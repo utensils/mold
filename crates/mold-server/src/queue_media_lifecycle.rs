@@ -93,15 +93,6 @@ impl QueueMediaLifecycle {
             })
     }
 
-    pub(crate) fn seal_operation_receipt(
-        &self,
-        operation_id: &str,
-        fingerprint: &QueueMediaOperationFingerprint,
-    ) -> Result<QueueMediaOperationReceipt, QueueMediaError> {
-        self.runtime_store()?
-            .seal_operation_receipt_v1(&self.owner_uuid, operation_id, fingerprint)
-    }
-
     pub(crate) fn open_operation_receipt(
         &self,
         operation_id: &str,

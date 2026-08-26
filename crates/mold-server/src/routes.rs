@@ -2542,6 +2542,15 @@ async fn admit_generation_batch(
             StatusCode::SERVICE_UNAVAILABLE,
         ));
     }
+    let config = state.config.read().await;
+    if state.is_output_disabled(&config) {
+        return Err(ApiError::with_code(
+            "durable batch admission requires server gallery output",
+            "DURABLE_ADMISSION_UNAVAILABLE",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
+    }
+    drop(config);
     body.client_batch_id = canonical_client_batch_id(&body.client_batch_id)?;
     if body.requests.is_empty() || body.requests.len() > MAX_HETEROGENEOUS_BATCH_OUTPUTS {
         return Err(ApiError::validation(format!(

@@ -42,8 +42,10 @@ pub struct GenerationBatchDetail {
 /// An idempotency loser is not an error from the cleanup perspective: its
 /// distinct staged sets are durably recorded as gc-pending in the same
 /// transaction that observes the winner. `request_sha256` is an opaque,
-/// randomized encrypted receipt for this API: the DB returns the winner's
-/// stored receipt without comparing or classifying it.
+/// randomized receipt for this API: the DB returns the winner's stored receipt
+/// without comparing or classifying it. Current servers use a store-independent
+/// verifier; older encrypted receipts remain readable at the server boundary
+/// during rolling upgrades.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GenerationBatchMediaInsertOutcome {
     Inserted(GenerationBatchDetail),
