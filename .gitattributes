@@ -49,9 +49,5 @@
 # Xcode project files are machine-owned; leave their bytes alone.
 *.pbxproj -text
 
-# Understand Anything graphs can exceed GitHub's normal diff-friendly size.
-# Keep committed graph artifacts in Git LFS as recommended upstream.
-.ua/*.json filter=lfs diff=lfs merge=lfs -text
-
 # Keep the existing rich diff for single-file components.
 *.vue text diff

@@ -1,3 +1,1247 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:d5ca73c536a803fb89e72c7a20002f7e350343fb55c582f20f8fa9e03c047d0a
-size 37224
+{
+  "version": "1.0.0",
+  "project": {
+    "name": "Mold",
+    "languages": [
+      "Rust",
+      "TypeScript",
+      "Vue",
+      "Kotlin"
+    ],
+    "frameworks": [
+      "Vue",
+      "Vite",
+      "Tauri"
+    ],
+    "description": "Mold is a local and remote AI image and video generation system whose CLI, server, desktop, web, and remote-only mobile Studio surfaces share generation, model, gallery, and host contracts.",
+    "analyzedAt": "2026-08-25T14:24:28.336Z",
+    "gitCommitHash": "4ec7da5dd760305a7d4123dd3afd36f7f9d0dba5"
+  },
+  "nodes": [
+    {
+      "id": "domain:generation-orchestration",
+      "type": "domain",
+      "name": "Generation Orchestration",
+      "summary": "Coordinates one-shot and sequence image/video work from validated Studio requests through server admission, queueing, execution, and recovery. It keeps durable execution state and cancellation behavior aligned across clients and server workers.",
+      "tags": [
+        "generation",
+        "queue",
+        "sequence"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entities": [
+          "GenerateRequest",
+          "queue item",
+          "chain job",
+          "stage artifact"
+        ],
+        "businessRules": [
+          "Generation must be admitted before execution.",
+          "Sequence jobs are durable and observable through lifecycle events.",
+          "Cancellation and recovery operate against persisted work."
+        ],
+        "crossDomainInteractions": [
+          "Routes selected work through Distributed Host Access and files completed prints through Print Library."
+        ]
+      }
+    },
+    {
+      "id": "domain:model-lifecycle",
+      "type": "domain",
+      "name": "Model Lifecycle",
+      "summary": "Discovers model catalog entries, manages host-targeted downloads, and removes installed model assets according to manifest-derived ownership. It supplies the available capabilities and inventory required by generation routing.",
+      "tags": [
+        "models",
+        "catalog",
+        "downloads"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entities": [
+          "catalog entry",
+          "model manifest",
+          "download job",
+          "owned path"
+        ],
+        "businessRules": [
+          "Downloads expose lifecycle progress and cancellation.",
+          "Removal derives owned paths from manifests rather than a partial configuration projection."
+        ],
+        "crossDomainInteractions": [
+          "Publishes installed-model availability to Generation Orchestration and Distributed Host Access."
+        ]
+      }
+    },
+    {
+      "id": "domain:print-library",
+      "type": "domain",
+      "name": "Print Library",
+      "summary": "Provides authenticated access to generated media and manages print metadata, collections, tags, favorites, trash, and per-host mutation fan-out. It merges logical library views while respecting individual host capabilities.",
+      "tags": [
+        "gallery",
+        "organization",
+        "media"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entities": [
+          "print",
+          "media ticket",
+          "collection",
+          "tag",
+          "trash record"
+        ],
+        "businessRules": [
+          "Authenticated media uses host-scoped access paths.",
+          "Organization mutations fan out to each physical host copy.",
+          "Trash and organization controls are capability-gated."
+        ],
+        "crossDomainInteractions": [
+          "Receives completed artifacts from Generation Orchestration and uses Distributed Host Access to reach every copy."
+        ]
+      }
+    },
+    {
+      "id": "domain:distributed-host-access",
+      "type": "domain",
+      "name": "Distributed Host Access",
+      "summary": "Maintains remote host authority, chooses an eligible generation target, and connects mobile devices through pairing or local-network discovery. It treats credentials, instance identity, reachability, and per-host capabilities as routing inputs.",
+      "tags": [
+        "hosts",
+        "routing",
+        "pairing"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entities": [
+          "host",
+          "API key",
+          "instance ID",
+          "pairing ticket",
+          "capability snapshot"
+        ],
+        "businessRules": [
+          "Requests use exact authenticated host targets.",
+          "Automatic routing requires eligible reachable hosts.",
+          "Discovery normalizes host metadata before connection."
+        ],
+        "crossDomainInteractions": [
+          "Selects execution destinations for Generation Orchestration, exposes inventory from Model Lifecycle, and reaches Print Library copies."
+        ]
+      }
+    },
+    {
+      "id": "domain:mobile-studio-experience",
+      "type": "domain",
+      "name": "Mobile Studio Experience",
+      "summary": "Composes the remote-only Mold Studio workflow for mobile creation, recovery, library use, host management, pairing, and native integrations. It adapts shared contracts to mobile lifecycle, appearance, and platform bridge requirements.",
+      "tags": [
+        "mobile",
+        "studio",
+        "native-bridge"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entities": [
+          "mobile draft",
+          "background task lease",
+          "appearance preference",
+          "native bridge"
+        ],
+        "businessRules": [
+          "Mobile generation remains remote-only.",
+          "Native background leases cover preparation and remote admission.",
+          "Appearance updates coalesce before reaching native platform APIs."
+        ],
+        "crossDomainInteractions": [
+          "Uses all other domains to render and operate the remote mobile Studio surface."
+        ]
+      }
+    },
+    {
+      "id": "flow:prompt-to-print",
+      "type": "flow",
+      "name": "Prompt to Print",
+      "summary": "Validates a one-shot generation request, admits required media and parameters, then queues work for rendering.",
+      "tags": [
+        "generation",
+        "admission",
+        "print"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entryPoint": "generation submission",
+        "entryType": "event"
+      }
+    },
+    {
+      "id": "step:prompt-to-print:validate-capabilities",
+      "type": "step",
+      "name": "Validate Capabilities",
+      "filePath": "studio/lib/generationCapabilities.ts",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Checks that the selected generation parameters are supported before an admission request is constructed.",
+      "tags": [
+        "generation",
+        "validation"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:prompt-to-print:admit-media-and-request",
+      "type": "step",
+      "name": "Admit Media and Request",
+      "filePath": "studio/api/generationAdmission.ts",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Admits generation work and related media through the shared Studio admission contract.",
+      "tags": [
+        "generation",
+        "admission"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:prompt-to-print:enqueue-render-work",
+      "type": "step",
+      "name": "Enqueue Render Work",
+      "filePath": "crates/mold-server/src/queue.rs",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Records accepted work in the server queue for subsequent execution.",
+      "tags": [
+        "queue",
+        "server"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "flow:sequence-production",
+      "type": "flow",
+      "name": "Sequence Production",
+      "summary": "Builds a multi-clip sequence, creates a durable chain job, and watches server progress until its staged output settles.",
+      "tags": [
+        "sequence",
+        "chain",
+        "generation"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entryPoint": "sequence submission",
+        "entryType": "event"
+      }
+    },
+    {
+      "id": "step:sequence-production:compose-clips",
+      "type": "step",
+      "name": "Compose Clips",
+      "filePath": "desktop/src/mobile/MobileSequenceComposer.vue",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Composes clip cards, seam controls, frame validation, and shared parameters into a sequence draft.",
+      "tags": [
+        "sequence",
+        "composer"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:sequence-production:create-durable-chain-job",
+      "type": "step",
+      "name": "Create Durable Chain Job",
+      "filePath": "crates/mold-server/src/routes_chain_jobs.rs",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Creates and exposes the server route contract for durable chain-job work.",
+      "tags": [
+        "chain",
+        "api"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:sequence-production:watch-sequence-state",
+      "type": "step",
+      "name": "Watch Sequence State",
+      "filePath": "desktop/src/mobile/sequenceWatch.ts",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Watches durable chain-job events with polling and visibility fallbacks, allowing cancellation and recovery.",
+      "tags": [
+        "sequence",
+        "sse",
+        "recovery"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "flow:generation-queue-recovery",
+      "type": "flow",
+      "name": "Generation Queue Recovery",
+      "summary": "Persists queued generation state and media, reconciles work after restart, and exposes cancellation through the server queue lifecycle.",
+      "tags": [
+        "queue",
+        "recovery",
+        "cancellation"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entryPoint": "queue lifecycle",
+        "entryType": "event"
+      }
+    },
+    {
+      "id": "step:generation-queue-recovery:persist-queue-state",
+      "type": "step",
+      "name": "Persist Queue State",
+      "filePath": "crates/mold-db/src/generation_queue.rs",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Maintains durable generation queue records used by queue lifecycle operations.",
+      "tags": [
+        "queue",
+        "persistence"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:generation-queue-recovery:reconcile-media",
+      "type": "step",
+      "name": "Reconcile Media",
+      "filePath": "crates/mold-server/src/queue_media_startup.rs",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Coordinates queued media lifecycle storage and startup reconciliation for admitted work.",
+      "tags": [
+        "queue",
+        "media",
+        "recovery"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:generation-queue-recovery:cancel-queued-generation",
+      "type": "step",
+      "name": "Cancel Queued Generation",
+      "filePath": "crates/mold-server/src/generation_cancel.rs",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Applies server cancellation behavior to generation work under the queue lifecycle.",
+      "tags": [
+        "queue",
+        "cancellation"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "flow:catalog-browsing",
+      "type": "flow",
+      "name": "Catalog Browsing",
+      "summary": "Queries the live model catalog and reconciles browsing state with installed inventory and host changes.",
+      "tags": [
+        "catalog",
+        "models",
+        "inventory"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entryPoint": "model catalog query",
+        "entryType": "http"
+      }
+    },
+    {
+      "id": "step:catalog-browsing:resolve-live-catalog",
+      "type": "step",
+      "name": "Resolve Live Catalog",
+      "filePath": "crates/mold-catalog/src/live.rs",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Resolves live catalog data used to discover available model entries.",
+      "tags": [
+        "catalog",
+        "models"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:catalog-browsing:serve-catalog-api",
+      "type": "step",
+      "name": "Serve Catalog API",
+      "filePath": "crates/mold-server/src/catalog_api.rs",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Exposes catalog operations through the server API layer.",
+      "tags": [
+        "catalog",
+        "api"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:catalog-browsing:heal-mobile-browse-state",
+      "type": "step",
+      "name": "Heal Mobile Browse State",
+      "filePath": "desktop/src/mobile/MobileCatalogView.vue",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Browses catalog and installed inventory while re-driving family and search state when a target host changes.",
+      "tags": [
+        "mobile",
+        "catalog",
+        "hosts"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "flow:model-download-lifecycle",
+      "type": "flow",
+      "name": "Model Download Lifecycle",
+      "summary": "Starts target-host model acquisition, reports progressive state, and maintains installed model management state.",
+      "tags": [
+        "models",
+        "downloads",
+        "progress"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entryPoint": "model pull",
+        "entryType": "http"
+      }
+    },
+    {
+      "id": "step:model-download-lifecycle:request-model-download",
+      "type": "step",
+      "name": "Request Model Download",
+      "filePath": "crates/mold-server/src/downloads.rs",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Accepts model download requests and controls the download job lifecycle.",
+      "tags": [
+        "downloads",
+        "api"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:model-download-lifecycle:manage-installed-model",
+      "type": "step",
+      "name": "Manage Installed Model",
+      "filePath": "crates/mold-server/src/model_manager.rs",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Maintains server-side model-manager state for available downloaded models.",
+      "tags": [
+        "models",
+        "server"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:model-download-lifecycle:show-mobile-pull-progress",
+      "type": "step",
+      "name": "Show Mobile Pull Progress",
+      "filePath": "desktop/src/mobile/MobileCatalogView.vue",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Drives target-host pull progress and cancellation from the mobile catalog experience.",
+      "tags": [
+        "mobile",
+        "downloads",
+        "progress"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "flow:model-removal",
+      "type": "flow",
+      "name": "Model Removal",
+      "summary": "Determines the files owned by an installed model and removes them through CLI-driven lifecycle operations without treating a partial configuration as the authority.",
+      "tags": [
+        "models",
+        "removal",
+        "manifest"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entryPoint": "mold rm",
+        "entryType": "cli"
+      }
+    },
+    {
+      "id": "step:model-removal:derive-owned-paths",
+      "type": "step",
+      "name": "Derive Owned Paths",
+      "filePath": "crates/mold-core/src/removal.rs",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Derives model-owned paths from the manifest for removal and reference-count decisions.",
+      "tags": [
+        "models",
+        "manifest",
+        "removal"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:model-removal:plan-removal",
+      "type": "step",
+      "name": "Plan Removal",
+      "filePath": "crates/mold-core/src/removal.rs",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Classifies model paths for removal planning before an operation deletes unique assets.",
+      "tags": [
+        "models",
+        "removal"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:model-removal:run-remove-command",
+      "type": "step",
+      "name": "Run Remove Command",
+      "filePath": "crates/mold-cli/src/commands/rm.rs",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Exposes the model removal workflow through the CLI command surface.",
+      "tags": [
+        "cli",
+        "models",
+        "removal"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "flow:gallery-access-and-media",
+      "type": "flow",
+      "name": "Gallery Access and Media",
+      "summary": "Serves generated print media through the gallery authority and presents authenticated image and video actions in mobile Studio.",
+      "tags": [
+        "gallery",
+        "media",
+        "authentication"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entryPoint": "gallery media request",
+        "entryType": "http"
+      }
+    },
+    {
+      "id": "step:gallery-access-and-media:authorize-gallery-media",
+      "type": "step",
+      "name": "Authorize Gallery Media",
+      "filePath": "crates/mold-server/src/gallery_authority.rs",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Controls server gallery authority for media access and related lifecycle behavior.",
+      "tags": [
+        "gallery",
+        "authentication"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:gallery-access-and-media:issue-media-ticket",
+      "type": "step",
+      "name": "Issue Media Ticket",
+      "filePath": "crates/mold-server/src/auth.rs",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Issues and validates scoped gallery media tickets alongside API-key authentication.",
+      "tags": [
+        "gallery",
+        "authentication",
+        "ticket"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:gallery-access-and-media:present-mobile-media",
+      "type": "step",
+      "name": "Present Mobile Media",
+      "filePath": "desktop/src/mobile/MobileGalleryViewer.vue",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Presents authenticated image and video media with native copy, save, share, and scoped navigation actions.",
+      "tags": [
+        "mobile",
+        "gallery",
+        "media"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "flow:library-organization",
+      "type": "flow",
+      "name": "Library Organization",
+      "summary": "Applies tags, favorites, collections, title metadata, and trash actions to logical prints while fan-out updates reach every physical host copy.",
+      "tags": [
+        "gallery",
+        "organization",
+        "multi-host"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entryPoint": "gallery organization mutation",
+        "entryType": "http"
+      }
+    },
+    {
+      "id": "step:library-organization:merge-host-library-state",
+      "type": "step",
+      "name": "Merge Host Library State",
+      "filePath": "desktop/src/mobile/libraryOrganization.ts",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Merges logical copies and applies per-host capability gating for scope, filters, collections, tags, and mutations.",
+      "tags": [
+        "gallery",
+        "organization",
+        "multi-host"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:library-organization:fan-out-organization-mutation",
+      "type": "step",
+      "name": "Fan Out Organization Mutation",
+      "filePath": "studio/api/galleryOrganization.ts",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Builds the shared gallery-organization API calls used to mutate copies on their exact hosts.",
+      "tags": [
+        "gallery",
+        "organization",
+        "api"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:library-organization:manage-trash",
+      "type": "step",
+      "name": "Manage Trash",
+      "filePath": "crates/mold-server/src/gallery_trash.rs",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Provides server trash operations for retention, restore, and permanent deletion behavior.",
+      "tags": [
+        "gallery",
+        "trash",
+        "retention"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "flow:multi-host-generation-routing",
+      "type": "flow",
+      "name": "Multi-host Generation Routing",
+      "summary": "Builds host authority snapshots, selects a capable reachable destination, and freezes an exact target for client generation work.",
+      "tags": [
+        "hosts",
+        "routing",
+        "generation"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entryPoint": "generation target selection",
+        "entryType": "event"
+      }
+    },
+    {
+      "id": "step:multi-host-generation-routing:normalize-host-authority",
+      "type": "step",
+      "name": "Normalize Host Authority",
+      "filePath": "desktop/src/mobile/hosts.ts",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Tracks mobile host identity, authentication rejection, instance mismatch, status, and exact-target helpers.",
+      "tags": [
+        "mobile",
+        "hosts",
+        "authentication"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:multi-host-generation-routing:select-eligible-host",
+      "type": "step",
+      "name": "Select Eligible Host",
+      "filePath": "studio/lib/hostRouting.ts",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Applies shared host routing logic to choose among reachable eligible generation hosts.",
+      "tags": [
+        "hosts",
+        "routing",
+        "capabilities"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:multi-host-generation-routing:preview-placement",
+      "type": "step",
+      "name": "Preview Placement",
+      "filePath": "studio/api/generationPlacement.ts",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Uses generation placement API operations to compare selected candidates before remote admission.",
+      "tags": [
+        "generation",
+        "placement",
+        "hosts"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "flow:mobile-pairing-and-discovery",
+      "type": "flow",
+      "name": "Mobile Pairing and Discovery",
+      "summary": "Pairs a mobile client through the shared pairing API or discovers local Mold services through DNS-SD/Bonjour and normalizes the resulting host identity.",
+      "tags": [
+        "mobile",
+        "pairing",
+        "discovery"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entryPoint": "mobile host onboarding",
+        "entryType": "event"
+      }
+    },
+    {
+      "id": "step:mobile-pairing-and-discovery:create-or-claim-pairing",
+      "type": "step",
+      "name": "Create or Claim Pairing",
+      "filePath": "studio/api/pairing.ts",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Uses the shared Studio pairing API client to establish a mobile connection through the pairing workflow.",
+      "tags": [
+        "pairing",
+        "api",
+        "mobile"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:mobile-pairing-and-discovery:advertise-and-resolve-mdns",
+      "type": "step",
+      "name": "Advertise and Resolve mDNS",
+      "filePath": "crates/mold-server/src/mdns.rs",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Provides server-side mDNS behavior for reachable Mold services.",
+      "tags": [
+        "mdns",
+        "discovery",
+        "server"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:mobile-pairing-and-discovery:discover-mobile-hosts",
+      "type": "step",
+      "name": "Discover Mobile Hosts",
+      "filePath": "apps/mobile/src-tauri/src/discovery.rs",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Runs the mobile Tauri discovery command, delegating Android DNS-SD or Apple Bonjour resolution and normalizing discovered host metadata.",
+      "tags": [
+        "mobile",
+        "discovery",
+        "native-bridge"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "flow:mobile-native-studio-lifecycle",
+      "type": "flow",
+      "name": "Mobile Native Studio Lifecycle",
+      "summary": "Orchestrates the remote-only mobile Studio application while coordinating finite native background work and persisted native appearance preferences.",
+      "tags": [
+        "mobile",
+        "native-bridge",
+        "lifecycle"
+      ],
+      "complexity": "complex",
+      "domainMeta": {
+        "entryPoint": "mobile application lifecycle",
+        "entryType": "event"
+      }
+    },
+    {
+      "id": "step:mobile-native-studio-lifecycle:orchestrate-mobile-studio",
+      "type": "step",
+      "name": "Orchestrate Mobile Studio",
+      "filePath": "desktop/src/mobile/MobileApp.vue",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Composes remote generation, durable recovery, gallery organization, host management, pairing, and native mobile integrations.",
+      "tags": [
+        "mobile",
+        "studio",
+        "remote-generation"
+      ],
+      "complexity": "complex"
+    },
+    {
+      "id": "step:mobile-native-studio-lifecycle:lease-background-admission",
+      "type": "step",
+      "name": "Lease Background Admission",
+      "filePath": "desktop/src/mobile/backgroundTask.ts",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Acquires and releases finite native background-task leases around mobile preparation and remote admission.",
+      "tags": [
+        "mobile",
+        "background-task",
+        "generation"
+      ],
+      "complexity": "moderate"
+    },
+    {
+      "id": "step:mobile-native-studio-lifecycle:apply-native-appearance",
+      "type": "step",
+      "name": "Apply Native Appearance",
+      "filePath": "desktop/src/mobile/settings.ts",
+      "lineRange": [
+        0,
+        0
+      ],
+      "summary": "Loads mobile appearance settings and coalesces native theme and status-bar updates.",
+      "tags": [
+        "mobile",
+        "settings",
+        "appearance"
+      ],
+      "complexity": "moderate"
+    }
+  ],
+  "edges": [
+    {
+      "source": "domain:generation-orchestration",
+      "target": "flow:prompt-to-print",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:generation-orchestration",
+      "target": "flow:sequence-production",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:generation-orchestration",
+      "target": "flow:generation-queue-recovery",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:model-lifecycle",
+      "target": "flow:catalog-browsing",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:model-lifecycle",
+      "target": "flow:model-download-lifecycle",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:model-lifecycle",
+      "target": "flow:model-removal",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:print-library",
+      "target": "flow:gallery-access-and-media",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:print-library",
+      "target": "flow:library-organization",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:distributed-host-access",
+      "target": "flow:multi-host-generation-routing",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:distributed-host-access",
+      "target": "flow:mobile-pairing-and-discovery",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "domain:mobile-studio-experience",
+      "target": "flow:mobile-native-studio-lifecycle",
+      "type": "contains_flow",
+      "direction": "forward",
+      "weight": 1
+    },
+    {
+      "source": "flow:prompt-to-print",
+      "target": "step:prompt-to-print:validate-capabilities",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:prompt-to-print",
+      "target": "step:prompt-to-print:admit-media-and-request",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "flow:prompt-to-print",
+      "target": "step:prompt-to-print:enqueue-render-work",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.9
+    },
+    {
+      "source": "flow:sequence-production",
+      "target": "step:sequence-production:compose-clips",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:sequence-production",
+      "target": "step:sequence-production:create-durable-chain-job",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "flow:sequence-production",
+      "target": "step:sequence-production:watch-sequence-state",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.9
+    },
+    {
+      "source": "flow:generation-queue-recovery",
+      "target": "step:generation-queue-recovery:persist-queue-state",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:generation-queue-recovery",
+      "target": "step:generation-queue-recovery:reconcile-media",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "flow:generation-queue-recovery",
+      "target": "step:generation-queue-recovery:cancel-queued-generation",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.9
+    },
+    {
+      "source": "flow:catalog-browsing",
+      "target": "step:catalog-browsing:resolve-live-catalog",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:catalog-browsing",
+      "target": "step:catalog-browsing:serve-catalog-api",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "flow:catalog-browsing",
+      "target": "step:catalog-browsing:heal-mobile-browse-state",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.9
+    },
+    {
+      "source": "flow:model-download-lifecycle",
+      "target": "step:model-download-lifecycle:request-model-download",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:model-download-lifecycle",
+      "target": "step:model-download-lifecycle:manage-installed-model",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "flow:model-download-lifecycle",
+      "target": "step:model-download-lifecycle:show-mobile-pull-progress",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.9
+    },
+    {
+      "source": "flow:model-removal",
+      "target": "step:model-removal:derive-owned-paths",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:model-removal",
+      "target": "step:model-removal:plan-removal",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "flow:model-removal",
+      "target": "step:model-removal:run-remove-command",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.9
+    },
+    {
+      "source": "flow:gallery-access-and-media",
+      "target": "step:gallery-access-and-media:authorize-gallery-media",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:gallery-access-and-media",
+      "target": "step:gallery-access-and-media:issue-media-ticket",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "flow:gallery-access-and-media",
+      "target": "step:gallery-access-and-media:present-mobile-media",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.9
+    },
+    {
+      "source": "flow:library-organization",
+      "target": "step:library-organization:merge-host-library-state",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:library-organization",
+      "target": "step:library-organization:fan-out-organization-mutation",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "flow:library-organization",
+      "target": "step:library-organization:manage-trash",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.9
+    },
+    {
+      "source": "flow:multi-host-generation-routing",
+      "target": "step:multi-host-generation-routing:normalize-host-authority",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:multi-host-generation-routing",
+      "target": "step:multi-host-generation-routing:select-eligible-host",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "flow:multi-host-generation-routing",
+      "target": "step:multi-host-generation-routing:preview-placement",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.9
+    },
+    {
+      "source": "flow:mobile-pairing-and-discovery",
+      "target": "step:mobile-pairing-and-discovery:create-or-claim-pairing",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:mobile-pairing-and-discovery",
+      "target": "step:mobile-pairing-and-discovery:advertise-and-resolve-mdns",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "flow:mobile-pairing-and-discovery",
+      "target": "step:mobile-pairing-and-discovery:discover-mobile-hosts",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.9
+    },
+    {
+      "source": "flow:mobile-native-studio-lifecycle",
+      "target": "step:mobile-native-studio-lifecycle:orchestrate-mobile-studio",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.3
+    },
+    {
+      "source": "flow:mobile-native-studio-lifecycle",
+      "target": "step:mobile-native-studio-lifecycle:lease-background-admission",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.6
+    },
+    {
+      "source": "flow:mobile-native-studio-lifecycle",
+      "target": "step:mobile-native-studio-lifecycle:apply-native-appearance",
+      "type": "flow_step",
+      "direction": "forward",
+      "weight": 0.9
+    },
+    {
+      "source": "domain:model-lifecycle",
+      "target": "domain:generation-orchestration",
+      "type": "cross_domain",
+      "direction": "forward",
+      "description": "Installed model inventory and capabilities determine which generation requests can be admitted.",
+      "weight": 0.6
+    },
+    {
+      "source": "domain:distributed-host-access",
+      "target": "domain:generation-orchestration",
+      "type": "cross_domain",
+      "direction": "forward",
+      "description": "Host routing freezes the authenticated destination for generation admission and execution.",
+      "weight": 0.6
+    },
+    {
+      "source": "domain:generation-orchestration",
+      "target": "domain:print-library",
+      "type": "cross_domain",
+      "direction": "forward",
+      "description": "Completed generation artifacts become prints that the library serves and organizes.",
+      "weight": 0.6
+    },
+    {
+      "source": "domain:distributed-host-access",
+      "target": "domain:print-library",
+      "type": "cross_domain",
+      "direction": "forward",
+      "description": "Per-host authority enables media retrieval and organization mutation fan-out for physical print copies.",
+      "weight": 0.6
+    },
+    {
+      "source": "domain:mobile-studio-experience",
+      "target": "domain:distributed-host-access",
+      "type": "cross_domain",
+      "direction": "forward",
+      "description": "The remote-only mobile surface onboards hosts and submits exact-target remote operations.",
+      "weight": 0.6
+    },
+    {
+      "source": "domain:mobile-studio-experience",
+      "target": "domain:generation-orchestration",
+      "type": "cross_domain",
+      "direction": "forward",
+      "description": "Mobile Studio creates and observes remote one-shot and sequence generation work.",
+      "weight": 0.6
+    }
+  ],
+  "layers": [],
+  "tour": []
+}
