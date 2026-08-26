@@ -2102,11 +2102,13 @@ fn validate_private_h3_before_cuda(
     // the worker's actual compute capability and an authoritative post-drop
     // device/host capacity sample immediately before private preparation;
     // the run path repeats the exact-peak physical check before allocation.
-    evidence.resolve_request(request).map_err(|error| {
-        ExecutionPlanError::PlanInvalidated(format!(
-            "MiniMax H3 request changed after private admission: {error:#}"
-        ))
-    })?;
+    evidence
+        .validate_resolved_request(request)
+        .map_err(|error| {
+            ExecutionPlanError::PlanInvalidated(format!(
+                "MiniMax H3 request changed after private admission: {error:#}"
+            ))
+        })?;
     let inputs = prepared.by_device.get(worker_device_id).ok_or_else(|| {
         ExecutionPlanError::PlanInvalidated(format!(
             "MiniMax H3 pre-CUDA validation has no prepared route for '{worker_device_id}'"

@@ -417,6 +417,7 @@ pub(crate) struct ApiKeyAuthenticated {
     /// Restart-stable credential subject used only inside encrypted durable
     /// admission authority. It is never logged or returned on the wire.
     #[cfg_attr(not(any(feature = "h3", feature = "h3-private-uat")), allow(dead_code))]
+    #[cfg_attr(feature = "h3", allow(dead_code))]
     pub(crate) durable_identity: String,
 }
 

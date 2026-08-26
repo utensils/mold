@@ -137,7 +137,7 @@ pub(crate) fn restore(
                 message: "durable admission authority is attached to an unsupported request".into(),
             });
         }
-        return crate::h3_private_bridge::restore_durable_h3_private_ingress(
+        crate::h3_private_bridge::restore_durable_h3_private_ingress(
             request,
             &envelope.payload,
             instance_id,
@@ -158,7 +158,7 @@ pub(crate) fn restore(
                 FailureDisposition::Hold
             },
             message: error.error,
-        });
+        })
     }
     #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
     {

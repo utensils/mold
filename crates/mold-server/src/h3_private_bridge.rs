@@ -246,6 +246,7 @@ fn classify_h3_private_ingress_with_runtime(
     instance_id: &str,
     runtime_available: impl FnOnce(mold_core::minimax_h3::Task) -> bool,
 ) -> Result<Option<H3PrivateIngressGrant>, crate::routes::ApiError> {
+    #[cfg(not(feature = "h3"))]
     use axum::http::StatusCode;
 
     let Some(_contract) = mold_core::minimax_h3::capability_contract_for_model(&request.model)

@@ -1307,7 +1307,7 @@ pub struct H3PrivateFl2VaUatPaths<'a> {
 /// target budget. The returned evidence remains valid while a later capacity
 /// sample is still at least the exact admitted peaks.
 pub struct H3PrivateFl2VaAdmissionInput<'a> {
-    pub request: &'a GenerateRequest,
+    pub request: &'a mut GenerateRequest,
     pub paths: H3PrivateFl2VaUatPaths<'a>,
     pub device_id: &'a str,
     pub device_ordinal: usize,
@@ -1547,25 +1547,30 @@ impl H3PrivateFl2VaAdmissionEvidence {
     /// Return the exact request the owner must retain. An omitted seed is
     /// replaced by the one resolved during preprocessing; every other byte of
     /// the serialized request must still match the admitted submission.
-    pub fn resolve_request(&self, request: &GenerateRequest) -> Result<GenerateRequest> {
+    pub fn resolve_request(&self, request: &mut GenerateRequest) -> Result<()> {
         let supplied_identity = private_h3_request_identity(request)?;
         if supplied_identity != self.submitted_request_identity_sha256
             && supplied_identity != self.resolved_request_identity_sha256
         {
             bail!("private H3 request changed after allocation-free admission")
         }
-        let mut resolved = request.clone();
-        match resolved.seed {
+        match request.seed {
             Some(seed) if seed != self.seed => {
                 bail!("private H3 request seed differs from allocation-free admission")
             }
             Some(_) => {}
-            None => resolved.seed = Some(self.seed),
+            None => request.seed = Some(self.seed),
         }
-        if private_h3_request_identity(&resolved)? != self.resolved_request_identity_sha256 {
+        self.validate_resolved_request(request)
+    }
+
+    pub fn validate_resolved_request(&self, request: &GenerateRequest) -> Result<()> {
+        if request.seed != Some(self.seed)
+            || private_h3_request_identity(request)? != self.resolved_request_identity_sha256
+        {
             bail!("private H3 resolved request differs from allocation-free admission")
         }
-        Ok(resolved)
+        Ok(())
     }
 
     /// Revalidate this immutable DTO against an exact request and GPU route.
@@ -1581,7 +1586,7 @@ impl H3PrivateFl2VaAdmissionEvidence {
         available_device_bytes: u64,
         available_host_headroom_bytes: u64,
     ) -> Result<()> {
-        let resolved = self.resolve_request(request)?;
+        self.validate_resolved_request(request)?;
         self.base_factory_authority.validate_engine_seam(
             &self.canonical_model,
             device_ordinal,
@@ -1600,10 +1605,9 @@ impl H3PrivateFl2VaAdmissionEvidence {
         // killed the Ref2VA evidence the rest of admission had just derived.
         let recorded_contract = contract::capability_contract_for_model(&self.canonical_model);
         if !recorded_contract.is_some_and(|recorded| recorded.task == self.task)
-            || contract::validate_resolved_request_contract(&resolved, self.task)
+            || contract::validate_resolved_request_contract(request, self.task)
                 .map_err(|error| anyhow!("{}: {}", error.code, error.message))?
                 != self.mode
-            || private_h3_request_identity(&resolved)? != self.resolved_request_identity_sha256
             || self.device_id != device_id
             || self.device_ordinal != device_ordinal
             || self.compute_capability != compute_capability
@@ -2025,9 +2029,8 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         turbo_adapter.as_ref(),
     )?;
     let seed = admission_request.seed;
-    let mut resolved_request = request.clone();
-    resolved_request.seed = Some(seed);
-    let resolved_request_identity_sha256 = private_h3_request_identity(&resolved_request)?;
+    request.seed = Some(seed);
+    let resolved_request_identity_sha256 = private_h3_request_identity(request)?;
 
     let qwen_artifact = exact_qualified_qwen_artifact(&artifact_report)?;
     let qwen_header_identity = qwen_artifact
@@ -2232,7 +2235,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     };
     evidence.identity_sha256 = private_h3_admission_evidence_identity(&evidence);
     evidence.validate_for(
-        &resolved_request,
+        request,
         device_id,
         device_ordinal,
         compute_capability,
@@ -2261,12 +2264,13 @@ struct H3PrivateComponentDigest {
 }
 
 fn private_h3_request_identity(request: &GenerateRequest) -> Result<String> {
-    let bytes =
-        serde_json::to_vec(request).context("failed to serialize exact private H3 request")?;
+    let bytes = zeroize::Zeroizing::new(
+        serde_json::to_vec(request).context("failed to serialize exact private H3 request")?,
+    );
     let mut digest = Sha256::new();
     digest.update(b"mold.minimax-h3.private-admission-request.v1\0");
     digest.update((bytes.len() as u64).to_le_bytes());
-    digest.update(bytes);
+    digest.update(bytes.as_slice());
     Ok(format!("{:x}", digest.finalize()))
 }
 
@@ -2987,8 +2991,8 @@ fn prepare_reviewed_h3_private_fl2va_attempt(
         admission_evidence.admitted_available_device_bytes(),
         admission_evidence.admitted_host_headroom_bytes(),
     )?;
-    let resolved_request = admission_evidence.resolve_request(request)?;
-    let resolved_request_identity_sha256 = private_h3_request_identity(&resolved_request)?;
+    admission_evidence.validate_resolved_request(request)?;
+    let resolved_request_identity_sha256 = private_h3_request_identity(request)?;
     if frozen_factory != admission_evidence.base_factory_authority()
         || owner_fence.admission_evidence_identity_sha256 != admission_evidence.identity_sha256()
         || owner_fence.artifact_qualification_identity_sha256
@@ -9467,11 +9471,11 @@ mod tests {
     fn ref2va_admission_proceeds_past_the_missing_reviewed_record() {
         let models_root = tempfile::tempdir().unwrap();
         let staging_root = tempfile::tempdir().unwrap();
-        let request = ref2va_reopen_request();
+        let mut request = ref2va_reopen_request();
         let progress = ProgressReporter::default();
         let error = prepare_reviewed_h3_private_fl2va_admission(
             H3PrivateFl2VaAdmissionInput {
-                request: &request,
+                request: &mut request,
                 paths: H3PrivateFl2VaUatPaths {
                     models_root: models_root.path(),
                     staging_root: staging_root.path(),
