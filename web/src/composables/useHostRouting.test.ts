@@ -267,6 +267,46 @@ describe("useHostRouting", () => {
     expect(placementCall).not.toHaveBeenCalled();
   });
 
+  it("returns missing-model recovery without placement when canonical inventory knows it is absent", async () => {
+    const canonical: ServerCapabilities = {
+      gallery: { can_delete: true },
+      queue: {
+        heterogeneous_batch: true,
+        heterogeneous_batch_max_outputs: 64,
+        durable_batch_outcomes: true,
+        admission_protocol_version: 2,
+      },
+    };
+    statuses.set(ORIGIN_HOST_ID, status());
+    models.set(ORIGIN_HOST_ID, []);
+    capabilities.set(ORIGIN_HOST_ID, canonical);
+    const routing = useHostRouting();
+    await routing.refresh();
+    setGenerateTargetId(ORIGIN_HOST_ID);
+
+    await expect(
+      routing.resolveFeasible({
+        prompt: "missing",
+        model: "ltx-2.5-22b-distilled:int8-conv",
+        width: 512,
+        height: 512,
+        steps: 4,
+        guidance: 1,
+        seed: null,
+        batch_size: 1,
+      }),
+    ).resolves.toMatchObject({
+      kind: "infeasible",
+      perHost: [
+        {
+          hostId: ORIGIN_HOST_ID,
+          missingModel: { model: "ltx-2.5-22b-distilled:int8-conv" },
+        },
+      ],
+    });
+    expect(placementCall).not.toHaveBeenCalled();
+  });
+
   it("bounds the first queue read by current status capacity and merges live-only rows once", async () => {
     statuses.set(ORIGIN_HOST_ID, status({ queue_capacity: 17 }));
     models.set(ORIGIN_HOST_ID, []);

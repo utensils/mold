@@ -1410,7 +1410,7 @@ describe("MobileApp Output field", () => {
     const action = wrapper.get("[data-test='mobile-create-action']");
     expect(action.get("[data-test='mobile-develop-button']").attributes("disabled")).toBeDefined();
     expect(action.get("[data-test='mobile-develop-blocker']").text()).toContain(
-      "Choose an installed model before generating.",
+      "Choose a model before generating.",
     );
   });
 
@@ -1787,6 +1787,175 @@ describe("MobileApp generation queue", () => {
     expect(openStreams.filter((stream) => stream.path === "/api/generate/stream")).toHaveLength(0);
     expect(wrapper.text()).not.toContain("Checking placement");
     expect(wrapper.text()).toContain("Accepted");
+  });
+
+  it("confirms and tracks the exact model download when a pinned v2 host is missing it", async () => {
+    let installed = false;
+    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve(installed ? [model] : []);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          queue: {
+            heterogeneous_batch: true,
+            heterogeneous_batch_max_outputs: 64,
+            durable_batch_outcomes: true,
+            admission_protocol_version: 2,
+          },
+        });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        const clientBatchId = JSON.parse(String(init.body)).client_batch_id as string;
+        return Promise.resolve({
+          id: "downloaded-model-batch",
+          client_batch_id: clientBatchId,
+          instance_id: "studio-id",
+          durable: true,
+          children: [
+            {
+              index: 1,
+              job_id: "downloaded-model-job",
+              state: "accepted",
+              created_at_ms: 10,
+              updated_at_ms: 11,
+            },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    const pullResponse = deferred<string | null>();
+    startCatalogDownload.mockReturnValue(pullResponse.promise);
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    applyModelDefaults(liveForm, model);
+    await submitPrompt("download before admission");
+
+    const sheet = wrapper.get("[data-test='mobile-missing-model-sheet']");
+    expect(document.body.textContent).toContain(`${model.name} isn't installed on Studio`);
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+    expect(startCatalogDownload).not.toHaveBeenCalled();
+
+    await sheet.get("[data-test='mobile-pull-expansion']").trigger("click");
+    await flushPromises();
+    const downloadStream = openStreams
+      .filter((stream) => stream.path === "/api/downloads/stream")
+      .at(-1)!;
+    downloadStream.options.onEvent(
+      "download",
+      JSON.stringify({
+        type: "snapshot",
+        listing: { active_jobs: [], queued: [], history: [] },
+      }),
+    );
+    await flushPromises();
+    expect(startCatalogDownload).toHaveBeenCalledWith(model.name, target, false);
+    expect(sheet.text()).toContain(`Starting ${model.name} on Studio`);
+    pullResponse.resolve("model-job");
+    await flushPromises();
+
+    downloadStream.options.onEvent(
+      "download",
+      JSON.stringify({ type: "enqueued", id: "model-job", model: model.name, position: 0 }),
+    );
+    await flushPromises();
+
+    downloadStream.options.onEvent(
+      "download",
+      JSON.stringify({ type: "job_done", id: "other-job", model: model.name }),
+    );
+    await flushPromises();
+    expect(sheet.text()).not.toContain("Done");
+
+    installed = true;
+    downloadStream.options.onEvent(
+      "download",
+      JSON.stringify({ type: "job_done", id: "model-job", model: model.name }),
+    );
+    await flushPromises();
+    expect(
+      apiJsonTo.mock.calls.filter(([, path]) => path === "/api/models").length,
+    ).toBeGreaterThan(1);
+    await vi.waitFor(() =>
+      expect(
+        wrapper
+          ?.get("[data-test='mobile-missing-model-sheet']")
+          .get("[data-test='mobile-retry-expansion']")
+          .text(),
+      ).toBe("Done"),
+    );
+    expect(
+      apiJsonTo.mock.calls.filter(([, path]) => path === "/api/models").length,
+    ).toBeGreaterThan(1);
+
+    await wrapper
+      .get("[data-test='mobile-missing-model-sheet']")
+      .get("[data-test='mobile-retry-expansion']")
+      .trigger("click");
+    await submitPrompt("download before admission");
+    expect(
+      apiJsonTo.mock.calls.filter(([, path]) => path === "/api/generation-batches"),
+    ).toHaveLength(1);
+    expect(wrapper.get("[data-test='mobile-missing-model-sheet']").classes()).not.toContain(
+      "is-open",
+    );
+  });
+
+  it("offers the same missing-model recovery for a restored sequence", async () => {
+    const restoredSequenceModel: ModelEntry = {
+      ...model,
+      name: "ltx-video-0.9.8-2b-dev:bf16",
+      family: "ltx-video",
+      default_frames: 25,
+      default_fps: 30,
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          queue: {
+            heterogeneous_batch: true,
+            heterogeneous_batch_max_outputs: 64,
+            durable_batch_outcomes: true,
+            admission_protocol_version: 2,
+          },
+        });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    const pinia = createPinia();
+    wrapper = mountMobileApp(pinia);
+    await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    applyModelDefaults(liveForm, restoredSequenceModel);
+    const draft = useSequenceDraftStore(pinia);
+    draft.output = "sequence";
+    draft.ensureClips(restoredSequenceModel.default_frames ?? 97);
+    draft.clips[0]!.prompt = "opening shot";
+    draft.clips[1]!.prompt = "closing shot";
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-missing-model-sheet']").classes()).toContain("is-open");
+    expect(document.body.textContent).toContain(
+      `${restoredSequenceModel.name} isn't installed on Studio`,
+    );
+    expect(previewChainPlacement).not.toHaveBeenCalled();
   });
 
   it("keeps accepting durable prints while earlier admissions are still awaiting responses", async () => {

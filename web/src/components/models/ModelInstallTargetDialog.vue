@@ -29,9 +29,20 @@ const targets = useModelInstallTargets();
       @close="targets.cancel()"
     >
       <h2 class="pick__title">
-        Install {{ targets.pending.value.displayName }}
+        {{
+          targets.pending.value.confirmation
+            ? "Model download required"
+            : "Install"
+        }}
+        {{ targets.pending.value.displayName }}
       </h2>
-      <p class="pick__lede">Choose which machine to send it to.</p>
+      <p class="pick__lede">
+        {{
+          targets.pending.value.confirmation
+            ? "Confirm the machine that should download it before this generation continues."
+            : "Choose which machine to send it to."
+        }}
+      </p>
       <div class="pick__list">
         <button
           v-for="target in targets.pending.value.targets"

@@ -20,6 +20,7 @@ import {
   type GenerationHostSubmissionPolicy,
   type GenerationTargetPolicy,
 } from "@studio/lib/generationSubmissionPolicy";
+import { modelPresenceOnHost } from "@studio/lib/modelInstallTargets";
 import type { MobileHost } from "./hosts";
 import { mobileIdentityRouteRefusal } from "./identity";
 
@@ -50,6 +51,7 @@ export type MobileAutomaticRoute =
       placement: GenerationPlacementPreview | null;
       legacyUnsupported: boolean;
     }
+  | { kind: "missing_model"; host: MobileHost; route: HostRoute; model: string }
   | { kind: "error"; message: string }
   | { kind: "abandoned" };
 
@@ -59,6 +61,7 @@ export type MobilePinnedPlacement =
       placement: GenerationPlacementPreview | null;
       legacyUnsupported: boolean;
     }
+  | { kind: "missing_model"; model: string }
   | { kind: "error"; message: string }
   | { kind: "abandoned" };
 
@@ -127,6 +130,9 @@ export interface RouteAutomaticMobileGenerationOptions {
   isCurrent?: () => boolean;
   signal?: AbortSignal;
   settleMs?: number;
+  model?: string;
+  modelOwnerIds?: readonly string[];
+  inventoryKnown?: (hostId: string) => boolean;
 }
 
 export interface PreviewPinnedMobileGenerationOptions {
@@ -138,6 +144,9 @@ export interface PreviewPinnedMobileGenerationOptions {
   requireAuthoritative: boolean;
   isCurrent?: () => boolean;
   signal?: AbortSignal;
+  model?: string;
+  modelOwnerIds?: readonly string[];
+  inventoryKnown?: boolean;
 }
 
 function automaticTargetPolicy(policy: string): GenerationTargetPolicy {
@@ -186,6 +195,18 @@ export async function previewPinnedMobileGeneration(
     target: { kind: "pinned", hostId: options.route.hostId },
   });
   if (submission.routing === "none") {
+    if (
+      modelPresenceOnHost(
+        options.route.hostId,
+        options.modelOwnerIds ?? [],
+        options.inventoryKnown ?? false,
+      ) === "missing"
+    ) {
+      return {
+        kind: "missing_model",
+        model: options.model ?? String(options.request.model ?? ""),
+      };
+    }
     return { kind: "placement", placement: null, legacyUnsupported: false };
   }
   let placement: GenerationPlacementPreview | null = null;
@@ -257,6 +278,7 @@ export async function routeAutomaticMobileGeneration(
   const isCurrent = options.isCurrent ?? (() => true);
   const carriesIdentity = Boolean(options.request.id_image);
   const probes: MobileRoutingObservation[] = [];
+  const knownMissing: MobileRoutingObservation[] = [];
   const controllers = options.candidates.map(() => new AbortController());
   let pending = options.candidates.length;
   let resolveAllSettled!: () => void;
@@ -283,7 +305,7 @@ export async function routeAutomaticMobileGeneration(
           target: automaticTargetPolicy(options.policy),
         });
         if (submission.routing === "telemetry_only") {
-          probes.push({
+          const observation = {
             ...candidate,
             route,
             roundTripMs: elapsed(),
@@ -291,8 +313,19 @@ export async function routeAutomaticMobileGeneration(
             error: null,
             legacyUnsupported: false,
             telemetryOnly: true,
-          });
-          resolveFirstPlanned();
+          };
+          if (
+            modelPresenceOnHost(
+              candidate.host.id,
+              options.modelOwnerIds ?? [],
+              options.inventoryKnown?.(candidate.host.id) ?? false,
+            ) === "missing"
+          ) {
+            knownMissing.push(observation);
+          } else {
+            probes.push(observation);
+            resolveFirstPlanned();
+          }
           return;
         }
         const preview = options.chain
@@ -404,6 +437,24 @@ export async function routeAutomaticMobileGeneration(
       placement: winner.probe.preview,
       legacyUnsupported: false,
     };
+  }
+  if (knownMissing.length > 0) {
+    const views = knownMissing.map((probe) => probe.view);
+    const selected =
+      options.policy === CAPABLE_TARGET_ID
+        ? pickMostCapableHost(views, null, { lowestIdWins: true })
+        : pickAutoHost(views, { lowestIdWins: true });
+    const probe = selected
+      ? knownMissing.find((entry) => entry.host.id === selected.id)
+      : knownMissing[0];
+    if (probe) {
+      return {
+        kind: "missing_model",
+        host: probe.host,
+        route: probe.route,
+        model: options.model ?? String(options.request.model ?? ""),
+      };
+    }
   }
 
   const legacy = settledProbes.filter(

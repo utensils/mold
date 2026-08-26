@@ -3,14 +3,24 @@ import { computed } from "vue";
 import { expansionPullPresentation, type ExpansionPullView } from "../lib/expansionPull";
 import type { ModelEntry } from "../lib/api/types";
 
-const props = defineProps<{
-  model: string;
-  hostLabel: string;
-  error: string;
-  status: ExpansionPullView;
-  etaSeconds: number | null;
-  models?: ModelEntry[] | undefined;
-}>();
+const props = withDefaults(
+  defineProps<{
+    model: string;
+    hostLabel: string;
+    error: string;
+    status: ExpansionPullView;
+    etaSeconds: number | null;
+    models?: ModelEntry[] | undefined;
+    pullLabel?: string;
+    readyLabel?: string;
+    retryLabel?: string;
+  }>(),
+  {
+    pullLabel: "Pull expansion model",
+    readyLabel: "Retry expansion",
+    retryLabel: "",
+  },
+);
 defineEmits<{ pull: []; "retry-expansion": [] }>();
 
 const presentation = computed(() =>
@@ -65,7 +75,7 @@ const presentation = computed(() =>
       data-test="mobile-pull-expansion"
       @click="$emit('pull')"
     >
-      Pull expansion model
+      {{ pullLabel }}
     </button>
     <button
       v-else-if="status.kind === 'ready'"
@@ -74,7 +84,7 @@ const presentation = computed(() =>
       data-test="mobile-retry-expansion"
       @click="$emit('retry-expansion')"
     >
-      Retry expansion
+      {{ readyLabel }}
     </button>
     <button
       v-else-if="status.kind === 'failed' || status.kind === 'cancelled'"
@@ -83,7 +93,7 @@ const presentation = computed(() =>
       data-test="mobile-retry-expansion-pull"
       @click="$emit('pull')"
     >
-      Retry {{ presentation.modelLabel }} pull on {{ hostLabel }}
+      {{ retryLabel || `Retry ${presentation.modelLabel} pull on ${hostLabel}` }}
     </button>
   </section>
 </template>

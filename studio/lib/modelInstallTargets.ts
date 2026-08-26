@@ -35,6 +35,24 @@ export interface ModelInstallPlan<H> {
   label: "Pull" | "Repair";
 }
 
+export type ModelPresence = "installed" | "missing" | "unknown";
+
+/**
+ * Read one host's model presence from the same inventory evidence used by the
+ * install picker. Canonical generation routing uses this before skipping the
+ * expensive placement preview: a known absence must enter the existing
+ * confirm-and-download flow, while an unread inventory remains unknown and is
+ * left for the server to decide at admission.
+ */
+export function modelPresenceOnHost(
+  hostId: string,
+  ownerIds: Iterable<string> | null | undefined,
+  inventoryKnown: boolean,
+): ModelPresence {
+  if (new Set(ownerIds ?? []).has(hostId)) return "installed";
+  return inventoryKnown ? "missing" : "unknown";
+}
+
 /**
  * `hosts` must already be narrowed to machines that can accept a download
  * (reachable, addressable). `ownerIds` are the machines known to have the

@@ -35,6 +35,8 @@ export interface PendingInstallChoice {
   /** What the dialog calls the model. */
   displayName: string;
   targets: InstallTarget[];
+  /** Create uses the picker as an explicit consent step even for one host. */
+  confirmation?: boolean;
 }
 
 export interface InstallChoiceRequest {
@@ -48,6 +50,8 @@ export interface InstallChoiceRequest {
    * `installed` flag, or a row from the origin's installed shelf) — positive
    * knowledge that lands before the per-host poll does. */
   ownedByOrigin?: boolean;
+  /** Never start a generation-triggered model pull without user consent. */
+  confirm?: boolean;
 }
 
 export type InstallChoice =
@@ -119,7 +123,7 @@ export function useModelInstallTargets(): ModelInstallTargets {
   ): Promise<InstallChoice> {
     const plan = planFor(req.modelId, req.ownedByOrigin, req.restrictToHostIds);
     if (plan.targets.length === 0) return { kind: "target", target: null };
-    if (plan.targets.length === 1) {
+    if (plan.targets.length === 1 && !req.confirm) {
       return { kind: "target", target: plan.targets[0] };
     }
     // Supersede any picker still on screen rather than stacking two.
@@ -130,6 +134,7 @@ export function useModelInstallTargets(): ModelInstallTargets {
         modelId: req.modelId,
         displayName: req.displayName,
         targets: plan.targets,
+        confirmation: req.confirm === true,
       };
     });
     return chosen ? { kind: "target", target: chosen } : { kind: "cancelled" };

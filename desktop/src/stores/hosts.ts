@@ -40,6 +40,7 @@ import type {
 import type { ReferenceUploadCapabilities } from "@studio/api/referenceUploads";
 import type { DurableMediaCapabilities } from "@studio/api/generationAdmission";
 import { generationHostSubmissionPolicy } from "@studio/lib/generationSubmissionPolicy";
+import { modelPresenceOnHost } from "@studio/lib/modelInstallTargets";
 import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
 import { useDownloadsStore } from "./downloads";
@@ -877,6 +878,7 @@ export const useHostsStore = defineStore("hosts", {
           error: unknown;
           legacyUnsupported: boolean;
           telemetryOnly: boolean;
+          knownMissingModel: boolean;
           roundTripMs: number;
         };
         const probes: PlacementProbe[] = [];
@@ -918,16 +920,26 @@ export const useHostsStore = defineStore("hosts", {
                   : "generation",
               );
               if (submission.routing === "telemetry_only" || submission.routing === "none") {
+                const models = useHostModelsStore();
+                const knownMissingModel =
+                  modelPresenceOnHost(
+                    host.id,
+                    models.hostsFor(request.model),
+                    (models.byHost[host.id]?.fetchedAt ?? 0) > 0,
+                  ) === "missing";
                 probes.push({
                   host,
                   preview: null,
                   error: null,
                   legacyUnsupported: false,
-                  telemetryOnly: true,
+                  telemetryOnly: !knownMissingModel,
+                  knownMissingModel,
                   roundTripMs: Math.max(0, performance.now() - started),
                 });
-                anyPlanned = true;
-                resolveFirstPlanned();
+                if (!knownMissingModel) {
+                  anyPlanned = true;
+                  resolveFirstPlanned();
+                }
                 return;
               }
               const preview =
@@ -956,6 +968,7 @@ export const useHostsStore = defineStore("hosts", {
                 error: null,
                 legacyUnsupported: false,
                 telemetryOnly: false,
+                knownMissingModel: false,
                 roundTripMs: Math.max(0, performance.now() - started),
               });
               if (classifyPlacementPreview(preview) === "planned") {
@@ -970,6 +983,7 @@ export const useHostsStore = defineStore("hosts", {
                 legacyUnsupported:
                   error instanceof ApiError && (error.status === 404 || error.status === 405),
                 telemetryOnly: false,
+                knownMissingModel: false,
                 roundTripMs: Math.max(0, performance.now() - started),
               });
             } finally {
@@ -1026,6 +1040,7 @@ export const useHostsStore = defineStore("hosts", {
               ),
               legacyUnsupported: false,
               telemetryOnly: false,
+              knownMissingModel: false,
               roundTripMs: autoDeadlineMs,
             });
           }
@@ -1139,6 +1154,21 @@ export const useHostsStore = defineStore("hosts", {
 
         const failures = settledProbes.flatMap<HostFeasibilityFailure>((probe) => {
           const classification = classifyPlacementPreview(probe.preview);
+          if (probe.knownMissingModel) {
+            const route = hostRoute(probe.host, this.capabilities[probe.host.id]);
+            if (!route) return [];
+            return [
+              {
+                kind: "infeasible",
+                hostId: probe.host.id,
+                label: probe.host.label,
+                route,
+                reason: `model '${request.model}' is not installed on this machine`,
+                missingComponents: [],
+                missingModel: { model: request.model, missingComponents: [] },
+              },
+            ];
+          }
           if (
             requireAuthoritative &&
             (probe.legacyUnsupported || classification === "unsupported")

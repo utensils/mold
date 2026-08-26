@@ -19,7 +19,7 @@ describe("MobileApp prompt requirement", () => {
     const occurrences = mobileAppSource.match(/promptMissing(\.value)?\b/g) ?? [];
     // definition + the shared Develop-disabled computation + the `generate()` guard
     expect(occurrences.length).toBeGreaterThanOrEqual(3);
-    expect(mobileAppSource).toMatch(/promptMissing\.value \|\|\s*!selectedModelAvailable\.value/);
+    expect(mobileAppSource).toMatch(/promptMissing\.value \|\|\s*!form\.model\.trim\(\)/);
     expect(mobileAppSource).toContain(':disabled="developDisabled"');
     // The bare check must not survive anywhere in the generation path; only
     // "Use as prompt" may still skip a print with no recorded prompt.

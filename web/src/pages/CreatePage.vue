@@ -3525,6 +3525,7 @@ async function offerMissingModelPull(
     modelId: model,
     displayName: modelDisplayNameForId(model, models.value),
     restrictToHostIds: candidateIds,
+    confirm: true,
   });
   if (signal?.aborted) return true;
   // An explicit cancel is an answer: nothing was queued, and the dead-end

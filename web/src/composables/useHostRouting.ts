@@ -40,6 +40,7 @@ import type { DeviceInfo } from "@studio/api/devices";
 import { ApiError, type ApiTarget } from "@studio/api/client";
 import { profileHashConflict } from "@studio/lib/profileFleet";
 import { generationHostSubmissionPolicy } from "@studio/lib/generationSubmissionPolicy";
+import { modelPresenceOnHost } from "@studio/lib/modelInstallTargets";
 import {
   mergeQueueEntries,
   predictedCompletionUnixMs,
@@ -885,6 +886,7 @@ async function resolveFeasibleWithPreview(
           preview: null,
           legacyUnsupported: false,
           telemetryOnly: false,
+          knownMissingModel: false,
           error: "machine disappeared from the host registry",
           roundTripMs: 0,
         };
@@ -912,11 +914,18 @@ async function resolveFeasibleWithPreview(
           submission.routing === "telemetry_only" ||
           submission.routing === "none"
         ) {
+          const knownMissingModel =
+            modelPresenceOnHost(
+              candidate.id,
+              hostsForModel(model),
+              inventoryKnown(candidate.id),
+            ) === "missing";
           return {
             candidate,
             preview: null,
             legacyUnsupported: false,
-            telemetryOnly: true,
+            telemetryOnly: !knownMissingModel,
+            knownMissingModel,
             error: null,
             roundTripMs: Math.max(0, performance.now() - started),
           };
@@ -927,6 +936,7 @@ async function resolveFeasibleWithPreview(
           preview,
           legacyUnsupported: false,
           telemetryOnly: false,
+          knownMissingModel: false,
           error: null,
           roundTripMs: Math.max(0, performance.now() - started),
         };
@@ -944,6 +954,7 @@ async function resolveFeasibleWithPreview(
             error instanceof ApiError &&
             (error.status === 404 || error.status === 405),
           telemetryOnly: false,
+          knownMissingModel: false,
           error: probeError,
           roundTripMs: Math.max(0, performance.now() - started),
         };
@@ -1093,6 +1104,17 @@ async function resolveFeasibleWithPreview(
     ];
   });
   const infeasible = probes.flatMap((probe) => {
+    if (probe.knownMissingModel) {
+      return [
+        {
+          hostId: probe.candidate.id,
+          label: probe.candidate.label,
+          reason: `model '${model}' is not installed on this machine`,
+          missingComponents: [],
+          missingModel: { model, missingComponents: [] },
+        },
+      ];
+    }
     if (
       !probe.preview ||
       classifyPlacementPreview(probe.preview) !== "infeasible"
@@ -1113,6 +1135,7 @@ async function resolveFeasibleWithPreview(
     .filter((probe) => {
       const classification = classifyPlacementPreview(probe.preview);
       return (
+        !probe.knownMissingModel &&
         (requireAuthoritative || !probe.legacyUnsupported) &&
         (!probe.preview ||
           classification === "invalid" ||
