@@ -63,6 +63,23 @@ export interface GenerationBatchStatusResponse {
 export type GenerationBatchLookup =
   { kind: "found"; batch: GenerationBatchStatus } | { kind: "missing" };
 
+/** A response that proves the server rejected the operation before commit.
+ * Timeout-style client responses, throttling, server errors, transport loss,
+ * and response-decode failures are all ambiguous and must be reconciled by
+ * the caller's durable identity. */
+export function isDefiniteGenerationAdmissionRejection(
+  error: unknown,
+): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 408 &&
+    error.status !== 425 &&
+    error.status !== 429
+  );
+}
+
 export interface DurableGenerationQueueCapabilities {
   heterogeneous_batch?: boolean;
   heterogeneous_batch_max_outputs?: number | null;

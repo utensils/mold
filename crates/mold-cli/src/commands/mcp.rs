@@ -18,7 +18,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Mutex;
 
 use crate::commands::durable_generation::{
-    hydrate_canonical_artifact, reconcile_canonical_authority_observed, retry_canonical_child,
+    hydrate_canonical_artifact, reconcile_ambiguous_retry_observed,
+    reconcile_canonical_authority_observed, retry_canonical_child,
     try_canonical_generation_observed, try_canonical_singleton_artifact, CanonicalGenerationEvent,
     CanonicalGenerationReport, CanonicalRetrySubmission,
 };
@@ -580,7 +581,9 @@ impl McpServer {
         };
 
         self.jobs.mark_retry_queued(&args.job_id).await;
-        if let CanonicalRetrySubmission::Ambiguous { error } = retry_result {
+        let retry_was_ambiguous =
+            matches!(retry_result, CanonicalRetrySubmission::Ambiguous { .. });
+        if let CanonicalRetrySubmission::Ambiguous { error } = &retry_result {
             self.jobs
                 .record_reconciliation_error(
                     &args.job_id,
@@ -600,9 +603,18 @@ impl McpServer {
                     event_jobs.apply_canonical_event(&event_job_id, event).await;
                 }
             });
-            let status =
+            let status = if retry_was_ambiguous {
+                reconcile_ambiguous_retry_observed(
+                    &client,
+                    &retry.authority,
+                    &retry.durable_job_id,
+                    Some(&event_tx),
+                )
+                .await
+            } else {
                 reconcile_canonical_authority_observed(&client, &retry.authority, Some(&event_tx))
-                    .await;
+                    .await
+            };
             drop(event_tx);
             let _ = event_task.await;
             match status {
@@ -1288,8 +1300,12 @@ impl AsyncJobRegistry {
             return;
         };
         let (authority, status) = match event {
-            CanonicalGenerationEvent::Admitted { authority, status }
-            | CanonicalGenerationEvent::Snapshot { authority, status } => (authority, status),
+            CanonicalGenerationEvent::Admitted {
+                authority, status, ..
+            }
+            | CanonicalGenerationEvent::Snapshot {
+                authority, status, ..
+            } => (authority, status),
             CanonicalGenerationEvent::ReconcileDelayed { authority, error } => {
                 job.transport = AsyncGenerationTransport::Canonical;
                 job.authority = Some(authority);

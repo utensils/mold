@@ -10,6 +10,7 @@ pub mod config_keys;
 pub mod control;
 pub mod cuda_distribution;
 pub mod download;
+pub mod durable_generation;
 pub mod error;
 pub mod expand;
 pub mod expand_prompts;

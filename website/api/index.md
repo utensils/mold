@@ -10,6 +10,10 @@ clients, and custom integrations on one generation contract.
 | -------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `POST`   | `/api/generate`                               | Generate images from prompt                                                                                       |
 | `POST`   | `/api/generate/stream`                        | Generate with SSE progress streaming                                                                              |
+| `POST`   | `/api/generation-batches`                     | Durably admit an idempotent ordered batch of singleton generations                                                |
+| `GET`    | `/api/generation-batches/:id`                 | Read one durable generation batch by server batch ID                                                              |
+| `GET`    | `/api/generation-batches/by-client/:id`       | Recover a durable generation batch by its client idempotency ID                                                   |
+| `POST`   | `/api/generation-batches/status`              | Reconcile a bounded set of durable generation batches                                                             |
 | `POST`   | `/api/generate/estimate`                      | Estimate request-sensitive peak memory for a generation request                                                   |
 | `POST`   | `/api/generate/chain`                         | Chained video generation (LTX-2, LTX-Video, Wan)                                                                  |
 | `GET`    | `/api/capabilities/ltx2-control-adapters`     | Compatible official IC-LoRA controls for an installed LTX-2 model                                                 |
@@ -68,6 +72,7 @@ clients, and custom integrations on one generation contract.
 | `GET`    | `/api/queue`                                  | Server-authoritative job listing (queued + running, UUIDv4 ids); used by the SPA to reconcile dropped SSE streams |
 | `PATCH`  | `/api/queue/:id`                              | Update the preferred GPU lane and/or dispatch position for a queued job                                           |
 | `DELETE` | `/api/queue/:id`                              | Cancel a still-queued generation job                                                                              |
+| `POST`   | `/api/queue/:id/retry`                        | Retry a held child using its complete fenced batch authority                                                      |
 | `GET`    | `/api/history`                                | Prompt history, newest first (`?query=` substring filter, `?limit=` up to 500)                                    |
 | `DELETE` | `/api/history`                                | Clear prompt history (`?keep=N` trims to the most recent N)                                                       |
 | `GET`    | `/api/capabilities`                           | Feature capabilities, including optional per-host expansion and LAN-discovery state                               |

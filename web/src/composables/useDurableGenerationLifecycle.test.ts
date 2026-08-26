@@ -6,6 +6,7 @@ import type {
   GenerationBatchStatus,
   GenerationBatchStatusResponse,
 } from "@studio/api/generationAdmission";
+import { ApiError } from "@studio/api/client";
 
 const admitGenerationBatch = vi.hoisted(() => vi.fn());
 const lookupGenerationBatchByClientId = vi.hoisted(() => vi.fn());
@@ -15,6 +16,9 @@ const generateStream = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const cancelQueueJob = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const mutateQueueJobOnExpectedInstance = vi.hoisted(() =>
   vi.fn().mockResolvedValue(undefined),
+);
+const retryQueueJobRecoveringAmbiguity = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ kind: "accepted" }),
 );
 const listGalleryFrom = vi.hoisted(() => vi.fn());
 const fetchGalleryBlob = vi.hoisted(() => vi.fn());
@@ -32,6 +36,7 @@ vi.mock("@microsoft/fetch-event-source", () => ({ fetchEventSource }));
 vi.mock("@studio/api/queuePlan", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@studio/api/queuePlan")>()),
   mutateQueueJobOnExpectedInstance,
+  retryQueueJobRecoveringAmbiguity,
 }));
 
 vi.mock("../api", () => ({
@@ -50,6 +55,14 @@ vi.mock("../lib/galleryMedia", () => ({
 import { __testing__, useGenerateStream, type Job } from "./useGenerateStream";
 
 const nativeStorageSetItem = localStorage.setItem;
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 function request(prompt = "a patient red fox"): GenerateRequestWire {
   return {
@@ -211,6 +224,8 @@ beforeEach(() => {
   generateStream.mockClear();
   cancelQueueJob.mockClear();
   mutateQueueJobOnExpectedInstance.mockClear();
+  retryQueueJobRecoveringAmbiguity.mockReset();
+  retryQueueJobRecoveringAmbiguity.mockResolvedValue({ kind: "accepted" });
   listGalleryFrom.mockReset();
   fetchGalleryBlob.mockReset();
   fetchGalleryThumbnailBlob.mockReset();
@@ -386,48 +401,55 @@ describe("web durable generation lifecycle", () => {
     }
   });
 
-  it("recovers an ambiguous POST only by UUID and never falls back after dispatch", async () => {
-    let generationWrites = 0;
-    const storage = vi
-      .spyOn(localStorage, "setItem")
-      .mockImplementation(function (key, value) {
-        if (key === "mold.generate.jobs" && generationWrites++ > 0) {
-          throw new DOMException("quota exceeded", "QuotaExceededError");
-        }
-        return Reflect.apply(nativeStorageSetItem, localStorage, [key, value]);
-      });
-    try {
-      admitGenerationBatch.mockRejectedValue(
-        new TypeError("connection closed"),
-      );
-      lookupGenerationBatchByClientId.mockImplementation(
-        (_target: unknown, clientBatchId: string) =>
-          Promise.resolve({ kind: "found", batch: batch(clientBatchId) }),
-      );
-      const stream = useGenerateStream();
-      const id = stream.submit(request(), { kind: "single" }, route);
+  it.each([
+    ["commit-then-500", new ApiError("response lost", 500)],
+    ["disconnect", new TypeError("connection closed")],
+  ])(
+    "recovers an ambiguous %s POST only by UUID and never falls back",
+    async (_case, failure) => {
+      let generationWrites = 0;
+      const storage = vi
+        .spyOn(localStorage, "setItem")
+        .mockImplementation(function (key, value) {
+          if (key === "mold.generate.jobs" && generationWrites++ > 0) {
+            throw new DOMException("quota exceeded", "QuotaExceededError");
+          }
+          return Reflect.apply(nativeStorageSetItem, localStorage, [
+            key,
+            value,
+          ]);
+        });
+      try {
+        admitGenerationBatch.mockRejectedValue(failure);
+        lookupGenerationBatchByClientId.mockImplementation(
+          (_target: unknown, clientBatchId: string) =>
+            Promise.resolve({ kind: "found", batch: batch(clientBatchId) }),
+        );
+        const stream = useGenerateStream();
+        const id = stream.submit(request(), { kind: "single" }, route);
 
-      await vi.waitFor(() =>
-        expect(
-          stream.jobs.value.find((job) => job.id === id)?.serverId,
-        ).toMatch(/^job-/),
-      );
-      const clientBatchId = stream.jobs.value.find((job) => job.id === id)!
-        .durableBatch!.clientBatchId;
-      const persisted = localStorage.getItem(
-        `mold.generate.jobs.recovery.${clientBatchId}`,
-      )!;
-      expect(persisted).toContain(clientBatchId);
-      expect(persisted).not.toContain("secret");
-      expect(lookupGenerationBatchByClientId).toHaveBeenCalledWith(
-        expect.anything(),
-        clientBatchId,
-      );
-      expect(generateStream).not.toHaveBeenCalled();
-    } finally {
-      storage.mockRestore();
-    }
-  });
+        await vi.waitFor(() =>
+          expect(
+            stream.jobs.value.find((job) => job.id === id)?.serverId,
+          ).toMatch(/^job-/),
+        );
+        const clientBatchId = stream.jobs.value.find((job) => job.id === id)!
+          .durableBatch!.clientBatchId;
+        const persisted = localStorage.getItem(
+          `mold.generate.jobs.recovery.${clientBatchId}`,
+        )!;
+        expect(persisted).toContain(clientBatchId);
+        expect(persisted).not.toContain("secret");
+        expect(lookupGenerationBatchByClientId).toHaveBeenCalledWith(
+          expect.anything(),
+          clientBatchId,
+        );
+        expect(generateStream).not.toHaveBeenCalled();
+      } finally {
+        storage.mockRestore();
+      }
+    },
+  );
 
   it("persists each deep outstanding batch independently instead of rewriting the backlog", () => {
     admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
@@ -586,9 +608,15 @@ describe("web durable generation lifecycle", () => {
     reconcileGenerationBatches.mockResolvedValue(statusResponse([held]));
     await __testing__.reconcileDurableHost(route.hostId);
 
-    await stream.retry(id);
+    const confirmation = deferred<{ kind: "accepted" }>();
+    retryQueueJobRecoveringAmbiguity.mockReturnValue(confirmation.promise);
+    const retry = stream.retry(id);
 
-    expect(mutateQueueJobOnExpectedInstance).toHaveBeenCalledWith(
+    expect(job).toMatchObject({ retryable: false, retrying: true });
+    confirmation.resolve({ kind: "accepted" });
+    await retry;
+
+    expect(retryQueueJobRecoveringAmbiguity).toHaveBeenCalledWith(
       route.target,
       {
         instanceId: route.instanceId,
@@ -596,7 +624,6 @@ describe("web durable generation lifecycle", () => {
         clientBatchId,
         jobId: `job-${clientBatchId}-1`,
       },
-      "retry",
     );
   });
 

@@ -163,13 +163,15 @@ import {
   listQueue,
   mergeQueueEntries,
   queuePageRequestForCapacity,
-  retryQueueJob,
+  retryQueueJobRecoveringAmbiguity,
   type QueueListing,
 } from "@studio/api/queuePlan";
 import {
   admitGenerationBatch,
   canonicalGenerationBatchLimit,
   chunkGenerationBatchRequests,
+  isDefiniteGenerationAdmissionRejection,
+  lookupGenerationBatchByClientId,
   reconcileGenerationBatches,
 } from "@studio/api/generationAdmission";
 import {
@@ -3043,6 +3045,11 @@ async function reconcileMobileDurableHost(
         durableGenerationRecoveries.value = durableGenerationRecoveries.value.map(
           (recovery) => merged.get(recovery.tracker.clientBatchId) ?? recovery,
         );
+        for (const batch of response.batches) {
+          for (const child of batch.children) {
+            durableGenerationRetryAttempts.delete(child.job_id);
+          }
+        }
       }
       persistDurableGenerationRecoveries();
       syncDurableGenerationJobs();
@@ -3110,8 +3117,7 @@ async function submitMobileDurableGenerationChunk(input: {
       batch: admitted,
     });
   } catch (error) {
-    const authoritativeRejection =
-      error instanceof ApiError && error.status >= 400 && error.status < 500;
+    const authoritativeRejection = isDefiniteGenerationAdmissionRejection(error);
     const latest =
       durableGenerationRecoveries.value.find(
         (candidate) => candidate.tracker.clientBatchId === clientBatchId,
@@ -3119,12 +3125,26 @@ async function submitMobileDurableGenerationChunk(input: {
     recovery = reduceMobileDurableGenerationRecovery(
       latest,
       authoritativeRejection
-        ? { type: "admission_rejected", error: error.message }
+        ? {
+            type: "admission_rejected",
+            error: error instanceof Error ? error.message : String(error),
+          }
         : {
             type: "admission_uncertain",
             error: error instanceof Error ? error.message : String(error),
           },
     );
+    if (!authoritativeRejection) {
+      const lookup = await lookupGenerationBatchByClientId(input.route.target, clientBatchId).catch(
+        () => null,
+      );
+      if (lookup?.kind === "found") {
+        recovery = reduceMobileDurableGenerationRecovery(recovery, {
+          type: "batch_snapshot",
+          batch: lookup.batch,
+        });
+      }
+    }
   }
   replaceDurableRecovery(recovery);
   persistDurableGenerationRecoveries();
@@ -6161,13 +6181,31 @@ async function retryHeldGeneration(job: Job): Promise<void> {
     return;
   }
   durableGenerationRetryAttempts.add(job.id);
+  let retryStillUncertain = false;
   try {
-    await retryQueueJob(mobileHostTarget(host), {
+    const outcome = await retryQueueJobRecoveringAmbiguity(mobileHostTarget(host), {
       instanceId: durable.recovery.tracker.expectedInstanceId,
       batchId: durable.recovery.tracker.serverBatchId,
       clientBatchId: durable.recovery.tracker.clientBatchId,
       jobId: job.id,
     });
+    if (outcome.kind === "reconciled") {
+      replaceDurableRecovery(
+        reduceMobileDurableGenerationRecovery(durable.recovery, {
+          type: "batch_snapshot",
+          batch: outcome.batch,
+        }),
+      );
+      persistDurableGenerationRecoveries();
+      syncDurableGenerationJobs();
+      return;
+    }
+    if (outcome.kind === "uncertain") {
+      retryStillUncertain = true;
+      void reconcileMobileDurableHost(durable.recovery.tracker.hostId);
+      setGenerationStatus(`Retry confirmation is delayed. ${outcome.error}`, true);
+      return;
+    }
     await reconcileMobileDurableHost(durable.recovery.tracker.hostId);
     setGenerationStatus(`Retry queued on ${job.hostLabel}.`);
   } catch (error) {
@@ -6176,7 +6214,7 @@ async function retryHeldGeneration(job: Job): Promise<void> {
       true,
     );
   } finally {
-    durableGenerationRetryAttempts.delete(job.id);
+    if (!retryStillUncertain) durableGenerationRetryAttempts.delete(job.id);
   }
 }
 

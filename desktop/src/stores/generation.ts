@@ -55,6 +55,7 @@ import {
   admitGenerationBatch,
   canonicalGenerationBatchLimit,
   chunkGenerationBatchRequests,
+  isDefiniteGenerationAdmissionRejection,
   lookupGenerationBatchByClientId,
   reconcileGenerationBatches,
   type DurableMediaCapabilities,
@@ -80,7 +81,7 @@ import {
 } from "../lib/durableGeneration";
 import { TargetStreamSlots } from "@studio/lib/targetStreamSlots";
 import { useToastStore } from "./toasts";
-import { retryQueueJob } from "@studio/api/queuePlan";
+import { retryQueueJobRecoveringAmbiguity } from "@studio/api/queuePlan";
 
 export {
   applyChainProgress,
@@ -871,20 +872,43 @@ export const useGenerationStore = defineStore("generation", {
       }
       const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
       job.retrying = true;
+      job.retryable = false;
       try {
-        await retryQueueJob(target, {
+        const outcome = await retryQueueJobRecoveringAmbiguity(target, {
           instanceId: record.tracker.expectedInstanceId,
           batchId: record.tracker.serverBatchId,
           clientBatchId: record.tracker.clientBatchId,
           jobId: job.id,
         });
-        job.retryable = false;
+        if (outcome.kind === "reconciled") {
+          record.tracker = reduceGenerationLifecycle(record.tracker, {
+            type: "batch_snapshot",
+            batch: outcome.batch,
+          });
+          this.applyDurableRecord(record);
+          persistDurableRecords();
+          return;
+        }
+        if (outcome.kind === "uncertain") {
+          job.holdError = outcome.error;
+          void this.reconcileDurableHost(
+            record.tracker.hostId,
+            new Set([record.tracker.clientBatchId]),
+          );
+          throw new Error(outcome.error);
+        }
         job.holdError = null;
         job.stage = null;
         void this.reconcileDurableHost(
           record.tracker.hostId,
           new Set([record.tracker.clientBatchId]),
         );
+      } catch (error) {
+        void this.reconcileDurableHost(
+          record.tracker.hostId,
+          new Set([record.tracker.clientBatchId]),
+        );
+        throw error;
       } finally {
         job.retrying = false;
       }
@@ -1093,7 +1117,7 @@ export const useGenerationStore = defineStore("generation", {
         attach(await admitGenerationBatch(target, body));
         return;
       } catch (error) {
-        if (!isTransportFailure(error)) {
+        if (isDefiniteGenerationAdmissionRejection(error)) {
           record.tracker = reduceGenerationLifecycle(record.tracker, {
             type: "admission_rejected",
             error: error instanceof Error ? error.message : String(error),
