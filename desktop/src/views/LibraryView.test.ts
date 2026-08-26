@@ -284,13 +284,18 @@ describe("LibraryView delete keyboard handling", () => {
     )!;
     menu.activate(sourceEntry);
     await flushPromises();
+    await vi.waitFor(() => {
+      expect(form.h3Authoring?.references).toHaveLength(1);
+    });
 
     expect(form.sourceImage).toBeNull();
-    expect(form.h3Authoring?.references).toHaveLength(1);
     expect(form.h3Authoring?.references[0]?.reference).toMatchObject({
       kind: "image",
       media: { authority: "inline", data: "QUJD" },
-      provenance: { name: "ordered-subject.png" },
+      provenance: {
+        name: "ordered-subject.png",
+        sha256: "b5d4045c3f466fa91fe2cc6abe79232a1a57cdf104f7a26e716e0a1e2789df78",
+      },
       mime_type: "image/png",
       width: 1024,
       height: 1024,

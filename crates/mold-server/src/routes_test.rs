@@ -4793,7 +4793,8 @@ mod tests {
         assert_eq!(body["devices"]["stable_pins"], true);
         assert_eq!(body["devices"]["planned_lanes"], true);
         assert_eq!(body["devices"]["learned_eta"], true);
-        assert_eq!(body["reference_uploads"]["available"], true);
+        assert_eq!(body["reference_uploads"]["available"], false);
+        assert_eq!(body["reference_uploads"]["authless_inline"], true);
         assert_eq!(body["reference_uploads"]["protocol_version"], 2);
         assert_eq!(body["reference_uploads"]["requires_api_key"], true);
         assert_eq!(
@@ -4804,6 +4805,26 @@ mod tests {
             body["reference_uploads"]["max_file_bytes"],
             crate::reference_uploads::MAX_REFERENCE_UPLOAD_FILE_BYTES
         );
+    }
+
+    #[tokio::test]
+    async fn capabilities_offer_reference_uploads_only_when_api_key_auth_is_enabled() {
+        let keys = std::collections::HashSet::from(["test-key".to_string()]);
+        let auth = Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys)));
+        let response = app_with_auth(auth)
+            .oneshot(
+                Request::get("/api/capabilities")
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["reference_uploads"]["available"], true);
+        assert_eq!(body["reference_uploads"]["authless_inline"], false);
+        assert_eq!(body["reference_uploads"]["requires_api_key"], true);
     }
 
     #[tokio::test]
@@ -10547,6 +10568,97 @@ mod tests {
             );
             assert!(!state.reference_uploads.staging_exists());
         }
+    }
+
+    #[cfg(feature = "h3")]
+    #[tokio::test]
+    async fn auth_disabled_host_accepts_inline_ref2va_but_auth_enabled_host_requires_a_key() {
+        let models_dir = tempfile::tempdir().unwrap();
+        let _models_root = EnvVarGuard::set("MOLD_MODELS_DIR", models_dir.path().as_os_str());
+        populate_manifest_files(models_dir.path(), mold_core::minimax_h3::REF2VA_COMFY);
+        let image = minimal_png();
+        let image_sha256 = format!("{:x}", Sha256::digest(&image));
+        let body = serde_json::json!({
+            "prompt": "authless inline reference",
+            "model": mold_core::minimax_h3::REF2VA_COMFY,
+            "width": mold_core::minimax_h3::DEFAULT_WIDTH,
+            "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
+            "steps": mold_core::minimax_h3::DEFAULT_STEPS,
+            "guidance": 0.0,
+            "strength": 1.0,
+            "batch_size": 1,
+            "frames": mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
+            "fps": mold_core::minimax_h3::FIXED_FPS,
+            "output_format": "mp4",
+            "references": [{
+                "kind": "image",
+                "media": {
+                    "authority": "inline",
+                    "data": base64::engine::general_purpose::STANDARD.encode(&image)
+                },
+                "provenance": { "name": "anchor.png", "sha256": image_sha256 },
+                "mime_type": "image/png",
+                "width": 1,
+                "height": 1
+            }]
+        })
+        .to_string();
+
+        let (state, mut queue_rx) = AppState::with_engine_and_queue(MockEngine::ready_for_model(
+            mold_core::minimax_h3::REF2VA_COMFY,
+        ));
+        let authless_app = app_with_state(state.clone())
+            .layer(axum::middleware::from_fn(crate::auth::require_api_key))
+            .layer(axum::middleware::from_fn_with_state(
+                None,
+                crate::auth::inject_auth_state,
+            ));
+        let accepted = authless_app
+            .clone()
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if accepted.status() != StatusCode::OK {
+            let status = accepted.status();
+            let error = json_body(accepted).await;
+            panic!("auth-disabled inline Ref2VA returned {status}: {error}");
+        }
+        assert_eq!(state.job_registry.len(), 1);
+        assert!(queue_rx.try_recv().is_ok(), "inline Ref2VA was not queued");
+
+        let mut upload_body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        upload_body["references"][0]["media"] = serde_json::json!({
+            "authority": "upload",
+            "handle": "authless-upload-must-not-resolve"
+        });
+        let upload_rejected = authless_app
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(upload_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(upload_rejected.status(), StatusCode::UNAUTHORIZED);
+
+        let keys = std::collections::HashSet::from(["test-key".to_string()]);
+        let auth = Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys)));
+        let rejected = app_with_auth(auth)
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

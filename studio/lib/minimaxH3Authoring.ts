@@ -9,6 +9,7 @@ import {
 import { imageDimensionsFromBase64 } from "./imageDimensions";
 import { MINIMAX_H3_REVIEWED_COMPACT_STEPS } from "./minimaxH3Inventory";
 import { readFileBase64 } from "./fileBase64";
+import { Base64DigestError, sha256PaddedBase64 } from "./base64Digest";
 import {
   canonicalMinimaxH3ModelName,
   isMinimaxH3Identity,
@@ -185,10 +186,10 @@ function validateGalleryImageSource(
  * The returned state is shallowly immutable: existing potentially-large media
  * strings are retained without a JSON-clone, while the ordered array and new
  * row are fresh objects for Vue reactivity. */
-export function appendMinimaxH3GalleryImageReference(
+export async function appendMinimaxH3GalleryImageReference(
   state: MinimaxH3AuthoringState | null | undefined,
   image: MinimaxH3GalleryImageSource,
-): MinimaxH3GalleryImageResult {
+): Promise<MinimaxH3GalleryImageResult> {
   const invalid = validateGalleryImageSource(image);
   if (invalid) return { ok: false, error: invalid };
   const current = state ?? emptyMinimaxH3AuthoringState();
@@ -206,12 +207,31 @@ export function appendMinimaxH3GalleryImageReference(
     };
   }
   const mimeType = image.mimeType.split(";", 1)[0]!.trim().toLowerCase();
+  let sha256: string;
+  try {
+    sha256 = await sha256PaddedBase64(image.data);
+  } catch (error) {
+    return {
+      ok: false,
+      error:
+        error instanceof Base64DigestError
+          ? error.message
+          : "The gallery image could not be hashed.",
+    };
+  }
+  const declaredSha256 = image.sha256?.trim().toLowerCase();
+  if (declaredSha256 && declaredSha256 !== sha256) {
+    return {
+      ok: false,
+      error: "The gallery image does not match its declared SHA-256 digest.",
+    };
+  }
   const reference: GenerationReference = {
     kind: "image",
     media: { authority: "inline", data: image.data },
     provenance: {
       name: image.filename.trim(),
-      ...(image.sha256 ? { sha256: image.sha256.toLowerCase() } : {}),
+      sha256,
     },
     mime_type: mimeType,
     width: image.width,
@@ -299,16 +319,16 @@ export function setMinimaxH3PickedImageFirstFrame(
 /** Normalize one or more images returned by the established surface picker
  * into the Ref2VA semantic order. Keeping this beside the boundary adapter
  * means desktop, web, and mobile never grow H3-specific gallery readers. */
-export function appendMinimaxH3PickedImageReferences(
+export async function appendMinimaxH3PickedImageReferences(
   state: MinimaxH3AuthoringState | null | undefined,
   images: readonly MinimaxH3PickedImageSource[],
-): MinimaxH3GalleryImageResult {
+): Promise<MinimaxH3GalleryImageResult> {
   let current = state ?? emptyMinimaxH3AuthoringState();
   let lastReference: number | null = null;
   for (const image of images) {
     const decoded = imageDimensionsFromBase64(image.base64);
     const extension = image.filename.trim().toLowerCase();
-    const result = appendMinimaxH3GalleryImageReference(current, {
+    const result = await appendMinimaxH3GalleryImageReference(current, {
       filename: image.filename,
       mimeType:
         image.mimeType?.split(";", 1)[0]?.trim().toLowerCase() ||

@@ -46,6 +46,7 @@ import {
 import {
   prepareReferenceUploads,
   requestNeedsReferenceUpload,
+  requestShouldUseReferenceUploads,
   type ReferenceUploadCapabilities,
   type ReferenceUploadLease,
 } from "@studio/api/referenceUploads";
@@ -1100,7 +1101,7 @@ export const useGenerationStore = defineStore("generation", {
           job.retainEncodedResult = route.retainEncodedResult ?? true;
           job.metadataOnlyCompletion = route.metadataOnlyCompletion ?? false;
           targets.set(job.clientId, route.target);
-          if (requestNeedsReferenceUpload(plan)) {
+          if (requestShouldUseReferenceUploads(plan, route.target, route.referenceUploads)) {
             referenceUploadAuthorities.set(job.clientId, {
               target: { ...route.target },
               instanceId: route.instanceId ?? "",
@@ -1654,6 +1655,11 @@ export const useGenerationStore = defineStore("generation", {
       const chainRoute = chainRoutes.get(job.clientId);
       const path = chainRoute ? "/api/generate/chain/stream" : "/api/generate/stream";
       let transportRequest = req;
+      const authority = referenceUploadAuthorities.get(job.clientId);
+      const uploadAuthority =
+        authority && requestShouldUseReferenceUploads(req, authority.target, authority.capabilities)
+          ? authority
+          : null;
       if (requestNeedsReferenceUpload(req)) {
         try {
           if (chainRoute) {
@@ -1661,21 +1667,17 @@ export const useGenerationStore = defineStore("generation", {
               "MiniMax H3 reference media cannot be submitted through a chain route.",
             );
           }
-          const authority = referenceUploadAuthorities.get(job.clientId);
-          if (!authority) {
-            throw new Error(
-              "MiniMax H3 reference uploads require a frozen authenticated host route.",
-            );
+          if (uploadAuthority) {
+            const prepared = await prepareReferenceUploads({
+              target: uploadAuthority.target,
+              expectedInstanceId: uploadAuthority.instanceId,
+              capabilities: uploadAuthority.capabilities,
+              request: req,
+              signal: abort.signal,
+            });
+            lease = prepared;
+            transportRequest = prepared.request;
           }
-          const prepared = await prepareReferenceUploads({
-            target: authority.target,
-            expectedInstanceId: authority.instanceId,
-            capabilities: authority.capabilities,
-            request: req,
-            signal: abort.signal,
-          });
-          lease = prepared;
-          transportRequest = prepared.request;
         } catch (error) {
           onAdmitted();
           if (!abort.signal.aborted && !jobHasSettled(job)) {

@@ -36,6 +36,16 @@ let lastChainHandlers: ChainStreamHandlers | null = null;
 // submission was never routed and lands on the serving origin.
 let lastSingleTarget: StreamTarget | undefined;
 let lastChainTarget: StreamTarget | undefined;
+const prepareReferenceUploads = vi.hoisted(() =>
+  vi.fn(({ request }: { request: GenerateRequestWire }) =>
+    Promise.resolve({
+      request,
+      expiresAtMs: Date.now() + 60_000,
+      requestScopeSha256: "a".repeat(64),
+      cancel: () => Promise.resolve(),
+    }),
+  ),
+);
 
 vi.mock("../api", () => ({
   cancelQueueJob: vi.fn().mockResolvedValue(undefined),
@@ -70,15 +80,7 @@ vi.mock("@studio/api/referenceUploads", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@studio/api/referenceUploads")>()),
   // Keep the real `requestNeedsReferenceUpload` predicate; only the network
   // side of the lease is stubbed so a submission can reach the stream.
-  prepareReferenceUploads: vi.fn(
-    ({ request }: { request: GenerateRequestWire }) =>
-      Promise.resolve({
-        request,
-        expiresAtMs: Date.now() + 60_000,
-        requestScopeSha256: "a".repeat(64),
-        cancel: () => Promise.resolve(),
-      }),
-  ),
+  prepareReferenceUploads,
 }));
 
 function fakeCompleteEvent(
@@ -1198,6 +1200,7 @@ describe("useGenerateStream host routing", () => {
     localStorage.clear();
     lastSingleTarget = undefined;
     lastChainTarget = undefined;
+    prepareReferenceUploads.mockClear();
   });
 
   const studioRoute: HostRoute = {
@@ -1213,6 +1216,89 @@ describe("useGenerateStream host routing", () => {
       baseUrl: "http://studio:7680",
       apiKey: "sk-studio",
     });
+  });
+
+  it("submits Ref2VA inline when auth is disabled despite a stale saved key", async () => {
+    const authlessRoute: HostRoute = {
+      ...studioRoute,
+      referenceUploads: {
+        available: false,
+        authless_inline: true,
+        protocol_version: 2,
+        requires_api_key: true,
+        session_path: "/api/generate/reference-upload-sessions",
+        upload_path: "/api/generate/reference-upload",
+        session_handle_header: "x-mold-reference-session",
+        upload_handle_header: "x-mold-reference-upload",
+        max_file_bytes: 1_000_000,
+        max_session_bytes: 2_000_000,
+        session_ttl_ms: 60_000,
+      },
+    };
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({
+        model: "minimax-h3-ref2va",
+        frames: 124,
+        references: [
+          {
+            kind: "image",
+            media: {
+              authority: "inline",
+              data: "cHJpdmF0ZS1pbWFnZS1ieXRlcw==",
+            },
+            provenance: {
+              name: "identity.png",
+              sha256:
+                "b86a89c0eda0e9381e785564df9dc33f88d96e04aae6fa6185c9c94de2652520",
+            },
+            mime_type: "image/png",
+            width: 32,
+            height: 24,
+          },
+        ],
+      }),
+      { kind: "single" },
+      authlessRoute,
+    );
+
+    await vi.waitFor(() =>
+      expect(
+        stream.jobs.value.find((job) => job.id === id)?.streamStarted,
+      ).toBe(true),
+    );
+    expect(prepareReferenceUploads).not.toHaveBeenCalled();
+    expect(lastSingleTarget).toEqual(authlessRoute.target);
+    expect(stream.jobs.value.find((job) => job.id === id)?.error).toBeNull();
+
+    stream.submit(
+      singleGen({
+        model: "minimax-h3-ref2va",
+        frames: 124,
+        references: [
+          {
+            kind: "image",
+            media: {
+              authority: "inline",
+              data: "cHJpdmF0ZS1pbWFnZS1ieXRlcw==",
+            },
+            provenance: {
+              name: "identity.png",
+              sha256:
+                "b86a89c0eda0e9381e785564df9dc33f88d96e04aae6fa6185c9c94de2652520",
+            },
+            mime_type: "image/png",
+            width: 32,
+            height: 24,
+          },
+        ],
+      }),
+      { kind: "single" },
+      { ...authlessRoute, referenceUploads: null },
+    );
+    await vi.waitFor(() =>
+      expect(prepareReferenceUploads).toHaveBeenCalledTimes(1),
+    );
   });
 
   it("dispatches an auto-promoted chain submission to the routed host", () => {

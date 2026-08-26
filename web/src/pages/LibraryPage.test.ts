@@ -348,7 +348,9 @@ describe("LibraryPage", () => {
     await flushPromises();
 
     expect(form.state.value.imageAttachments).toEqual([]);
-    expect(form.state.value.h3Authoring?.references).toHaveLength(1);
+    await vi.waitFor(() =>
+      expect(form.state.value.h3Authoring?.references).toHaveLength(1),
+    );
     expect(
       form.state.value.h3Authoring?.references[0]?.reference,
     ).toMatchObject({
