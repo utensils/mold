@@ -270,7 +270,9 @@ fn dequantize_convrot_rows(
         .enumerate()
         .for_each(|(index, (values, row))| {
             let scale = scales[if scales.len() == 1 { 0 } else { index }];
-            for (pair, byte) in values.chunks_exact_mut(2).zip(row) {
+            let (pairs, remainder) = values.as_chunks_mut::<2>();
+            debug_assert!(remainder.is_empty());
+            for (pair, byte) in pairs.iter_mut().zip(row) {
                 pair[0] = sign_extend_nibble(byte & 0x0f) as f32 * scale;
                 pair[1] = sign_extend_nibble(byte >> 4) as f32 * scale;
             }
