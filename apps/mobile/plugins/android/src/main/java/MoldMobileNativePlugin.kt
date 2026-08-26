@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.res.Configuration
 import android.content.Intent
+import android.graphics.Color
 import android.os.Build
 import androidx.activity.result.ActivityResult
 import app.tauri.PermissionState
@@ -251,6 +252,7 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
     }
 
     @Command
+    @Suppress("DEPRECATION")
     fun setMobileAppearance(invoke: Invoke) {
         val args = invoke.parseArgs(AppearanceArgs::class.java)
         hostActivity.runOnUiThread {
@@ -268,6 +270,17 @@ class MoldMobileNativePlugin(private val hostActivity: Activity) : Plugin(hostAc
                 ).apply {
                     isAppearanceLightStatusBars = !dark
                     isAppearanceLightNavigationBars = !dark
+                }
+                // Native system bars sit outside the WebView; mirror the Safelight desk tokens.
+                val chromeColor = Color.parseColor(if (dark) "#0A0805" else "#E6DCC7")
+                hostActivity.window.apply {
+                    statusBarColor = chromeColor
+                    navigationBarColor = chromeColor
+                    decorView.setBackgroundColor(chromeColor)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        isStatusBarContrastEnforced = false
+                        isNavigationBarContrastEnforced = false
+                    }
                 }
                 invoke.resolve()
             }
