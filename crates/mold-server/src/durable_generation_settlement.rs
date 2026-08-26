@@ -5,6 +5,7 @@
 //! path and dedicated GPU owner threads pass through this module.
 
 use crate::queue_journal::{QueueTicket, RetainOutcome};
+use mold_core::SseErrorEvent;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DurableDisposition {
@@ -33,6 +34,21 @@ impl SettlementOutcome {
 
     pub(crate) fn is_cancelled(self) -> bool {
         self == Self::Cancelled
+    }
+}
+
+/// Build the observer frame from the durable transition that actually won.
+/// Callers still resolve their raw result channel with the original error;
+/// direct raw routes reconcile that result against the authoritative row.
+pub(crate) fn terminal_error_event(
+    settlement: SettlementOutcome,
+    message: impl Into<String>,
+) -> SseErrorEvent {
+    let message = message.into();
+    match settlement {
+        SettlementOutcome::Cancelled => SseErrorEvent::cancelled(message),
+        SettlementOutcome::Retained => SseErrorEvent::retained(message),
+        SettlementOutcome::Untracked | SettlementOutcome::Settled => SseErrorEvent::failed(message),
     }
 }
 

@@ -144,6 +144,7 @@ pub enum OwnedHold {
 pub enum OwnedRetry {
     Retried,
     NotOwned,
+    AuthorityMismatch,
     NotHeld,
     NotRetryable,
 }
@@ -654,38 +655,57 @@ pub fn hold_owned(
 
 /// Atomically return one explicitly retryable held row to the durable queue.
 ///
-/// The owner and retryable bit are the public authority. Clearing the runtime
-/// claim and both crash-loop counters gives the operator-approved attempt a
-/// fresh budget. A heterogeneous child is restored in the same transaction so
-/// its status cannot remain held while the queue has resumed it.
+/// The captured instance/batch/client/job tuple, current owner, held state and
+/// retryable bit are checked in the same transaction as the mutation.
+/// Clearing the runtime claim and both crash-loop counters gives the
+/// operator-approved attempt a fresh budget. A heterogeneous child is restored
+/// in that transaction so its status cannot remain held while the queue has
+/// resumed it.
 pub fn retry_held_owned(
     db: &MetadataDb,
     owner_uuid: &str,
-    job_id: &str,
+    authority: &mold_core::GenerationRetryRequest,
     now_ms: i64,
 ) -> Result<OwnedRetry> {
     db.transact_immediate(|conn| {
+        if authority.instance_id != owner_uuid {
+            return Ok(OwnedRetry::AuthorityMismatch);
+        }
         let row = conn
             .query_row(
                 "SELECT state, retryable,
                         (SELECT child.state
                            FROM generation_batch_children AS child
+                          WHERE child.job_id = generation_queue.id),
+                        (SELECT child.batch_id
+                           FROM generation_batch_children AS child
+                          WHERE child.job_id = generation_queue.id),
+                        (SELECT batch.client_batch_id
+                           FROM generation_batch_children AS child
+                           JOIN generation_batches AS batch ON batch.id = child.batch_id
                           WHERE child.job_id = generation_queue.id)
                    FROM generation_queue
                   WHERE id = ?1 AND owner_uuid = ?2",
-                params![job_id, owner_uuid],
+                params![authority.job_id, owner_uuid],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, i64>(1)? != 0,
                         row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((state, retryable, child_state)) = row else {
+        let Some((state, retryable, child_state, batch_id, client_batch_id)) = row else {
             return Ok(OwnedRetry::NotOwned);
         };
+        if batch_id.as_deref() != Some(authority.batch_id.as_str())
+            || client_batch_id.as_deref() != Some(authority.client_batch_id.as_str())
+        {
+            return Ok(OwnedRetry::AuthorityMismatch);
+        }
         if state != "held" {
             return Ok(OwnedRetry::NotHeld);
         }
@@ -703,7 +723,7 @@ pub fn retry_held_owned(
                     started_at = NULL, updated_at = ?3
               WHERE id = ?1 AND owner_uuid = ?2
                 AND state = 'held' AND retryable = 1",
-            params![job_id, owner_uuid, now_ms],
+            params![authority.job_id, owner_uuid, now_ms],
         )?;
         if updated != 1 {
             bail!("retryable queue row changed during retry");
@@ -713,7 +733,7 @@ pub fn retry_held_owned(
                 "UPDATE generation_batch_children
                     SET state = 'accepted', error = NULL, updated_at_ms = ?2
                   WHERE job_id = ?1 AND state = 'held'",
-                params![job_id, now_ms],
+                params![authority.job_id, now_ms],
             )?;
             if child_updated != 1 {
                 bail!("held batch child changed during retry");
@@ -2460,6 +2480,12 @@ mod tests {
     fn explicit_retry_restores_only_retryable_held_work_atomically() {
         let db = MetadataDb::open_in_memory().unwrap();
         insert_or_get(&db, &batch("same"), &rows(2)).unwrap();
+        let authority = |job_id: &str| mold_core::GenerationRetryRequest {
+            instance_id: "owner-1".into(),
+            batch_id: "batch-1".into(),
+            client_batch_id: "client-1".into(),
+            job_id: job_id.into(),
+        };
 
         assert_eq!(
             hold_owned(&db, "owner-1", "job-0", None, "dependency failed", true, 2).unwrap(),
@@ -2470,11 +2496,11 @@ mod tests {
             OwnedHold::Held
         );
         assert_eq!(
-            retry_held_owned(&db, "owner-1", "job-1", 3).unwrap(),
+            retry_held_owned(&db, "owner-1", &authority("job-1"), 3).unwrap(),
             OwnedRetry::NotRetryable
         );
         assert_eq!(
-            retry_held_owned(&db, "owner-1", "job-0", 3).unwrap(),
+            retry_held_owned(&db, "owner-1", &authority("job-0"), 3).unwrap(),
             OwnedRetry::Retried
         );
 
@@ -2485,5 +2511,87 @@ mod tests {
         assert_eq!(detail.children[0].state, "accepted");
         assert_eq!(detail.children[0].error, None);
         assert_eq!(detail.children[1].state, "held");
+    }
+
+    #[test]
+    fn explicit_retry_rejects_replacement_and_batch_identity_without_mutation() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
+        hold_owned(&db, "owner-1", "job-0", None, "dependency failed", true, 2).unwrap();
+        let mut authority = mold_core::GenerationRetryRequest {
+            instance_id: "replacement".into(),
+            batch_id: "batch-1".into(),
+            client_batch_id: "client-1".into(),
+            job_id: "job-0".into(),
+        };
+        assert_eq!(
+            retry_held_owned(&db, "owner-1", &authority, 3).unwrap(),
+            OwnedRetry::AuthorityMismatch
+        );
+        authority.instance_id = "owner-1".into();
+        authority.batch_id = "foreign-batch".into();
+        assert_eq!(
+            retry_held_owned(&db, "owner-1", &authority, 3).unwrap(),
+            OwnedRetry::AuthorityMismatch
+        );
+        authority.batch_id = "batch-1".into();
+        authority.client_batch_id = "foreign-client".into();
+        assert_eq!(
+            retry_held_owned(&db, "owner-1", &authority, 3).unwrap(),
+            OwnedRetry::AuthorityMismatch
+        );
+        let queue = crate::generation_queue::get(&db, "job-0").unwrap().unwrap();
+        assert_eq!(queue.state, QueueRowState::Held);
+        assert!(
+            get_durable(&db, "owner-1", "batch-1")
+                .unwrap()
+                .unwrap()
+                .children[0]
+                .retryable
+        );
+    }
+
+    #[test]
+    fn concurrent_explicit_retry_has_one_transactional_winner() {
+        let db = Arc::new(MetadataDb::open_in_memory().unwrap());
+        insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
+        hold_owned(&db, "owner-1", "job-0", None, "dependency failed", true, 2).unwrap();
+        let authority = Arc::new(mold_core::GenerationRetryRequest {
+            instance_id: "owner-1".into(),
+            batch_id: "batch-1".into(),
+            client_batch_id: "client-1".into(),
+            job_id: "job-0".into(),
+        });
+        let barrier = Arc::new(Barrier::new(3));
+        let attempts = (0..2)
+            .map(|offset| {
+                let db = Arc::clone(&db);
+                let authority = Arc::clone(&authority);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    retry_held_owned(&db, "owner-1", &authority, 3 + offset).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let outcomes = attempts
+            .into_iter()
+            .map(|attempt| attempt.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == OwnedRetry::Retried)
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == OwnedRetry::NotHeld)
+                .count(),
+            1
+        );
     }
 }

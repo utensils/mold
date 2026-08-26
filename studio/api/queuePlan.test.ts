@@ -390,13 +390,24 @@ describe("queue plan contract", () => {
 
     await retryQueueJob(
       { baseUrl: "https://gpu.example", apiKey: "secret" },
-      "job/1",
+      {
+        instanceId: "instance-1",
+        batchId: "batch-1",
+        clientBatchId: "client-1",
+        jobId: "job/1",
+      },
     );
 
     const [url, init] = captured!;
     expect(url).toBe("https://gpu.example/api/queue/job%2F1/retry");
     expect(init?.method).toBe("POST");
     expect((init?.headers as Headers).get("x-api-key")).toBe("secret");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      instance_id: "instance-1",
+      batch_id: "batch-1",
+      client_batch_id: "client-1",
+      job_id: "job/1",
+    });
   });
 
   it.each([
@@ -419,8 +430,12 @@ describe("queue plan contract", () => {
 
       await mutateQueueJobOnExpectedInstance(
         { baseUrl: "https://gpu.example", apiKey: "secret" },
-        "instance-1",
-        "job/1",
+        {
+          instanceId: "instance-1",
+          batchId: "batch-1",
+          clientBatchId: "client-1",
+          jobId: "job/1",
+        },
         mutation,
       );
 
@@ -429,6 +444,14 @@ describe("queue plan contract", () => {
         `https://gpu.example${mutationPath}`,
       ]);
       expect(fetchMock.mock.calls[1]?.[1]?.method).toBe(method);
+      if (mutation === "retry") {
+        expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+          instance_id: "instance-1",
+          batch_id: "batch-1",
+          client_batch_id: "client-1",
+          job_id: "job/1",
+        });
+      }
       for (const [, init] of fetchMock.mock.calls) {
         expect((init?.headers as Headers).get("x-api-key")).toBe("secret");
       }
@@ -448,11 +471,48 @@ describe("queue plan contract", () => {
     await expect(
       mutateQueueJobOnExpectedInstance(
         { baseUrl: "https://gpu.example", apiKey: "secret" },
-        "instance-1",
-        "job/1",
+        {
+          instanceId: "instance-1",
+          batchId: "batch-1",
+          clientBatchId: "client-1",
+          jobId: "job/1",
+        },
         "cancel",
       ),
     ).rejects.toThrow(/identity changed/i);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a transactional retry fence after the preflight instance read", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({
+          instance_id: "instance-1",
+          hostname: "render-box",
+          queue_depth: 1,
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json(
+          { code: "QUEUE_JOB_AUTHORITY_MISMATCH", error: "authority changed" },
+          { status: 409 },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      mutateQueueJobOnExpectedInstance(
+        { baseUrl: "https://gpu.example", apiKey: "secret" },
+        {
+          instanceId: "instance-1",
+          batchId: "batch-1",
+          clientBatchId: "client-1",
+          jobId: "job/1",
+        },
+        "retry",
+      ),
+    ).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

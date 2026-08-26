@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use mold_core::{
     GenerateRequest, GenerationBatchAdmissionRequest, GenerationBatchAuthority,
-    GenerationBatchChild, GenerationBatchChildState, GenerationBatchStatus, MoldClient,
+    GenerationBatchChild, GenerationBatchChildState, GenerationBatchStatus, GenerationRetryRequest,
+    MoldClient,
 };
 use std::time::Duration;
 
@@ -15,6 +16,7 @@ pub(crate) struct CanonicalGenerationOutcome {
 
 #[derive(Debug, Default)]
 pub(crate) struct CanonicalGenerationReport {
+    pub authorities: Vec<GenerationBatchAuthority>,
     pub admitted_client_ids: Vec<String>,
     pub outcomes: Vec<CanonicalGenerationOutcome>,
     pub failures: Vec<String>,
@@ -25,6 +27,29 @@ pub(crate) struct CanonicalGenerationArtifact {
     pub bytes: Vec<u8>,
     pub filename: String,
     pub request: GenerateRequest,
+    pub metadata: mold_core::OutputMetadata,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum CanonicalGenerationEvent {
+    Admitted {
+        authority: GenerationBatchAuthority,
+        status: GenerationBatchStatus,
+    },
+    Snapshot {
+        authority: GenerationBatchAuthority,
+        status: GenerationBatchStatus,
+    },
+    ReconcileDelayed {
+        authority: GenerationBatchAuthority,
+        error: String,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) struct CanonicalHydratedArtifact {
+    pub bytes: Vec<u8>,
+    pub filename: String,
     pub metadata: mold_core::OutputMetadata,
 }
 
@@ -108,6 +133,7 @@ async fn wait_for_batch(
     client: &MoldClient,
     mut status: GenerationBatchStatus,
     authority: &GenerationBatchAuthority,
+    events: Option<&tokio::sync::mpsc::UnboundedSender<CanonicalGenerationEvent>>,
 ) -> Result<GenerationBatchStatus> {
     authority
         .validate_status(&status)
@@ -121,14 +147,105 @@ async fn wait_for_batch(
             return Ok(status);
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let next = client
-            .generation_batch(&status.id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("generation batch {} disappeared", status.id))?;
+        let next = loop {
+            match client.generation_batch(&status.id).await {
+                Ok(Some(next)) => break next,
+                Ok(None) => {
+                    anyhow::bail!("generation batch {} disappeared", status.id)
+                }
+                Err(error) if reconciliation_error_is_retryable(&error) => {
+                    send_event(
+                        events,
+                        CanonicalGenerationEvent::ReconcileDelayed {
+                            authority: authority.clone(),
+                            error: error.to_string(),
+                        },
+                    );
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        };
         authority
             .validate_status(&next)
             .map_err(anyhow::Error::msg)?;
+        send_event(
+            events,
+            CanonicalGenerationEvent::Snapshot {
+                authority: authority.clone(),
+                status: next.clone(),
+            },
+        );
         status = next;
+    }
+}
+
+pub(crate) async fn retry_canonical_child(
+    client: &MoldClient,
+    authority: &GenerationBatchAuthority,
+    job_id: &str,
+) -> Result<()> {
+    client
+        .retry_queue_job(&GenerationRetryRequest::from_authority(authority, job_id))
+        .await
+}
+
+pub(crate) async fn reconcile_canonical_authority_observed(
+    client: &MoldClient,
+    authority: &GenerationBatchAuthority,
+    events: Option<&tokio::sync::mpsc::UnboundedSender<CanonicalGenerationEvent>>,
+) -> Result<GenerationBatchStatus> {
+    let status = loop {
+        match client.generation_batch(&authority.batch_id).await {
+            Ok(Some(status)) => break status,
+            Ok(None) => anyhow::bail!("generation batch {} disappeared", authority.batch_id),
+            Err(error) if reconciliation_error_is_retryable(&error) => {
+                send_event(
+                    events,
+                    CanonicalGenerationEvent::ReconcileDelayed {
+                        authority: authority.clone(),
+                        error: error.to_string(),
+                    },
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    authority
+        .validate_status(&status)
+        .map_err(anyhow::Error::msg)?;
+    send_event(
+        events,
+        CanonicalGenerationEvent::Snapshot {
+            authority: authority.clone(),
+            status: status.clone(),
+        },
+    );
+    wait_for_batch(client, status, authority, events).await
+}
+
+fn reconciliation_error_is_retryable(error: &anyhow::Error) -> bool {
+    if MoldClient::is_connection_error(error) {
+        return true;
+    }
+    error.chain().any(|cause| {
+        cause.downcast_ref::<reqwest::Error>().is_some_and(|error| {
+            error.is_timeout()
+                || error.is_connect()
+                || error
+                    .status()
+                    .is_some_and(|status| status.is_server_error() || status.as_u16() == 429)
+        })
+    })
+}
+
+fn send_event(
+    events: Option<&tokio::sync::mpsc::UnboundedSender<CanonicalGenerationEvent>>,
+    event: CanonicalGenerationEvent,
+) {
+    if let Some(events) = events {
+        let _ = events.send(event);
     }
 }
 
@@ -167,6 +284,14 @@ pub(crate) async fn try_canonical_generation(
     client: &MoldClient,
     requests: &[GenerateRequest],
 ) -> Result<Option<CanonicalGenerationReport>> {
+    try_canonical_generation_observed(client, requests, None).await
+}
+
+pub(crate) async fn try_canonical_generation_observed(
+    client: &MoldClient,
+    requests: &[GenerateRequest],
+    events: Option<&tokio::sync::mpsc::UnboundedSender<CanonicalGenerationEvent>>,
+) -> Result<Option<CanonicalGenerationReport>> {
     let capabilities = match client.server_capabilities().await {
         Ok(capabilities) => capabilities,
         Err(error) if mold_core::client::is_missing_endpoint_error(&error) => return Ok(None),
@@ -199,6 +324,14 @@ pub(crate) async fn try_canonical_generation(
                 report
                     .admitted_client_ids
                     .push(status.client_batch_id.clone());
+                report.authorities.push(authority.clone());
+                send_event(
+                    events,
+                    CanonicalGenerationEvent::Admitted {
+                        authority: authority.clone(),
+                        status: status.clone(),
+                    },
+                );
                 admitted.push((admission.requests, status, authority));
             }
             Ok(CanonicalAdmission::MissingEndpoint) if admitted.is_empty() => return Ok(None),
@@ -220,7 +353,7 @@ pub(crate) async fn try_canonical_generation(
 
     for (chunk, initial_status, authority) in admitted {
         let client_batch_id = initial_status.client_batch_id.clone();
-        let status = match wait_for_batch(client, initial_status, &authority).await {
+        let status = match wait_for_batch(client, initial_status, &authority, events).await {
             Ok(status) => status,
             Err(error) => {
                 report.failures.push(format!(
@@ -251,6 +384,41 @@ pub(crate) async fn try_canonical_generation(
     Ok(Some(report))
 }
 
+pub(crate) async fn hydrate_canonical_artifact(
+    client: &MoldClient,
+    child: &GenerationBatchChild,
+) -> Result<CanonicalHydratedArtifact> {
+    let job_id = child.job_id.clone();
+    let result = child
+        .result
+        .clone()
+        .context("canonical generation completed without a gallery result")?;
+    let filename = result
+        .filename
+        .or(result.original_filename)
+        .context("canonical generation completed without a gallery filename")?;
+    let bytes = client
+        .get_gallery_image(&filename)
+        .await
+        .with_context(|| format!("could not hydrate accepted output {filename}"))?;
+    let metadata = client
+        .list_gallery()
+        .await
+        .with_context(|| format!("could not read metadata for accepted output {filename}"))?
+        .into_iter()
+        .find(|item| item.filename == filename)
+        .with_context(|| format!("accepted output {filename} is missing from the gallery index"))?
+        .metadata;
+    if metadata.job_id.as_deref() != Some(job_id.as_str()) {
+        anyhow::bail!("accepted output {filename} does not belong to durable job {job_id}");
+    }
+    Ok(CanonicalHydratedArtifact {
+        bytes,
+        filename,
+        metadata,
+    })
+}
+
 /// Canonical singleton transport shared by callers that need the rendered
 /// bytes rather than the full durable reconciliation report.
 pub(crate) async fn try_canonical_singleton_artifact(
@@ -279,36 +447,12 @@ pub(crate) async fn try_canonical_singleton_artifact(
     if outcome.authority.client_batch_id != outcome.client_batch_id {
         anyhow::bail!("canonical singleton outcome lost its admission authority");
     }
-    let job_id = outcome.child.job_id.clone();
-    let result = outcome
-        .child
-        .result
-        .context("canonical singleton completed without a gallery result")?;
-    let filename = result
-        .filename
-        .or(result.original_filename)
-        .context("canonical singleton completed without a gallery filename")?;
-    let bytes = client
-        .get_gallery_image(&filename)
-        .await
-        .with_context(|| format!("could not hydrate accepted output {filename}"))?;
-    let gallery = client
-        .list_gallery()
-        .await
-        .with_context(|| format!("could not read metadata for accepted output {filename}"))?;
-    let metadata = gallery
-        .into_iter()
-        .find(|item| item.filename == filename)
-        .with_context(|| format!("accepted output {filename} is missing from the gallery index"))?
-        .metadata;
-    if metadata.job_id.as_deref() != Some(job_id.as_str()) {
-        anyhow::bail!("accepted output {filename} does not belong to durable job {job_id}");
-    }
+    let artifact = hydrate_canonical_artifact(client, &outcome.child).await?;
     Ok(Some(CanonicalGenerationArtifact {
-        bytes,
-        filename,
+        bytes: artifact.bytes,
+        filename: artifact.filename,
         request: outcome.request,
-        metadata,
+        metadata: artifact.metadata,
     }))
 }
 
@@ -429,7 +573,7 @@ mod tests {
             }],
         };
         let authority = GenerationBatchAuthority::from_admission(&initial, "accepted-id").unwrap();
-        let error = wait_for_batch(&MoldClient::new(&server.uri()), initial, &authority)
+        let error = wait_for_batch(&MoldClient::new(&server.uri()), initial, &authority, None)
             .await
             .unwrap_err();
         assert!(

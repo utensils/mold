@@ -5523,14 +5523,7 @@ mod tests {
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let (state, _rx) = durable_state(db.clone(), root.path());
         let owner = state.queue_journal.owner_uuid().unwrap().to_string();
-        seed_durable_projection_row(
-            &db,
-            &owner,
-            "retryable-preparation",
-            mold_db::generation_queue::QueueRowState::Queued,
-            500,
-            0,
-        );
+        admit_one_durable_batch(&state, "retryable-preparation", "batch-retry");
         assert_eq!(
             mold_db::generation_batches::hold_owned(
                 db.as_ref().as_ref().unwrap(),
@@ -5558,17 +5551,49 @@ mod tests {
         assert_eq!(held["error"], "dependency download failed");
         assert_eq!(held["retryable"], true);
 
+        let replacement = app
+            .clone()
+            .oneshot(
+                Request::post("/api/queue/retryable-preparation/retry")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "instance_id": "replacement",
+                            "batch_id": "batch-retry",
+                            "client_batch_id": "client-batch-retry",
+                            "job_id": "retryable-preparation"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replacement.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(replacement).await["code"],
+            "QUEUE_JOB_AUTHORITY_MISMATCH"
+        );
+
         let response = app
             .oneshot(
                 Request::post("/api/queue/retryable-preparation/retry")
-                    .body(Body::empty())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "instance_id": owner,
+                            "batch_id": "batch-retry",
+                            "client_batch_id": "client-batch-retry",
+                            "job_id": "retryable-preparation"
+                        })
+                        .to_string(),
+                    ))
                     .unwrap(),
             )
             .await
             .unwrap();
         let status = response.status();
-        let response_body = json_body(response).await;
-        assert_eq!(status, StatusCode::ACCEPTED, "{response_body}");
+        assert_eq!(status, StatusCode::ACCEPTED);
         let row = state.queue_journal.list_all().pop().unwrap();
         assert_eq!(row.state, mold_db::generation_queue::QueueRowState::Queued);
         assert_eq!(row.held_reason, None);

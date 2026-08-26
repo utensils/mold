@@ -1801,14 +1801,19 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                     job.request.model
                 );
                 drop(scheduler_mutation);
-                durable_generation_settlement::settle_async(
+                let settlement = durable_generation_settlement::settle_async(
                     &mut job.journal,
                     DurableDisposition::NonRetryableHold,
                     "dispatch attempts exhausted",
                 )
                 .await;
                 if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                    let _ = tx.send(SseMessage::Error(
+                        durable_generation_settlement::terminal_error_event(
+                            settlement,
+                            err_msg.clone(),
+                        ),
+                    ));
                 }
                 let _ = job.result_tx.send(Err(err_msg));
                 return;
@@ -1956,14 +1961,19 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             }
             let err_msg = request
                 .redact_staging_paths(format!("generation reference binding error: {error:#}"));
-            durable_generation_settlement::settle_async(
+            let settlement = durable_generation_settlement::settle_async(
                 &mut job.journal,
                 DurableDisposition::RetryableHold,
                 &err_msg,
             )
             .await;
             if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                let _ = tx.send(SseMessage::Error(
+                    durable_generation_settlement::terminal_error_event(
+                        settlement,
+                        err_msg.clone(),
+                    ),
+                ));
             }
             let _ = job.result_tx.send(Err(err_msg));
             return;
@@ -1990,14 +2000,16 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     .await
     {
         let err_msg = request.redact_staging_paths(api_err.error.clone());
-        durable_generation_settlement::settle_async(
+        let settlement = durable_generation_settlement::settle_async(
             &mut job.journal,
             DurableDisposition::RetryableHold,
             &err_msg,
         )
         .await;
         if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+            let _ = tx.send(SseMessage::Error(
+                durable_generation_settlement::terminal_error_event(settlement, err_msg.clone()),
+            ));
         }
         let _ = job.result_tx.send(Err(err_msg));
         return;
@@ -2031,14 +2043,16 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     };
     let Some(mut cached_engine) = taken else {
         let err_msg = "no engine available after model readiness check".to_string();
-        durable_generation_settlement::settle_async(
+        let settlement = durable_generation_settlement::settle_async(
             &mut job.journal,
             DurableDisposition::RetryableHold,
             &err_msg,
         )
         .await;
         if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+            let _ = tx.send(SseMessage::Error(
+                durable_generation_settlement::terminal_error_event(settlement, err_msg.clone()),
+            ));
         }
         let _ = job.result_tx.send(Err(err_msg));
         return;
@@ -2136,14 +2150,19 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             if response.images.is_empty() && response.video.is_none() && response.audio.is_none() {
                 let err_msg =
                     "generation error: engine returned no images, video, or audio".to_string();
-                durable_generation_settlement::settle_async(
+                let settlement = durable_generation_settlement::settle_async(
                     &mut job.journal,
                     DurableDisposition::RetryableHold,
                     &err_msg,
                 )
                 .await;
                 if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                    let _ = tx.send(SseMessage::Error(
+                        durable_generation_settlement::terminal_error_event(
+                            settlement,
+                            err_msg.clone(),
+                        ),
+                    ));
                 }
                 let _ = job.result_tx.send(Err(err_msg));
                 return;
@@ -2342,7 +2361,12 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             if settlement.is_cancelled() {
                 let message = "Cancelled".to_string();
                 if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(message.clone())));
+                    let _ = tx.send(SseMessage::Error(
+                        durable_generation_settlement::terminal_error_event(
+                            settlement,
+                            message.clone(),
+                        ),
+                    ));
                 }
                 let _ = job.result_tx.send(Err(message));
                 return;
@@ -2391,14 +2415,19 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             let err_msg = request
                 .redact_staging_paths(format!("generation error: {}", clean_error_message(&e)));
             tracing::error!(%err_msg, "generation failed");
-            durable_generation_settlement::settle_async(
+            let settlement = durable_generation_settlement::settle_async(
                 &mut job.journal,
                 DurableDisposition::RetryableHold,
                 &err_msg,
             )
             .await;
             if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                let _ = tx.send(SseMessage::Error(
+                    durable_generation_settlement::terminal_error_event(
+                        settlement,
+                        err_msg.clone(),
+                    ),
+                ));
             }
             let _ = job.result_tx.send(Err(err_msg));
         }
@@ -2414,14 +2443,19 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 .unwrap_or("unknown panic");
             let err_msg = request.redact_staging_paths(format!("inference panicked: {msg}"));
             tracing::error!(%err_msg, "inference panicked");
-            durable_generation_settlement::settle_async(
+            let settlement = durable_generation_settlement::settle_async(
                 &mut job.journal,
                 DurableDisposition::RetryableHold,
                 &err_msg,
             )
             .await;
             if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                let _ = tx.send(SseMessage::Error(
+                    durable_generation_settlement::terminal_error_event(
+                        settlement,
+                        err_msg.clone(),
+                    ),
+                ));
             }
             let _ = job.result_tx.send(Err(err_msg));
         }
@@ -2432,14 +2466,19 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
             tracing::error!("inference task join error: {join_err:?}");
             let err_msg = "inference task failed".to_string();
-            durable_generation_settlement::settle_async(
+            let settlement = durable_generation_settlement::settle_async(
                 &mut job.journal,
                 DurableDisposition::RetryableHold,
                 &err_msg,
             )
             .await;
             if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                let _ = tx.send(SseMessage::Error(
+                    durable_generation_settlement::terminal_error_event(
+                        settlement,
+                        err_msg.clone(),
+                    ),
+                ));
             }
             let _ = job.result_tx.send(Err(err_msg));
         }
@@ -2490,7 +2529,7 @@ fn finish_single_worker_cancelled(mut job: GenerationJob, user_requested: bool) 
     };
     if let Some(ref tx) = job.progress_tx {
         let event = if user_requested {
-            SseErrorEvent::failed(message.clone())
+            SseErrorEvent::cancelled(message.clone())
         } else {
             SseErrorEvent::retained(message.clone())
         };
@@ -2506,33 +2545,23 @@ fn finish_single_worker_hydration_failure(
     use crate::queue_media_runtime::DeferredHydrationDisposition;
 
     let disposition = error.disposition();
-    if let Some(ticket) = job.journal.take() {
-        match disposition {
-            DeferredHydrationDisposition::Hold => {
-                job.journal = Some(ticket);
-                durable_generation_settlement::settle_blocking(
-                    &mut job.journal,
-                    DurableDisposition::NonRetryableHold,
-                    "durable queue-media validation failed",
-                );
-            }
-            DeferredHydrationDisposition::Retain => {
-                job.journal = Some(ticket);
-                durable_generation_settlement::settle_blocking(
-                    &mut job.journal,
-                    DurableDisposition::Retain,
-                    "durable queue-media hydration must be retried after restart",
-                );
-            }
-        }
-    }
+    let settlement = match disposition {
+        DeferredHydrationDisposition::Hold => durable_generation_settlement::settle_blocking(
+            &mut job.journal,
+            DurableDisposition::NonRetryableHold,
+            "durable queue-media validation failed",
+        ),
+        DeferredHydrationDisposition::Retain => durable_generation_settlement::settle_blocking(
+            &mut job.journal,
+            DurableDisposition::Retain,
+            "durable queue-media hydration must be retried after restart",
+        ),
+    };
     tracing::error!(job = %job.id, %error, "durable queue-media hydration failed");
     let message = error.public_message().to_string();
     if let Some(ref tx) = job.progress_tx {
-        let event = match disposition {
-            DeferredHydrationDisposition::Hold => SseErrorEvent::failed(message.clone()),
-            DeferredHydrationDisposition::Retain => SseErrorEvent::retained(message.clone()),
-        };
+        let event =
+            durable_generation_settlement::terminal_error_event(settlement, message.clone());
         let _ = tx.send(SseMessage::Error(event));
     }
     let _ = job.result_tx.send(Err(message));
@@ -3031,14 +3060,19 @@ async fn run_queue_dispatcher_with_tuning_inner(
             crate::gpu_pool::model_unschedulable_message(&model_name, Some(&shape_bucket))
         {
             tracing::warn!(model = %model_name, "{err_msg}");
-            durable_generation_settlement::settle_async(
+            let settlement = durable_generation_settlement::settle_async(
                 &mut job.journal,
                 DurableDisposition::NonRetryableHold,
                 &err_msg,
             )
             .await;
             if let Some(tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                let _ = tx.send(SseMessage::Error(
+                    durable_generation_settlement::terminal_error_event(
+                        settlement,
+                        err_msg.clone(),
+                    ),
+                ));
             }
             let _ = job.result_tx.send(Err(err_msg));
             state.queue.decrement();
@@ -3056,14 +3090,19 @@ async fn run_queue_dispatcher_with_tuning_inner(
             Ok(ordinal) => ordinal,
             Err(err_msg) => {
                 tracing::warn!(model = %model_name, "{err_msg}");
-                durable_generation_settlement::settle_async(
+                let settlement = durable_generation_settlement::settle_async(
                     &mut job.journal,
                     DurableDisposition::NonRetryableHold,
                     &err_msg,
                 )
                 .await;
                 if let Some(tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                    let _ = tx.send(SseMessage::Error(
+                        durable_generation_settlement::terminal_error_event(
+                            settlement,
+                            err_msg.clone(),
+                        ),
+                    ));
                 }
                 let _ = job.result_tx.send(Err(err_msg));
                 state.queue.decrement();
@@ -3095,14 +3134,19 @@ async fn run_queue_dispatcher_with_tuning_inner(
                 upscaler = ?job.request.upscale_model,
                 "{err_msg}"
             );
-            durable_generation_settlement::settle_async(
+            let settlement = durable_generation_settlement::settle_async(
                 &mut job.journal,
                 DurableDisposition::RetryableHold,
                 &err_msg,
             )
             .await;
             if let Some(tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                let _ = tx.send(SseMessage::Error(
+                    durable_generation_settlement::terminal_error_event(
+                        settlement,
+                        err_msg.clone(),
+                    ),
+                ));
             }
             let _ = job.result_tx.send(Err(err_msg));
             state.queue.decrement();
@@ -3422,14 +3466,18 @@ async fn run_queue_dispatcher_with_tuning_inner(
                             "gpu:{} disconnected while dispatching model {model_name}",
                             worker.gpu.ordinal
                         );
-                        durable_generation_settlement::settle_blocking(
+                        let settlement = durable_generation_settlement::settle_blocking(
                             &mut rejected.journal,
                             DurableDisposition::RetryableHold,
                             &err_msg,
                         );
                         if let Some(tx) = rejected.progress_tx {
-                            let _ =
-                                tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                            let _ = tx.send(SseMessage::Error(
+                                durable_generation_settlement::terminal_error_event(
+                                    settlement,
+                                    err_msg.clone(),
+                                ),
+                            ));
                         }
                         let _ = rejected.result_tx.send(Err(err_msg));
                         state.queue.decrement();
@@ -3472,11 +3520,9 @@ fn reject_generation_job(state: &AppState, mut job: GenerationJob, message: Stri
         &message,
     );
     if let Some(progress) = &job.progress_tx {
-        let _ = progress.send(SseMessage::Error(if settlement.is_retained() {
-            SseErrorEvent::retained(message.clone())
-        } else {
-            SseErrorEvent::failed(message.clone())
-        }));
+        let _ = progress.send(SseMessage::Error(
+            durable_generation_settlement::terminal_error_event(settlement, message.clone()),
+        ));
     }
     let job_id = job.id.clone();
     let _ = job.result_tx.send(Err(message));

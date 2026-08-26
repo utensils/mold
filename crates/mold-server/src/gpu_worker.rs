@@ -2057,11 +2057,9 @@ fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUp
             &message,
         );
         if let Some(ref tx) = job.generation.progress_tx {
-            let _ = tx.send(SseMessage::Error(if settlement.is_retained() {
-                SseErrorEvent::retained(message.clone())
-            } else {
-                SseErrorEvent::failed(message.clone())
-            }));
+            let _ = tx.send(SseMessage::Error(
+                durable_generation_settlement::terminal_error_event(settlement, message.clone()),
+            ));
         }
         let _ = job.generation.result_tx.send(Err(message));
         drop(cleanup);
@@ -3641,13 +3639,15 @@ fn validate_h3_publication_contract(
 }
 
 fn reject_claimed_h3_generation_message(mut job: GpuJob, error: String) -> bool {
-    durable_generation_settlement::settle_blocking(
+    let settlement = durable_generation_settlement::settle_blocking(
         &mut job.journal,
         DurableDisposition::RetryableHold,
         &error,
     );
     if let Some(progress_tx) = &job.progress_tx {
-        let _ = progress_tx.send(SseMessage::Error(SseErrorEvent::failed(error.clone())));
+        let _ = progress_tx.send(SseMessage::Error(
+            durable_generation_settlement::terminal_error_event(settlement, error.clone()),
+        ));
     }
     let _ = job.result_tx.send(Err(error));
     false
@@ -3779,7 +3779,6 @@ fn process_job_with_sink(
     // explicitly pinned to this ordinal.
     if let Some(unavailable) = worker_unavailable(worker, &model_name) {
         let err_msg = unavailable.message;
-        let retained = job.journal.is_some() && unavailable.retainable;
         let settlement = durable_generation_settlement::settle_blocking(
             &mut job.journal,
             if unavailable.retainable {
@@ -3790,11 +3789,8 @@ fn process_job_with_sink(
             &err_msg,
         );
         if let Some(ref tx) = job.progress_tx {
-            let event = if retained || settlement.is_retained() {
-                SseErrorEvent::retained(err_msg.clone())
-            } else {
-                SseErrorEvent::failed(err_msg.clone())
-            };
+            let event =
+                durable_generation_settlement::terminal_error_event(settlement, err_msg.clone());
             let _ = tx.send(SseMessage::Error(event));
         }
         let _ = job.result_tx.send(Err(err_msg));
@@ -3818,13 +3814,18 @@ fn process_job_with_sink(
                  it is held for review instead of being retried"
                 );
                 tracing::error!(gpu = ordinal, model = %model_name, attempts, cap, "held an exhausted durable queue row");
-                durable_generation_settlement::settle_blocking(
+                let settlement = durable_generation_settlement::settle_blocking(
                     &mut job.journal,
                     DurableDisposition::NonRetryableHold,
                     "dispatch attempts exhausted",
                 );
                 if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                    let _ = tx.send(SseMessage::Error(
+                        durable_generation_settlement::terminal_error_event(
+                            settlement,
+                            err_msg.clone(),
+                        ),
+                    ));
                 }
                 let _ = job.result_tx.send(Err(err_msg));
                 return false;
@@ -3923,13 +3924,18 @@ fn process_job_with_sink(
         Err(error) => {
             let err_msg = format!("generation reference binding error: {error:#}");
             let err_msg = request.redact_staging_paths(err_msg);
-            durable_generation_settlement::settle_blocking(
+            let settlement = durable_generation_settlement::settle_blocking(
                 &mut job.journal,
                 DurableDisposition::RetryableHold,
                 &err_msg,
             );
             if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                let _ = tx.send(SseMessage::Error(
+                    durable_generation_settlement::terminal_error_event(
+                        settlement,
+                        err_msg.clone(),
+                    ),
+                ));
             }
             let _ = job.result_tx.send(Err(err_msg));
             return false;
@@ -3958,11 +3964,9 @@ fn process_job_with_sink(
             &err_msg,
         );
         if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(if settlement.is_retained() {
-                SseErrorEvent::retained(err_msg.clone())
-            } else {
-                SseErrorEvent::failed(err_msg.clone())
-            }));
+            let _ = tx.send(SseMessage::Error(
+                durable_generation_settlement::terminal_error_event(settlement, err_msg.clone()),
+            ));
         }
         let _ = job.result_tx.send(Err(err_msg));
         return false;
@@ -4024,84 +4028,88 @@ fn process_job_with_sink(
     if let Some(warning) = pinned.as_ref().and_then(|pinned| pinned.warning.clone()) {
         identity_warning.get_or_insert(warning);
     }
-    let frozen_identity = match carried_identity.or_else(|| pinned.map(|pinned| pinned.embedding)) {
-        Some(frozen) => Some(frozen),
-        None => {
-            let identity_paths = job
-                .execution_plan
-                .as_ref()
-                .and_then(|plan| plan.engine_config.identity_assets.clone());
-            let pin = identity_pin.clone().unwrap_or_default();
-            match crate::identity_extraction::resolve_pinned_identity_for_lease(
-                &request,
-                identity_paths.as_ref(),
-                &pin,
-                worker.gpu.backend,
-                ordinal,
-            ) {
-                Ok(resolved) => {
-                    // Only a resolution that actually COMPUTED reports the
-                    // phase. A sibling served from the per-photograph cache,
-                    // or one that waited on a peer's single flight, costs
-                    // about two milliseconds — recording that would drag
-                    // `ewma_identity_extract_ms` to a figure no cold request
-                    // can meet and make every conditioned ETA wrong.
-                    if resolved.extracted {
-                        let elapsed = identity_started.elapsed();
-                        // The scheduler's learned evidence for this phase.
-                        // Only the sibling that actually extracted reports it;
-                        // every other one leaves `identity_extract_ms` at
-                        // `None`, exactly as `cold_load_ms` does on a warm
-                        // reuse.
-                        record_phase_timing(&mold_inference::ProgressEvent::PhaseDone {
-                            phase: mold_inference::ProgressPhase::IdentityExtract,
-                            name: "Extracting face identity".to_string(),
-                            elapsed,
-                        });
-                        if let Some(ref tx) = job.progress_tx {
-                            let _ = tx.send(SseMessage::Progress(progress_to_sse(
-                                mold_inference::ProgressEvent::StageDone {
-                                    name: "Extracting face identity".to_string(),
-                                    elapsed,
-                                },
-                            )));
+    let frozen_identity =
+        match carried_identity.or_else(|| pinned.map(|pinned| pinned.embedding)) {
+            Some(frozen) => Some(frozen),
+            None => {
+                let identity_paths = job
+                    .execution_plan
+                    .as_ref()
+                    .and_then(|plan| plan.engine_config.identity_assets.clone());
+                let pin = identity_pin.clone().unwrap_or_default();
+                match crate::identity_extraction::resolve_pinned_identity_for_lease(
+                    &request,
+                    identity_paths.as_ref(),
+                    &pin,
+                    worker.gpu.backend,
+                    ordinal,
+                ) {
+                    Ok(resolved) => {
+                        // Only a resolution that actually COMPUTED reports the
+                        // phase. A sibling served from the per-photograph cache,
+                        // or one that waited on a peer's single flight, costs
+                        // about two milliseconds — recording that would drag
+                        // `ewma_identity_extract_ms` to a figure no cold request
+                        // can meet and make every conditioned ETA wrong.
+                        if resolved.extracted {
+                            let elapsed = identity_started.elapsed();
+                            // The scheduler's learned evidence for this phase.
+                            // Only the sibling that actually extracted reports it;
+                            // every other one leaves `identity_extract_ms` at
+                            // `None`, exactly as `cold_load_ms` does on a warm
+                            // reuse.
+                            record_phase_timing(&mold_inference::ProgressEvent::PhaseDone {
+                                phase: mold_inference::ProgressPhase::IdentityExtract,
+                                name: "Extracting face identity".to_string(),
+                                elapsed,
+                            });
+                            if let Some(ref tx) = job.progress_tx {
+                                let _ = tx.send(SseMessage::Progress(progress_to_sse(
+                                    mold_inference::ProgressEvent::StageDone {
+                                        name: "Extracting face identity".to_string(),
+                                        elapsed,
+                                    },
+                                )));
+                            }
                         }
+                        if let Some(warning) = resolved.warning {
+                            identity_warning.get_or_insert(warning);
+                        }
+                        resolved.embedding
                     }
-                    if let Some(warning) = resolved.warning {
-                        identity_warning.get_or_insert(warning);
+                    Err(error) => {
+                        let err_msg = request.redact_staging_paths(
+                            settle_identity_extraction_failure(worker, &model_name, &error),
+                        );
+                        tracing::error!(
+                            gpu = ordinal,
+                            model = %model_name,
+                            %err_msg,
+                            "face-identity conditioning failed"
+                        );
+                        let settlement = durable_generation_settlement::settle_blocking(
+                            &mut job.journal,
+                            if error.user_input {
+                                DurableDisposition::NonRetryableHold
+                            } else {
+                                DurableDisposition::RetryableHold
+                            },
+                            &err_msg,
+                        );
+                        if let Some(ref tx) = job.progress_tx {
+                            let _ = tx.send(SseMessage::Error(
+                                durable_generation_settlement::terminal_error_event(
+                                    settlement,
+                                    err_msg.clone(),
+                                ),
+                            ));
+                        }
+                        let _ = job.result_tx.send(Err(err_msg));
+                        return false;
                     }
-                    resolved.embedding
-                }
-                Err(error) => {
-                    let err_msg = request.redact_staging_paths(settle_identity_extraction_failure(
-                        worker,
-                        &model_name,
-                        &error,
-                    ));
-                    tracing::error!(
-                        gpu = ordinal,
-                        model = %model_name,
-                        %err_msg,
-                        "face-identity conditioning failed"
-                    );
-                    durable_generation_settlement::settle_blocking(
-                        &mut job.journal,
-                        if error.user_input {
-                            DurableDisposition::NonRetryableHold
-                        } else {
-                            DurableDisposition::RetryableHold
-                        },
-                        &err_msg,
-                    );
-                    if let Some(ref tx) = job.progress_tx {
-                        let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-                    }
-                    let _ = job.result_tx.send(Err(err_msg));
-                    return false;
                 }
             }
-        }
-    };
+        };
 
     // Ensure model is loaded on this GPU.
     let config_snapshot = job.config.blocking_read().clone();
@@ -4190,11 +4198,9 @@ fn process_job_with_sink(
             &err_msg,
         );
         if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(if settlement.is_retained() {
-                SseErrorEvent::retained(err_msg.clone())
-            } else {
-                SseErrorEvent::failed(err_msg.clone())
-            }));
+            let _ = tx.send(SseMessage::Error(
+                durable_generation_settlement::terminal_error_event(settlement, err_msg.clone()),
+            ));
         }
         let _ = job.result_tx.send(Err(err_msg));
         if count_worker_failure {
@@ -4233,11 +4239,9 @@ fn process_job_with_sink(
             &err_msg,
         );
         if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(if settlement.is_retained() {
-                SseErrorEvent::retained(err_msg.clone())
-            } else {
-                SseErrorEvent::failed(err_msg.clone())
-            }));
+            let _ = tx.send(SseMessage::Error(
+                durable_generation_settlement::terminal_error_event(settlement, err_msg.clone()),
+            ));
         }
         let _ = job.result_tx.send(Err(err_msg));
         return false;
@@ -4278,13 +4282,15 @@ fn process_job_with_sink(
 
     let Some(mut cached_engine) = taken else {
         let err_msg = "engine not found in cache after load".to_string();
-        durable_generation_settlement::settle_blocking(
+        let settlement = durable_generation_settlement::settle_blocking(
             &mut job.journal,
             DurableDisposition::RetryableHold,
             &err_msg,
         );
         if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+            let _ = tx.send(SseMessage::Error(
+                durable_generation_settlement::terminal_error_event(settlement, err_msg.clone()),
+            ));
         }
         let _ = job.result_tx.send(Err(err_msg));
         clear_active_generation(worker);
@@ -4423,13 +4429,18 @@ fn process_job_with_sink(
             ) {
                 clear_active_generation(worker);
                 let error = error.to_string();
-                durable_generation_settlement::settle_blocking(
+                let settlement = durable_generation_settlement::settle_blocking(
                     &mut job.journal,
                     DurableDisposition::RetryableHold,
                     &error,
                 );
                 if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(error.clone())));
+                    let _ = tx.send(SseMessage::Error(
+                        durable_generation_settlement::terminal_error_event(
+                            settlement,
+                            error.clone(),
+                        ),
+                    ));
                 }
                 let _ = job.result_tx.send(Err(error));
                 return false;
@@ -4471,13 +4482,18 @@ fn process_job_with_sink(
             if response.images.is_empty() && response.video.is_none() && response.audio.is_none() {
                 let err_msg =
                     "generation error: engine returned no images, video, or audio".to_string();
-                durable_generation_settlement::settle_blocking(
+                let settlement = durable_generation_settlement::settle_blocking(
                     &mut job.journal,
                     DurableDisposition::RetryableHold,
                     &err_msg,
                 );
                 if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
+                    let _ = tx.send(SseMessage::Error(
+                        durable_generation_settlement::terminal_error_event(
+                            settlement,
+                            err_msg.clone(),
+                        ),
+                    ));
                 }
                 let _ = job.result_tx.send(Err(err_msg));
                 return false;
@@ -4666,12 +4682,12 @@ fn process_job_with_sink(
             // quiet close: a quiet close leaves the desktop app in `loading`
             // forever and hard-fails the web client. The flag is what lets a
             // new client read this as interrupted instead of failed.
-            let retained = job.journal.is_some()
+            let should_retain = job.journal.is_some()
                 && mold_inference::is_inference_cancelled(&e)
                 && !user_cancelled;
             let settlement = durable_generation_settlement::settle_blocking(
                 &mut job.journal,
-                if retained || fatal_cuda {
+                if should_retain || fatal_cuda {
                     DurableDisposition::Retain
                 } else {
                     DurableDisposition::RetryableHold
@@ -4679,11 +4695,10 @@ fn process_job_with_sink(
                 &err_msg,
             );
             if let Some(ref tx) = job.progress_tx {
-                let event = if retained || settlement.is_retained() {
-                    SseErrorEvent::retained(err_msg.clone())
-                } else {
-                    SseErrorEvent::failed(err_msg.clone())
-                };
+                let event = durable_generation_settlement::terminal_error_event(
+                    settlement,
+                    err_msg.clone(),
+                );
                 let _ = tx.send(SseMessage::Error(event));
             }
             let _ = job.result_tx.send(Err(err_msg));
@@ -4705,11 +4720,12 @@ fn process_job_with_sink(
                 &err_msg,
             );
             if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(if settlement.is_retained() {
-                    SseErrorEvent::retained(err_msg.clone())
-                } else {
-                    SseErrorEvent::failed(err_msg.clone())
-                }));
+                let _ = tx.send(SseMessage::Error(
+                    durable_generation_settlement::terminal_error_event(
+                        settlement,
+                        err_msg.clone(),
+                    ),
+                ));
             }
             let _ = job.result_tx.send(Err(err_msg));
             false
@@ -4845,7 +4861,9 @@ fn finish_generation_success(
     if settlement.is_cancelled() {
         let message = "Cancelled".to_string();
         if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(message.clone())));
+            let _ = tx.send(SseMessage::Error(
+                durable_generation_settlement::terminal_error_event(settlement, message.clone()),
+            ));
         }
         let _ = job.result_tx.send(Err(message));
         return;
@@ -4896,7 +4914,7 @@ fn finish_generation_cancelled(mut job: GpuJob, user_requested: bool) {
     };
     if let Some(ref tx) = job.progress_tx {
         let event = if user_requested {
-            SseErrorEvent::failed(message.clone())
+            SseErrorEvent::cancelled(message.clone())
         } else {
             SseErrorEvent::retained(message.clone())
         };
@@ -4912,33 +4930,23 @@ fn finish_generation_hydration_failure(
     use crate::queue_media_runtime::DeferredHydrationDisposition;
 
     let disposition = error.disposition();
-    if let Some(ticket) = job.journal.take() {
-        match disposition {
-            DeferredHydrationDisposition::Hold => {
-                job.journal = Some(ticket);
-                durable_generation_settlement::settle_blocking(
-                    &mut job.journal,
-                    DurableDisposition::NonRetryableHold,
-                    "durable queue-media validation failed",
-                );
-            }
-            DeferredHydrationDisposition::Retain => {
-                job.journal = Some(ticket);
-                durable_generation_settlement::settle_blocking(
-                    &mut job.journal,
-                    DurableDisposition::Retain,
-                    "durable queue-media hydration must be retried after restart",
-                );
-            }
-        }
-    }
+    let settlement = match disposition {
+        DeferredHydrationDisposition::Hold => durable_generation_settlement::settle_blocking(
+            &mut job.journal,
+            DurableDisposition::NonRetryableHold,
+            "durable queue-media validation failed",
+        ),
+        DeferredHydrationDisposition::Retain => durable_generation_settlement::settle_blocking(
+            &mut job.journal,
+            DurableDisposition::Retain,
+            "durable queue-media hydration must be retried after restart",
+        ),
+    };
     tracing::error!(job = %job.id, %error, "durable queue-media hydration failed");
     let message = error.public_message().to_string();
     if let Some(ref tx) = job.progress_tx {
-        let event = match disposition {
-            DeferredHydrationDisposition::Hold => SseErrorEvent::failed(message.clone()),
-            DeferredHydrationDisposition::Retain => SseErrorEvent::retained(message.clone()),
-        };
+        let event =
+            durable_generation_settlement::terminal_error_event(settlement, message.clone());
         let _ = tx.send(SseMessage::Error(event));
     }
     let _ = job.result_tx.send(Err(message));

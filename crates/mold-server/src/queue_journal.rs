@@ -1745,13 +1745,16 @@ impl QueueJournal {
     }
 
     /// Return one explicitly retryable held row to the feeder backlog.
-    pub fn retry_held(&self, id: &str) -> anyhow::Result<generation_batches::OwnedRetry> {
+    pub fn retry_held(
+        &self,
+        authority: &mold_core::GenerationRetryRequest,
+    ) -> anyhow::Result<generation_batches::OwnedRetry> {
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
             return Ok(generation_batches::OwnedRetry::NotOwned);
         };
-        let outcome = generation_batches::retry_held_owned(db, owner, id, now_ms())?;
+        let outcome = generation_batches::retry_held_owned(db, owner, authority, now_ms())?;
         if outcome == generation_batches::OwnedRetry::Retried {
-            self.publish_state_committed(id);
+            self.publish_state_committed(&authority.job_id);
             self.wake_feeder();
         }
         Ok(outcome)
@@ -2555,9 +2558,17 @@ impl QueueTicket {
     /// Park the row: listed, never auto-run, and no longer owned by a ticket.
     pub fn hold(mut self, reason: &str) -> RetainOutcome {
         match self.hold_owned(reason, false, now_ms()) {
-            Ok(_) => {
+            Ok(generation_batches::OwnedHold::Held) => {
                 self.settled = true;
                 RetainOutcome::Released
+            }
+            Ok(generation_batches::OwnedHold::Cancelled) => {
+                self.settled = true;
+                RetainOutcome::Cancelled
+            }
+            Ok(generation_batches::OwnedHold::Fenced) => {
+                self.settled = true;
+                RetainOutcome::Stale
             }
             Err(error) => {
                 tracing::warn!(
@@ -2575,9 +2586,17 @@ impl QueueTicket {
     /// returned to the queue through the retry API.
     pub fn hold_retryable(mut self, reason: &str) -> RetainOutcome {
         match self.hold_owned(reason, true, now_ms()) {
-            Ok(_) => {
+            Ok(generation_batches::OwnedHold::Held) => {
                 self.settled = true;
                 RetainOutcome::Released
+            }
+            Ok(generation_batches::OwnedHold::Cancelled) => {
+                self.settled = true;
+                RetainOutcome::Cancelled
+            }
+            Ok(generation_batches::OwnedHold::Fenced) => {
+                self.settled = true;
+                RetainOutcome::Stale
             }
             Err(error) => {
                 tracing::warn!(
@@ -3159,11 +3178,47 @@ mod tests {
         let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
 
         assert!(journal.cancel_id("racing-hold-child").unwrap());
-        ticket.hold("server gallery output is disabled");
+        assert!(matches!(
+            ticket.hold("server gallery output is disabled"),
+            RetainOutcome::Cancelled
+        ));
 
         assert!(journal.list_all().is_empty());
         let child = &journal
             .generation_batch("racing-hold-batch")
+            .unwrap()
+            .children[0];
+        assert_eq!(child.state, "cancelled");
+    }
+
+    #[test]
+    fn cancellation_cannot_be_erased_by_a_late_retryable_feeder_hold() {
+        let journal = journal_with_db();
+        let request = request();
+        journal
+            .record_batch(BatchJournalAdmission {
+                id: "racing-retryable-hold-batch",
+                client_batch_id: "racing-retryable-hold-client",
+                request_sha256: "racing-retryable-hold-sha",
+                children: &[admission(
+                    "racing-retryable-hold-child",
+                    &request,
+                    Path::new("/gallery"),
+                )],
+            })
+            .unwrap();
+        let claim = journal.claim_next_feeder().unwrap().unwrap();
+        let ticket = journal.attach_claimed(&claim.row.id, claim.claim_token);
+
+        assert!(journal.cancel_id("racing-retryable-hold-child").unwrap());
+        assert!(matches!(
+            ticket.hold_retryable("dependency unavailable"),
+            RetainOutcome::Cancelled
+        ));
+
+        assert!(journal.list_all().is_empty());
+        let child = &journal
+            .generation_batch("racing-retryable-hold-batch")
             .unwrap()
             .children[0];
         assert_eq!(child.state, "cancelled");

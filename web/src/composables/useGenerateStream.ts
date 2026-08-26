@@ -2298,7 +2298,12 @@ function markCancellationConfirmed(job: Job): void {
 
 async function confirmDurableCancellation(job: Job): Promise<void> {
   const durable = job.durableBatch;
-  if (job.state !== "running" || !job.serverId || !durable) return;
+  if (
+    job.state !== "running" ||
+    !job.serverId ||
+    !durable?.serverBatchId
+  )
+    return;
   const active = durableCancellations.get(job.id);
   if (active) return active;
   job.cancelRequested = true;
@@ -2313,8 +2318,12 @@ async function confirmDurableCancellation(job: Job): Promise<void> {
   }
   const task = mutateQueueJobOnExpectedInstance(
     { baseUrl: target.baseUrl, apiKey: target.apiKey ?? null },
-    durable.expectedInstanceId,
-    job.serverId,
+    {
+      instanceId: durable.expectedInstanceId,
+      batchId: durable.serverBatchId,
+      clientBatchId: durable.clientBatchId,
+      jobId: job.serverId,
+    },
     "cancel",
   )
     .then(() => {
@@ -2383,7 +2392,12 @@ async function cancelJob(id: string): Promise<void> {
 
 async function retryJob(id: string): Promise<void> {
   const job = jobs.value.find((candidate) => candidate.id === id);
-  if (!job?.durableBatch || !job.serverId || !job.retryable || job.retrying) {
+  if (
+    !job?.durableBatch?.serverBatchId ||
+    !job.serverId ||
+    !job.retryable ||
+    job.retrying
+  ) {
     throw new Error("This held generation is not retryable yet.");
   }
   const route = durableRoutes.get(job.hostId ?? "");
@@ -2393,8 +2407,12 @@ async function retryJob(id: string): Promise<void> {
   try {
     await mutateQueueJobOnExpectedInstance(
       { baseUrl: target.baseUrl, apiKey: target.apiKey ?? null },
-      job.durableBatch.expectedInstanceId,
-      job.serverId,
+      {
+        instanceId: job.durableBatch.expectedInstanceId,
+        batchId: job.durableBatch.serverBatchId,
+        clientBatchId: job.durableBatch.clientBatchId,
+        jobId: job.serverId,
+      },
       "retry",
     );
     job.retryable = false;
