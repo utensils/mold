@@ -49,10 +49,16 @@ incremental = true
 debug = 1
 strip = false
 
-# TEMPORARY: one-package-identity compatibility patch while the remaining
-# backend fixes land upstream. Unlike the old `candle-*-mold` packages, these
-# crates retain Candle's upstream package names, so every transitive consumer
-# shares one `Tensor` type. Remove patches individually as upstream releases
-# absorb them.
+# TEMPORARY: compatibility patches while the remaining backend fixes land
+# upstream. Remove patches individually as upstream releases absorb them.
+#
+# Candle itself is NOT patched here any more. #1393 needed merged fork kernels
+# that ship under the renamed `candle-*-mold` package identities, which
+# `[patch.crates-io]` cannot express (a patch must keep the patched package's
+# name). Every candle crate is therefore a direct git dependency on ONE fork
+# revision, and `candle-flash-attn` and `candle-onnx` must move with it: a
+# crates.io copy of either pulls the upstream-named `candle-core` alongside
+# `candle-core-mold` and two nominally distinct `Tensor` types land in one
+# graph (#1399). `scripts/tests/candle-single-identity.sh` enforces that.
 [patch.crates-io]
 cudarc = { git = "https://github.com/utensils/cudarc", rev = "9b3b1bc276bc27c3e99343ee82db7f99705b9ed5" }

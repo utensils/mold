@@ -723,43 +723,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "candle-core"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ecb245093b0f791b89d3420c3df9c6d49c60ab63ba54db896bf8a3baf486706"
-dependencies = [
- "byteorder",
- "candle-kernels 0.11.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "candle-ug 0.11.0",
- "cudarc 0.19.8",
- "float8",
- "gemm 0.19.0",
- "half",
- "libc",
- "libm",
- "memmap2",
- "num-traits",
- "num_cpus",
- "rand 0.9.4",
- "rand_distr 0.5.1",
- "rayon",
- "safetensors 0.8.0",
- "thiserror 2.0.18",
- "tokenizers 0.22.2",
- "yoke 0.8.3",
- "zerocopy",
- "zip 8.6.0",
-]
-
-[[package]]
 name = "candle-core-mold"
 version = "0.11.1"
 source = "git+https://github.com/utensils/candle.git?rev=ad5fd432974913887f17b25c8ee863cfc54eb67c#ad5fd432974913887f17b25c8ee863cfc54eb67c"
 dependencies = [
  "byteorder",
- "candle-kernels 0.11.0 (git+https://github.com/utensils/candle.git?rev=ad5fd432974913887f17b25c8ee863cfc54eb67c)",
+ "candle-kernels",
  "candle-metal-kernels-mold",
- "candle-ug 0.11.1",
+ "candle-ug",
  "cudarc 0.19.8",
  "float8",
  "gemm 0.19.0",
@@ -785,22 +756,12 @@ dependencies = [
 [[package]]
 name = "candle-flash-attn"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5f1e2f29f5123d7a627171209fdaeb4ee91d076aefeac588922aa9842e30c2c"
+source = "git+https://github.com/utensils/candle.git?rev=ad5fd432974913887f17b25c8ee863cfc54eb67c#ad5fd432974913887f17b25c8ee863cfc54eb67c"
 dependencies = [
  "anyhow",
- "candle-core",
+ "candle-core-mold",
  "cudaforge",
  "half",
-]
-
-[[package]]
-name = "candle-kernels"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67450168a281bbb195a14cc85cf164c7a12023a54a03409a3324f476346e0789"
-dependencies = [
- "cudaforge",
 ]
 
 [[package]]
@@ -870,16 +831,6 @@ dependencies = [
  "serde_json",
  "serde_plain",
  "tracing",
-]
-
-[[package]]
-name = "candle-ug"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "257411c33abf7d898a31ac20d80813dfe96ff09e23a73039e22ab293aea9b871"
-dependencies = [
- "ug",
- "ug-cuda",
 ]
 
 [[package]]

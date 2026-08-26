@@ -125,6 +125,14 @@ jobs:
               - 'flake.lock'
               - 'nix/**'
             release:
+              # Every cargo manifest and lockfile in the repo, including roots
+              # that do not exist yet. `candle-single-identity.sh` discovers
+              # roots with `git ls-files`, so enumerating today's paths here
+              # would let a new one be added with a registry Candle dependency
+              # and no PR-visible check (#1399). The contracts on this route
+              # compile nothing, so the widening is cheap.
+              - '**/Cargo.toml'
+              - '**/Cargo.lock'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'Dockerfile'
@@ -206,6 +214,7 @@ jobs:
               - 'scripts/qualify-cuda-sm86.sh'
               - 'docs/qualification/**'
               - 'scripts/tests/docker-web-context.sh'
+              - 'scripts/tests/candle-single-identity.sh'
               - 'scripts/tests/desktop-candle-lock-sync.sh'
               - 'scripts/tests/desktop-candle-nix-source-hash.sh'
               - 'scripts/tests/desktop-dmg-packaging.sh'
@@ -437,6 +446,7 @@ jobs:
           bash scripts/tests/ci-coverage-disk-guard.sh
           bash scripts/tests/ci-routing-contract.sh
           bash scripts/tests/docker-web-context.sh
+          bash scripts/tests/candle-single-identity.sh
           bash scripts/tests/desktop-candle-lock-sync.sh
           bash scripts/tests/desktop-candle-nix-source-hash.sh
           bash scripts/tests/desktop-dmg-packaging.sh
@@ -606,6 +616,14 @@ jobs:
   # covered. Cold builds can take more than an hour, and the feature is not
   # included in any release artifact, so it never consumes the PR critical
   # path or read-only PR cache generations.
+  #
+  # Being push-only means a PR cannot see this job go red: #1399 landed a
+  # duplicate `candle-core` in the CUDA graph and broke four consecutive main
+  # merges before anyone read the result. The cheap half of that coverage —
+  # every candle crate resolving to ONE package identity — is now
+  # `scripts/tests/candle-single-identity.sh` on the release-contract route,
+  # which does run on PRs. Keep dependency-shape assertions there; this job
+  # stays the compile-the-kernels backstop.
   flash-attn-check:
     name: FlashAttention feature typecheck
     needs: changes
