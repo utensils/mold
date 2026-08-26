@@ -11206,7 +11206,7 @@ onBeforeUnmount(() => {
               <button class="primary-button" type="submit">Test and save</button>
             </div>
           </form>
-          <form v-else style="margin-top: 20px" @submit.prevent="connectHost()">
+          <form v-else class="mobile-host-form" @submit.prevent="connectHost()">
             <label class="field"
               ><span>Name</span
               ><input

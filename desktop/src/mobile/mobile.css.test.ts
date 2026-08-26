@@ -104,6 +104,33 @@ describe("mobile scrolling", () => {
     expect(content?.[1]).toMatch(/overscroll-behavior:\s*none\s*;/);
     expect(content?.[1]).not.toMatch(/-webkit-overflow-scrolling/);
   });
+
+  it("turns wide mobile surfaces into a full-width responsive workspace", () => {
+    const tablet = css.match(/@media \(min-width: 640px\) \{([\s\S]*?)\n\}/);
+    expect(tablet?.[1]).toMatch(/grid-template-areas:[\s\S]*"tabs header"/);
+    expect(tablet?.[1]).toMatch(
+      /\.mobile-shell\.is-settings-open\s*\{[\s\S]*grid-template-areas:[\s\S]*"header"[\s\S]*"content"/,
+    );
+    expect(tablet?.[1]).toMatch(/\.mobile-content\s*\{[\s\S]*width:\s*100%/);
+    expect(tablet?.[1]).toMatch(
+      /\.mobile-tabs\s*\{[\s\S]*grid-template-columns:\s*minmax\(0,\s*1fr\)/,
+    );
+    expect(tablet?.[1]).toMatch(/\.mobile-host-form\s*\{[\s\S]*repeat\(2,/);
+    expect(tablet?.[1]).toMatch(
+      /\.mobile-catalog-detail-scroll\s*\{[\s\S]*padding-right:\s*env\(safe-area-inset-right\)[\s\S]*padding-left:\s*env\(safe-area-inset-left\)/,
+    );
+    expect(tablet?.[1]).toContain("env(safe-area-inset-left)");
+
+    const roomyTablet = css.match(/@media \(min-width: 768px\) \{([\s\S]*?)\n\}/);
+    expect(roomyTablet?.[1]).toMatch(/\.mobile-settings-section\s*\{[\s\S]*minmax\(220px,/);
+    expect(roomyTablet?.[1]).toMatch(/\.mobile-catalog-results\s*\{[\s\S]*repeat\(2,/);
+    expect(roomyTablet?.[1]).not.toMatch(/\.mobile-catalog-detail-scroll/);
+
+    const wideDetail = css.match(/@media \(min-width: 900px\) \{([\s\S]*?)\n\}/);
+    expect(wideDetail?.[1]).toMatch(
+      /\.mobile-catalog-detail-scroll\s*\{[\s\S]*minmax\(320px,[\s\S]*minmax\(420px,/,
+    );
+  });
 });
 
 describe("mobile navigation", () => {

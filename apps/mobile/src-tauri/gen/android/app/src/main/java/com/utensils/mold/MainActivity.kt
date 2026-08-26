@@ -1,6 +1,7 @@
 package com.utensils.mold
 
 import android.R
+import android.graphics.Color
 import android.os.Bundle
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
@@ -10,6 +11,8 @@ class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    // Avoid a light flash before the WebView applies the persisted appearance.
+    window.decorView.setBackgroundColor(Color.parseColor("#0A0805"))
     val content = findViewById<android.view.View>(R.id.content)
     ViewCompat.setOnApplyWindowInsetsListener(content) { view, insets ->
       val safeChrome = insets.getInsets(
