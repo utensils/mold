@@ -509,8 +509,12 @@ describe("web durable generation lifecycle", () => {
     await vi.waitFor(() =>
       expect(mutateQueueJobOnExpectedInstance).toHaveBeenCalledWith(
         route.target,
-        route.instanceId,
-        `job-${clientBatchId}-1`,
+        {
+          instanceId: route.instanceId,
+          batchId: `server-${clientBatchId}`,
+          clientBatchId,
+          jobId: `job-${clientBatchId}-1`,
+        },
         "cancel",
       ),
     );
@@ -547,8 +551,12 @@ describe("web durable generation lifecycle", () => {
     await vi.waitFor(() =>
       expect(mutateQueueJobOnExpectedInstance).toHaveBeenCalledWith(
         route.target,
-        route.instanceId,
-        `job-${clientBatchId}-1`,
+        {
+          instanceId: route.instanceId,
+          batchId: `server-${clientBatchId}`,
+          clientBatchId,
+          jobId: `job-${clientBatchId}-1`,
+        },
         "cancel",
       ),
     );
@@ -582,8 +590,12 @@ describe("web durable generation lifecycle", () => {
 
     expect(mutateQueueJobOnExpectedInstance).toHaveBeenCalledWith(
       route.target,
-      route.instanceId,
-      `job-${clientBatchId}-1`,
+      {
+        instanceId: route.instanceId,
+        batchId: `server-${clientBatchId}`,
+        clientBatchId,
+        jobId: `job-${clientBatchId}-1`,
+      },
       "retry",
     );
   });
