@@ -281,7 +281,8 @@ if wants contracts; then
                   minimax-h3-attention-release-contract bench-qwen-parse \
                   regression-matrix-aggregate-failures regression-matrix-concurrency \
                   regression-matrix-family-sizing regression-matrix-source-image \
-                  regression-matrix-transient-retry wan-regression-matrix; do
+                  regression-matrix-transient-retry wan-regression-matrix \
+                  ltx25-metal-verification; do
     script="scripts/tests/${contract}.sh"
     if [ -f "$script" ]; then
       step "contracts: ${contract}" bash "$script"

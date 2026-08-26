@@ -110,3 +110,16 @@ The implementation and parity fixtures are pinned to:
 Retained parity artifacts, logs, prompts, seeds, and run manifests live under
 `/Volumes/ExternalStorage/mold2/output/verification/ltx-2.5/`. Downloaded model
 files remain under `/Volumes/ExternalStorage/mold2` and are not cleanup data.
+
+Run `scripts/capture-ltx25-metal-verification.sh` on Apple Silicon to capture a
+machine-readable INT8 Metal report. The capture validates the pinned upstream
+clones, download-time SHA-256 markers, decoded retained media, and focused Rust
+parity/regression gates. It only reads existing model and media files; reports
+and logs are added under the verification directory without deleting renders.
+
+The executable compact-checkpoint A/B row is Mold versus ComfyUI on MPS. The
+official PyTorch and Diffusers BF16 pipelines remain static tensor/config
+oracles because neither directly loads the Comfy INT8 ConvRot checkpoint.
+CUDA qualification is performed on its dedicated host. BF16 remains available
+and retained, but a stopped BF16 runtime run is recorded as operator-deferred,
+not misreported as passing.
