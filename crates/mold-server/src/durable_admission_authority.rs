@@ -113,8 +113,15 @@ pub(crate) fn restore(
 ) -> Result<RuntimeAuthority, Failure> {
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     {
-        let requires_h3 =
-            mold_core::minimax_h3::capability_contract_for_model(&request.model).is_some();
+        // Must ask the SAME question `capture` asked. `capture` routes through
+        // `classify_h3_private_ingress`, which returns `Ok(None)` for a pinned
+        // unrunnable identity and therefore binds no envelope; asking the
+        // broader `capability_contract_for_model` here made restore demand an
+        // envelope capture never wrote, so a download-only H3 row parked as a
+        // permanent hold where its own `/api/models` entry promised
+        // `MINIMAX_H3_RUNTIME_UNAVAILABLE` / 501.
+        let requires_h3 = !mold_core::is_pinned_unrunnable_minimax_h3_identity(&request.model)
+            && mold_core::minimax_h3::capability_contract_for_model(&request.model).is_some();
         let Some(envelope) = envelope else {
             return if requires_h3 {
                 Err(Failure {

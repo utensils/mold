@@ -915,11 +915,16 @@ mod tests {
     }
 
     fn install_authoritative_v2(state: &mut AppState) {
+        install_dispatch_mode(state, crate::dispatch_mode::DispatchMode::V2);
+    }
+
+    /// The non-V2 half of the same helper. Every durable route test installs
+    /// V2, which left the legacy and observe hosts with zero coverage on any
+    /// generation route — the blind axis that let `direct_durable_admission`
+    /// omit the `v2_authoritative` conjunct entirely.
+    fn install_dispatch_mode(state: &mut AppState, mode: crate::dispatch_mode::DispatchMode) {
         let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
-        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
-            scheduled_tx,
-            crate::dispatch_mode::DispatchMode::V2,
-        );
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(scheduled_tx, mode);
     }
 
     fn app_with_worker_pool(engine: MockEngine, ordinals: &[usize]) -> axum::Router {
@@ -5876,11 +5881,28 @@ mod tests {
             request
         };
 
+        // DELIBERATE CHANGE, not a weakened assertion. This gate used to refuse
+        // unconditionally while the gate below it consulted
+        // `explicitly_requested`, so a degraded media store 503'd EVERY
+        // media-carrying and H3 generation on both direct routes — behind a
+        // status both client classifiers read as transient, on a host whose
+        // capabilities were already telling clients to use the attached path.
+        // A caller that explicitly demanded durability still gets the typed
+        // refusal; a caller that did not now falls back, which is what
+        // capability discovery promised it. The fallback half is asserted by
+        // `a_degraded_media_store_falls_back_instead_of_refusing`, which drives
+        // the gate directly rather than running a generation.
         for path in ["/api/generate", "/api/generate/stream"] {
             for request in [&body, &h3_body] {
                 let response = app
                     .clone()
-                    .oneshot(json_request("POST", path, request.clone()))
+                    .oneshot(
+                        Request::post(path)
+                            .header("content-type", "application/json")
+                            .header("x-mold-operation-id", uuid::Uuid::new_v4().to_string())
+                            .body(Body::from(serde_json::to_vec(request).unwrap()))
+                            .unwrap(),
+                    )
                     .await
                     .unwrap();
                 assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -8237,10 +8259,19 @@ mod tests {
         .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        assert!(
-            journal.list_all().is_empty(),
-            "a published generation clears its durable row"
-        );
+        // The row is cleared on the worker as it settles, which is not ordered
+        // against this response arriving, so wait for it rather than sampling
+        // once. The assertion is unchanged — the row must still be gone; under
+        // parallel load the immediate sample raced and made this test flaky in
+        // CI. Same bounded-wait shape as
+        // `headerless_direct_media_is_durable_without_a_client_operation_id`.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !journal.list_all().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a published generation clears its durable row");
 
         // The saved print carries the queue job that produced it, which is
         // what makes replay idempotent.
@@ -18242,5 +18273,159 @@ mod tests {
         assert!(gallery_rows(&app, "/api/gallery?view=trash")
             .await
             .is_empty());
+    }
+
+    // ── Durable-admission readiness ───────────────────────────────────────────
+    //
+    // Appended as one block on purpose. A semantic conflict in a Rust test file
+    // compiles and passes on both sides of a rebase, so new coverage goes at the
+    // end rather than interleaved into existing modules, where a three-way merge
+    // could delete it with no signal.
+    //
+    // These drive `direct_durable_admission` directly rather than POSTing to
+    // `/api/generate`: the attached fallback they assert on is exactly the path
+    // that then runs a real generation, so a route-level test would block on a
+    // worker instead of measuring the gate.
+
+    fn readiness_request() -> mold_core::GenerateRequest {
+        serde_json::from_str(&generate_body("a cat", 64, 64)).unwrap()
+    }
+
+    /// Durable DIRECT admission deliberately does not require an authoritative
+    /// scheduler, and this pins that as a contract rather than an oversight.
+    ///
+    /// The durable feeder is spawned on `start_generation_runner` alone and
+    /// runs in legacy and observe dispatch too, so a direct generation on such
+    /// a host is genuinely durable. Requiring V2 here would remove real
+    /// durability from every legacy and observe host in exchange for nothing a
+    /// client can observe — a headerless request receives the same attached
+    /// media bytes either way. The batch PROTOCOL is what needs V2, because
+    /// that is what `capabilities.queue.heterogeneous_batch` advertises, and
+    /// `a_non_authoritative_host_refuses_the_batch_protocol` covers that half.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_non_authoritative_host_still_admits_direct_generations_durably() {
+        for mode in [
+            crate::dispatch_mode::DispatchMode::Legacy,
+            crate::dispatch_mode::DispatchMode::Observe,
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+            let (mut state, _rx) = durable_state(db, root.path());
+            install_dispatch_mode(&mut state, mode);
+
+            let mut request = readiness_request();
+            let admission = crate::routes::direct_durable_admission(&state, &mut request, false)
+                .await
+                .expect("a non-authoritative host still admits durably");
+            assert!(
+                admission.is_some(),
+                "{mode:?}: durable direct admission does not depend on Scheduler V2"
+            );
+        }
+    }
+
+    /// The batch protocol DOES require V2, and the capability says so, so the
+    /// route must agree with the capability.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_non_authoritative_host_refuses_the_batch_protocol() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_dispatch_mode(&mut state, crate::dispatch_mode::DispatchMode::Legacy);
+        let app = app_with_state(state);
+
+        let capabilities = json_body(
+            app.clone()
+                .oneshot(empty_request("GET", "/api/capabilities"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(capabilities["queue"]["heterogeneous_batch"], false);
+        assert!(capabilities["queue"]["admission_protocol_version"].is_null());
+
+        let refused = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [serde_json::from_str::<serde_json::Value>(
+                        &generate_body("a cat", 64, 64)
+                    ).unwrap()],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json_body(refused).await["code"],
+            "HETEROGENEOUS_BATCH_UNAVAILABLE"
+        );
+    }
+
+    /// N1. A degraded encrypted-media store must route a media-carrying request
+    /// to the attached path, not refuse it. This gate ignored
+    /// `explicitly_requested` while the gate six lines below it consulted it, so
+    /// every conditioning field 503'd on a host whose clients were already
+    /// negotiating the attached path — behind a status both client classifiers
+    /// read as transient. The table is the point: the blast radius was every
+    /// conditioning field, not just `source_image`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_degraded_media_store_falls_back_instead_of_refusing() {
+        const PIXEL: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        for field in ["source_image", "id_image", "mask_image", "control_image"] {
+            let root = tempfile::tempdir().unwrap();
+            let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+            // Admission installed, media store NOT reconciled: exactly the
+            // shape a corrupt or unreadable queue-media directory produces, and
+            // the shape the four readiness conjuncts cannot see.
+            let (mut state, _rx) = durable_state(db, root.path());
+            install_authoritative_v2(&mut state);
+            state.queue_journal.set_durable_media_ready(false);
+            assert!(
+                state.queue_journal.durable_media_capabilities().is_none(),
+                "{field}: fixture must present a degraded media store"
+            );
+
+            let mut body: serde_json::Value =
+                serde_json::from_str(&generate_body("a cat", 64, 64)).unwrap();
+            body[field] = serde_json::Value::String(PIXEL.to_string());
+            let mut request: mold_core::GenerateRequest = serde_json::from_value(body).unwrap();
+
+            let admission = crate::routes::direct_durable_admission(&state, &mut request, false)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{field}: a degraded media store must fall back, got {}",
+                        error.code
+                    )
+                });
+            assert!(
+                admission.is_none(),
+                "{field}: fallback means no durable admission"
+            );
+        }
+    }
+
+    /// The overreach tripwire. `v2_authoritative()` serves five distinct roles
+    /// and only the durability role belongs behind the readiness authority. The
+    /// can-this-host-execute sites are always `|| gpu_pool.worker_count() > 0`;
+    /// folding them into a durability gate takes legacy and observe hosts
+    /// offline, and this fails loudly if that happens.
+    #[tokio::test(flavor = "current_thread")]
+    async fn legacy_dispatch_still_falls_back_rather_than_refusing() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_dispatch_mode(&mut state, crate::dispatch_mode::DispatchMode::Legacy);
+
+        let mut request = readiness_request();
+        assert!(
+            crate::routes::direct_durable_admission(&state, &mut request, false)
+                .await
+                .expect("legacy hosts still generate")
+                .is_some()
+        );
     }
 }

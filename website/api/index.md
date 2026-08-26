@@ -293,6 +293,24 @@ route returns HTTP 202 with its `GenerationBatchStatus` instead of an opaque
 clients can enter the same reconciliation path. Queued cancellation emits the
 terminal code `queued_cancelled`.
 
+Durable admission is best-effort on the direct routes. When this host cannot
+admit durably — no queue owner, gallery output disabled, a non-authoritative
+scheduler, an unavailable admission service, or a degraded encrypted-media
+store — `POST /api/generate` and `POST /api/generate/stream` fall back to the
+attached path rather than refusing, because that is what capability discovery
+already told the client to use. Send `X-Mold-Operation-Id` to demand durable
+admission instead: the same conditions then return HTTP 503 with
+`HETEROGENEOUS_BATCH_UNAVAILABLE`, `DURABLE_ADMISSION_UNAVAILABLE` (gallery
+output off), or `DURABLE_MEDIA_UNAVAILABLE` (media-carrying or MiniMax H3
+request against a degraded store). `POST /api/generation-batches` is always an
+explicit durable request and always refuses rather than falling back.
+
+`POST /api/generation-batches/status` is rate-limited as a read operation;
+`POST /api/queue/{id}/retry` is rate-limited with generation because it
+re-queues GPU work. A retry restores the job's dispatch budget but not its
+replay budget, which bounds a boot crash loop and is not an operator's to
+spend.
+
 ```bash
 curl -i -X POST http://localhost:7680/api/generate \
   -H "Content-Type: application/json" \

@@ -206,7 +206,14 @@ pub async fn run_generation(
     // singleton must not pay the legacy placement-preview round trip before it
     // can enter the durable queue. Capability failure falls through to the
     // attached path below for mixed-version hosts.
-    if params.inference_mode != InferenceMode::Local {
+    // Batch N only, matching the CLI. A singleton keeps the attached SSE path,
+    // which is what feeds `SseProgressEvent::Preview` into the centered
+    // fixed-protocol preview sink CLAUDE.md protects by name — the canonical
+    // path carries no preview frames, only `Info` strings, so routing
+    // singletons through it left remote generation with no preview and no step
+    // progress. Durability is unaffected: `/api/generate` admits through
+    // `direct_durable_admission` on both paths.
+    if batch > 1 && params.inference_mode != InferenceMode::Local {
         let effective_url = params.host.clone().or_else(|| server_url.clone());
         if let Some(url) = effective_url {
             let client = crate::hosts::client_for(&url, api_key.as_deref());
