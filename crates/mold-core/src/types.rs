@@ -8257,6 +8257,28 @@ pub struct GenerationBatchStatusResponse {
     pub missing: GenerationBatchMissing,
 }
 
+/// Complete authority required to retry one held durable generation child.
+/// The route job id is repeated here so the server can reject a mismatched
+/// path/body pair before entering the transactional lifecycle mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationRetryRequest {
+    pub instance_id: String,
+    pub batch_id: String,
+    pub client_batch_id: String,
+    pub job_id: String,
+}
+
+impl GenerationRetryRequest {
+    pub fn from_authority(authority: &GenerationBatchAuthority, job_id: impl Into<String>) -> Self {
+        Self {
+            instance_id: authority.instance_id.clone(),
+            batch_id: authority.batch_id.clone(),
+            client_batch_id: authority.client_batch_id.clone(),
+            job_id: job_id.into(),
+        }
+    }
+}
+
 /// Immutable identity captured from canonical generation admission. Rust
 /// clients validate every later snapshot against this fence before merging
 /// lifecycle state or acting on a returned job id.

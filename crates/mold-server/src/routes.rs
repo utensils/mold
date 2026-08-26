@@ -6429,6 +6429,7 @@ async fn cancel_queue_job(
     path = "/api/queue/{id}/retry",
     tag = "queue",
     params(("id" = String, Path, description = "Held generation job id")),
+    request_body = mold_core::GenerationRetryRequest,
     responses(
         (status = 202, description = "Held job returned to the durable queue"),
         (status = 404, description = "Queue job not found"),
@@ -6438,14 +6439,26 @@ async fn cancel_queue_job(
 async fn retry_queue_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Json(authority): Json<mold_core::GenerationRetryRequest>,
 ) -> Result<StatusCode, ApiError> {
+    if authority.job_id != id {
+        return Err(ApiError::with_code(
+            "retry job authority does not match the route",
+            "QUEUE_JOB_AUTHORITY_MISMATCH",
+            StatusCode::CONFLICT,
+        ));
+    }
     let _durable_transition = state.queue_journal.lock_durable_transition().await;
     let journal = state.queue_journal.clone();
-    let retry_id = id.clone();
-    match spawn_queue_mutation(move || journal.retry_held(&retry_id)).await? {
+    match spawn_queue_mutation(move || journal.retry_held(&authority)).await? {
         mold_db::generation_batches::OwnedRetry::Retried => Ok(StatusCode::ACCEPTED),
         mold_db::generation_batches::OwnedRetry::NotOwned => Err(ApiError::queue_job_not_found(
             format!("queue job {id} not found"),
+        )),
+        mold_db::generation_batches::OwnedRetry::AuthorityMismatch => Err(ApiError::with_code(
+            format!("queue job {id} retry authority changed"),
+            "QUEUE_JOB_AUTHORITY_MISMATCH",
+            StatusCode::CONFLICT,
         )),
         mold_db::generation_batches::OwnedRetry::NotHeld => Err(ApiError::with_code(
             format!("queue job {id} is not held"),

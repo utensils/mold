@@ -9,11 +9,11 @@ use crate::types::{
     CollectionUpdateRequest, DeviceState, EmptyTrashResult, ExpandRequest, ExpandResponse,
     GalleryImage, GalleryOrganizeRequest, GalleryPatchRequest, GenerateRequest, GenerateResponse,
     GenerationBatchAdmissionRequest, GenerationBatchStatus, GenerationBatchStatusRequest,
-    GenerationBatchStatusResponse, ImageData, LoraInfo, ModelInfo, ModelInfoExtended, OutputFormat,
-    QueueListingWire, ReferenceUploadCompleteResponse, ReferenceUploadSessionRequest,
-    ReferenceUploadSessionResponse, ServerStatus, SseCompleteEvent, SseErrorEvent,
-    SseProgressEvent, TagCount, TagRenameRequest, TrashFilenamesRequest, TrashSweepResult,
-    VideoData,
+    GenerationBatchStatusResponse, GenerationRetryRequest, ImageData, LoraInfo, ModelInfo,
+    ModelInfoExtended, OutputFormat, QueueListingWire, ReferenceUploadCompleteResponse,
+    ReferenceUploadSessionRequest, ReferenceUploadSessionResponse, ServerStatus, SseCompleteEvent,
+    SseErrorEvent, SseProgressEvent, TagCount, TagRenameRequest, TrashFilenamesRequest,
+    TrashSweepResult, VideoData,
 };
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -1417,14 +1417,15 @@ impl MoldClient {
     }
 
     /// Return a retryable held generation child to the durable queue.
-    pub async fn retry_queue_job(&self, id: &str) -> Result<()> {
+    pub async fn retry_queue_job(&self, request: &GenerationRetryRequest) -> Result<()> {
         let response = self
             .client
             .post(format!(
                 "{}/api/queue/{}/retry",
                 self.base_url,
-                encode_path_segment(id)
+                encode_path_segment(&request.job_id)
             ))
+            .json(request)
             .send()
             .await?;
         error_for_status_with_body(response).await?;
@@ -4317,6 +4318,12 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/api/queue/job-1/retry"))
+            .and(body_json(serde_json::json!({
+                "instance_id": "instance-1",
+                "batch_id": "batch-1",
+                "client_batch_id": admission.client_batch_id,
+                "job_id": "job-1"
+            })))
             .respond_with(ResponseTemplate::new(202))
             .expect(1)
             .mount(&server)
@@ -4335,7 +4342,15 @@ mod tests {
                 .job_id,
             "job-1"
         );
-        client.retry_queue_job("job-1").await.unwrap();
+        client
+            .retry_queue_job(&GenerationRetryRequest {
+                instance_id: "instance-1".into(),
+                batch_id: "batch-1".into(),
+                client_batch_id: admission.client_batch_id.clone(),
+                job_id: "job-1".into(),
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

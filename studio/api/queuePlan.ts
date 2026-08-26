@@ -331,14 +331,34 @@ export async function cancelQueueJob(
   });
 }
 
-/** Resume one explicitly retryable durable hold on the exact host. */
+export interface QueueJobAuthority {
+  instanceId: string;
+  batchId: string;
+  clientBatchId: string;
+  jobId: string;
+}
+
+/** Resume one explicitly retryable durable hold on the exact host. The body
+ * repeats the complete captured authority so the server can fence the
+ * mutation transaction rather than trusting a preceding status read. */
 export async function retryQueueJob(
   target: ApiTarget,
-  workId: string,
+  authority: QueueJobAuthority,
 ): Promise<void> {
-  await apiFetchTo(target, `/api/queue/${encodeURIComponent(workId)}/retry`, {
-    method: "POST",
-  });
+  await apiFetchTo(
+    target,
+    `/api/queue/${encodeURIComponent(authority.jobId)}/retry`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        instance_id: authority.instanceId,
+        batch_id: authority.batchId,
+        client_batch_id: authority.clientBatchId,
+        job_id: authority.jobId,
+      }),
+    },
+  );
 }
 
 export type QueueJobMutation = "cancel" | "retry";
@@ -348,25 +368,24 @@ export type QueueJobMutation = "cancel" | "retry";
  * replacement, so neither is sufficient authority for a recovered job. */
 export async function mutateQueueJobOnExpectedInstance(
   target: ApiTarget,
-  expectedInstanceId: string,
-  workId: string,
+  authority: QueueJobAuthority,
   mutation: QueueJobMutation,
 ): Promise<void> {
-  if (!expectedInstanceId.trim()) {
+  if (!authority.instanceId.trim()) {
     throw new TypeError("queue mutation requires an expected server instance");
   }
   const status = parseCurrentServerStatus(
     await apiJsonTo<unknown>(target, "/api/status"),
   );
-  if (status.instance_id !== expectedInstanceId) {
+  if (status.instance_id !== authority.instanceId) {
     throw new Error(
       "The original machine identity changed; this queue action is unavailable.",
     );
   }
   if (mutation === "cancel") {
-    await cancelQueueJob(target, workId);
+    await cancelQueueJob(target, authority.jobId);
   } else {
-    await retryQueueJob(target, workId);
+    await retryQueueJob(target, authority);
   }
 }
 

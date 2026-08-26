@@ -268,6 +268,7 @@ async fn retain_for_retry(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HoldClaimOutcome {
     Held,
+    Cancelled,
     Retained,
 }
 
@@ -301,9 +302,9 @@ async fn hold_claimed(
         }
         Ok(crate::queue_journal::RetainOutcome::Cancelled) => {
             if let Some(ingress) = ingress {
-                ingress.fail_claimed(job_id, "Cancelled".into());
+                ingress.cancel(job_id);
             }
-            HoldClaimOutcome::Held
+            HoldClaimOutcome::Cancelled
         }
         Ok(crate::queue_journal::RetainOutcome::Retry { ticket, error }) => {
             tracing::warn!(job = %job_id, %error, "hold transition failed; returning durable row to replay");
@@ -748,7 +749,7 @@ async fn feed_available(
                         return report;
                     }
                     tracing::error!(job = %row.id, %error, "held durable generation with invalid publication authority");
-                    report.held += 1;
+                    report.held += usize::from(held == HoldClaimOutcome::Held);
                     continue;
                 }
                 Ok(Err(error)) => {
@@ -779,7 +780,7 @@ async fn feed_available(
                     return report;
                 }
                 tracing::error!(job = %row.id, %error, "held durable generation with invalid publication metadata");
-                report.held += 1;
+                report.held += usize::from(held == HoldClaimOutcome::Held);
                 continue;
             }
         } else if let Some(output) = completed_output {
@@ -825,7 +826,7 @@ async fn feed_available(
                             return report;
                         }
                         tracing::warn!(job = %row.id, %error, "held durable generation with an unusable output target");
-                        report.held += 1;
+                        report.held += usize::from(held == HoldClaimOutcome::Held);
                         continue;
                     }
                     row.output_dir = replacement;
@@ -854,7 +855,7 @@ async fn feed_available(
                             return report;
                         }
                         tracing::warn!(job = %row.id, %error, "held durable generation with an unusable output target");
-                        report.held += 1;
+                        report.held += usize::from(held == HoldClaimOutcome::Held);
                         continue;
                     }
                 }
@@ -873,7 +874,7 @@ async fn feed_available(
                         report.stop = FeederStop::RecoverableFailure;
                         return report;
                     }
-                    report.held += 1;
+                    report.held += usize::from(held == HoldClaimOutcome::Held);
                     continue;
                 }
             }
@@ -897,7 +898,7 @@ async fn feed_available(
                     return report;
                 }
                 tracing::warn!(job = %row.id, %error, "held unreadable durable generation");
-                report.held += 1;
+                report.held += usize::from(held == HoldClaimOutcome::Held);
                 continue;
             }
         };
@@ -944,7 +945,7 @@ async fn feed_available(
                         return report;
                     }
                     tracing::error!(job = %row.id, %error, "held durable generation with invalid media projection");
-                    report.held += 1;
+                    report.held += usize::from(held == HoldClaimOutcome::Held);
                     continue;
                 }
                 Err(error) => {
@@ -990,7 +991,7 @@ async fn feed_available(
                         return report;
                     }
                     tracing::error!(job = %row.id, reason = %logged_reason, "held durable generation with invalid admission authority");
-                    report.held += 1;
+                    report.held += usize::from(held == HoldClaimOutcome::Held);
                     continue;
                 }
                 Ok(Err(crate::durable_admission_authority::Failure {
@@ -1008,7 +1009,7 @@ async fn feed_available(
                         return report;
                     }
                     tracing::warn!(job = %row.id, reason = %logged_reason, "held durable generation until its admission runtime is available");
-                    report.held += 1;
+                    report.held += usize::from(held == HoldClaimOutcome::Held);
                     continue;
                 }
                 Ok(Err(crate::durable_admission_authority::Failure {
@@ -1067,7 +1068,7 @@ async fn feed_available(
                                 report.stop = FeederStop::RecoverableFailure;
                                 return report;
                             }
-                            report.held += 1;
+                            report.held += usize::from(held == HoldClaimOutcome::Held);
                             continue;
                         }
                         crate::queue_media_runtime::DeferredHydrationDisposition::Retain => {
@@ -1133,7 +1134,7 @@ async fn feed_available(
                     report.stop = FeederStop::RecoverableFailure;
                     return report;
                 }
-                report.held += 1;
+                report.held += usize::from(held == HoldClaimOutcome::Held);
                 continue;
             }
         };
@@ -1263,7 +1264,7 @@ async fn feed_available(
                             outcome_rx.await
                         {
                             let _ = cancellation_tx.send(crate::state::SseMessage::Error(
-                                mold_core::SseErrorEvent::failed("cancelled".to_string()),
+                                mold_core::SseErrorEvent::cancelled("cancelled".to_string()),
                             ));
                         }
                     });
@@ -1744,6 +1745,86 @@ mod tests {
                 .id,
             ids[0],
             "the durable FIFO predecessor remains next"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_winning_a_feeder_hold_resolves_raw_and_sse_as_cancelled() {
+        use crate::queue_media_ingress::{AttachedObserver, ObserverMode, QueueMediaIngress};
+
+        let (state, _rx) = state(2);
+        let ids = admit(&state, 2);
+        let ingress = QueueMediaIngress::new(2);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+
+        let raw = ingress.reserve(&ids[0], ObserverMode::Raw).unwrap();
+        ingress.publish_committed(&ids[0]);
+        let raw_claim = state
+            .queue_journal
+            .claim_feeder_by_id(&ids[0])
+            .unwrap()
+            .unwrap();
+        let raw_ticket = state
+            .queue_journal
+            .attach_claimed(&ids[0], raw_claim.claim_token);
+        assert!(state.queue_journal.cancel_id(&ids[0]).unwrap());
+        assert_eq!(
+            hold_claimed(
+                raw_ticket,
+                Some(&ingress),
+                &ids[0],
+                "dependency unavailable".into(),
+                true,
+                &shutdown,
+            )
+            .await,
+            HoldClaimOutcome::Cancelled
+        );
+        let AttachedObserver::Raw { outcome, .. } = raw.attached().await.unwrap() else {
+            panic!("raw registration received the wrong observer type");
+        };
+        assert!(matches!(
+            outcome.await.unwrap(),
+            crate::job_supervisor::SupervisedOutcome::Cancelled
+        ));
+
+        let sse = ingress
+            .reserve(
+                &ids[1],
+                ObserverMode::Sse(crate::state::SseCompletionPayload::Full),
+            )
+            .unwrap();
+        ingress.publish_committed(&ids[1]);
+        let sse_claim = state
+            .queue_journal
+            .claim_feeder_by_id(&ids[1])
+            .unwrap()
+            .unwrap();
+        let sse_ticket = state
+            .queue_journal
+            .attach_claimed(&ids[1], sse_claim.claim_token);
+        assert!(state.queue_journal.cancel_id(&ids[1]).unwrap());
+        assert_eq!(
+            hold_claimed(
+                sse_ticket,
+                Some(&ingress),
+                &ids[1],
+                "dependency unavailable".into(),
+                true,
+                &shutdown,
+            )
+            .await,
+            HoldClaimOutcome::Cancelled
+        );
+        let AttachedObserver::Sse { mut messages } = sse.attached().await.unwrap() else {
+            panic!("SSE registration received the wrong observer type");
+        };
+        let Some(crate::state::SseMessage::Error(error)) = messages.recv().await else {
+            panic!("cancelled SSE observer must receive a terminal error");
+        };
+        assert_eq!(
+            error.code.as_deref(),
+            Some(mold_core::SSE_ERROR_CODE_QUEUED_CANCELLED)
         );
     }
 
