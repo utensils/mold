@@ -604,13 +604,31 @@ impl McpServer {
                 }
             });
             let status = if retry_was_ambiguous {
-                reconcile_ambiguous_retry_observed(
+                match reconcile_ambiguous_retry_observed(
                     &client,
                     &retry.authority,
                     &retry.durable_job_id,
                     Some(&event_tx),
                 )
                 .await
+                {
+                    Ok(status) => Ok(status),
+                    Err(error) => {
+                        jobs.record_reconciliation_error(
+                            &local_job_id,
+                            format!(
+                                "bounded retry confirmation expired; retry remains locked while exact reconciliation continues: {error:#}"
+                            ),
+                        )
+                        .await;
+                        reconcile_canonical_authority_observed(
+                            &client,
+                            &retry.authority,
+                            Some(&event_tx),
+                        )
+                        .await
+                    }
+                }
             } else {
                 reconcile_canonical_authority_observed(&client, &retry.authority, Some(&event_tx))
                     .await
@@ -2445,6 +2463,8 @@ mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
     use serde_json::json;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
@@ -2624,6 +2644,114 @@ mod tests {
         assert!(!requests
             .iter()
             .any(|request| request.url.path() == "/api/generate"));
+    }
+
+    struct RetryRecoveryAfterBoundedFailures {
+        calls: Arc<AtomicUsize>,
+        client_batch_id: String,
+    }
+
+    impl Respond for RetryRecoveryAfterBoundedFailures {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
+            if attempt < 5 {
+                return ResponseTemplate::new(503);
+            }
+            if attempt == 5 {
+                return ResponseTemplate::new(404);
+            }
+            ResponseTemplate::new(200).set_body_json(json!({
+                "id": "batch-1",
+                "client_batch_id": self.client_batch_id,
+                "instance_id": "instance-1",
+                "durable": true,
+                "children": [{
+                    "index": 1,
+                    "job_id": "durable-job-1",
+                    "state": "held",
+                    "error": "dependency remains unavailable",
+                    "retryable": true
+                }]
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn async_mcp_continues_exact_reconciliation_after_bounded_retry_expiry() {
+        let server = MockServer::start().await;
+        mount_canonical_capabilities(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .respond_with(HeldCanonicalAdmission)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer {
+            client: MoldClient::new(&server.uri()),
+            jobs: AsyncJobRegistry::default(),
+        };
+        let request = transport_request();
+        let local_id = mcp.jobs.create(&request).await;
+        run_async_generation(
+            mcp.client.clone(),
+            mcp.jobs.clone(),
+            local_id.clone(),
+            request,
+        )
+        .await;
+        let client_batch_id = mcp
+            .jobs
+            .get(&local_id)
+            .await
+            .unwrap()
+            .authority
+            .unwrap()
+            .client_batch_id;
+        Mock::given(method("POST"))
+            .and(path("/api/queue/durable-job-1/retry"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let status_calls = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("GET"))
+            .and(path("/api/generation-batches/batch-1"))
+            .respond_with(RetryRecoveryAfterBoundedFailures {
+                calls: status_calls.clone(),
+                client_batch_id,
+            })
+            .expect(7)
+            .mount(&server)
+            .await;
+
+        let immediate = mcp
+            .tool_generation_retry(json!({ "job_id": local_id }))
+            .await
+            .unwrap();
+        assert_eq!(immediate["structuredContent"]["status"], "queued");
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let job = mcp.jobs.get(&local_id).await.unwrap();
+                if job.status == AsyncJobStatus::Held && job.retryable == Some(true) {
+                    assert_eq!(job.error.as_deref(), Some("dependency remains unavailable"));
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("exact retry reconciliation did not recover after the host returned");
+
+        assert_eq!(status_calls.load(Ordering::SeqCst), 7);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.url.path() == "/api/queue/durable-job-1/retry")
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
