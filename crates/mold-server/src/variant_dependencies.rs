@@ -2023,7 +2023,7 @@ async fn prepare_h3_private_inputs_for_devices(
             // Clone the zeroizing wrapper itself. A deref clone here would
             // leave hydrated private media in an ordinary GenerateRequest on
             // success, error, or panic unwind.
-            let admission_request: crate::queue_media_runtime::ZeroizingGenerateRequest =
+            let mut admission_request: crate::queue_media_runtime::ZeroizingGenerateRequest =
                 resolved_request.clone();
             let paths = uat_paths.clone();
             // Each device's admission mints its own descriptors rather than
@@ -2067,7 +2067,7 @@ async fn prepare_h3_private_inputs_for_devices(
                 };
                 mold_inference::prepare_h3_private_fl2va_admission(
                     mold_inference::H3PrivateFl2VaAdmissionInput {
-                        request: &admission_request,
+                        request: &mut admission_request,
                         paths: paths.inference_paths(),
                         references: &bindings,
                         device_id: &device_id,
@@ -2099,8 +2099,9 @@ async fn prepare_h3_private_inputs_for_devices(
                     continue;
                 }
             };
-            let next_request = evidence
-                .resolve_request(&resolved_request)
+            let mut next_request = resolved_request.clone();
+            evidence
+                .resolve_request(&mut next_request)
                 .map_err(|error| {
                     format!("MiniMax H3 admission seed resolution failed: {error:#}")
                 })?;
