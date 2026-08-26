@@ -586,6 +586,7 @@ cd ..
 android-doctor
 android-check
 ./scripts/tests/ios-release-assets.sh
+./scripts/tests/android-release-assets.sh
 ./scripts/ios.sh check
 ./scripts/ios.sh simulator
 ```
@@ -597,6 +598,15 @@ icon catalog contains the current opaque Mold artwork. If
 
 ```bash
 ./scripts/generate-ios-icons.sh
+```
+
+`scripts/tests/android-release-assets.sh` verifies that every adaptive and
+legacy launcher density contains Mold artwork and matches the current
+`desktop/icon-master.png`. Regenerate Android launcher assets after changing
+the master icon:
+
+```bash
+./scripts/generate-android-icons.sh
 ```
 
 Keep `apps/mobile/src-tauri/Info.ios.plist`, the generated Apple plist, and

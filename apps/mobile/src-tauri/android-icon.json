@@ -1,0 +1,6 @@
+{
+  "default": "../../../desktop/icon-master.png",
+  "bg_color": "#12101d",
+  "android_fg": "../../../desktop/icon-master.png",
+  "android_fg_scale": 88
+}
