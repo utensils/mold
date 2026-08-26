@@ -109,9 +109,10 @@ const FORWARD_PHASE_RANK: Record<GenerationLifecyclePhase, number> = {
   queued: 1,
   held: 2,
   running: 3,
-  complete: 4,
-  failed: 4,
-  cancelled: 4,
+  cancelling: 4,
+  complete: 5,
+  failed: 5,
+  cancelled: 5,
 };
 
 export function isTerminalGenerationPhase(
@@ -376,7 +377,8 @@ export interface BulkGenerationMergeResult {
 /**
  * Build the one bulk reconciliation request for a host. Known batches use
  * their server IDs; ambiguous admissions use the client idempotency IDs.
- * Input order is retained and no client-side cap is introduced.
+ * Input order is retained. Callers split trackers with
+ * `chunkGenerationBatchTrackers` before sending each bounded request.
  */
 export function buildGenerationBatchStatusRequest(
   trackers: readonly GenerationBatchTracker[],
@@ -402,6 +404,26 @@ export function buildGenerationBatchStatusRequest(
     client_batch_ids: clientBatchIds,
     ...(batchIds.length === 0 ? {} : { batch_ids: batchIds }),
   };
+}
+
+/** Server status reconciliation is deliberately bounded so one client cannot
+ * monopolize queue persistence. Surfaces process every chunk in order. */
+export const GENERATION_BATCH_STATUS_IDENTITY_LIMIT = 256;
+
+export function chunkGenerationBatchTrackers(
+  trackers: readonly GenerationBatchTracker[],
+  hostId: string,
+  limit = GENERATION_BATCH_STATUS_IDENTITY_LIMIT,
+): GenerationBatchTracker[][] {
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new Error("generation batch status limit must be a positive integer");
+  }
+  const matching = trackers.filter((tracker) => tracker.hostId === hostId);
+  const chunks: GenerationBatchTracker[][] = [];
+  for (let offset = 0; offset < matching.length; offset += limit) {
+    chunks.push(matching.slice(offset, offset + limit));
+  }
+  return chunks;
 }
 
 /**

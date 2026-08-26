@@ -62,6 +62,7 @@ import {
 } from "@studio/api/generationAdmission";
 import {
   buildGenerationBatchStatusRequest,
+  chunkGenerationBatchTrackers,
   createGenerationBatchTracker,
   isTerminalGenerationPhase,
   mergeBulkGenerationBatchResponse,
@@ -79,6 +80,7 @@ import {
 } from "../lib/durableGeneration";
 import { TargetStreamSlots } from "@studio/lib/targetStreamSlots";
 import { useToastStore } from "./toasts";
+import { retryQueueJob } from "@studio/api/queuePlan";
 
 export {
   applyChainProgress,
@@ -738,15 +740,19 @@ export const useGenerationStore = defineStore("generation", {
           if (matching.length > 0) {
             const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
             const trackers = matching.map((record) => record.tracker);
-            const request = buildGenerationBatchStatusRequest(trackers, hostId);
-            if (request.client_batch_ids.length > 0 || request.batch_ids?.length) {
+            for (const trackerChunk of chunkGenerationBatchTrackers(trackers, hostId)) {
+              const request = buildGenerationBatchStatusRequest(trackerChunk, hostId);
+              if (request.client_batch_ids.length === 0 && !request.batch_ids?.length) continue;
               const response = await reconcileGenerationBatches(target, request);
-              const merged = mergeBulkGenerationBatchResponse(trackers, hostId, response);
-              merged.trackers.forEach((tracker, index) => {
-                const record = matching[index]!;
+              const merged = mergeBulkGenerationBatchResponse(trackerChunk, hostId, response);
+              for (const tracker of merged.trackers) {
+                const record = matching.find(
+                  (candidate) => candidate.tracker.clientBatchId === tracker.clientBatchId,
+                );
+                if (!record) continue;
                 record.tracker = tracker;
                 this.applyDurableRecord(record);
-              });
+              }
             }
           }
           persistDurableRecords();
@@ -790,12 +796,24 @@ export const useGenerationStore = defineStore("generation", {
             if (!jobHasSettled(job)) {
               job.status = "queued";
               job.stage = null;
+              job.holdError = null;
+              job.retryable = false;
+              job.retrying = false;
             }
             break;
           case "held":
             if (!jobHasSettled(job)) {
               job.status = "queued";
-              job.stage = "Held by host — open Jobs for details";
+              job.stage = "Held by host — action required";
+              job.holdError = lifecycle.error;
+              job.retryable = lifecycle.retryable === true;
+            }
+            break;
+          case "cancelling":
+            if (!jobHasSettled(job)) {
+              job.status = "queued";
+              job.stage = "Cancellation pending";
+              job.cancelling = true;
             }
             break;
           case "running":
@@ -819,6 +837,39 @@ export const useGenerationStore = defineStore("generation", {
       durableSettlements.get(record.tracker.clientBatchId)?.resolve(jobs);
       durableSettlements.delete(record.tracker.clientBatchId);
       void this.finishDurableBatchEffects(record, jobs);
+    },
+    async retryHeld(clientId: number): Promise<void> {
+      const job = this.jobs.find((candidate) => candidate.clientId === clientId);
+      if (!job || !job.id || !job.retryable || job.retrying) {
+        throw new Error("This held generation is not retryable yet.");
+      }
+      const target =
+        targets.get(clientId) ??
+        (() => {
+          const host = useHostsStore().all.find((candidate) => candidate.id === job.hostId);
+          return host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null;
+        })();
+      if (!target) throw new Error("The original machine is not connected.");
+      job.retrying = true;
+      try {
+        await retryQueueJob(target, job.id);
+        job.retryable = false;
+        job.holdError = null;
+        job.stage = null;
+        const record = [...durableRecords.values()].find((candidate) =>
+          [...(durableJobIds.get(candidate.tracker.clientBatchId)?.values() ?? [])].includes(
+            clientId,
+          ),
+        );
+        if (record) {
+          void this.reconcileDurableHost(
+            record.tracker.hostId,
+            new Set([record.tracker.clientBatchId]),
+          );
+        }
+      } finally {
+        job.retrying = false;
+      }
     },
     async fulfillDurableCancelIntent(
       record: DurableGenerationRecoveryRecord,
@@ -1149,9 +1200,9 @@ export const useGenerationStore = defineStore("generation", {
         route.durableBatchOutcomes === true &&
         !!route.instanceId &&
         canonicalGenerationBatchLimit({
-          heterogeneous_batch: route.heterogeneousBatch,
+          heterogeneous_batch: true,
           heterogeneous_batch_max_outputs: route.heterogeneousBatchMaxOutputs ?? null,
-          durable_batch_outcomes: route.durableBatchOutcomes,
+          durable_batch_outcomes: true,
           admission_protocol_version: route.admissionProtocolVersion ?? null,
         }) !== null &&
         chainRouting?.kind !== "chain" &&
@@ -1172,9 +1223,9 @@ export const useGenerationStore = defineStore("generation", {
         );
       if (durableAdmission) {
         const limit = canonicalGenerationBatchLimit({
-          heterogeneous_batch: route.heterogeneousBatch,
+          heterogeneous_batch: true,
           heterogeneous_batch_max_outputs: route.heterogeneousBatchMaxOutputs ?? null,
-          durable_batch_outcomes: route.durableBatchOutcomes,
+          durable_batch_outcomes: true,
           admission_protocol_version: route.admissionProtocolVersion ?? null,
         })!;
         const chunks = chunkGenerationBatchRequests(plans, limit).map(

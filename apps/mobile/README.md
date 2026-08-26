@@ -65,12 +65,12 @@ pushed screen opened from the header.
   `mold.mobile.generate-target.v1` and resolved through
   `desktop/src/mobile/generateTarget.ts`. Under either policy the model picker
   is the union of every reachable machine's installed models, tagged with the
-  machine that has one when they differ, and Develop fans
-  `POST /api/generate/placement-preview` out to the candidate machines (each
-  with its own Keychain key) before choosing, keeping slower machines in the
-  race only until one of them answers with a plan — Auto by soonest predicted
-  completion including round trip, Most capable by that machine's reported
-  `gpu_info.backend`. The winner is frozen into the same immutable route record
+  machine that has one when they differ. Protocol-v2 machines are ranked from
+  their cached model and queue telemetry, so Develop does not block on a
+  placement round trip before durable admission. Legacy candidates still use
+  `POST /api/generate/placement-preview` with their own Keychain keys. Auto
+  chooses the least-busy model owner; Most capable uses the machine's reported
+  `gpu_info.backend`, then VRAM and queue depth. The winner is frozen into the same immutable route record
   a pinned machine uses (host id, URL, Keychain key, instance id), so prepared
   and quick expansion keep their own machine, durable sequences restore on the
   exact machine that ran them, and a fleet split across incompatible major Mold
@@ -334,14 +334,15 @@ On a protocol-v2 host, that acceptance is one durable
 `POST /api/generation-batches` operation of ordered singleton children; larger
 sets are chunked at the advertised limit without changing global sibling
 provenance. Held children survive app/server restarts and remain visible with
-their error and retry action. Legacy hosts retain singleton stream fan-out.
-After source preprocessing, Create performs one read-only placement preview for
-the finalized sibling shape (`batch_size: 1`, `copies: N`) on that exact frozen
-route. A URL, Keychain key, or instance change, an authoritative infeasible
-result, a malformed response, or any non-legacy HTTP failure preserves the
-reviewed work and queues nothing. The UI names the server's infeasible reason,
-temporary planner failure, malformed response, transport error, or host-identity
-race instead of collapsing them into one route error. Additive
+their error and retry action. Protocol-v2 ordinary work goes directly to
+durable admission after source preprocessing; the server persists it before
+expensive preparation. Legacy hosts retain singleton stream fan-out and a
+read-only placement preview for the finalized sibling shape (`batch_size: 1`,
+`copies: N`). A URL, Keychain key, or instance change, an authoritative legacy
+infeasible result, a malformed response, or any non-legacy HTTP failure
+preserves the reviewed work and queues nothing. The UI names the host's reason,
+transport error, or host-identity race instead of collapsing them into one
+route error. Additive
 `missing_components` metadata is informational until Create owns a finalized
 held request and the exact host's complete grouped repair pull; it must not
 promise automatic resume before then. Additive `pending_downloads` and their

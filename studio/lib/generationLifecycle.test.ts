@@ -5,6 +5,7 @@ import type {
 } from "../api/generationAdmission";
 import {
   buildGenerationBatchStatusRequest,
+  chunkGenerationBatchTrackers,
   createGenerationBatchTracker,
   generationAuthorityKey,
   mergeBulkGenerationBatchResponse,
@@ -325,6 +326,29 @@ describe("canonical durable generation lifecycle", () => {
       client_batch_ids: ["unknown-a", "unknown-b"],
       batch_ids: ["batch-1"],
     });
+  });
+
+  it("chunks host reconciliation without dropping or mixing trackers", () => {
+    const hostTrackers = Array.from({ length: 5 }, (_, index) =>
+      tracker(`client-${index}`),
+    );
+    const otherHost = { ...tracker("other"), hostId: "host-2" };
+    const chunks = chunkGenerationBatchTrackers(
+      [...hostTrackers, otherHost],
+      "host-1",
+      2,
+    );
+
+    expect(
+      chunks.map((chunk) => chunk.map((item) => item.clientBatchId)),
+    ).toEqual([
+      ["client-0", "client-1"],
+      ["client-2", "client-3"],
+      ["client-4"],
+    ]);
+    expect(() =>
+      chunkGenerationBatchTrackers(hostTrackers, "host-1", 0),
+    ).toThrow("positive integer");
   });
 
   it("does not confuse incomplete bulk output with explicit missing", () => {

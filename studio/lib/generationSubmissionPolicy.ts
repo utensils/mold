@@ -171,7 +171,7 @@ export function planGenerationSubmission(input: {
 }
 
 export type GenerationTruthfulPhase =
-  "accepted" | "held" | "queued" | "running" | "terminal";
+  "accepted" | "held" | "queued" | "running" | "cancelling" | "terminal";
 
 type GenerationPhaseSource =
   | Pick<GenerationBatchChild, "state">
@@ -185,6 +185,7 @@ export function truthfulGenerationPhase(
   if (state === "held") return "held";
   if (state === "queued") return "queued";
   if (state === "running") return "running";
+  if (state === "cancelling") return "cancelling";
   if (state === "accepted") return "accepted";
   return "terminal";
 }

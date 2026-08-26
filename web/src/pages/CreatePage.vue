@@ -2389,6 +2389,14 @@ function cancelPrint(id: string) {
     );
 }
 
+function retryPrint(id: string) {
+  void stream
+    .retry(id)
+    .catch((error) =>
+      toast("error", error instanceof Error ? error.message : String(error)),
+    );
+}
+
 /**
  * Reuse a sequence print's recorded clips as a BRAND-NEW draft: no edit
  * session, nothing cached, Generate queues a fresh job. Shared params ride
@@ -5054,6 +5062,7 @@ onBeforeUnmount(() => {
           :shared="sharedActivityRows"
           :queue-status="routing.queueStatus.value"
           @cancel="cancelPrint"
+          @retry="retryPrint"
           @dismiss="stream.remove"
           @open="openJob"
           @sequence-action="onSequenceAction"

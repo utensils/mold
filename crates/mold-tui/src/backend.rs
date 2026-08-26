@@ -203,7 +203,11 @@ pub async fn run_generation(
     };
     let base_seed = params.seed;
 
-    if batch > 1 && params.inference_mode != InferenceMode::Local {
+    // Protocol-v2 admission is the common 1..N path. In particular, a pinned
+    // singleton must not pay the legacy placement-preview round trip before it
+    // can enter the durable queue. Capability failure falls through to the
+    // attached path below for mixed-version hosts.
+    if params.inference_mode != InferenceMode::Local {
         let effective_url = params.host.clone().or_else(|| server_url.clone());
         if let Some(url) = effective_url {
             let client = crate::hosts::client_for(&url, api_key.as_deref());
@@ -704,6 +708,7 @@ fn batch_child_is_settled(state: &GenerationBatchChildState) -> bool {
 fn batch_child_state_label(state: &GenerationBatchChildState) -> &'static str {
     match state {
         GenerationBatchChildState::Accepted => "accepted",
+        GenerationBatchChildState::Cancelling => "cancelling",
         GenerationBatchChildState::Running => "running",
         GenerationBatchChildState::Complete => "complete",
         GenerationBatchChildState::Failed => "failed",
@@ -1713,6 +1718,22 @@ mod tests {
         assert_eq!(
             capabilities.canonical_generation_batch_limit(&[request]),
             None
+        );
+    }
+
+    #[test]
+    fn canonical_request_builder_covers_a_remote_singleton() {
+        let config = mold_core::Config::default();
+        let params = GenerateParams::from_config(&config);
+        let requests = build_batch_requests(&params, "one print", &None, &[], &[], 1, Some(42))
+            .expect("singleton request");
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].batch_size, 1);
+        assert_eq!(requests[0].seed, Some(42));
+        assert_eq!(
+            canonical_batch_capabilities(64).canonical_generation_batch_limit(&requests),
+            Some(64)
         );
     }
 

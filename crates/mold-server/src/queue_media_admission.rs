@@ -192,7 +192,6 @@ impl DurableMediaAdmission {
                 )
             })
             .collect::<Vec<_>>();
-        let count = body.requests.len() as u32;
         for (offset, request) in body.requests.iter_mut().enumerate() {
             mold_core::minimax_h3::canonicalize_request_model(request);
             if request.batch_size != 1 {
@@ -201,10 +200,8 @@ impl DurableMediaAdmission {
                     offset + 1
                 )));
             }
-            request.batch_id = Some(body.client_batch_id.clone());
-            request.batch_index = Some(offset as u32 + 1);
-            request.batch_count = Some(count);
         }
+        normalize_batch_provenance(&mut body.requests, &body.client_batch_id)?;
         // Protocol-level authority refusals are request facts, not stored
         // operation state. Resolve them before even a read-only SQLite lookup;
         // in particular an HDR output path must never cross the DB boundary.
@@ -500,6 +497,72 @@ impl DurableMediaAdmission {
     }
 }
 
+/// Admission identity and logical sibling identity are separate. A client may
+/// split one large Batch N across several idempotent operations, so supplied
+/// global provenance must survive each operation unchanged. Requests without
+/// provenance receive a local operation-scoped group for older callers.
+fn normalize_batch_provenance(
+    requests: &mut [mold_core::GenerateRequest],
+    client_batch_id: &str,
+) -> Result<(), ApiError> {
+    let supplied = requests.iter().any(|request| {
+        request.batch_id.is_some() || request.batch_index.is_some() || request.batch_count.is_some()
+    });
+    if !supplied {
+        let count = u32::try_from(requests.len())
+            .map_err(|_| ApiError::validation("requests contains too many children"))?;
+        for (offset, request) in requests.iter_mut().enumerate() {
+            request.batch_id = Some(client_batch_id.to_string());
+            request.batch_index = Some(offset as u32 + 1);
+            request.batch_count = Some(count);
+        }
+        return Ok(());
+    }
+
+    let mut logical_id: Option<&str> = None;
+    let mut logical_count: Option<u32> = None;
+    let mut indexes = std::collections::HashSet::with_capacity(requests.len());
+    for (offset, request) in requests.iter().enumerate() {
+        let (Some(batch_id), Some(batch_index), Some(batch_count)) = (
+            request.batch_id.as_deref(),
+            request.batch_index,
+            request.batch_count,
+        ) else {
+            return Err(ApiError::validation(format!(
+                "requests[{}] must provide batch_id, batch_index, and batch_count together",
+                offset + 1
+            )));
+        };
+        if batch_id.trim().is_empty() {
+            return Err(ApiError::validation(format!(
+                "requests[{}].batch_id must not be empty",
+                offset + 1
+            )));
+        }
+        if batch_index == 0 || batch_count == 0 || batch_index > batch_count {
+            return Err(ApiError::validation(format!(
+                "requests[{}] has invalid batch_index/batch_count provenance",
+                offset + 1
+            )));
+        }
+        if logical_id.is_some_and(|expected| expected != batch_id)
+            || logical_count.is_some_and(|expected| expected != batch_count)
+        {
+            return Err(ApiError::validation(
+                "all requests in one operation must share batch_id and batch_count",
+            ));
+        }
+        if !indexes.insert(batch_index) {
+            return Err(ApiError::validation(format!(
+                "requests contains duplicate batch_index {batch_index}"
+            )));
+        }
+        logical_id = Some(batch_id);
+        logical_count = Some(batch_count);
+    }
+    Ok(())
+}
+
 pub(crate) fn request_has_durable_media(request: &mold_core::GenerateRequest) -> bool {
     crate::queue_media::request_has_extractable_media(request)
 }
@@ -724,6 +787,36 @@ mod tests {
             "output_format": "png"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn chunk_admission_preserves_global_batch_provenance() {
+        let mut requests = vec![request(), request()];
+        for (offset, request) in requests.iter_mut().enumerate() {
+            request.batch_id = Some("logical-batch".to_string());
+            request.batch_index = Some(offset as u32 + 65);
+            request.batch_count = Some(130);
+        }
+        normalize_batch_provenance(&mut requests, "operation-id").unwrap();
+        assert_eq!(requests[0].batch_id.as_deref(), Some("logical-batch"));
+        assert_eq!(requests[0].batch_index, Some(65));
+        assert_eq!(requests[1].batch_index, Some(66));
+        assert_eq!(requests[1].batch_count, Some(130));
+    }
+
+    #[test]
+    fn partial_or_duplicate_batch_provenance_is_rejected() {
+        let mut partial = vec![request()];
+        partial[0].batch_id = Some("logical-batch".to_string());
+        assert!(normalize_batch_provenance(&mut partial, "operation-id").is_err());
+
+        let mut duplicate = vec![request(), request()];
+        for request in &mut duplicate {
+            request.batch_id = Some("logical-batch".to_string());
+            request.batch_index = Some(1);
+            request.batch_count = Some(2);
+        }
+        assert!(normalize_batch_provenance(&mut duplicate, "operation-id").is_err());
     }
 
     #[cfg(unix)]

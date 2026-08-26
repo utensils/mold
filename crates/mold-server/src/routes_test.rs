@@ -7011,8 +7011,8 @@ mod tests {
                 "POST",
                 "/api/generation-batches/status",
                 serde_json::json!({
-                    "client_batch_ids": [client_batch_id, unknown_client],
-                    "batch_ids": [batch_id, unknown_batch],
+                    "client_batch_ids": [client_batch_id, unknown_client, unknown_client],
+                    "batch_ids": [batch_id, unknown_batch, unknown_batch],
                 }),
             ))
             .await
@@ -7037,6 +7037,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn generation_batch_status_bounds_and_validates_unique_uuid_identities() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let app = app_with_state(state);
+
+        let too_many = (0..=256)
+            .map(|_| uuid::Uuid::new_v4().to_string())
+            .collect::<Vec<_>>();
+        let over_limit = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches/status",
+                serde_json::json!({ "client_batch_ids": too_many }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(over_limit.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(over_limit).await["code"],
+            "GENERATION_BATCH_STATUS_LIMIT_EXCEEDED"
+        );
+
+        let malformed = app
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches/status",
+                serde_json::json!({
+                    "client_batch_ids": [],
+                    "batch_ids": ["not-a-server-batch-uuid"]
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(malformed.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -186,6 +186,7 @@ describe("generation submission policy", () => {
   it("presents the authoritative durable child lifecycle", () => {
     expect(truthfulGenerationPhase({ state: "accepted" })).toBe("accepted");
     expect(truthfulGenerationPhase({ state: "held" })).toBe("held");
+    expect(truthfulGenerationPhase({ state: "cancelling" })).toBe("cancelling");
     expect(truthfulGenerationPhase({ phase: "running" })).toBe("running");
     expect(truthfulGenerationPhase({ phase: "complete" })).toBe("terminal");
   });
