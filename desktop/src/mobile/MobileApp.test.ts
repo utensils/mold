@@ -2299,6 +2299,24 @@ describe("MobileApp generation queue", () => {
   });
 
   it("retries only an explicitly retryable held child on its exact authenticated host", async () => {
+    let clientBatchId = "";
+    const heldBatch = () => ({
+      id: "retry-batch",
+      client_batch_id: clientBatchId,
+      instance_id: "studio-id",
+      durable: true,
+      children: [
+        {
+          index: 1,
+          job_id: "retry/job",
+          state: "held",
+          retryable: true,
+          error: "artifact digest mismatch",
+          created_at_ms: 10,
+          updated_at_ms: 11,
+        },
+      ],
+    });
     apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
@@ -2318,23 +2336,14 @@ describe("MobileApp generation queue", () => {
         return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
       }
       if (path === "/api/generation-batches" && init?.method === "POST") {
-        const clientBatchId = JSON.parse(String(init.body)).client_batch_id as string;
+        clientBatchId = JSON.parse(String(init.body)).client_batch_id as string;
+        return Promise.resolve(heldBatch());
+      }
+      if (path === "/api/generation-batches/status" && init?.method === "POST") {
         return Promise.resolve({
-          id: "retry-batch",
-          client_batch_id: clientBatchId,
           instance_id: "studio-id",
-          durable: true,
-          children: [
-            {
-              index: 1,
-              job_id: "retry/job",
-              state: "held",
-              retryable: true,
-              error: "artifact digest mismatch",
-              created_at_ms: 10,
-              updated_at_ms: 11,
-            },
-          ],
+          batches: [heldBatch()],
+          missing: { client_batch_ids: [], batch_ids: [] },
         });
       }
       return Promise.reject(new Error(`Unexpected API path: ${path}`));
@@ -2357,6 +2366,11 @@ describe("MobileApp generation queue", () => {
         : Promise.resolve(new Response(null, { status: 204 })),
     );
     const retryClick = retry.trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-generation-retry']").attributes("disabled")).toBe("");
+    openStreams
+      .find((stream) => stream.path === "/api/events")!
+      .options.onEvent("event", JSON.stringify({ type: "generation_states_committed" }));
     await flushPromises();
     expect(wrapper.get("[data-test='mobile-generation-retry']").attributes("disabled")).toBe("");
     confirmation.resolve(new Response(null, { status: 202 }));

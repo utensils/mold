@@ -1064,6 +1064,7 @@ const durableGenerationReconciles = new Map<string, Promise<void>>();
 const durableGenerationReconcilePending = new Map<string, Set<string> | null>();
 const durableGenerationCancelAttempts = new Map<string, Promise<boolean>>();
 const durableGenerationRetryAttempts = reactive(new Set<string>());
+const durableGenerationRetryConfirmations = new Set<string>();
 let nextDurableGenerationClientId = -1;
 let selectedDurableGenerationClientId: number | null = null;
 const mobileDownloads = useMobileDownloadsStore();
@@ -3047,7 +3048,9 @@ async function reconcileMobileDurableHost(
         );
         for (const batch of response.batches) {
           for (const child of batch.children) {
-            durableGenerationRetryAttempts.delete(child.job_id);
+            if (child.state !== "held" || !durableGenerationRetryConfirmations.has(child.job_id)) {
+              durableGenerationRetryAttempts.delete(child.job_id);
+            }
           }
         }
       }
@@ -6181,6 +6184,7 @@ async function retryHeldGeneration(job: Job): Promise<void> {
     return;
   }
   durableGenerationRetryAttempts.add(job.id);
+  durableGenerationRetryConfirmations.add(job.id);
   let retryStillUncertain = false;
   try {
     const outcome = await retryQueueJobRecoveringAmbiguity(mobileHostTarget(host), {
@@ -6214,6 +6218,7 @@ async function retryHeldGeneration(job: Job): Promise<void> {
       true,
     );
   } finally {
+    durableGenerationRetryConfirmations.delete(job.id);
     if (!retryStillUncertain) durableGenerationRetryAttempts.delete(job.id);
   }
 }

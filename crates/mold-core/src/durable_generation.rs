@@ -29,6 +29,10 @@ pub struct CanonicalGenerationReport {
     pub authorities: Vec<GenerationBatchAuthority>,
     pub admitted_client_ids: Vec<String>,
     pub outcomes: Vec<CanonicalGenerationOutcome>,
+    /// Admission, identity, or reconciliation failures that are not already
+    /// represented by a terminal child outcome.
+    pub orchestration_failures: Vec<String>,
+    /// Complete user-facing failure set, including terminal child outcomes.
     pub failures: Vec<String>,
 }
 
@@ -77,18 +81,14 @@ async fn admit_recovering_ambiguity(
         Err(error) if is_transient_request_error(&error) => {
             const LOOKUP_ATTEMPTS: u32 = 5;
             let mut last_lookup_error = None;
+            let mut saw_missing = false;
             for attempt in 0..LOOKUP_ATTEMPTS {
                 match client
                     .generation_batch_by_client_id(&request.client_batch_id)
                     .await
                 {
                     Ok(Some(status)) => return Ok(CanonicalAdmission::Admitted(status)),
-                    Ok(None) => {
-                        return Err(error.context(format!(
-                            "generation-batch admission is uncertain for client id {}; the host did not retain that idempotency key",
-                            request.client_batch_id
-                        )));
-                    }
+                    Ok(None) => saw_missing = true,
                     Err(lookup) => last_lookup_error = Some(lookup),
                 }
                 if attempt + 1 < LOOKUP_ATTEMPTS {
@@ -96,11 +96,12 @@ async fn admit_recovering_ambiguity(
                 }
             }
             Err(error.context(format!(
-                "generation-batch admission is uncertain for client id {}; idempotency lookup failed after {LOOKUP_ATTEMPTS} attempts: {}",
+                "generation-batch admission is uncertain for client id {}; no durable admission became visible after {LOOKUP_ATTEMPTS} attempts{}{}",
                 request.client_batch_id,
+                if saw_missing { "; the idempotency key was not found" } else { "" },
                 last_lookup_error
-                    .map(|lookup| lookup.to_string())
-                    .unwrap_or_else(|| "unknown lookup error".to_string())
+                    .map(|lookup| format!("; last lookup error: {lookup}"))
+                    .unwrap_or_default()
             )))
         }
         Err(error) => Err(error),
@@ -249,7 +250,54 @@ pub async fn reconcile_ambiguous_retry_observed(
     observer: Option<&CanonicalGenerationObserver<'_>>,
 ) -> Result<GenerationBatchStatus> {
     for attempt in 0..AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS {
-        let status = read_canonical_authority(client, authority, observer).await?;
+        let status = match client.generation_batch(&authority.batch_id).await {
+            Ok(Some(status)) => {
+                authority
+                    .validate_status(&status)
+                    .map_err(anyhow::Error::msg)?;
+                status
+            }
+            Ok(None) => {
+                let error = format!(
+                    "retry outcome is not confirmed; generation batch {} is not visible",
+                    authority.batch_id
+                );
+                observe(
+                    observer,
+                    CanonicalGenerationEvent::ReconcileDelayed {
+                        authority: authority.clone(),
+                        error: error.clone(),
+                    },
+                );
+                if attempt + 1 == AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS {
+                    anyhow::bail!(
+                        "ambiguous retry remains unconfirmed after {} bounded attempts; retry lock retained: {error}",
+                        AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS
+                    );
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+            Err(error) if is_transient_request_error(&error) => {
+                let error = error.to_string();
+                observe(
+                    observer,
+                    CanonicalGenerationEvent::ReconcileDelayed {
+                        authority: authority.clone(),
+                        error: error.clone(),
+                    },
+                );
+                if attempt + 1 == AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS {
+                    anyhow::bail!(
+                        "ambiguous retry remains unconfirmed after {} bounded attempts; retry lock retained: {error}",
+                        AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS
+                    );
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let child = status
             .children
             .iter()
@@ -308,6 +356,45 @@ fn terminal_failure(client_batch_id: &str, child: &GenerationBatchChild) -> Opti
     ))
 }
 
+fn push_orchestration_failure(report: &mut CanonicalGenerationReport, error: String) {
+    report.orchestration_failures.push(error.clone());
+    report.failures.push(error);
+}
+
+fn validate_terminal_children(
+    client_batch_id: &str,
+    children: &[GenerationBatchChild],
+    expected: usize,
+) -> Result<(), String> {
+    if children.len() != expected {
+        return Err(format!(
+            "accepted client id {client_batch_id} returned {} children, expected {expected}",
+            children.len()
+        ));
+    }
+    let mut seen = vec![false; expected];
+    for child in children {
+        let Some(offset) = child
+            .index
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+            .filter(|index| *index < expected)
+        else {
+            return Err(format!(
+                "accepted client id {client_batch_id} returned invalid child index {}",
+                child.index
+            ));
+        };
+        if std::mem::replace(&mut seen[offset], true) {
+            return Err(format!(
+                "accepted client id {client_batch_id} duplicated child index {}",
+                child.index
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub async fn try_canonical_generation(
     client: &MoldClient,
     requests: &[GenerateRequest],
@@ -349,7 +436,7 @@ pub async fn try_canonical_generation_observed(
                     match GenerationBatchAuthority::from_admission(&status, &client_batch_id) {
                         Ok(authority) => authority,
                         Err(error) => {
-                            report.failures.push(error);
+                            push_orchestration_failure(&mut report, error);
                             break;
                         }
                     };
@@ -369,16 +456,20 @@ pub async fn try_canonical_generation_observed(
             }
             Ok(CanonicalAdmission::MissingEndpoint) if admitted.is_empty() => return Ok(None),
             Ok(CanonicalAdmission::MissingEndpoint) => {
-                report.failures.push(format!(
+                let error = format!(
                     "generation-batch endpoint disappeared after accepting client ids: {}",
                     report.admitted_client_ids.join(", ")
-                ));
+                );
+                push_orchestration_failure(&mut report, error);
                 break;
             }
             Err(error) => {
-                report.failures.push(format!(
+                push_orchestration_failure(
+                    &mut report,
+                    format!(
                     "generation-batch admission failed for client id {client_batch_id}: {error:#}"
-                ));
+                ),
+                );
                 break;
             }
         }
@@ -397,20 +488,21 @@ pub async fn try_canonical_generation_observed(
         {
             Ok(status) => status,
             Err(error) => {
-                report.failures.push(format!(
-                    "could not reconcile accepted client id {client_batch_id}: {error:#}"
-                ));
+                push_orchestration_failure(
+                    &mut report,
+                    format!("could not reconcile accepted client id {client_batch_id}: {error:#}"),
+                );
                 continue;
             }
         };
+        if let Err(error) =
+            validate_terminal_children(&client_batch_id, &status.children, chunk.len())
+        {
+            push_orchestration_failure(&mut report, error);
+            continue;
+        }
         for child in status.children {
-            let Some(request) = chunk.get(child.index.saturating_sub(1) as usize) else {
-                report.failures.push(format!(
-                    "accepted client id {client_batch_id} returned invalid child index {}",
-                    child.index
-                ));
-                continue;
-            };
+            let request = &chunk[child.index.saturating_sub(1) as usize];
             if let Some(error) = terminal_failure(&client_batch_id, &child) {
                 report.failures.push(error);
             }
@@ -443,10 +535,13 @@ pub async fn admit_canonical_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
     fn request(prompt: &str) -> GenerateRequest {
         serde_json::from_value(serde_json::json!({
@@ -478,6 +573,84 @@ mod tests {
             instance_id: "instance-1".into(),
             batch_id: "batch-1".into(),
             client_batch_id: "accepted-id".into(),
+        }
+    }
+
+    struct MissingThenAdmitted {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Respond for MissingThenAdmitted {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(404)
+            } else {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "batch-1",
+                    "client_batch_id": "recovery-key",
+                    "instance_id": "instance-1",
+                    "durable": true,
+                    "children": [{"index": 1, "job_id": "job-1", "state": "accepted"}]
+                }))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn admission_ambiguity_retries_a_missing_lookup_until_commit_is_visible() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generation-batches"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("GET"))
+            .and(path("/api/generation-batches/by-client/recovery-key"))
+            .respond_with(MissingThenAdmitted {
+                calls: calls.clone(),
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let status = admit_canonical_batch(
+            &MoldClient::new(&server.uri()),
+            &GenerationBatchAdmissionRequest {
+                client_batch_id: "recovery-key".into(),
+                requests: vec![request("one")],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(status.id, "batch-1");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn terminal_child_validation_rejects_missing_and_duplicate_indices() {
+        let child = |index| GenerationBatchChild {
+            index,
+            job_id: format!("job-{index}"),
+            state: GenerationBatchChildState::Complete,
+            error: None,
+            retryable: None,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            completed_at_ms: Some(1),
+            terminal_error: None,
+            result: None,
+        };
+        let cases = [
+            (vec![child(1)], 2, "returned 1 children, expected 2"),
+            (vec![child(1), child(1)], 2, "duplicated child index 1"),
+        ];
+
+        for (children, expected, detail) in cases {
+            let error = validate_terminal_children("client-1", &children, expected).unwrap_err();
+            assert!(error.contains(detail), "unexpected error: {error}");
         }
     }
 
@@ -828,5 +1001,113 @@ mod tests {
                 if status.children[0].state == GenerationBatchChildState::Held
         )));
         server.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ambiguous_retry_bounds_repeated_transient_status_failures() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/generation-batches/batch-1"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS as u64)
+            .mount(&server)
+            .await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let observed = events.clone();
+        let client = MoldClient::new(&server.uri());
+        let observer = move |event| observed.lock().unwrap().push(event);
+        let error =
+            reconcile_ambiguous_retry_observed(&client, &authority(), "job-1", Some(&observer))
+                .await
+                .unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "ambiguous retry remains unconfirmed after 5 bounded attempts; retry lock retained"
+            ),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(event, CanonicalGenerationEvent::ReconcileDelayed { .. }))
+                .count(),
+            AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS
+        );
+    }
+
+    struct TransientMissingHeldThenComplete {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Respond for TransientMissingHeldThenComplete {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            match self.calls.fetch_add(1, Ordering::SeqCst) {
+                0 => ResponseTemplate::new(500),
+                1 => ResponseTemplate::new(429),
+                2 => ResponseTemplate::new(404),
+                3 => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "batch-1",
+                    "client_batch_id": "accepted-id",
+                    "instance_id": "instance-1",
+                    "durable": true,
+                    "children": [{
+                        "index": 1,
+                        "job_id": "job-1",
+                        "state": "held",
+                        "error": "old dependency failure",
+                        "retryable": true
+                    }]
+                })),
+                _ => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "batch-1",
+                    "client_batch_id": "accepted-id",
+                    "instance_id": "instance-1",
+                    "durable": true,
+                    "children": [{
+                        "index": 1,
+                        "job_id": "job-1",
+                        "state": "complete",
+                        "result": {"filename": "settled.png"}
+                    }]
+                })),
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ambiguous_retry_recovers_after_transient_missing_and_held_reads() {
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("GET"))
+            .and(path("/api/generation-batches/batch-1"))
+            .respond_with(TransientMissingHeldThenComplete {
+                calls: calls.clone(),
+            })
+            .expect(AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS as u64)
+            .mount(&server)
+            .await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let observed = events.clone();
+        let client = MoldClient::new(&server.uri());
+        let observer = move |event| observed.lock().unwrap().push(event);
+        let status =
+            reconcile_ambiguous_retry_observed(&client, &authority(), "job-1", Some(&observer))
+                .await
+                .unwrap();
+        assert_eq!(
+            status.children[0].state,
+            GenerationBatchChildState::Complete
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS
+        );
+        assert!(!events.lock().unwrap().iter().any(|event| matches!(
+            event,
+            CanonicalGenerationEvent::Snapshot { status, .. }
+                if status.children[0].state == GenerationBatchChildState::Held
+        )));
     }
 }
