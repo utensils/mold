@@ -2743,6 +2743,7 @@ async fn generate(
     mold_core::minimax_h3::canonicalize_request_model(&mut req);
     validate_direct_generation_request(&req)?;
     let operation_id = requested_operation_id(&headers)?;
+    ensure_generation_available(&state)?;
     let canonical_admission =
         direct_durable_admission(&state, &req, operation_id.is_some()).await?;
     if let Some(admission) = canonical_admission {
@@ -3949,6 +3950,7 @@ async fn generate_stream(
     let completion_payload = requested_sse_completion_payload(&headers)?;
     validate_direct_generation_request(&req)?;
     let operation_id = requested_operation_id(&headers)?;
+    ensure_generation_available(&state)?;
     let canonical_admission =
         direct_durable_admission(&state, &req, operation_id.is_some()).await?;
     if let Some(admission) = canonical_admission {

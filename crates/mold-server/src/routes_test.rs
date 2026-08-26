@@ -3093,27 +3093,36 @@ mod tests {
 
     #[tokio::test]
     async fn maintenance_mode_rejects_generation_before_queueing() {
-        let state = AppState::with_engine(MockEngine::ready());
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db, root.path());
+        let journal = state.queue_journal.clone();
         state.set_generation_unavailable(
             "generation is unavailable while GPU selection is 'none' (maintenance mode)",
         );
         let app = app_with_state(state);
 
-        let response = app
-            .clone()
-            .oneshot(
-                Request::post("/api/generate")
-                    .header("content-type", "application/json")
-                    .body(Body::from(generate_body("must not run", 512, 512)))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        for path in ["/api/generate", "/api/generate/stream"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from(generate_body("must not run", 512, 512)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
 
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let body = json_body(response).await;
-        assert_eq!(body["code"], "GENERATION_UNAVAILABLE");
-        assert!(body["error"].as_str().unwrap().contains("maintenance mode"));
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "GENERATION_UNAVAILABLE");
+            assert!(body["error"].as_str().unwrap().contains("maintenance mode"));
+        }
+        assert!(
+            journal.list_all().is_empty(),
+            "maintenance must reject before durable admission"
+        );
     }
 
     #[tokio::test]
@@ -8195,19 +8204,24 @@ mod tests {
         let (state, rx) = durable_state(db.clone(), output_dir.path());
         let journal = state.queue_journal.clone();
 
-        // The real CPU-only dispatch owner — `StartupMode::CpuFallback` spawns
-        // exactly this.
+        // The real CPU-only dispatch pair — `StartupMode::CpuFallback` spawns
+        // the durable feeder plus exactly this worker.
+        let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
         let worker = tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
 
-        let response = app_with_state(state.clone())
-            .oneshot(
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            app_with_state(state.clone()).oneshot(
                 Request::post("/api/generate")
                     .header("content-type", "application/json")
                     .body(Body::from(generate_body("a cat", 512, 512)))
                     .unwrap(),
-            )
-            .await
-            .unwrap();
+            ),
+        )
+        .await
+        .expect("CPU fallback generation must settle")
+        .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
         assert!(
@@ -8241,6 +8255,8 @@ mod tests {
             "replay's idempotence gate must recognise a CPU-rendered print"
         );
 
+        feeder_shutdown.cancel();
+        feeder.await.unwrap();
         worker.abort();
         let _ = worker.await;
     }
