@@ -1,14 +1,17 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 #[cfg(any(feature = "preview", test))]
 use base64::{engine::general_purpose, Engine as _};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
+#[cfg(test)]
+use mold_core::ServerCapabilities;
 use mold_core::{
     classify_generate_error, fit_to_model_dimensions_aligned, fit_to_target_area, manifest, Config,
-    DevicePlacement, GenerateRequest, GenerateResponse, GenerateServerAction, GenerationReference,
-    GenerationReferenceAuthority, ImageData, KeyframeCondition, LoraWeight, Ltx2GuidanceOverrides,
-    Ltx2PipelineMode, Ltx2SpatialUpscale, Ltx2TemporalUpscale, MoldClient, OutputFormat,
-    ReferenceUploadLease, ReferenceUploadSource, Scheduler, TimeRange,
+    DevicePlacement, GenerateRequest, GenerateResponse, GenerateServerAction,
+    GenerationBatchAdmissionRequest, GenerationBatchChildState, GenerationBatchStatus,
+    GenerationReference, GenerationReferenceAuthority, ImageData, KeyframeCondition, LoraWeight,
+    Ltx2GuidanceOverrides, Ltx2PipelineMode, Ltx2SpatialUpscale, Ltx2TemporalUpscale, MoldClient,
+    OutputFormat, ReferenceUploadLease, ReferenceUploadSource, Scheduler, TimeRange,
 };
 use rand::Rng;
 #[cfg(feature = "preview")]
@@ -367,6 +370,269 @@ fn validate_batch_stdout(batch: u32, piped: bool, output: &Option<String>) -> Re
             anyhow::bail!(
                 "--batch with more than 1 output is not supported with stdout output. \
                  Use --output <path> to save batch outputs to separate files."
+            );
+        }
+    }
+    Ok(())
+}
+
+fn new_client_batch_id() -> String {
+    let bytes = rand::random::<u128>().to_be_bytes();
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-4{:01x}{:02x}-{:01x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6] & 0x0f,
+        bytes[7],
+        (bytes[8] & 0x3f) | 0x80,
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
+}
+
+fn remote_batch_requests(
+    base: &GenerateRequest,
+    batch: u32,
+    base_seed: u64,
+    prompts: Option<&[String]>,
+) -> Vec<GenerateRequest> {
+    let batch_id = new_client_batch_id();
+    (0..batch)
+        .map(|index| {
+            let mut request = base.clone();
+            request.seed = Some(base_seed.wrapping_add(u64::from(index)));
+            request.batch_size = 1;
+            request.batch_id = Some(batch_id.clone());
+            request.batch_index = Some(index + 1);
+            request.batch_count = Some(batch);
+            if let Some(prompt) = prompts.and_then(|values| values.get(index as usize)) {
+                request.prompt = prompt.clone();
+            }
+            request
+        })
+        .collect()
+}
+
+async fn admit_generation_batch_recovering_ambiguity(
+    client: &MoldClient,
+    request: &GenerationBatchAdmissionRequest,
+) -> Result<GenerationBatchStatus> {
+    match client.admit_generation_batch(request).await {
+        Ok(status) => Ok(status),
+        Err(error) if generation_admission_may_have_committed(&error) => {
+            match client
+                .generation_batch_by_client_id(&request.client_batch_id)
+                .await
+            {
+                Ok(Some(status)) => Ok(status),
+                Ok(None) => Err(error.context(
+                    "generation-batch admission response was lost and the host did not retain the idempotency key",
+                )),
+                Err(lookup) => Err(error.context(format!(
+                    "generation-batch admission response was lost; idempotency lookup also failed: {lookup}"
+                ))),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn generation_admission_may_have_committed(error: &anyhow::Error) -> bool {
+    if MoldClient::is_connection_error(error) {
+        return true;
+    }
+    error.downcast_ref::<reqwest::Error>().is_some_and(|error| {
+        error.is_timeout() || error.is_body() || error.is_decode() || error.is_request()
+    })
+}
+
+async fn wait_for_generation_batch(
+    client: &MoldClient,
+    mut status: GenerationBatchStatus,
+) -> Result<GenerationBatchStatus> {
+    let mut last_states = status
+        .children
+        .iter()
+        .map(|child| child.state.clone())
+        .collect::<Vec<_>>();
+    loop {
+        if status.children.iter().all(|child| {
+            matches!(
+                child.state,
+                GenerationBatchChildState::Complete
+                    | GenerationBatchChildState::Failed
+                    | GenerationBatchChildState::Cancelled
+                    | GenerationBatchChildState::Held
+            )
+        }) {
+            return Ok(status);
+        }
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        status = client
+            .generation_batch(&status.id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("generation batch {} disappeared", status.id))?;
+        for (offset, child) in status.children.iter().enumerate() {
+            if last_states.get(offset) != Some(&child.state) {
+                status!(
+                    "{} Batch item {} is {}",
+                    theme::icon_info(),
+                    child.index,
+                    match child.state {
+                        GenerationBatchChildState::Accepted => "accepted",
+                        GenerationBatchChildState::Running => "running",
+                        GenerationBatchChildState::Complete => "complete",
+                        GenerationBatchChildState::Failed => "failed",
+                        GenerationBatchChildState::Cancelled => "cancelled",
+                        GenerationBatchChildState::Held => "held",
+                    }
+                );
+            }
+        }
+        last_states = status
+            .children
+            .iter()
+            .map(|child| child.state.clone())
+            .collect();
+    }
+}
+
+fn save_durable_batch_download(
+    bytes: &[u8],
+    server_filename: &str,
+    request: &GenerateRequest,
+    output: &Option<String>,
+    batch: u32,
+    index: u32,
+    preview: bool,
+) -> Result<()> {
+    let format = request.resolved_output_format();
+    let destination = if output.is_some() {
+        batch_media_filename(
+            output,
+            &request.model,
+            format.extension(),
+            batch,
+            index,
+            request
+                .title
+                .as_deref()
+                .and_then(mold_core::title_slug)
+                .as_deref(),
+        )
+    } else {
+        std::path::Path::new(server_filename)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("server returned an invalid gallery filename"))?
+            .to_string()
+    };
+    if std::path::Path::new(&destination).exists() {
+        status!("{} Overwriting: {}", theme::icon_alert(), destination);
+    }
+    std::fs::write(&destination, bytes)?;
+    status!("{} Saved: {}", theme::icon_done(), destination.bold());
+    if preview && !format.is_video() && !format.is_audio() {
+        preview_image(bytes);
+    }
+    Ok(())
+}
+
+async fn run_canonical_remote_batch(
+    client: &MoldClient,
+    requests: &[GenerateRequest],
+    max_outputs: usize,
+    output: &Option<String>,
+    preview: bool,
+) -> Result<()> {
+    let total = u32::try_from(requests.len()).context("batch is too large")?;
+    let mut admitted = Vec::new();
+    for chunk in requests.chunks(max_outputs.max(1)) {
+        let admission = GenerationBatchAdmissionRequest {
+            client_batch_id: new_client_batch_id(),
+            requests: chunk.to_vec(),
+        };
+        let status = admit_generation_batch_recovering_ambiguity(client, &admission).await?;
+        admitted.push((admission.requests, status));
+    }
+
+    // Every chunk is durable before waiting for the first result. Large CLI
+    // batches therefore retain the same fast queue-delivery property as one
+    // endpoint-sized batch instead of serializing admission behind inference.
+    for (chunk, initial_status) in admitted {
+        let status = wait_for_generation_batch(client, initial_status).await?;
+        for child in status
+            .children
+            .iter()
+            .filter(|child| child.state == GenerationBatchChildState::Complete)
+        {
+            let request = chunk
+                .get(child.index.saturating_sub(1) as usize)
+                .ok_or_else(|| anyhow::anyhow!("server returned an invalid batch child index"))?;
+            let filename = child
+                .result
+                .as_ref()
+                .and_then(|result| result.filename.as_deref())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "completed generation batch child {} has no gallery filename",
+                        child.index
+                    )
+                })?;
+            let bytes = client.get_gallery_image(filename).await?;
+            let global_index = request.batch_index.unwrap_or(child.index).saturating_sub(1);
+            save_durable_batch_download(
+                &bytes,
+                filename,
+                request,
+                output,
+                total,
+                global_index,
+                preview,
+            )?;
+        }
+        if let Some(child) = status.children.iter().find(|child| {
+            matches!(
+                child.state,
+                GenerationBatchChildState::Held
+                    | GenerationBatchChildState::Failed
+                    | GenerationBatchChildState::Cancelled
+            )
+        }) {
+            let detail = child.error.as_deref().unwrap_or(match child.state {
+                GenerationBatchChildState::Held => "dependency preparation stopped",
+                GenerationBatchChildState::Cancelled => "cancelled without server detail",
+                _ => "failed without server detail",
+            });
+            let retry = if child.state == GenerationBatchChildState::Held
+                && child.retryable == Some(true)
+            {
+                format!(
+                    "; durable job {} is retryable after correcting the cause",
+                    child.job_id
+                )
+            } else {
+                String::new()
+            };
+            anyhow::bail!(
+                "generation batch child {} is {}: {detail}{retry}",
+                child.index,
+                match child.state {
+                    GenerationBatchChildState::Held => "held",
+                    GenerationBatchChildState::Cancelled => "cancelled",
+                    _ => "failed",
+                }
             );
         }
     }
@@ -1350,19 +1616,39 @@ pub async fn run(
         };
         let mut collected = BatchOutputs::new(batch, base_seed);
 
-        for i in 0..batch {
-            let mut iter_req = req.clone();
-            if reference_session.is_none() {
-                iter_req.seed = Some(base_seed.wrapping_add(i as u64));
-                iter_req.batch_size = 1;
-
-                // Use per-batch expanded prompt if available
-                if let Some(ref prompts) = batch_prompts {
-                    if let Some(p) = prompts.get(i as usize) {
-                        iter_req.prompt = p.clone();
+        let legacy_requests = if batch > 1 {
+            let requests = remote_batch_requests(&req, batch, base_seed, batch_prompts.as_deref());
+            let capabilities = match ctx.client().server_capabilities().await {
+                Ok(capabilities) => Some(capabilities),
+                Err(error) if mold_core::client::is_missing_endpoint_error(&error) => None,
+                Err(error) => return Err(tag_remote(ctx.client(), error)),
+            };
+            if let Some(capabilities) = capabilities.as_ref() {
+                if let Some(max_outputs) = capabilities.canonical_generation_batch_limit(&requests)
+                {
+                    run_canonical_remote_batch(
+                        ctx.client(),
+                        &requests,
+                        max_outputs,
+                        &output,
+                        preview,
+                    )
+                    .await
+                    .map_err(|error| tag_remote(ctx.client(), error))?;
+                    if let Some(lease) = reference_session.as_mut() {
+                        lease.mark_consumed();
                     }
+                    return Ok(());
                 }
             }
+            requests
+        } else {
+            vec![req.clone()]
+        };
+
+        for (i, iter_req) in legacy_requests.into_iter().enumerate() {
+            let i = i as u32;
+            debug_assert_eq!(iter_req.batch_size, 1);
 
             if batch > 1 {
                 status!(
@@ -6062,6 +6348,65 @@ mod audio_batch_passthrough_tests {
         assert!(
             std::fs::read_dir(dir.path()).unwrap().next().is_none(),
             "the collector must not write for a batch of one",
+        );
+    }
+
+    #[test]
+    fn remote_batch_requests_freeze_singleton_provenance() {
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"source","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0,"batch_size":3}"#,
+        )
+        .unwrap();
+        let prompts = vec!["first".into(), "second".into(), "third".into()];
+        let children = remote_batch_requests(&request, 3, u64::MAX, Some(&prompts));
+
+        assert_eq!(children.len(), 3);
+        assert!(children.iter().all(|child| child.batch_size == 1));
+        assert_eq!(children[0].seed, Some(u64::MAX));
+        assert_eq!(children[1].seed, Some(0));
+        assert_eq!(children[2].seed, Some(1));
+        assert_eq!(children[0].prompt, "first");
+        assert_eq!(children[2].prompt, "third");
+        assert_eq!(children[0].batch_index, Some(1));
+        assert_eq!(children[2].batch_index, Some(3));
+        assert_eq!(children[0].batch_count, Some(3));
+        assert!(children
+            .iter()
+            .all(|child| child.batch_id == children[0].batch_id));
+    }
+
+    #[test]
+    fn canonical_batch_support_requires_the_complete_v2_contract() {
+        let mut capabilities = ServerCapabilities::default();
+        capabilities.queue.heterogeneous_batch = true;
+        capabilities.queue.durable_batch_outcomes = true;
+        capabilities.queue.admission_protocol_version = Some(2);
+        capabilities.queue.heterogeneous_batch_max_outputs = Some(64);
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"print","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            capabilities.canonical_generation_batch_limit(std::slice::from_ref(&request)),
+            Some(64)
+        );
+
+        let mut media = request.clone();
+        media.source_image = Some(vec![1, 2, 3]);
+        assert_eq!(
+            capabilities.canonical_generation_batch_limit(&[media.clone()]),
+            None
+        );
+        capabilities.durable_media = Some(mold_core::DurableMediaCapabilities::v2(false));
+        assert_eq!(
+            capabilities.canonical_generation_batch_limit(&[media]),
+            Some(64)
+        );
+
+        capabilities.queue.admission_protocol_version = Some(1);
+        assert_eq!(
+            capabilities.canonical_generation_batch_limit(&[request]),
+            None
         );
     }
 }

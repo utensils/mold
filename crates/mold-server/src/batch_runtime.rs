@@ -41,7 +41,7 @@ struct LiveBatchAdmissionError {
     pub limit: u32,
 }
 
-fn validate_live_server_batch_size(
+fn validate_recovered_server_batch_size(
     request: &GenerateRequest,
 ) -> Result<(), LiveBatchAdmissionError> {
     if request.batch_size > MAX_LIVE_SERVER_BATCH_OUTPUTS {
@@ -1041,7 +1041,7 @@ async fn resume_recovered_batch(
                 return Ok(false);
             }
         };
-    if let Err(error) = validate_live_server_batch_size(&envelope.request) {
+    if let Err(error) = validate_recovered_server_batch_size(&envelope.request) {
         tracing::error!(
             %parent_id,
             error = %error,
@@ -1834,11 +1834,11 @@ mod tests {
         .unwrap();
 
         request.batch_size = MAX_LIVE_SERVER_BATCH_OUTPUTS;
-        assert_eq!(validate_live_server_batch_size(&request), Ok(()));
+        assert_eq!(validate_recovered_server_batch_size(&request), Ok(()));
 
         request.batch_size = MAX_LIVE_SERVER_BATCH_OUTPUTS + 1;
         assert_eq!(
-            validate_live_server_batch_size(&request),
+            validate_recovered_server_batch_size(&request),
             Err(LiveBatchAdmissionError {
                 requested: MAX_LIVE_SERVER_BATCH_OUTPUTS + 1,
                 limit: MAX_LIVE_SERVER_BATCH_OUTPUTS,
@@ -1846,7 +1846,7 @@ mod tests {
         );
 
         request.batch_size = 1;
-        assert_eq!(validate_live_server_batch_size(&request), Ok(()));
+        assert_eq!(validate_recovered_server_batch_size(&request), Ok(()));
     }
 
     #[tokio::test]

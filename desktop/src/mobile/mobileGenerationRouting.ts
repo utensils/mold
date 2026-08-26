@@ -157,6 +157,7 @@ export function mobileGenerationSubmissionPolicy(options: {
       hostId: options.route.hostId,
       queue: {
         heterogeneous_batch: options.route.heterogeneousBatch === true,
+        heterogeneous_batch_max_outputs: options.route.heterogeneousBatchMaxOutputs ?? null,
         durable_batch_outcomes: options.route.durableBatchOutcomes === true,
         admission_protocol_version: options.route.admissionProtocolVersion ?? null,
       },

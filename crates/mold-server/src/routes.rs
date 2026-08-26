@@ -824,7 +824,6 @@ fn sse_message_to_event(msg: SseMessage) -> SseEvent {
     match msg {
         SseMessage::Progress(payload) => serialize_event("progress", &payload),
         SseMessage::Complete(payload) => serialize_event("complete", &payload),
-        SseMessage::BatchComplete(payload) => serialize_event("batch_complete", &payload),
         SseMessage::UpscaleComplete(payload) => serialize_event("complete", &payload),
         SseMessage::Error(payload) => serialize_event("error", &payload),
     }
@@ -2365,17 +2364,65 @@ fn validate_direct_generation_request(
     Ok(())
 }
 
-async fn direct_durable_admission(
+pub(crate) async fn direct_durable_admission(
     state: &AppState,
-) -> Option<Arc<crate::queue_media_admission::DurableMediaAdmission>> {
+    request: &mold_core::GenerateRequest,
+    explicitly_requested: bool,
+) -> Result<Option<Arc<crate::queue_media_admission::DurableMediaAdmission>>, ApiError> {
     let config = state.config.read().await;
-    if state.is_output_disabled(&config)
-        || state.queue_journal.durable_media_capabilities().is_none()
-    {
-        None
-    } else {
-        state.queue_journal.queue_media_admission()
+    if state.is_output_disabled(&config) {
+        return if explicitly_requested {
+            Err(ApiError::with_code(
+                "durable direct admission requires server gallery output",
+                "DURABLE_ADMISSION_UNAVAILABLE",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ))
+        } else {
+            Ok(None)
+        };
     }
+    let durable_media_ready = state.queue_journal.durable_media_capabilities().is_some();
+    if !durable_media_ready
+        && (crate::queue_media_admission::request_has_durable_media(request)
+            || mold_core::minimax_h3::task_for_model(&request.model).is_some())
+    {
+        return Err(ApiError::with_code(
+            "encrypted durable request media is unavailable",
+            "DURABLE_MEDIA_UNAVAILABLE",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
+    }
+    if let Err(error) = crate::queue_media_admission::durable_media_preflight(request) {
+        return if explicitly_requested {
+            Err(error)
+        } else {
+            Ok(None)
+        };
+    }
+    let admission = durable_media_ready
+        .then(|| state.queue_journal.queue_media_admission())
+        .flatten();
+    if admission.is_none() && explicitly_requested {
+        return Err(ApiError::with_code(
+            "durable direct admission is unavailable on this host",
+            "DURABLE_ADMISSION_UNAVAILABLE",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
+    }
+    Ok(admission)
+}
+
+fn durable_reconciliation_response(
+    status: mold_core::GenerationBatchStatus,
+    reason: &'static str,
+) -> Response {
+    tracing::warn!(
+        batch_id = %status.id,
+        client_batch_id = %status.client_batch_id,
+        reason,
+        "durable direct observer detached; returning reconciliation state"
+    );
+    (StatusCode::ACCEPTED, Json(status)).into_response()
 }
 
 const MAX_HETEROGENEOUS_BATCH_OUTPUTS: usize = 64;
@@ -2612,6 +2659,7 @@ async fn reconcile_generation_batches(
     )),
     responses(
         (status = 200, description = "Generated media bytes with the matching image/video Content-Type"),
+        (status = 202, description = "Durable singleton accepted; reconcile the returned batch status", body = mold_core::GenerationBatchStatus),
         (status = 404, description = "Model not downloaded"),
         (status = 422, description = "Invalid request parameters"),
         (status = 500, description = "Inference error"),
@@ -2629,18 +2677,10 @@ async fn generate(
     mold_core::minimax_h3::canonicalize_request_model(&mut req);
     validate_direct_generation_request(&req)?;
     let operation_id = requested_operation_id(&headers)?;
-    let canonical_admission = direct_durable_admission(&state).await;
+    let canonical_admission =
+        direct_durable_admission(&state, &req, operation_id.is_some()).await?;
     if let Some(admission) = canonical_admission {
         let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        if crate::queue_media_admission::request_has_durable_media(&req)
-            && state.queue_journal.durable_media_capabilities().is_none()
-        {
-            return Err(ApiError::with_code(
-                "encrypted durable request media is unavailable",
-                "DURABLE_MEDIA_UNAVAILABLE",
-                StatusCode::SERVICE_UNAVAILABLE,
-            ));
-        }
         let outcome = admission
             .admit_batch(
                 &state,
@@ -2670,7 +2710,12 @@ async fn generate(
             .expect("checked above");
         let attached = match observer.attached().await {
             Ok(attached) => attached,
-            Err(_) => return Err(ApiError::internal("durable raw observer detached")),
+            Err(_) => {
+                return Ok(durable_reconciliation_response(
+                    status,
+                    "observer detached before feeder handoff",
+                ));
+            }
         };
         let crate::queue_media_ingress::AttachedObserver::Raw { outcome } = attached else {
             return Err(ApiError::internal(
@@ -2685,7 +2730,12 @@ async fn generate(
                     status.children[0].job_id
                 )));
             }
-            Err(_) => return Err(ApiError::internal("durable raw observer dropped")),
+            Err(_) => {
+                return Ok(durable_reconciliation_response(
+                    status,
+                    "worker observer dropped before terminal result",
+                ));
+            }
         };
         return generation_result_response(result, warnings);
     }
@@ -3800,18 +3850,10 @@ async fn generate_stream(
     let completion_payload = requested_sse_completion_payload(&headers)?;
     validate_direct_generation_request(&req)?;
     let operation_id = requested_operation_id(&headers)?;
-    let canonical_admission = direct_durable_admission(&state).await;
+    let canonical_admission =
+        direct_durable_admission(&state, &req, operation_id.is_some()).await?;
     if let Some(admission) = canonical_admission {
         let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        if crate::queue_media_admission::request_has_durable_media(&req)
-            && state.queue_journal.durable_media_capabilities().is_none()
-        {
-            return Err(ApiError::with_code(
-                "encrypted durable request media is unavailable",
-                "DURABLE_MEDIA_UNAVAILABLE",
-                StatusCode::SERVICE_UNAVAILABLE,
-            ));
-        }
         let outcome = admission
             .admit_batch(
                 &state,
@@ -3842,6 +3884,8 @@ async fn generate_stream(
             .flatten()
             .expect("checked above");
         let job_id = status.children[0].job_id.clone();
+        let batch_id = status.id.clone();
+        let client_batch_id = status.client_batch_id.clone();
         let stream = async_stream::stream! {
             for warning in warnings.all() {
                 yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Progress(
@@ -3852,17 +3896,36 @@ async fn generate_stream(
                 SseProgressEvent::Queued { position: 0, id: job_id }
             )));
             let Ok(attached) = observer.attached().await else {
+                yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Error(
+                    mold_core::SseErrorEvent::retained_with_code(
+                        format!(
+                            "durable generation remains queued; reconcile batch {batch_id} or client operation {client_batch_id}"
+                        ),
+                        mold_core::SSE_ERROR_CODE_DURABLE_OBSERVER_DETACHED,
+                    ),
+                )));
                 return;
             };
             let crate::queue_media_ingress::AttachedObserver::Sse { mut messages } = attached else {
                 return;
             };
+            let mut terminal = false;
             while let Some(message) = messages.recv().await {
-                let terminal = matches!(message, SseMessage::Error(_));
+                terminal = matches!(message, SseMessage::Complete(_) | SseMessage::Error(_));
                 yield Ok::<_, Infallible>(sse_message_to_event(message));
                 if terminal {
                     break;
                 }
+            }
+            if !terminal {
+                yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Error(
+                    mold_core::SseErrorEvent::retained_with_code(
+                        format!(
+                            "durable generation remains queued; reconcile batch {batch_id} or client operation {client_batch_id}"
+                        ),
+                        mold_core::SSE_ERROR_CODE_DURABLE_OBSERVER_DETACHED,
+                    ),
+                )));
             }
         };
         return Ok(Sse::new(stream)
@@ -6633,17 +6696,11 @@ async fn server_capabilities(
             stable_device_pins: true,
             cooperative_cancellation: true,
             durable_queue,
-            server_batch: false,
-            server_batch_max_outputs: None,
             heterogeneous_batch,
             heterogeneous_batch_max_outputs: heterogeneous_batch
                 .then_some(MAX_HETEROGENEOUS_BATCH_OUTPUTS as u32),
             durable_batch_outcomes: heterogeneous_batch,
-            admission_protocol_version: state
-                .queue_journal
-                .queue_media_admission()
-                .is_some()
-                .then_some(2),
+            admission_protocol_version: heterogeneous_batch.then_some(2),
         },
         durable_media: heterogeneous_batch
             .then(|| state.queue_journal.durable_media_capabilities())

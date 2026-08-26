@@ -1520,6 +1520,28 @@ pub struct GenerateRequest {
 }
 
 impl GenerateRequest {
+    /// Whether durable admission must extract request-owned media or media
+    /// provenance before persisting the JSON request. Process-private ordered
+    /// references and local HDR/LoRA authority are classified separately.
+    pub fn has_durable_media_inputs(&self) -> bool {
+        self.source_image.is_some()
+            || self.source_image_name.is_some()
+            || self.id_image.is_some()
+            || self.id_image_name.is_some()
+            || self.id_images.is_some()
+            || self.id_image_names.is_some()
+            || self.edit_images.is_some()
+            || self.mask_image.is_some()
+            || self.control_image.is_some()
+            || self.audio_file.is_some()
+            || self.audio_file_path.is_some()
+            || self.source_video.is_some()
+            || self.source_video_path.is_some()
+            || self.extend_video.is_some()
+            || self.extend_video_path.is_some()
+            || self.keyframes.is_some()
+    }
+
     /// Returns the resolved output format, falling back to the default (`Png`)
     /// when the caller did not supply one.
     ///
@@ -2014,22 +2036,6 @@ pub struct GenerateResponse {
     /// Additive; empty on every response that carried no advisory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub request_warnings: Vec<String>,
-}
-
-/// Ordered response for a direct batch submitted through `POST /api/generate`.
-/// Every output is an independently durable queue sibling.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct BatchGenerateResponse {
-    pub batch_id: String,
-    pub outputs: Vec<BatchGenerateOutput>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct BatchGenerateOutput {
-    /// One-based stable position in the normalized parent.
-    pub batch_index: u32,
-    pub filename: String,
-    pub response: GenerateResponse,
 }
 
 /// LTX-2 still-image conditioning preprocessing as actually executed —
@@ -4338,14 +4344,6 @@ pub struct SseCompleteEvent {
     pub metadata: Option<Box<OutputMetadata>>,
 }
 
-/// One atomic server-owned parent completion. Emitted as `batch_complete`
-/// only after every ordered output and metadata row is durably published.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct SseBatchCompleteEvent {
-    pub batch_id: String,
-    pub outputs: Vec<SseCompleteEvent>,
-}
-
 /// SSE event emitted when an upscale request completes.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SseUpscaleCompleteEvent {
@@ -4378,6 +4376,11 @@ pub struct SseErrorEvent {
 
 /// `SseErrorEvent.code` for a job the host retained across a restart.
 pub const SSE_ERROR_CODE_SERVER_RESTARTING: &str = "server_restarting";
+/// A durable direct observer disconnected after admission. The job remains
+/// authoritative in the queue and clients reconcile it by the queued ID.
+pub const SSE_ERROR_CODE_DURABLE_OBSERVER_DETACHED: &str = "durable_observer_detached";
+/// A queued job was cancelled before its direct observer reached a worker.
+pub const SSE_ERROR_CODE_QUEUED_CANCELLED: &str = "queued_cancelled";
 
 impl SseErrorEvent {
     /// An ordinary failure: the job is over and the client should say so.
@@ -4391,10 +4394,22 @@ impl SseErrorEvent {
 
     /// The host is restarting and will finish this job after it comes back.
     pub fn retained(message: impl Into<String>) -> Self {
+        Self::retained_with_code(message, SSE_ERROR_CODE_SERVER_RESTARTING)
+    }
+
+    pub fn retained_with_code(message: impl Into<String>, code: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             retained: true,
-            code: Some(SSE_ERROR_CODE_SERVER_RESTARTING.to_string()),
+            code: Some(code.into()),
+        }
+    }
+
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retained: false,
+            code: Some(SSE_ERROR_CODE_QUEUED_CANCELLED.to_string()),
         }
     }
 }
@@ -7171,49 +7186,6 @@ mod tests {
     }
 
     #[test]
-    fn atomic_batch_complete_round_trips_as_one_ordered_parent() {
-        let output = |index| SseCompleteEvent {
-            request_warnings: Vec::new(),
-            audio_sample_rate: None,
-            audio_channels: None,
-            audio_duration_ms: None,
-            audio_thumbnail: None,
-            image: String::new(),
-            format: OutputFormat::Png,
-            width: 64,
-            height: 64,
-            original_image: None,
-            original_width: None,
-            original_height: None,
-            seed_used: index,
-            generation_time_ms: 1,
-            model: "flux".into(),
-            video_frames: None,
-            video_fps: None,
-            video_thumbnail: None,
-            video_gif_preview: None,
-            video_has_audio: false,
-            video_duration_ms: None,
-            video_audio_sample_rate: None,
-            video_audio_channels: None,
-            gpu: Some(index as usize),
-            filename: Some(format!("{index}.png")),
-            original_filename: None,
-            metadata: None,
-        };
-        let event = SseBatchCompleteEvent {
-            batch_id: "parent".into(),
-            outputs: vec![output(1), output(2)],
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let decoded: SseBatchCompleteEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.batch_id, "parent");
-        assert_eq!(decoded.outputs.len(), 2);
-        assert_eq!(decoded.outputs[0].seed_used, 1);
-        assert_eq!(decoded.outputs[1].seed_used, 2);
-    }
-
-    #[test]
     fn generate_request_control_scale_defaults_to_1() {
         let json = r#"{"prompt":"test","model":"test","width":512,"height":512,"steps":4}"#;
         let req: GenerateRequest = serde_json::from_str(json).unwrap();
@@ -8390,15 +8362,6 @@ pub struct QueueCapabilities {
     /// stream died — on this host that job is still going to run.
     #[serde(default)]
     pub durable_queue: bool,
-    /// Server durably normalizes one direct batch request into ordered queue
-    /// siblings instead of using an ephemeral batch execution route.
-    #[serde(default)]
-    pub server_batch: bool,
-    /// Maximum number of ordered outputs accepted by one direct
-    /// `POST /api/generate` or `/api/generate/stream` request. Absent on older
-    /// servers and whenever durable batch admission is unavailable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub server_batch_max_outputs: Option<u32>,
     /// Server accepts one idempotent heterogeneous prepared-batch admission.
     #[serde(default)]
     pub heterogeneous_batch: bool,
@@ -8856,6 +8819,50 @@ pub struct ServerCapabilities {
     /// deliver.
     #[serde(default)]
     pub licenses: bool,
+}
+
+impl ServerCapabilities {
+    /// Exact shared Rust-client gate for canonical durable Batch N admission.
+    /// Returns the host's per-operation child limit only when every request is
+    /// representable by the advertised protocol. Web/desktop/mobile mirror
+    /// this versioned matrix in `studio/lib/generationSubmissionPolicy.ts`.
+    pub fn canonical_generation_batch_limit(&self, requests: &[GenerateRequest]) -> Option<usize> {
+        if requests.is_empty()
+            || !self.queue.heterogeneous_batch
+            || !self.queue.durable_batch_outcomes
+            || self.queue.admission_protocol_version.unwrap_or(0) < 2
+        {
+            return None;
+        }
+        let limit = usize::try_from(self.queue.heterogeneous_batch_max_outputs?).ok()?;
+        if limit == 0 {
+            return None;
+        }
+        for request in requests {
+            if request.batch_size != 1 || request.hdr_exr_dir.is_some() {
+                return None;
+            }
+            let h3 = crate::minimax_h3::task_for_model(&request.model).is_some();
+            let media = request.has_durable_media_inputs();
+            if media && (request.lora.is_some() || request.loras.is_some()) {
+                return None;
+            }
+            if media || h3 || request.references.is_some() {
+                let capabilities = self.durable_media.as_ref()?;
+                if capabilities.protocol_version < 2
+                    || !capabilities.encrypted_at_rest
+                    || !capabilities.generate_request_media
+                    || (h3 && !capabilities.private_h3)
+                    || (request.references.is_some() && !capabilities.h3_references)
+                    || ((request.id_image.is_some() || request.id_images.is_some())
+                        && !capabilities.identity)
+                {
+                    return None;
+                }
+            }
+        }
+        Some(limit)
+    }
 }
 
 /// One third-party model license and this server's acceptance state for it.

@@ -1,4 +1,5 @@
 import {
+  canonicalGenerationBatchLimit,
   isDurableMediaCapabilitiesV1,
   supportsDurableGenerationLifecycle,
   supportsDurableRequest,
@@ -56,6 +57,7 @@ function supportsCanonicalRequest(
 ): boolean {
   if (
     !supportsDurableGenerationLifecycle(host.queue) ||
+    canonicalGenerationBatchLimit(host.queue) === null ||
     !Number.isSafeInteger(host.queue?.admission_protocol_version) ||
     (host.queue?.admission_protocol_version ?? 0) < 2
   ) {
@@ -66,7 +68,15 @@ function supportsCanonicalRequest(
     typeof record.family === "string" ? record.family : null,
     typeof record.model === "string" ? record.model : null,
   );
-  if (!requestCarriesGenerationMedia(request) && !h3) return true;
+  const carriesMedia = requestCarriesGenerationMedia(request);
+  if (fieldPresent(record, "hdr_exr_dir")) return false;
+  if (
+    carriesMedia &&
+    (fieldPresent(record, "lora") || fieldPresent(record, "loras"))
+  ) {
+    return false;
+  }
+  if (!carriesMedia && !h3) return true;
   const media = host.durableMedia;
   if (
     !media ||

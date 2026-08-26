@@ -64,6 +64,7 @@ export type GenerationBatchLookup =
 
 export interface DurableGenerationQueueCapabilities {
   heterogeneous_batch?: boolean;
+  heterogeneous_batch_max_outputs?: number | null;
   durable_batch_outcomes?: boolean;
   /** Version 2 admits durably before model-family preparation begins. */
   admission_protocol_version?: number | null;
@@ -109,6 +110,35 @@ export function supportsDurableGenerationLifecycle(
   return (
     queue?.heterogeneous_batch === true && queue.durable_batch_outcomes === true
   );
+}
+
+export function canonicalGenerationBatchLimit(
+  queue: DurableGenerationQueueCapabilities | null | undefined,
+): number | null {
+  if (
+    !supportsDurableGenerationLifecycle(queue) ||
+    !Number.isSafeInteger(queue?.admission_protocol_version) ||
+    (queue?.admission_protocol_version ?? 0) < 2 ||
+    !Number.isSafeInteger(queue?.heterogeneous_batch_max_outputs) ||
+    (queue?.heterogeneous_batch_max_outputs ?? 0) < 1
+  ) {
+    return null;
+  }
+  return queue!.heterogeneous_batch_max_outputs!;
+}
+
+export function chunkGenerationBatchRequests<T>(
+  requests: readonly T[],
+  limit: number,
+): T[][] {
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new Error("generation batch limit must be a positive integer");
+  }
+  const chunks: T[][] = [];
+  for (let offset = 0; offset < requests.length; offset += limit) {
+    chunks.push(requests.slice(offset, offset + limit));
+  }
+  return chunks;
 }
 
 function requestFieldIsPresent(

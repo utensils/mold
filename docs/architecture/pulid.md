@@ -438,10 +438,10 @@ nothing worth optimizing.
 
 ### The three ways it could have leaked, and what stops each
 
-1. **The scheduler re-prepares dependencies for EVERY pending job**, batch
-   children included, and `compose_prepared_generation` replaces
-   `pending.prepared_inputs` wholesale. Left alone, a `batch_size = 4` parent
-   would extract five times and then discard the parent's value. So the child's
+1. **The scheduler re-prepares dependencies for EVERY pending job**, durable
+   batch children included, and `compose_prepared_generation` replaces
+   `pending.prepared_inputs` wholesale. A four-child canonical batch must not
+   re-extract identity once per deferred preparation. So the child's
    frozen identity is handed to preparation through
    `DependencyPreparationContext::frozen_identity`, which short-circuits the
    extraction entirely, and `compose_prepared_generation` carries it across as a

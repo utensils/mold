@@ -456,7 +456,10 @@ mod tests {
         let run = |mode: &str, scrubbed: Arc<std::sync::atomic::AtomicBool>| {
             let clone = source.clone().with_scrub_probe(scrubbed);
             match mode {
-                "success" => Ok::<(), ()>(drop(clone)),
+                "success" => {
+                    drop(clone);
+                    Ok::<(), ()>(())
+                }
                 "error" => Err(()),
                 "panic" => panic!("injected per-device admission panic"),
                 _ => unreachable!(),

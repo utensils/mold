@@ -39,6 +39,8 @@ import { ApiError, apiHeaders, type ApiTarget } from "@studio/api/client";
 import { mergeQueueEntries } from "@studio/api/queuePlan";
 import {
   admitGenerationBatch,
+  canonicalGenerationBatchLimit,
+  chunkGenerationBatchRequests,
   lookupGenerationBatchByClientId,
   reconcileGenerationBatches,
   type GenerationBatchStatus,
@@ -1202,7 +1204,7 @@ function durableRequestIneligibility(
       ? { ...generation, family: route.modelFamily }
       : generation,
   ).admission;
-  if (admission === "legacy_attached") {
+  if (admission !== "canonical_durable") {
     return "the host does not advertise encrypted durable support for this request";
   }
   return null;
@@ -1690,34 +1692,39 @@ function submitDurableJobs(
 ): string[] {
   selectedJobId.value = null;
   canvasErrorJobId.value = null;
-  const clientBatchId = createUuid();
-  const tracker = createGenerationBatchTracker({
-    hostId: route.hostId,
-    expectedInstanceId: route.instanceId!,
-    clientBatchId,
-    submittedAtMs: Date.now(),
-  });
-  const admitted = requests.map((request, offset) =>
-    createJobRecord(request, decision, route, {
-      clientBatchId,
+  const limit = canonicalGenerationBatchLimit(route.durableGeneration);
+  if (limit === null)
+    throw new Error("This host does not support durable generation admission.");
+  const admitted: Job[] = [];
+  for (const requestChunk of chunkGenerationBatchRequests(requests, limit)) {
+    const clientBatchId = createUuid();
+    const tracker = createGenerationBatchTracker({
+      hostId: route.hostId,
       expectedInstanceId: route.instanceId!,
-      serverBatchId: null,
-      childIndex: offset + 1,
-    }),
-  );
+      clientBatchId,
+      submittedAtMs: Date.now(),
+    });
+    const chunkJobs = requestChunk.map((request, offset) =>
+      createJobRecord(request, decision, route, {
+        clientBatchId,
+        expectedInstanceId: route.instanceId!,
+        serverBatchId: null,
+        childIndex: offset + 1,
+      }),
+    );
+    admitted.push(...chunkJobs);
+    durableJobsByBatch.set(clientBatchId, chunkJobs);
+    durableTrackers.set(clientBatchId, tracker);
+    // Journal each independently idempotent chunk before its POST leaves.
+    persistDurableRecoveryBatch(clientBatchId);
+    void admitDurableBatch(route, clientBatchId, requestChunk);
+  }
   jobs.value = [...admitted, ...jobs.value];
-  durableJobsByBatch.set(clientBatchId, admitted);
-  // Journal only THIS batch before dispatch. The ordinary rail's debounced
-  // presentation write is deliberately outside admission, so submitting job
-  // N never projects or serializes jobs 1..N-1.
-  persistDurableRecoveryBatch(clientBatchId);
-  durableTrackers.set(clientBatchId, tracker);
   durableRoutes.set(route.hostId, {
     ...route,
     target: { ...route.target },
   });
   ensureDurableEventSession(route);
-  void admitDurableBatch(route, clientBatchId, requests);
   return admitted.map((job) => job.id);
 }
 

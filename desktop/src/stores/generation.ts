@@ -53,6 +53,8 @@ import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
 import { blobToBase64 } from "@studio/lib/base64";
 import {
   admitGenerationBatch,
+  canonicalGenerationBatchLimit,
+  chunkGenerationBatchRequests,
   lookupGenerationBatchByClientId,
   reconcileGenerationBatches,
   type DurableMediaCapabilities,
@@ -1146,14 +1148,19 @@ export const useGenerationStore = defineStore("generation", {
         route?.heterogeneousBatch === true &&
         route.durableBatchOutcomes === true &&
         !!route.instanceId &&
-        (route.heterogeneousBatchMaxOutputs == null ||
-          size <= route.heterogeneousBatchMaxOutputs) &&
+        canonicalGenerationBatchLimit({
+          heterogeneous_batch: route.heterogeneousBatch,
+          heterogeneous_batch_max_outputs: route.heterogeneousBatchMaxOutputs ?? null,
+          durable_batch_outcomes: route.durableBatchOutcomes,
+          admission_protocol_version: route.admissionProtocolVersion ?? null,
+        }) !== null &&
         chainRouting?.kind !== "chain" &&
         plans.every((plan) =>
           requestIsEligibleForDurableGeneration(
             plan,
             {
               heterogeneous_batch: route.heterogeneousBatch === true,
+              heterogeneous_batch_max_outputs: route.heterogeneousBatchMaxOutputs ?? null,
               durable_batch_outcomes: route.durableBatchOutcomes === true,
               ...(route.admissionProtocolVersion === undefined
                 ? {}
@@ -1164,48 +1171,63 @@ export const useGenerationStore = defineStore("generation", {
           ),
         );
       if (durableAdmission) {
-        const clientBatchId = durableClientBatchId();
-        const record: DurableGenerationRecoveryRecord = {
-          tracker: createGenerationBatchTracker({
-            hostId: route.hostId,
-            expectedInstanceId: route.instanceId!,
-            clientBatchId,
-            submittedAtMs: Date.now(),
-          }),
-          hostLabel: route.label,
-          hostKind: route.kind,
-          mirrorRemoteOutput: route.mirrorRemoteOutput ?? true,
-          children: plans.map((plan, index) =>
-            durableChildSummary(plan, index + 1, jobs[index]!.clientId),
-          ),
-          cancelRequestedChildIndexes: [],
-          effectReceipts: [],
-        };
-        durableRecords.set(clientBatchId, record);
-        durableJobIds.set(
-          clientBatchId,
-          new Map(jobs.map((job, index) => [index + 1, job.clientId])),
+        const limit = canonicalGenerationBatchLimit({
+          heterogeneous_batch: route.heterogeneousBatch,
+          heterogeneous_batch_max_outputs: route.heterogeneousBatchMaxOutputs ?? null,
+          durable_batch_outcomes: route.durableBatchOutcomes,
+          admission_protocol_version: route.admissionProtocolVersion ?? null,
+        })!;
+        const chunks = chunkGenerationBatchRequests(plans, limit).map(
+          (requestChunk, chunkIndex) => {
+            const offset = chunkIndex * limit;
+            const jobChunk = jobs.slice(offset, offset + requestChunk.length);
+            const clientBatchId = durableClientBatchId();
+            const record: DurableGenerationRecoveryRecord = {
+              tracker: createGenerationBatchTracker({
+                hostId: route.hostId,
+                expectedInstanceId: route.instanceId!,
+                clientBatchId,
+                submittedAtMs: Date.now(),
+              }),
+              hostLabel: route.label,
+              hostKind: route.kind,
+              mirrorRemoteOutput: route.mirrorRemoteOutput ?? true,
+              children: requestChunk.map((plan, index) =>
+                durableChildSummary(plan, index + 1, jobChunk[index]!.clientId),
+              ),
+              cancelRequestedChildIndexes: [],
+              effectReceipts: [],
+            };
+            durableRecords.set(clientBatchId, record);
+            durableJobIds.set(
+              clientBatchId,
+              new Map(jobChunk.map((job, index) => [index + 1, job.clientId])),
+            );
+            const settlement = createDurableSettlement();
+            durableSettlements.set(clientBatchId, settlement);
+            return { record, requestChunk, settlement };
+          },
         );
-        const settlement = createDurableSettlement();
-        durableSettlements.set(clientBatchId, settlement);
         // Prefer putting crash authority on disk before the first byte of the
-        // POST leaves. If Web Storage rejects the write, retain the same UUID
-        // and instance fence in memory and continue through this durable path;
+        // first chunk POST leaves. If Web Storage rejects the write, retain
+        // every UUID and instance fence in memory and continue through this durable path;
         // a client-side quota/privacy failure cannot veto valid host work or
         // redirect it into the legacy endpoint.
         persistDurableRecords();
-        const admitted = this.admitDurableRecord(record, plans).then(() => jobs);
-        const settled = settlement.promise.then((settledJobs) => {
+        const admitted = Promise.all(
+          chunks.map(({ record, requestChunk }) => this.admitDurableRecord(record, requestChunk)),
+        ).then(() => jobs);
+        const settled = Promise.all(chunks.map(({ settlement }) => settlement.promise)).then(() => {
           this.pendingConsumerBatchIds = this.pendingConsumerBatchIds.filter(
             (pendingBatchId) => pendingBatchId !== batchId,
           );
           const pendingBatches = new Set(this.pendingConsumerBatchIds);
           this.prune(
             GENERATION_HISTORY_LIMIT,
-            settledJobs.map((job) => job.clientId),
+            jobs.map((job) => job.clientId),
             this.jobs.filter((job) => !pendingBatches.has(job.batchId)).map((job) => job.clientId),
           );
-          return settledJobs;
+          return jobs;
         });
         return { jobs, admitted, settled };
       }

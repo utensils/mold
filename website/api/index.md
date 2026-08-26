@@ -205,7 +205,7 @@ host requires no credential.
 When `MOLD_RATE_LIMIT` is set, per-IP rate limiting is enforced with two tiers:
 
 - **Generation tier** (configured rate): `/api/generate`,
-  `/api/generate/stream`, `/api/expand`, `/api/upscale`,
+  `/api/generate/stream`, `/api/generation-batches`, `/api/expand`, `/api/upscale`,
   `/api/upscale/stream`, `/api/models/load`, `/api/models/pull`,
   `/api/models/unload`
 - **Read tier** (10x the configured rate): `/api/models`, `/api/loras`,
@@ -275,11 +275,18 @@ open http://localhost:7680/api/docs
 
 ## `/api/generate`
 
-`POST /api/generate` returns raw image bytes for `batch_size = 1`. A raw
-server-owned batch (`batch_size > 1`) returns one ordered
-`BatchGenerateResponse` JSON parent after its gallery transaction commits.
+`POST /api/generate` returns raw image bytes for exactly one output.
+`batch_size > 1` fails with HTTP 422 and `DIRECT_BATCH_UNSUPPORTED`; use
+`POST /api/generation-batches` for Batch N.
 The server includes an `x-mold-seed-used` header with the effective seed on
 singleton responses.
+
+If a durable singleton's attached raw observer disappears after commit, the
+route returns HTTP 202 with its `GenerationBatchStatus` instead of an opaque
+500; reconcile by batch or client operation ID and do not resubmit. SSE emits
+`retained: true`, code `durable_observer_detached`, after its queued job ID so
+clients can enter the same reconciliation path. Queued cancellation emits the
+terminal code `queued_cancelled`.
 
 ```bash
 curl -i -X POST http://localhost:7680/api/generate \
@@ -479,14 +486,28 @@ rather than letting the expander invent a prompt) and is not written to prompt
 history.
 :::
 
-Authoritative Scheduler V2 servers with gallery output enabled advertise
-`queue.server_batch = true` and `queue.server_batch_max_outputs = 64` from
-`GET /api/capabilities`. The latter is the live atomic HTTP
-delivery/materialization limit, not a GPU planner limit. Requests above it
-fail promptly with HTTP 422 and stable code
-`BATCH_OUTPUT_LIMIT_EXCEEDED`, before model preparation, child enumeration, or
-gallery filename reservation. Clients that need more outputs should submit
-multiple parents or independent prepared siblings.
+Authoritative Scheduler V2 servers advertise canonical admission through
+`queue.heterogeneous_batch`, `queue.durable_batch_outcomes`, and
+`queue.admission_protocol_version = 2`. Clients must also honor the exact
+`durable_media` capability for requests carrying source or identity media.
+
+## `/api/generation-batches`
+
+`POST /api/generation-batches` durably commits 1–64 ordered singleton
+`GenerateRequest` children before model resolution, downloads, or inference.
+Every child must set `batch_size: 1`; clients chunk larger Batch N requests.
+The body is `{ "client_batch_id": "<uuid>", "requests": [...] }`. A new
+operation returns HTTP 202; replaying the same client ID and identical requests
+returns the existing status, while changed requests return HTTP 409.
+
+If the admission response is lost, recover it with
+`GET /api/generation-batches/by-client/{client_batch_id}`. Poll one batch with
+`GET /api/generation-batches/{id}` or reconcile a bounded set with
+`POST /api/generation-batches/status`. Children expose `accepted`, `running`,
+`complete`, `failed`, `cancelled`, or `held`; completed children name their
+gallery `result.filename`. Held retryable work stays queued durably and can be
+resubmitted with `POST /api/queue/{job_id}/retry`; cancel queued work with
+`DELETE /api/queue/{job_id}`.
 
 Important fields:
 
@@ -742,10 +763,10 @@ first. `?query=` filters by case-insensitive prompt substring; `?limit=`
 bounds the row count (default 50, max 500). `used_at` is Unix epoch
 milliseconds.
 
-The server records history automatically: every accepted `POST /api/generate`
-or `POST /api/generate/stream` appends the typed prompt (before prompt
-expansion), negative prompt, and model. Consecutive identical rows are
-collapsed, so batch siblings and retries produce a single entry.
+The server records history automatically for accepted `POST /api/generate`,
+`POST /api/generate/stream`, and `POST /api/generation-batches` requests. It
+stores the typed prompt before expansion, negative prompt, and model.
+Consecutive identical rows are collapsed, so retries do not duplicate history.
 
 ```bash
 curl "http://localhost:7680/api/history?query=sunset&limit=10"
@@ -825,10 +846,9 @@ curl -N http://localhost:7680/api/generate/stream \
   }'
 ```
 
-For `batch_size = 1`, the final `complete` event matches the
-`GenerateResponse` JSON shape used by the server internally. A server-owned
-batch emits one ordered `batch_complete` event after durable commit and uses
-the same advertised 64-output live limit.
+The final `complete` event matches the `GenerateResponse` JSON shape used by
+the server internally. Streaming is singleton-only; Batch N uses the durable,
+pollable `/api/generation-batches` lifecycle above.
 
 ::: tip RunPod Note
 RunPod's proxy has a 100-second timeout. Use the SSE streaming endpoint for long generations to keep the connection alive.

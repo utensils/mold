@@ -54,22 +54,7 @@ pub const REQUEST_AUTHORITY_JSON_FIELDS: &[&str] = &[
 /// encrypted durable-media store. Process-private references and local-only
 /// HDR/LoRA authorities are intentionally classified separately.
 pub(crate) fn request_has_extractable_media(request: &mold_core::GenerateRequest) -> bool {
-    request.source_image.is_some()
-        || request.source_image_name.is_some()
-        || request.id_image.is_some()
-        || request.id_image_name.is_some()
-        || request.id_images.is_some()
-        || request.id_image_names.is_some()
-        || request.edit_images.is_some()
-        || request.mask_image.is_some()
-        || request.control_image.is_some()
-        || request.audio_file.is_some()
-        || request.audio_file_path.is_some()
-        || request.source_video.is_some()
-        || request.source_video_path.is_some()
-        || request.extend_video.is_some()
-        || request.extend_video_path.is_some()
-        || request.keyframes.is_some()
+    request.has_durable_media_inputs()
 }
 
 /// A process-private authority that media extraction cannot make durable.
