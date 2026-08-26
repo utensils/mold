@@ -682,6 +682,7 @@ async fn run_extend_sends_the_familys_own_carryover_overlap() {
         .await
         .expect("the mock server records requests")
         .iter()
+        .filter(|request| request.url.path() == "/api/generate/stream")
         .map(|request| serde_json::from_slice(&request.body).expect("the CLI posts JSON"))
         .collect();
     assert_eq!(sent.len(), 2, "one generate request per run");
