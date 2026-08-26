@@ -22,18 +22,18 @@ community checkpoints and LoRAs. See the
 | Fast + great        | `z-image-turbo:q8`                    | 9 steps, excellent quality                             |
 | SDXL                | `sdxl-turbo:fp16`                     | 4 steps, 1024x1024                                     |
 | **Video**           | `ltx-video-0.9.6-distilled:bf16`      | Text-to-video, 30fps, APNG/MP4, best-supported default |
-| **Audio + video**   | `ltx-2-19b-distilled:fp8`             | Joint audio-video, MP4-first, advanced conditioning    |
+| **Audio + video**   | `ltx-2.5-22b-distilled:int8-conv`     | Compact LTX-2.5 default; joint audio-video on Metal    |
 | **Wan video**       | `wan22-ti2v-5b:q8`                    | Text/image-to-video with broad Wan workflow support    |
 | **Reference AV**    | `minimax-h3-ref2va:comfy-pruned-int8` | Ordered image/video/audio references; SM89 CUDA build  |
 
 ## Choosing a Video Family
 
-| Family                           | Start with                           | Best for                                                | Important boundary                           |
-| -------------------------------- | ------------------------------------ | ------------------------------------------------------- | -------------------------------------------- |
-| [LTX Video](/models/ltx-video)   | `ltx-video-0.9.6-distilled:bf16`     | Straightforward text-to-video                           | No generated audio                           |
-| [LTX-2 / 2.3](/models/ltx2)      | `ltx-2-19b-distilled:fp8`            | Joint audio-video and the broadest conditioning surface | Large gated checkpoints                      |
-| [Wan Video](/models/wan)         | `wan22-ti2v-5b:q8`                   | Text/image-to-video, first/last frames, and sequences   | CUDA-qualified; Metal/CPU correctness-only   |
-| [MiniMax H3](/models/minimax-h3) | `minimax-h3-fl2va:comfy-pruned-int8` | First-frame or ordered-reference audio-video            | 42.482 GB base pull; runtime is build-scoped |
+| Family                            | Start with                           | Best for                                              | Important boundary                            |
+| --------------------------------- | ------------------------------------ | ----------------------------------------------------- | --------------------------------------------- |
+| [LTX Video](/models/ltx-video)    | `ltx-video-0.9.6-distilled:bf16`     | Straightforward text-to-video                         | No generated audio                            |
+| [LTX-2 / 2.3 / 2.5](/models/ltx2) | `ltx-2.5-22b-distilled:int8-conv`    | Joint audio-video; compact LTX-2.5 Metal default      | Gated split pack; some 2.5 workflows deferred |
+| [Wan Video](/models/wan)          | `wan22-ti2v-5b:q8`                   | Text/image-to-video, first/last frames, and sequences | CUDA-qualified; Metal/CPU correctness-only    |
+| [MiniMax H3](/models/minimax-h3)  | `minimax-h3-fl2va:comfy-pruned-int8` | First-frame or ordered-reference audio-video          | 42.482 GB base pull; runtime is build-scoped  |
 
 MiniMax H3's pull size is disk/download size, not peak VRAM. Its compact
 runtime is available on H3-enabled SM89 CUDA builds; Metal is shipped as an
@@ -153,7 +153,7 @@ for more options.
 | [Wuerstchen](/models/wuerstchen)      | 1024x1024                     | 3-stage cascade, 42x compress                  |
 | [Qwen-Image](/models/qwen-image)      | 1328x1328                     | Qwen2.5-VL, flow-matching, CFG                 |
 | [Qwen-Image-Edit](/models/qwen-image) | Derived from first edit image | Qwen2.5-VL multimodal edit, flow-matching, CFG |
-| [LTX-2 / 2.3](/models/ltx2)           | 1216x704                      | Gemma 3, joint audio-video transformer         |
+| [LTX-2 / 2.3 / 2.5](/models/ltx2)     | 1216x704                      | Gemma 3/4, joint audio-video transformer       |
 | [LTX Video](/models/ltx-video)        | 768x512                       | T5-XXL, DiT, 3D causal VAE                     |
 | [MiniMax H3](/models/minimax-h3)      | 1344x768                      | Qwen3-VL, joint audio-video DiT, dual VAEs     |
 | [Wan Video](/models/wan)              | 832x480 / 1280x704            | UMT5-XXL, flow DiT, causal 3D VAE, A14B MoE    |
@@ -171,8 +171,11 @@ bounds, profile hashes, and pinned upstream provenance.
 ::: warning Backend qualification
 All image families and `LTX Video` run on CUDA, Apple Metal, and CPU. LTX-2 /
 LTX-2.3 is performance-qualified on CUDA and Apple Metal (measured on the 19B
-and 22B distilled FP8 tiers; Metal is slower than a comparable CUDA card); its
-CPU path stays correctness-oriented and can be extremely slow. Wan is
+and 22B distilled FP8 tiers; Metal is slower than a comparable CUDA card).
+LTX-2.5's compact distilled INT8 ConvRot split pack is qualified on Apple
+Metal; its BF16 route remains operator-deferred, and CUDA qualification is
+being completed separately. The LTX-2 family CPU path stays
+correctness-oriented and can be extremely slow. Wan is
 performance-qualified on CUDA; its CPU and Apple
 Metal paths are correctness-oriented (fp8-scaled Wan checkpoints stay
 CUDA-only — Metal has no fp8 widening kernel). MiniMax H3 compact checkpoints

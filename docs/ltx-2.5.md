@@ -2,8 +2,9 @@
 
 Mold runs the official LTX-2.5 split checkpoints natively through Candle. The
 same request and capability contract serves the CLI, HTTP API, web, desktop,
-TUI, and the shared iPhone/Android surface. Metal is the native Apple backend;
-CUDA is the native NVIDIA backend.
+TUI, and the shared iPhone/Android surface. This qualification covers the
+compact distilled INT8 ConvRot pack on Apple Metal. CUDA qualification is
+completed separately on an NVIDIA host.
 
 ## Pick a model
 
@@ -74,20 +75,31 @@ persists them as a durable chain job, and stitches their outputs. A native
 multishot prompt should stay a One shot request unless separate resumable clips
 and explicit seams are wanted.
 
-## Supported and deferred paths
+## Implemented and qualified paths
 
-Supported now:
+Executed on Apple Metal with retained media and machine-readable reports:
 
-- distilled and dev transformers in BF16 and ComfyUI-compatible INT8 ConvRot;
-- conventional and diffusion video VAEs;
-- Gemma 4 conditioning, explicit or predicted duration, synchronized audio,
-  source/keyframe conditioning, guidance overrides, LoRAs, and offload;
+- the distilled ComfyUI-compatible INT8 ConvRot transformer with the
+  conventional video VAE;
+- Gemma 4 conditioning with explicit frames, including synchronized-audio MP4
+  and silent T2V APNG outputs.
+
+Implemented and covered by focused planning, parsing, or unit contracts, but
+not claimed as executed Metal qualification by this report:
+
+- predicted duration, source/keyframe conditioning, guidance overrides, LoRAs,
+  and offload;
 - native spatial/temporal two-stage upscaling and ordinary Mold Sequence jobs;
-- discovery, pull, readiness, ownership-aware removal, metadata, and reuse on
-  every Mold surface.
+- discovery, pull, readiness, ownership-aware removal, metadata, and reuse
+  across Mold surfaces.
 
 Deferred and fail-closed:
 
+- BF16 execution on Metal; its approximately 71.4 GB split packs remain
+  downloadable and checksum-qualified;
+- the diffusion-video-VAE packs, which are BF16 and therefore part of the
+  deferred Metal runtime row;
+- CUDA runtime qualification, which belongs to the dedicated NVIDIA campaign;
 - NVFP4 execution (the official file is known but not exposed as runnable);
 - HDR/EXR, IC-LoRA, Retake, and LipDub adapters until LTX-2.5-specific weights
   and parity are qualified;
@@ -114,12 +126,21 @@ files remain under `/Volumes/ExternalStorage/mold2` and are not cleanup data.
 Run `scripts/capture-ltx25-metal-verification.sh` on Apple Silicon to capture a
 machine-readable INT8 Metal report. The capture validates the pinned upstream
 clones, download-time SHA-256 markers, decoded retained media, and focused Rust
-parity/regression gates. It only reads existing model and media files; reports
-and logs are added under the verification directory without deleting renders.
+parity/regression gates. First run
+`scripts/capture-ltx25-comfy-metal-reference.sh` to retain the exact-weight
+ComfyUI MPS graph, history, log, and manifest used by the report. A completed
+reference also retains its decoded clip; a run that exceeds the guarded budget
+is recorded as operator-deferred with the blocking operator and sampler
+progress instead of being reported as passing. Neither capture deletes models
+or renders.
 
-The executable compact-checkpoint A/B row is Mold versus ComfyUI on MPS. The
-official PyTorch and Diffusers BF16 pipelines remain static tensor/config
-oracles because neither directly loads the Comfy INT8 ConvRot checkpoint.
-CUDA qualification is performed on its dedicated host. BF16 remains available
-and retained, but a stopped BF16 runtime run is recorded as operator-deferred,
-not misreported as passing.
+The compact-checkpoint reference row is Mold versus ComfyUI on MPS. On the
+qualification host, ComfyUI loaded the exact INT8 ConvRot weights and reached
+the official sampler, but PyTorch sent `aten::_int_mm` to CPU and the run
+remained at `0/8` when the 60-minute guard stopped it. The retained row is
+therefore `operator_deferred`, not a completed visual A/B. The official
+PyTorch and Diffusers BF16 pipelines remain static tensor/config oracles
+because neither directly loads the Comfy INT8 ConvRot checkpoint. CUDA
+qualification is performed on its dedicated host. BF16 remains available and
+retained, but a stopped BF16 runtime run is recorded as operator-deferred, not
+misreported as passing.

@@ -198,6 +198,9 @@ jobs:
               - 'scripts/tests/regression-matrix-transient-retry.sh'
               - 'scripts/tests/wan-regression-matrix.sh'
               - 'scripts/capture-ltx25-metal-verification.sh'
+              - 'scripts/capture-ltx25-comfy-metal-reference.sh'
+              - 'scripts/fixtures/ltx25-comfy-metal-api-prompt.json'
+              - 'scripts/tests/ltx25-comfy-metal-reference.sh'
               - 'scripts/tests/ltx25-metal-verification.sh'
               - 'scripts/tests/minimax-h3-private-uat-release-contract.sh'
               - 'scripts/qualify-cuda-sm86.sh'
@@ -451,6 +454,7 @@ jobs:
           bash scripts/tests/regression-matrix-source-image.sh
           bash scripts/tests/regression-matrix-transient-retry.sh
           bash scripts/tests/wan-regression-matrix.sh
+          bash scripts/tests/ltx25-comfy-metal-reference.sh
           bash scripts/tests/ltx25-metal-verification.sh
       - name: Test MiniMax H3 private-UAT release contract
         if: needs.changes.outputs.release == 'true'

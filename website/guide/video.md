@@ -4,10 +4,10 @@ title: Video Generation
 
 # Video Generation
 
-mold supports generating video clips using the LTX Video, LTX-2, Wan 2.1/2.2,
-and MiniMax H3 model families. Every LTX-2 and Wan checkpoint can chain multiple
-clips together for longer videos with scene-by-scene direction; H3 is
-single-clip only. A dev checkpoint
+mold supports generating video clips using the LTX Video, LTX-2 (including
+LTX-2.5), Wan 2.1/2.2, and MiniMax H3 model families. Every LTX-2 and Wan
+checkpoint can chain multiple clips together for longer videos with
+scene-by-scene direction; H3 is single-clip only. A dev checkpoint
 renders its clips through the two-stage pipeline, so expect roughly twice the
 wall time per clip as a distilled one — stage 1 runs classifier-free guidance
 as two sequential forward passes.
@@ -29,8 +29,16 @@ mold run wan22-ti2v-5b:q8 "a paper boat drifting down a rain gutter" \
 ## Single-clip generation
 
 ```bash
-mold run ltx-2-19b-distilled:fp8 "a cat walks through autumn leaves" --frames 97
+mold pull ltx-2.5-22b-distilled:int8-conv
+mold run ltx-2.5-22b-distilled:int8-conv \
+  "a cat walks through autumn leaves" --frames 97
 ```
+
+The compact LTX-2.5 INT8 ConvRot split pack is the recommended Apple Metal
+path. It is gated on Hugging Face and includes the matching Gemma 4 encoder,
+audio/video VAEs, duration head, and latent upscalers. See
+[LTX-2 / 2.3 / 2.5](/models/ltx2) for download size, qualified workflows, and
+the currently deferred BF16 and CUDA paths.
 
 ## Wan Video
 

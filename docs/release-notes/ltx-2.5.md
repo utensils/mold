@@ -1,18 +1,25 @@
 # LTX-2.5 native runtime
 
-Mold adds native LTX-2.5 generation on Metal and CUDA, including the official
-Gemma 4 conditioner, conventional and diffusion video VAEs, synchronized audio,
-duration prediction, and two-stage latent upscaling.
+Mold adds native LTX-2.5 support, including the official Gemma 4 conditioner,
+conventional and diffusion video VAE pack wiring, synchronized audio, duration
+prediction, and two-stage latent upscaling. Retained Apple Metal runtime
+evidence currently qualifies the compact INT8 ConvRot pack with the
+conventional video VAE for explicit-frame synchronized-audio and silent T2V
+outputs; the other paths are covered by focused contracts or remain deferred as
+listed below.
 
 - The default `ltx-2.5-22b-distilled` alias is the smaller INT8 ConvRot pack
   (about 40.0 GB / 37.2 GiB). BF16 remains available (about 71.4 GB / 66.5 GiB
-  for distilled); dev packs add about 8.9 GB.
+  for distilled) but is operator-deferred on Metal; dev packs add about 8.9 GB.
 - Hosts advertise split-pack readiness. Automatic routing refuses incomplete
   packs instead of discovering a missing component after queue admission.
 - Explicit frames remain the default. `--predict-duration` and the Studio
-  switch use the official duration head and preserve omission in metadata.
+  switch wire the official duration head and preserve omission in metadata;
+  duration prediction is not part of the retained Metal runtime row.
 - Native multishot is one LTX prompt/clip; Mold Sequence remains separate,
   durable multi-clip authoring.
+- CUDA qualification is intentionally completed on a separate NVIDIA host and
+  is not claimed by this Apple Metal release campaign.
 - NVFP4, LTX-2.5 HDR/EXR, IC-LoRA, Retake, LipDub, Dynamic Frame Rate, and the
   prompt enhancer remain deferred and fail closed.
 - Weights are gated, are not redistributed by Mold, and remain governed by the

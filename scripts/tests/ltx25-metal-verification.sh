@@ -71,6 +71,21 @@ FAKE
 chmod +x "$tmp/bin/ffprobe"
 printf 'mp4 fixture\n' >"$tmp/home/output/ltx25-final-int8-metal-audio-seed-25026.mp4"
 printf 'apng fixture\n' >"$tmp/home/output/verification/ltx-2.5/phase2-int8-metal-smoke-seed-25025.apng"
+printf 'comfy mp4 fixture\n' >"$tmp/home/output/comfy.mp4"
+printf '{}\n' >"$tmp/home/output/comfy-graph.json"
+comfy_manifest="$tmp/home/output/comfy-manifest.json"
+comfy_video_sha="$(shasum -a 256 "$tmp/home/output/comfy.mp4" | awk '{print $1}')"
+comfy_graph_sha="$(shasum -a 256 "$tmp/home/output/comfy-graph.json" | awk '{print $1}')"
+jq -n --arg video "$tmp/home/output/comfy.mp4" --arg video_sha "$comfy_video_sha" \
+  --arg graph "$tmp/home/output/comfy-graph.json" --arg graph_sha "$comfy_graph_sha" '
+  {schema_version:"mold.ltx25.comfy-metal-reference.v1", status:"passed", implementation:"ComfyUI",
+    backend:"MPS", checkpoint:"distilled INT8 ConvRot",
+    settings:{width:256,height:256,frames:9,fps:24,stage1_seed:25026,stage2_seed:42,
+      video_cfg:1,audio_cfg:1}, graph:{path:$graph,sha256:$graph_sha},
+    video:{path:$video,sha256:$video_sha,ffprobe:{streams:[
+      {codec_type:"video",width:256,height:256,r_frame_rate:"24/1",nb_frames:"9"},
+      {codec_type:"audio",sample_rate:"48000",channels:2}]}}, retained_in_library:true}' \
+  >"$comfy_manifest"
 database="$tmp/home/mold.db"
 sqlite3 "$database" 'CREATE TABLE generations (
   id INTEGER PRIMARY KEY, filename TEXT, output_dir TEXT, format TEXT, title TEXT,
@@ -98,6 +113,7 @@ LTX25_REPORT="$report" \
 LTX25_CAPTURE_TIMESTAMP=fixture \
 LTX25_SKIP_GATES=1 \
 LTX25_HOST_JSON='{"os":"fixture","arch":"arm64","metal_devices":[{"name":"fixture"}]}' \
+LTX25_COMFY_MANIFEST="$comfy_manifest" \
   "$runner" >/dev/null
 
 jq -e '
@@ -111,19 +127,58 @@ jq -e '
   and ([.references[].status] | all(. == "pinned_clean"))
   and (.media | length) == 2
   and ([.media[].retained_in_library] | all(. == true))
+  and .comfy_reference.schema_version == "mold.ltx25.comfy-metal-reference.v1"
   and ([.gates[].status] | all(. == "skipped_contract_test"))
   and (.comparison_matrix[] | select(.implementation == "Mold"
     and .backend == "Metal" and .checkpoint == "distilled INT8 ConvRot").status)
     == "not_qualified_contract_test"
-  and (.comparison_matrix[] | select(.implementation == "ComfyUI").status) == "pending"
+  and (.comparison_matrix[] | select(.implementation == "ComfyUI").status)
+    == "not_qualified_contract_test"
   and .preservation.downloaded_models_deleted == false
   and .preservation.rendered_media_deleted == false
 ' "$report" >/dev/null
+
+guard_marker="$tmp/home/output/comfy-resource-guard-aborted"
+printf '%s\n' '{"cause":"memory_pressure","pressure_percent":19,"server_rss_kib":565616,"elapsed_seconds":10}' >"$guard_marker"
+server_log="$tmp/home/output/comfy-server.log"
+: >"$server_log"
+guard_marker_sha="$(shasum -a 256 "$guard_marker" | awk '{print $1}')"
+server_log_sha="$(shasum -a 256 "$server_log" | awk '{print $1}')"
+deferred_manifest="$tmp/home/output/comfy-deferred-manifest.json"
+jq -n --arg graph "$tmp/home/output/comfy-graph.json" --arg graph_sha "$comfy_graph_sha" \
+  --arg guard_marker "$guard_marker" --arg guard_marker_sha "$guard_marker_sha" \
+  --arg server_log "$server_log" --arg server_log_sha "$server_log_sha" '
+  {schema_version:"mold.ltx25.comfy-metal-reference.v1", status:"operator_deferred",
+    implementation:"ComfyUI", backend:"MPS", checkpoint:"distilled INT8 ConvRot",
+    settings:{width:256,height:256,frames:9,fps:24,stage1_seed:25026,stage2_seed:42,
+      video_cfg:1,audio_cfg:1}, graph:{path:$graph,sha256:$graph_sha}, video:null,
+    server_log_path:$server_log, server_log_sha256:$server_log_sha,
+    retained_in_library:false, deferred:{guard_cause:"memory_pressure",
+      resource_guard_marker:$guard_marker,resource_guard_marker_sha256:$guard_marker_sha},
+    preservation:{downloaded_models_deleted:false,rendered_media_deleted:false}}' \
+  >"$deferred_manifest"
+deferred_report="$tmp/deferred-report.json"
+PATH="$tmp/bin:$PATH" MOLD_HOME="$tmp/home" LTX25_ALLOW_TEST_HOME=1 \
+  LTX25_CONTRACT_TEST=1 LTX25_REFERENCES_ROOT="$tmp/refs" \
+  LTX25_REPORT="$deferred_report" LTX25_SKIP_GATES=1 \
+  LTX25_HOST_JSON='{}' LTX25_COMFY_MANIFEST="$deferred_manifest" \
+  "$runner" >/dev/null
+jq -e '.comfy_reference.status == "operator_deferred"
+  and .comfy_reference.video == null
+  and (.comparison_matrix[] | select(.implementation == "ComfyUI").evidence
+    | contains("resource guard cause: memory_pressure"))
+  and ((.comparison_matrix[] | select(.implementation == "ComfyUI").evidence
+    | contains("0/8")) | not)
+  and ((.comparison_matrix[] | select(.implementation == "ComfyUI").evidence
+    | contains("_int_mm")) | not)
+  and .comfy_reference.preservation.downloaded_models_deleted == false' \
+  "$deferred_report" >/dev/null
 
 bad_marker="$tmp/home/models/shared/ltx2/model_patches/ltx-2.5-duration-head-bf16.safetensors.sha256-verified"
 printf '%064d\n' 0 >"$bad_marker"
 if PATH="$tmp/bin:$PATH" MOLD_HOME="$tmp/home" LTX25_ALLOW_TEST_HOME=1 \
   LTX25_CONTRACT_TEST=1 LTX25_REFERENCES_ROOT="$tmp/refs" \
+  LTX25_COMFY_MANIFEST="$comfy_manifest" \
   LTX25_REPORT="$tmp/bad.json" LTX25_SKIP_GATES=1 \
   LTX25_HOST_JSON='{}' "$runner" >/dev/null 2>&1; then
   echo "runner accepted a mismatched verified SHA marker" >&2

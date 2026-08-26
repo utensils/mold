@@ -10,8 +10,11 @@ use mold_desktop_lib::server;
 async fn engine_boots_authenticates_and_shuts_down() {
     let models_dir = tempfile::tempdir().unwrap();
     let state_dir = tempfile::tempdir().unwrap();
-    // Isolate from the user's real mold.db and enforce a known API key.
+    // Isolate from the user's real database and gallery. The server waits for
+    // its finite gallery observers during shutdown, so inheriting a populated
+    // output directory makes this boot-contract test depend on runner state.
     std::env::set_var("MOLD_DB_PATH", state_dir.path().join("mold.db"));
+    std::env::set_var("MOLD_OUTPUT_DIR", state_dir.path().join("output"));
     std::env::set_var("MOLD_API_KEY", "desktop-test-key");
 
     let port = server::allocate_port("127.0.0.1").unwrap();
