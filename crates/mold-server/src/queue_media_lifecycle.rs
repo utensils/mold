@@ -46,6 +46,10 @@ pub(crate) struct QueueMediaLifecycle {
 }
 
 impl QueueMediaLifecycle {
+    pub(crate) fn mold_home(&self) -> &std::path::Path {
+        &self.mold_home
+    }
+
     pub(crate) fn new(db: Arc<Option<MetadataDb>>, mold_home: PathBuf, owner_uuid: String) -> Self {
         Self {
             db,

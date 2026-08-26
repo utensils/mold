@@ -26,6 +26,7 @@ use zeroize::{Zeroize, Zeroizing};
 const STORE_DIR: &str = "queue-media";
 const STORE_VERSION_DIR: &str = "v1";
 const KEY_FILE: &str = "master.key";
+const GENERATION_ADMISSION_KEY_FILE: &str = "generation-admission.key";
 const MAGIC: &[u8; 8] = b"MOLDQMS1";
 const FORMAT_VERSION: u16 = 1;
 const V2_MAGIC: &[u8; 8] = b"MOLDQMS2";
@@ -452,6 +453,17 @@ impl QueueMediaOperationFingerprint {
             version: OPERATION_FINGERPRINT_VERSION_SHA256_V1,
             sha256_hex: hex_encode(&digest),
         }
+    }
+
+    pub(crate) fn from_parts(version: u16, sha256_hex: String) -> Result<Self, QueueMediaError> {
+        validate_operation_fingerprint(WireOperationFingerprint {
+            version,
+            sha256_hex: sha256_hex.clone(),
+        })?;
+        Ok(Self {
+            version,
+            sha256_hex,
+        })
     }
 
     pub fn version(&self) -> u16 {
@@ -1035,6 +1047,24 @@ impl StoredState {
 }
 
 impl QueueMediaStore {
+    /// Load or atomically initialize the durable-generation receipt key.
+    /// This key deliberately shares neither readiness nor bytes with encrypted
+    /// request media, so media-free admission survives a damaged media key.
+    pub(crate) fn generation_admission_key(
+        mold_home: impl AsRef<Path>,
+    ) -> Result<Zeroizing<[u8; KEY_BYTES]>, QueueMediaError> {
+        let mold_home = mold_home.as_ref();
+        ensure_existing_directory(mold_home)?;
+        let container = mold_home.join(STORE_DIR);
+        ensure_private_dir(&container)?;
+        let key_path = container.join(GENERATION_ADMISSION_KEY_FILE);
+        if symlink_metadata_optional(&key_path)?.is_some() {
+            load_master_key(&key_path)
+        } else {
+            initialize_master_key(&key_path).map(|(key, _)| key)
+        }
+    }
+
     /// Opens the store, initializing a key only when no stored payload exists.
     pub fn open(mold_home: impl AsRef<Path>) -> Result<OpenedQueueMediaStore, QueueMediaError> {
         Self::open_or_initialize(mold_home, true)

@@ -5,8 +5,10 @@ use std::io::Write as _;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
+use hmac::{Hmac, Mac as _};
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq as _;
+use zeroize::Zeroizing;
 
 use crate::queue_journal::{MediaBatchJournalAdmission, MediaJournalAdmission};
 use crate::queue_media_ingress::{ObserverMode, ObserverRegistration, QueueMediaIngress};
@@ -23,6 +25,7 @@ pub(crate) const DURABLE_MEDIA_ADMISSION_CONFLICT: &str = "DURABLE_MEDIA_ADMISSI
 pub(crate) struct DurableMediaAdmission {
     lifecycle: Arc<QueueMediaLifecycle>,
     ingress: Arc<QueueMediaIngress>,
+    receipt_key: Arc<Zeroizing<[u8; 32]>>,
 }
 
 pub(crate) struct DurableAdmissionOutcome {
@@ -43,60 +46,94 @@ struct PreparedChild {
 
 struct FingerprintWriter(Sha256);
 
-const DURABLE_OPERATION_RECEIPT_PREFIX: &str = "generation-v1";
+const DURABLE_OPERATION_RECEIPT_PREFIX: &str = "generation-v2";
+
+enum DurableReceiptVerification {
+    Match,
+    Conflict,
+    Invalid,
+}
 
 fn durable_operation_receipt(
+    key: &[u8; 32],
     operation_id: &str,
     fingerprint: &QueueMediaOperationFingerprint,
 ) -> String {
     let nonce = uuid::Uuid::new_v4().simple().to_string();
-    let digest = durable_operation_receipt_digest(operation_id, fingerprint, &nonce);
+    let digest = durable_operation_receipt_mac(key, operation_id, fingerprint, &nonce);
     format!(
-        "{DURABLE_OPERATION_RECEIPT_PREFIX}.{nonce}.{}",
+        "{DURABLE_OPERATION_RECEIPT_PREFIX}.{nonce}.{:04x}.{}.{}",
+        fingerprint.version(),
+        fingerprint.sha256_hex(),
         hex_bytes(&digest)
     )
 }
 
-fn durable_operation_receipt_digest(
+fn durable_operation_receipt_mac(
+    key: &[u8; 32],
     operation_id: &str,
     fingerprint: &QueueMediaOperationFingerprint,
     nonce: &str,
 ) -> [u8; 32] {
-    let mut digest = Sha256::new();
-    digest.update(b"mold durable generation operation receipt\0");
-    digest.update((operation_id.len() as u64).to_be_bytes());
-    digest.update(operation_id.as_bytes());
-    digest.update(nonce.as_bytes());
-    digest.update(fingerprint.version().to_be_bytes());
-    digest.update(fingerprint.sha256_hex().as_bytes());
-    digest.finalize().into()
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts a 32-byte key");
+    mac.update(b"mold durable generation operation receipt\0");
+    mac.update(&(operation_id.len() as u64).to_be_bytes());
+    mac.update(operation_id.as_bytes());
+    mac.update(nonce.as_bytes());
+    mac.update(&fingerprint.version().to_be_bytes());
+    mac.update(fingerprint.sha256_hex().as_bytes());
+    mac.finalize().into_bytes().into()
 }
 
 fn verify_durable_operation_receipt(
+    key: &[u8; 32],
     receipt: &str,
     operation_id: &str,
     fingerprint: &QueueMediaOperationFingerprint,
-) -> Option<bool> {
+) -> Option<DurableReceiptVerification> {
     let mut parts = receipt.split('.');
     if parts.next()? != DURABLE_OPERATION_RECEIPT_PREFIX {
         return None;
     }
     let nonce = parts.next()?;
-    let received = parts.next()?;
+    let stored_version = parts.next()?;
+    let stored_fingerprint = parts.next()?;
+    let received_mac = parts.next()?;
     if parts.next().is_some()
         || nonce.len() != 32
         || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || received.len() != 64
-        || !received.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || stored_version.len() != 4
+        || !stored_version.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || stored_fingerprint.len() != 64
+        || !stored_fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || received_mac.len() != 64
+        || !received_mac.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
-        return Some(false);
+        return Some(DurableReceiptVerification::Invalid);
     }
-    let expected = hex_bytes(&durable_operation_receipt_digest(
+    let Ok(version) = u16::from_str_radix(stored_version, 16) else {
+        return Some(DurableReceiptVerification::Invalid);
+    };
+    let stored = QueueMediaOperationFingerprint::from_parts(version, stored_fingerprint.to_owned());
+    let Ok(stored) = stored else {
+        return Some(DurableReceiptVerification::Invalid);
+    };
+    let expected = hex_bytes(&durable_operation_receipt_mac(
+        key,
         operation_id,
-        fingerprint,
+        &stored,
         nonce,
     ));
-    Some(bool::from(expected.as_bytes().ct_eq(received.as_bytes())))
+    if !bool::from(expected.as_bytes().ct_eq(received_mac.as_bytes())) {
+        return Some(DurableReceiptVerification::Invalid);
+    }
+    Some(if stored.constant_time_eq(fingerprint) {
+        DurableReceiptVerification::Match
+    } else {
+        DurableReceiptVerification::Conflict
+    })
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
@@ -218,11 +255,18 @@ enum BlockingRecordOutcome {
 }
 
 impl DurableMediaAdmission {
-    pub(crate) fn new(lifecycle: Arc<QueueMediaLifecycle>, queue_capacity: usize) -> Arc<Self> {
-        Arc::new(Self {
+    pub(crate) fn new(
+        lifecycle: Arc<QueueMediaLifecycle>,
+        queue_capacity: usize,
+    ) -> Result<Arc<Self>, crate::queue_media_store::QueueMediaError> {
+        let receipt_key = crate::queue_media_store::QueueMediaStore::generation_admission_key(
+            lifecycle.mold_home(),
+        )?;
+        Ok(Arc::new(Self {
             lifecycle,
             ingress: QueueMediaIngress::new(queue_capacity),
-        })
+            receipt_key: Arc::new(receipt_key),
+        }))
     }
 
     pub(crate) fn ingress(&self) -> &Arc<QueueMediaIngress> {
@@ -345,7 +389,7 @@ impl DurableMediaAdmission {
         let fingerprint = fingerprint.finish();
 
         if let Some(existing) = existing_by_client(state, &body.client_batch_id).await? {
-            self.verify_existing_async(&body.client_batch_id, &fingerprint, &existing)
+            self.verify_existing_async(state, &body.client_batch_id, &fingerprint, &existing)
                 .await?;
             if observer_mode.is_some() {
                 return Err(ApiError::with_code(
@@ -395,6 +439,7 @@ impl DurableMediaAdmission {
         }
 
         let lifecycle = Arc::clone(&self.lifecycle);
+        let receipt_key = Arc::clone(&self.receipt_key);
         let fingerprint_for_seal = fingerprint.clone();
         let operation_id = body.client_batch_id.clone();
         let observers = job_ids
@@ -425,6 +470,7 @@ impl DurableMediaAdmission {
             spawn_admission_blocking("media sealing and generation batch DB", move || {
                 let mut sealed = seal_batch_blocking(
                     lifecycle,
+                    receipt_key.as_ref(),
                     &operation_id,
                     &fingerprint_for_seal,
                     seal_inputs,
@@ -515,7 +561,7 @@ impl DurableMediaAdmission {
                 let detail = existing_by_id(state, &batch_id)
                     .await?
                     .ok_or_else(|| ApiError::internal("idempotent generation batch disappeared"))?;
-                self.verify_existing_async(&body.client_batch_id, &fingerprint, &detail)
+                self.verify_existing_async(state, &body.client_batch_id, &fingerprint, &detail)
                     .await?;
                 if observer_mode.is_some() {
                     return Err(ApiError::with_code(
@@ -536,35 +582,39 @@ impl DurableMediaAdmission {
 
     async fn verify_existing_async(
         &self,
+        state: &AppState,
         operation_id: &str,
         fingerprint: &QueueMediaOperationFingerprint,
         detail: &mold_db::generation_batches::DurableGenerationBatchDetail,
     ) -> Result<(), ApiError> {
-        if let Some(matches) = verify_durable_operation_receipt(
+        if let Some(result) = verify_durable_operation_receipt(
+            self.receipt_key.as_ref(),
             &detail.batch.request_sha256,
             operation_id,
             fingerprint,
         ) {
-            return if matches {
-                Ok(())
-            } else {
-                Err(ApiError::with_code(
+            return match result {
+                DurableReceiptVerification::Match => Ok(()),
+                DurableReceiptVerification::Conflict => Err(ApiError::with_code(
                     "client_batch_id was already used for a different request",
                     "GENERATION_BATCH_IDEMPOTENCY_CONFLICT",
                     StatusCode::CONFLICT,
-                ))
+                )),
+                DurableReceiptVerification::Invalid => Err(identity_undecidable()),
             };
         }
         let lifecycle = Arc::clone(&self.lifecycle);
         let operation_id = operation_id.to_string();
         let fingerprint = fingerprint.clone();
+        let legacy_operation_id = operation_id.clone();
+        let legacy_fingerprint = fingerprint.clone();
         let receipt = QueueMediaOperationReceipt::parse(detail.batch.request_sha256.clone())
             .map_err(|_| identity_undecidable())?;
-        spawn_admission_blocking("operation receipt verification", move || {
+        spawn_admission_blocking("legacy operation receipt verification", move || {
             let existing = lifecycle
-                .open_operation_receipt(&operation_id, &receipt)
+                .open_operation_receipt(&legacy_operation_id, &receipt)
                 .map_err(|_| identity_undecidable())?;
-            if existing.constant_time_eq(&fingerprint) {
+            if existing.constant_time_eq(&legacy_fingerprint) {
                 Ok(())
             } else {
                 Err(ApiError::with_code(
@@ -574,7 +624,40 @@ impl DurableMediaAdmission {
                 ))
             }
         })
+        .await??;
+
+        let replacement =
+            durable_operation_receipt(self.receipt_key.as_ref(), &operation_id, &fingerprint);
+        let journal = state.queue_journal.clone();
+        let batch_id = detail.batch.id.clone();
+        let expected = detail.batch.request_sha256.clone();
+        let replacement_for_update = replacement.clone();
+        let migrated = spawn_admission_blocking("legacy operation receipt migration", move || {
+            journal.replace_generation_batch_receipt(&batch_id, &expected, &replacement_for_update)
+        })
         .await?
+        .map_err(ApiError::internal)?;
+        if migrated {
+            return Ok(());
+        }
+
+        let current = existing_by_id(state, &detail.batch.id)
+            .await?
+            .ok_or_else(identity_undecidable)?;
+        match verify_durable_operation_receipt(
+            self.receipt_key.as_ref(),
+            &current.batch.request_sha256,
+            &operation_id,
+            &fingerprint,
+        ) {
+            Some(DurableReceiptVerification::Match) => Ok(()),
+            Some(DurableReceiptVerification::Conflict) => Err(ApiError::with_code(
+                "client_batch_id was already used for a different request",
+                "GENERATION_BATCH_IDEMPOTENCY_CONFLICT",
+                StatusCode::CONFLICT,
+            )),
+            _ => Err(identity_undecidable()),
+        }
     }
 }
 
@@ -717,6 +800,7 @@ fn durable_media_batch_preflight(requests: &[mold_core::GenerateRequest]) -> Res
 
 fn seal_batch_blocking(
     lifecycle: Arc<QueueMediaLifecycle>,
+    receipt_key: &[u8; 32],
     operation_id: &str,
     fingerprint: &QueueMediaOperationFingerprint,
     inputs: Vec<SealInput>,
@@ -800,7 +884,11 @@ fn seal_batch_blocking(
             admission_authority,
         });
     }
-    batch.receipt = Some(durable_operation_receipt(operation_id, fingerprint));
+    batch.receipt = Some(durable_operation_receipt(
+        receipt_key,
+        operation_id,
+        fingerprint,
+    ));
     Ok(batch)
 }
 

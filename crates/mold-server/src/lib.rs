@@ -719,7 +719,7 @@ pub async fn run_server(
     // sole durable feeder. Install it before runtime recovery or the router.
     if let Some(lifecycle) = queue_journal.queue_media_lifecycle() {
         let admission =
-            queue_media_admission::DurableMediaAdmission::new(lifecycle, state.queue_capacity);
+            queue_media_admission::DurableMediaAdmission::new(lifecycle, state.queue_capacity)?;
         queue_journal
             .install_queue_media_admission(admission)
             .map_err(anyhow::Error::msg)?;
