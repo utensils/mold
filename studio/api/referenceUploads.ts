@@ -27,6 +27,9 @@ const RESERVED_SECRET_HEADERS = new Set([
 
 export interface ReferenceUploadCapabilities {
   available: boolean;
+  /** Positive current-host evidence that API-key auth is disabled. Absent on
+   * legacy/unknown snapshots, which authenticated routes treat fail-closed. */
+  authless_inline?: boolean;
   protocol_version: number;
   requires_api_key: boolean;
   session_path: string;
@@ -187,6 +190,7 @@ function validateCapabilities(
   }
   return {
     available: true,
+    authless_inline: false,
     protocol_version: 2,
     requires_api_key: true,
     session_path: sessionPath,
@@ -915,5 +919,22 @@ export function requestNeedsReferenceUpload(
     request.references.some(
       (reference) => reference.media.authority === "inline",
     )
+  );
+}
+
+/** Prefer request-bound uploads for every API-key route unless a current host
+ * snapshot positively identifies authless inline support. Missing/legacy
+ * capabilities stay fail-closed by entering upload preparation, whose strict
+ * validation refuses the unknown protocol instead of disclosing media inline. */
+export function requestShouldUseReferenceUploads(
+  request: ReferenceUploadRequest,
+  target: Pick<ApiTarget, "apiKey"> | null | undefined,
+  capabilities:
+    Pick<ReferenceUploadCapabilities, "authless_inline"> | null | undefined,
+): boolean {
+  return (
+    requestNeedsReferenceUpload(request) &&
+    Boolean(target?.apiKey?.trim()) &&
+    capabilities?.authless_inline !== true
   );
 }

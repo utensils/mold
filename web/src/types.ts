@@ -244,6 +244,7 @@ export interface ServerCapabilities {
    * separate model_access decision. */
   reference_uploads?: {
     available: boolean;
+    authless_inline?: boolean;
     protocol_version: number;
     requires_api_key: boolean;
     session_path: string;

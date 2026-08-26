@@ -8395,6 +8395,11 @@ pub struct QueueCapabilities {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReferenceUploadCapabilities {
     pub available: bool,
+    /// Positive evidence that this host has API-key auth disabled and accepts
+    /// validated inline references. Absent/false remains fail-closed for
+    /// clients holding a key and older capability snapshots.
+    #[serde(default)]
+    pub authless_inline: bool,
     pub protocol_version: u32,
     pub requires_api_key: bool,
     pub session_path: String,
@@ -9015,6 +9020,7 @@ mod device_types_tests {
         assert!(!caps.dispatch.observes_v2_decisions);
         assert!(caps.model_access.restrictions.is_empty());
         assert!(!caps.reference_uploads.available);
+        assert!(!caps.reference_uploads.authless_inline);
         assert_eq!(caps.reference_uploads.protocol_version, 0);
     }
 }

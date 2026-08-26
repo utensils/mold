@@ -80,6 +80,8 @@ const halRoute = {
   kind: "remote" as const,
   target: { baseUrl: "http://hal9000:7680", apiKey: "hk" },
 };
+const referenceBase64 = "cHJpdmF0ZS1pbWFnZS1ieXRlcw==";
+const referenceSha256 = "b86a89c0eda0e9381e785564df9dc33f88d96e04aae6fa6185c9c94de2652520";
 
 const chainDecision = {
   kind: "chain" as const,
@@ -144,8 +146,8 @@ describe("generation store multi-host routing", () => {
       references: [
         {
           kind: "image",
-          media: { authority: "inline", data: "PRIVATE-IMAGE-BYTES" },
-          provenance: { name: "identity.png", sha256: "b".repeat(64) },
+          media: { authority: "inline", data: referenceBase64 },
+          provenance: { name: "identity.png", sha256: referenceSha256 },
           mime_type: "image/png",
           width: 32,
           height: 24,
@@ -157,6 +159,7 @@ describe("generation store multi-host routing", () => {
       instanceId: "instance-1",
       referenceUploads: {
         available: true,
+        authless_inline: false,
         protocol_version: 2,
         requires_api_key: true,
         session_path: "/api/generate/reference-upload-sessions",
@@ -190,13 +193,79 @@ describe("generation store multi-host routing", () => {
     });
     expect(first.jobs[0]!.request!.references?.[0]?.media).toEqual({
       authority: "inline",
-      data: "PRIVATE-IMAGE-BYTES",
+      data: referenceBase64,
     });
     expect(second.jobs[0]!.request!.references?.[0]?.media).toEqual({
       authority: "inline",
-      data: "PRIVATE-IMAGE-BYTES",
+      data: referenceBase64,
     });
     expect(cancel).toHaveBeenCalledTimes(2);
+  });
+
+  it("submits Ref2VA inline when auth is disabled despite a stale saved key", async () => {
+    sseStream.mockResolvedValue(undefined);
+    const original: GenerateRequest = {
+      ...request(),
+      model: "minimax-h3-ref2va",
+      frames: 124,
+      fps: 24,
+      references: [
+        {
+          kind: "image",
+          media: { authority: "inline", data: referenceBase64 },
+          provenance: { name: "identity.png", sha256: referenceSha256 },
+          mime_type: "image/png",
+          width: 32,
+          height: 24,
+        },
+      ],
+    };
+    const authlessRoute = {
+      ...halRoute,
+      instanceId: "instance-1",
+      referenceUploads: {
+        available: false,
+        authless_inline: true,
+        protocol_version: 2,
+        requires_api_key: true,
+        session_path: "/api/generate/reference-upload-sessions",
+        upload_path: "/api/generate/reference-upload",
+        session_handle_header: "x-mold-reference-session",
+        upload_handle_header: "x-mold-reference-upload",
+        max_file_bytes: 1_000_000,
+        max_session_bytes: 2_000_000,
+        session_ttl_ms: 60_000,
+      },
+    };
+
+    const submission = useGenerationStore().submitBatch(original, 1, authlessRoute);
+    await submission.settled;
+
+    expect(prepareReferenceUploads).not.toHaveBeenCalled();
+    expect(sseStream.mock.calls[0]?.[1]).toMatchObject({
+      target: authlessRoute.target,
+      body: {
+        references: [
+          expect.objectContaining({
+            media: { authority: "inline", data: referenceBase64 },
+          }),
+        ],
+      },
+    });
+    expect(submission.jobs[0]?.error).not.toContain("API-key-authenticated");
+
+    prepareReferenceUploads.mockResolvedValue({
+      request: original,
+      expiresAtMs: Date.now() + 60_000,
+      requestScopeSha256: "a".repeat(64),
+      cancel: vi.fn().mockResolvedValue(undefined),
+    });
+    const unknownCapabilities = useGenerationStore().submitBatch(original, 1, {
+      ...authlessRoute,
+      referenceUploads: null,
+    });
+    await unknownCapabilities.settled;
+    expect(prepareReferenceUploads).toHaveBeenCalledTimes(1);
   });
 
   it("tags jobs with their host and streams against its target", async () => {

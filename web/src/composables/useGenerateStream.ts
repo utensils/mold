@@ -24,6 +24,7 @@ import { createUuid } from "@studio/lib/id";
 import {
   prepareReferenceUploads,
   requestNeedsReferenceUpload,
+  requestShouldUseReferenceUploads,
   type ReferenceUploadLease,
 } from "@studio/api/referenceUploads";
 import { redactGenerationMediaForPersistence } from "@studio/lib/generationMedia";
@@ -2165,19 +2166,23 @@ function submitJob(
       let lease: ReferenceUploadLease<GenerateRequestWire> | null = null;
       try {
         let transportRequest = req;
-        if (requestNeedsReferenceUpload(req)) {
-          if (!route) {
-            throw new Error(
-              "MiniMax H3 reference uploads require a frozen authenticated host route.",
-            );
-          }
+        const uploadRoute =
+          route &&
+          requestShouldUseReferenceUploads(
+            req,
+            route.target,
+            route.referenceUploads,
+          )
+            ? route
+            : null;
+        if (uploadRoute) {
           const prepared = await prepareReferenceUploads({
             target: {
-              baseUrl: route.target.baseUrl,
-              apiKey: route.target.apiKey ?? null,
+              baseUrl: uploadRoute.target.baseUrl,
+              apiKey: uploadRoute.target.apiKey ?? null,
             },
-            expectedInstanceId: route.instanceId ?? "",
-            capabilities: route.referenceUploads,
+            expectedInstanceId: uploadRoute.instanceId ?? "",
+            capabilities: uploadRoute.referenceUploads,
             request: req,
             signal: controller.signal,
           });

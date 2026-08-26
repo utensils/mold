@@ -1111,16 +1111,22 @@ fn durable_generation_unsupported(message: impl Into<String>) -> ApiError {
     )
 }
 
+fn auth_explicitly_disabled(auth_state: Option<&Extension<crate::auth::AuthState>>) -> bool {
+    auth_state.is_some_and(|Extension(state)| state.is_none())
+}
+
 async fn prepare_generation(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
     authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
+    allow_authless_inline_references: bool,
 ) -> Result<PreparedGenerationRoute, ApiError> {
-    prepare_generation_for_delivery(
+    prepare_generation_for_delivery_with_reference_mode(
         state,
         request,
         authenticated,
         GenerationPreparationDelivery::AttachedResponse,
+        allow_authless_inline_references,
     )
     .await
 }
@@ -1130,6 +1136,23 @@ pub(crate) async fn prepare_generation_for_delivery(
     request: &mut mold_core::GenerateRequest,
     authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
     delivery: GenerationPreparationDelivery,
+) -> Result<PreparedGenerationRoute, ApiError> {
+    prepare_generation_for_delivery_with_reference_mode(
+        state,
+        request,
+        authenticated,
+        delivery,
+        false,
+    )
+    .await
+}
+
+async fn prepare_generation_for_delivery_with_reference_mode(
+    state: &AppState,
+    request: &mut mold_core::GenerateRequest,
+    authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
+    delivery: GenerationPreparationDelivery,
+    allow_authless_inline_references: bool,
 ) -> Result<PreparedGenerationRoute, ApiError> {
     // This seam deliberately does not load an inference engine, prepare model
     // weights, or reserve execution memory. Scheduler V2 owns those bounded
@@ -1208,21 +1231,29 @@ pub(crate) async fn prepare_generation_for_delivery(
         // resolution, still before the request can enter the queue.
         mold_core::minimax_h3::validate_references(references).map_err(ApiError::reference)?;
     }
-    let reference_identity = if request.references.is_some() {
-        Some(
-            authenticated
-                .ok_or_else(|| {
-                    ApiError::with_code(
-                        "API key authentication is required for reference media",
-                        "UNAUTHORIZED",
-                        StatusCode::UNAUTHORIZED,
+    let reference_identity = match request.references.as_deref() {
+        None => None,
+        Some(_) if authenticated.is_some() => {
+            Some(authenticated.expect("checked above").identity.clone())
+        }
+        Some(references)
+            if allow_authless_inline_references
+                && references.iter().all(|reference| {
+                    matches!(
+                        reference.media(),
+                        mold_core::GenerationReferenceAuthority::Inline { .. }
                     )
-                })?
-                .identity
-                .clone(),
-        )
-    } else {
-        None
+                }) =>
+        {
+            Some(format!("auth-disabled-inline:{}", state.instance_id))
+        }
+        Some(_) => {
+            return Err(ApiError::with_code(
+                "API key authentication is required for reference media",
+                "UNAUTHORIZED",
+                StatusCode::UNAUTHORIZED,
+            ));
+        }
     };
     let reference_scope_sha256 = request
         .references
@@ -2738,6 +2769,7 @@ async fn reconcile_generation_batches(
 // requests use the authoritative scheduler and return one atomic JSON parent.
 async fn generate(
     State(state): State<AppState>,
+    auth_state: Option<Extension<crate::auth::AuthState>>,
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     headers: HeaderMap,
     Json(mut req): Json<mold_core::GenerateRequest>,
@@ -2816,6 +2848,7 @@ async fn generate(
         &state,
         &mut req,
         authenticated.as_ref().map(|Extension(auth)| auth),
+        auth_explicitly_disabled(auth_state.as_ref()),
     )
     .await?;
     let PreparedGenerationRoute {
@@ -3938,6 +3971,7 @@ pub(crate) fn requested_sse_completion_payload(
 )]
 async fn generate_stream(
     State(state): State<AppState>,
+    auth_state: Option<Extension<crate::auth::AuthState>>,
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     headers: HeaderMap,
     Json(mut req): Json<mold_core::GenerateRequest>,
@@ -4027,6 +4061,7 @@ async fn generate_stream(
         &state,
         &mut req,
         authenticated.as_ref().map(|Extension(auth)| auth),
+        auth_explicitly_disabled(auth_state.as_ref()),
     )
     .await?;
     let PreparedGenerationRoute {
@@ -6815,7 +6850,11 @@ async fn server_capabilities(
             .then(|| state.queue_journal.durable_media_capabilities())
             .flatten(),
         reference_uploads: mold_core::ReferenceUploadCapabilities {
-            available: true,
+            // The request-bound upload protocol derives its authority from an
+            // authenticated API-key identity. When server auth is disabled,
+            // clients must retain validated inline references instead.
+            available: api_key_auth_enabled,
+            authless_inline: !api_key_auth_enabled,
             // V2 rebinds the request scope to content-probed canonical
             // descriptors as each upload completes. V1 trusted provisional
             // browser AAC packet arithmetic and is intentionally not offered.
@@ -9975,7 +10014,7 @@ mod tests {
         wan.extend_video_path = None;
         wan.extend_video = Some(b"\0\0\0\x20ftypisom".to_vec());
         assert_eq!(wan.extend_overlap_frames, None);
-        let _ = prepare_generation(&state, &mut wan, None).await;
+        let _ = prepare_generation(&state, &mut wan, None, false).await;
         assert_eq!(
             wan.extend_overlap_frames,
             Some(mold_core::validation::WAN_HANDOFF_DUPLICATED_FRAMES),
@@ -9986,7 +10025,7 @@ mod tests {
         ltx2.extend_video_path = None;
         ltx2.extend_video = Some(b"\0\0\0\x20ftypisom".to_vec());
         assert_eq!(ltx2.extend_overlap_frames, None);
-        let _ = prepare_generation(&state, &mut ltx2, None).await;
+        let _ = prepare_generation(&state, &mut ltx2, None, false).await;
         assert_eq!(
             ltx2.extend_overlap_frames,
             Some(mold_core::validation::DEFAULT_EXTEND_OVERLAP_FRAMES),
@@ -9999,12 +10038,12 @@ mod tests {
         explicit.extend_video_path = None;
         explicit.extend_video = Some(b"\0\0\0\x20ftypisom".to_vec());
         explicit.extend_overlap_frames = Some(5);
-        let _ = prepare_generation(&state, &mut explicit, None).await;
+        let _ = prepare_generation(&state, &mut explicit, None, false).await;
         assert_eq!(explicit.extend_overlap_frames, Some(5));
 
         let mut plain = wan_continuation("wan22-t2v-a14b:q8");
         plain.extend_video_path = None;
-        let _ = prepare_generation(&state, &mut plain, None).await;
+        let _ = prepare_generation(&state, &mut plain, None, false).await;
         assert_eq!(plain.extend_overlap_frames, None);
     }
 
