@@ -5920,11 +5920,11 @@ mod tests {
         let (mut state, _rx) = durable_state(db, root.path());
         install_authoritative_v2(&mut state);
         state.queue_journal.set_durable_media_ready(false);
-        let request: GenerateRequest =
+        let mut request: GenerateRequest =
             serde_json::from_str(&generate_body("media-free admission", 64, 64)).unwrap();
 
         assert!(
-            crate::routes::direct_durable_admission(&state, &request, true)
+            crate::routes::direct_durable_admission(&state, &mut request, true)
                 .await
                 .unwrap()
                 .is_some(),
@@ -6332,12 +6332,13 @@ mod tests {
         request.references = Some(Vec::new());
 
         assert!(
-            crate::routes::direct_durable_admission(&state, &request, false)
+            crate::routes::direct_durable_admission(&state, &mut request, false)
                 .await
                 .unwrap()
                 .is_none()
         );
-        let error = match crate::routes::direct_durable_admission(&state, &request, true).await {
+        let error = match crate::routes::direct_durable_admission(&state, &mut request, true).await
+        {
             Err(error) => error,
             Ok(_) => panic!("an explicit durable operation must not downgrade"),
         };
@@ -6629,10 +6630,18 @@ mod tests {
         );
         let first = first.unwrap();
         let second = second.unwrap();
-        assert!(matches!(
+        if !matches!(
             (first.status(), second.status()),
             (StatusCode::ACCEPTED, StatusCode::OK) | (StatusCode::OK, StatusCode::ACCEPTED)
-        ));
+        ) {
+            let first_status = first.status();
+            let second_status = second.status();
+            let first_body = json_body(first).await;
+            let second_body = json_body(second).await;
+            panic!(
+                "concurrent responses: {first_status} {first_body}; {second_status} {second_body}"
+            );
+        }
         let first = json_body(first).await;
         let second = json_body(second).await;
         assert_eq!(first["id"], second["id"]);
@@ -8115,6 +8124,8 @@ mod tests {
 
         let submitted = {
             let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+            let feeder_shutdown = tokio_util::sync::CancellationToken::new();
+            let feeder = crate::durable_queue_feeder::spawn(state.clone(), feeder_shutdown.clone());
             let app = app_with_state(state.clone());
             let mut submitted = Vec::new();
             let mut in_flight = Vec::new();
@@ -8165,6 +8176,8 @@ mod tests {
 
             state.queue_journal.retain_all();
             drop(in_flight);
+            feeder_shutdown.cancel();
+            feeder.await.unwrap();
             submitted
         };
 

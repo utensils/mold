@@ -3589,8 +3589,12 @@ fn ensure_private_dir(path: &Path) -> Result<(), QueueMediaError> {
             if fs::symlink_metadata(parent).is_err() {
                 ensure_private_dir(parent)?;
             }
-            create_directory_owner_only(path)?;
-            crate::dir_sync::sync_directory(parent)?;
+            match create_directory_owner_only(path) {
+                Ok(()) => crate::dir_sync::sync_directory(parent)?,
+                Err(QueueMediaError::Io(error))
+                    if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
             let metadata = fs::symlink_metadata(path)?;
             verify_private_directory_metadata(path, &metadata)
         }
