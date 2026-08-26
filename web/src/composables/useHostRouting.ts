@@ -903,8 +903,7 @@ async function resolveFeasibleWithPreview(
           {
             hostId: candidate.id,
             queue: capabilitiesByHost.value[candidate.id]?.queue,
-            durableMedia:
-              capabilitiesByHost.value[candidate.id]?.durable_media,
+            durableMedia: capabilitiesByHost.value[candidate.id]?.durable_media,
           },
           request,
           outputKind,
@@ -1007,7 +1006,8 @@ async function resolveFeasibleWithPreview(
       hostsForModel(model).filter((id) => usableIds.has(id)),
     );
     if (route) {
-      const preview = planned.find((probe) => probe.hostId === route.hostId)?.preview ?? null;
+      const preview =
+        planned.find((probe) => probe.hostId === route.hostId)?.preview ?? null;
       return { kind: "route", route: withReferenceUploads(route)!, preview };
     }
   }
