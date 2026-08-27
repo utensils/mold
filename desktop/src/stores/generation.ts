@@ -1,6 +1,6 @@
 import { reactive } from "vue";
 import { defineStore } from "pinia";
-import { apiFetchTo, currentTarget, type ApiTarget } from "../lib/api/client";
+import { apiFetchTo, currentTarget, type ApiTarget, apiJsonTo } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
 import {
   evictMedia,
@@ -23,6 +23,8 @@ import type {
   CompleteEvent,
   GenerateRequest,
   PromptTransformProvenance,
+  OutputMetadata,
+  GalleryImage,
 } from "../lib/api/types";
 import {
   buildAutoChainRequest,
@@ -308,6 +310,29 @@ const durableHiddenJobIds = new Set<number>();
 const durableSettlements = new Map<string, DurableSettlement>();
 /** Live preview + step progress for our own running prints (see web). */
 const ownPreviews = new OwnPrintPreviewWatchers();
+
+/**
+ * The origin host's own gallery row for one print. `GET /api/gallery` filters
+ * by filename server-side, so this is a single-row read through the same
+ * DB / archive / organization pipeline the listing uses. `null` when the row
+ * is not there (yet) or the host cannot answer — the mirror still saves the
+ * bytes, with the metadata the desktop synthesizes from the filename.
+ */
+async function originGalleryMetadata(
+  target: ApiTarget,
+  filename: string,
+): Promise<OutputMetadata | null> {
+  try {
+    const rows = await apiJsonTo<GalleryImage[]>(
+      target,
+      `/api/gallery?filename=${encodeURIComponent(filename)}`,
+    );
+    const row = Array.isArray(rows) ? rows.find((entry) => entry.filename === filename) : null;
+    return row?.metadata ?? null;
+  } catch {
+    return null;
+  }
+}
 const durableHostStreams = new Map<string, DurableHostStream>();
 const durableReconciles = new Map<string, Promise<void>>();
 /** Missing = no follow-up; null = host-wide; Set = selected client batches. */
@@ -1139,12 +1164,19 @@ export const useGenerationStore = defineStore("generation", {
               continue;
             }
             try {
+              // The durable child names only the file; the origin's gallery
+              // row is where its prompt, seed, dimensions, and timing live.
+              // Mirror the print WITH that metadata so This device's copy is
+              // a real print (reuse, cross-host collapse) rather than a file
+              // whose metadata was synthesized from its name.
+              const metadata = await originGalleryMetadata(target, filename);
+              if (metadata && result.filename === filename) result.metadata = metadata;
               const bytes = await fetchGalleryMediaBytes(
                 galleryMediaPath(filename, "host"),
                 target,
               );
               const buffer = Uint8Array.from(bytes).buffer;
-              await ipc.saveOutputBytes(filename, await blobToBase64(new Blob([buffer])), null);
+              await ipc.saveOutputBytes(filename, await blobToBase64(new Blob([buffer])), metadata);
               void useGalleryStore().refreshHost("local");
             } catch (error) {
               console.warn("local save of remote durable output failed:", error);
@@ -1858,9 +1890,10 @@ export const useGenerationStore = defineStore("generation", {
         return;
       }
       try {
+        const metadata = await originGalleryMetadata(target, filename);
         const bytes = await fetchGalleryMediaBytes(galleryMediaPath(filename, "host"), target);
         const buffer = Uint8Array.from(bytes).buffer;
-        await ipc.saveOutputBytes(filename, await blobToBase64(new Blob([buffer])), null);
+        await ipc.saveOutputBytes(filename, await blobToBase64(new Blob([buffer])), metadata);
         void useGalleryStore().refreshHost("local");
       } catch (error) {
         console.warn("local save of remote sequence output failed:", error);

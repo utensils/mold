@@ -673,6 +673,19 @@ describe("submitBatch connection cap", () => {
       batches: [status()],
       missing: { client_batch_ids: [], batch_ids: [] },
     }));
+    // The origin's gallery row is the only place the print's real metadata
+    // lives; the mirror must save it with the bytes and stamp it on the job.
+    const originMetadata = {
+      prompt: "mirrored print",
+      seed: 7,
+      width: 64,
+      height: 64,
+    };
+    vi.mocked(apiJsonTo).mockImplementation(async (_target: unknown, path: string) =>
+      path === "/api/gallery?filename=finished.png"
+        ? [{ filename: "finished.png", metadata: originMetadata, timestamp: 1 }]
+        : undefined,
+    );
     const submitted = store.submitBatch(req, 1, {
       hostId: "hal9000",
       label: "hal9000",
@@ -722,6 +735,12 @@ describe("submitBatch connection cap", () => {
       { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
     );
     expect(effectMocks.saveOutputBytes).toHaveBeenCalledTimes(1);
+    expect(effectMocks.saveOutputBytes).toHaveBeenCalledWith(
+      "finished.png",
+      expect.any(String),
+      originMetadata,
+    );
+    expect(submitted.jobs[0]!.result?.metadata).toEqual(originMetadata);
     expect(mockSse).not.toHaveBeenCalled();
   });
 
