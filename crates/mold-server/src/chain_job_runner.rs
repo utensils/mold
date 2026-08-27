@@ -2206,22 +2206,57 @@ fn finalize_job(
                 chain_job_id: (!manifest.ephemeral).then_some(job.id.as_str()),
                 stage_seeds: Some(&stage_seeds),
             };
-            let metadata = effective.stitched_output_metadata(
-                OutputFormat::Mp4,
-                frame_count,
-                Some(&provenance),
-            );
+            // Stitching and the audio mux are MP4-native, so the job's own
+            // artifact stays MP4 — amend and retake decode it back. The
+            // GALLERY print is what the request asked for: a gif/webp/apng
+            // request is transcoded once here, from the artifact just
+            // published, exactly as the deleted generate/chain shim did on
+            // its way out through the response. With the print fetched from
+            // the gallery there is no response to do it in, so it is done
+            // here or `mold run --frames 200 --format gif` gets an MP4.
+            let (gallery_bytes, gallery_format) = if effective.output_format == OutputFormat::Mp4 {
+                (
+                    std::borrow::Cow::Borrowed(video_bytes.as_slice()),
+                    OutputFormat::Mp4,
+                )
+            } else {
+                let (_, frames) =
+                    mold_inference::ltx2::media::decode_video_frames_from_path(&output_path)
+                        .with_context(|| {
+                            format!(
+                                "decoding stitched chain output '{}' for {:?} transcode",
+                                output_path.display(),
+                                effective.output_format
+                            )
+                        })?;
+                let encoded = mold_inference::chain::encode_chain_frames(
+                    &frames,
+                    effective.fps,
+                    effective.output_format,
+                    None,
+                )
+                .with_context(|| {
+                    format!("transcoding chain output to {:?}", effective.output_format)
+                })?;
+                for warning in &encoded.warnings {
+                    tracing::warn!(job = %job.id, "{}", warning.message());
+                }
+                (std::borrow::Cow::Owned(encoded.bytes), encoded.format)
+            };
+            let metadata =
+                effective.stitched_output_metadata(gallery_format, frame_count, Some(&provenance));
             let generation_time_ms: u64 = manifest
                 .stage_status
                 .iter()
                 .filter_map(|stage| stage.generation_time_ms)
                 .sum();
-            let gallery_filename = chain_gallery_filename(&job.id, take, metadata.title.as_deref());
+            let gallery_filename =
+                chain_gallery_filename(&job.id, take, metadata.title.as_deref(), gallery_format);
             save_video_to_dir_named(
                 output_dir,
                 &gallery_filename,
-                &video_bytes,
-                OutputFormat::Mp4,
+                &gallery_bytes,
+                gallery_format,
                 &metadata,
                 (generation_time_ms > 0).then_some(generation_time_ms as i64),
                 Some(db),
@@ -2269,14 +2304,20 @@ fn finalize_job(
 /// lossy `~slug` a one-shot uses, and it is equally deterministic — the title
 /// is frozen in the job manifest's effective request, so a resumed job
 /// derives the identical name.
-fn chain_gallery_filename(job_id: &str, take: u32, title: Option<&str>) -> String {
+fn chain_gallery_filename(
+    job_id: &str,
+    take: u32,
+    title: Option<&str>,
+    format: OutputFormat,
+) -> String {
     let stem = format!(
         "mold-chain-{:x}-take-{take}",
         Sha256::digest(job_id.as_bytes())
     );
+    let ext = format.extension();
     match title.and_then(mold_core::title_slug) {
-        Some(slug) => format!("{stem}{}{slug}.mp4", mold_core::TITLE_SLUG_SEPARATOR),
-        None => format!("{stem}.mp4"),
+        Some(slug) => format!("{stem}{}{slug}.{ext}", mold_core::TITLE_SLUG_SEPARATOR),
+        None => format!("{stem}.{ext}"),
     }
 }
 
@@ -2639,8 +2680,11 @@ pub fn apply_amend(
     let candidate = amend_candidate_request(&old_effective, req)
         .normalise()
         .map_err(|e| anyhow!("{CHAIN_JOB_AMEND_INVALID}: {e}"))?;
-    if candidate.output_format != OutputFormat::Mp4 {
-        bail!("{CHAIN_JOB_AMEND_INVALID}: durable chain jobs require output_format = mp4");
+    if !candidate.output_format.is_video() {
+        bail!(
+            "{CHAIN_JOB_AMEND_INVALID}: {:?} is not a video output format",
+            candidate.output_format
+        );
     }
 
     // Invalidation: longest identity prefix, clamped to the leading run of
@@ -3944,10 +3988,10 @@ mod tests {
     /// deterministic — the title is frozen in the job manifest.
     #[test]
     fn chain_gallery_filename_is_deterministic_and_titled() {
-        let untitled = chain_gallery_filename("01JBR55TEST", 0, None);
+        let untitled = chain_gallery_filename("01JBR55TEST", 0, None, OutputFormat::Mp4);
         assert_eq!(
             untitled,
-            chain_gallery_filename("01JBR55TEST", 0, None),
+            chain_gallery_filename("01JBR55TEST", 0, None, OutputFormat::Mp4),
             "same inputs must produce the same name"
         );
         assert!(untitled.starts_with("mold-chain-"), "{untitled}");
@@ -3957,10 +4001,11 @@ mod tests {
             "{untitled}"
         );
 
-        let titled = chain_gallery_filename("01JBR55TEST", 0, Some("Smurf Village"));
+        let titled =
+            chain_gallery_filename("01JBR55TEST", 0, Some("Smurf Village"), OutputFormat::Mp4);
         assert_eq!(
             titled,
-            chain_gallery_filename("01JBR55TEST", 0, Some("Smurf Village"))
+            chain_gallery_filename("01JBR55TEST", 0, Some("Smurf Village"), OutputFormat::Mp4)
         );
         assert_eq!(
             titled,
@@ -3978,11 +4023,20 @@ mod tests {
 
         // A title with no usable slug leaves the legacy name byte-identical.
         for title in [Some(""), Some("   "), Some("日本語")] {
-            assert_eq!(chain_gallery_filename("01JBR55TEST", 0, title), untitled);
+            assert_eq!(
+                chain_gallery_filename("01JBR55TEST", 0, title, OutputFormat::Mp4),
+                untitled
+            );
         }
         // Take and job id both still vary the name.
-        assert_ne!(untitled, chain_gallery_filename("01JBR55TEST", 1, None));
-        assert_ne!(untitled, chain_gallery_filename("01JBR55OTHER", 0, None));
+        assert_ne!(
+            untitled,
+            chain_gallery_filename("01JBR55TEST", 1, None, OutputFormat::Mp4)
+        );
+        assert_ne!(
+            untitled,
+            chain_gallery_filename("01JBR55OTHER", 0, None, OutputFormat::Mp4)
+        );
     }
 
     fn claim_test_pool(worker_count: usize) -> Arc<GpuPool> {
@@ -5004,6 +5058,60 @@ mod tests {
         assert_eq!(
             chain_jobs::get_job(db, &row.id).unwrap().unwrap().state,
             ChainJobState::Completed
+        );
+    }
+
+    /// A chain job whose request asked for GIF publishes a GIF.
+    ///
+    /// Stitching and the audio mux are MP4-native, so the job's own artifact
+    /// stays MP4 — amend and retake read it back. The GALLERY print is what
+    /// the user asked for, transcoded once at finalization. The deleted shim
+    /// did this on the way out through its response; with the print now
+    /// fetched from the gallery there is no response to do it in, so it has
+    /// to happen here or `mold run --frames 200 --format gif` gets an MP4.
+    #[test]
+    fn a_non_mp4_chain_job_publishes_the_requested_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let mut req = request(vec![TransitionMode::Smooth]);
+        req.output_format = OutputFormat::Gif;
+        let job_dir = dir.path().join("job");
+        let row = persist_job(&db, &job_dir, "01JBR55GIFOUT", &req, ChainJobState::Queued);
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let output_dir = dir.path().join("gallery");
+        let mut deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor,
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        deps.output_dir = Some(output_dir.clone());
+
+        execute_job(&deps, &row, 0).unwrap();
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let rows = db.list(Some(&output_dir)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].filename.ends_with(".gif"),
+            "the gallery print takes the requested format: {}",
+            rows[0].filename
+        );
+        let published = output_dir.join(&rows[0].filename);
+        let bytes = std::fs::read(&published).unwrap();
+        assert!(
+            bytes.starts_with(b"GIF8"),
+            "the published bytes must actually be a GIF"
+        );
+
+        // The job's own artifact stays MP4, because amend and retake decode it.
+        let layout = JobDirLayout::new(job_dir.clone());
+        assert!(
+            layout.final_output_path(1).exists(),
+            "the retained artifact is still the MP4 the runner stitched"
         );
     }
 
