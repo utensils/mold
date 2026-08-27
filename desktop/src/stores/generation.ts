@@ -63,8 +63,14 @@ import {
   isTerminalGenerationPhase,
   mergeBulkGenerationBatchResponse,
   reduceGenerationLifecycle,
-  type GenerationLifecycleJob,
 } from "@studio/lib/generationLifecycle";
+import {
+  generationTrackerSettled,
+  presentGenerationChild,
+  reconciliationPresentation,
+  type GenerationChildPresentation,
+} from "@studio/lib/generationPresentation";
+import { applyDurablePresentation } from "../lib/durableGenerationPresentation";
 import {
   durableChildSummary,
   loadDurableGenerationRecovery,
@@ -386,12 +392,8 @@ function createStoreJob(req: GenerateRequest, clientId: number): Job {
   return job;
 }
 
-function recordIsTerminal(record: DurableGenerationRecoveryRecord): boolean {
-  const jobs = Object.values(record.tracker.jobs);
-  return (
-    jobs.length === record.children.length &&
-    jobs.every((job) => isTerminalGenerationPhase(job.phase))
-  );
+function recordIsSettled(record: DurableGenerationRecoveryRecord): boolean {
+  return generationTrackerSettled(record.tracker, record.children.length);
 }
 
 function requestFormat(
@@ -643,7 +645,7 @@ export const useGenerationStore = defineStore("generation", {
     onDurableEventClose(hostId: string): void {
       let changed = false;
       for (const record of durableRecords.values()) {
-        if (record.tracker.hostId !== hostId || recordIsTerminal(record)) continue;
+        if (record.tracker.hostId !== hostId || recordIsSettled(record)) continue;
         record.tracker = reduceGenerationLifecycle(record.tracker, {
           type: "event_gap",
           instanceId: record.tracker.expectedInstanceId,
@@ -657,7 +659,7 @@ export const useGenerationStore = defineStore("generation", {
     },
     onDurableEvent(hostId: string, event: string, data: string): void {
       const records = [...durableRecords.values()].filter(
-        (record) => record.tracker.hostId === hostId && !recordIsTerminal(record),
+        (record) => record.tracker.hostId === hostId && !recordIsSettled(record),
       );
       if (records.length === 0) return;
       if (event === "authority") {
@@ -744,7 +746,7 @@ export const useGenerationStore = defineStore("generation", {
         (candidate) =>
           candidate.tracker.hostId === hostId &&
           candidate.tracker.expectedInstanceId === host?.instanceId &&
-          !recordIsTerminal(candidate),
+          !recordIsSettled(candidate),
       );
       if (!record) return;
       if (!host?.baseUrl || host.status !== "ready") return;
@@ -779,12 +781,12 @@ export const useGenerationStore = defineStore("generation", {
     async reconcileDurableAll(): Promise<void> {
       const hostIds = new Set(
         [...durableRecords.values()]
-          .filter((record) => !recordIsTerminal(record))
+          .filter((record) => !recordIsSettled(record))
           .map((record) => record.tracker.hostId),
       );
       await Promise.all([...hostIds].map((hostId) => this.reconcileDurableHost(hostId)));
       await Promise.all(
-        [...durableRecords.values()].filter(recordIsTerminal).map((record) => {
+        [...durableRecords.values()].filter(recordIsSettled).map((record) => {
           const jobs = [...(durableBatchJobs.get(record.tracker.clientBatchId)?.values() ?? [])];
           return this.finishDurableBatchEffects(record, jobs);
         }),
@@ -810,7 +812,7 @@ export const useGenerationStore = defineStore("generation", {
         const records = [...durableRecords.values()].filter(
           (record) =>
             record.tracker.hostId === hostId &&
-            !recordIsTerminal(record) &&
+            !recordIsSettled(record) &&
             (!clientBatchIds || clientBatchIds.has(record.tracker.clientBatchId)),
         );
         const host = useHostsStore().all.find((candidate) => candidate.id === hostId);
@@ -862,28 +864,30 @@ export const useGenerationStore = defineStore("generation", {
       }
     },
     applyDurableRecord(record: DurableGenerationRecoveryRecord): void {
-      const mapping = durableJobIds.get(record.tracker.clientBatchId);
-      if (!mapping) return;
-      if (record.tracker.reconciliation.reason === "instance_mismatch") {
-        for (const clientId of mapping.values()) {
-          const job = this.jobs.find((candidate) => candidate.clientId === clientId);
-          if (!job || jobHasSettled(job)) continue;
-          job.stage = "Original machine identity changed — outcome unknown";
-          job.interrupted = true;
-          job.retryable = false;
-          job.retrying = false;
+      const batchJobs = durableBatchJobs.get(record.tracker.clientBatchId);
+      if (!durableJobIds.has(record.tracker.clientBatchId) || !batchJobs) return;
+      const now = Date.now();
+      for (const [childIndex, job] of batchJobs) {
+        const lifecycle =
+          Object.values(record.tracker.jobs).find(
+            (candidate) => candidate.childIndex === childIndex,
+          ) ?? null;
+        if (lifecycle) {
+          job.id = lifecycle.authority.jobId;
+          job.streamStarted = true;
         }
-        return;
-      }
-      for (const lifecycle of Object.values(record.tracker.jobs)) {
-        const job = durableBatchJobs.get(record.tracker.clientBatchId)?.get(lifecycle.childIndex);
-        if (!job) continue;
+        const p = presentGenerationChild({
+          tracker: record.tracker,
+          childIndex,
+          hostLabel: record.hostLabel,
+          now,
+        });
         // The durable child carries no denoise preview or step count; poll
         // the host's `/api/queue/{id}/preview` for our own running print
         // exactly as an inspected queue row does, and stop when it leaves
         // `running`.
         const previewTarget = targets.get(job.clientId) ?? null;
-        if (lifecycle.phase === "running" && previewTarget && !jobHasSettled(job)) {
+        if (p.kind === "running" && lifecycle && previewTarget && !jobHasSettled(job)) {
           ownPreviews.ensure(
             String(job.clientId),
             previewTarget,
@@ -898,52 +902,12 @@ export const useGenerationStore = defineStore("generation", {
         } else {
           ownPreviews.stop(String(job.clientId));
         }
-        job.id = lifecycle.authority.jobId;
-        job.streamStarted = true;
-        switch (lifecycle.phase) {
-          case "accepted":
-          case "queued":
-            if (!jobHasSettled(job)) {
-              job.status = "queued";
-              job.stage = null;
-              job.holdError = null;
-              job.holdCode = null;
-              job.retryable = false;
-              job.retrying = false;
-            }
-            break;
-          case "held":
-            if (!jobHasSettled(job)) {
-              job.status = "queued";
-              job.stage = "Held by host — action required";
-              job.holdError = lifecycle.error;
-              job.holdCode = lifecycle.errorCode;
-              job.retryable = lifecycle.retryable === true;
-            }
-            break;
-          case "cancelling":
-            if (!jobHasSettled(job)) {
-              job.status = "queued";
-              job.stage = "Cancellation pending";
-              job.cancelling = true;
-            }
-            break;
-          case "running":
-            if (!jobHasSettled(job)) {
-              job.status = "loading";
-              job.stage = "Developing";
-            }
-            break;
-          case "complete":
-          case "failed":
-          case "cancelled":
-            this.applyDurableTerminal(record, lifecycle, job);
-            break;
-        }
+        if (p.kind === "complete") this.applyDurableCompletion(record, childIndex, p, job);
+        else applyDurablePresentation(job, p);
       }
       this.scheduleDurableCancelIntents(record);
-      if (!recordIsTerminal(record)) return;
-      const jobs = [...(durableBatchJobs.get(record.tracker.clientBatchId)?.values() ?? [])];
+      if (!recordIsSettled(record)) return;
+      const jobs = [...batchJobs.values()];
       durableSettlements.get(record.tracker.clientBatchId)?.resolve(jobs);
       durableSettlements.delete(record.tracker.clientBatchId);
       void this.finishDurableBatchEffects(record, jobs);
@@ -1071,47 +1035,38 @@ export const useGenerationStore = defineStore("generation", {
         });
       }
     },
-    applyDurableTerminal(
+    /** The one arm the store maps itself: the result is built from the
+     * recovery record's child summary, and its media URL is host-exact. */
+    applyDurableCompletion(
       record: DurableGenerationRecoveryRecord,
-      lifecycle: GenerationLifecycleJob,
+      childIndex: number,
+      p: Extract<GenerationChildPresentation, { kind: "complete" }>,
       job: Job,
     ): void {
       if (jobHasSettled(job)) return;
-      if (lifecycle.phase === "complete" && lifecycle.result?.filename) {
-        const summary = record.children.find((child) => child.index === lifecycle.childIndex)!;
-        const format = requestFormat(lifecycle.result.filename, summary.format);
-        job.result = {
-          image: "",
-          format,
-          width: summary.width,
-          height: summary.height,
-          seed_used: summary.seed ?? 0,
-          generation_time_ms: 0,
-          model: summary.model,
-          filename: lifecycle.result.filename,
-          ...(lifecycle.result.originalFilename
-            ? { original_filename: lifecycle.result.originalFilename }
-            : {}),
-          metadata: null,
-        };
-        job.visualSeed = String(summary.seed ?? 0);
-        settleJob(job, "complete");
-        if (!durableHiddenJobIds.has(job.clientId)) {
-          void this.refreshRemoteResultUrl(job.clientId).catch(() => undefined);
-        }
-      } else {
-        settleJob(job, "error");
-        job.error =
-          lifecycle.phase === "cancelled"
-            ? "Cancelled"
-            : lifecycle.phase === "complete"
-              ? "The host reported this print complete but published no file."
-              : (lifecycle.error ?? "Generation failed on the host.");
-      }
+      const summary = record.children.find((child) => child.index === childIndex)!;
+      job.result = {
+        image: "",
+        format: requestFormat(p.filename, summary.format),
+        width: summary.width,
+        height: summary.height,
+        seed_used: summary.seed ?? 0,
+        generation_time_ms: p.generationTimeMs,
+        model: summary.model,
+        filename: p.filename,
+        ...(p.originalFilename ? { original_filename: p.originalFilename } : {}),
+        metadata: null,
+      };
+      job.visualSeed = String(summary.seed ?? 0);
       job.cancelling = false;
+      job.settledAtMs ??= p.settledAtMs;
+      settleJob(job, "complete");
       if (job.previewUrl) {
         URL.revokeObjectURL(job.previewUrl);
         job.previewUrl = null;
+      }
+      if (!durableHiddenJobIds.has(job.clientId)) {
+        void this.refreshRemoteResultUrl(job.clientId).catch(() => undefined);
       }
     },
     async finishDurableBatchEffects(
@@ -1124,10 +1079,16 @@ export const useGenerationStore = defineStore("generation", {
         persistDurableRecords();
         return true;
       };
-      const completed = jobs.filter((job) => job.status === "complete" && job.result?.filename);
+      // An unknown outcome is advisory: no notification, no mirror, only the
+      // dismissal bookkeeping below.
+      const unknown =
+        reconciliationPresentation(record.tracker.reconciliation, null).kind === "unknown";
+      const completed = unknown
+        ? []
+        : jobs.filter((job) => job.status === "complete" && job.result?.filename);
       if (completed.length > 0 && claim("native-notification")) {
         notifyGenerated(completed[0]!.prompt, completed[0]!.result?.filename);
-      } else {
+      } else if (!unknown) {
         const failed = jobs.find(
           (job) => job.status === "error" && job.error && !isCancelledError(job.error),
         );
@@ -1205,12 +1166,22 @@ export const useGenerationStore = defineStore("generation", {
       persistDurableRecords();
       if (
         ![...durableRecords.values()].some(
-          (item) => item.tracker.hostId === record.tracker.hostId && !recordIsTerminal(item),
+          (item) => item.tracker.hostId === record.tracker.hostId && !recordIsSettled(item),
         )
       ) {
         durableHostStreams.get(record.tracker.hostId)?.abort.abort();
         durableHostStreams.delete(record.tracker.hostId);
       }
+    },
+    /** The host refused the batch by name: nothing is queued, every child
+     * shows the host's own sentence, and the batch settles at once. */
+    rejectDurableRecord(record: DurableGenerationRecoveryRecord, error: unknown): void {
+      record.tracker = reduceGenerationLifecycle(record.tracker, {
+        type: "admission_rejected",
+        error: error instanceof Error ? error.message : String(error),
+      });
+      this.applyDurableRecord(record);
+      persistDurableRecords();
     },
     async admitDurableRecord(
       record: DurableGenerationRecoveryRecord,
@@ -1244,23 +1215,7 @@ export const useGenerationStore = defineStore("generation", {
         return;
       } catch (error) {
         if (isDefiniteGenerationAdmissionRejection(error)) {
-          record.tracker = reduceGenerationLifecycle(record.tracker, {
-            type: "admission_rejected",
-            error: error instanceof Error ? error.message : String(error),
-          });
-          for (const clientId of durableJobIds.get(record.tracker.clientBatchId)?.values() ?? []) {
-            const job = this.jobs.find((candidate) => candidate.clientId === clientId);
-            if (!job || jobHasSettled(job)) continue;
-            settleJob(job, "error");
-            job.error = record.tracker.admission.error;
-          }
-          persistDurableRecords();
-          const jobs = [...(durableJobIds.get(record.tracker.clientBatchId)?.values() ?? [])]
-            .map((clientId) => this.jobs.find((candidate) => candidate.clientId === clientId))
-            .filter((job): job is Job => !!job);
-          durableSettlements.get(record.tracker.clientBatchId)?.resolve(jobs);
-          durableSettlements.delete(record.tracker.clientBatchId);
-          void this.finishDurableBatchEffects(record, jobs);
+          this.rejectDurableRecord(record, error);
           return;
         }
         record.tracker = reduceGenerationLifecycle(record.tracker, {
@@ -1284,23 +1239,7 @@ export const useGenerationStore = defineStore("generation", {
         if (isDefiniteGenerationAdmissionRejection(retryError)) {
           // The second, identical POST was refused by name: nothing is queued
           // and the host's own sentence is the answer, not a silent wait.
-          record.tracker = reduceGenerationLifecycle(record.tracker, {
-            type: "admission_rejected",
-            error: retryError instanceof Error ? retryError.message : String(retryError),
-          });
-          for (const clientId of durableJobIds.get(record.tracker.clientBatchId)?.values() ?? []) {
-            const job = this.jobs.find((candidate) => candidate.clientId === clientId);
-            if (!job || jobHasSettled(job)) continue;
-            settleJob(job, "error");
-            job.error = record.tracker.admission.error;
-          }
-          persistDurableRecords();
-          const jobs = [...(durableJobIds.get(record.tracker.clientBatchId)?.values() ?? [])]
-            .map((clientId) => this.jobs.find((candidate) => candidate.clientId === clientId))
-            .filter((job): job is Job => !!job);
-          durableSettlements.get(record.tracker.clientBatchId)?.resolve(jobs);
-          durableSettlements.delete(record.tracker.clientBatchId);
-          void this.finishDurableBatchEffects(record, jobs);
+          this.rejectDurableRecord(record, retryError);
           return;
         }
         // Authority remains uncertain and persisted. Reconnect/wake performs
@@ -1678,7 +1617,7 @@ export const useGenerationStore = defineStore("generation", {
       releaseSettledJob(job);
       this.jobs.splice(index, 1);
       if (this.selectedClientId === clientId) this.selectedClientId = null;
-      if (record && recordIsTerminal(record)) {
+      if (record && recordIsSettled(record)) {
         const jobs = [...(durableBatchJobs.get(record.tracker.clientBatchId)?.values() ?? [])];
         void this.finishDurableBatchEffects(record, jobs);
       }

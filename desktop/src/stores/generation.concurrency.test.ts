@@ -408,9 +408,11 @@ describe("submitBatch connection cap", () => {
     hosts.extras[0]!.instanceId = "replacement-instance";
     await store.reconcileDurableHost("hal9000");
     expect(submitted.jobs[0]).toMatchObject({
+      status: "error",
       retryable: false,
-      interrupted: true,
-      stage: "Original machine identity changed — outcome unknown",
+      interrupted: false,
+      stage: "Outcome unknown",
+      error: expect.stringMatching(/replaced by a new server instance/),
     });
     await expect(store.retryHeld(submitted.jobs[0]!.clientId)).rejects.toThrow("not retryable");
     expect(queueApi.retryQueueJobRecoveringAmbiguity).not.toHaveBeenCalled();
@@ -1621,9 +1623,9 @@ describe("submitBatch connection cap", () => {
     expect(store.jobs[0]).toMatchObject({ id: "job-restored", status: "queued" });
     expect(store.jobs[1]).toMatchObject({
       id: "job-stale",
-      status: "queued",
-      interrupted: true,
-      stage: "Original machine identity changed — outcome unknown",
+      status: "error",
+      interrupted: false,
+      stage: "Outcome unknown",
     });
     expect(store.jobs[2]).toMatchObject({
       id: "job-terminal",
