@@ -60,6 +60,14 @@ import {
   emptyChainJobLive,
   reduceChainJobFrame,
 } from "@studio/lib/chainJobProgress";
+import {
+  generationTrackerSettled,
+  presentGenerationChild,
+  presentationIsSettled,
+  reconciliationPresentation,
+  type GenerationChildPresentation,
+} from "@studio/lib/generationPresentation";
+import { applyDurablePresentation } from "../lib/durableGenerationPresentation";
 import type { ChainJobEvent } from "@studio/lib/api/chainTypes";
 
 function surfaceRequestWarnings(warnings: string[]): void {
@@ -1188,16 +1196,13 @@ async function wavFacts(blob: Blob): Promise<WavFacts | null> {
 async function durableCompletionResult(
   job: Job,
   saved: {
-    filename?: string | null;
+    filename: string;
     originalFilename?: string | null;
-    /** How long the machine actually spent, when the caller knows. */
-    generationTimeMs?: number;
+    /** How long the machine actually spent. */
+    generationTimeMs: number;
   },
 ): Promise<SseCompleteEvent> {
   const filename = saved.filename;
-  if (!filename) {
-    throw new Error("the host completed this print without an output filename");
-  }
   const target = routeForDetachedJob(job);
   const print = await galleryRowForCompletion(job, filename);
   const host = getHost(job.hostId ?? ORIGIN_HOST_ID) ?? {
@@ -1237,7 +1242,7 @@ async function durableCompletionResult(
     width: metadata.width,
     height: metadata.height,
     seed_used: metadata.seed,
-    generation_time_ms: Math.max(0, saved.generationTimeMs ?? 0),
+    generation_time_ms: saved.generationTimeMs,
     model: metadata.model,
     ...(originalImage ? { original_image: originalImage } : {}),
     ...(kind === "video"
@@ -1260,32 +1265,16 @@ async function durableCompletionResult(
   };
 }
 
-function settleDurableTerminal(
+/** The `complete` arm is the one presentation the composable maps itself:
+ * hydrating the print's media is web-specific and asynchronous. */
+function hydrateDurableCompletion(
   job: Job,
   lifecycle: GenerationLifecycleJob,
+  p: Extract<GenerationChildPresentation, { kind: "complete" }>,
 ): void {
   if (durableEffectKeys.has(lifecycle.key)) return;
-  const isReloadedCompletion =
-    lifecycle.phase === "complete" && job.state === "done" && !job.result;
+  const isReloadedCompletion = job.state === "done" && !job.result;
   if (job.state !== "running" && !isReloadedCompletion) return;
-  if (lifecycle.phase === "cancelled") {
-    durableEffectKeys.add(lifecycle.key);
-    job.state = "canceled";
-    job.cancelling = false;
-    job.cancelRequested = false;
-    job.settledAt = lifecycle.completedAtMs ?? Date.now();
-    job.previewUrl = null;
-    return;
-  }
-  if (lifecycle.phase === "failed") {
-    durableEffectKeys.add(lifecycle.key);
-    job.cancelling = false;
-    job.cancelRequested = false;
-    job.error = lifecycle.error ?? errorText(lifecycle.terminalError);
-    recordFailedSettlement(job);
-    return;
-  }
-  if (lifecycle.phase !== "complete") return;
 
   // Claim the terminal transition before fetching media. A concurrent cancel
   // sees `done` and cannot replace a success the host already made durable.
@@ -1306,25 +1295,14 @@ function settleDurableTerminal(
     .then(async (release) => {
       if (!release) return;
       try {
-        const result = await durableCompletionResult(job, {
-          filename: lifecycle.result?.filename ?? null,
-          originalFilename: lifecycle.result?.originalFilename ?? null,
-          generationTimeMs:
-            (lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs) -
-            lifecycle.createdAtMs,
-        });
+        const result = await durableCompletionResult(job, p);
         if (job.state !== "done") return;
         job.result = result;
         job.mediaHydrationError = null;
         job.error = null;
-        if (lifecycle.result?.filename) {
-          durableGalleryRows.delete(
-            durableGalleryRowKey(
-              durableHostKey(job),
-              lifecycle.result.filename,
-            ),
-          );
-        }
+        durableGalleryRows.delete(
+          durableGalleryRowKey(durableHostKey(job), p.filename),
+        );
         durableEffectKeys.add(lifecycle.key);
         fireComplete(job);
         scheduleAutoRemoveOnDone(job.id);
@@ -1353,70 +1331,66 @@ function settleDurableTerminal(
   durableHydrations.set(lifecycle.key, hydration);
 }
 
+/** Nothing on this authority can repair a fenced batch, and the instance now
+ * answering is not the one that published its files. */
+function authorityLost(tracker: GenerationBatchTracker): boolean {
+  return (
+    reconciliationPresentation(tracker.reconciliation, null).kind === "unknown"
+  );
+}
+
 function applyDurableTracker(tracker: GenerationBatchTracker): void {
-  const ownedJobs = jobsForClientBatch(tracker.clientBatchId);
-  if (tracker.reconciliation.reason === "instance_mismatch") {
-    for (const job of ownedJobs) {
-      settleDetachedJob(
-        job.id,
-        "This machine was replaced. The previous server instance still owns this print's outcome.",
+  const now = Date.now();
+  const previewRoute = durableRoutes.get(tracker.hostId) ?? null;
+  const lost = authorityLost(tracker);
+  for (const job of jobsForClientBatch(tracker.clientBatchId)) {
+    const childIndex = job.durableBatch?.childIndex;
+    if (childIndex === undefined) continue;
+    const lifecycle =
+      Object.values(tracker.jobs).find(
+        (candidate) => candidate.childIndex === childIndex,
+      ) ?? null;
+    if (lifecycle) {
+      job.serverId = lifecycle.authority.jobId;
+      job.durableBatch!.serverBatchId = lifecycle.authority.batchId;
+      job.lastProgressAt = Math.max(
+        job.lastProgressAt,
+        lifecycle.version.updatedAtMs,
       );
     }
-    return;
-  }
-  if (
-    tracker.reconciliation.reason === "missing" ||
-    tracker.reconciliation.reason === "batch_mismatch"
-  ) {
-    for (const job of ownedJobs) {
-      settleDetachedJob(
-        job.id,
-        "The durable generation record could not be reconciled on its original machine.",
-      );
-    }
-    return;
-  }
-  for (const lifecycle of Object.values(tracker.jobs)) {
-    const job = ownedJobs.find(
-      (candidate) =>
-        candidate.durableBatch?.childIndex === lifecycle.childIndex,
-    );
-    if (!job) continue;
-    job.serverId = lifecycle.authority.jobId;
-    if (job.durableBatch) {
-      job.durableBatch.serverBatchId = lifecycle.authority.batchId;
-    }
-    job.lastProgressAt = Math.max(
-      job.lastProgressAt,
-      lifecycle.version.updatedAtMs,
-    );
-    if (lifecycle.phase === "running") {
-      markWorkStarted(job);
-      job.progress.stage = "Developing";
-    } else if (lifecycle.phase === "held") {
-      const alreadyHeld = job.holdError !== null && job.holdError !== undefined;
-      job.progress.stage = "Held by host · action required";
-      job.holdError = lifecycle.error;
-      job.holdCode = lifecycle.errorCode;
-      job.retryable = lifecycle.retryable === true;
-      job.workStarted = false;
-      if (!alreadyHeld) fireHeld(job);
-    } else if (lifecycle.phase === "cancelling") {
-      job.progress.stage = "Cancellation pending";
-      job.cancelling = true;
-      job.workStarted = false;
-    } else if (lifecycle.phase === "accepted" || lifecycle.phase === "queued") {
-      job.progress.stage = "Queued";
-      job.holdError = null;
-      job.holdCode = null;
-      job.retryable = false;
-      job.retrying = false;
-      job.workStarted = false;
+    const p = presentGenerationChild({
+      tracker,
+      childIndex,
+      hostLabel: job.hostLabel,
+      now,
+    });
+    if (p.kind === "complete" && lifecycle) {
+      // A frozen completion keeps its outcome, but a media read that already
+      // failed is not retried against a replacement instance.
+      if (lost && job.state === "done" && !job.result) {
+        job.progress.stage = "Completed · media unavailable";
+      } else {
+        hydrateDurableCompletion(job, lifecycle, p);
+      }
+    } else if (presentationIsSettled(p)) {
+      // A terminal transition is an effect boundary, claimed once per
+      // authority key so no replayed snapshot settles it a second time.
+      if (
+        job.state === "running" &&
+        !durableEffectKeys.has(lifecycle?.key ?? "")
+      ) {
+        applyDurablePresentation(job, p, now);
+        if (lifecycle) durableEffectKeys.add(lifecycle.key);
+        if (p.kind !== "cancelled" && p.kind !== "unknown") {
+          canvasErrorJobId.value = job.id;
+        }
+      }
     } else {
-      settleDurableTerminal(job, lifecycle);
+      const wasHeld = job.holdError != null;
+      applyDurablePresentation(job, p, now);
+      if (p.kind === "held" && !wasHeld) fireHeld(job);
     }
-    const previewRoute = durableRoutes.get(tracker.hostId) ?? null;
-    if (lifecycle.phase === "running" && previewRoute) {
+    if (p.kind === "running" && previewRoute && lifecycle) {
       ownPreviews.ensure(
         job.id,
         routeApiTarget(previewRoute),
@@ -1434,10 +1408,9 @@ function applyDurableTracker(tracker: GenerationBatchTracker): void {
     }
     if (
       job.cancelRequested &&
-      (lifecycle.phase === "accepted" ||
-        lifecycle.phase === "queued" ||
-        lifecycle.phase === "held" ||
-        lifecycle.phase === "running")
+      (p.kind === "held" ||
+        p.kind === "running" ||
+        (p.kind === "waiting" && p.reason === "queued"))
     ) {
       void confirmDurableCancellation(job).catch(() => undefined);
     }
@@ -1450,13 +1423,16 @@ function pruneDurableTrackerIfSettled(clientBatchId: string): void {
   const tracker = durableTrackers.get(clientBatchId);
   if (!tracker) return;
   const owned = jobsForClientBatch(clientBatchId);
+  if (!generationTrackerSettled(tracker, owned.length)) return;
+  // A completion whose media is still hydrating keeps its tracker so the
+  // next reconciliation can retry the exact read — unless no reconciliation
+  // on this authority can ever answer again.
   if (
-    owned.length === 0 ||
-    owned.some(
-      (job) => job.state === "running" || (job.state === "done" && !job.result),
-    )
-  )
+    !authorityLost(tracker) &&
+    owned.some((job) => job.state === "done" && !job.result)
+  ) {
     return;
+  }
   durableTrackers.delete(clientBatchId);
   durableJobsByBatch.delete(clientBatchId);
   for (const lifecycle of Object.values(tracker.jobs)) {
@@ -1496,17 +1472,13 @@ function applyDurableBatchStatus(
  * server's own sentence and mark the tracker rejected so nothing waits. */
 function rejectDurableAdmission(clientBatchId: string, error: string): void {
   const tracker = durableTrackers.get(clientBatchId);
-  if (tracker) {
-    durableTrackers.set(
-      clientBatchId,
-      reduceGenerationLifecycle(tracker, { type: "admission_rejected", error }),
-    );
-  }
-  for (const job of jobsForClientBatch(clientBatchId)) {
-    if (job.state !== "running") continue;
-    job.error = error;
-    recordFailedSettlement(job);
-  }
+  if (!tracker) return;
+  const next = reduceGenerationLifecycle(tracker, {
+    type: "admission_rejected",
+    error,
+  });
+  durableTrackers.set(clientBatchId, next);
+  applyDurableTracker(next);
 }
 
 async function recoverAmbiguousAdmission(
@@ -1535,10 +1507,7 @@ async function recoverAmbiguousAdmission(
     // reconnect/wake reconciliation retries against that same authority. It
     // never submits a second job.
     for (const job of jobsForClientBatch(clientBatchId)) {
-      if (job.state === "running") {
-        job.detached = true;
-        job.progress.stage = "Confirming durable admission";
-      }
+      if (job.state === "running") job.detached = true;
     }
   }
 }
@@ -1561,13 +1530,12 @@ async function admitDurableBatch(
       return;
     }
     if (tracker) {
-      durableTrackers.set(
-        clientBatchId,
-        reduceGenerationLifecycle(tracker, {
-          type: "admission_uncertain",
-          error: errorText(error),
-        }),
-      );
+      const next = reduceGenerationLifecycle(tracker, {
+        type: "admission_uncertain",
+        error: errorText(error),
+      });
+      durableTrackers.set(clientBatchId, next);
+      applyDurableTracker(next);
     }
     await recoverAmbiguousAdmission(route, clientBatchId);
   }
@@ -1610,7 +1578,7 @@ function submitDurableJobs(
     durableJobsByBatch.set(clientBatchId, chunkJobs);
     durableTrackers.set(clientBatchId, tracker);
     // Journal each independently idempotent chunk before its POST leaves.
-    persistDurableRecoveryBatch(clientBatchId);
+    applyDurableTracker(tracker);
     void admitDurableBatch(host, clientBatchId, requestChunk);
   }
   jobs.value = [...admitted, ...jobs.value];

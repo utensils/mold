@@ -871,51 +871,6 @@ describe("web durable generation lifecycle", () => {
     );
   });
 
-  it("fences a replacement server instance instead of adopting its work", async () => {
-    admitGenerationBatch.mockImplementation(
-      (_target: unknown, body: { client_batch_id: string }) =>
-        Promise.resolve(batch(body.client_batch_id)),
-    );
-    const stream = useGenerateStream();
-    const id = stream.submit(request(), { kind: "single" }, route);
-    await vi.waitFor(() =>
-      expect(
-        stream.jobs.value.find((job) => job.id === id)?.serverId,
-      ).toBeTruthy(),
-    );
-    let confirmReplacement!: () => void;
-    reconcileGenerationBatches.mockImplementation(
-      () =>
-        new Promise<GenerationBatchStatusResponse>((resolve) => {
-          confirmReplacement = () =>
-            resolve({
-              ...statusResponse([]),
-              instance_id: "replacement",
-            });
-        }),
-    );
-
-    __testing__.handleDurableEvent(
-      route.hostId,
-      "authority",
-      JSON.stringify({ instance_id: "replacement" }),
-    );
-
-    expect(
-      stream.jobs.value.find((candidate) => candidate.id === id)?.state,
-    ).toBe("running");
-    confirmReplacement();
-    await vi.waitFor(() =>
-      expect(
-        stream.jobs.value.find((candidate) => candidate.id === id)?.state,
-      ).toBe("error"),
-    );
-    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
-    expect(job.state).toBe("error");
-    expect(job.detached).toBe(true);
-    expect(job.error).toMatch(/replaced/i);
-  });
-
   it("lets an observed completion beat a racing cancel and emits its effects once", async () => {
     admitGenerationBatch.mockImplementation(
       (_target: unknown, body: { client_batch_id: string }) =>
@@ -1247,6 +1202,33 @@ describe("web durable generation lifecycle", () => {
     });
   });
 
+  it("settles a completion that published no file as a failure, once", async () => {
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(batch(body.client_batch_id)),
+    );
+    const stream = useGenerateStream();
+    const id = stream.submit(request("no file"), { kind: "single" }, route);
+    await vi.waitFor(() =>
+      expect(
+        stream.jobs.value.find((job) => job.id === id)?.serverId,
+      ).toBeTruthy(),
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    const fileless = batch(job.durableBatch!.clientBatchId, ["complete"]);
+    delete fileless.children[0]!.result;
+    reconcileGenerationBatches.mockResolvedValue(statusResponse([fileless]));
+
+    await __testing__.reconcileDurableHost(route.hostId);
+    await __testing__.reconcileDurableHost(route.hostId);
+
+    expect(job.state).toBe("error");
+    expect(job.error).toMatch(/published no file/);
+    expect(job.detached).not.toBe(true);
+    expect(fetchGalleryBlob).not.toHaveBeenCalled();
+    expect(stream.canvasErrorJobId.value).toBe(id);
+  });
+
   it("keeps complete authority and retries after a transient artifact read failure", async () => {
     admitGenerationBatch.mockImplementation(
       (_target: unknown, body: { client_batch_id: string }) =>
@@ -1280,6 +1262,43 @@ describe("web durable generation lifecycle", () => {
     expect(job.state).toBe("done");
     expect(job.mediaHydrationError).toBeNull();
     expect(fetchGalleryBlob).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops retrying a completion's media once its authority is lost", async () => {
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(batch(body.client_batch_id)),
+    );
+    fetchGalleryBlob.mockRejectedValue(new TypeError("read failed"));
+    const stream = useGenerateStream();
+    const id = stream.submit(request("lost media"), { kind: "single" }, route);
+    await vi.waitFor(() =>
+      expect(
+        stream.jobs.value.find((job) => job.id === id)?.serverId,
+      ).toBeTruthy(),
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    const clientBatchId = job.durableBatch!.clientBatchId;
+    reconcileGenerationBatches.mockResolvedValueOnce(
+      statusResponse([batch(clientBatchId, ["complete"])]),
+    );
+    await __testing__.reconcileDurableHost(route.hostId);
+    await vi.waitFor(() => expect(job.mediaHydrationError).toMatch(/read/));
+
+    // The replacement instance is not the one that published the file, and
+    // no reconciliation can repair a fenced batch: the outcome stays known,
+    // the read is not retried, and the tracker is released.
+    reconcileGenerationBatches.mockResolvedValue({
+      ...statusResponse([]),
+      instance_id: "replacement",
+    });
+    await __testing__.reconcileDurableHost(route.hostId);
+    await __testing__.reconcileDurableHost(route.hostId);
+
+    expect(job.state).toBe("done");
+    expect(job.result).toBeNull();
+    expect(fetchGalleryBlob).toHaveBeenCalledTimes(1);
+    expect(reconcileGenerationBatches).toHaveBeenCalledTimes(2);
   });
 
   it("targets an exact batch for ordinary lifecycle hints", async () => {

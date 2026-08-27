@@ -698,7 +698,10 @@ describe("workStarted tracking", () => {
       error: "host ran out of memory",
     });
 
-    expect(job.error).toBe("host ran out of memory");
+    // The machine's sentence runs through the shared describer.
+    expect(job.error).toBe(
+      "Render box ran out of memory. Try a smaller model, image size, or batch.",
+    );
     expect(stream.canvasErrorJobId.value).toBe(id);
     expect(job.detached).not.toBe(true);
   });
