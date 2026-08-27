@@ -2962,7 +2962,7 @@ fn canonical_generation_batch_status_ids(
         description = "Optional caller-chosen UUID used as the durable client_batch_id; a replay answers with the admitted batch status"
     )),
     responses(
-        (status = 200, description = "Generated media bytes with the matching image/video Content-Type; or, for a replayed X-Mold-Client-Batch-Id, the admitted batch status as JSON", body = mold_core::GenerationBatchStatus),
+        (status = 200, description = "Generated media bytes with the matching image/video/audio Content-Type. A replayed X-Mold-Client-Batch-Id answers 200 application/json with the admitted GenerationBatchStatus instead; read the Content-Type."),
         (status = 202, description = "Durable singleton accepted but the attached observer detached; reconcile the returned batch status", body = mold_core::GenerationBatchStatus),
         (status = 404, description = "Model not downloaded or unknown (MODEL_NOT_FOUND / UNKNOWN_MODEL); the held durable job is named in the error"),
         (status = 422, description = "Invalid request parameters"),
@@ -4031,7 +4031,7 @@ pub(crate) fn requested_sse_completion_payload(
         description = "Optional caller-chosen UUID used as the durable client_batch_id; a replay answers with the admitted batch status as JSON"
     )),
     responses(
-        (status = 200, description = "SSE event stream with progress and result"),
+        (status = 200, description = "SSE event stream with progress and result. A replayed X-Mold-Client-Batch-Id answers 200 application/json with the admitted GenerationBatchStatus instead; read the Content-Type."),
         (status = 404, description = "Model not downloaded"),
         (status = 422, description = "Invalid request parameters"),
         (status = 500, description = "Inference error"),
