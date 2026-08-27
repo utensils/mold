@@ -1,10 +1,18 @@
-//! Crash-recoverable, logically atomic publication for server-owned batches.
+//! Crash-recoverable, logically atomic publication of one imported gallery
+//! file, plus the committed gallery archive every publication path shares.
 //!
-//! Child artifacts stay below the gallery's reserved transaction directory
-//! until every child is prepared. Publication then holds the exclusive side
-//! of [`GalleryPublicationGate`] while it links every file with no-replace
-//! semantics, commits all metadata rows in one SQLite transaction, and
-//! durably advances the manifest to `committed`.
+//! The staged artifact stays below the gallery's reserved transaction
+//! directory until it is prepared. Publication then holds the exclusive side
+//! of [`GalleryPublicationGate`] while it links the file with no-replace
+//! semantics, commits its metadata row, and durably advances the manifest to
+//! `committed`.
+//!
+//! The on-disk [`BatchAttemptManifest`] keeps its `children` vector: the
+//! committed archive (`committed/`) was written by releases that staged
+//! several children per attempt and is read on every boot, so that shape is a
+//! file format. A LIVE attempt, by contrast, holds exactly one record; a
+//! crash-orphaned attempt with more, or a journal carrying a retired lease-era
+//! event, fails recovery closed and names its directory for the operator.
 
 use anyhow::{bail, ensure, Context};
 use mold_db::GenerationRecord;
@@ -16,31 +24,31 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// The child slot one staged artifact belongs to.
+/// Durable proof that the attempt sealed one immutable staged file.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BatchChildLease {
-    pub parent_id: String,
-    pub child_index: usize,
-    pub attempt_generation: u64,
-    pub lease_generation: u64,
+struct StagedReceipt {
+    version: u32,
+    parent_id: String,
+    attempt_generation: u64,
+    child_index: usize,
+    checksum_sha256: String,
+    size_bytes: u64,
+    record_identity_sha256: String,
 }
 
-/// Durable proof that a particular lease produced one immutable staged file.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BatchChildReceipt {
-    pub version: u32,
-    pub parent_id: String,
-    pub attempt_generation: u64,
-    pub child_index: usize,
-    pub lease_generation: u64,
-    pub checksum_sha256: String,
-    pub size_bytes: u64,
-    pub record_identity_sha256: String,
+impl StagedReceipt {
+    const VERSION: u32 = 1;
 }
 
-impl BatchChildReceipt {
-    pub const VERSION: u32 = 1;
-}
+/// Journal event kinds written by the lease-era multi-child staging path that
+/// no release still replays. They are refused by name rather than parsed, so
+/// a torn trailing record of one can never be truncated away as noise.
+const RETIRED_JOURNAL_EVENT_KINDS: [&str; 4] = [
+    "child_record_updated",
+    "child_auxiliary_staged",
+    "child_auxiliaries_cleared",
+    "child_unstaged",
+];
 
 pub const TRANSACTION_DIR: &str = ".mold-batch-transactions";
 const MANIFEST_FILE: &str = "manifest.json";
@@ -458,9 +466,9 @@ impl GalleryPublicationGate {
     }
 }
 
-/// Refuse a batch before inference when the gallery filesystem cannot hold
-/// the expected staged children, a portable no-hard-link publication copy,
-/// and a bounded safety margin. Filesystems that support hard links use less,
+/// Refuse an import before it streams when the gallery filesystem cannot hold
+/// the expected staged file, a portable no-hard-link publication copy, and a
+/// bounded safety margin. Filesystems that support hard links use less,
 /// but admission stays correct on mounts that do not.
 pub fn preflight_disk_space(output_dir: &Path, expected_staging_bytes: u64) -> anyhow::Result<()> {
     use sysinfo::Disks;
@@ -687,64 +695,23 @@ struct BatchJournalRecord {
     event: BatchJournalEvent,
 }
 
+/// On-disk journal tags (`kind`) are a file format and must not change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum BatchJournalEvent {
-    ManifestSnapshot {
-        manifest: BatchAttemptManifest,
-    },
-    ChildRecordUpdated {
-        child_index: usize,
-        lease_generation: u64,
-        record: Box<GenerationRecord>,
-    },
-    ChildAuxiliaryStaged {
-        receipt: BatchAuxiliaryReceipt,
-    },
-    ChildAuxiliariesCleared {
-        child_index: usize,
-        lease_generation: u64,
-    },
-    ChildStaged {
-        receipt: BatchChildReceipt,
-    },
-    ChildUnstaged {
-        child_index: usize,
-        lease_generation: u64,
-        record_identity_sha256: String,
-    },
-    FinalPublished {
-        child_index: usize,
-    },
+    ManifestSnapshot { manifest: BatchAttemptManifest },
+    ChildStaged { receipt: StagedReceipt },
+    FinalPublished { child_index: usize },
     MetadataCommitted,
     CleanupStarted,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum BatchAuxiliaryKind {
-    ThumbnailPng,
-    PreviewGif,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct BatchAuxiliaryReceipt {
-    child_index: usize,
-    lease_generation: u64,
-    kind: BatchAuxiliaryKind,
-    checksum_sha256: String,
-    size_bytes: u64,
 }
 
 #[derive(Clone, Debug)]
 struct BatchJournalReplay {
     manifest: BatchAttemptManifest,
     manifest_history: Vec<BatchAttemptManifest>,
-    staged_receipts: BTreeMap<usize, BatchChildReceipt>,
-    record_lease_generations: BTreeMap<usize, u64>,
-    auxiliary_receipts: BTreeMap<(usize, BatchAuxiliaryKind), BatchAuxiliaryReceipt>,
-    cleared_auxiliary_leases: BTreeSet<(usize, u64)>,
-    published_children: BTreeSet<usize>,
+    staged_receipt: Option<StagedReceipt>,
+    final_published: bool,
     post_publish_snapshot: bool,
     metadata_committed: bool,
     cleanup_started: bool,
@@ -835,8 +802,10 @@ impl Drop for GalleryNameReservation {
     }
 }
 
+/// One imported gallery file moving from private staging to the committed
+/// archive. The manifest it owns always holds exactly one child.
 #[derive(Debug)]
-pub struct BatchTransaction {
+pub struct GalleryImportTransaction {
     output_dir: PathBuf,
     attempt_dir: PathBuf,
     // A live attempt owns this OS lock from before its first durable manifest
@@ -845,16 +814,13 @@ pub struct BatchTransaction {
     _attempt_authority: AttemptAuthority,
     manifest: BatchAttemptManifest,
     next_journal_sequence: u64,
-    journaled_final_children: BTreeSet<usize>,
+    final_published: bool,
     post_publish_snapshot: bool,
     metadata_committed: bool,
     cleanup_started: bool,
     reconstructed_from_journal: bool,
     journal_needs_heal: bool,
-    staged_receipts: BTreeMap<usize, BatchChildReceipt>,
-    record_lease_generations: BTreeMap<usize, u64>,
-    auxiliary_receipts: BTreeMap<(usize, BatchAuxiliaryKind), BatchAuxiliaryReceipt>,
-    cleared_auxiliary_leases: BTreeSet<(usize, u64)>,
+    staged_receipt: Option<StagedReceipt>,
     poisoned: bool,
     #[cfg(test)]
     commit_failpoint: Option<CommitFailpoint>,
@@ -1020,9 +986,9 @@ enum CommitFailpoint {
     #[cfg(test)]
     PanicAfterCommitting,
     CommittingState,
-    FinalPublish(usize),
-    FinalFileFsync(usize),
-    FinalJournalFsync(usize),
+    FinalPublish,
+    FinalFileFsync,
+    FinalJournalFsync,
     OutputDirectoryFsync,
     MetadataManifestFsync,
     DatabaseTransaction,
@@ -1062,22 +1028,59 @@ pub struct BatchAttemptAuthorityContended {
     pub attempt_generation: u64,
 }
 
-impl BatchTransaction {
-    /// Create a generation-scoped transaction and reserve collision-safe final
-    /// names. The returned manifest is already durable.
+/// The one record a live attempt carries. `begin` constructs exactly one and
+/// `ensure_single_record_attempt` refuses every loaded manifest with more, so
+/// the index is total here even though the archive format stays N-ary.
+fn sole_child(manifest: &BatchAttemptManifest) -> &BatchManifestChild {
+    &manifest.children[0]
+}
+
+fn sole_child_mut(manifest: &mut BatchAttemptManifest) -> &mut BatchManifestChild {
+    &mut manifest.children[0]
+}
+
+/// Live attempts hold one record. Releases 0.21–0.25 staged several children
+/// per attempt; a crash-orphaned attempt of theirs is retained, never guessed
+/// at, because this release has no replay for its per-child publication.
+fn ensure_single_record_attempt(
+    attempt_dir: &Path,
+    manifest: &BatchAttemptManifest,
+) -> anyhow::Result<()> {
+    ensure!(
+        manifest.version == MANIFEST_VERSION,
+        "live gallery attempt {} has manifest version {} but this release writes only one \
+         record per attempt at version {MANIFEST_VERSION}; move it outside {TRANSACTION_DIR} \
+         after inspecting it",
+        attempt_dir.display(),
+        manifest.version
+    );
+    ensure!(
+        manifest.children.len() == 1,
+        "live gallery attempt {} holds {} children but this release publishes one record per \
+         attempt; it was written by an earlier multi-child release, so move it outside \
+         {TRANSACTION_DIR} after inspecting it (the committed archive is unaffected)",
+        attempt_dir.display(),
+        manifest.children.len()
+    );
+    Ok(())
+}
+
+impl GalleryImportTransaction {
+    /// Create an import-scoped transaction and reserve a collision-safe final
+    /// name. The returned manifest is already durable.
     pub fn begin(
         output_dir: &Path,
         parent_id: &str,
         attempt_generation: u64,
         normalized_request: serde_json::Value,
-        records: Vec<GenerationRecord>,
+        record: GenerationRecord,
     ) -> anyhow::Result<Self> {
         Self::begin_with_reservation_directory_hook(
             output_dir,
             parent_id,
             attempt_generation,
             normalized_request,
-            records,
+            record,
             || {},
         )
     }
@@ -1087,7 +1090,7 @@ impl BatchTransaction {
         parent_id: &str,
         attempt_generation: u64,
         normalized_request: serde_json::Value,
-        records: Vec<GenerationRecord>,
+        record: GenerationRecord,
         after_reservation_directory_created: impl FnOnce(),
     ) -> anyhow::Result<Self> {
         Self::begin_with_hooks(
@@ -1095,7 +1098,7 @@ impl BatchTransaction {
             parent_id,
             attempt_generation,
             normalized_request,
-            records,
+            record,
             || {},
             after_reservation_directory_created,
         )
@@ -1107,7 +1110,7 @@ impl BatchTransaction {
         parent_id: &str,
         attempt_generation: u64,
         normalized_request: serde_json::Value,
-        records: Vec<GenerationRecord>,
+        record: GenerationRecord,
         after_attempt_directory_created: impl FnOnce(),
     ) -> anyhow::Result<Self> {
         Self::begin_with_hooks(
@@ -1115,7 +1118,7 @@ impl BatchTransaction {
             parent_id,
             attempt_generation,
             normalized_request,
-            records,
+            record,
             after_attempt_directory_created,
             || {},
         )
@@ -1126,15 +1129,12 @@ impl BatchTransaction {
         parent_id: &str,
         attempt_generation: u64,
         normalized_request: serde_json::Value,
-        mut records: Vec<GenerationRecord>,
+        mut record: GenerationRecord,
         after_attempt_directory_created: impl FnOnce(),
         after_reservation_directory_created: impl FnOnce(),
     ) -> anyhow::Result<Self> {
         validate_component(parent_id, "parent id")?;
-        ensure!(!records.is_empty(), "batch transaction must have children");
-        for record in &records {
-            validate_component(&record.filename, "requested final filename")?;
-        }
+        validate_component(&record.filename, "requested final filename")?;
         fs::create_dir_all(output_dir)
             .with_context(|| format!("creating gallery {}", output_dir.display()))?;
         // Lock the stable gallery directory inode, not a removable file below
@@ -1237,41 +1237,33 @@ impl BatchTransaction {
             parent_id: parent_id.to_owned(),
             attempt_generation,
         };
-        let mut children = Vec::with_capacity(records.len());
-        let mut reserved_names: Vec<String> = Vec::with_capacity(records.len());
-        for (index, record) in records.iter_mut().enumerate() {
-            // Transaction-owned staging establishes fresh filesystem identity.
-            // Caller-provided DB/stat fields cannot become part of the initial
-            // snapshot because the protocol derives them from staged/final
-            // files at its durable boundaries.
-            record.id = None;
-            record.file_mtime_ms = None;
-            record.file_size_bytes = None;
-            let final_name =
-                match reserve_final_name(output_dir, &record.filename, &reservation_owner) {
-                    Ok(name) => name,
-                    Err(error) => {
-                        for name in &reserved_names {
-                            let _ = release_reservation(output_dir, name, &reservation_owner);
-                        }
-                        let _ = fs::remove_dir_all(&attempt_dir);
-                        drop(_bookkeeping_lock);
-                        drop(attempt_authority_for_unwind.take());
-                        return Err(error);
-                    }
-                };
-            reserved_names.push(final_name.clone());
-            record.filename.clone_from(&final_name);
-            record.output_dir = canonical_output_dir.to_string_lossy().into_owned();
-            children.push(BatchManifestChild {
-                child_index: index,
-                staging_name: format!("{index:08}.stage"),
-                final_name,
-                checksum_sha256: None,
-                size_bytes: None,
-                record: record.clone(),
-            });
-        }
+        // Transaction-owned staging establishes fresh filesystem identity.
+        // Caller-provided DB/stat fields cannot become part of the initial
+        // snapshot because the protocol derives them from staged/final files
+        // at its durable boundaries.
+        record.id = None;
+        record.file_mtime_ms = None;
+        record.file_size_bytes = None;
+        let final_name = match reserve_final_name(output_dir, &record.filename, &reservation_owner)
+        {
+            Ok(name) => name,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&attempt_dir);
+                drop(_bookkeeping_lock);
+                drop(attempt_authority_for_unwind.take());
+                return Err(error);
+            }
+        };
+        record.filename.clone_from(&final_name);
+        record.output_dir = canonical_output_dir.to_string_lossy().into_owned();
+        let child = BatchManifestChild {
+            child_index: 0,
+            staging_name: "00000000.stage".to_owned(),
+            final_name,
+            checksum_sha256: None,
+            size_bytes: None,
+            record,
+        };
 
         // All namespace and reservation lifecycle mutations are now durable.
         // Release bookkeeping before constructing an owning value so any
@@ -1287,7 +1279,7 @@ impl BatchTransaction {
             attempt_generation,
             normalized_request,
             state: BatchManifestState::Staging,
-            children,
+            children: vec![child],
         };
         let mut transaction = Self {
             output_dir: canonical_output_dir,
@@ -1295,16 +1287,13 @@ impl BatchTransaction {
             _attempt_authority: attempt_authority,
             manifest,
             next_journal_sequence: 0,
-            journaled_final_children: BTreeSet::new(),
+            final_published: false,
             post_publish_snapshot: false,
             metadata_committed: false,
             cleanup_started: false,
             reconstructed_from_journal: false,
             journal_needs_heal: false,
-            staged_receipts: BTreeMap::new(),
-            record_lease_generations: BTreeMap::new(),
-            auxiliary_receipts: BTreeMap::new(),
-            cleared_auxiliary_leases: BTreeSet::new(),
+            staged_receipt: None,
             poisoned: false,
             #[cfg(test)]
             commit_failpoint: None,
@@ -1312,7 +1301,7 @@ impl BatchTransaction {
             delta_append_failpoint: None,
         };
         if let Err(error) = transaction.persist_manifest() {
-            transaction.release_reservations();
+            transaction.release_reservation();
             let _ = fs::remove_dir_all(&transaction.attempt_dir);
             return Err(error);
         }
@@ -1323,150 +1312,52 @@ impl BatchTransaction {
         &self.manifest
     }
 
-    pub fn staging_path(&self, child_index: usize) -> anyhow::Result<PathBuf> {
-        let child = self
-            .manifest
-            .children
-            .get(child_index)
-            .context("batch child index out of range")?;
-        Ok(self.attempt_dir.join("staging").join(&child.staging_name))
-    }
-
-    fn auxiliary_staging_path(&self, child_index: usize, suffix: &str) -> anyhow::Result<PathBuf> {
-        let child = self
-            .manifest
-            .children
-            .get(child_index)
-            .context("batch child index out of range")?;
-        Ok(self
-            .attempt_dir
+    /// The private path the caller streams the import into before `seal_staged_file`.
+    pub fn staging_path(&self) -> PathBuf {
+        self.attempt_dir
             .join("staging")
-            .join(format!("{}.{suffix}", child.staging_name)))
+            .join(&sole_child(&self.manifest).staging_name)
     }
 
-    fn auxiliary_path(
-        &self,
-        child_index: usize,
-        kind: BatchAuxiliaryKind,
-    ) -> anyhow::Result<PathBuf> {
-        self.auxiliary_staging_path(
-            child_index,
-            match kind {
-                BatchAuxiliaryKind::ThumbnailPng => "thumbnail.png",
-                BatchAuxiliaryKind::PreviewGif => "preview.gif",
-            },
-        )
-    }
-
-    /// Write one private child artifact, fsync it, and journal its checksum.
-    pub fn stage_bytes(&mut self, child_index: usize, bytes: &[u8]) -> anyhow::Result<()> {
-        let lease = BatchChildLease {
-            parent_id: self.manifest.parent_id.clone(),
-            child_index,
-            attempt_generation: self.manifest.attempt_generation,
-            lease_generation: 0,
-        };
-        self.stage_bytes_for_lease(&lease, bytes).map(|_| ())
-    }
-
-    /// Stage a child for one exact reducer lease. The returned receipt is
-    /// durable only after the file, staging directory, and ChildStaged journal
-    /// delta have all been fsynced, in that order.
-    pub fn stage_bytes_for_lease(
-        &mut self,
-        lease: &BatchChildLease,
-        bytes: &[u8],
-    ) -> anyhow::Result<BatchChildReceipt> {
+    /// Seal the file that was streamed directly into `staging_path`. Metadata
+    /// is immutable from `begin`; this transition adds only the staged file
+    /// checksum and size before the normal journaled commit. The receipt is
+    /// durable only after the file, staging directory, and ChildStaged
+    /// journal delta have all been fsynced, in that order.
+    pub fn seal_staged_file(&mut self) -> anyhow::Result<()> {
         self.ensure_usable()?;
         ensure!(
             self.manifest.state == BatchManifestState::Staging,
-            "children can only be staged while the attempt is staging"
+            "an import can only be sealed while the attempt is staging"
         );
         ensure!(
-            lease.parent_id == self.manifest.parent_id
-                && lease.attempt_generation == self.manifest.attempt_generation,
-            "child lease does not belong to this transaction attempt"
+            self.staged_receipt.is_none(),
+            "the import is already sealed"
         );
-        let path = self.staging_path(lease.child_index)?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .with_context(|| format!("creating staged child {}", path.display()))?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        sync_dir(path.parent().expect("staging path has parent"))?;
-
-        let receipt = BatchChildReceipt {
-            version: BatchChildReceipt::VERSION,
-            parent_id: self.manifest.parent_id.clone(),
-            attempt_generation: self.manifest.attempt_generation,
-            child_index: lease.child_index,
-            lease_generation: lease.lease_generation,
-            checksum_sha256: checksum_bytes(bytes),
-            size_bytes: bytes.len() as u64,
-            record_identity_sha256: immutable_record_identity(
-                &self.manifest.children[lease.child_index],
-            )?,
-        };
-        ensure!(
-            self.record_lease_generations
-                .get(&lease.child_index)
-                .is_none_or(|generation| *generation == lease.lease_generation),
-            "staged child lease does not match its result metadata update"
-        );
-        self.append_journal(BatchJournalEvent::ChildStaged {
-            receipt: receipt.clone(),
-        })?;
-        let child = &mut self.manifest.children[lease.child_index];
-        child.checksum_sha256 = Some(receipt.checksum_sha256.clone());
-        child.size_bytes = Some(receipt.size_bytes);
-        child.record.file_size_bytes = Some(receipt.size_bytes as i64);
-        self.staged_receipts
-            .insert(lease.child_index, receipt.clone());
-        Ok(receipt)
-    }
-
-    /// Seal a child that was streamed directly into its transaction-owned
-    /// staging path. Metadata is immutable from `begin`; this transition adds
-    /// only the staged file checksum and size before the normal journaled
-    /// commit.
-    pub fn seal_staged_file(&mut self, child_index: usize) -> anyhow::Result<()> {
-        self.ensure_usable()?;
-        ensure!(
-            self.manifest.state == BatchManifestState::Staging,
-            "children can only be staged while the attempt is staging"
-        );
-        let path = self.staging_path(child_index)?;
+        let path = self.staging_path();
         File::open(&path)?.sync_all()?;
         sync_dir(path.parent().expect("staging path has parent"))?;
 
         let size = fs::metadata(&path)?.len();
         let record_size =
             i64::try_from(size).context("staged gallery import exceeds SQLite size range")?;
-        let receipt = BatchChildReceipt {
-            version: BatchChildReceipt::VERSION,
+        let receipt = StagedReceipt {
+            version: StagedReceipt::VERSION,
             parent_id: self.manifest.parent_id.clone(),
             attempt_generation: self.manifest.attempt_generation,
-            child_index,
-            lease_generation: 0,
+            child_index: 0,
             checksum_sha256: checksum_file(&path)?,
             size_bytes: size,
-            record_identity_sha256: immutable_record_identity(
-                self.manifest
-                    .children
-                    .get(child_index)
-                    .context("batch child index out of range")?,
-            )?,
+            record_identity_sha256: immutable_record_identity(sole_child(&self.manifest))?,
         };
         self.append_journal(BatchJournalEvent::ChildStaged {
             receipt: receipt.clone(),
         })?;
-        let child = &mut self.manifest.children[child_index];
+        let child = sole_child_mut(&mut self.manifest);
         child.checksum_sha256 = Some(receipt.checksum_sha256.clone());
         child.size_bytes = Some(size);
         child.record.file_size_bytes = Some(record_size);
-        self.staged_receipts.insert(child_index, receipt);
+        self.staged_receipt = Some(receipt);
         Ok(())
     }
 
@@ -1484,30 +1375,30 @@ impl BatchTransaction {
             "only an unpublished batch attempt can be rolled back"
         );
         ensure!(
-            !self.any_final_exists(),
+            !self.final_exists(),
             "unpublished batch attempt unexpectedly has a public final"
         );
         self.manifest.state = BatchManifestState::Failed;
         self.persist_manifest()?;
-        self.release_reservations();
+        self.release_reservation();
         self.cleanup_private_staging();
         remove_failed_attempt(&self);
         Ok(())
     }
 
-    /// Verify every child and durably close the attempt to further staging.
+    /// Verify the staged file and durably close the attempt to further staging.
     pub fn mark_prepared(&mut self) -> anyhow::Result<()> {
         self.ensure_usable()?;
         ensure!(
             self.manifest.state == BatchManifestState::Staging,
             "only a staging attempt can become prepared"
         );
-        self.verify_all_staged()?;
+        self.verify_staged()?;
         self.manifest.state = BatchManifestState::Prepared;
         self.persist_manifest()
     }
 
-    /// Publish every child while excluding all gallery observers and
+    /// Publish the import while excluding all gallery observers and
     /// mutators. Errors after `committing` are returned with the writer guard
     /// retained; dropping that error terminates the process so a live server
     /// can never expose an unresolved transaction.
@@ -1565,8 +1456,8 @@ impl BatchTransaction {
             Err(error) => return Err(UnresolvedBatchCommit::pre_commit(error)),
         };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.verify_owned_reservations()?;
-            self.verify_all_committed()?;
+            self.verify_owned_reservation()?;
+            self.verify_committed()?;
             self.commit_while_locked(gate, &db, &mut bookkeeping)
         }));
         match result {
@@ -1592,24 +1483,22 @@ impl BatchTransaction {
             ),
             "batch attempt is not prepared for commit"
         );
-        self.verify_owned_reservations()?;
-        self.verify_all_staged()
+        self.verify_owned_reservation()?;
+        self.verify_staged()
     }
 
-    fn verify_owned_reservations(&self) -> anyhow::Result<()> {
+    fn verify_owned_reservation(&self) -> anyhow::Result<()> {
         let expected = self.reservation_owner();
-        for child in &self.manifest.children {
-            let path = reservation_path(&self.output_dir, &child.final_name);
-            let actual: ReservationOwner = serde_json::from_slice(&fs::read(&path)?)
-                .with_context(|| format!("reading reservation {}", path.display()))?;
-            ensure!(
-                actual == expected,
-                "batch final reservation {} is no longer owned by attempt {}/generation {}",
-                child.final_name,
-                expected.parent_id,
-                expected.attempt_generation
-            );
-        }
+        let final_name = &sole_child(&self.manifest).final_name;
+        let path = reservation_path(&self.output_dir, final_name);
+        let actual: ReservationOwner = serde_json::from_slice(&fs::read(&path)?)
+            .with_context(|| format!("reading reservation {}", path.display()))?;
+        ensure!(
+            actual == expected,
+            "batch final reservation {final_name} is no longer owned by attempt {}/generation {}",
+            expected.parent_id,
+            expected.attempt_generation
+        );
         Ok(())
     }
 
@@ -1630,39 +1519,40 @@ impl BatchTransaction {
             panic!("injected panic after committing");
         }
 
-        for child_index in 0..self.manifest.children.len() {
-            let child = &self.manifest.children[child_index];
-            let staged = self.attempt_dir.join("staging").join(&child.staging_name);
-            let final_path = self.output_dir.join(&child.final_name);
-            if final_path.exists() {
-                if checksum_file(&final_path)? != child.checksum_sha256.as_deref().unwrap() {
-                    ensure!(
-                        !self.journaled_final_children.contains(&child_index),
-                        "durably published batch child changed after publication: {}",
-                        final_path.display()
-                    );
-                    // A no-replace copy can be interrupted by a power loss
-                    // before its FinalPublished journal record. The attempt's
-                    // owner-scoped reservation makes that unjournaled path
-                    // ours to remove and reconstruct from verified staging.
-                    fs::remove_file(&final_path)?;
-                    sync_dir(&self.output_dir)?;
-                    publish_no_replace(&staged, &final_path)?;
-                }
-            } else {
+        let staged = self.staging_path();
+        let final_path = self.final_path();
+        if final_path.exists() {
+            let expected = sole_child(&self.manifest)
+                .checksum_sha256
+                .as_deref()
+                .context("prepared import has no staged checksum")?;
+            if checksum_file(&final_path)? != expected {
+                ensure!(
+                    !self.final_published,
+                    "durably published gallery import changed after publication: {}",
+                    final_path.display()
+                );
+                // A no-replace copy can be interrupted by a power loss before
+                // its FinalPublished journal record. The attempt's owner-scoped
+                // reservation makes that unjournaled path ours to remove and
+                // reconstruct from verified staging.
+                fs::remove_file(&final_path)?;
+                sync_dir(&self.output_dir)?;
                 publish_no_replace(&staged, &final_path)?;
             }
-            self.inject_commit_error(CommitFailpoint::FinalPublish(child_index))?;
-            File::open(&final_path)?.sync_all()?;
-            self.inject_commit_error(CommitFailpoint::FinalFileFsync(child_index))?;
-            self.manifest.children[child_index]
-                .record
-                .stat_from_disk(&final_path);
-            if !self.journaled_final_children.contains(&child_index) {
-                self.append_journal(BatchJournalEvent::FinalPublished { child_index })?;
-                self.journaled_final_children.insert(child_index);
-                self.inject_commit_error(CommitFailpoint::FinalJournalFsync(child_index))?;
-            }
+        } else {
+            publish_no_replace(&staged, &final_path)?;
+        }
+        self.inject_commit_error(CommitFailpoint::FinalPublish)?;
+        File::open(&final_path)?.sync_all()?;
+        self.inject_commit_error(CommitFailpoint::FinalFileFsync)?;
+        sole_child_mut(&mut self.manifest)
+            .record
+            .stat_from_disk(&final_path);
+        if !self.final_published {
+            self.append_journal(BatchJournalEvent::FinalPublished { child_index: 0 })?;
+            self.final_published = true;
+            self.inject_commit_error(CommitFailpoint::FinalJournalFsync)?;
         }
         sync_dir(&self.output_dir)?;
         self.inject_commit_error(CommitFailpoint::OutputDirectoryFsync)?;
@@ -1677,10 +1567,8 @@ impl BatchTransaction {
         let mut authority_manifest = self.manifest.clone();
         authority_manifest.state = BatchManifestState::Committed;
         self.persist_committed_archive_manifest_value(&authority_manifest)?;
-        // Hard-link publication shares inode ctime with private primary
-        // staging. Remove only those private links before capturing stable
-        // final-file facts; receipted auxiliaries remain private until the
-        // central gallery authority is durable.
+        // Hard-link publication shares inode ctime with private staging.
+        // Remove the private link before capturing stable final-file facts.
         self.cleanup_private_primary_staging()?;
         gate.record_committed_manifest(
             &self.output_dir,
@@ -1689,13 +1577,6 @@ impl BatchTransaction {
                 .as_ref()
                 .context("gallery bookkeeping authority released before publication")?,
         )?;
-        // Cache sidecars are never visible before the central gallery
-        // authority. Projection is idempotent so recovery can retry after a
-        // crash between authority commit and private-attempt cleanup.
-        self.publish_video_auxiliary_cache()?;
-        // Hard-link publication shares inode ctime with private staging.
-        // Remove every private primary/auxiliary only after both gallery
-        // authority and cache projection are complete.
         self.cleanup_private_staging();
         self.inject_commit_crash(CommitFailpoint::PrivateStagingCleaned);
         // The checksummed filesystem authority is now durable. Cross-process
@@ -1708,13 +1589,7 @@ impl BatchTransaction {
         // attempt and can never make a partial batch authoritative.
         if !self.metadata_committed {
             if let Some(db) = db.as_ref() {
-                let records: Vec<_> = self
-                    .manifest
-                    .children
-                    .iter()
-                    .map(|child| child.record.clone())
-                    .collect();
-                db.upsert_batch(&records)?;
+                db.upsert(&sole_child(&self.manifest).record)?;
             }
             self.inject_commit_error(CommitFailpoint::DatabaseTransaction)?;
             self.append_journal(BatchJournalEvent::MetadataCommitted)?;
@@ -1724,99 +1599,10 @@ impl BatchTransaction {
         self.manifest.state = BatchManifestState::Committed;
         self.persist_manifest()?;
         self.inject_commit_error(CommitFailpoint::CommittedState)?;
-        self.release_reservations();
+        self.release_reservation();
         self.inject_commit_crash(CommitFailpoint::ReservationsReleased);
         self.archive_committed_attempt(false)?;
         Ok(())
-    }
-
-    fn publish_video_auxiliary_cache(&self) -> anyhow::Result<()> {
-        for ((child_index, kind), receipt) in &self.auxiliary_receipts {
-            let source = self.auxiliary_path(*child_index, *kind)?;
-            let bytes = fs::read(&source).with_context(|| {
-                format!("reading receipted batch auxiliary {}", source.display())
-            })?;
-            ensure!(
-                bytes.len() as u64 == receipt.size_bytes
-                    && checksum_bytes(&bytes) == receipt.checksum_sha256,
-                "receipted batch auxiliary changed: {}",
-                source.display()
-            );
-            let destination = self.auxiliary_cache_path(*child_index, *kind)?;
-            atomic_write_bytes(&destination, &bytes)?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn verify_auxiliary_receipts_for_child(
-        &self,
-        child_index: usize,
-        lease_generation: u64,
-    ) -> anyhow::Result<()> {
-        ensure!(
-            !self
-                .cleared_auxiliary_leases
-                .contains(&(child_index, lease_generation)),
-            "accepted child lease had its video auxiliary receipts cleared"
-        );
-        for ((_, kind), receipt) in self.auxiliary_receipts.range(
-            (child_index, BatchAuxiliaryKind::ThumbnailPng)
-                ..=(child_index, BatchAuxiliaryKind::PreviewGif),
-        ) {
-            ensure!(
-                receipt.lease_generation == lease_generation,
-                "video auxiliary receipt belongs to the wrong accepted child lease"
-            );
-            let path = self.auxiliary_path(child_index, *kind)?;
-            let verified_path = if path.is_file() {
-                path
-            } else {
-                ensure!(
-                    self.output_dir
-                        .join(&self.manifest.children[child_index].final_name)
-                        .is_file(),
-                    "receipted batch auxiliary is missing: {}",
-                    path.display()
-                );
-                self.auxiliary_cache_path(child_index, *kind)?
-            };
-            let metadata = fs::metadata(&verified_path).with_context(|| {
-                format!(
-                    "receipted batch auxiliary projection is missing: {}",
-                    verified_path.display()
-                )
-            })?;
-            ensure!(
-                metadata.is_file()
-                    && metadata.len() == receipt.size_bytes
-                    && checksum_file(&verified_path)? == receipt.checksum_sha256,
-                "receipted batch auxiliary changed: {}",
-                verified_path.display()
-            );
-        }
-        Ok(())
-    }
-
-    fn auxiliary_cache_path(
-        &self,
-        child_index: usize,
-        kind: BatchAuxiliaryKind,
-    ) -> anyhow::Result<PathBuf> {
-        let child = self
-            .manifest
-            .children
-            .get(child_index)
-            .context("batch auxiliary child index out of range")?;
-        let mold_dir = mold_core::Config::mold_dir().unwrap_or_else(|| PathBuf::from(".mold"));
-        Ok(match kind {
-            BatchAuxiliaryKind::ThumbnailPng => mold_dir
-                .join("cache")
-                .join("thumbnails")
-                .join(format!("{}.png", child.final_name)),
-            BatchAuxiliaryKind::PreviewGif => mold_dir.join("cache").join("previews").join(
-                mold_core::media_paths::preview_gif_filename(&child.final_name),
-            ),
-        })
     }
 
     #[cfg(test)]
@@ -1844,52 +1630,44 @@ impl BatchTransaction {
     #[cfg(not(test))]
     fn inject_commit_crash(&mut self, _point: CommitFailpoint) {}
 
-    fn verify_all_staged(&self) -> anyhow::Result<()> {
-        for (child_index, child) in self.manifest.children.iter().enumerate() {
-            let expected = child
-                .checksum_sha256
-                .as_deref()
-                .context("batch child has no staged checksum")?;
-            let path = self.attempt_dir.join("staging").join(&child.staging_name);
-            ensure!(
-                checksum_file(&path)? == expected,
-                "staged child checksum changed: {}",
-                path.display()
-            );
-            let lease_generation = self
-                .staged_receipts
-                .get(&child_index)
-                .map_or(0, |receipt| receipt.lease_generation);
-            self.verify_auxiliary_receipts_for_child(child_index, lease_generation)?;
-        }
+    fn verify_staged(&self) -> anyhow::Result<()> {
+        let expected = sole_child(&self.manifest)
+            .checksum_sha256
+            .as_deref()
+            .context("gallery import has no staged checksum")?;
+        let path = self.staging_path();
+        ensure!(
+            checksum_file(&path)? == expected,
+            "staged import checksum changed: {}",
+            path.display()
+        );
         Ok(())
     }
 
-    fn any_final_exists(&self) -> bool {
-        self.manifest
-            .children
-            .iter()
-            .any(|child| self.output_dir.join(&child.final_name).exists())
+    fn final_path(&self) -> PathBuf {
+        self.output_dir.join(&sole_child(&self.manifest).final_name)
     }
 
-    fn verify_all_committed(&self) -> anyhow::Result<()> {
-        for child in &self.manifest.children {
-            let expected = child
-                .checksum_sha256
-                .as_deref()
-                .context("committed batch child has no checksum")?;
-            let path = self.output_dir.join(&child.final_name);
-            ensure!(
-                path.is_file(),
-                "committed batch child is missing: {}",
-                path.display()
-            );
-            ensure!(
-                checksum_file(&path)? == expected,
-                "committed batch child checksum changed: {}",
-                path.display()
-            );
-        }
+    fn final_exists(&self) -> bool {
+        self.final_path().exists()
+    }
+
+    fn verify_committed(&self) -> anyhow::Result<()> {
+        let expected = sole_child(&self.manifest)
+            .checksum_sha256
+            .as_deref()
+            .context("committed gallery import has no checksum")?;
+        let path = self.final_path();
+        ensure!(
+            path.is_file(),
+            "committed gallery import is missing: {}",
+            path.display()
+        );
+        ensure!(
+            checksum_file(&path)? == expected,
+            "committed gallery import checksum changed: {}",
+            path.display()
+        );
         Ok(())
     }
 
@@ -1970,16 +1748,15 @@ impl BatchTransaction {
         }
     }
 
-    fn release_reservations(&self) {
+    fn release_reservation(&self) {
         let owner = self.reservation_owner();
-        for child in &self.manifest.children {
-            if let Err(error) = release_reservation(&self.output_dir, &child.final_name, &owner) {
-                tracing::warn!(
-                    final_name = %child.final_name,
-                    %error,
-                    "failed to release owned batch filename reservation"
-                );
-            }
+        let final_name = &sole_child(&self.manifest).final_name;
+        if let Err(error) = release_reservation(&self.output_dir, final_name, &owner) {
+            tracing::warn!(
+                final_name = %final_name,
+                %error,
+                "failed to release owned gallery filename reservation"
+            );
         }
         let _ = sync_dir(&reservations_dir(&self.output_dir));
     }
@@ -1999,12 +1776,10 @@ impl BatchTransaction {
 
     fn cleanup_private_primary_staging(&self) -> anyhow::Result<()> {
         let staging = self.attempt_dir.join("staging");
-        for child in &self.manifest.children {
-            match fs::remove_file(staging.join(&child.staging_name)) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
+        match fs::remove_file(self.staging_path()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
         match sync_dir(&staging) {
             Ok(()) => Ok(()),
@@ -2113,6 +1888,7 @@ impl BatchTransaction {
         let disk_manifest = match fs::read(manifest_path) {
             Ok(bytes) => match serde_json::from_slice::<BatchAttemptManifest>(&bytes) {
                 Ok(manifest) => match validate_loaded_manifest(output_dir, &attempt_dir, &manifest)
+                    .and_then(|()| ensure_single_record_attempt(&attempt_dir, &manifest))
                 {
                     Ok(()) => Some(manifest),
                     Err(error) => {
@@ -2144,11 +1920,7 @@ impl BatchTransaction {
                         attempt_dir.display()
                     )
                 })?;
-        ensure!(
-            matches!(manifest.version, MANIFEST_VERSION_V1 | MANIFEST_VERSION),
-            "unsupported batch manifest version {}",
-            manifest.version
-        );
+        ensure_single_record_attempt(&attempt_dir, &manifest)?;
         let next_journal_sequence = match journal.last() {
             Some(record) => record
                 .sequence
@@ -2162,16 +1934,13 @@ impl BatchTransaction {
             _attempt_authority: attempt_authority,
             manifest,
             next_journal_sequence,
-            journaled_final_children: replay.published_children,
+            final_published: replay.final_published,
             post_publish_snapshot: replay.post_publish_snapshot,
             metadata_committed: replay.metadata_committed,
             cleanup_started: replay.cleanup_started,
             reconstructed_from_journal,
             journal_needs_heal,
-            staged_receipts: replay.staged_receipts,
-            record_lease_generations: replay.record_lease_generations,
-            auxiliary_receipts: replay.auxiliary_receipts,
-            cleared_auxiliary_leases: replay.cleared_auxiliary_leases,
+            staged_receipt: replay.staged_receipt,
             poisoned: false,
             #[cfg(test)]
             commit_failpoint: None,
@@ -2217,16 +1986,11 @@ fn same_attempt_identity(
     {
         return Ok(false);
     }
-    for (left, right) in left.children.iter().zip(&right.children) {
-        if left.child_index != right.child_index
-            || left.staging_name != right.staging_name
-            || left.final_name != right.final_name
-            || !record_eq_ignoring_file_stat(&left.record, &right.record)?
-        {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    let (left, right) = (sole_child(left), sole_child(right));
+    Ok(left.child_index == right.child_index
+        && left.staging_name == right.staging_name
+        && left.final_name == right.final_name
+        && record_eq_ignoring_file_stat(&left.record, &right.record)?)
 }
 
 fn manifests_equal_except_state(
@@ -2248,45 +2012,6 @@ fn is_initial_batch_manifest(manifest: &BatchAttemptManifest) -> bool {
         })
 }
 
-fn is_staging_successor(
-    previous: &BatchAttemptManifest,
-    next: &BatchAttemptManifest,
-) -> anyhow::Result<bool> {
-    if previous.state != BatchManifestState::Staging
-        || next.state != BatchManifestState::Staging
-        || !same_attempt_identity(previous, next)?
-    {
-        return Ok(false);
-    }
-    let mut staged_child = None;
-    for (index, (previous, next)) in previous.children.iter().zip(&next.children).enumerate() {
-        if manifest_child_eq(previous, next)? {
-            continue;
-        }
-        if staged_child.is_some()
-            || previous.checksum_sha256.is_some()
-            || previous.size_bytes.is_some()
-            || previous.record.file_size_bytes.is_some()
-            || previous.record.file_mtime_ms != next.record.file_mtime_ms
-            || next.checksum_sha256.is_none()
-            || next.size_bytes.is_none()
-            || next.record.file_size_bytes != next.size_bytes.map(|size| size as i64)
-            || !record_eq_ignoring_file_stat(&previous.record, &next.record)?
-        {
-            return Ok(false);
-        }
-        staged_child = Some(index);
-    }
-    Ok(staged_child.is_some())
-}
-
-fn manifest_child_eq(
-    left: &BatchManifestChild,
-    right: &BatchManifestChild,
-) -> anyhow::Result<bool> {
-    Ok(serde_json::to_value(left)? == serde_json::to_value(right)?)
-}
-
 fn is_post_publish_snapshot(
     previous: &BatchAttemptManifest,
     next: &BatchAttemptManifest,
@@ -2297,21 +2022,16 @@ fn is_post_publish_snapshot(
     {
         return Ok(false);
     }
-    for (previous, next) in previous.children.iter().zip(&next.children) {
-        if previous.checksum_sha256 != next.checksum_sha256
-            || previous.size_bytes != next.size_bytes
-            || previous.record.file_size_bytes != next.record.file_size_bytes
-            || !record_eq_ignoring_file_stat(&previous.record, &next.record)?
-            || match (previous.record.file_mtime_ms, next.record.file_mtime_ms) {
-                (Some(previous), Some(next)) => previous != next,
-                (Some(_), None) => true,
-                (None, _) => false,
-            }
-        {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    let (previous, next) = (sole_child(previous), sole_child(next));
+    Ok(previous.checksum_sha256 == next.checksum_sha256
+        && previous.size_bytes == next.size_bytes
+        && previous.record.file_size_bytes == next.record.file_size_bytes
+        && record_eq_ignoring_file_stat(&previous.record, &next.record)?
+        && match (previous.record.file_mtime_ms, next.record.file_mtime_ms) {
+            (Some(previous), Some(next)) => previous == next,
+            (Some(_), None) => false,
+            (None, _) => true,
+        })
 }
 
 impl BatchJournalReplay {
@@ -2319,11 +2039,8 @@ impl BatchJournalReplay {
         Self {
             manifest_history: vec![manifest.clone()],
             manifest,
-            staged_receipts: BTreeMap::new(),
-            record_lease_generations: BTreeMap::new(),
-            auxiliary_receipts: BTreeMap::new(),
-            cleared_auxiliary_leases: BTreeSet::new(),
-            published_children: BTreeSet::new(),
+            staged_receipt: None,
+            final_published: false,
             post_publish_snapshot: false,
             metadata_committed: false,
             cleanup_started: false,
@@ -2338,15 +2055,8 @@ impl BatchJournalReplay {
         let committed = manifest.state == BatchManifestState::Committed;
         Self {
             manifest_history: vec![manifest.clone()],
-            staged_receipts: BTreeMap::new(),
-            record_lease_generations: BTreeMap::new(),
-            auxiliary_receipts: BTreeMap::new(),
-            cleared_auxiliary_leases: BTreeSet::new(),
-            published_children: if committed {
-                (0..manifest.children.len()).collect()
-            } else {
-                BTreeSet::new()
-            },
+            staged_receipt: None,
+            final_published: committed,
             manifest,
             post_publish_snapshot: committed,
             metadata_committed: committed,
@@ -2366,6 +2076,7 @@ impl BatchJournalReplay {
         next: &BatchAttemptManifest,
     ) -> anyhow::Result<()> {
         validate_loaded_manifest(output_dir, attempt_dir, next)?;
+        ensure_single_record_attempt(attempt_dir, next)?;
         ensure!(
             same_attempt_identity(&self.manifest, next)?,
             "batch journal changes immutable attempt identity"
@@ -2375,36 +2086,14 @@ impl BatchJournalReplay {
             "batch journal contains an event after cleanup started"
         );
         let legal = match (self.manifest.state, next.state) {
-            (BatchManifestState::Staging, BatchManifestState::Staging) => {
-                // 0.21.0 gallery imports wrote this full snapshot before the
-                // v2 receipt delta below replaced that legacy writer path.
-                (self.manifest.version == MANIFEST_VERSION_V1
-                    || (self.manifest.version == MANIFEST_VERSION
-                        && self.manifest.children.len() == 1
-                        && self
-                            .manifest
-                            .normalized_request
-                            .get("kind")
-                            .and_then(|kind| kind.as_str())
-                            == Some("gallery_import")
-                        && self.staged_receipts.is_empty()
-                        && self.record_lease_generations.is_empty()
-                        && self.auxiliary_receipts.is_empty()
-                        && self.cleared_auxiliary_leases.is_empty()))
-                    && is_staging_successor(&self.manifest, next)?
-            }
             (BatchManifestState::Staging, BatchManifestState::Prepared) => {
                 manifests_equal_except_state(&self.manifest, next)?
-                    && next
-                        .children
-                        .iter()
-                        .all(|child| child.checksum_sha256.is_some())
-                    && (next.version == MANIFEST_VERSION_V1
-                        || self.staged_receipts.len() == next.children.len())
+                    && sole_child(next).checksum_sha256.is_some()
+                    && self.staged_receipt.is_some()
             }
             (BatchManifestState::Staging, BatchManifestState::Failed)
             | (BatchManifestState::Prepared, BatchManifestState::Failed) => {
-                self.published_children.is_empty()
+                !self.final_published
                     && !self.metadata_committed
                     && manifests_equal_except_state(&self.manifest, next)?
             }
@@ -2412,7 +2101,7 @@ impl BatchJournalReplay {
                 manifests_equal_except_state(&self.manifest, next)?
             }
             (BatchManifestState::Committing, BatchManifestState::Committing) => {
-                self.published_children.len() == self.manifest.children.len()
+                self.final_published
                     && !self.post_publish_snapshot
                     && !self.metadata_committed
                     && is_post_publish_snapshot(&self.manifest, next)?
@@ -2423,7 +2112,7 @@ impl BatchJournalReplay {
                     && manifests_equal_except_state(&self.manifest, next)?
             }
             (BatchManifestState::Committing, BatchManifestState::Failed) => {
-                self.published_children.is_empty()
+                !self.final_published
                     && !self.metadata_committed
                     && manifests_equal_except_state(&self.manifest, next)?
             }
@@ -2439,44 +2128,6 @@ impl BatchJournalReplay {
             && next.state == BatchManifestState::Committing
         {
             self.post_publish_snapshot = true;
-        }
-        if self.manifest.version == MANIFEST_VERSION
-            && self.manifest.state == BatchManifestState::Staging
-            && next.state == BatchManifestState::Staging
-        {
-            // Reconstruct the receipt that the legacy full-snapshot writer
-            // omitted so every later v2 transition retains its normal proof.
-            let mut refreshed = None;
-            for (child_index, (previous, next)) in self
-                .manifest
-                .children
-                .iter()
-                .zip(&next.children)
-                .enumerate()
-            {
-                if !manifest_child_eq(previous, next)? {
-                    refreshed = Some((child_index, next));
-                    break;
-                }
-            }
-            let (child_index, child) =
-                refreshed.context("v2 staging snapshot refresh has no changed child")?;
-            let receipt = BatchChildReceipt {
-                version: BatchChildReceipt::VERSION,
-                parent_id: next.parent_id.clone(),
-                attempt_generation: next.attempt_generation,
-                child_index,
-                lease_generation: 0,
-                checksum_sha256: child
-                    .checksum_sha256
-                    .clone()
-                    .context("v2 staging snapshot refresh has no checksum")?,
-                size_bytes: child
-                    .size_bytes
-                    .context("v2 staging snapshot refresh has no size")?,
-                record_identity_sha256: immutable_record_identity(child)?,
-            };
-            self.staged_receipts.insert(child_index, receipt);
         }
         self.manifest = next.clone();
         self.manifest_history.push(next.clone());
@@ -2497,139 +2148,27 @@ impl BatchJournalReplay {
             BatchJournalEvent::ManifestSnapshot { manifest } => {
                 self.apply_manifest_snapshot(output_dir, attempt_dir, manifest)
             }
-            BatchJournalEvent::ChildRecordUpdated {
-                child_index,
-                lease_generation,
-                record,
-            } => {
-                ensure!(
-                    self.manifest.version == MANIFEST_VERSION
-                        && self.manifest.state == BatchManifestState::Staging,
-                    "ChildRecordUpdated is outside a v2 staging attempt"
-                );
-                let child = self
-                    .manifest
-                    .children
-                    .get_mut(*child_index)
-                    .context("ChildRecordUpdated child index is out of range")?;
-                ensure!(
-                    child.checksum_sha256.is_none()
-                        && !self.staged_receipts.contains_key(child_index),
-                    "ChildRecordUpdated follows an accepted staging receipt"
-                );
-                ensure!(
-                    record.filename == child.final_name
-                        && Path::new(&record.output_dir) == output_dir,
-                    "ChildRecordUpdated changed reserved output identity"
-                );
-                child.record = *record.clone();
-                self.record_lease_generations
-                    .insert(*child_index, *lease_generation);
-                ensure!(
-                    self.auxiliary_receipts
-                        .iter()
-                        .filter(|((index, _), _)| index == child_index)
-                        .all(|(_, receipt)| receipt.lease_generation == *lease_generation),
-                    "ChildRecordUpdated lease does not match staged video auxiliaries"
-                );
-                Ok(())
-            }
-            BatchJournalEvent::ChildAuxiliaryStaged { receipt } => {
-                ensure!(
-                    self.manifest.version == MANIFEST_VERSION
-                        && self.manifest.state == BatchManifestState::Staging
-                        && receipt.child_index < self.manifest.children.len()
-                        && !self.staged_receipts.contains_key(&receipt.child_index),
-                    "ChildAuxiliaryStaged is outside an unstaged v2 child"
-                );
-                ensure!(
-                    receipt.size_bytes <= i64::MAX as u64
-                        && receipt.checksum_sha256.len() == 64
-                        && receipt
-                            .checksum_sha256
-                            .bytes()
-                            .all(|byte| { byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) }),
-                    "ChildAuxiliaryStaged receipt is invalid"
-                );
-                ensure!(
-                    self.record_lease_generations
-                        .get(&receipt.child_index)
-                        .is_none_or(|generation| *generation == receipt.lease_generation),
-                    "ChildAuxiliaryStaged lease does not match result metadata"
-                );
-                ensure!(
-                    self.auxiliary_receipts
-                        .insert((receipt.child_index, receipt.kind), receipt.clone())
-                        .is_none(),
-                    "ChildAuxiliaryStaged duplicates an existing kind"
-                );
-                Ok(())
-            }
-            BatchJournalEvent::ChildAuxiliariesCleared {
-                child_index,
-                lease_generation,
-            } => {
-                ensure!(
-                    self.manifest.version == MANIFEST_VERSION
-                        && self.manifest.state == BatchManifestState::Staging
-                        && *child_index < self.manifest.children.len()
-                        && self
-                            .auxiliary_receipts
-                            .keys()
-                            .any(|(index, _)| index == child_index),
-                    "ChildAuxiliariesCleared has no staged auxiliary receipts"
-                );
-                ensure!(
-                    self.auxiliary_receipts
-                        .iter()
-                        .filter(|((index, _), _)| index == child_index)
-                        .all(|(_, receipt)| receipt.lease_generation == *lease_generation),
-                    "ChildAuxiliariesCleared spans the wrong child lease"
-                );
-                self.auxiliary_receipts
-                    .retain(|(index, _), _| index != child_index);
-                self.cleared_auxiliary_leases
-                    .insert((*child_index, *lease_generation));
-                Ok(())
-            }
             BatchJournalEvent::ChildStaged { receipt } => {
                 ensure!(
-                    self.manifest.version == MANIFEST_VERSION
-                        && self.manifest.state == BatchManifestState::Staging
-                        && !self.cleanup_started,
-                    "ChildStaged is outside a v2 staging attempt"
+                    self.manifest.state == BatchManifestState::Staging,
+                    "ChildStaged is outside a staging attempt"
                 );
                 ensure!(
                     receipt.parent_id == self.manifest.parent_id
                         && receipt.attempt_generation == self.manifest.attempt_generation
-                        && receipt.child_index < self.manifest.children.len(),
+                        && receipt.child_index == 0,
                     "ChildStaged receipt does not belong to this attempt"
                 );
-                let child = &mut self.manifest.children[receipt.child_index];
+                let child = sole_child_mut(&mut self.manifest);
                 ensure!(
                     child.checksum_sha256.is_none()
                         && child.size_bytes.is_none()
-                        && !self.staged_receipts.contains_key(&receipt.child_index),
+                        && self.staged_receipt.is_none(),
                     "ChildStaged duplicates an existing receipt"
                 );
                 ensure!(
                     receipt.record_identity_sha256 == immutable_record_identity(child)?,
                     "ChildStaged immutable record identity changed"
-                );
-                ensure!(
-                    self.record_lease_generations
-                        .get(&receipt.child_index)
-                        .is_none_or(|generation| *generation == receipt.lease_generation),
-                    "ChildStaged lease generation does not match ChildRecordUpdated"
-                );
-                ensure!(
-                    self.auxiliary_receipts
-                        .iter()
-                        .filter(|((index, _), _)| *index == receipt.child_index)
-                        .all(|(_, auxiliary)| {
-                            auxiliary.lease_generation == receipt.lease_generation
-                        }),
-                    "ChildStaged lease generation does not match video auxiliaries"
                 );
                 ensure!(
                     receipt.checksum_sha256.len() == 64
@@ -2646,34 +2185,7 @@ impl BatchJournalReplay {
                 child.checksum_sha256 = Some(receipt.checksum_sha256.clone());
                 child.size_bytes = Some(receipt.size_bytes);
                 child.record.file_size_bytes = Some(receipt.size_bytes as i64);
-                self.staged_receipts
-                    .insert(receipt.child_index, receipt.clone());
-                Ok(())
-            }
-            BatchJournalEvent::ChildUnstaged {
-                child_index,
-                lease_generation,
-                record_identity_sha256,
-            } => {
-                ensure!(
-                    self.manifest.version == MANIFEST_VERSION
-                        && self.manifest.state == BatchManifestState::Staging,
-                    "ChildUnstaged is outside a v2 staging attempt"
-                );
-                let receipt = self
-                    .staged_receipts
-                    .remove(child_index)
-                    .context("ChildUnstaged has no matching receipt")?;
-                ensure!(
-                    receipt.lease_generation == *lease_generation
-                        && receipt.record_identity_sha256 == *record_identity_sha256,
-                    "ChildUnstaged does not match its receipt"
-                );
-                let child = &mut self.manifest.children[*child_index];
-                child.checksum_sha256 = None;
-                child.size_bytes = None;
-                child.record.file_size_bytes = None;
-                child.record.file_mtime_ms = None;
+                self.staged_receipt = Some(receipt.clone());
                 Ok(())
             }
             BatchJournalEvent::FinalPublished { child_index } => {
@@ -2684,23 +2196,20 @@ impl BatchJournalReplay {
                     "batch final publication is outside the committing publication phase"
                 );
                 ensure!(
-                    *child_index < self.manifest.children.len(),
+                    *child_index == 0,
                     "batch journal publishes out-of-range child {child_index}"
                 );
                 ensure!(
-                    *child_index == self.published_children.len(),
-                    "batch journal publishes child {child_index} out of order or more than once"
-                );
-                ensure!(
-                    self.published_children.insert(*child_index),
+                    !self.final_published,
                     "batch journal publishes child {child_index} more than once"
                 );
+                self.final_published = true;
                 Ok(())
             }
             BatchJournalEvent::MetadataCommitted => {
                 ensure!(
                     self.manifest.state == BatchManifestState::Committing
-                        && self.published_children.len() == self.manifest.children.len()
+                        && self.final_published
                         && self.post_publish_snapshot
                         && !self.metadata_committed,
                     "batch metadata commit is out of order or duplicated"
@@ -2741,6 +2250,7 @@ fn replay_batch_journal(
             anyhow::bail!("batch journal does not begin with a manifest snapshot");
         };
         validate_loaded_manifest(output_dir, attempt_dir, manifest)?;
+        ensure_single_record_attempt(attempt_dir, manifest)?;
         ensure!(
             record.sequence == 0
                 && record.attempt_generation == manifest.attempt_generation
@@ -2926,8 +2436,11 @@ pub async fn recover_transactions(
 
     let mut report = RecoveryReport::default();
     for claimed in attempts {
-        let mut transaction =
-            BatchTransaction::load_claimed(output_dir, &claimed.manifest_path, claimed.authority)?;
+        let mut transaction = GalleryImportTransaction::load_claimed(
+            output_dir,
+            &claimed.manifest_path,
+            claimed.authority,
+        )?;
         if transaction.reconstructed_from_journal {
             atomic_write_json(
                 &transaction.attempt_dir.join(MANIFEST_FILE),
@@ -2958,27 +2471,26 @@ pub async fn recover_transactions(
             BatchManifestState::Staging | BatchManifestState::Prepared => {
                 let _guard = gate.write().await;
                 ensure!(
-                    !transaction.any_final_exists(),
+                    !transaction.final_exists(),
                     "unpublished batch attempt has a final-path artifact; refusing to serve: {}",
                     transaction.attempt_dir.display()
                 );
                 transaction.manifest.state = BatchManifestState::Failed;
                 transaction.persist_manifest()?;
-                transaction.release_reservations();
+                transaction.release_reservation();
                 let _ = fs::remove_dir_all(transaction.attempt_dir.join("staging"));
                 remove_failed_attempt(&transaction);
                 report.rolled_back += 1;
             }
             BatchManifestState::Committing => {
-                if let Err(staged_error) = transaction.verify_all_staged() {
-                    let any_final_exists = transaction.any_final_exists();
-                    let has_durable_publication_evidence =
-                        !transaction.journaled_final_children.is_empty();
-                    if !any_final_exists && !has_durable_publication_evidence {
+                if let Err(staged_error) = transaction.verify_staged() {
+                    let final_exists = transaction.final_exists();
+                    let has_durable_publication_evidence = transaction.final_published;
+                    if !final_exists && !has_durable_publication_evidence {
                         let _guard = gate.write().await;
                         transaction.manifest.state = BatchManifestState::Failed;
                         transaction.persist_manifest()?;
-                        transaction.release_reservations();
+                        transaction.release_reservation();
                         remove_failed_attempt(&transaction);
                         report.rolled_back += 1;
                         tracing::warn!(
@@ -2989,7 +2501,7 @@ pub async fn recover_transactions(
                         continue;
                     }
 
-                    match transaction.verify_all_committed() {
+                    match transaction.verify_committed() {
                         Ok(()) => {
                             match transaction.commit_verified_finals(gate, db.clone()).await {
                                 Ok(()) => {
@@ -3043,23 +2555,17 @@ pub async fn recover_transactions(
                 }
             }
             BatchManifestState::Committed => {
-                transaction.verify_all_committed()?;
+                transaction.verify_committed()?;
                 let _guard = gate.write().await;
                 let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
                 transaction.persist_committed_archive_manifest()?;
                 gate.record_committed_manifest(output_dir, &transaction.manifest, &bookkeeping)?;
                 drop(bookkeeping);
                 if let Some(db) = db.as_ref() {
-                    let records: Vec<_> = transaction
-                        .manifest
-                        .children
-                        .iter()
-                        .map(|child| child.record.clone())
-                        .collect();
-                    db.upsert_batch(&records)?;
-                    report.healed_committed_rows += records.len();
+                    db.upsert(&sole_child(&transaction.manifest).record)?;
+                    report.healed_committed_rows += 1;
                 }
-                transaction.release_reservations();
+                transaction.release_reservation();
                 transaction.cleanup_private_staging();
                 transaction
                     .archive_committed_attempt(false)
@@ -3067,11 +2573,11 @@ pub async fn recover_transactions(
             }
             BatchManifestState::Failed => {
                 ensure!(
-                    !transaction.any_final_exists(),
+                    !transaction.final_exists(),
                     "failed batch attempt has a final-path artifact; refusing to remove durable evidence: {}",
                     transaction.attempt_dir.display()
                 );
-                transaction.release_reservations();
+                transaction.release_reservation();
                 transaction.cleanup_private_staging();
                 remove_failed_attempt(&transaction);
             }
@@ -3278,7 +2784,7 @@ fn release_all_reservations_for_owner(
     sync_dir(&reservations)
 }
 
-fn remove_failed_attempt(transaction: &BatchTransaction) {
+fn remove_failed_attempt(transaction: &GalleryImportTransaction) {
     if let Err(error) = fs::remove_dir_all(&transaction.attempt_dir) {
         if error.kind() != std::io::ErrorKind::NotFound {
             tracing::warn!(
@@ -5787,6 +5293,7 @@ fn load_journal(path: &Path) -> anyhow::Result<Vec<BatchJournalRecord>> {
             }
             continue;
         }
+        refuse_retired_journal_event(line, path)?;
         match serde_json::from_slice::<BatchJournalRecord>(line) {
             Ok(record) => {
                 ensure!(
@@ -5834,6 +5341,28 @@ fn load_journal(path: &Path) -> anyhow::Result<Vec<BatchJournalRecord>> {
         }
     }
     Ok(records)
+}
+
+/// A journal line whose event kind a lease-era release wrote is refused by
+/// name before the ordinary parse, so it can never be mistaken for a torn
+/// trailing record and truncated. A line that is not JSON at all falls
+/// through to the ordinary parser, which owns that decision.
+fn refuse_retired_journal_event(line: &[u8], path: &Path) -> anyhow::Result<()> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
+        return Ok(());
+    };
+    let Some(kind) = value.pointer("/event/kind").and_then(|kind| kind.as_str()) else {
+        return Ok(());
+    };
+    ensure!(
+        !RETIRED_JOURNAL_EVENT_KINDS.contains(&kind),
+        "batch journal {} carries a `{kind}` event from an earlier multi-child release that \
+         this release cannot replay; move the attempt directory {} outside {TRANSACTION_DIR} \
+         after inspecting it",
+        path.display(),
+        path.parent().unwrap_or(path).display()
+    );
+    Ok(())
 }
 
 fn validate_component(value: &str, description: &str) -> anyhow::Result<()> {
@@ -6078,26 +5607,6 @@ fn atomic_write_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> 
     result
 }
 
-fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    let parent = path.parent().context("cache path has no parent")?;
-    fs::create_dir_all(parent)?;
-    let temp = parent.join(format!(".batch-cache.tmp-{}", uuid::Uuid::new_v4()));
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temp, path)?;
-        sync_dir(parent)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
-}
-
 pub(crate) fn sync_ordinary_gallery_directory(path: &Path) -> anyhow::Result<()> {
     tolerate_unsupported_ordinary_directory_sync(path, sync_dir(path))
 }
@@ -6152,6 +5661,21 @@ mod tests {
     use std::io::BufRead as _;
     use std::sync::{Arc as StdArc, Barrier};
 
+    impl GalleryImportTransaction {
+        /// Test shorthand for the production route: the caller streams into
+        /// `staging_path` with no-replace semantics, then seals it.
+        fn stage_bytes(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+            let path = self.staging_path();
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .with_context(|| format!("creating staged import {}", path.display()))?
+                .write_all(bytes)?;
+            self.seal_staged_file()
+        }
+    }
+
     fn predecessor_attempt_authority_path(attempt_dir: &Path) -> PathBuf {
         let generation = attempt_dir
             .file_name()
@@ -6200,6 +5724,25 @@ mod tests {
         record("unused.png", seed).metadata
     }
 
+    /// Publish one import end to end under its own parent id, as two
+    /// independent imports do when they share a gallery.
+    async fn publish_import(dir: &Path, parent_id: &str, name: &str, seed: u64, bytes: &[u8]) {
+        let mut transaction = GalleryImportTransaction::begin(
+            dir,
+            parent_id,
+            0,
+            serde_json::json!({"kind": "gallery_import"}),
+            record(name, seed),
+        )
+        .unwrap();
+        transaction.stage_bytes(bytes).unwrap();
+        transaction.mark_prepared().unwrap();
+        transaction
+            .commit(&GalleryPublicationGate::default(), Arc::new(None))
+            .await
+            .unwrap();
+    }
+
     #[test]
     #[ignore = "subprocess helper for cross-process gallery authority tests"]
     fn gallery_authority_process_helper() {
@@ -6210,15 +5753,15 @@ mod tests {
             Ok("batch") => {
                 let runtime = tokio::runtime::Runtime::new().unwrap();
                 runtime.block_on(async {
-                    let mut batch = BatchTransaction::begin(
+                    let mut batch = GalleryImportTransaction::begin(
                         &output,
                         "subprocess-batch",
                         0,
                         serde_json::json!({}),
-                        vec![record("subprocess.png", 7)],
+                        record("subprocess.png", 7),
                     )
                     .unwrap();
-                    batch.stage_bytes(0, b"subprocess").unwrap();
+                    batch.stage_bytes(b"subprocess").unwrap();
                     batch.mark_prepared().unwrap();
                     batch
                         .commit(&GalleryPublicationGate::default(), Arc::new(None))
@@ -6255,7 +5798,7 @@ mod tests {
         journal.sync_all().unwrap();
     }
 
-    fn next_batch_sequence(transaction: &BatchTransaction) -> u64 {
+    fn next_batch_sequence(transaction: &GalleryImportTransaction) -> u64 {
         load_journal(&transaction.attempt_dir.join(JOURNAL_FILE))
             .unwrap()
             .len() as u64
@@ -6274,12 +5817,12 @@ mod tests {
                 let barrier = StdArc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    BatchTransaction::begin(
+                    GalleryImportTransaction::begin(
                         &output_dir,
                         "parent",
                         0,
                         serde_json::json!({"batch_size": 1}),
-                        vec![record("one.png", 0)],
+                        record("one.png", 0),
                     )
                     .is_ok()
                 })
@@ -6325,12 +5868,12 @@ mod tests {
         let (continue_begin_tx, continue_begin_rx) = std::sync::mpsc::channel();
         let begin_output = StdArc::clone(&output_dir);
         let begin = std::thread::spawn(move || {
-            BatchTransaction::begin_with_reservation_directory_hook(
+            GalleryImportTransaction::begin_with_reservation_directory_hook(
                 &begin_output,
                 "parent",
                 0,
                 serde_json::json!({"batch_size": 1}),
-                vec![record("batch.png", 0)],
+                record("batch.png", 0),
                 move || {
                     directory_ready_tx.send(()).unwrap();
                     continue_begin_rx.recv().unwrap();
@@ -6361,7 +5904,7 @@ mod tests {
             !reservation_path(&output_dir, "ordinary.png").exists(),
             "ordinary reservation bookkeeping leaked"
         );
-        transaction.release_reservations();
+        transaction.release_reservation();
         remove_failed_attempt(&transaction);
     }
 
@@ -6485,15 +6028,15 @@ mod tests {
     #[tokio::test]
     async fn predecessor_v1_owner_blocks_v2_recovery_until_release() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "mixed-parent",
             0,
             serde_json::json!({"batch_size": 1}),
-            vec![record("mixed.png", 0)],
+            record("mixed.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"mixed child").unwrap();
+        transaction.stage_bytes(b"mixed child").unwrap();
         transaction.relinquish_attempt_authority_for_recovery();
 
         let (mut predecessor, mut predecessor_input, mut predecessor_output) =
@@ -6537,12 +6080,12 @@ mod tests {
     #[test]
     fn predecessor_v1_owner_makes_v2_begin_return_typed_contention() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "mixed-parent",
             0,
             serde_json::json!({"batch_size": 1}),
-            vec![record("mixed.png", 0)],
+            record("mixed.png", 0),
         )
         .unwrap();
         transaction.relinquish_attempt_authority_for_recovery();
@@ -6555,12 +6098,12 @@ mod tests {
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             result_tx
-                .send(BatchTransaction::begin(
+                .send(GalleryImportTransaction::begin(
                     &output_dir,
                     "mixed-parent",
                     0,
                     serde_json::json!({"batch_size": 1}),
-                    vec![record("mixed.png", 0)],
+                    record("mixed.png", 0),
                 ))
                 .unwrap();
         });
@@ -6582,12 +6125,12 @@ mod tests {
     #[test]
     fn v2_owner_blocks_predecessor_style_v1_claimant() {
         let dir = tempfile::tempdir().unwrap();
-        let transaction = BatchTransaction::begin(
+        let transaction = GalleryImportTransaction::begin(
             dir.path(),
             "mixed-parent",
             0,
             serde_json::json!({"batch_size": 1}),
-            vec![record("mixed.png", 0)],
+            record("mixed.png", 0),
         )
         .unwrap();
 
@@ -6603,15 +6146,15 @@ mod tests {
     #[tokio::test]
     async fn predecessor_v1_process_exit_releases_authority_for_recovery() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "mixed-parent",
             0,
             serde_json::json!({"batch_size": 1}),
-            vec![record("mixed.png", 0)],
+            record("mixed.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"mixed child").unwrap();
+        transaction.stage_bytes(b"mixed child").unwrap();
         transaction.relinquish_attempt_authority_for_recovery();
 
         let (mut predecessor, mut predecessor_input, mut predecessor_output) =
@@ -6637,15 +6180,15 @@ mod tests {
     #[test]
     fn simultaneous_v2_recovery_skips_a_predecessor_v1_owner() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "mixed-parent",
             0,
             serde_json::json!({"batch_size": 1}),
-            vec![record("mixed.png", 0)],
+            record("mixed.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"mixed child").unwrap();
+        transaction.stage_bytes(b"mixed child").unwrap();
         transaction.relinquish_attempt_authority_for_recovery();
 
         let (mut predecessor, mut predecessor_input, mut predecessor_output) =
@@ -6692,12 +6235,12 @@ mod tests {
     #[test]
     fn stale_unlocked_predecessor_v1_authority_is_retained_as_a_reusable_inode() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "mixed-parent",
             0,
             serde_json::json!({"batch_size": 1}),
-            vec![record("mixed.png", 0)],
+            record("mixed.png", 0),
         )
         .unwrap();
         transaction.relinquish_attempt_authority_for_recovery();
@@ -6784,12 +6327,12 @@ mod tests {
     #[test]
     fn predecessor_open_before_lock_keeps_one_stable_legacy_authority_inode() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "mixed-parent",
             0,
             serde_json::json!({"batch_size": 1}),
-            vec![record("mixed.png", 0)],
+            record("mixed.png", 0),
         )
         .unwrap();
         transaction.relinquish_attempt_authority_for_recovery();
@@ -6822,12 +6365,12 @@ mod tests {
     #[test]
     fn exact_claim_fails_closed_on_a_legacy_authority_symlink() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({"batch_size": 1}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         transaction.relinquish_attempt_authority_for_recovery();
@@ -6851,12 +6394,12 @@ mod tests {
     #[test]
     fn hardlinked_stale_authority_is_warn_skipped_but_exact_claim_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({"batch_size": 1}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         transaction.relinquish_attempt_authority_for_recovery();
@@ -7050,22 +6593,22 @@ mod tests {
         );
         let state = std::env::var("MOLD_TEST_BATCH_ATTEMPT_STATE")
             .expect("MOLD_TEST_BATCH_ATTEMPT_STATE must be set by parent test");
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             &output_dir,
             "live-parent",
             0,
             serde_json::json!({"batch_size": 1}),
-            vec![record("live-child.png", 0)],
+            record("live-child.png", 0),
         )
         .unwrap();
         match state.as_str() {
             "staging" => {}
             "prepared" => {
-                transaction.stage_bytes(0, b"live child").unwrap();
+                transaction.stage_bytes(b"live child").unwrap();
                 transaction.mark_prepared().unwrap();
             }
             "committing" => {
-                transaction.stage_bytes(0, b"live child").unwrap();
+                transaction.stage_bytes(b"live child").unwrap();
                 transaction.mark_prepared().unwrap();
                 transaction.manifest.state = BatchManifestState::Committing;
                 transaction.persist_manifest().unwrap();
@@ -7091,15 +6634,15 @@ mod tests {
             std::env::var_os("MOLD_TEST_GALLERY_OUTPUT")
                 .expect("MOLD_TEST_GALLERY_OUTPUT must be set by parent test"),
         );
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             &output_dir,
             "archived-parent",
             0,
             serde_json::json!({"batch_size": 1}),
-            vec![record("archived-child.png", 0)],
+            record("archived-child.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"archived child").unwrap();
+        transaction.stage_bytes(b"archived child").unwrap();
         transaction.mark_prepared().unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -7119,12 +6662,12 @@ mod tests {
             match command.trim() {
                 "BEGIN_SECOND" => {
                     write_process_test_marker("SECOND_STARTED");
-                    let second = BatchTransaction::begin(
+                    let second = GalleryImportTransaction::begin(
                         &output_dir,
                         "second-parent",
                         0,
                         serde_json::json!({"batch_size": 1}),
-                        vec![record("second-child.png", 0)],
+                        record("second-child.png", 0),
                     )
                     .unwrap();
                     write_process_test_marker("SECOND_ACQUIRED");
@@ -7148,12 +6691,12 @@ mod tests {
                 .expect("MOLD_TEST_GALLERY_OUTPUT must be set by parent test"),
         );
         let mut input = std::io::BufReader::new(std::io::stdin());
-        let result = BatchTransaction::begin_with_attempt_authority_hook(
+        let result = GalleryImportTransaction::begin_with_attempt_authority_hook(
             &output_dir,
             "archived-parent",
             0,
             serde_json::json!({"batch_size": 1}),
-            vec![record("archived-child.png", 0)],
+            record("archived-child.png", 0),
             || {
                 write_process_test_marker("REPLACEMENT_CREATED");
                 let mut command = String::new();
@@ -7178,12 +6721,12 @@ mod tests {
             return;
         }
         assert_eq!(command.trim(), "RETRY");
-        let transaction = BatchTransaction::begin(
+        let transaction = GalleryImportTransaction::begin(
             &output_dir,
             "archived-parent",
             0,
             serde_json::json!({"batch_size": 1}),
-            vec![record("archived-child.png", 0)],
+            record("archived-child.png", 0),
         )
         .unwrap();
         write_process_test_marker("RETRY_ACQUIRED");
@@ -7512,15 +7055,15 @@ mod tests {
     #[test]
     fn simultaneous_recovery_skips_an_attempt_claimed_by_another_process() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "recovery-parent",
             0,
             serde_json::json!({"batch_size": 1}),
-            vec![record("recovery-child.png", 0)],
+            record("recovery-child.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"orphaned child").unwrap();
+        transaction.stage_bytes(b"orphaned child").unwrap();
         transaction.relinquish_attempt_authority_for_recovery();
 
         let mut first = std::process::Command::new(std::env::current_exe().unwrap())
@@ -7846,12 +7389,12 @@ mod tests {
         let (begin_paused_tx, begin_paused_rx) = std::sync::mpsc::channel();
         let (continue_begin_tx, continue_begin_rx) = std::sync::mpsc::channel();
         let begin = std::thread::spawn(move || {
-            BatchTransaction::begin_with_reservation_directory_hook(
+            GalleryImportTransaction::begin_with_reservation_directory_hook(
                 &output_dir,
                 "parent",
                 0,
                 serde_json::json!({"batch_size": 1}),
-                vec![record("batch-process.png", 0)],
+                record("batch-process.png", 0),
                 move || {
                     begin_paused_tx.send(()).unwrap();
                     continue_begin_rx.recv().unwrap();
@@ -7892,7 +7435,7 @@ mod tests {
             !reservation_path(dir.path(), "ordinary-process.png").exists(),
             "cross-process ordinary reservation bookkeeping leaked"
         );
-        transaction.release_reservations();
+        transaction.release_reservation();
         remove_failed_attempt(&transaction);
     }
 
@@ -7918,12 +7461,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gallery = dir.path().join("gallery");
         fs::create_dir(&gallery).unwrap();
-        let transaction = BatchTransaction::begin(
+        let transaction = GalleryImportTransaction::begin(
             &gallery,
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         let gallery_alias = dir.path().join("gallery-alias");
@@ -7968,12 +7511,12 @@ mod tests {
         fs::write(&near_match, b"user data").unwrap();
         fs::write(&non_hex, b"other user data").unwrap();
 
-        let transaction = BatchTransaction::begin(
+        let transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         fs::write(&legacy_unrelated, b"operator data").unwrap();
@@ -8007,12 +7550,12 @@ mod tests {
     #[test]
     fn attempt_authority_open_rejects_final_file_symlink_replacement() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         transaction.relinquish_attempt_authority_for_recovery();
@@ -8040,12 +7583,12 @@ mod tests {
     #[test]
     fn attempt_authority_open_rejects_final_file_regular_replacement() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         transaction.relinquish_attempt_authority_for_recovery();
@@ -8070,12 +7613,12 @@ mod tests {
     #[test]
     fn attempt_authority_claim_rejects_regular_replacement_after_lock() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         transaction.relinquish_attempt_authority_for_recovery();
@@ -8100,12 +7643,12 @@ mod tests {
     #[test]
     fn legacy_lock_directory_symlink_replacement_cannot_redirect_authority() {
         let dir = tempfile::tempdir().unwrap();
-        let transaction = BatchTransaction::begin(
+        let transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         let outside = dir.path().join("outside-directory");
@@ -8133,17 +7676,17 @@ mod tests {
     #[test]
     fn terminal_attempt_drop_reclaims_current_and_retains_stable_legacy_authority() {
         let dir = tempfile::tempdir().unwrap();
-        let transaction = BatchTransaction::begin(
+        let transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         let lock_path = attempt_authority_lock_path(&transaction.attempt_dir).unwrap();
         let legacy_path = predecessor_attempt_authority_path(&transaction.attempt_dir);
-        transaction.release_reservations();
+        transaction.release_reservation();
         remove_failed_attempt(&transaction);
         drop(transaction);
 
@@ -8160,21 +7703,21 @@ mod tests {
     #[test]
     fn existing_live_attempt_returns_typed_contention() {
         let dir = tempfile::tempdir().unwrap();
-        let transaction = BatchTransaction::begin(
+        let transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
 
-        let error = BatchTransaction::begin(
+        let error = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("two.png", 0)],
+            record("two.png", 0),
         )
         .unwrap_err();
         error
@@ -8187,15 +7730,15 @@ mod tests {
     #[test]
     fn dropped_unfinished_attempt_retains_recoverable_evidence_without_authority_leak() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"unfinished").unwrap();
+        transaction.stage_bytes(b"unfinished").unwrap();
         let lock_path = attempt_authority_lock_path(&transaction.attempt_dir).unwrap();
         drop(transaction);
         assert!(
@@ -8256,15 +7799,15 @@ mod tests {
         );
     }
 
-    fn journal_post_publish_snapshot(transaction: &mut BatchTransaction, bytes: &[u8]) {
-        transaction.stage_bytes(0, bytes).unwrap();
+    fn journal_post_publish_snapshot(transaction: &mut GalleryImportTransaction, bytes: &[u8]) {
+        transaction.stage_bytes(bytes).unwrap();
         transaction.mark_prepared().unwrap();
         transaction.manifest.state = BatchManifestState::Committing;
         transaction.persist_manifest().unwrap();
         let final_path = transaction
             .output_dir
             .join(&transaction.manifest.children[0].final_name);
-        fs::hard_link(transaction.staging_path(0).unwrap(), &final_path).unwrap();
+        fs::hard_link(transaction.staging_path(), &final_path).unwrap();
         File::open(&final_path).unwrap().sync_all().unwrap();
         transaction.manifest.children[0]
             .record
@@ -8275,7 +7818,7 @@ mod tests {
         transaction.persist_manifest().unwrap();
     }
 
-    fn commit_journal_without_cleanup(transaction: &mut BatchTransaction, bytes: &[u8]) {
+    fn commit_journal_without_cleanup(transaction: &mut GalleryImportTransaction, bytes: &[u8]) {
         journal_post_publish_snapshot(transaction, bytes);
         transaction
             .append_journal(BatchJournalEvent::MetadataCommitted)
@@ -8285,30 +7828,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn db_disabled_commit_publishes_all_children_and_durable_central_authority() {
+    async fn db_disabled_commit_publishes_the_import_and_durable_central_authority() {
         let dir = tempfile::tempdir().unwrap();
         let gate = GalleryPublicationGate::default();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
-            serde_json::json!({"batch_size": 2}),
-            vec![record("same.png", 0), record("other.png", 1)],
+            serde_json::json!({"kind": "gallery_import"}),
+            record("same.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"first").unwrap();
-        transaction.stage_bytes(1, b"second").unwrap();
+        transaction.stage_bytes(b"first").unwrap();
         transaction.mark_prepared().unwrap();
 
         transaction.commit(&gate, Arc::new(None)).await.unwrap();
 
         assert_eq!(fs::read(dir.path().join("same.png")).unwrap(), b"first");
-        assert_eq!(fs::read(dir.path().join("other.png")).unwrap(), b"second");
         assert_eq!(transaction.manifest().state, BatchManifestState::Committed);
         assert!(!transaction.attempt_dir.exists());
         let index = gate.committed_archive_index(dir.path()).unwrap();
         assert!(index.get("same.png").is_some());
-        assert!(index.get("other.png").is_some());
         assert!(
             !committed_manifests_dir(dir.path(), "parent")
                 .join("0.json")
@@ -8321,15 +7861,15 @@ mod tests {
     async fn db_enabled_restart_heals_exact_rows_from_a_db_disabled_archive() {
         let dir = tempfile::tempdir().unwrap();
         let original = record("archived.webp", 7);
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "db-disabled-parent",
             0,
             serde_json::json!({"batch_size": 1}),
-            vec![original.clone()],
+            original.clone(),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"archived webp bytes").unwrap();
+        transaction.stage_bytes(b"archived webp bytes").unwrap();
         transaction.mark_prepared().unwrap();
         transaction
             .commit(&GalleryPublicationGate::default(), Arc::new(None))
@@ -8373,15 +7913,15 @@ mod tests {
     #[tokio::test]
     async fn legacy_import_rejects_future_state_but_isolates_a_malformed_archive() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.stage_bytes(b"one").unwrap();
         transaction.mark_prepared().unwrap();
         transaction
             .commit(&GalleryPublicationGate::default(), Arc::new(None))
@@ -8435,15 +7975,15 @@ mod tests {
     async fn committed_archive_index_ignores_active_attempts_and_quarantines_duplicate_live_names()
     {
         let dir = tempfile::tempdir().unwrap();
-        let mut committed = BatchTransaction::begin(
+        let mut committed = GalleryImportTransaction::begin(
             dir.path(),
             "committed-parent",
             0,
             serde_json::json!({}),
-            vec![record("same.png", 0)],
+            record("same.png", 0),
         )
         .unwrap();
-        committed.stage_bytes(0, b"committed").unwrap();
+        committed.stage_bytes(b"committed").unwrap();
         committed.mark_prepared().unwrap();
         committed
             .commit(&GalleryPublicationGate::default(), Arc::new(None))
@@ -8452,12 +7992,12 @@ mod tests {
         let original = committed.manifest().clone();
         drop(committed);
 
-        let active = BatchTransaction::begin(
+        let active = GalleryImportTransaction::begin(
             dir.path(),
             "active-parent",
             0,
             serde_json::json!({}),
-            vec![record("active.png", 0)],
+            record("active.png", 0),
         )
         .unwrap();
         let index = load_committed_archive_index(dir.path()).unwrap();
@@ -8490,22 +8030,15 @@ mod tests {
     #[tokio::test]
     async fn archive_child_tombstone_finishes_delete_preserves_sibling_and_allows_reuse() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        publish_import(dir.path(), "first-parent", "one.png", 0, b"first bytes").await;
+        publish_import(
             dir.path(),
-            "first-parent",
-            0,
-            serde_json::json!({}),
-            vec![record("one.png", 0), record("sibling.png", 1)],
+            "sibling-parent",
+            "sibling.png",
+            1,
+            b"sibling bytes",
         )
-        .unwrap();
-        transaction.stage_bytes(0, b"first bytes").unwrap();
-        transaction.stage_bytes(1, b"sibling bytes").unwrap();
-        transaction.mark_prepared().unwrap();
-        transaction
-            .commit(&GalleryPublicationGate::default(), Arc::new(None))
-            .await
-            .unwrap();
-        drop(transaction);
+        .await;
 
         let delete_gate = GalleryPublicationGate::default();
         assert_eq!(
@@ -8525,16 +8058,16 @@ mod tests {
             "prompt 1"
         );
 
-        let mut replacement = BatchTransaction::begin(
+        let mut replacement = GalleryImportTransaction::begin(
             dir.path(),
             "replacement-parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 9)],
+            record("one.png", 9),
         )
         .unwrap();
         assert_eq!(replacement.manifest.children[0].final_name, "one.png");
-        replacement.stage_bytes(0, b"replacement bytes").unwrap();
+        replacement.stage_bytes(b"replacement bytes").unwrap();
         replacement.mark_prepared().unwrap();
         replacement
             .commit(&GalleryPublicationGate::default(), Arc::new(None))
@@ -8557,15 +8090,15 @@ mod tests {
     #[tokio::test]
     async fn startup_quarantines_an_externally_missing_file_without_tombstoning_or_deleting_it() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("removed.png", 0)],
+            record("removed.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"removed bytes").unwrap();
+        transaction.stage_bytes(b"removed bytes").unwrap();
         transaction.mark_prepared().unwrap();
         transaction
             .commit(&GalleryPublicationGate::default(), Arc::new(None))
@@ -8611,15 +8144,15 @@ mod tests {
         let first_gate = GalleryPublicationGate::default();
         let second_gate = GalleryPublicationGate::default();
 
-        let mut first = BatchTransaction::begin(
+        let mut first = GalleryImportTransaction::begin(
             dir.path(),
             "first",
             0,
             serde_json::json!({}),
-            vec![record("first.png", 0)],
+            record("first.png", 0),
         )
         .unwrap();
-        first.stage_bytes(0, b"first").unwrap();
+        first.stage_bytes(b"first").unwrap();
         first.mark_prepared().unwrap();
         first.commit(&first_gate, Arc::new(None)).await.unwrap();
         assert!(first_gate
@@ -8628,15 +8161,15 @@ mod tests {
             .get("first.png")
             .is_some());
 
-        let mut second = BatchTransaction::begin(
+        let mut second = GalleryImportTransaction::begin(
             dir.path(),
             "second",
             0,
             serde_json::json!({}),
-            vec![record("second.png", 1)],
+            record("second.png", 1),
         )
         .unwrap();
-        second.stage_bytes(0, b"second").unwrap();
+        second.stage_bytes(b"second").unwrap();
         second.mark_prepared().unwrap();
         second.commit(&second_gate, Arc::new(None)).await.unwrap();
 
@@ -8731,20 +8264,8 @@ mod tests {
     #[tokio::test]
     async fn authority_restart_stats_every_live_name_but_hashes_only_changed_media() {
         let dir = tempfile::tempdir().unwrap();
-        let gate = GalleryPublicationGate::default();
-        let mut batch = BatchTransaction::begin(
-            dir.path(),
-            "stats",
-            0,
-            serde_json::json!({}),
-            vec![record("first.png", 0), record("second.png", 1)],
-        )
-        .unwrap();
-        batch.stage_bytes(0, b"first").unwrap();
-        batch.stage_bytes(1, b"second").unwrap();
-        batch.mark_prepared().unwrap();
-        batch.commit(&gate, Arc::new(None)).await.unwrap();
-        drop(batch);
+        publish_import(dir.path(), "stats-first", "first.png", 0, b"first").await;
+        publish_import(dir.path(), "stats-second", "second.png", 1, b"second").await;
 
         let bookkeeping = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
         let unchanged =
@@ -8900,22 +8421,15 @@ mod tests {
     #[tokio::test]
     async fn delete_preserves_and_quarantines_a_file_whose_archived_identity_changed() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        publish_import(dir.path(), "parent", "damaged.png", 0, b"original bytes").await;
+        publish_import(
             dir.path(),
-            "parent",
-            0,
-            serde_json::json!({}),
-            vec![record("damaged.png", 0), record("sibling.png", 1)],
+            "sibling-parent",
+            "sibling.png",
+            1,
+            b"sibling bytes",
         )
-        .unwrap();
-        transaction.stage_bytes(0, b"original bytes").unwrap();
-        transaction.stage_bytes(1, b"sibling bytes").unwrap();
-        transaction.mark_prepared().unwrap();
-        transaction
-            .commit(&GalleryPublicationGate::default(), Arc::new(None))
-            .await
-            .unwrap();
-        drop(transaction);
+        .await;
 
         fs::write(dir.path().join("damaged.png"), b"tampered").unwrap();
         sync_dir(dir.path()).unwrap();
@@ -8948,16 +8462,16 @@ mod tests {
     async fn collision_is_frozen_without_overwriting_existing_file() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("same.png"), b"existing").unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("same.png", 0)],
+            record("same.png", 0),
         )
         .unwrap();
         assert_eq!(transaction.manifest.children[0].final_name, "same-1.png");
-        transaction.stage_bytes(0, b"new").unwrap();
+        transaction.stage_bytes(b"new").unwrap();
         transaction.mark_prepared().unwrap();
         transaction
             .commit(&GalleryPublicationGate::default(), Arc::new(None))
@@ -8970,25 +8484,25 @@ mod tests {
     #[test]
     fn stale_attempt_cleanup_cannot_release_a_retry_owned_reservation() {
         let dir = tempfile::tempdir().unwrap();
-        let stale = BatchTransaction::begin(
+        let stale = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             1,
             serde_json::json!({}),
-            vec![record("same.png", 0)],
+            record("same.png", 0),
         )
         .unwrap();
         fs::remove_file(reservation_path(dir.path(), "same.png")).unwrap();
-        let retry = BatchTransaction::begin(
+        let retry = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             2,
             serde_json::json!({}),
-            vec![record("same.png", 0)],
+            record("same.png", 0),
         )
         .unwrap();
 
-        stale.release_reservations();
+        stale.release_reservation();
 
         let owner: ReservationOwner =
             serde_json::from_slice(&fs::read(reservation_path(dir.path(), "same.png")).unwrap())
@@ -8999,24 +8513,19 @@ mod tests {
     #[tokio::test]
     async fn committing_recovery_rolls_forward_idempotently_with_db_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             7,
             serde_json::json!({}),
-            vec![record("one.png", 0), record("two.png", 1)],
+            record("one.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"one").unwrap();
-        transaction.stage_bytes(1, b"two").unwrap();
+        transaction.stage_bytes(b"one").unwrap();
         transaction.mark_prepared().unwrap();
         transaction.manifest.state = BatchManifestState::Committing;
         transaction.persist_manifest().unwrap();
-        fs::hard_link(
-            transaction.staging_path(0).unwrap(),
-            dir.path().join("one.png"),
-        )
-        .unwrap();
+        fs::hard_link(transaction.staging_path(), dir.path().join("one.png")).unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let gate = GalleryPublicationGate::default();
         transaction.relinquish_attempt_authority_for_recovery();
@@ -9030,8 +8539,8 @@ mod tests {
 
         assert_eq!(report.rolled_forward, 1);
         assert_eq!(second, RecoveryReport::default());
-        assert_eq!(db.as_ref().as_ref().unwrap().count().unwrap(), 2);
-        assert_eq!(fs::read(dir.path().join("two.png")).unwrap(), b"two");
+        assert_eq!(db.as_ref().as_ref().unwrap().count().unwrap(), 1);
+        assert_eq!(fs::read(dir.path().join("one.png")).unwrap(), b"one");
         assert!(
             db.as_ref()
                 .as_ref()
@@ -9048,15 +8557,15 @@ mod tests {
     #[tokio::test]
     async fn recovery_replaces_an_unjournaled_interrupted_no_replace_copy() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"complete").unwrap();
+        transaction.stage_bytes(b"complete").unwrap();
         transaction.mark_prepared().unwrap();
         transaction.manifest.state = BatchManifestState::Committing;
         transaction.persist_manifest().unwrap();
@@ -9078,15 +8587,15 @@ mod tests {
     #[tokio::test]
     async fn recovery_fails_closed_if_a_journaled_final_was_modified() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"complete").unwrap();
+        transaction.stage_bytes(b"complete").unwrap();
         transaction.mark_prepared().unwrap();
         transaction.manifest.state = BatchManifestState::Committing;
         transaction.persist_manifest().unwrap();
@@ -9113,19 +8622,19 @@ mod tests {
     async fn recovery_retains_publication_evidence_when_staged_and_final_bytes_are_lost() {
         for corrupt_staging in [false, true] {
             let dir = tempfile::tempdir().unwrap();
-            let mut transaction = BatchTransaction::begin(
+            let mut transaction = GalleryImportTransaction::begin(
                 dir.path(),
                 "parent",
                 0,
                 serde_json::json!({}),
-                vec![record("one.png", 0)],
+                record("one.png", 0),
             )
             .unwrap();
-            transaction.stage_bytes(0, b"complete").unwrap();
+            transaction.stage_bytes(b"complete").unwrap();
             transaction.mark_prepared().unwrap();
             transaction.manifest.state = BatchManifestState::Committing;
             transaction.persist_manifest().unwrap();
-            let staged = transaction.staging_path(0).unwrap();
+            let staged = transaction.staging_path();
             let final_path = dir.path().join("one.png");
             fs::hard_link(&staged, &final_path).unwrap();
             File::open(&final_path).unwrap().sync_all().unwrap();
@@ -9159,43 +8668,37 @@ mod tests {
                 journal_before,
                 "recovery must not append a Failed transition"
             );
-            let loaded =
-                BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
-                    .unwrap();
+            let loaded = GalleryImportTransaction::load(
+                dir.path(),
+                &transaction.attempt_dir.join(MANIFEST_FILE),
+            )
+            .unwrap();
             assert_eq!(loaded.manifest.state, BatchManifestState::Committing);
-            assert_eq!(loaded.journaled_final_children, BTreeSet::from([0]));
+            assert!(loaded.final_published);
         }
     }
 
     #[tokio::test]
     async fn recovery_rolls_forward_checksum_valid_finals_when_staging_is_lost() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
-            serde_json::json!({"batch_size": 2}),
-            vec![record("one.png", 0), record("two.png", 1)],
+            serde_json::json!({"kind": "gallery_import"}),
+            record("one.png", 0),
         )
         .unwrap();
-        for (child_index, bytes) in [b"one".as_slice(), b"two".as_slice()]
-            .into_iter()
-            .enumerate()
-        {
-            transaction.stage_bytes(child_index, bytes).unwrap();
-        }
+        transaction.stage_bytes(b"one").unwrap();
         transaction.mark_prepared().unwrap();
         transaction.manifest.state = BatchManifestState::Committing;
         transaction.persist_manifest().unwrap();
-        for child_index in 0..transaction.manifest.children.len() {
-            let child = &transaction.manifest.children[child_index];
-            let final_path = dir.path().join(&child.final_name);
-            fs::hard_link(transaction.staging_path(child_index).unwrap(), &final_path).unwrap();
-            File::open(&final_path).unwrap().sync_all().unwrap();
-            transaction
-                .append_journal(BatchJournalEvent::FinalPublished { child_index })
-                .unwrap();
-        }
+        let final_path = dir.path().join("one.png");
+        fs::hard_link(transaction.staging_path(), &final_path).unwrap();
+        File::open(&final_path).unwrap().sync_all().unwrap();
+        transaction
+            .append_journal(BatchJournalEvent::FinalPublished { child_index: 0 })
+            .unwrap();
         fs::remove_dir_all(transaction.attempt_dir.join("staging")).unwrap();
         transaction.relinquish_attempt_authority_for_recovery();
 
@@ -9209,7 +8712,6 @@ mod tests {
 
         assert_eq!(report.rolled_forward, 1);
         assert_eq!(fs::read(dir.path().join("one.png")).unwrap(), b"one");
-        assert_eq!(fs::read(dir.path().join("two.png")).unwrap(), b"two");
         assert!(!transaction.attempt_dir.exists());
         assert!(!committed_manifests_dir(dir.path(), "parent")
             .join("0.json")
@@ -9223,24 +8725,24 @@ mod tests {
     #[tokio::test]
     async fn startup_rolls_back_unpublished_attempts_without_touching_retry() {
         let dir = tempfile::tempdir().unwrap();
-        let mut stale = BatchTransaction::begin(
+        let mut stale = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             1,
             serde_json::json!({}),
-            vec![record("stale.png", 0)],
+            record("stale.png", 0),
         )
         .unwrap();
-        stale.stage_bytes(0, b"stale").unwrap();
-        let mut retry = BatchTransaction::begin(
+        stale.stage_bytes(b"stale").unwrap();
+        let mut retry = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             2,
             serde_json::json!({}),
-            vec![record("retry.png", 0)],
+            record("retry.png", 0),
         )
         .unwrap();
-        retry.stage_bytes(0, b"retry").unwrap();
+        retry.stage_bytes(b"retry").unwrap();
         stale.relinquish_attempt_authority_for_recovery();
         retry.relinquish_attempt_authority_for_recovery();
 
@@ -9262,15 +8764,15 @@ mod tests {
     #[tokio::test]
     async fn startup_reconstructs_a_torn_manifest_from_the_fsynced_journal() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             3,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.stage_bytes(b"one").unwrap();
         fs::write(transaction.attempt_dir.join(MANIFEST_FILE), b"{torn").unwrap();
         transaction.relinquish_attempt_authority_for_recovery();
 
@@ -9290,12 +8792,12 @@ mod tests {
     #[test]
     fn incomplete_trailing_journal_record_is_truncated_before_append() {
         let dir = tempfile::tempdir().unwrap();
-        let transaction = BatchTransaction::begin(
+        let transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         let journal_path = transaction.attempt_dir.join(JOURNAL_FILE);
@@ -9304,10 +8806,12 @@ mod tests {
         journal.sync_all().unwrap();
         drop(journal);
 
-        let mut loaded =
-            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
-                .unwrap();
-        loaded.stage_bytes(0, b"one").unwrap();
+        let mut loaded = GalleryImportTransaction::load(
+            dir.path(),
+            &transaction.attempt_dir.join(MANIFEST_FILE),
+        )
+        .unwrap();
+        loaded.stage_bytes(b"one").unwrap();
 
         let records = load_journal(&journal_path).unwrap();
         assert_eq!(records.len(), 2);
@@ -9318,12 +8822,12 @@ mod tests {
     #[test]
     fn parseable_journal_tail_without_newline_is_healed_before_append() {
         let dir = tempfile::tempdir().unwrap();
-        let transaction = BatchTransaction::begin(
+        let transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         let journal_path = transaction.attempt_dir.join(JOURNAL_FILE);
@@ -9331,10 +8835,12 @@ mod tests {
         assert_eq!(bytes.pop(), Some(b'\n'));
         fs::write(&journal_path, bytes).unwrap();
 
-        let mut loaded =
-            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
-                .unwrap();
-        loaded.stage_bytes(0, b"one").unwrap();
+        let mut loaded = GalleryImportTransaction::load(
+            dir.path(),
+            &transaction.attempt_dir.join(MANIFEST_FILE),
+        )
+        .unwrap();
+        loaded.stage_bytes(b"one").unwrap();
 
         let bytes = fs::read(&journal_path).unwrap();
         assert!(bytes.ends_with(b"\n"));
@@ -9347,12 +8853,12 @@ mod tests {
     #[test]
     fn complete_malformed_journal_record_fails_closed_without_truncation() {
         let dir = tempfile::tempdir().unwrap();
-        let transaction = BatchTransaction::begin(
+        let transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         let journal_path = transaction.attempt_dir.join(JOURNAL_FILE);
@@ -9369,12 +8875,12 @@ mod tests {
     #[test]
     fn semantically_invalid_atomic_manifest_recovers_from_valid_journal() {
         let dir = tempfile::tempdir().unwrap();
-        let transaction = BatchTransaction::begin(
+        let transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         let manifest_path = transaction.attempt_dir.join(MANIFEST_FILE);
@@ -9383,7 +8889,7 @@ mod tests {
         corrupt["parent_id"] = serde_json::json!("../escape");
         fs::write(&manifest_path, serde_json::to_vec(&corrupt).unwrap()).unwrap();
 
-        let recovered = BatchTransaction::load(dir.path(), &manifest_path).unwrap();
+        let recovered = GalleryImportTransaction::load(dir.path(), &manifest_path).unwrap();
 
         assert_eq!(recovered.manifest.parent_id, "parent");
         assert!(recovered.reconstructed_from_journal);
@@ -9404,12 +8910,12 @@ mod tests {
             serde_json::to_vec(&owner).unwrap(),
         )
         .unwrap();
-        let _retry = BatchTransaction::begin(
+        let _retry = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             5,
             serde_json::json!({}),
-            vec![record("retry.png", 0)],
+            record("retry.png", 0),
         )
         .unwrap();
 
@@ -9430,22 +8936,17 @@ mod tests {
     #[tokio::test]
     async fn recovery_refuses_to_serve_an_unjournaled_partial_publish() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             1,
             serde_json::json!({}),
-            vec![record("one.png", 0), record("two.png", 1)],
+            record("one.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"one").unwrap();
-        transaction.stage_bytes(1, b"two").unwrap();
+        transaction.stage_bytes(b"one").unwrap();
         transaction.mark_prepared().unwrap();
-        fs::hard_link(
-            transaction.staging_path(0).unwrap(),
-            dir.path().join("one.png"),
-        )
-        .unwrap();
+        fs::hard_link(transaction.staging_path(), dir.path().join("one.png")).unwrap();
         transaction.relinquish_attempt_authority_for_recovery();
 
         let error = recover_transactions(
@@ -9458,10 +8959,13 @@ mod tests {
 
         assert!(error.to_string().contains("refusing to serve"));
         assert_eq!(
-            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
-                .unwrap()
-                .manifest
-                .state,
+            GalleryImportTransaction::load(
+                dir.path(),
+                &transaction.attempt_dir.join(MANIFEST_FILE)
+            )
+            .unwrap()
+            .manifest
+            .state,
             BatchManifestState::Prepared
         );
     }
@@ -9469,12 +8973,12 @@ mod tests {
     #[tokio::test]
     async fn committed_manifest_with_missing_final_fails_startup_without_rollback() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         commit_journal_without_cleanup(&mut transaction, b"one");
@@ -9491,7 +8995,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("committed batch child is missing"));
+            .contains("committed gallery import is missing"));
         assert_eq!(transaction.manifest.state, BatchManifestState::Committed);
     }
 
@@ -9510,15 +9014,15 @@ mod tests {
     #[tokio::test]
     async fn panic_after_committing_is_captured_with_writer_gate_retained() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.stage_bytes(b"one").unwrap();
         transaction.mark_prepared().unwrap();
         transaction.commit_failpoint = Some(CommitFailpoint::PanicAfterCommitting);
 
@@ -9536,8 +9040,11 @@ mod tests {
 
     #[tokio::test]
     async fn every_durable_commit_boundary_rolls_forward_atomically_after_restart() {
-        let mut fault_points = vec![
+        let fault_points = [
             CommitFailpoint::CommittingState,
+            CommitFailpoint::FinalPublish,
+            CommitFailpoint::FinalFileFsync,
+            CommitFailpoint::FinalJournalFsync,
             CommitFailpoint::OutputDirectoryFsync,
             CommitFailpoint::MetadataManifestFsync,
             CommitFailpoint::DatabaseTransaction,
@@ -9550,28 +9057,20 @@ mod tests {
             CommitFailpoint::AttemptDirectoryRemoved,
             CommitFailpoint::AttemptsDirectoryFsync,
         ];
-        for child_index in 0..2 {
-            fault_points.extend([
-                CommitFailpoint::FinalPublish(child_index),
-                CommitFailpoint::FinalFileFsync(child_index),
-                CommitFailpoint::FinalJournalFsync(child_index),
-            ]);
-        }
 
         for fault_point in fault_points {
             let dir = tempfile::tempdir().unwrap();
             let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
             let gate = GalleryPublicationGate::default();
-            let mut transaction = BatchTransaction::begin(
+            let mut transaction = GalleryImportTransaction::begin(
                 dir.path(),
                 "parent",
                 0,
-                serde_json::json!({"batch_size": 2}),
-                vec![record("one.png", 0), record("two.png", 1)],
+                serde_json::json!({"kind": "gallery_import"}),
+                record("one.png", 0),
             )
             .unwrap();
-            transaction.stage_bytes(0, b"one").unwrap();
-            transaction.stage_bytes(1, b"two").unwrap();
+            transaction.stage_bytes(b"one").unwrap();
             transaction.mark_prepared().unwrap();
             transaction.commit_failpoint = Some(fault_point);
 
@@ -9592,13 +9091,12 @@ mod tests {
                 .unwrap();
             assert!(
                 report.rolled_forward == 1
-                    || report.healed_committed_rows == 2
+                    || report.healed_committed_rows == 1
                     || report == RecoveryReport::default(),
                 "unexpected recovery report for {fault_point:?}: {report:?}"
             );
             assert_eq!(fs::read(dir.path().join("one.png")).unwrap(), b"one");
-            assert_eq!(fs::read(dir.path().join("two.png")).unwrap(), b"two");
-            assert_eq!(db.as_ref().as_ref().unwrap().count().unwrap(), 2);
+            assert_eq!(db.as_ref().as_ref().unwrap().count().unwrap(), 1);
             assert!(
                 !attempt_dir(dir.path(), "parent", 0).is_dir(),
                 "terminal attempt was not archived for {fault_point:?}"
@@ -9611,15 +9109,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(None);
         let gate = GalleryPublicationGate::default();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.stage_bytes(b"one").unwrap();
         transaction.mark_prepared().unwrap();
         transaction.commit_failpoint = Some(CommitFailpoint::ArchivedManifest);
 
@@ -9651,15 +9149,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gate = GalleryPublicationGate::default();
         let db = Arc::new(None);
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "gallery-import-test",
             0,
             serde_json::json!({"declared_size": 4096}),
-            vec![record("partial.mp4", 0)],
+            record("partial.mp4", 0),
         )
         .unwrap();
-        fs::write(transaction.staging_path(0).unwrap(), b"partial body").unwrap();
+        fs::write(transaction.staging_path(), b"partial body").unwrap();
         transaction.relinquish_attempt_authority_for_recovery();
 
         let report = recover_transactions(dir.path(), &gate, db).await.unwrap();
@@ -9725,15 +9223,15 @@ mod tests {
     #[test]
     fn batch_journal_rejects_manifest_state_regression() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.stage_bytes(b"one").unwrap();
         transaction.mark_prepared().unwrap();
         let mut regressed = transaction.manifest.clone();
         regressed.state = BatchManifestState::Staging;
@@ -9748,24 +9246,25 @@ mod tests {
             },
         );
 
-        assert!(
-            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
-                .is_err()
-        );
+        assert!(GalleryImportTransaction::load(
+            dir.path(),
+            &transaction.attempt_dir.join(MANIFEST_FILE)
+        )
+        .is_err());
     }
 
     #[test]
     fn batch_journal_rejects_non_monotonic_staging_facts() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.stage_bytes(b"one").unwrap();
         let mut changed = transaction.manifest.clone();
         changed.children[0].checksum_sha256 = Some("a".repeat(64));
         append_raw_batch_record(
@@ -9777,21 +9276,22 @@ mod tests {
             },
         );
 
-        assert!(
-            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
-                .is_err()
-        );
+        assert!(GalleryImportTransaction::load(
+            dir.path(),
+            &transaction.attempt_dir.join(MANIFEST_FILE)
+        )
+        .is_err());
     }
 
     #[test]
     fn batch_journal_rejects_immutable_attempt_identity_drift() {
         let dir = tempfile::tempdir().unwrap();
-        let transaction = BatchTransaction::begin(
+        let transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({"prompt": "original"}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         for drift in 0..3 {
@@ -9813,7 +9313,7 @@ mod tests {
                     event: BatchJournalEvent::ManifestSnapshot { manifest: drifted },
                 },
             );
-            assert!(BatchTransaction::load(
+            assert!(GalleryImportTransaction::load(
                 dir.path(),
                 &transaction.attempt_dir.join(MANIFEST_FILE)
             )
@@ -9839,12 +9339,12 @@ mod tests {
     #[test]
     fn batch_journal_rejects_publication_before_committing() {
         let dir = tempfile::tempdir().unwrap();
-        let transaction = BatchTransaction::begin(
+        let transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         append_raw_batch_record(
@@ -9856,26 +9356,26 @@ mod tests {
             },
         );
 
-        assert!(
-            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
-                .is_err()
-        );
+        assert!(GalleryImportTransaction::load(
+            dir.path(),
+            &transaction.attempt_dir.join(MANIFEST_FILE)
+        )
+        .is_err());
     }
 
     #[test]
     fn batch_journal_rejects_out_of_order_and_duplicate_publications() {
         for published in [vec![1], vec![0, 0]] {
             let dir = tempfile::tempdir().unwrap();
-            let mut transaction = BatchTransaction::begin(
+            let mut transaction = GalleryImportTransaction::begin(
                 dir.path(),
                 "parent",
                 0,
                 serde_json::json!({}),
-                vec![record("one.png", 0), record("two.png", 1)],
+                record("one.png", 0),
             )
             .unwrap();
-            transaction.stage_bytes(0, b"one").unwrap();
-            transaction.stage_bytes(1, b"two").unwrap();
+            transaction.stage_bytes(b"one").unwrap();
             transaction.mark_prepared().unwrap();
             transaction.manifest.state = BatchManifestState::Committing;
             transaction.persist_manifest().unwrap();
@@ -9890,7 +9390,7 @@ mod tests {
                 );
             }
 
-            assert!(BatchTransaction::load(
+            assert!(GalleryImportTransaction::load(
                 dir.path(),
                 &transaction.attempt_dir.join(MANIFEST_FILE)
             )
@@ -9902,16 +9402,16 @@ mod tests {
     fn batch_journal_rejects_premature_or_duplicate_metadata_commit() {
         for duplicate in [false, true] {
             let dir = tempfile::tempdir().unwrap();
-            let mut transaction = BatchTransaction::begin(
+            let mut transaction = GalleryImportTransaction::begin(
                 dir.path(),
                 "parent",
                 0,
                 serde_json::json!({}),
-                vec![record("one.png", 0)],
+                record("one.png", 0),
             )
             .unwrap();
             if duplicate {
-                transaction.stage_bytes(0, b"one").unwrap();
+                transaction.stage_bytes(b"one").unwrap();
                 transaction.mark_prepared().unwrap();
                 transaction.manifest.state = BatchManifestState::Committing;
                 transaction.persist_manifest().unwrap();
@@ -9929,7 +9429,7 @@ mod tests {
                     .unwrap();
             }
 
-            assert!(BatchTransaction::load(
+            assert!(GalleryImportTransaction::load(
                 dir.path(),
                 &transaction.attempt_dir.join(MANIFEST_FILE)
             )
@@ -9940,15 +9440,15 @@ mod tests {
     #[test]
     fn batch_journal_rejects_metadata_before_post_publish_snapshot() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.stage_bytes(b"one").unwrap();
         transaction.mark_prepared().unwrap();
         transaction.manifest.state = BatchManifestState::Committing;
         transaction.persist_manifest().unwrap();
@@ -9959,21 +9459,22 @@ mod tests {
             .append_journal(BatchJournalEvent::MetadataCommitted)
             .unwrap();
 
-        assert!(
-            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
-                .is_err()
-        );
+        assert!(GalleryImportTransaction::load(
+            dir.path(),
+            &transaction.attempt_dir.join(MANIFEST_FILE)
+        )
+        .is_err());
     }
 
     #[test]
     fn batch_journal_rejects_committed_snapshot_before_metadata() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         journal_post_publish_snapshot(&mut transaction, b"one");
@@ -9990,21 +9491,22 @@ mod tests {
             },
         );
 
-        assert!(
-            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
-                .is_err()
-        );
+        assert!(GalleryImportTransaction::load(
+            dir.path(),
+            &transaction.attempt_dir.join(MANIFEST_FILE)
+        )
+        .is_err());
     }
 
     #[test]
     fn batch_journal_rejects_cleanup_before_commit() {
         let dir = tempfile::tempdir().unwrap();
-        let transaction = BatchTransaction::begin(
+        let transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         append_raw_batch_record(
@@ -10016,10 +9518,11 @@ mod tests {
             },
         );
 
-        assert!(
-            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
-                .is_err()
-        );
+        assert!(GalleryImportTransaction::load(
+            dir.path(),
+            &transaction.attempt_dir.join(MANIFEST_FILE)
+        )
+        .is_err());
     }
 
     #[test]
@@ -10030,12 +9533,12 @@ mod tests {
             BatchJournalEvent::FinalPublished { child_index: 0 },
         ] {
             let dir = tempfile::tempdir().unwrap();
-            let mut transaction = BatchTransaction::begin(
+            let mut transaction = GalleryImportTransaction::begin(
                 dir.path(),
                 "parent",
                 0,
                 serde_json::json!({}),
-                vec![record("one.png", 0)],
+                record("one.png", 0),
             )
             .unwrap();
             commit_journal_without_cleanup(&mut transaction, b"one");
@@ -10056,7 +9559,7 @@ mod tests {
                 },
             );
 
-            assert!(BatchTransaction::load(
+            assert!(GalleryImportTransaction::load(
                 dir.path(),
                 &transaction.attempt_dir.join(MANIFEST_FILE)
             )
@@ -10067,15 +9570,15 @@ mod tests {
     #[test]
     fn batch_load_heals_exactly_one_atomic_manifest_record_ahead() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.stage_bytes(b"one").unwrap();
         transaction.mark_prepared().unwrap();
         let journal_path = transaction.attempt_dir.join(JOURNAL_FILE);
         let bytes = fs::read(&journal_path).unwrap();
@@ -10083,9 +9586,11 @@ mod tests {
         records.pop();
         fs::write(&journal_path, records.concat()).unwrap();
 
-        let mut loaded =
-            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
-                .unwrap();
+        let mut loaded = GalleryImportTransaction::load(
+            dir.path(),
+            &transaction.attempt_dir.join(MANIFEST_FILE),
+        )
+        .unwrap();
 
         assert!(loaded.journal_needs_heal);
         assert_eq!(loaded.manifest.state, BatchManifestState::Prepared);
@@ -10103,17 +9608,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_partial_staging_snapshot_is_recoverable() {
+    async fn failed_staged_snapshot_is_recoverable() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0), record("two.png", 1)],
+            record("one.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.stage_bytes(b"one").unwrap();
         transaction.manifest.state = BatchManifestState::Failed;
         transaction.persist_manifest().unwrap();
         transaction.relinquish_attempt_authority_for_recovery();
@@ -10133,12 +9638,12 @@ mod tests {
     #[tokio::test]
     async fn terminal_committed_manifest_without_journal_finishes_durable_cleanup() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         commit_journal_without_cleanup(&mut transaction, b"one");
@@ -10175,15 +9680,15 @@ mod tests {
     #[tokio::test]
     async fn terminal_failed_manifest_without_journal_finishes_durable_cleanup() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.stage_bytes(b"one").unwrap();
         transaction.manifest.state = BatchManifestState::Failed;
         transaction.persist_manifest().unwrap();
         let reservation = reservation_path(dir.path(), "one.png");
@@ -10209,18 +9714,18 @@ mod tests {
     #[tokio::test]
     async fn terminal_failed_manifest_without_journal_retains_unexpected_final_evidence() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.stage_bytes(b"one").unwrap();
         transaction.manifest.state = BatchManifestState::Failed;
         transaction.persist_manifest().unwrap();
-        let staged = transaction.staging_path(0).unwrap();
+        let staged = transaction.staging_path();
         let final_path = dir.path().join("one.png");
         fs::hard_link(staged, &final_path).unwrap();
         File::open(&final_path).unwrap().sync_all().unwrap();
@@ -10246,22 +9751,24 @@ mod tests {
     #[test]
     fn batch_load_never_prefers_a_stale_valid_disk_manifest() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
         let initial = transaction.manifest.clone();
-        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.stage_bytes(b"one").unwrap();
         transaction.mark_prepared().unwrap();
         atomic_write_json(&transaction.attempt_dir.join(MANIFEST_FILE), &initial).unwrap();
 
-        let loaded =
-            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
-                .unwrap();
+        let loaded = GalleryImportTransaction::load(
+            dir.path(),
+            &transaction.attempt_dir.join(MANIFEST_FILE),
+        )
+        .unwrap();
 
         assert_eq!(loaded.manifest.state, BatchManifestState::Prepared);
         assert!(!loaded.journal_needs_heal);
@@ -10270,64 +9777,42 @@ mod tests {
     #[test]
     fn batch_load_rejects_a_divergent_valid_disk_manifest() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "parent",
             0,
             serde_json::json!({}),
-            vec![record("one.png", 0)],
+            record("one.png", 0),
         )
         .unwrap();
-        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.stage_bytes(b"one").unwrap();
         transaction.mark_prepared().unwrap();
         let mut divergent = transaction.manifest.clone();
         divergent.state = BatchManifestState::Staging;
         divergent.children[0].checksum_sha256 = Some("a".repeat(64));
         atomic_write_json(&transaction.attempt_dir.join(MANIFEST_FILE), &divergent).unwrap();
 
-        assert!(
-            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn child_staging_journal_growth_is_linear_in_child_count() {
-        let dir = tempfile::tempdir().unwrap();
-        let records = (0..64)
-            .map(|index| record(&format!("{index}.png"), index))
-            .collect();
-        let mut transaction =
-            BatchTransaction::begin(dir.path(), "parent", 0, serde_json::json!({}), records)
-                .unwrap();
-
-        for child_index in 0..64 {
-            transaction.stage_bytes(child_index, b"x").unwrap();
-        }
-
-        let journal_bytes = std::fs::metadata(transaction.attempt_dir.join(JOURNAL_FILE))
-            .unwrap()
-            .len();
-        assert!(
-            journal_bytes < 1_000_000,
-            "per-child staging rewrote the full manifest: {journal_bytes} bytes"
-        );
+        assert!(GalleryImportTransaction::load(
+            dir.path(),
+            &transaction.attempt_dir.join(MANIFEST_FILE)
+        )
+        .is_err());
     }
 
     #[test]
     fn sealed_stream_uses_v2_child_receipt_delta() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "gallery-import",
             0,
             serde_json::json!({"kind": "gallery_import"}),
-            vec![record("import.mp4", 0)],
+            record("import.mp4", 0),
         )
         .unwrap();
-        fs::write(transaction.staging_path(0).unwrap(), b"streamed video").unwrap();
+        fs::write(transaction.staging_path(), b"streamed video").unwrap();
 
-        transaction.seal_staged_file(0).unwrap();
+        transaction.seal_staged_file().unwrap();
         transaction.mark_prepared().unwrap();
 
         let journal = load_journal(&transaction.attempt_dir.join(JOURNAL_FILE)).unwrap();
@@ -10335,66 +9820,57 @@ mod tests {
             journal[1].event,
             BatchJournalEvent::ChildStaged { .. }
         ));
-        assert_eq!(transaction.staged_receipts.len(), 1);
+        assert!(transaction.staged_receipt.is_some());
         let manifest_path = transaction.attempt_dir.join(MANIFEST_FILE);
         drop(transaction);
-        let loaded = BatchTransaction::load(dir.path(), &manifest_path).unwrap();
+        let loaded = GalleryImportTransaction::load(dir.path(), &manifest_path).unwrap();
         assert_eq!(loaded.manifest.state, BatchManifestState::Prepared);
-        assert_eq!(loaded.staged_receipts.len(), 1);
+        assert!(loaded.staged_receipt.is_some());
     }
 
+    /// 0.21.0 imports journaled a full staging→staging manifest snapshot in
+    /// place of the receipt delta. That reconstruction is retired with the
+    /// lease-era events: the journal is refused rather than replayed.
     #[tokio::test]
-    async fn legacy_v2_staging_snapshot_recovers_published_gallery_import() {
+    async fn a_full_staging_snapshot_journal_is_refused_at_recovery() {
         let dir = tempfile::tempdir().unwrap();
-        let mut transaction = BatchTransaction::begin(
+        let mut transaction = GalleryImportTransaction::begin(
             dir.path(),
             "gallery-import-legacy",
             0,
             serde_json::json!({"kind": "gallery_import"}),
-            vec![record("import.mp4", 0)],
+            record("import.mp4", 0),
         )
         .unwrap();
         let bytes = b"published video";
-        fs::write(transaction.staging_path(0).unwrap(), bytes).unwrap();
-
+        fs::write(transaction.staging_path(), bytes).unwrap();
         transaction.manifest.children[0].checksum_sha256 = Some(checksum_bytes(bytes));
         transaction.manifest.children[0].size_bytes = Some(bytes.len() as u64);
         transaction.manifest.children[0].record.file_size_bytes = Some(bytes.len() as i64);
         transaction.persist_manifest().unwrap();
-        transaction.manifest.state = BatchManifestState::Prepared;
-        transaction.persist_manifest().unwrap();
-        transaction.manifest.state = BatchManifestState::Committing;
-        transaction.persist_manifest().unwrap();
-
-        let final_path = dir.path().join("import.mp4");
-        fs::hard_link(transaction.staging_path(0).unwrap(), &final_path).unwrap();
-        File::open(&final_path).unwrap().sync_all().unwrap();
-        transaction.manifest.children[0]
-            .record
-            .stat_from_disk(&final_path);
-        transaction
-            .append_journal(BatchJournalEvent::FinalPublished { child_index: 0 })
-            .unwrap();
-        transaction.persist_manifest().unwrap();
-
-        let manifest_path = transaction.attempt_dir.join(MANIFEST_FILE);
-        let loaded = BatchTransaction::load(dir.path(), &manifest_path).unwrap();
-        assert_eq!(loaded.staged_receipts.len(), 1);
-        assert_eq!(loaded.journaled_final_children, BTreeSet::from([0]));
-        drop(loaded);
+        let attempt = transaction.attempt_dir.clone();
         transaction.relinquish_attempt_authority_for_recovery();
 
-        let report = recover_transactions(
+        let load_error = GalleryImportTransaction::load(dir.path(), &attempt.join(MANIFEST_FILE))
+            .err()
+            .map(|error| format!("{error:#}"))
+            .expect("a full staging snapshot no longer replays");
+        assert!(
+            load_error.contains("illegal batch manifest transition Staging -> Staging"),
+            "{load_error}"
+        );
+        let error = recover_transactions(
             dir.path(),
             &GalleryPublicationGate::default(),
             Arc::new(None),
         )
         .await
-        .unwrap();
-
-        assert_eq!(report.rolled_forward, 1);
-        assert_eq!(fs::read(final_path).unwrap(), bytes);
-        assert!(!attempt_dir(dir.path(), "gallery-import-legacy", 0).exists());
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains(&attempt.display().to_string()),
+            "{error:#}"
+        );
+        assert!(attempt.join(MANIFEST_FILE).is_file());
     }
 
     /// `fs::rename` replaces an existing destination on Unix, so a live
@@ -10444,5 +9920,199 @@ mod tests {
             "the live bytes must survive"
         );
         assert!(trash_path.is_file(), "the trashed bytes must stay in place");
+    }
+
+    /// A durable manifest child whose record already carries the canonical
+    /// gallery identity `validate_loaded_manifest` demands.
+    fn manifest_child(dir: &Path, index: usize, name: &str, seed: u64) -> BatchManifestChild {
+        let mut record = record(name, seed);
+        record.output_dir = fs::canonicalize(dir)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        BatchManifestChild {
+            child_index: index,
+            staging_name: format!("{index:08}.stage"),
+            final_name: name.to_owned(),
+            checksum_sha256: None,
+            size_bytes: None,
+            record,
+        }
+    }
+
+    /// Write a crash-orphaned staging attempt exactly as a previous release
+    /// left it: a durable initial manifest plus its sequence-0 journal record.
+    fn write_live_staging_attempt(
+        dir: &Path,
+        parent_id: &str,
+        children: Vec<BatchManifestChild>,
+    ) -> PathBuf {
+        let attempt = attempt_dir(dir, parent_id, 0);
+        fs::create_dir_all(attempt.join("staging")).unwrap();
+        let manifest = BatchAttemptManifest {
+            version: MANIFEST_VERSION,
+            parent_id: parent_id.to_owned(),
+            attempt_generation: 0,
+            normalized_request: serde_json::json!({"kind": "gallery_import"}),
+            state: BatchManifestState::Staging,
+            children,
+        };
+        atomic_write_json(&attempt.join(MANIFEST_FILE), &manifest).unwrap();
+        let mut line = serde_json::to_vec(&serde_json::json!({
+            "sequence": 0,
+            "attempt_generation": 0,
+            "event": {"kind": "manifest_snapshot", "manifest": manifest},
+        }))
+        .unwrap();
+        line.push(b'\n');
+        fs::write(attempt.join(JOURNAL_FILE), line).unwrap();
+        attempt
+    }
+
+    #[tokio::test]
+    async fn a_live_attempt_with_more_than_one_child_is_refused_at_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let attempt = write_live_staging_attempt(
+            dir.path(),
+            "multi-child",
+            vec![
+                manifest_child(dir.path(), 0, "one.png", 0),
+                manifest_child(dir.path(), 1, "two.png", 1),
+            ],
+        );
+
+        let error = recover_transactions(
+            dir.path(),
+            &GalleryPublicationGate::default(),
+            Arc::new(None),
+        )
+        .await
+        .unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(&attempt.display().to_string()),
+            "refusal must name the attempt directory: {message}"
+        );
+        assert!(
+            message.contains("one record"),
+            "refusal must explain the single-record rule: {message}"
+        );
+        assert!(
+            attempt.join(MANIFEST_FILE).is_file(),
+            "a refused attempt is retained for operator inspection"
+        );
+    }
+
+    #[test]
+    fn a_journal_carrying_a_lease_era_event_is_refused() {
+        for (kind, terminated) in [
+            ("child_record_updated", true),
+            ("child_auxiliary_staged", true),
+            ("child_auxiliaries_cleared", true),
+            ("child_unstaged", true),
+            ("child_record_updated", false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let attempt = write_live_staging_attempt(
+                dir.path(),
+                "lease-era",
+                vec![manifest_child(dir.path(), 0, "one.png", 0)],
+            );
+            let mut line = serde_json::to_vec(&serde_json::json!({
+                "sequence": 1,
+                "attempt_generation": 0,
+                "event": {
+                    "kind": kind,
+                    "child_index": 0,
+                    "lease_generation": 1,
+                    "record": record("one.png", 0),
+                    "record_identity_sha256": "0".repeat(64),
+                    "receipt": {
+                        "child_index": 0,
+                        "lease_generation": 1,
+                        "kind": "thumbnail_png",
+                        "checksum_sha256": "0".repeat(64),
+                        "size_bytes": 1,
+                    },
+                },
+            }))
+            .unwrap();
+            if terminated {
+                line.push(b'\n');
+            }
+            let mut journal = OpenOptions::new()
+                .append(true)
+                .open(attempt.join(JOURNAL_FILE))
+                .unwrap();
+            journal.write_all(&line).unwrap();
+            journal.sync_all().unwrap();
+            let journal_len = fs::metadata(attempt.join(JOURNAL_FILE)).unwrap().len();
+
+            let error = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(recover_transactions(
+                    dir.path(),
+                    &GalleryPublicationGate::default(),
+                    Arc::new(None),
+                ))
+                .unwrap_err();
+
+            let message = format!("{error:#}");
+            assert!(
+                message.contains(&attempt.display().to_string()) && message.contains(kind),
+                "{kind} (terminated={terminated}) must be refused by name: {message}"
+            );
+            assert_eq!(
+                fs::metadata(attempt.join(JOURNAL_FILE)).unwrap().len(),
+                journal_len,
+                "{kind} (terminated={terminated}) must never be truncated away"
+            );
+            assert!(attempt.join(MANIFEST_FILE).is_file());
+        }
+    }
+
+    #[test]
+    fn committed_archive_catalog_still_reads_a_two_child_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut children = Vec::new();
+        for (index, (name, bytes)) in [("one.png", b"one".as_slice()), ("two.png", b"two")]
+            .into_iter()
+            .enumerate()
+        {
+            let final_path = dir.path().join(name);
+            fs::write(&final_path, bytes).unwrap();
+            let mut child = manifest_child(dir.path(), index, name, index as u64);
+            child.checksum_sha256 = Some(checksum_bytes(bytes));
+            child.size_bytes = Some(bytes.len() as u64);
+            child.record.stat_from_disk(&final_path);
+            children.push(child);
+        }
+        let manifest = BatchAttemptManifest {
+            version: MANIFEST_VERSION,
+            parent_id: "batch-era".to_owned(),
+            attempt_generation: 0,
+            normalized_request: serde_json::json!({"batch_size": 2}),
+            state: BatchManifestState::Committed,
+            children,
+        };
+        atomic_write_json(
+            &committed_manifests_dir(dir.path(), "batch-era").join("0.json"),
+            &manifest,
+        )
+        .unwrap();
+
+        let index = load_committed_archive_index(dir.path()).unwrap();
+
+        assert_eq!(
+            index.get("one.png").unwrap().record().metadata.prompt,
+            "prompt 0"
+        );
+        assert_eq!(
+            index.get("two.png").unwrap().record().metadata.prompt,
+            "prompt 1"
+        );
+        assert!(!index.is_quarantined("one.png"));
+        assert!(!index.is_quarantined("two.png"));
     }
 }

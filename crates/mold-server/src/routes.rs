@@ -7490,16 +7490,12 @@ async fn parse_gallery_import_prefix(
 }
 
 async fn stream_gallery_import_file(
-    transaction: &crate::batch_transaction::BatchTransaction,
+    transaction: &crate::batch_transaction::GalleryImportTransaction,
     mut parsed: ParsedGalleryImport,
 ) -> Result<(GalleryImportDescriptor, u64), ApiError> {
     use tokio::io::AsyncWriteExt as _;
 
-    let staged_path = transaction.staging_path(0).map_err(|error| {
-        ApiError::internal(format!(
-            "failed to resolve gallery import staging: {error:#}"
-        ))
-    })?;
+    let staged_path = transaction.staging_path();
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -7630,7 +7626,7 @@ async fn import_gallery_file(
     let begin_dir = output_dir.clone();
     let requested_filename = filename.clone();
     let mut transaction = tokio::task::spawn_blocking(move || {
-        crate::batch_transaction::BatchTransaction::begin(
+        crate::batch_transaction::GalleryImportTransaction::begin(
             &begin_dir,
             &parent_id,
             0,
@@ -7638,7 +7634,7 @@ async fn import_gallery_file(
                 "kind": "gallery_import",
                 "requested_filename": requested_filename,
             }),
-            vec![record],
+            record,
         )
     })
     .await
@@ -7656,11 +7652,7 @@ async fn import_gallery_file(
                 return Err(error);
             }
         };
-    let staged_path = transaction.staging_path(0).map_err(|error| {
-        ApiError::internal(format!(
-            "failed to resolve gallery import staging: {error:#}"
-        ))
-    })?;
+    let staged_path = transaction.staging_path();
     let descriptor_for_validation = descriptor.clone();
     let validation = tokio::task::spawn_blocking(move || {
         let valid =
@@ -7695,7 +7687,7 @@ async fn import_gallery_file(
     }
     transaction = tokio::task::spawn_blocking(move || {
         if let Err(error) = transaction
-            .seal_staged_file(0)
+            .seal_staged_file()
             .and_then(|()| transaction.mark_prepared())
         {
             let cleanup = transaction.rollback_unpublished();
@@ -7771,15 +7763,11 @@ async fn import_gallery_file(
     let archive_for_existing = state.gallery_publication_gate.clone();
     let filename_for_task = filename.clone();
     let dir_for_task = output_dir.clone();
-    let staged_path = transaction.staging_path(0).map_err(|error| {
-        ApiError::internal(format!(
-            "failed to resolve gallery import staging: {error:#}"
-        ))
-    })?;
+    let staged_path = transaction.staging_path();
     enum PreparedGalleryImport {
         Existing(String),
         Transaction {
-            transaction: Box<crate::batch_transaction::BatchTransaction>,
+            transaction: Box<crate::batch_transaction::GalleryImportTransaction>,
             filename: String,
         },
     }
