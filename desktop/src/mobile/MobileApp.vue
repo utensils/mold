@@ -4354,10 +4354,16 @@ function promptForMissingGenerationModel(
  */
 const offeredMissingModelHolds = new Set<string>();
 function offerHeldMissingModelPull(job: Job): void {
+  const heldCode = durableHeldCode(job);
+  if (heldCode === null && job.id) {
+    // The hold ended: a later hold on the same print is a new offer.
+    offeredMissingModelHolds.delete(job.id);
+    return;
+  }
   const planned = planHeldMissingModelPull({
     jobId: job.id,
     model: job.model,
-    heldCode: durableHeldCode(job),
+    heldCode,
     alreadyOffered: offeredMissingModelHolds,
   });
   if (!planned) return;

@@ -214,6 +214,11 @@ const queued = computed(() =>
  * rest. Cancellation reveals the following row, so every job remains
  * reachable without producing one interactive DOM subtree per backlog item. */
 const nextQueued = computed(() => {
+  // A held print has no queue position and needs a human: it is always the
+  // row that is shown, so its reason and Retry are never folded into
+  // "N more queued".
+  const held = queued.value.find((job) => job.holdError && !job.cancelling);
+  if (held) return held;
   let best: Job | null = null;
   let bestPosition: number | null = null;
   const actionable = queued.value.filter((job) => !job.cancelling);

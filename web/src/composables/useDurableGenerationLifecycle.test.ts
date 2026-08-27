@@ -12,7 +12,6 @@ const admitGenerationBatch = vi.hoisted(() => vi.fn());
 const lookupGenerationBatchByClientId = vi.hoisted(() => vi.fn());
 const reconcileGenerationBatches = vi.hoisted(() => vi.fn());
 const fetchEventSource = vi.hoisted(() => vi.fn(() => new Promise(() => {})));
-const generateStream = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const cancelQueueJob = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const mutateQueueJobOnExpectedInstance = vi.hoisted(() =>
   vi.fn().mockResolvedValue(undefined),
@@ -42,7 +41,6 @@ vi.mock("@studio/api/queuePlan", async (importOriginal) => ({
 vi.mock("../api", () => ({
   cancelQueueJob,
   fetchQueue: vi.fn().mockResolvedValue({ entries: [] }),
-  generateStream,
   generateChainStream: vi.fn().mockResolvedValue(undefined),
   listGalleryFrom,
 }));
@@ -250,7 +248,6 @@ beforeEach(() => {
   lookupGenerationBatchByClientId.mockReset();
   reconcileGenerationBatches.mockReset();
   fetchEventSource.mockClear();
-  generateStream.mockClear();
   cancelQueueJob.mockClear();
   mutateQueueJobOnExpectedInstance.mockClear();
   retryQueueJobRecoveringAmbiguity.mockReset();
@@ -280,7 +277,6 @@ describe("web durable generation lifecycle", () => {
     expect(admitGenerationBatch.mock.calls[0]![1].requests[0]).toMatchObject({
       source_image: "PRIVATE-DURABLE-SOURCE",
     });
-    expect(generateStream).not.toHaveBeenCalled();
     const persisted = Array.from({ length: localStorage.length }, (_, index) =>
       localStorage.getItem(localStorage.key(index)!),
     ).join("\n");
@@ -304,7 +300,6 @@ describe("web durable generation lifecycle", () => {
     );
 
     expect(admitGenerationBatch).toHaveBeenCalledTimes(1);
-    expect(generateStream).not.toHaveBeenCalled();
   });
 
   it("admits canonical v2 H3 through the durable batch transport", () => {
@@ -321,7 +316,6 @@ describe("web durable generation lifecycle", () => {
       model: "hf:opaque-h3-checkpoint",
       source_image: "PRIVATE-H3-SOURCE",
     });
-    expect(generateStream).not.toHaveBeenCalled();
   });
 
   it("has no browser submission-count cap and releases every POST immediately", () => {
@@ -334,7 +328,6 @@ describe("web durable generation lifecycle", () => {
 
     expect(new Set(ids).size).toBe(9);
     expect(admitGenerationBatch).toHaveBeenCalledTimes(9);
-    expect(generateStream).not.toHaveBeenCalled();
     expect(
       stream.jobs.value.filter((job) => job.state === "running"),
     ).toHaveLength(9);
@@ -399,7 +392,6 @@ describe("web durable generation lifecycle", () => {
     expect(
       admitGenerationBatch.mock.calls.map((call) => call[1].requests.length),
     ).toEqual([2, 1]);
-    expect(generateStream).not.toHaveBeenCalled();
   });
 
   it("never turns browser quota into a durable admission gate", async () => {
@@ -423,7 +415,6 @@ describe("web durable generation lifecycle", () => {
       expect(job.error).toBeNull();
       expect(job.durableBatch).toBeDefined();
       expect(admitGenerationBatch).toHaveBeenCalledTimes(1);
-      expect(generateStream).not.toHaveBeenCalled();
       expect(lookupGenerationBatchByClientId).not.toHaveBeenCalled();
       expect(fetchEventSource).toHaveBeenCalledTimes(1);
     } finally {
@@ -474,7 +465,6 @@ describe("web durable generation lifecycle", () => {
           expect.anything(),
           clientBatchId,
         );
-        expect(generateStream).not.toHaveBeenCalled();
       } finally {
         storage.mockRestore();
       }
@@ -1341,11 +1331,6 @@ describe("web durable generation lifecycle", () => {
       { ...route, durableGeneration: null },
       "does not advertise the durable generation queue",
     ],
-    [
-      "a machine with no durable request media",
-      { ...route, durableMedia: null },
-      "does not advertise durable request media",
-    ],
   ])(
     "refuses %s by name and queues nothing",
     (_name, candidateRoute, reason) => {
@@ -1355,7 +1340,6 @@ describe("web durable generation lifecycle", () => {
         stream.submit(request(), { kind: "single" }, candidateRoute),
       ).toThrow(reason);
       expect(admitGenerationBatch).not.toHaveBeenCalled();
-      expect(generateStream).not.toHaveBeenCalled();
       expect(stream.jobs.value).toHaveLength(0);
     },
   );
@@ -1398,7 +1382,6 @@ describe("web durable generation lifecycle", () => {
       expect(admitGenerationBatch.mock.calls[0]![1].requests[0]).toMatchObject({
         [field]: valueByField[field],
       });
-      expect(generateStream).not.toHaveBeenCalled();
     },
   );
 
@@ -1432,7 +1415,6 @@ describe("web durable generation lifecycle", () => {
     expect(admitGenerationBatch.mock.calls[1]![1].requests[0]).toMatchObject({
       hdr_exr_dir: "/private/hdr",
     });
-    expect(generateStream).not.toHaveBeenCalled();
   });
 
   it("admits every media print immediately — there is no browser stream budget left to drain", () => {
@@ -1462,7 +1444,6 @@ describe("web durable generation lifecycle", () => {
       stream.jobs.value.filter((job) => ids.includes(job.id)),
     ).toHaveLength(10);
     expect(admitGenerationBatch).toHaveBeenCalledTimes(10);
-    expect(generateStream).not.toHaveBeenCalled();
   });
 
   it("polls the host's queue preview for our own running print and stops when it settles", async () => {

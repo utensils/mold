@@ -477,13 +477,20 @@ function presentMissingModelPull(
  */
 const offeredMissingModelHolds = new Set<number>();
 function offerHeldMissingModelPull(job: Job): void {
-  if (offeredMissingModelHolds.has(job.clientId)) return;
   const request = job.request;
   if (!request) return;
   const missing = classifyMissingModelHold(job.holdCode, job.model);
-  if (!missing) return;
+  if (!missing) {
+    // The hold ended (or was never about the model): a later hold on the
+    // same print is a new offer.
+    offeredMissingModelHolds.delete(job.clientId);
+    return;
+  }
+  if (offeredMissingModelHolds.has(job.clientId)) return;
   offeredMissingModelHolds.add(job.clientId);
-  const hostId = job.hostId ?? hosts.primaryHost?.id ?? null;
+  // Only the machine that parked the job is a pull target; a job with no
+  // known host has nobody to pull on.
+  const hostId = job.hostId ?? null;
   const host = hostId ? hosts.all.find((entry) => entry.id === hostId) : null;
   const targets = planModelInstall(host ? [host] : [], hostModels.hostsFor(missing.model), {
     // The machine's own hold IS the positive knowledge that it lacks the

@@ -1569,14 +1569,6 @@ async function admitDurableBatch(
         }),
       );
     }
-    const lookup = await lookupGenerationBatchByClientId(
-      routeApiTarget(route),
-      clientBatchId,
-    ).catch(() => null);
-    if (lookup?.kind === "found") {
-      applyDurableBatchStatus(clientBatchId, lookup.batch);
-      return;
-    }
     await recoverAmbiguousAdmission(route, clientBatchId);
   }
 }

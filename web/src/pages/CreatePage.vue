@@ -3644,16 +3644,27 @@ async function offerMissingModelPull(
  */
 const offeredMissingModelHolds = new Set<string>();
 async function offerHeldMissingModelPull(job: Job): Promise<void> {
-  if (offeredMissingModelHolds.has(job.id)) return;
   const missing = classifyMissingModelHold(job.holdCode, job.request.model);
-  if (!missing) return;
+  if (!missing) {
+    // The hold ended (or was never about the model): a later hold on the
+    // same print is a new offer.
+    offeredMissingModelHolds.delete(job.id);
+    return;
+  }
+  if (offeredMissingModelHolds.has(job.id)) return;
   offeredMissingModelHolds.add(job.id);
   const hostId = job.hostId ?? ORIGIN_HOST_ID;
   await armMissingModelPull({
     model: missing.model,
     candidateIds: [hostId],
     signal: new AbortController().signal,
-    resume: () => void stream.retry(job.id),
+    resume: () =>
+      void stream.retry(job.id).catch((error: unknown) => {
+        toast(
+          "error",
+          `Could not resume the held print: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }),
     pendingMessage: (hostLabel) =>
       `Pulling ${missing.model} on ${hostLabel} — the held print resumes when it's ready`,
   });

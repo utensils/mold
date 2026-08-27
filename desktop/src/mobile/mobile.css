@@ -2515,17 +2515,6 @@ button:disabled {
   font-size: var(--text-data);
 }
 
-.mobile-generation-retry {
-  min-width: 64px;
-  min-height: 44px;
-  border: 0;
-  padding: 0 4px;
-  background: transparent;
-  color: var(--halide);
-  font-family: var(--font-utility);
-  font-size: var(--text-data);
-}
-
 .mobile-generation-held-error {
   display: block !important;
   margin-top: 6px !important;

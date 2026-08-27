@@ -1104,7 +1104,9 @@ export const useGenerationStore = defineStore("generation", {
         job.error =
           lifecycle.phase === "cancelled"
             ? "Cancelled"
-            : (lifecycle.error ?? "Generation failed on the host.");
+            : lifecycle.phase === "complete"
+              ? "The host reported this print complete but published no file."
+              : (lifecycle.error ?? "Generation failed on the host.");
       }
       job.cancelling = false;
       if (job.previewUrl) {
