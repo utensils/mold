@@ -351,7 +351,12 @@ function heldAdmissions(): {
   count: () => number;
   settleAt: (
     index: number,
-    options?: { state?: string; filename?: string | null; error?: string },
+    options?: {
+      state?: string;
+      filename?: string | null;
+      error?: string;
+      children?: ReadonlyArray<{ state?: string; filename?: string | null; error?: string }>;
+    },
   ) => void;
   settle: (state?: string, filenames?: readonly string[]) => void;
 } {
@@ -366,7 +371,12 @@ function heldAdmissions(): {
   /** Answer ONE held admission, in submission order. */
   function settleAt(
     index: number,
-    options: { state?: string; filename?: string | null; error?: string } = {},
+    options: {
+      state?: string;
+      filename?: string | null;
+      error?: string;
+      children?: ReadonlyArray<{ state?: string; filename?: string | null; error?: string }>;
+    } = {},
   ): void {
     const entry = pending[index];
     if (!entry) throw new Error(`No held admission at ${index}`);
@@ -382,25 +392,27 @@ function heldAdmissions(): {
       client_batch_id: parsed.client_batch_id,
       instance_id: status.instance_id,
       durable: true,
-      children: parsed.requests.map((_request, offset) => ({
-        index: offset + 1,
-        job_id: `durable-job-${index + 1}-${offset + 1}`,
-        state,
-        created_at_ms: now,
-        updated_at_ms: now + 1,
-        ...(options.error === undefined ? {} : { error: options.error }),
-        ...(state === "complete" || state === "failed" || state === "cancelled"
-          ? { completed_at_ms: now + 2 }
-          : {}),
-        ...(state === "complete"
-          ? {
-              result:
-                options.filename === null
-                  ? {}
-                  : { filename: options.filename ?? "saved print.png" },
-            }
-          : {}),
-      })),
+      children: parsed.requests.map((_request, offset) => {
+        const child = options.children?.[offset] ?? options;
+        const childState = child.state ?? state;
+        return {
+          index: offset + 1,
+          job_id: `durable-job-${index + 1}-${offset + 1}`,
+          state: childState,
+          created_at_ms: now,
+          updated_at_ms: now + 1,
+          ...(child.error === undefined ? {} : { error: child.error }),
+          ...(childState === "complete" || childState === "failed" || childState === "cancelled"
+            ? { completed_at_ms: now + 2 }
+            : {}),
+          ...(childState === "complete"
+            ? {
+                result:
+                  child.filename === null ? {} : { filename: child.filename ?? "saved print.png" },
+              }
+            : {}),
+        };
+      }),
     });
   }
 
@@ -4202,56 +4214,44 @@ describe("MobileApp generation queue", () => {
     );
   });
 
-  it.each([
-    ["quick Batch 1", 1],
-    ["prepared Batch N", 2],
-  ])(
-    "does not submit %s when placement returns after the same URL/key has a new instance",
-    async (_label, count) => {
-      wrapper = mountMobileApp();
-      await flushPromises();
-      await fieldControl("Prompt").setValue("identity-fenced storm");
-      if (count === 1) {
-        await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
-        await flushPromises();
-      } else {
-        await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
-        await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
-        await flushPromises();
+  it("does not submit a print when the same URL and key report a new instance", async () => {
+    // A print no longer waits on a placement probe, but source preprocessing
+    // still runs against the frozen machine — that is the window in which the
+    // machine can be replaced under the submission.
+    const imageModel: ModelEntry = { ...model, name: "flux:image", family: "flux" };
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([imageModel]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return durableApiFallback(path, init, callTarget);
+    });
+    const preprocess = deferred<{ source: string | null; mask: string | null; changed: boolean }>();
+    applySourceFitPreprocess.mockReturnValueOnce(preprocess.promise);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.sourceImage = btoa("source");
+    liveForm.sourceImageName = "source.png";
+    await fieldControl("Prompt").setValue("identity-fenced storm");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") {
+        return Promise.resolve({ ...status, instance_id: "replacement-instance" });
       }
+      if (path === "/api/models") return Promise.resolve([imageModel]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return durableApiFallback(path, init, callTarget);
+    });
+    window.dispatchEvent(new Event("pageshow"));
+    await flushPromises();
+    preprocess.resolve({ source: btoa("fitted"), mask: null, changed: true });
+    await flushPromises();
 
-      const preview = deferred<ReturnType<typeof plannedPlacement>>();
-      previewGenerationPlacement.mockReturnValueOnce(preview.promise);
-      if (count === 1) {
-        await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
-      } else {
-        await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
-      }
-      await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(1));
-      expect(previewGenerationPlacement).toHaveBeenCalledWith(
-        target,
-        expect.objectContaining({ batch_size: 1 }),
-        count,
-        expect.objectContaining({ signal: expect.any(AbortSignal) }),
-      );
-
-      apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
-        if (path === "/api/status") {
-          return Promise.resolve({ ...status, instance_id: "replacement-instance" });
-        }
-        if (path === "/api/models") return Promise.resolve([model]);
-        if (path === "/api/gallery") return Promise.resolve([print]);
-        return durableApiFallback(path, init, callTarget);
-      });
-      window.dispatchEvent(new Event("pageshow"));
-      await flushPromises();
-      preview.resolve(plannedPlacement());
-      await flushPromises();
-
-      expect(openStreams).toHaveLength(0);
-      expect(wrapper.text()).toContain("connection details changed while checking placement");
-    },
-  );
+    expect(admittedRequests()).toHaveLength(0);
+    expect(wrapper.text()).toContain("connection details changed");
+  });
 
   it("preserves prepared Batch N and queues nothing when the machine refuses the print", async () => {
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
@@ -4288,7 +4288,8 @@ describe("MobileApp generation queue", () => {
   });
 
   it("identifies a failed middle prepared sibling by variation and reviewed prompt", async () => {
-    admitCompletedPrints();
+    serveStillModel();
+    const admissions = heldAdmissions();
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
@@ -4305,29 +4306,28 @@ describe("MobileApp generation queue", () => {
 
     await flushPromises();
     expect(admittedRequests()).toHaveLength(3);
-    openStreams[1]!.options.onEvent("error", JSON.stringify({ message: "host ran out of memory" }));
-    openStreams[1]!.resolve();
-    openStreams[2]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: btoa("third"),
-        format: "png",
-        width: 768,
-        height: 512,
-        seed_used: 3,
-        generation_time_ms: 700,
-        model: model.name,
-      }),
-    );
-    openStreams[2]!.resolve();
+    // One batch, three children, three different outcomes.
+    admissions.settleAt(0, {
+      children: [
+        { state: "complete", filename: "first.png" },
+        { state: "failed", error: "host ran out of memory" },
+        { state: "complete", filename: "third.png" },
+      ],
+    });
+    await flushPromises();
     await flushPromises();
 
-    const liveSummary = wrapper.findAll(".sr-only[aria-live='polite']")[1]!.text();
-    expect(liveSummary).toContain("Variation 2, “middle thunderstorm”");
-    expect(liveSummary).toContain(
+    // The partial failure names the one-based variation and its reviewed
+    // prompt wherever it is announced.
+    const announced = wrapper
+      .findAll(".sr-only[aria-live='polite']")
+      .map((region) => region.text())
+      .join(" ");
+    expect(announced).toContain("Variation 2, “middle thunderstorm”");
+    expect(announced).toContain(
       "Studio ran out of memory. Try a smaller model, image size, or batch.",
     );
-    expect(wrapper.find("img.result-media").exists()).toBe(true);
+    await vi.waitFor(() => expect(wrapper!.find("img.result-media").exists()).toBe(true));
   });
 
   it("keeps a prepared sibling live when cancellation is unconfirmed", async () => {

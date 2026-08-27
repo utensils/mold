@@ -17,6 +17,20 @@ export function mobileCompletionSummary(result: CompleteEvent): string {
   return `${timing}seed ${result.seed_used}`;
 }
 
+/**
+ * One sentence naming WHICH sibling of a batch failed and the prompt it was
+ * reviewed with. Shared so the sequence path and the durable print path
+ * cannot word a partial failure differently.
+ */
+export function preparedVariationFailure(
+  oneBasedIndex: number,
+  prompt: string,
+  detail: string,
+): string {
+  const trimmed = prompt.length > 120 ? `${prompt.slice(0, 117)}…` : prompt;
+  return `Variation ${oneBasedIndex}, “${trimmed}”, failed: ${detail}`;
+}
+
 export function summarizeMobileGenerationOutcome(
   jobs: readonly Job[],
   options: { hostLabel: string; prepared: boolean },

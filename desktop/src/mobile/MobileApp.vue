@@ -490,6 +490,7 @@ import {
 import {
   mobileCompletionSummary as completionSummary,
   summarizeMobileGenerationOutcome,
+  preparedVariationFailure,
 } from "./mobileGenerationOutcome";
 import { MobileSubmissionAttempts } from "./mobileSubmissionAttempt";
 
@@ -2931,6 +2932,9 @@ function scheduleMobileDurableCancelIntents(): void {
 
 async function processDurableGenerationTerminalEffects(): Promise<void> {
   const effects: Array<() => Promise<unknown> | void> = [];
+  // A failure has the last word: within one pass a sibling's completion must
+  // not overwrite the sentence naming which variation failed.
+  const failureAnnouncements: Array<() => void> = [];
   let changed = false;
   for (const original of durableGenerationRecoveries.value) {
     let recovery = original;
@@ -2990,9 +2994,17 @@ async function processDurableGenerationTerminalEffects(): Promise<void> {
           });
         } else {
           const detail = durableFailureMessage(lifecycle.error, job.hostLabel);
-          effects.push(() => {
-            setGenerationStatus(detail, true);
-            generationAnnouncement.value = `Generation failed. ${detail}`;
+          // A batch's partial failure must say WHICH sibling failed and the
+          // prompt it was reviewed with; a bare "Generation failed" leaves a
+          // reviewed set unidentifiable.
+          const siblings = mobileDurableJobs(recovery).length;
+          const summary =
+            siblings > 1
+              ? preparedVariationFailure(lifecycle.childIndex, job.prompt, detail)
+              : detail;
+          failureAnnouncements.push(() => {
+            setGenerationStatus(summary, true);
+            generationAnnouncement.value = `Generation failed. ${summary}`;
           });
         }
       }
@@ -3016,6 +3028,7 @@ async function processDurableGenerationTerminalEffects(): Promise<void> {
   // claimed state, never replay an effect.
   if (changed) persistDurableGenerationRecoveries();
   await Promise.allSettled(effects.map(async (run) => await run()));
+  for (const announce of failureAnnouncements) announce();
   pruneDurableTerminalRuntime();
 }
 
