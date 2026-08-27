@@ -73,6 +73,8 @@ export interface QueueWorkItem {
     component: string;
     bytes_done: number;
     bytes_total: number;
+    /** Age of the current phase alone, reset when the phase changes. */
+    phase_elapsed_ms?: number | null;
   } | null;
   warm_wait_deadline_unix_ms?: number | null;
   activity_phase?:
