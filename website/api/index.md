@@ -1095,10 +1095,34 @@ a chain plan, but return immediately with `202 Accepted`:
 { "job_id": "550e8400-e29b-41d4-a716-446655440000" }
 ```
 
+### Ephemeral jobs
+
+`ChainRequest.ephemeral` (additive; absent means `false`) marks a chain that is
+ONE print's implementation detail rather than a sequence the user authored.
+`mold run --frames 200` splits a long video into clips because the model cannot
+render it in one pass — the user asked for a video, not for a chain — so the CLI
+sets this and browser surfaces should set it for the same auto-chained case.
+
+An ephemeral job renders identically to an authored one and publishes the same
+stitched print, with full per-clip provenance. What differs:
+
+- it is absent from `GET /api/chain-jobs`, so it never appears in History ▸
+  Sequences;
+- it emits no `chain_job_queued` event, so it never appears in "Now developing";
+- its working directory is swept after finalization, and `resume` answers
+  `409 CHAIN_JOB_EPHEMERAL`;
+- **its print records no `chain_job_id`**, so "Reuse settings" restores a
+  one-shot rather than opening the clip rail for a job that no longer exists.
+
+Chain jobs require `output_format: "mp4"`. Stitching and its audio mux are
+MP4-native; convert the finished print if you need GIF, WebP or APNG.
+
 Endpoints:
 
 - `POST /api/chain-jobs` — create a queued job.
-- `GET /api/chain-jobs` — list summaries, newest first.
+- `GET /api/chain-jobs` — list summaries, newest first. Ephemeral jobs are
+  omitted; pass `?include_ephemeral=true` only to recover an id lost during
+  suspension.
 - `GET /api/chain-jobs/:id` — detail including stages, retakes, finalizes, and effective script.
 - `GET /api/chain-jobs/:id/events` — SSE stream; first frame is always a snapshot.
 - `POST /api/chain-jobs/:id/resume` — requeue `interrupted`, `failed`, or `cancelled`.
