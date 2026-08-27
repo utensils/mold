@@ -2,17 +2,12 @@ import type {
   ChainProgressEvent,
   CompleteEvent,
   GenerateRequest,
-  ProgressEvent,
   SseChainCompleteEvent,
 } from "./api/types";
 import type { DevelopPhase } from "@ui/lib/grain";
 import { queueWaitCode, resolveQueueWait } from "@studio/lib/queuePosition";
 import { requestWarningsFromCompleteEvent } from "@studio/lib/requestWarnings";
-import {
-  generationProgressCopy,
-  phaseForStageStart,
-  type GenerationWorkPhase,
-} from "@studio/lib/generationProgress";
+import { generationProgressCopy, type GenerationWorkPhase } from "@studio/lib/generationProgress";
 
 export type JobStatus = "queued" | "loading" | "denoising" | "finishing" | "complete" | "error";
 
@@ -186,78 +181,6 @@ export function markJobSettled(job: Job): void {
 export function applyCompletionWarnings(job: Job, complete: unknown): Job {
   for (const warning of requestWarningsFromCompleteEvent(complete)) {
     if (!job.requestWarnings.includes(warning)) job.requestWarnings.push(warning);
-  }
-  return job;
-}
-
-export function applyProgress(job: Job, event: ProgressEvent): Job {
-  switch (event.type) {
-    case "queued":
-      job.status = "queued";
-      job.queuePosition = event.position;
-      if (event.id) job.id = event.id;
-      break;
-    case "dependency_wait":
-      job.status = "queued";
-      job.stage = `Waiting for ${event.dependency}`;
-      break;
-    case "download_progress": {
-      job.status = "queued";
-      const percent =
-        event.bytes_total > 0 ? Math.round((event.bytes_downloaded / event.bytes_total) * 100) : 0;
-      job.stage = `Downloading ${event.filename} (${percent}%)`;
-      break;
-    }
-    case "download_done":
-      job.status = "queued";
-      job.stage = `Dependency ready: ${event.filename}`;
-      break;
-    case "pull_complete":
-      job.status = "queued";
-      job.stage = `Dependency ready: ${event.model}`;
-      break;
-    case "weight_load":
-    case "stage_start":
-      // StageStart is also used for nested work inside a denoise evaluation.
-      // MiniMax H3, for example, starts a 50-block transformer stage before
-      // each DenoiseStep. Keep that work attached to its truthful N/N count;
-      // only a stage beginning after N/N is final output preparation.
-      if (job.status === "denoising" || job.status === "finishing") {
-        if (event.type === "stage_start") {
-          const current: GenerationWorkPhase =
-            job.status === "finishing" ? "finalizing" : "denoising";
-          job.status =
-            phaseForStageStart(current, job.step, job.total) === "finalizing"
-              ? "finishing"
-              : "denoising";
-          job.stage = event.name;
-        }
-      } else {
-        job.status = "loading";
-        job.stage = event.type === "stage_start" ? event.name : "Loading weights";
-      }
-      break;
-    case "stage_progress":
-      if (job.status !== "denoising" && job.status !== "finishing") job.status = "loading";
-      job.queuePosition = null;
-      job.stage = `${event.name} ${event.current}/${event.total}`;
-      break;
-    case "denoise_step":
-      job.status = "denoising";
-      job.queuePosition = null;
-      job.step = event.step;
-      job.total = event.total;
-      break;
-    case "preview": {
-      job.status = "denoising";
-      job.queuePosition = null;
-      const previous = job.previewUrl;
-      job.previewUrl = base64ToBlobUrl(event.image, "image/png");
-      if (previous) URL.revokeObjectURL(previous);
-      break;
-    }
-    default:
-      break;
   }
   return job;
 }

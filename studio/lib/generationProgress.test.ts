@@ -1,12 +1,8 @@
 import { describe, expect, it } from "vitest";
-import {
-  generationProgressCopy,
-  phaseForStageStart,
-} from "./generationProgress";
+import { generationProgressCopy } from "./generationProgress";
 
 describe("generation progress phases", () => {
   it("keeps a nested transformer-block stage inside denoising", () => {
-    expect(phaseForStageStart("denoising", 4, 20)).toBe("denoising");
     expect(
       generationProgressCopy({
         phase: "denoising",
@@ -18,7 +14,6 @@ describe("generation progress phases", () => {
   });
 
   it("reserves finalizing for a stage after the last denoise evaluation", () => {
-    expect(phaseForStageStart("denoising", 20, 20)).toBe("finalizing");
     expect(
       generationProgressCopy({
         phase: "finalizing",

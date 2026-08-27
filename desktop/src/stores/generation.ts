@@ -23,7 +23,6 @@ import type {
   CompleteEvent,
   GenerateRequest,
   PromptTransformProvenance,
-  ProgressEvent,
   SseChainCompleteEvent,
 } from "../lib/api/types";
 import {
@@ -34,7 +33,6 @@ import {
 import {
   applyChainProgress,
   applyCompletionWarnings,
-  applyProgress,
   base64ToBlobUrl,
   chainCompleteToComplete,
   isCancelledError,
@@ -82,7 +80,6 @@ import { retryQueueJobRecoveringAmbiguity } from "@studio/api/queuePlan";
 export {
   applyChainProgress,
   applyCompletionWarnings,
-  applyProgress,
   base64ToBlobUrl,
   chainCompleteToComplete,
   isCancelledError,
@@ -1844,15 +1841,12 @@ export const useGenerationStore = defineStore("generation", {
           if (abort.signal.aborted || jobHasSettled(current)) return;
           try {
             if (event === "progress") {
-              if (chainRoute) {
-                applyChainProgress(current, JSON.parse(data) as ChainProgressEvent);
-              } else {
-                applyProgress(current, JSON.parse(data) as ProgressEvent);
-              }
+              applyChainProgress(current, JSON.parse(data) as ChainProgressEvent);
             } else if (event === "complete") {
-              const complete = chainRoute
-                ? chainCompleteToComplete(JSON.parse(data) as SseChainCompleteEvent, req)
-                : (JSON.parse(data) as CompleteEvent);
+              const complete = chainCompleteToComplete(
+                JSON.parse(data) as SseChainCompleteEvent,
+                req,
+              );
               applyCompletionWarnings(current, complete);
               const useSavedResult =
                 !complete.image ||
