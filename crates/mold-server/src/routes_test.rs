@@ -6382,6 +6382,68 @@ mod tests {
         assert!(journal.list_all().is_empty());
     }
 
+    /// Conditioning media never reaches `mold.db`, and the mechanism is
+    /// extraction rather than refusal.
+    ///
+    /// The media-free journal writers refused to persist media at all. They
+    /// are gone; the live path extracts every media field into the encrypted
+    /// queue-media store and serializes `request_json` from what is LEFT,
+    /// which is what `capabilities.durable_media` advertises. This asserts the
+    /// guarantee against the bytes on disk rather than against a refusal.
+    ///
+    /// Uses `source_image` because this binary is built without `pulid`, so an
+    /// identity request is refused before admission here. The face-photograph
+    /// half of the rule — biometric data about a real person, supplied for one
+    /// render — is pinned by
+    /// `queue_journal::tests::an_identity_request_never_writes_the_photograph_to_the_database`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn conditioning_media_is_sealed_and_never_written_into_sqlite() {
+        let root = tempfile::tempdir().unwrap();
+        let db_path = root.path().join("mold.db");
+        let db = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+
+        // A base64 payload distinctive enough to find in the raw database.
+        const PIXELS: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let mut body: serde_json::Value =
+            serde_json::from_str(&generate_body("a repaint", 64, 64)).unwrap();
+        body["source_image"] = serde_json::json!(PIXELS);
+
+        let accepted = app_with_state(state)
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [body],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+
+        // The row exists — the print IS durable — and the photograph is not in
+        // it.
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 1, "a media-carrying print is admitted durably");
+        assert!(
+            rows[0].media_set_id.is_some(),
+            "its media belongs to the encrypted store"
+        );
+        let mut sqlite = std::fs::read(&db_path).unwrap();
+        if let Ok(wal) = std::fs::read(format!("{}-wal", db_path.display())) {
+            sqlite.extend(wal);
+        }
+        assert!(
+            !sqlite
+                .windows(PIXELS.len())
+                .any(|window| window == PIXELS.as_bytes()),
+            "conditioning media must never be written into mold.db"
+        );
+    }
+
     /// Ordered references still refuse, and the reason is their one-use upload
     /// authority rather than a protocol version. Nothing reaches SQLite: the
     /// point of the refusal is that those handles are never written down.
