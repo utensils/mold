@@ -7,7 +7,11 @@ import type { GalleryImage, ModelEntry, ServerStatus } from "../lib/api/types";
 import { applyModelDefaults, newGenerateForm, type GenerateForm } from "../lib/generateForm";
 import { saveGenerationTemplate } from "../lib/generationTemplates";
 import { MOBILE_GENERATION_TEMPLATES_STORAGE_KEY } from "./mobileTemplateStorage";
-import { MOBILE_DURABLE_GENERATIONS_KEY } from "./mobileGenerationRecovery";
+import {
+  MOBILE_DURABLE_GENERATIONS_KEY,
+  createMobileDurableGenerationRecovery,
+  reduceMobileDurableGenerationRecovery,
+} from "./mobileGenerationRecovery";
 import {
   loadCachedGallery,
   storeCachedGallery,
@@ -2556,6 +2560,110 @@ describe("MobileApp generation queue", () => {
       );
     },
   );
+
+  it("hydrates a relaunch-recovered print from the host's queue row on selection", async () => {
+    // A recovery persisted by a previous launch: byte-free presentation only,
+    // no in-memory request. Selecting it must restore the print's REAL
+    // settings from the host, never the "Recovered print" stub.
+    const relaunchBatch = {
+      id: "relaunch-batch-id",
+      client_batch_id: "relaunch-batch",
+      instance_id: "studio-id",
+      durable: true,
+      children: [
+        {
+          index: 1,
+          job_id: "relaunch-job",
+          state: "running",
+          created_at_ms: 100,
+          updated_at_ms: 101,
+        },
+      ],
+    };
+    const recovery = reduceMobileDurableGenerationRecovery(
+      createMobileDurableGenerationRecovery({
+        hostId: "studio-id",
+        expectedInstanceId: "studio-id",
+        clientBatchId: "relaunch-batch",
+        requests: [
+          {
+            prompt: "lost with the old process",
+            model: model.name,
+            width: 768,
+            height: 512,
+            steps: 4,
+            guidance: 3.5,
+            seed: 7,
+            batch_size: 1,
+            output_format: "png",
+          },
+        ],
+        submittedAtMs: 100,
+      }),
+      { type: "batch_snapshot", batch: relaunchBatch as never },
+    );
+    localStorage.setItem(MOBILE_DURABLE_GENERATIONS_KEY, JSON.stringify([recovery]));
+    const realMetadata = {
+      prompt: "the real prompt from the host",
+      negative_prompt: "no fog",
+      model: model.name,
+      width: 768,
+      height: 512,
+      steps: 4,
+      guidance: 3.5,
+      seed: 7,
+    };
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({ events: { available: true }, ...durableQueueCapabilities });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path === "/api/generation-batches/status" && init?.method === "POST") {
+        return Promise.resolve({
+          instance_id: "studio-id",
+          batches: [relaunchBatch],
+          missing: { client_batch_ids: [], batch_ids: [] },
+        });
+      }
+      if (path.startsWith("/api/queue")) {
+        return Promise.resolve({
+          entries: [
+            {
+              id: "relaunch-job",
+              state: "running",
+              model: model.name,
+              prompt: realMetadata.prompt,
+              started_at_unix_ms: 100,
+              position: 0,
+              metadata: realMetadata,
+            },
+          ],
+          plan: null,
+        });
+      }
+      return durableApiFallback(path, init, callTarget);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await flushPromises();
+    const row = wrapper.get("[data-test='mobile-generation-job']");
+    await row.get(".mobile-generation-job").trigger("click");
+    await flushPromises();
+    await flushPromises();
+
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
+      "the real prompt from the host",
+    );
+    expect(wrapper.get("[data-test='mobile-generation-job']").text()).not.toContain(
+      "Recovered print",
+    );
+  });
 
   it("persists one pre-admission cancel tap until the exact server job id is reconciled", async () => {
     const admission = deferred<Record<string, unknown>>();
