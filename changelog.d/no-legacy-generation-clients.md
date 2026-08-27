@@ -1,4 +1,3 @@
-### Changed
 
 - Web, desktop, and iPhone now admit every print — Batch 1, Batch N, and each prepared variation — through the durable `POST /api/generation-batches` queue. The attached `/api/generate/stream` submission path, the mixed-version capability probes (`queue.heterogeneous_batch`, `queue.durable_batch_outcomes`, `queue.admission_protocol_version`), and the 404/405 placement-preview fallbacks are gone from the browser surfaces.
 - The browser no longer inspects a request before submitting it. Source media combined with a LoRA and identity photos are carried by the durable queue, and every request shape is submitted rather than fenced client-side; a machine that cannot take one — an HDR EXR output directory, or MiniMax H3's ordered references, which the durable queue does not yet carry — refuses it by name with its own message. The only client-side refusal left is a machine that does not advertise the durable contract at all.
