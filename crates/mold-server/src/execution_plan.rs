@@ -2829,8 +2829,11 @@ fn build_plan(
     let mut components = BTreeMap::new();
     let mut host_bytes_by_path: BTreeMap<PathBuf, u64> = BTreeMap::new();
     // The subset of `host_bytes_by_path` a request allocates again on a warm
-    // hit: a streaming encoder's forward-loop heap. A parked encoder's bytes
-    // stay resident in the engine and are already absent from `MemAvailable`.
+    // hit: a streaming encoder's forward-loop heap, and every host-only
+    // component — the identity extraction stack is built and released per
+    // extraction, a LoRA is merged per request — none of which the resident
+    // engine holds. A parked encoder's bytes stay resident in the engine and
+    // are already absent from `MemAvailable`.
     let mut recurring_host_bytes_by_path: BTreeMap<PathBuf, u64> = BTreeMap::new();
     let gemma_anon_peak_anchor =
         ltx2_cpu_gemma_anon_peak_anchor(context.family, context.artifacts, &placements);
@@ -2863,7 +2866,7 @@ fn build_plan(
                 bytes
             };
             host_bytes_by_path.insert(path.clone(), host);
-            if streams_from_mmap {
+            if streams_from_mmap || role.is_host_only() {
                 recurring_host_bytes_by_path.insert(path.clone(), host);
             }
             (
@@ -5081,6 +5084,50 @@ mod tests {
         );
         assert!(plan.admission_host_demand_bytes() > HAL9000_HOST_HEADROOM_BYTES);
         assert!(plan.admission_warm_host_demand_bytes() <= HAL9000_HOST_HEADROOM_BYTES);
+    }
+
+    /// Only what the resident engine HOLDS is credited on a warm hit. A
+    /// host-only component — a LoRA merged per request, the identity
+    /// extraction stack built and released per extraction — is a per-request
+    /// transient whatever the engine's residency, so its bytes stay in the warm
+    /// figure beside the base transient.
+    #[test]
+    fn a_warm_hit_keeps_charging_host_only_transients() {
+        let root = TempDir::new().unwrap();
+        sparse_file(&root.path().join("t5.safetensors"), 4 * GIB);
+        let lora = root.path().join("style.safetensors");
+        sparse_file(&lora, 300 * MIB);
+        let placement = DevicePlacement {
+            text_encoders: DeviceRef::Cpu,
+            advanced: None,
+        };
+        let mut request = request(Some(placement));
+        request.loras = Some(vec![mold_core::LoraWeight {
+            path: lora.display().to_string(),
+            scale: 1.0,
+            expert: None,
+        }]);
+        let plan = resolve_execution_plans(
+            &config(root.path(), "flux2", None),
+            &request,
+            &devices(&[24 * GIB]),
+            false,
+        )
+        .unwrap()
+        .remove(0);
+
+        let lora_component = &plan.components[&ComponentRole::Lora(0)];
+        assert_eq!(lora_component.placement, ResolvedComponentPlacement::Cpu);
+        assert_eq!(lora_component.predicted_host_bytes, 300 * MIB);
+        assert_eq!(
+            plan.predicted_host_increment_bytes,
+            BASE_HOST_TRANSIENT + 4 * GIB + 300 * MIB
+        );
+        assert_eq!(
+            plan.predicted_warm_host_increment_bytes,
+            BASE_HOST_TRANSIENT + 300 * MIB,
+            "the parked encoder is credited; the per-request LoRA is not"
+        );
     }
 
     /// A CPU-placed LTX-2 Gemma costs its streaming heap and nothing else.

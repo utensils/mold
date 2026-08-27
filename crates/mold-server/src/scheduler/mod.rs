@@ -3656,6 +3656,21 @@ impl Coordinator {
         })
     }
 
+    /// Whether the reclaim running for `job_id` still has a job to serve.
+    ///
+    /// A cancelled or dispatched job leaves `pending` (or loses its block),
+    /// and a reclaim that kept evicting for it would flush every idle engine
+    /// on the machine for a print nobody is waiting on; the run loop aborts
+    /// the task the moment this answers false.
+    fn host_reclaim_still_wanted(&self, job_id: &str) -> bool {
+        self.pending.get(job_id).is_some_and(|pending| {
+            matches!(
+                pending.host_block.as_ref().map(|block| &block.reclaim),
+                Some(HostReclaimAttempt::InFlight)
+            )
+        })
+    }
+
     /// A reclaim finished: keep what it gave back beside the block so a
     /// surviving shortfall is refused with the post-eviction numbers, then
     /// re-sample and replan.
@@ -6070,13 +6085,16 @@ pub async fn run_scheduler_coordinator(
     let mut generation_ingress_open = true;
     let mut owner_ingress_open = true;
     let mut resource_stream_open = true;
-    let mut host_reclaim: Option<
+    // The job id rides beside the task so a reclaim whose job was cancelled
+    // or dispatched is aborted rather than left flushing the cache.
+    let mut host_reclaim: Option<(
+        String,
         tokio::task::JoinHandle<(String, crate::host_reclaim::HostReclaimOutcome)>,
-    > = None;
+    )> = None;
     loop {
         let mut immediate = false;
         tokio::select! {
-            finished = async { host_reclaim.as_mut().expect("guarded by the branch precondition").await }, if host_reclaim.is_some() => {
+            finished = async { (&mut host_reclaim.as_mut().expect("guarded by the branch precondition").1).await }, if host_reclaim.is_some() => {
                 host_reclaim = None;
                 match finished {
                     Ok((job_id, outcome)) => {
@@ -6210,19 +6228,34 @@ pub async fn run_scheduler_coordinator(
         }
         coordinator.start_needed_preparations();
         while coordinator.preparation_tasks.try_join_next().is_some() {}
+        if let Some((job_id, task)) = host_reclaim
+            .as_ref()
+            .filter(|(job_id, _)| !coordinator.host_reclaim_still_wanted(job_id))
+        {
+            tracing::info!(
+                job_id,
+                "host reclaim abandoned; its job no longer waits on host memory"
+            );
+            task.abort();
+            host_reclaim = None;
+        }
         if host_reclaim.is_none() {
             if let Some(request) = coordinator.next_host_reclaim() {
                 let state = coordinator.state.clone();
-                host_reclaim = Some(tokio::spawn(async move {
-                    let outcome = crate::host_reclaim::reclaim_host_headroom(
-                        &state,
-                        &request.model,
-                        request.required_bytes,
-                        &host_headroom_from_system,
-                    )
-                    .await;
-                    (request.job_id, outcome)
-                }));
+                let job_id = request.job_id.clone();
+                host_reclaim = Some((
+                    job_id,
+                    tokio::spawn(async move {
+                        let outcome = crate::host_reclaim::reclaim_host_headroom(
+                            &state,
+                            &request.model,
+                            request.required_bytes,
+                            &host_headroom_from_system,
+                        )
+                        .await;
+                        (request.job_id, outcome)
+                    }),
+                ));
             }
         }
         if coordinator
@@ -9650,6 +9683,32 @@ mod tests {
             !error.contains("unloading"),
             "nothing was released: {error}"
         );
+    }
+
+    /// A cancelled job must not leave its reclaim flushing every idle engine
+    /// on the machine: the run loop asks this before every turn and aborts.
+    #[tokio::test]
+    async fn a_reclaim_is_no_longer_wanted_once_its_job_leaves_the_queue() {
+        let (mut coordinator, _worker, _worker_rx, _result_rx, _plan, _root) =
+            hal9000_host_blocked_coordinator().await;
+        let _ = coordinator.dispatch_ready().await;
+        let request = coordinator.next_host_reclaim().expect("blocked and idle");
+        assert!(coordinator.host_reclaim_still_wanted(&request.job_id));
+
+        let cancelled = coordinator
+            .pending
+            .remove(&request.job_id)
+            .expect("the blocked job is pending");
+        assert!(!coordinator.host_reclaim_still_wanted(&request.job_id));
+
+        // Finishing after the job left is harmless bookkeeping, not a panic.
+        let mut immediate = false;
+        coordinator.finish_host_reclaim(
+            &request.job_id,
+            crate::host_reclaim::HostReclaimOutcome::default(),
+            &mut immediate,
+        );
+        drop(cancelled);
     }
 
     /// Running work is about to give its memory back; evicting under it would
