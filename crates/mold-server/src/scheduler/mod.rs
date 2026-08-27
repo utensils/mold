@@ -626,7 +626,7 @@ struct PendingGeneration {
     capacity_park: Option<crate::execution_plan::CapacityPark>,
     /// The planner parked this job on host RAM (`insufficient_host_ram` or
     /// `aggregate_host_ram_reserved`), as last published.
-    host_block: Option<HostBlock>,
+    memory_block: Option<MemoryBlock>,
     /// When this job's dependency preparation started, so the queue can say
     /// how long it has been running. `None` unless one is in flight.
     preparation_started_ms: Option<u64>,
@@ -640,17 +640,46 @@ struct PreparationRefreshObservation {
     first_observed_ms: u64,
 }
 
-/// A job the planner parked on host RAM, recorded from the published plan —
-/// the one place the block is observed — so the idle reclaim and the idle
-/// bound act on a typed fact instead of re-deriving one, and the WARN that
-/// names the numbers is logged once per block rather than once per replan.
+/// A job the planner parked on memory — host RAM, or the VRAM of every
+/// device that could run it — recorded from the published plan, the one
+/// place the block is observed, so the idle reclaim and the idle bound act on
+/// a typed fact instead of re-deriving one, and the WARN that names the
+/// numbers is logged once per block rather than once per replan.
+///
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MemoryBlockKind {
+    Host,
+    Device {
+        device_id: String,
+        ordinal: usize,
+        backend: mold_core::GpuBackend,
+    },
+}
+
+impl MemoryBlockKind {
+    fn noun(&self) -> &'static str {
+        match self {
+            Self::Host => "host memory",
+            Self::Device { .. } => "device memory",
+        }
+    }
+}
+
+/// The device kind exists because an idle device is planned against
+/// `free + the cache's recorded footprint`, and what the driver attributes to
+/// mold can exceed that record by the gigabytes a plan is short by (hal9000,
+/// 2026-08-27: a PuLID `flux-dev:q8` print at 22.2 GB sat unplanned for five
+/// minutes beside an idle `flux2-klein:q8`, then dispatched the moment
+/// another print had evicted it). Nothing running means nothing will ever
+/// give that memory back, so mold releases it itself, exactly as for host RAM.
 #[derive(Clone, Debug)]
-struct HostBlock {
-    /// The cheapest eligible candidate's host demand, what the planner compared.
+struct MemoryBlock {
+    kind: MemoryBlockKind,
+    /// The cheapest eligible candidate's demand, what the planner compared.
     required_bytes: u64,
-    /// The ledger headroom that demand was compared against.
+    /// The headroom that demand was compared against.
     headroom_bytes: u64,
-    reclaim: HostReclaimAttempt,
+    reclaim: ReclaimAttempt,
 }
 
 /// Whether mold has yet asked its own idle model cache for the missing bytes.
@@ -660,19 +689,35 @@ struct HostBlock {
 /// allowed to become a refusal. `Done` carries what that release gave back so
 /// the refusal a user finally reads names it (`host_shortfall_message`).
 #[derive(Clone, Debug)]
-enum HostReclaimAttempt {
+enum ReclaimAttempt {
     NotStarted,
     InFlight,
     Done(crate::host_reclaim::HostReclaimOutcome),
 }
 
 /// What the run loop hands to `host_reclaim::reclaim_host_headroom`, off the
-/// coordinator's own turn: an eviction is awaited owner work.
+/// coordinator's own turn: an eviction is awaited owner work. The kind picks
+/// the sampler the reclaim re-asks between evictions.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct HostReclaimRequest {
+struct ReclaimRequest {
     job_id: String,
     model: String,
     required_bytes: u64,
+    kind: MemoryBlockKind,
+}
+
+/// Free device memory as the driver reports it right now, for the reclaim's
+/// re-sample between evictions — the same reading the worker's own post-drop
+/// gate trusts, not the registry's last one-second sample.
+fn device_headroom_from_driver(ordinal: usize, backend: mold_core::GpuBackend) -> u64 {
+    match backend {
+        mold_core::GpuBackend::Cuda => {
+            mold_inference::device::usable_free_vram_bytes_result(ordinal).unwrap_or(0)
+        }
+        mold_core::GpuBackend::Metal => {
+            mold_inference::device::available_system_memory_bytes().unwrap_or(0)
+        }
+    }
 }
 
 /// The ledger's headroom rule on a fresh OS sample, for the reclaim's
@@ -747,15 +792,42 @@ fn dispatch_retry_delay_ms(round: u8) -> u64 {
 
 #[derive(Debug)]
 enum GenerationPlanFailure {
-    Transient(String),
+    Transient(TransientPlanFailure),
     StalePreparation(String),
     Terminal(crate::execution_plan::ExecutionPlanError),
+}
+
+/// A plan the resolver could not produce right now but may next turn. When
+/// the cause is device memory, the numbers ride along so an idle scheduler
+/// can record the block and release its own cache: the resolver refuses a
+/// device BEFORE the planner sees it, so `BlockedReason::InsufficientVram`
+/// never appears for this case and the job would otherwise wait unnamed and
+/// unbounded (hal9000, 2026-08-27).
+#[derive(Debug, Clone)]
+struct TransientPlanFailure {
+    message: String,
+    vram_shortfall: Option<VramShortfall>,
+}
+
+#[derive(Debug, Clone)]
+struct VramShortfall {
+    required_peak_bytes: u64,
+    eligible_device_ids: Vec<String>,
+}
+
+impl From<String> for TransientPlanFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            vram_shortfall: None,
+        }
+    }
 }
 
 impl std::fmt::Display for GenerationPlanFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Transient(error) => formatter.write_str(error),
+            Self::Transient(failure) => formatter.write_str(&failure.message),
             Self::StalePreparation(error) => formatter.write_str(error),
             Self::Terminal(error) => error.fmt(formatter),
         }
@@ -1747,7 +1819,7 @@ impl Coordinator {
                 unschedulable_reason: None,
                 announced_position: None,
                 capacity_park: None,
-                host_block: None,
+                memory_block: None,
                 preparation_started_ms: None,
                 preparation_progress: Default::default(),
             },
@@ -2471,7 +2543,7 @@ impl Coordinator {
                                         unschedulable_reason: None,
                                         announced_position: None,
                                         capacity_park: None,
-                                        host_block: None,
+                                        memory_block: None,
                                         preparation_started_ms: None,
                                         preparation_progress: Default::default(),
                                     },
@@ -2500,7 +2572,7 @@ impl Coordinator {
                                     unschedulable_reason: None,
                                     announced_position: None,
                                     capacity_park: None,
-                                    host_block: None,
+                                    memory_block: None,
                                     preparation_started_ms: None,
                                     preparation_progress: Default::default(),
                                 },
@@ -3081,11 +3153,13 @@ impl Coordinator {
             .as_ref()
             .and_then(|prepared| prepared.capacity_park.as_ref())
         {
-            return Err(GenerationPlanFailure::Transient(park.reason.clone()));
+            return Err(GenerationPlanFailure::Transient(park.reason.clone().into()));
         }
         let config = self.state.config.try_read().map_err(|_| {
             GenerationPlanFailure::Transient(
-                "configuration changed while resolving execution plan".to_string(),
+                "configuration changed while resolving execution plan"
+                    .to_string()
+                    .into(),
             )
         })?;
         let offload_requested = matches!(
@@ -3570,7 +3644,7 @@ impl Coordinator {
 
     /// Record which pending generations the plan just published parked on
     /// host RAM, with the numbers the planner compared.
-    fn record_host_blocks(&mut self, snapshot: &PlannerSnapshot, plan: &Plan) {
+    fn record_memory_blocks(&mut self, snapshot: &PlannerSnapshot, plan: &Plan) {
         let headroom_bytes = snapshot.host_memory.headroom_bytes;
         let required_by_work = snapshot
             .work
@@ -3596,31 +3670,144 @@ impl Coordinator {
             })
             .map(|blocked| blocked.work_id.as_str().to_string())
             .collect::<BTreeSet<_>>();
+        // A VRAM block is recorded against the cheapest candidate on a
+        // schedulable device and that device's planned capacity — the two
+        // numbers the planner compared — so the reclaim knows which device
+        // to re-sample and the refusal names what it was short of.
+        let workers = self.state.gpu_pool.worker_snapshot();
+        let vram_blocked = plan
+            .blocked
+            .iter()
+            .filter(|blocked| blocked.reason == BlockedReason::InsufficientVram)
+            .filter_map(|blocked| {
+                let work = snapshot
+                    .work
+                    .iter()
+                    .find(|work| work.id == blocked.work_id)?;
+                let (candidate, device) = work
+                    .candidate_placements
+                    .iter()
+                    .filter_map(|candidate| {
+                        snapshot
+                            .devices
+                            .iter()
+                            .find(|device| {
+                                device.id == candidate.device_id && device.is_schedulable()
+                            })
+                            .map(|device| (candidate, device))
+                    })
+                    .min_by_key(|(candidate, _)| candidate.predicted_vram_bytes)?;
+                let ordinal = workers
+                    .iter()
+                    .find(|worker| worker_device_id(worker) == device.id.as_str())
+                    .map(|worker| worker.gpu.ordinal)?;
+                let backend = match device.backend {
+                    Backend::Cuda => mold_core::GpuBackend::Cuda,
+                    Backend::Metal => mold_core::GpuBackend::Metal,
+                    // The utility lane holds no VRAM to reclaim.
+                    Backend::Cpu => return None,
+                };
+                Some((
+                    blocked.work_id.as_str().to_string(),
+                    (
+                        candidate.predicted_vram_bytes,
+                        device.available_vram_bytes,
+                        MemoryBlockKind::Device {
+                            device_id: device.id.as_str().to_string(),
+                            ordinal,
+                            backend,
+                        },
+                    ),
+                ))
+            })
+            .collect::<BTreeMap<_, _>>();
         for (id, pending) in &mut self.pending {
-            if !host_blocked.contains(id) {
-                pending.host_block = None;
+            let (kind, required_bytes, headroom_bytes) = if host_blocked.contains(id) {
+                (
+                    MemoryBlockKind::Host,
+                    required_by_work.get(id).copied().unwrap_or(0),
+                    headroom_bytes,
+                )
+            } else if let Some((required, available, kind)) = vram_blocked.get(id) {
+                (kind.clone(), *required, *available)
+            } else {
+                // A job the plan placed or left unblocked has no block; one
+                // the resolver kept out of the plan altogether keeps the block
+                // the resolver recorded for it.
+                if snapshot.work.iter().any(|work| work.id.as_str() == id) {
+                    pending.memory_block = None;
+                }
                 continue;
-            }
-            let required_bytes = required_by_work.get(id).copied().unwrap_or(0);
-            match pending.host_block.as_mut() {
-                Some(block) => {
+            };
+            match pending.memory_block.as_mut() {
+                Some(block) if block.kind == kind => {
                     block.required_bytes = required_bytes;
                     block.headroom_bytes = headroom_bytes;
                 }
-                None => {
+                _ => {
                     tracing::warn!(
                         job_id = %id,
                         model = %pending.job.request.model,
-                        required_host_bytes = required_bytes,
-                        host_headroom_bytes = headroom_bytes,
-                        "queued generation is blocked on host memory"
-                    );
-                    pending.host_block = Some(HostBlock {
+                        memory = kind.noun(),
                         required_bytes,
                         headroom_bytes,
-                        reclaim: HostReclaimAttempt::NotStarted,
+                        "queued generation is blocked on memory"
+                    );
+                    pending.memory_block = Some(MemoryBlock {
+                        kind,
+                        required_bytes,
+                        headroom_bytes,
+                        reclaim: ReclaimAttempt::NotStarted,
                     });
                 }
+            }
+        }
+    }
+
+    /// Record a device block the RESOLVER raised — the plan never reached the
+    /// planner, so `record_memory_blocks` cannot see it — against the eligible
+    /// device with the most room, which is the one an eviction would free.
+    fn record_resolver_vram_block(
+        &mut self,
+        job_id: &str,
+        shortfall: &VramShortfall,
+        device_facts: &[crate::execution_plan::DeviceFact],
+    ) {
+        let Some(device) = device_facts
+            .iter()
+            .filter(|fact| shortfall.eligible_device_ids.contains(&fact.id))
+            .max_by_key(|fact| fact.available_vram_bytes)
+        else {
+            return;
+        };
+        let Some(pending) = self.pending.get_mut(job_id) else {
+            return;
+        };
+        let kind = MemoryBlockKind::Device {
+            device_id: device.id.clone(),
+            ordinal: device.ordinal,
+            backend: device.backend,
+        };
+        match pending.memory_block.as_mut() {
+            Some(block) if block.kind == kind => {
+                block.required_bytes = shortfall.required_peak_bytes;
+                block.headroom_bytes = device.available_vram_bytes;
+            }
+            _ => {
+                tracing::warn!(
+                    job_id,
+                    model = %pending.job.request.model,
+                    memory = kind.noun(),
+                    required_bytes = shortfall.required_peak_bytes,
+                    headroom_bytes = device.available_vram_bytes,
+                    "queued generation is blocked on memory"
+                );
+                pending.memory_block = Some(MemoryBlock {
+                    kind,
+                    required_bytes: shortfall.required_peak_bytes,
+                    headroom_bytes: device.available_vram_bytes,
+                    reclaim: ReclaimAttempt::NotStarted,
+                });
             }
         }
     }
@@ -3632,14 +3819,14 @@ impl Coordinator {
     /// idle engines. A busy scheduler never reclaims — running work is about
     /// to give its memory back, and evicting under it would only park the
     /// unload behind that render.
-    fn next_host_reclaim(&mut self) -> Option<HostReclaimRequest> {
+    fn next_memory_reclaim(&mut self) -> Option<ReclaimRequest> {
         if !self.scheduler_is_idle() {
             return None;
         }
         if self.pending.values().any(|pending| {
             matches!(
-                pending.host_block.as_ref().map(|block| &block.reclaim),
-                Some(HostReclaimAttempt::InFlight)
+                pending.memory_block.as_ref().map(|block| &block.reclaim),
+                Some(ReclaimAttempt::InFlight)
             )
         }) {
             return None;
@@ -3649,24 +3836,26 @@ impl Coordinator {
             .iter_mut()
             .filter(|(_, pending)| {
                 matches!(
-                    pending.host_block.as_ref().map(|block| &block.reclaim),
-                    Some(HostReclaimAttempt::NotStarted)
+                    pending.memory_block.as_ref().map(|block| &block.reclaim),
+                    Some(ReclaimAttempt::NotStarted)
                 )
             })
             .min_by_key(|(_, pending)| pending.queue_rank)?;
-        let block = pending.host_block.as_mut()?;
-        block.reclaim = HostReclaimAttempt::InFlight;
+        let block = pending.memory_block.as_mut()?;
+        block.reclaim = ReclaimAttempt::InFlight;
         tracing::info!(
             job_id = %id,
             model = %pending.job.request.model,
-            required_host_bytes = block.required_bytes,
-            host_headroom_bytes = block.headroom_bytes,
-            "host headroom is short on an idle scheduler; releasing idle models before bounding the wait"
+            memory = block.kind.noun(),
+            required_bytes = block.required_bytes,
+            headroom_bytes = block.headroom_bytes,
+            "memory is short on an idle scheduler; releasing idle models before bounding the wait"
         );
-        Some(HostReclaimRequest {
+        Some(ReclaimRequest {
             job_id: id.clone(),
             model: pending.job.request.model.clone(),
             required_bytes: block.required_bytes,
+            kind: block.kind.clone(),
         })
     }
 
@@ -3676,11 +3865,11 @@ impl Coordinator {
     /// and a reclaim that kept evicting for it would flush every idle engine
     /// on the machine for a print nobody is waiting on; the run loop aborts
     /// the task the moment this answers false.
-    fn host_reclaim_still_wanted(&self, job_id: &str) -> bool {
+    fn memory_reclaim_still_wanted(&self, job_id: &str) -> bool {
         self.pending.get(job_id).is_some_and(|pending| {
             matches!(
-                pending.host_block.as_ref().map(|block| &block.reclaim),
-                Some(HostReclaimAttempt::InFlight)
+                pending.memory_block.as_ref().map(|block| &block.reclaim),
+                Some(ReclaimAttempt::InFlight)
             )
         })
     }
@@ -3688,7 +3877,7 @@ impl Coordinator {
     /// A reclaim finished: keep what it gave back beside the block so a
     /// surviving shortfall is refused with the post-eviction numbers, then
     /// re-sample and replan.
-    fn finish_host_reclaim(
+    fn finish_memory_reclaim(
         &mut self,
         job_id: &str,
         outcome: crate::host_reclaim::HostReclaimOutcome,
@@ -3703,9 +3892,9 @@ impl Coordinator {
         if let Some(block) = self
             .pending
             .get_mut(job_id)
-            .and_then(|pending| pending.host_block.as_mut())
+            .and_then(|pending| pending.memory_block.as_mut())
         {
-            block.reclaim = HostReclaimAttempt::Done(outcome);
+            block.reclaim = ReclaimAttempt::Done(outcome);
         }
         self.collect_host_memory();
         self.mutate(immediate);
@@ -3715,6 +3904,7 @@ impl Coordinator {
         let idle = self.scheduler_is_idle();
         let now_ms = monotonic_ms();
         let device_facts = self.device_facts();
+        let mut vram_shortfalls: Vec<(String, VramShortfall)> = Vec::new();
         let observations = self
             .pending
             .iter()
@@ -3733,11 +3923,22 @@ impl Coordinator {
                     // A plan resolved: this job is schedulable and any earlier
                     // idle wait is void — unless the planner parked it on host
                     // RAM and mold has already released everything it could.
-                    Ok(plans) if !plans.is_empty() => host_shortfall_reason(pending),
+                    Ok(plans) if !plans.is_empty() => memory_shortfall_reason(pending),
                     Ok(_) => Some(String::new()),
                     // Terminal failures are rejected by their own pass, which
                     // already names the error.
                     Err(GenerationPlanFailure::Terminal(_)) => None,
+                    // A device the resolver refused for VRAM is the planner's
+                    // host block in another memory: recorded below, reclaimed
+                    // while idle, and bounded only once mold has released
+                    // everything it could.
+                    Err(GenerationPlanFailure::Transient(TransientPlanFailure {
+                        vram_shortfall: Some(shortfall),
+                        ..
+                    })) => {
+                        vram_shortfalls.push((id.clone(), shortfall));
+                        memory_shortfall_reason(pending)
+                    }
                     // Resource pressure and preparation refreshes are retry
                     // states, not evidence that durable work became invalid.
                     // Their duration cannot turn them into terminal failures.
@@ -3747,6 +3948,9 @@ impl Coordinator {
                 (id.clone(), failure)
             })
             .collect::<Vec<_>>();
+        for (id, shortfall) in vram_shortfalls {
+            self.record_resolver_vram_block(&id, &shortfall, &device_facts);
+        }
         let grace_ms = self.unschedulable_idle_grace_ms;
         let mut refusals = Vec::new();
         for (id, failure) in observations {
@@ -3790,13 +3994,21 @@ impl Coordinator {
                 continue;
             };
             self.plan_invalidations.remove(&id);
-            if let Some(shortfall) = host_shortfall_reason(&pending) {
-                let message =
-                    host_shortfall_rejection_message(&pending.job.request.model, &shortfall);
+            if let Some(shortfall) = memory_shortfall_reason(&pending) {
+                let kind = pending
+                    .memory_block
+                    .as_ref()
+                    .map(|block| block.kind.clone())
+                    .unwrap_or(MemoryBlockKind::Host);
+                let message = memory_shortfall_rejection_message(
+                    &pending.job.request.model,
+                    &kind,
+                    &shortfall,
+                );
                 tracing::warn!(
                     job_id = %id,
                     %message,
-                    "holding a queued generation whose host shortfall survived an idle reclaim"
+                    "holding a queued generation whose memory shortfall survived an idle reclaim"
                 );
                 // Retryable on purpose: the operator can free host memory and
                 // retry the row unchanged, exactly as an H3 host hold is.
@@ -5106,7 +5318,7 @@ impl Coordinator {
                     return None;
                 }
             };
-            self.record_host_blocks(&snapshot, &plan);
+            self.record_memory_blocks(&snapshot, &plan);
             if let Err(error) = self.publish_plan(&snapshot, &plan, self.dirty.dirty_since) {
                 tracing::error!(
                     state_version = snapshot.state_version,
@@ -5590,7 +5802,7 @@ impl Coordinator {
                                     unschedulable_reason: None,
                                     announced_position: None,
                                     capacity_park: None,
-                                    host_block: None,
+                                    memory_block: None,
                                     preparation_started_ms: None,
                                     preparation_progress: Default::default(),
                                 },
@@ -5838,7 +6050,7 @@ impl Coordinator {
             .and_then(|dirty| dirty.dirty_since)
             .or(self.dirty.dirty_since);
         self.publish_plan(&snapshot, &plan, published_dirty_since)?;
-        self.record_host_blocks(&snapshot, &plan);
+        self.record_memory_blocks(&snapshot, &plan);
         self.plan_version = plan.plan_version;
         Ok((prospective_state_version, prospective_dirty))
     }
@@ -6112,7 +6324,7 @@ pub async fn run_scheduler_coordinator(
                 host_reclaim = None;
                 match finished {
                     Ok((job_id, outcome)) => {
-                        coordinator.finish_host_reclaim(&job_id, outcome, &mut immediate);
+                        coordinator.finish_memory_reclaim(&job_id, outcome, &mut immediate);
                     }
                     Err(error) => {
                         tracing::warn!(%error, "host reclaim task did not complete");
@@ -6244,7 +6456,7 @@ pub async fn run_scheduler_coordinator(
         while coordinator.preparation_tasks.try_join_next().is_some() {}
         if let Some((job_id, task)) = host_reclaim
             .as_ref()
-            .filter(|(job_id, _)| !coordinator.host_reclaim_still_wanted(job_id))
+            .filter(|(job_id, _)| !coordinator.memory_reclaim_still_wanted(job_id))
         {
             tracing::info!(
                 job_id,
@@ -6254,17 +6466,26 @@ pub async fn run_scheduler_coordinator(
             host_reclaim = None;
         }
         if host_reclaim.is_none() {
-            if let Some(request) = coordinator.next_host_reclaim() {
+            if let Some(request) = coordinator.next_memory_reclaim() {
                 let state = coordinator.state.clone();
                 let job_id = request.job_id.clone();
                 host_reclaim = Some((
                     job_id,
                     tokio::spawn(async move {
+                        let sampler: Box<dyn Fn() -> u64 + Send + Sync> = match &request.kind {
+                            MemoryBlockKind::Host => Box::new(host_headroom_from_system),
+                            MemoryBlockKind::Device {
+                                ordinal, backend, ..
+                            } => {
+                                let (ordinal, backend) = (*ordinal, *backend);
+                                Box::new(move || device_headroom_from_driver(ordinal, backend))
+                            }
+                        };
                         let outcome = crate::host_reclaim::reclaim_host_headroom(
                             &state,
                             &request.model,
                             request.required_bytes,
-                            &host_headroom_from_system,
+                            sampler.as_ref(),
                         )
                         .await;
                         (request.job_id, outcome)
@@ -6486,9 +6707,9 @@ fn settle_refusal(
 /// stand alone — which is still an answer, and #1272 had none.
 /// The typed answer for a host block that outlived a reclaim, or `None` while
 /// the block is fresh, a reclaim is still running, or there is no block.
-fn host_shortfall_reason(pending: &PendingGeneration) -> Option<String> {
-    let block = pending.host_block.as_ref()?;
-    let HostReclaimAttempt::Done(outcome) = &block.reclaim else {
+fn memory_shortfall_reason(pending: &PendingGeneration) -> Option<String> {
+    let block = pending.memory_block.as_ref()?;
+    let ReclaimAttempt::Done(outcome) = &block.reclaim else {
         return None;
     };
     Some(crate::host_reclaim::host_shortfall_message(
@@ -6498,10 +6719,19 @@ fn host_shortfall_reason(pending: &PendingGeneration) -> Option<String> {
     ))
 }
 
-fn host_shortfall_rejection_message(model: &str, shortfall: &str) -> String {
-    format!(
-        "'{model}' needs more host memory than this machine has free while the queue is idle: {shortfall}"
-    )
+fn memory_shortfall_rejection_message(
+    model: &str,
+    kind: &MemoryBlockKind,
+    shortfall: &str,
+) -> String {
+    match kind {
+        MemoryBlockKind::Host => format!(
+            "'{model}' needs more host memory than this machine has free while the queue is idle: {shortfall}"
+        ),
+        MemoryBlockKind::Device { device_id, .. } => format!(
+            "'{model}' needs more device memory than {device_id} has free while the queue is idle: {shortfall}"
+        ),
+    }
 }
 
 fn unschedulable_rejection_message(model: &str, reason: Option<&str>) -> String {
@@ -7140,7 +7370,13 @@ fn classify_generation_plan_failure(
             ) {
                 GenerationPlanFailure::Terminal(error)
             } else {
-                GenerationPlanFailure::Transient(error.to_string())
+                GenerationPlanFailure::Transient(TransientPlanFailure {
+                    message: error.to_string(),
+                    vram_shortfall: Some(VramShortfall {
+                        required_peak_bytes: *required_peak_bytes,
+                        eligible_device_ids: eligible_device_ids.clone(),
+                    }),
+                })
             }
         }
         crate::execution_plan::ExecutionPlanError::PreparedInputsStale(_) => {
@@ -9574,26 +9810,27 @@ mod tests {
         let _ = coordinator.dispatch_ready().await;
         assert!(!granted(&worker_rx), "the cold demand does not fit");
         let block = coordinator.pending["print"]
-            .host_block
+            .memory_block
             .clone()
             .expect("the published block is recorded on the job");
         assert_eq!(block.required_bytes, plan.admission_host_demand_bytes());
         assert_eq!(block.headroom_bytes, 9_853_131_776);
-        assert!(matches!(block.reclaim, HostReclaimAttempt::NotStarted));
+        assert!(matches!(block.reclaim, ReclaimAttempt::NotStarted));
 
         let request = coordinator
-            .next_host_reclaim()
+            .next_memory_reclaim()
             .expect("an idle scheduler reclaims for a host-blocked job");
         assert_eq!(
             request,
-            HostReclaimRequest {
+            ReclaimRequest {
                 job_id: "print".into(),
                 model: "test:q4".into(),
                 required_bytes: plan.admission_host_demand_bytes(),
+                kind: MemoryBlockKind::Host,
             }
         );
         assert!(
-            coordinator.next_host_reclaim().is_none(),
+            coordinator.next_memory_reclaim().is_none(),
             "one reclaim at a time"
         );
 
@@ -9623,14 +9860,14 @@ mod tests {
 
         coordinator.memory = sampled_memory(HAL9000_TOTAL_BYTES, 45 << 30);
         let mut immediate = false;
-        coordinator.finish_host_reclaim(&request.job_id, outcome, &mut immediate);
+        coordinator.finish_memory_reclaim(&request.job_id, outcome, &mut immediate);
         assert!(immediate, "a finished reclaim wakes planning");
         assert!(matches!(
             coordinator.pending["print"]
-                .host_block
+                .memory_block
                 .as_ref()
                 .map(|block| &block.reclaim),
-            Some(HostReclaimAttempt::Done(_))
+            Some(ReclaimAttempt::Done(_))
         ));
 
         let _ = coordinator.dispatch_ready().await;
@@ -9642,6 +9879,171 @@ mod tests {
         assert!(result_rx.try_recv().is_err());
     }
 
+    /// The same machine, the other memory: an idle device whose resident
+    /// engine leaves the planner short of VRAM for a print that would fit
+    /// once that engine is gone. hal9000, 2026-08-27: a PuLID `flux-dev:q8`
+    /// print (22.2 GB) sat unplanned for five minutes beside an idle
+    /// `flux2-klein:q8` — no block reason, no bound, nothing running — and
+    /// dispatched the moment an unrelated print had evicted it.
+    async fn hal9000_vram_blocked_coordinator() -> (
+        Coordinator,
+        Arc<GpuWorker>,
+        std::sync::mpsc::Receiver<crate::gpu_pool::GpuWorkerCommand>,
+        tokio::sync::oneshot::Receiver<Result<crate::state::GenerationJobResult, String>>,
+        tempfile::TempDir,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = mold_core::Config::default();
+        config.models.insert(
+            "test:q4".into(),
+            mold_core::ModelConfig {
+                transformer: Some(
+                    root.path()
+                        .join("transformer-q4.gguf")
+                        .display()
+                        .to_string(),
+                ),
+                vae: Some(root.path().join("vae.safetensors").display().to_string()),
+                family: Some("flux2".into()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        let (worker, worker_rx) = test_worker(0);
+        let device_id = worker_device_id(&worker);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(config, queue.clone(), pool, 1);
+        state.job_registry.register("print", "test:q4");
+        let (mut job, result_rx) = fake_generation("print");
+        job.request.model = "test:q4".to_string();
+        queue.submit(job, 1).await.unwrap();
+        // One gigabyte free beside an idle engine whose recorded footprint
+        // credits nothing back: the plan cannot be placed until it is gone.
+        publish_free_vram(&state, 1 << 30);
+        {
+            let mut cache = state.model_cache.lock().await;
+            cache.insert(Box::new(NamedStubEngine("other-model".into())), 0);
+        }
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            sampled_memory(HAL9000_TOTAL_BYTES, 60 << 30),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        coordinator
+            .pending
+            .get_mut("print")
+            .expect("queued")
+            .preparation = PreparationState::Ready;
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id,
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        (coordinator, worker, worker_rx, result_rx, root)
+    }
+
+    #[tokio::test]
+    async fn a_vram_blocked_generation_reclaims_an_idle_engine_and_dispatches() {
+        let (mut coordinator, worker, worker_rx, mut result_rx, _root) =
+            hal9000_vram_blocked_coordinator().await;
+        let device_id = worker_device_id(&worker);
+
+        let _ = coordinator.dispatch_ready().await;
+        assert!(!granted(&worker_rx), "one gigabyte does not place the plan");
+        assert!(
+            !coordinator.settle_unschedulable_generations(),
+            "a fresh block is recorded, never refused"
+        );
+        let block = coordinator.pending["print"]
+            .memory_block
+            .clone()
+            .expect("the VRAM block is recorded on the job");
+        assert_eq!(
+            block.kind,
+            MemoryBlockKind::Device {
+                device_id: device_id.clone(),
+                ordinal: 0,
+                backend: mold_core::GpuBackend::Cuda,
+            }
+        );
+        assert!(block.required_bytes > block.headroom_bytes, "{block:?}");
+        assert!(matches!(block.reclaim, ReclaimAttempt::NotStarted));
+
+        let request = coordinator
+            .next_memory_reclaim()
+            .expect("an idle scheduler reclaims for a VRAM-blocked job");
+        assert_eq!(request.kind, block.kind);
+        assert_eq!(request.required_bytes, block.required_bytes);
+
+        // The eviction as the run loop awaits it, re-sampled by the device's
+        // own driver reading: the idle engine goes and the shortfall clears.
+        let samples = std::sync::atomic::AtomicUsize::new(0);
+        let free = || {
+            [1u64 << 30, 24 << 30][samples
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                .min(1)]
+        };
+        let outcome = crate::host_reclaim::reclaim_host_headroom(
+            &coordinator.state,
+            &request.model,
+            request.required_bytes,
+            &free,
+        )
+        .await;
+        assert_eq!(outcome.evicted, vec!["other-model".to_string()]);
+
+        publish_free_vram(&coordinator.state, 24 << 30);
+        let mut immediate = false;
+        coordinator.finish_memory_reclaim(&request.job_id, outcome, &mut immediate);
+        assert!(immediate, "a finished reclaim wakes planning");
+
+        let _ = coordinator.dispatch_ready().await;
+        assert!(granted(&worker_rx), "the released VRAM admits the print");
+        assert!(!coordinator.pending.contains_key("print"));
+        assert!(result_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_vram_shortfall_that_survives_reclaim_is_held_naming_the_device() {
+        let (mut coordinator, worker, worker_rx, mut result_rx, _root) =
+            hal9000_vram_blocked_coordinator().await;
+        let device_id = worker_device_id(&worker);
+        let _ = coordinator.dispatch_ready().await;
+        assert!(!coordinator.settle_unschedulable_generations());
+        let request = coordinator.next_memory_reclaim().expect("blocked and idle");
+        let mut immediate = false;
+        coordinator.finish_memory_reclaim(
+            &request.job_id,
+            crate::host_reclaim::HostReclaimOutcome::default(),
+            &mut immediate,
+        );
+        coordinator.unschedulable_idle_grace_ms = 0;
+        assert!(
+            coordinator.settle_unschedulable_generations(),
+            "a surviving shortfall on an idle scheduler is bounded"
+        );
+        assert!(!coordinator.pending.contains_key("print"));
+        assert!(!granted(&worker_rx));
+        let error = match result_rx.try_recv().expect("a bounded wait is answered") {
+            Ok(_) => panic!("a held print is not a result"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("device memory") && error.contains(&device_id),
+            "the refusal names the memory and the device: {error}"
+        );
+        assert!(error.contains("still"), "{error}");
+    }
+
     /// When the reclaim finds nothing to release, the wait is bounded like
     /// every other idle wait — but as a RETRYABLE hold that names the
     /// post-reclaim numbers, because freeing host memory and retrying the row
@@ -9651,9 +10053,9 @@ mod tests {
         let (mut coordinator, _worker, worker_rx, mut result_rx, _plan, _root) =
             hal9000_host_blocked_coordinator().await;
         let _ = coordinator.dispatch_ready().await;
-        let request = coordinator.next_host_reclaim().expect("blocked and idle");
+        let request = coordinator.next_memory_reclaim().expect("blocked and idle");
         let mut immediate = false;
-        coordinator.finish_host_reclaim(
+        coordinator.finish_memory_reclaim(
             &request.job_id,
             crate::host_reclaim::HostReclaimOutcome::default(),
             &mut immediate,
@@ -9661,7 +10063,7 @@ mod tests {
         let _ = coordinator.dispatch_ready().await;
         assert!(!granted(&worker_rx));
         assert!(
-            coordinator.next_host_reclaim().is_none(),
+            coordinator.next_memory_reclaim().is_none(),
             "a finished reclaim is not repeated for the same block"
         );
 
@@ -9689,18 +10091,18 @@ mod tests {
         let (mut coordinator, _worker, _worker_rx, _result_rx, _plan, _root) =
             hal9000_host_blocked_coordinator().await;
         let _ = coordinator.dispatch_ready().await;
-        let request = coordinator.next_host_reclaim().expect("blocked and idle");
-        assert!(coordinator.host_reclaim_still_wanted(&request.job_id));
+        let request = coordinator.next_memory_reclaim().expect("blocked and idle");
+        assert!(coordinator.memory_reclaim_still_wanted(&request.job_id));
 
         let cancelled = coordinator
             .pending
             .remove(&request.job_id)
             .expect("the blocked job is pending");
-        assert!(!coordinator.host_reclaim_still_wanted(&request.job_id));
+        assert!(!coordinator.memory_reclaim_still_wanted(&request.job_id));
 
         // Finishing after the job left is harmless bookkeeping, not a panic.
         let mut immediate = false;
-        coordinator.finish_host_reclaim(
+        coordinator.finish_memory_reclaim(
             &request.job_id,
             crate::host_reclaim::HostReclaimOutcome::default(),
             &mut immediate,
@@ -9715,12 +10117,12 @@ mod tests {
         let (mut coordinator, worker, _worker_rx, _result_rx, _plan, _root) =
             hal9000_host_blocked_coordinator().await;
         let _ = coordinator.dispatch_ready().await;
-        assert!(coordinator.pending["print"].host_block.is_some());
+        assert!(coordinator.pending["print"].memory_block.is_some());
 
         worker.in_flight.store(1, Ordering::SeqCst);
-        assert!(coordinator.next_host_reclaim().is_none());
+        assert!(coordinator.next_memory_reclaim().is_none());
         worker.in_flight.store(0, Ordering::SeqCst);
-        assert!(coordinator.next_host_reclaim().is_some());
+        assert!(coordinator.next_memory_reclaim().is_some());
     }
 
     /// The recovery half of #1272: a shortage that clears must not need a
