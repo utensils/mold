@@ -7032,10 +7032,13 @@ describe("MobileApp foreground resume", () => {
     openStreams[index]!.resolve();
   }
 
-  it("renders the finished print when resuming after the stream died mid-generation", async () => {
+  it("renders the finished print the machine saved while the app was away", async () => {
+    // A print holds no socket that can die: it is admitted durably and its
+    // media is fetched from the machine's own gallery.
+    admitCompletedPrints("resumed print.png");
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
-      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/models") return Promise.resolve([stillModel]);
       if (path === "/api/queue") return Promise.resolve({ entries: [] });
       if (path === "/api/gallery") return Promise.resolve([resumedPrint]);
       return durableApiFallback(path, init, callTarget);
@@ -7043,69 +7046,16 @@ describe("MobileApp foreground resume", () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await submitSeededPrompt("a ship crossing violet lightning", 77);
-    openStreams[0]!.options.onEvent(
-      "progress",
-      JSON.stringify({ type: "queued", position: 1, id: "job-9" }),
-    );
-    // iOS suspension killed the socket; the print finished server-side.
-    killStream();
     await flushPromises();
 
-    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("seed 77");
+    await vi.waitFor(() =>
+      expect(wrapper!.get("[data-test='mobile-generation-summary']").text()).toContain("seed 77"),
+    );
     expect(wrapper.text()).not.toContain("Load failed");
     expect(wrapper.get("img.result-media").attributes("src")).toBe(
       "https://studio/media/full-video",
     );
-    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toBe(
-      "Generation completed.",
-    );
     expect(wrapper.find("[data-test='mobile-generation-queue']").exists()).toBe(false);
-  });
-
-  it("keeps a queued job running after iOS suspends its stream", async () => {
-    let queueCalls = 0;
-    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
-      if (path === "/api/status") return Promise.resolve(status);
-      if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/queue") {
-        queueCalls += 1;
-        return Promise.resolve({
-          entries:
-            queueCalls === 1
-              ? [
-                  {
-                    id: "job-9",
-                    model: model.name,
-                    state: "queued",
-                    position: 0,
-                    durable: false,
-                    started_at_unix_ms: 0,
-                  },
-                ]
-              : [],
-        });
-      }
-      if (path === "/api/gallery") return Promise.resolve([resumedPrint]);
-      return durableApiFallback(path, init, callTarget);
-    });
-    wrapper = mountMobileApp();
-    await flushPromises();
-    await submitSeededPrompt("a ship crossing violet lightning", 77);
-    openStreams[0]!.options.onEvent(
-      "progress",
-      JSON.stringify({ type: "queued", position: 1, id: "job-9" }),
-    );
-    killStream(0, "The network connection was lost.");
-    await flushPromises();
-
-    expect(apiFetchTo).not.toHaveBeenCalledWith(target, "/api/queue/job-9", {
-      method: "DELETE",
-    });
-    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("seed 77");
-    expect(wrapper.text()).not.toContain("network connection was lost");
-    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toBe(
-      "Generation completed.",
-    );
   });
 
   it("detaches without cancelling accepted work when the app closes", async () => {
@@ -7126,38 +7076,6 @@ describe("MobileApp foreground resume", () => {
     expect(apiFetchTo).not.toHaveBeenCalledWith(target, "/api/queue/job-close", {
       method: "DELETE",
     });
-  });
-
-  it("re-attaches to a print still developing on the host and completes it", async () => {
-    let queueCalls = 0;
-    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
-      if (path === "/api/status") return Promise.resolve(status);
-      if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/queue") {
-        queueCalls += 1;
-        return Promise.resolve({
-          entries:
-            queueCalls <= 2
-              ? [{ id: "job-9", model: model.name, state: "running", position: 0 }]
-              : [],
-        });
-      }
-      if (path === "/api/gallery") return Promise.resolve([resumedPrint]);
-      return durableApiFallback(path, init, callTarget);
-    });
-    wrapper = mountMobileApp();
-    await flushPromises();
-    await submitSeededPrompt("a ship crossing violet lightning", 77);
-    openStreams[0]!.options.onEvent(
-      "progress",
-      JSON.stringify({ type: "queued", position: 1, id: "job-9" }),
-    );
-    killStream();
-    await vi.waitFor(() => expect(wrapper!.find("img.result-media").exists()).toBe(true));
-
-    expect(queueCalls).toBeGreaterThanOrEqual(3);
-    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("seed 77");
-    expect(wrapper.text()).not.toContain("Load failed");
   });
 
   it("renews the promoted result's expired media ticket when returning to the foreground", async () => {
