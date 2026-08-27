@@ -3297,7 +3297,6 @@ async fn run_queue_dispatcher_with_tuning_inner(
             #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
             h3_prepared_attempt: None,
             lease: None,
-            batch_child: job.batch_child,
             journal: job.journal,
         });
 
@@ -3707,7 +3706,6 @@ fn generation_from_legacy_gpu_job(job: GpuJob) -> GenerationJob {
         progress_tx: job.progress_tx,
         result_tx: job.result_tx,
         output_dir: job.output_dir,
-        batch_child: job.batch_child,
         journal: job.journal,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant: None,
@@ -4287,7 +4285,6 @@ mod tests {
             progress_tx: Some(progress_tx),
             result_tx,
             output_dir: None,
-            batch_child: None,
             journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -5068,7 +5065,6 @@ mod tests {
             #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
             h3_prepared_attempt: None,
             lease: None,
-            batch_child: None,
             journal: None,
         };
         let response = mold_core::GenerateResponse {
@@ -7093,7 +7089,6 @@ mod tests {
             #[cfg(any(test, feature = "h3-private-bridge", feature = "h3-private-uat"))]
             h3_prepared_attempt: None,
             lease: None,
-            batch_child: None,
             journal: None,
         };
         worker.send_job(filler_job).unwrap();
@@ -7117,7 +7112,6 @@ mod tests {
             progress_tx: None,
             result_tx,
             output_dir: None,
-            batch_child: None,
             journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -7171,7 +7165,6 @@ mod tests {
             progress_tx: None,
             result_tx,
             output_dir: None,
-            batch_child: None,
             journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -7256,7 +7249,6 @@ mod tests {
             progress_tx: None,
             result_tx: tx,
             output_dir: None,
-            batch_child: None,
             journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -7275,7 +7267,6 @@ mod tests {
             progress_tx: None,
             result_tx: tx,
             output_dir: None,
-            batch_child: None,
             journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -7537,7 +7528,6 @@ mod tests {
                 progress_tx: None,
                 result_tx: tx,
                 output_dir: None,
-                batch_child: None,
                 journal: None,
                 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 h3_private_ingress_grant: None,
@@ -7614,7 +7604,6 @@ mod tests {
                 progress_tx: None,
                 result_tx: tx,
                 output_dir: None,
-                batch_child: None,
                 journal: None,
                 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 h3_private_ingress_grant: None,
@@ -7676,7 +7665,6 @@ mod tests {
                 progress_tx: None,
                 result_tx: tx,
                 output_dir: None,
-                batch_child: None,
                 journal: None,
                 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 h3_private_ingress_grant: None,
@@ -7785,7 +7773,6 @@ mod tests {
                 progress_tx: None,
                 result_tx: tx,
                 output_dir: None,
-                batch_child: None,
                 journal: None,
                 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 h3_private_ingress_grant: None,
@@ -7923,7 +7910,6 @@ mod tests {
             progress_tx: None,
             result_tx,
             output_dir: None,
-            batch_child: None,
             journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -7968,7 +7954,6 @@ mod tests {
             progress_tx: None,
             result_tx,
             output_dir: None,
-            batch_child: None,
             journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -8052,7 +8037,6 @@ mod tests {
                     progress_tx: None,
                     result_tx,
                     output_dir: Some(output),
-                    batch_child: None,
                     journal: Some(ticket),
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
@@ -8222,7 +8206,6 @@ mod tests {
                         progress_tx: None,
                         result_tx,
                         output_dir: None,
-                        batch_child: None,
                         journal: None,
                         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                         h3_private_ingress_grant: None,
@@ -8343,7 +8326,6 @@ mod tests {
                     progress_tx: None,
                     result_tx,
                     output_dir: Some(output),
-                    batch_child: None,
                     journal: Some(ticket),
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
@@ -8442,7 +8424,6 @@ mod tests {
             progress_tx: None,
             result_tx,
             output_dir: None,
-            batch_child: None,
             journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -8505,7 +8486,6 @@ mod tests {
                         progress_tx: None,
                         result_tx,
                         output_dir: None,
-                        batch_child: None,
                         journal: None,
                         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                         h3_private_ingress_grant: None,
@@ -8571,7 +8551,6 @@ mod tests {
             progress_tx: None,
             result_tx,
             output_dir: None,
-            batch_child: None,
             journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,

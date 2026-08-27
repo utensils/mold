@@ -1335,7 +1335,6 @@ async fn feed_available(
             progress_tx,
             result_tx,
             output_dir: Some(row.output_dir),
-            batch_child: None,
             journal: Some(ticket),
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant,

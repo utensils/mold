@@ -79,9 +79,6 @@ pub struct GenerationJob {
     pub result_tx: tokio::sync::oneshot::Sender<Result<GenerationJobResult, String>>,
     /// Pre-resolved output directory for server-side image saving.
     pub output_dir: Option<PathBuf>,
-    /// Server-owned adaptive-batch child authority. Public singleton and
-    /// client-owned prepared siblings leave this absent.
-    pub batch_child: Option<BatchChildExecution>,
     /// Durable-queue row ownership. Dropping this deletes the row unless the
     /// retention fence is up, which is what turns every existing discard path
     /// into "retain and replay" during shutdown. `None` for a job that is not
@@ -109,20 +106,6 @@ pub(crate) const fn should_cancel_for_observer_disconnect(
     durably_owned: bool,
 ) -> bool {
     response_closed && !durably_owned
-}
-
-#[derive(Clone, Debug)]
-pub struct BatchChildExecution {
-    pub lease: crate::batch_parent::BatchChildLease,
-    /// Attempt-scoped cooperative cancellation authority. Cancelling the
-    /// parent signals every active child through the exact token returned by
-    /// its durable lease grant.
-    pub cancellation: mold_inference::InferenceCancellationToken,
-    /// Parent-level deterministic execution identity. The coordinator filters
-    /// every later re-resolution through this fence.
-    pub execution_equivalence_fingerprint: String,
-    /// Concrete dependency variants frozen once for the whole parent.
-    pub prepared_inputs: crate::execution_plan::PreparedExecutionInputs,
 }
 
 pub struct GenerationJobResult {
@@ -1013,7 +996,6 @@ mod tests {
             progress_tx: None,
             result_tx,
             output_dir: None,
-            batch_child: None,
             journal: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,

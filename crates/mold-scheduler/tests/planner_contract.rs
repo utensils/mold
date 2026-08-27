@@ -1367,7 +1367,7 @@ fn static_timing_floor_is_shared_and_never_zero() {
         WorkKind::PromptExpansion,
         WorkKind::AdminModelLoad,
         WorkKind::AdminModelUnload,
-        WorkKind::BatchChild,
+        WorkKind::PreparedSibling,
     ] {
         let timing = mold_scheduler::static_timing_for(kind);
         assert!(timing.cold_setup_ms > 0, "{kind:?}");
@@ -1406,7 +1406,7 @@ fn placement_aware_timing_does_not_change_non_utility_generation_costs() {
         WorkKind::Generation,
         WorkKind::PreparedSibling,
         WorkKind::ChainStage,
-        WorkKind::BatchChild,
+        WorkKind::PreparedSibling,
         WorkKind::AdminModelLoad,
         WorkKind::AdminModelUnload,
     ] {
@@ -1991,7 +1991,7 @@ fn only_model_unload_is_exempt_from_admission_pressure() {
         WorkKind::StandaloneUpscale,
         WorkKind::PromptExpansion,
         WorkKind::AdminModelLoad,
-        WorkKind::BatchChild,
+        WorkKind::PreparedSibling,
     ] {
         assert!(
             !kind.releases_resources(),

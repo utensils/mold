@@ -1198,10 +1198,7 @@ fn process_owner_work(
                 .as_ref()
                 .is_some_and(|plan| mold_core::minimax_h3::is_family(&plan.model_family)) =>
         {
-            Some(job.batch_child.as_ref().map_or_else(
-                mold_inference::InferenceCancellationToken::default,
-                |child| child.cancellation.clone(),
-            ))
+            Some(mold_inference::InferenceCancellationToken::default())
         }
         _ => None,
     };
@@ -3845,20 +3842,13 @@ fn process_job_with_sink(
         }
     }
 
-    // The durable parent owns an attempt-scoped token. Reference hashing runs
-    // on this dedicated worker thread and polls the same token before any
-    // model or CUDA work begins.
-    let batch_cancellation = job
-        .batch_child
-        .as_ref()
-        .map(|child| child.cancellation.clone());
-    // An ordinary singleton gets a token too, so a shutdown aborts it at the
-    // next inference checkpoint instead of holding the deploy open. Registered
-    // through a guard because this function has a dozen early returns and a
-    // leaked token would cancel an unrelated later job with the same id.
-    let singleton_cancellation = (h3_attempt_cancellation.is_none()
-        && batch_cancellation.is_none())
-    .then(|| worker.generation_cancel.token(&job_id));
+    // Every job gets a token, so a shutdown aborts it at the next inference
+    // checkpoint instead of holding the deploy open. Registered through a
+    // guard because this function has a dozen early returns and a leaked token
+    // would cancel an unrelated later job with the same id.
+    let singleton_cancellation = h3_attempt_cancellation
+        .is_none()
+        .then(|| worker.generation_cancel.token(&job_id));
     let _singleton_cancel_guard = singleton_cancellation
         .is_some()
         .then(|| SingletonCancelGuard {
@@ -3867,7 +3857,6 @@ fn process_job_with_sink(
         });
     let inference_cancellation = h3_attempt_cancellation
         .as_ref()
-        .or(batch_cancellation.as_ref())
         .or(singleton_cancellation.as_ref());
     if let Some(cancellation) = inference_cancellation {
         job.registry
@@ -3997,21 +3986,11 @@ fn process_job_with_sink(
     let carried_identity = job
         .prepared_execution_inputs
         .as_ref()
-        .and_then(|inputs| inputs.identity_embedding.clone())
-        .or_else(|| {
-            job.batch_child
-                .as_ref()
-                .and_then(|child| child.prepared_inputs.identity_embedding.clone())
-        });
+        .and_then(|inputs| inputs.identity_embedding.clone());
     let mut identity_warning = job
         .prepared_execution_inputs
         .as_ref()
-        .and_then(|inputs| inputs.identity_warning.clone())
-        .or_else(|| {
-            job.batch_child
-                .as_ref()
-                .and_then(|child| child.prepared_inputs.identity_warning.clone())
-        });
+        .and_then(|inputs| inputs.identity_warning.clone());
     // The batch plan's own cell, shared by every sibling. Consulted BEFORE the
     // resolver: a sibling arriving after another has already extracted takes
     // that exact embedding, whatever the bounded per-photograph LRU has done in
@@ -4020,12 +3999,7 @@ fn process_job_with_sink(
     let identity_pin = job
         .prepared_execution_inputs
         .as_ref()
-        .map(|inputs| inputs.identity_pin.clone())
-        .or_else(|| {
-            job.batch_child
-                .as_ref()
-                .map(|child| child.prepared_inputs.identity_pin.clone())
-        });
+        .map(|inputs| inputs.identity_pin.clone());
     // The pin carries the advisory too, so a sibling that never enters the
     // resolver still reports which face was chosen.
     let pinned = identity_pin.as_ref().and_then(|pin| pin.get());
@@ -6544,7 +6518,6 @@ mod tests {
                         progress_tx: None,
                         result_tx: placeholder_tx,
                         output_dir: None,
-                        batch_child: None,
                         journal: None,
                         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                         h3_private_ingress_grant: None,
@@ -6579,7 +6552,6 @@ mod tests {
             prepared_execution_inputs: None,
             h3_prepared_attempt: None,
             lease: None,
-            batch_child: None,
             journal: None,
         };
         (job, result_rx, progress_rx, queue_rx, queue, registry)
@@ -8669,7 +8641,6 @@ mod tests {
             prepared_execution_inputs: None,
             h3_prepared_attempt: None,
             lease: None,
-            batch_child: None,
             journal: None,
         }
     }
@@ -9003,7 +8974,6 @@ mod tests {
                     memory_sample_generation: 0,
                     memory_ledger_sequence: 0,
                 }),
-                batch_child: None,
                 journal: None,
             })
             .unwrap();
@@ -9861,7 +9831,6 @@ mod tests {
                 prepared_execution_inputs: None,
                 h3_prepared_attempt: None,
                 lease: None,
-                batch_child: None,
                 journal: None,
             };
             worker
@@ -9996,7 +9965,6 @@ mod tests {
                     prepared_execution_inputs: None,
                     h3_prepared_attempt: None,
                     lease: None,
-                    batch_child: None,
                     journal: None,
                 })),
                 retry: None,
@@ -10634,7 +10602,6 @@ mod tests {
                     prepared_execution_inputs: None,
                     h3_prepared_attempt: None,
                     lease: None,
-                    batch_child: None,
                     journal: None,
                 })),
                 retry: None,
@@ -11170,7 +11137,6 @@ mod tests {
                     progress_tx: None,
                     result_tx: placeholder_tx,
                     output_dir: None,
-                    batch_child: None,
                     journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
@@ -11205,7 +11171,6 @@ mod tests {
                 prepared_execution_inputs: None,
                 h3_prepared_attempt: None,
                 lease: Some(fence("generate", 3)),
-                batch_child: None,
                 journal: None,
             })
             .unwrap();
@@ -11471,7 +11436,6 @@ mod tests {
                     progress_tx: None,
                     result_tx: placeholder_tx,
                     output_dir: None,
-                    batch_child: None,
                     journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
@@ -11510,7 +11474,6 @@ mod tests {
                 prepared_execution_inputs: None,
                 h3_prepared_attempt: None,
                 lease: None,
-                batch_child: None,
                 journal: None,
             },
             &event_tx,
@@ -11662,7 +11625,6 @@ mod tests {
             prepared_execution_inputs: None,
             h3_prepared_attempt: None,
             lease: None,
-            batch_child: None,
             journal: Some(ticket),
         };
 
@@ -11732,7 +11694,6 @@ mod tests {
             prepared_execution_inputs: None,
             h3_prepared_attempt: None,
             lease: None,
-            batch_child: None,
             journal: Some(ticket),
         };
 
@@ -11789,7 +11750,6 @@ mod tests {
                     prepared_execution_inputs: None,
                     h3_prepared_attempt: None,
                     lease: None,
-                    batch_child: None,
                     journal: None,
                 },
                 &scheduler_tx,
@@ -11849,7 +11809,6 @@ mod tests {
                     progress_tx: None,
                     result_tx: placeholder_tx,
                     output_dir: None,
-                    batch_child: None,
                     journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
@@ -11888,7 +11847,6 @@ mod tests {
                     prepared_execution_inputs: None,
                     h3_prepared_attempt: None,
                     lease: None,
-                    batch_child: None,
                     journal: None,
                 },
                 &scheduler_tx,
@@ -11926,7 +11884,6 @@ mod tests {
                     progress_tx: None,
                     result_tx: placeholder_tx,
                     output_dir: None,
-                    batch_child: None,
                     journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,
@@ -11963,7 +11920,6 @@ mod tests {
                     prepared_execution_inputs: None,
                     h3_prepared_attempt: None,
                     lease: None,
-                    batch_child: None,
                     journal: None,
                 },
                 &scheduler_tx,
@@ -12376,7 +12332,6 @@ mod tests {
                     progress_tx: None,
                     result_tx: dummy_tx,
                     output_dir: None,
-                    batch_child: None,
                     journal: None,
                     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                     h3_private_ingress_grant: None,

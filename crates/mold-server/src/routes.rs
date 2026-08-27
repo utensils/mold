@@ -2958,7 +2958,6 @@ async fn generate(
         progress_tx: None,
         result_tx,
         output_dir,
-        batch_child: None,
         journal,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant,
@@ -4152,7 +4151,6 @@ async fn generate_stream(
         progress_tx: Some(tx.clone()),
         result_tx,
         output_dir,
-        batch_child: None,
         journal,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant,

@@ -1123,7 +1123,7 @@ pub struct PreparedExecutionInputs {
     /// per request, so putting it in the engine's construction config would
     /// rebuild the engine for every new face; and this struct is exactly what
     /// the batch parent clones into every child
-    /// (`batch_runtime::submit_child` → `BatchChildExecution::prepared_inputs`),
+    /// (the durable feeder → `PreparedExecutionInputs`),
     /// which is what makes "one extraction per parent, reused by every sibling
     /// on every device" structural instead of a convention.
     ///

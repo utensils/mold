@@ -18,7 +18,7 @@
 use crate::events::EventBroadcaster;
 use mold_core::ServerEvent;
 use serde::Serialize;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -205,7 +205,6 @@ pub(crate) enum DispatchAttemptError<T> {
 /// state rather than propagating the panic into the dispatcher hot path.
 pub struct JobRegistry {
     inner: RwLock<Vec<EntryInternal>>,
-    batch_parents: RwLock<HashMap<String, BatchParentEntry>>,
     mutation_sequence: AtomicU64,
     queue_patch_sequence: AtomicU64,
     mutation_notify: Arc<Notify>,
@@ -214,12 +213,6 @@ pub struct JobRegistry {
     /// promote / terminal path produces exactly one event. `None` keeps
     /// event-less construction (tests) cheap.
     events: Option<Arc<EventBroadcaster>>,
-}
-
-#[derive(Clone)]
-struct BatchParentEntry {
-    children: BTreeSet<String>,
-    cancel: tokio_util::sync::CancellationToken,
 }
 
 /// Cheap-cloneable handle. Workers and routes pass this around by value.
@@ -236,7 +229,6 @@ impl JobRegistry {
     pub fn new() -> SharedJobRegistry {
         Arc::new(Self {
             inner: RwLock::new(Vec::new()),
-            batch_parents: RwLock::new(HashMap::new()),
             mutation_sequence: AtomicU64::new(0),
             queue_patch_sequence: AtomicU64::new(0),
             mutation_notify: Arc::new(Notify::new()),
@@ -249,7 +241,6 @@ impl JobRegistry {
     pub fn with_events(events: Arc<EventBroadcaster>) -> SharedJobRegistry {
         Arc::new(Self {
             inner: RwLock::new(Vec::new()),
-            batch_parents: RwLock::new(HashMap::new()),
             mutation_sequence: AtomicU64::new(0),
             queue_patch_sequence: AtomicU64::new(0),
             mutation_notify: Arc::new(Notify::new()),
@@ -366,80 +357,6 @@ impl JobRegistry {
         cancel
     }
 
-    /// Create the one public cancellation authority for a server-owned batch.
-    pub fn register_batch_parent(
-        &self,
-        parent_id: impl Into<String>,
-    ) -> tokio_util::sync::CancellationToken {
-        let parent_id = parent_id.into();
-        let token = tokio_util::sync::CancellationToken::new();
-        self.batch_parents
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(
-                parent_id,
-                BatchParentEntry {
-                    children: BTreeSet::new(),
-                    cancel: token.clone(),
-                },
-            );
-        token
-    }
-
-    pub fn register_batch_child(&self, parent_id: &str, child_id: &str) -> bool {
-        let mut parents = self
-            .batch_parents
-            .write()
-            .unwrap_or_else(|error| error.into_inner());
-        let Some(parent) = parents.get_mut(parent_id) else {
-            return false;
-        };
-        if parent.cancel.is_cancelled() {
-            return false;
-        }
-        parent.children.insert(child_id.to_string());
-        true
-    }
-
-    pub fn unregister_batch_child(&self, parent_id: &str, child_id: &str) {
-        if let Some(parent) = self
-            .batch_parents
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .get_mut(parent_id)
-        {
-            parent.children.remove(child_id);
-        }
-    }
-
-    #[cfg(test)]
-    fn batch_child_count(&self, parent_id: &str) -> Option<usize> {
-        self.batch_parents
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(parent_id)
-            .map(|parent| parent.children.len())
-    }
-
-    /// Close cancellation admission immediately before durable commit. The
-    /// write lock orders this against `cancel_queued`: either cancellation
-    /// wins and this returns false, or commit wins and later DELETE observes
-    /// no cancellable parent.
-    pub fn begin_batch_commit(&self, parent_id: &str) -> bool {
-        self.batch_parents
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(parent_id)
-            .is_some_and(|parent| !parent.cancel.is_cancelled())
-    }
-
-    pub fn remove_batch_parent(&self, parent_id: &str) {
-        self.batch_parents
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(parent_id);
-    }
-
     /// Cancel a queued or running job. Queued work is removed immediately;
     /// running work keeps its row until the owner acknowledges the cooperative
     /// token. The running signal and terminal publication claim use this same
@@ -450,47 +367,6 @@ impl JobRegistry {
     /// promoted. (A worker that already dequeued the job before the cancel
     /// landed will observe the closed result channel and skip it.)
     pub fn cancel_queued(&self, id: &str) -> Result<(), QueuedJobCancelError> {
-        let batch_children = {
-            let parents = self
-                .batch_parents
-                .read()
-                .unwrap_or_else(|error| error.into_inner());
-            parents.get(id).map(|parent| {
-                // Cancel while retaining the read lock. `begin_batch_commit`
-                // takes the write side, so it cannot remove a not-yet-signaled
-                // authority between lookup and signal.
-                parent.cancel.cancel();
-                parent.children.clone()
-            })
-        };
-        if let Some(children) = batch_children {
-            let removed = {
-                let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
-                let mut removed = Vec::new();
-                entries.retain_mut(|entry| {
-                    if children.contains(&entry.id) {
-                        entry.cancel_requested = true;
-                        if let Some(token) = &entry.running_cancel {
-                            token.cancel();
-                        }
-                        if entry.state == JobLifecycle::Queued && entry.running_cancel.is_none() {
-                            entry.cancel.notify_one();
-                            removed.push(entry.id.clone());
-                            return false;
-                        }
-                    }
-                    true
-                });
-                removed
-            };
-            for child_id in &removed {
-                self.emit(ServerEvent::JobEnded {
-                    id: child_id.clone(),
-                });
-            }
-            self.mark_mutated();
-            return Ok(());
-        }
         {
             let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
             let Some(pos) = entries.iter().position(|e| e.id == id) else {
@@ -518,46 +394,20 @@ impl JobRegistry {
         Ok(())
     }
 
-    /// Cancel every still-queued job in one pass, backing `DELETE /api/queue`,
-    /// and close every open server-batch parent authority. Ordinary running
-    /// jobs remain untouched; running batch children drain without publication.
-    /// After dropping the entry lock this emits one `JobEnded` per removed
-    /// queued row. The public wrapper returns the established queued-row
-    /// count; the route uses the exact ids to avoid double-counting durable
-    /// rows in the same cancellation.
+    /// Cancel every still-queued job in one pass, backing `DELETE /api/queue`.
+    /// Running jobs remain untouched. After dropping the entry lock this emits
+    /// one `JobEnded` per removed queued row. The public wrapper returns the
+    /// established queued-row count; the route uses the exact ids to avoid
+    /// double-counting durable rows in the same cancellation.
     pub fn cancel_all_queued(&self) -> usize {
         self.cancel_all_queued_ids().len()
     }
 
     pub(crate) fn cancel_all_queued_ids(&self) -> Vec<String> {
-        let batch_children = {
-            // Hold the write side while closing every still-open parent
-            // authority. This orders bulk cancellation against
-            // `begin_batch_commit` exactly like the single-parent path:
-            // either commit already removed the authority, or cancellation
-            // becomes visible before commit can cross its fence.
-            let parents = self
-                .batch_parents
-                .write()
-                .unwrap_or_else(|error| error.into_inner());
-            for parent in parents.values() {
-                parent.cancel.cancel();
-            }
-            parents
-                .values()
-                .flat_map(|parent| parent.children.iter().cloned())
-                .collect::<BTreeSet<_>>()
-        };
         let cancelled_ids = {
             let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
             let mut ids = Vec::new();
             entries.retain_mut(|e| {
-                if batch_children.contains(&e.id) {
-                    e.cancel_requested = true;
-                    if let Some(token) = &e.running_cancel {
-                        token.cancel();
-                    }
-                }
                 if e.state == JobLifecycle::Queued && e.running_cancel.is_none() {
                     e.cancel.notify_one();
                     ids.push(e.id.clone());
@@ -1533,92 +1383,6 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), cancel_b.notified())
             .await
             .expect("cancel signal for b must resolve");
-    }
-
-    #[tokio::test]
-    async fn cancel_all_queued_cancels_mixed_batch_parent_authority() {
-        let reg = JobRegistry::new();
-        let parent_cancel = reg.register_batch_parent("parent");
-        let running_cancel = reg.register("parent", "flux-dev:fp16");
-        let queued_cancel = reg.register("sibling", "flux-dev:fp16");
-        assert!(reg.register_batch_child("parent", "parent"));
-        assert!(reg.register_batch_child("parent", "sibling"));
-        reg.mark_running("parent", Some(0));
-
-        assert_eq!(
-            reg.cancel_all_queued(),
-            1,
-            "the public bulk-delete count remains the number of queued rows removed"
-        );
-        assert!(
-            parent_cancel.is_cancelled(),
-            "bulk delete must close the parent authority even with a running child"
-        );
-        assert!(
-            !reg.begin_batch_commit("parent"),
-            "a cancelled parent must never cross the commit fence"
-        );
-        tokio::time::timeout(std::time::Duration::from_secs(1), queued_cancel.notified())
-            .await
-            .expect("the queued sibling must receive its existing cancellation signal");
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(10),
-                running_cancel.notified()
-            )
-            .await
-            .is_err(),
-            "running children remain owned by their worker and drain through parent cancellation"
-        );
-        let snapshot = reg.snapshot();
-        assert_eq!(snapshot.entries.len(), 1);
-        assert_eq!(snapshot.entries[0].id, "parent");
-        assert_eq!(snapshot.entries[0].state, JobLifecycle::Running);
-    }
-
-    #[test]
-    fn running_later_batch_child_uses_its_installed_attempt_token() {
-        let reg = JobRegistry::new();
-        let parent_cancel = reg.register_batch_parent("parent");
-        let child_id = "parent:child:2:try:0";
-        reg.register(child_id, "flux-dev:fp16");
-        assert!(reg.register_batch_child("parent", child_id));
-        reg.mark_running(child_id, Some(0));
-        let child_cancel = mold_inference::InferenceCancellationToken::default();
-        reg.install_running_cancellation(child_id, child_cancel.clone());
-
-        assert_eq!(
-            reg.cancel_queued(child_id),
-            Err(QueuedJobCancelError::AlreadyRunning)
-        );
-        assert!(child_cancel.is_cancelled());
-        assert!(!parent_cancel.is_cancelled());
-        assert_eq!(
-            reg.claim_completion(child_id),
-            CompletionClaim::UserCancelled
-        );
-    }
-
-    #[test]
-    fn cancelled_parent_rejects_late_child_registration() {
-        let reg = JobRegistry::new();
-        let cancel = reg.register_batch_parent("parent");
-        cancel.cancel();
-        assert!(!reg.register_batch_child("parent", "late"));
-        assert_eq!(reg.batch_child_count("parent"), Some(0));
-    }
-
-    #[test]
-    fn completed_batch_children_are_pruned_from_parent_authority() {
-        let reg = JobRegistry::new();
-        reg.register_batch_parent("parent");
-        for index in 0..10_000 {
-            let child = format!("child-{index}");
-            assert!(reg.register_batch_child("parent", &child));
-            assert_eq!(reg.batch_child_count("parent"), Some(1));
-            reg.unregister_batch_child("parent", &child);
-        }
-        assert_eq!(reg.batch_child_count("parent"), Some(0));
     }
 
     #[tokio::test]

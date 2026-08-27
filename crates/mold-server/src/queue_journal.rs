@@ -2194,7 +2194,6 @@ pub async fn replay(state: &crate::state::AppState, dispatch_available: bool) ->
             progress_tx: None,
             result_tx,
             output_dir: Some(row.output_dir.clone()),
-            batch_child: None,
             journal: Some(journal.attach(&row.id)),
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
