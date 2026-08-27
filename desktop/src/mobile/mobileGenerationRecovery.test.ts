@@ -267,6 +267,20 @@ describe("mobile durable generation recovery", () => {
     const gallery = claimMobileDurableTerminalEffect(photos, key, "gallery").recovery;
     expect(mobileDurableTerminalEffectsClaimed(gallery)).toBe(true);
 
+    // A completion that published no file settled as a failure: the viewer
+    // announcement is the only effect it owes.
+    const fileless = batch("client-1", ["complete"]);
+    delete fileless.children[0]!.result;
+    const unpublished = reduceMobileDurableGenerationRecovery(recovery(), {
+      type: "batch_snapshot",
+      batch: fileless,
+    });
+    expect(
+      mobileDurableTerminalEffectsClaimed(
+        claimMobileDurableTerminalEffect(unpublished, key, "viewer").recovery,
+      ),
+    ).toBe(true);
+
     let rejected = reduceMobileDurableGenerationRecovery(recovery("rejected"), {
       type: "admission_rejected",
       error: "invalid request",

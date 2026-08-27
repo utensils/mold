@@ -2,7 +2,6 @@ import {
   canonicalGenerationBatchLimit,
   type DurableGenerationQueueCapabilities,
   type DurableMediaCapabilities,
-  type GenerationBatchChild,
 } from "../api/generationAdmission";
 
 export type GenerationTargetPolicy =
@@ -79,24 +78,4 @@ export function generationHostSubmissionPolicy(
     admission: "canonical_durable",
     refusal: null,
   };
-}
-
-export type GenerationTruthfulPhase =
-  "accepted" | "held" | "queued" | "running" | "cancelling" | "terminal";
-
-type GenerationPhaseSource =
-  | Pick<GenerationBatchChild, "state">
-  | { phase: GenerationBatchChild["state"] };
-
-/** Present the authoritative durable-child lifecycle across wire and tracker shapes. */
-export function truthfulGenerationPhase(
-  child: GenerationPhaseSource,
-): GenerationTruthfulPhase {
-  const state = "state" in child ? child.state : child.phase;
-  if (state === "held") return "held";
-  if (state === "queued") return "queued";
-  if (state === "running") return "running";
-  if (state === "cancelling") return "cancelling";
-  if (state === "accepted") return "accepted";
-  return "terminal";
 }

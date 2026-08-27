@@ -3,7 +3,6 @@ import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   generationHostSubmissionPolicy,
-  truthfulGenerationPhase,
   type GenerationSubmissionHost,
 } from "./generationSubmissionPolicy";
 
@@ -112,13 +111,5 @@ describe("generation submission policy", () => {
       routing: "placement_preview",
       admission: "refused",
     });
-  });
-
-  it("presents the authoritative durable child lifecycle", () => {
-    expect(truthfulGenerationPhase({ state: "accepted" })).toBe("accepted");
-    expect(truthfulGenerationPhase({ state: "held" })).toBe("held");
-    expect(truthfulGenerationPhase({ state: "cancelling" })).toBe("cancelling");
-    expect(truthfulGenerationPhase({ phase: "running" })).toBe("running");
-    expect(truthfulGenerationPhase({ phase: "complete" })).toBe("terminal");
   });
 });

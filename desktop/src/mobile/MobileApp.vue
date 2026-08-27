@@ -336,7 +336,7 @@ import {
   useGenerationStore,
   type Job,
 } from "../stores/generation";
-import { markJobSettled, newJob } from "../lib/generationJob";
+import { newJob } from "../lib/generationJob";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import {
   mobileHostHealthLabel,
@@ -435,7 +435,12 @@ import {
   matchCollection,
   type FileUnderCollectionLike,
 } from "@studio/lib/fileUnder";
-import { truthfulGenerationPhase } from "@studio/lib/generationSubmissionPolicy";
+import { reconciliationPresentation } from "@studio/lib/generationPresentation";
+import {
+  applyMobileDurablePresentation,
+  mobileDurableHeld,
+  presentMobileDurableChild,
+} from "./generationPresentation";
 import { chunkGenerationBatchTrackers } from "@studio/lib/generationLifecycle";
 import {
   loadMobileSettings,
@@ -1976,37 +1981,15 @@ function durableRecoveryForJob(job: Job): {
   return recovery ? { recovery, childIndex: identity.childIndex } : null;
 }
 
-function durableLifecycleForJob(job: Job) {
-  const durable = durableRecoveryForJob(job);
-  if (!durable) return null;
-  const lifecycle = mobileDurableJobs(durable.recovery).find(
-    (candidate) => candidate.childIndex === durable.childIndex,
-  );
-  return lifecycle ? { ...durable, lifecycle } : null;
-}
-
 /** Live preview + step progress for our own running prints (see web). */
 const ownPreviews = new OwnPrintPreviewWatchers();
 
-function durableHeldError(job: Job): string | null {
-  const durable = durableLifecycleForJob(job);
-  if (!durable || truthfulGenerationPhase(durable.lifecycle) !== "held") return null;
-  return durable.lifecycle.error ?? null;
-}
-
-/** The held child's typed `error_code`; what the missing-model offer reads. */
-function durableHeldCode(job: Job): string | null {
-  const durable = durableLifecycleForJob(job);
-  if (!durable || truthfulGenerationPhase(durable.lifecycle) !== "held") return null;
-  return durable.lifecycle.errorCode ?? null;
-}
-
-function durableHeldIsRetryable(job: Job): boolean {
-  const durable = durableLifecycleForJob(job);
-  return (
-    durable !== null &&
-    truthfulGenerationPhase(durable.lifecycle) === "held" &&
-    durable.lifecycle.retryable === true
+/** The hold a queue row is parked on, from the shared presentation. */
+function durableHold(job: Job) {
+  const durable = durableRecoveryForJob(job);
+  if (!durable) return null;
+  return mobileDurableHeld(
+    presentMobileDurableChild(durable.recovery, durable.childIndex, job.hostLabel),
   );
 }
 
@@ -2121,6 +2104,7 @@ function persistDurableGenerationRecoveries(): boolean {
 }
 
 function syncDurableGenerationJobs(): void {
+  const now = Date.now();
   for (const recovery of durableGenerationRecoveries.value) {
     const host = hosts.value.find((candidate) => candidate.id === recovery.tracker.hostId);
     const lifecycleByIndex = new Map(
@@ -2153,27 +2137,9 @@ function syncDurableGenerationJobs(): void {
       }
       if (host) job.hostLabel = host.name;
       const lifecycle = lifecycleByIndex.get(presentation.index);
-      if (!lifecycle) {
-        if (recovery.tracker.admission.phase === "rejected") {
-          job.status = "error";
-          job.error = recovery.tracker.admission.error ?? "Generation was not accepted";
-          markJobSettled(job);
-          continue;
-        }
-        job.status = "queued";
-        job.cancelling = recovery.cancelRequestedChildIndexes.includes(presentation.index);
-        job.stage =
-          recovery.tracker.admission.phase === "uncertain"
-            ? "Waiting for host confirmation"
-            : "Accepted";
-        continue;
-      }
-      job.id = lifecycle.authority.jobId;
-      const truthfulPhase = truthfulGenerationPhase(lifecycle);
-      if (truthfulPhase === "running") {
-        job.status = "loading";
-        job.cancelling = recovery.cancelRequestedChildIndexes.includes(presentation.index);
-        job.stage = "Rendering";
+      if (lifecycle) job.id = lifecycle.authority.jobId;
+      const p = presentMobileDurableChild(recovery, presentation.index, job.hostLabel, now);
+      if (p.kind === "running" && lifecycle) {
         // The durable child carries no denoise preview or step count; poll
         // the host for our own running print as a tapped queue row does.
         const previewHost = resolveMobileDurableHost(recovery, connectedHosts.value);
@@ -2190,40 +2156,56 @@ function syncDurableGenerationJobs(): void {
             },
           );
         }
-      } else if (truthfulPhase !== "terminal") {
+      } else {
         ownPreviews.stop(String(job.clientId));
-        job.status = "queued";
-        job.cancelling = recovery.cancelRequestedChildIndexes.includes(presentation.index);
-        job.stage =
-          truthfulPhase === "accepted"
-            ? "Accepted"
-            : truthfulPhase === "held"
-              ? "Held by host — action required"
-              : truthfulPhase === "cancelling"
-                ? "Cancellation pending"
-                : null;
-      } else if (lifecycle.phase === "complete") {
+      }
+      if (p.kind === "complete" && lifecycle) {
         job.status = "complete";
         job.cancelling = false;
         job.error = null;
         job.result ??= durableCompleteEvent(presentation, lifecycle, job);
-        job.settledAtMs ??= lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs;
-      } else if (lifecycle.phase === "failed") {
-        job.status = "error";
-        job.cancelling = false;
-        // The machine's own sentence, run through the shared describer so an
-        // out-of-memory failure still reads as the actionable advice it did
-        // when the same outcome arrived on a stream.
-        job.error = durableFailureMessage(lifecycle.error, job.hostLabel);
-        job.settledAtMs ??= lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs;
-      } else if (lifecycle.phase === "cancelled") {
-        job.status = "error";
-        job.cancelling = false;
-        job.error = "Cancelled";
-        job.settledAtMs ??= lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs;
+        job.settledAtMs ??= p.settledAtMs;
+      } else {
+        applyMobileDurablePresentation(job, p, {
+          cancelRequested: recovery.cancelRequestedChildIndexes.includes(presentation.index),
+        });
       }
     }
   }
+}
+
+/**
+ * A batch whose outcome this authority can no longer report is retired: its
+ * rows are already settled as "Outcome unknown" by the sync above, and nothing
+ * further can arrive for it, so keeping the recovery would only poll a host
+ * that has disowned it.
+ */
+function retireUnknownDurableRecoveries(hostId: string): void {
+  const retired = durableGenerationRecoveries.value.filter(
+    (recovery) =>
+      recovery.tracker.hostId === hostId &&
+      reconciliationPresentation(recovery.tracker.reconciliation, null).kind === "unknown",
+  );
+  if (retired.length === 0) return;
+  for (const recovery of retired) {
+    for (const presentation of recovery.presentations) {
+      durableGenerationRequests.delete(
+        durableGenerationKey(recovery.tracker.clientBatchId, presentation.index),
+      );
+    }
+  }
+  const retiredIds = new Set(retired.map((recovery) => recovery.tracker.clientBatchId));
+  durableGenerationRecoveries.value = durableGenerationRecoveries.value.filter(
+    (recovery) => !retiredIds.has(recovery.tracker.clientBatchId),
+  );
+  setGenerationStatus(
+    retired.some((recovery) => recovery.tracker.reconciliation.reason === "instance_mismatch")
+      ? "The original server instance changed. Its queued work is no longer shown here because this replacement cannot authoritatively report the outcome."
+      : "The host no longer has an authoritative record of this queued work; its outcome is unknown.",
+    true,
+  );
+  generationAnnouncement.value =
+    "Generation tracking stopped because the host can no longer report this work's outcome.";
 }
 
 const allGenerationJobs = computed(() => [...generation.jobs, ...durableGenerationJobs.values()]);
@@ -2637,18 +2619,6 @@ const waitingRowCount = computed(
       row.print ? row.print.status === "queued" : row.sequence.state === "queued",
     ).length,
 );
-/**
- * A durable child's failure, in the words the user should read. The machine's
- * own sentence goes through the shared describer so an out-of-memory outcome
- * still carries its actionable advice — the same treatment it got when the
- * failure arrived on a stream.
- */
-function durableFailureMessage(error: string | null | undefined, hostLabel: string | null): string {
-  const detail = error?.trim();
-  if (!detail) return "Generation failed";
-  return describeTransportError(new Error(detail), hostLabel);
-}
-
 const activityCounts = computed(() => ({
   running: runningRowCount.value,
   waiting: waitingRowCount.value,
@@ -2909,38 +2879,7 @@ function markDurableHostGap(hostId: string, instanceId: string): void {
       : recovery,
   );
   syncDurableGenerationJobs();
-  const mismatched = durableGenerationRecoveries.value.filter(
-    (recovery) =>
-      recovery.tracker.hostId === hostId &&
-      recovery.tracker.reconciliation.reason === "instance_mismatch",
-  );
-  if (mismatched.length > 0) {
-    const retired = new Set(mismatched.map((recovery) => recovery.tracker.clientBatchId));
-    for (const recovery of mismatched) {
-      for (const presentation of recovery.presentations) {
-        const key = durableGenerationKey(recovery.tracker.clientBatchId, presentation.index);
-        const job = durableGenerationJobs.get(key);
-        if (job && job.status !== "complete" && job.status !== "error") {
-          job.status = "error";
-          job.stage = "Original machine identity changed";
-          job.error =
-            "The original server instance is no longer at this machine address; its outcome is unknown.";
-          job.cancelling = false;
-          markJobSettled(job);
-        }
-        durableGenerationRequests.delete(key);
-      }
-    }
-    durableGenerationRecoveries.value = durableGenerationRecoveries.value.filter(
-      (recovery) => !retired.has(recovery.tracker.clientBatchId),
-    );
-    setGenerationStatus(
-      "The original server instance changed. Its queued work is no longer shown here because this replacement cannot authoritatively report the outcome.",
-      true,
-    );
-    generationAnnouncement.value =
-      "Generation tracking stopped because the server identity changed.";
-  }
+  retireUnknownDurableRecoveries(hostId);
   persistDurableGenerationRecoveries();
 }
 
@@ -3048,22 +2987,24 @@ async function processDurableGenerationTerminalEffects(): Promise<void> {
       }
     }
     for (const lifecycle of mobileDurableJobs(recovery)) {
-      if (
-        lifecycle.phase !== "complete" &&
-        lifecycle.phase !== "failed" &&
-        lifecycle.phase !== "cancelled"
-      ) {
-        continue;
-      }
       const key = durableGenerationKey(recovery.tracker.clientBatchId, lifecycle.childIndex);
       const job = durableGenerationJobs.get(key);
       if (!job) continue;
+      const p = presentMobileDurableChild(recovery, lifecycle.childIndex, job.hostLabel);
+      if (
+        p.kind !== "complete" &&
+        p.kind !== "complete_without_file" &&
+        p.kind !== "failed" &&
+        p.kind !== "cancelled"
+      ) {
+        continue;
+      }
 
       const viewer = claimMobileDurableTerminalEffect(recovery, lifecycle.key, "viewer");
       recovery = viewer.recovery;
       changed ||= viewer.claimed;
       if (viewer.claimed) {
-        if (lifecycle.phase === "complete" && job.result) {
+        if (p.kind === "complete" && job.result) {
           effects.push(async () => {
             latestResultClientId.value = job.clientId;
             setGenerationStatus(completionSummary(job.result!));
@@ -3073,14 +3014,14 @@ async function processDurableGenerationTerminalEffects(): Promise<void> {
                 "Generation completed, but its preview is unavailable from the exact host.";
             });
           });
-        } else if (lifecycle.phase === "cancelled") {
+        } else if (p.kind === "cancelled") {
           effects.push(() => {
-            setGenerationStatus("Cancelled");
+            setGenerationStatus(p.label);
             generationAnnouncement.value = "Generation cancelled.";
           });
         } else {
           ownPreviews.stop(String(job.clientId));
-          const detail = durableFailureMessage(lifecycle.error, job.hostLabel);
+          const detail = p.kind === "complete" ? "Generation failed" : p.message;
           // A batch's partial failure must say WHICH sibling failed and the
           // prompt it was reviewed with; a bare "Generation failed" leaves a
           // reviewed set unidentifiable.
@@ -3096,7 +3037,7 @@ async function processDurableGenerationTerminalEffects(): Promise<void> {
         }
       }
 
-      if (lifecycle.phase === "complete" && job.result) {
+      if (p.kind === "complete" && job.result) {
         const photos = claimMobileDurableTerminalEffect(recovery, lifecycle.key, "photos");
         recovery = photos.recovery;
         changed ||= photos.claimed;
@@ -3263,8 +3204,9 @@ async function reconcileMobileDurableHost(
           }
         }
       }
-      persistDurableGenerationRecoveries();
       syncDurableGenerationJobs();
+      retireUnknownDurableRecoveries(hostId);
+      persistDurableGenerationRecoveries();
       scheduleMobileDurableCancelIntents();
       await processDurableGenerationTerminalEffects();
     } catch {
@@ -4354,7 +4296,7 @@ function promptForMissingGenerationModel(
  */
 const offeredMissingModelHolds = new Set<string>();
 function offerHeldMissingModelPull(job: Job): void {
-  const heldCode = durableHeldCode(job);
+  const heldCode = durableHold(job)?.code ?? null;
   if (heldCode === null && job.id) {
     // The hold ended: a later hold on the same print is a new offer.
     offeredMissingModelHolds.delete(job.id);
@@ -4367,7 +4309,7 @@ function offerHeldMissingModelPull(job: Job): void {
     alreadyOffered: offeredMissingModelHolds,
   });
   if (!planned) return;
-  const durable = durableLifecycleForJob(job);
+  const durable = durableRecoveryForJob(job);
   if (!durable) return;
   const host = resolveMobileDurableHost(durable.recovery, connectedHosts.value);
   if (!host) return;
@@ -4380,7 +4322,7 @@ watch(
     allGenerationJobs.value
       .map(
         (job) =>
-          `${job.id ?? job.clientId}:${durableHeldCode(job) ?? ""}:${durableHeldError(job) ?? ""}`,
+          `${job.id ?? job.clientId}:${durableHold(job)?.code ?? ""}:${durableHold(job)?.error ?? ""}`,
       )
       .join("|"),
   () => {
@@ -6611,12 +6553,11 @@ async function cancelGeneration(job: Job): Promise<void> {
 }
 
 async function retryHeldGeneration(job: Job): Promise<void> {
-  const durable = durableLifecycleForJob(job);
+  const durable = durableRecoveryForJob(job);
   if (
     !durable ||
     !job.id ||
-    truthfulGenerationPhase(durable.lifecycle) !== "held" ||
-    durable.lifecycle.retryable !== true ||
+    durableHold(job)?.retryable !== true ||
     durableGenerationRetryAttempts.has(job.id)
   ) {
     return;
@@ -10066,7 +10007,7 @@ type MobileActivityRow = (typeof activityRows.value)[number];
 function mobileQueueRowActions(row: MobileActivityRow): SwipeRowAction[] {
   const actions: SwipeRowAction[] = [];
   if (row.print) {
-    if (durableHeldIsRetryable(row.print) && !durableHeldIsRetrying(row.print)) {
+    if (durableHold(row.print)?.retryable && !durableHeldIsRetrying(row.print)) {
       actions.push({ id: "retry", label: "Retry" });
     }
     if (!row.print.cancelling) {
@@ -10936,11 +10877,11 @@ function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
                         <p>{{ row.print.prompt }}</p>
                         <span>{{ modelLabel(row.print.model) }} · {{ row.print.hostLabel }}</span>
                         <p
-                          v-if="durableHeldError(row.print)"
+                          v-if="durableHold(row.print)?.error"
                           class="mobile-generation-held-error"
                           data-test="mobile-generation-held-error"
                         >
-                          {{ durableHeldError(row.print) }}
+                          {{ durableHold(row.print)?.error }}
                         </p>
                       </div>
                       <div class="mobile-generation-job-action">

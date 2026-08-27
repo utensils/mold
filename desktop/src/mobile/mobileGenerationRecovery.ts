@@ -5,10 +5,10 @@ import type {
   GenerationBatchStatusResponse,
 } from "@studio/api/generationAdmission";
 import { generationHostSubmissionPolicy } from "@studio/lib/generationSubmissionPolicy";
+import { generationTrackerSettled } from "@studio/lib/generationPresentation";
 import {
   buildGenerationBatchStatusRequest,
   createGenerationBatchTracker,
-  isTerminalGenerationPhase,
   mergeBulkGenerationBatchResponse,
   reduceGenerationLifecycle,
   type GenerationBatchTracker,
@@ -328,13 +328,7 @@ export function mobileDurableJobs(
 export function mobileDurableRecoveryIsTerminal(
   recovery: MobileDurableGenerationRecovery,
 ): boolean {
-  const jobs = mobileDurableJobs(recovery);
-  return (
-    recovery.tracker.admission.phase === "rejected" ||
-    (jobs.length === recovery.presentations.length &&
-      jobs.length > 0 &&
-      jobs.every((job) => isTerminalGenerationPhase(job.phase)))
-  );
+  return generationTrackerSettled(recovery.tracker, recovery.presentations.length);
 }
 
 export function mobileDurableAdmissionEffectKey(recovery: MobileDurableGenerationRecovery): string {
@@ -353,9 +347,12 @@ export function mobileDurableTerminalEffectsClaimed(
   }
   return mobileDurableJobs(recovery).every((job) => {
     const effects = recovery.claimedEffects[job.key];
+    // Only a completion that PUBLISHED a file owes Photos and Library
+    // effects; one that named no file settled as a failure.
+    const published = job.phase === "complete" && !!job.result?.filename;
     return (
       effects?.viewer === true &&
-      (job.phase !== "complete" || (effects.photos === true && effects.gallery === true))
+      (!published || (effects.photos === true && effects.gallery === true))
     );
   });
 }

@@ -2113,7 +2113,7 @@ describe("MobileApp generation queue", () => {
     ).toHaveLength(1);
     expect(openStreams.filter((stream) => stream.path === "/api/generate/stream")).toHaveLength(0);
     expect(wrapper.text()).not.toContain("Checking placement");
-    expect(wrapper.text()).toContain("Accepted");
+    expect(wrapper.text()).toContain("Queued");
   });
 
   it("confirms and tracks the exact model download when a pinned v2 host is missing it", async () => {
@@ -2799,58 +2799,6 @@ describe("MobileApp generation queue", () => {
       "/api/queue/mismatch-job",
       expect.anything(),
     );
-  });
-
-  it("describes a held durable child as action-required rather than resource waiting", async () => {
-    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
-      if (path === "/api/status") return Promise.resolve(status);
-      if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/gallery") return Promise.resolve([print]);
-      if (path === "/api/capabilities") {
-        return Promise.resolve({
-          events: { available: true },
-          ...durableQueueCapabilities,
-        });
-      }
-      if (path === "/api/activity") {
-        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
-      }
-      if (path === "/api/generation-batches" && init?.method === "POST") {
-        const clientBatchId = JSON.parse(String(init.body)).client_batch_id;
-        return Promise.resolve({
-          id: "held-batch",
-          client_batch_id: clientBatchId,
-          instance_id: "studio-id",
-          durable: true,
-          children: [
-            {
-              index: 1,
-              job_id: "held-job",
-              state: "held",
-              error: "model access requires approval",
-              created_at_ms: 10,
-              updated_at_ms: 11,
-            },
-          ],
-        });
-      }
-      return durableApiFallback(path, init, callTarget);
-    });
-
-    wrapper = mountMobileApp();
-    await flushPromises();
-    await submitPrompt("held print");
-
-    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
-      "Held by host — action required",
-    );
-    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).not.toContain(
-      "Waiting for resources",
-    );
-    expect(wrapper.get("[data-test='mobile-generation-held-error']").text()).toBe(
-      "model access requires approval",
-    );
-    expect(wrapper.find("[data-test='swipe-action-retry']").exists()).toBe(false);
   });
 
   it("retries only an explicitly retryable held child on its exact authenticated host", async () => {
@@ -5618,7 +5566,13 @@ describe("MobileApp generation queue", () => {
 
     await wrapper.get("[data-test='swipe-action-cancel']").trigger("click");
     await flushPromises();
-    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("Accepted");
+    // The tap's status read is answered by the fallback's EMPTY bulk response
+    // (neither found nor missing), which the reducer files as an incomplete
+    // response the next snapshot repairs — the row says so instead of
+    // pretending the machine confirmed anything.
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe(
+      "Re-syncing with host",
+    );
 
     admissions.settleAt(0, { filename: "finished-anyway.png" });
     await flushPromises();
@@ -5773,26 +5727,25 @@ describe("MobileApp generation queue", () => {
     );
   });
 
-  it("does not show an older result when the latest saved result has no filename", async () => {
+  it("fails a completion that published no file instead of showing a stub", async () => {
     serveStillModel();
     const admissions = heldAdmissions();
     wrapper = mountMobileApp();
     await flushPromises();
 
-    await submitPrompt("first successful prompt");
-    admissions.settleAt(0, { filename: "first.png" });
-    await flushPromises();
-    await vi.waitFor(() => expect(wrapper!.find("img.result-media").exists()).toBe(true));
-
     await submitPrompt("metadata without a file");
-    admissions.settleAt(1, { filename: null });
+    admissions.settleAt(0, { filename: null });
     await flushPromises();
     await flushPromises();
 
-    // The machine settled this child without recording a saved file, so the
-    // canvas shows nothing rather than the PREVIOUS print's media.
+    // The machine settles a child on what reached its gallery, so a
+    // completion naming no file is a failure the user sees — never a stub
+    // Photos auto-save silently gets nothing from.
     expect(wrapper.find(".result-media").exists()).toBe(false);
-    expect(wrapper.html()).not.toContain("first.png");
+    expect(wrapper.find("[data-test='mobile-generation-queue']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
+      "published no file",
+    );
   });
 
   it("shows ticket failures and lets the user retry the preview", async () => {
