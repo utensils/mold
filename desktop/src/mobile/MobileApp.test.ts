@@ -11676,11 +11676,10 @@ describe("MobileApp Create File under", () => {
       // Only Studio holds the model; only the Filer can organize.
       if (path === "/api/models") return Promise.resolve(isFiler ? [] : [model]);
       if (path === "/api/capabilities") {
-        return Promise.resolve(
-          isFiler
-            ? { gallery: { can_delete: true, organize: true } }
-            : { gallery: { can_delete: true, organize: false } },
-        );
+        return Promise.resolve({
+          ...durableQueueCapabilities,
+          gallery: { can_delete: true, organize: isFiler },
+        });
       }
       if (path === "/api/gallery") return Promise.resolve([]);
       if (path === "/api/gallery/collections") return Promise.resolve([]);
@@ -11876,11 +11875,13 @@ describe("MobileApp Create File under", () => {
     await flushPromises();
 
     expect(admittedRequests()).toHaveLength(3);
-    for (const stream of openStreams) {
-      expect(stream.options.target).toEqual(filerTarget);
-      expect(stream.options.body.title).toBe("Smurfs");
-      expect(stream.options.body.tags).toBeUndefined();
-      expect(stream.options.body.collection).toBeUndefined();
+    for (const admissionTarget of admissionTargets()) {
+      expect(admissionTarget).toEqual(filerTarget);
+    }
+    for (const request of admittedRequests()) {
+      expect(request.title).toBe("Smurfs");
+      expect(request.tags).toBeUndefined();
+      expect(request.collection).toBeUndefined();
     }
     // One outcome for the whole batch, reported once.
     expect(wrapper!.findAll("[data-test='mobile-file-under-dropped']")).toHaveLength(1);
@@ -11939,12 +11940,15 @@ describe("MobileApp Create File under", () => {
     await flushPromises();
     expect(wrapper!.find("[data-test='mobile-file-under-dropped']").exists()).toBe(true);
 
-    autoWinner(target.baseUrl);
+    // Auto's ranking is captured at poll time, so pin the next print to the
+    // machine that CAN file rather than waiting for a re-rank.
+    await wrapper!.get("[data-test='mobile-generate-host']").setValue("studio-id");
+    await flushPromises();
     await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
 
     expect(admittedRequests()).toHaveLength(2);
-    expect(openStreams[1]?.options.body.tags).toEqual(["smurfs"]);
+    expect(admittedRequests()[1]?.tags).toEqual(["smurfs"]);
     expect(wrapper!.find("[data-test='mobile-file-under-dropped']").exists()).toBe(false);
   });
 
