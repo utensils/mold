@@ -324,9 +324,23 @@ function admissionCalls(): unknown[][] {
   );
 }
 
-/** The capability block a current machine advertises: the batch chunk limit's
- * presence IS the durable-generation contract. */
-const durableQueueCapabilities = { queue: { heterogeneous_batch_max_outputs: 64 } };
+/**
+ * What a current machine advertises. The batch chunk limit's presence IS the
+ * durable-generation contract, and the media block is what lets a print
+ * carrying a source image, an identity photo, or H3 references be queued at
+ * all — without it every media-bearing print is refused by name.
+ */
+const durableQueueCapabilities = {
+  queue: { heterogeneous_batch_max_outputs: 64 },
+  durable_media: {
+    protocol_version: 2,
+    encrypted_at_rest: true,
+    generate_request_media: true,
+    identity: true,
+    h3_references: true,
+    private_h3: true,
+  },
+};
 
 let wrapper: VueWrapper | null = null;
 let objectUrlSequence = 0;
@@ -1128,7 +1142,7 @@ describe("MobileApp sequence generation", () => {
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([sequenceModel]);
-      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path.startsWith("/api/capabilities/chain-limits")) {
         return Promise.resolve({
           model: sequenceModel.name,
@@ -1254,7 +1268,7 @@ describe("MobileApp sequence generation", () => {
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([sequenceModel]);
-      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path.startsWith("/api/capabilities/chain-limits")) {
         return Promise.resolve({
           model: sequenceModel.name,
@@ -1326,7 +1340,7 @@ describe("MobileApp sequence generation", () => {
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([sequenceModel]);
-      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path.startsWith("/api/capabilities/chain-limits")) {
         return Promise.resolve({
           model: sequenceModel.name,
@@ -1410,7 +1424,7 @@ describe("MobileApp sequence generation", () => {
         return Promise.resolve({ ...status, instance_id: undefined });
       }
       if (path === "/api/models") return Promise.resolve([sequenceModel]);
-      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path.startsWith("/api/capabilities/chain-limits")) {
         return Promise.resolve({
           model: sequenceModel.name,
@@ -1456,7 +1470,7 @@ describe("MobileApp Output field", () => {
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve(entries);
-      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path === "/api/gallery") return Promise.resolve([]);
       if (path.startsWith("/api/capabilities/chain-limits")) {
         return Promise.resolve({
@@ -1606,7 +1620,7 @@ describe("MobileApp Output field", () => {
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path === "/api/gallery") return Promise.resolve([]);
       if (path === "/api/catalog/families") return Promise.resolve({ families: [] });
       if (path.startsWith("/api/catalog/search")) return Promise.resolve({ entries: [] });
@@ -1872,9 +1886,7 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: {
-            heterogeneous_batch_max_outputs: 64,
-          },
+          ...durableQueueCapabilities,
         });
       }
       if (path === "/api/activity") {
@@ -1924,9 +1936,7 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: {
-            heterogeneous_batch_max_outputs: 64,
-          },
+          ...durableQueueCapabilities,
         });
       }
       if (path === "/api/activity") {
@@ -2046,9 +2056,7 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: {
-            heterogeneous_batch_max_outputs: 64,
-          },
+          ...durableQueueCapabilities,
         });
       }
       if (path === "/api/activity") {
@@ -2102,9 +2110,7 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: {
-            heterogeneous_batch_max_outputs: 64,
-          },
+          ...durableQueueCapabilities,
         });
       }
       if (path === "/api/activity") {
@@ -2159,9 +2165,7 @@ describe("MobileApp generation queue", () => {
         if (path === "/api/capabilities") {
           return Promise.resolve({
             events: { available: true },
-            queue: {
-              heterogeneous_batch_max_outputs: 64,
-            },
+            ...durableQueueCapabilities,
           });
         }
         if (path === "/api/activity") {
@@ -2238,9 +2242,7 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: {
-            heterogeneous_batch_max_outputs: 64,
-          },
+          ...durableQueueCapabilities,
           durable_media: {
             protocol_version: 2,
             encrypted_at_rest: true,
@@ -2323,9 +2325,7 @@ describe("MobileApp generation queue", () => {
         if (path === "/api/capabilities") {
           return Promise.resolve({
             events: { available: true },
-            queue: {
-              heterogeneous_batch_max_outputs: 64,
-            },
+            ...durableQueueCapabilities,
           });
         }
         if (path === "/api/activity") {
@@ -2400,9 +2400,7 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: {
-            heterogeneous_batch_max_outputs: 64,
-          },
+          ...durableQueueCapabilities,
         });
       }
       if (path === "/api/activity") {
@@ -2462,9 +2460,7 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: {
-            heterogeneous_batch_max_outputs: 64,
-          },
+          ...durableQueueCapabilities,
         });
       }
       if (path === "/api/activity") {
@@ -2520,9 +2516,7 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: {
-            heterogeneous_batch_max_outputs: 64,
-          },
+          ...durableQueueCapabilities,
         });
       }
       if (path === "/api/activity") {
@@ -2592,9 +2586,7 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: {
-            heterogeneous_batch_max_outputs: 64,
-          },
+          ...durableQueueCapabilities,
         });
       }
       if (path === "/api/activity") {
@@ -2686,9 +2678,7 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: {
-            heterogeneous_batch_max_outputs: 64,
-          },
+          ...durableQueueCapabilities,
         });
       }
       if (path === "/api/activity") {
@@ -2748,9 +2738,7 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: {
-            heterogeneous_batch_max_outputs: 64,
-          },
+          ...durableQueueCapabilities,
         });
       }
       if (path === "/api/activity") {
@@ -2884,9 +2872,7 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/capabilities") {
         return Promise.resolve({
           events: { available: true },
-          queue: {
-            heterogeneous_batch_max_outputs: 64,
-          },
+          ...durableQueueCapabilities,
         });
       }
       if (path === "/api/activity") {
@@ -3191,7 +3177,7 @@ describe("MobileApp generation queue", () => {
           instance_id: render ? "render-id" : "studio-id",
         });
       if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path === "/api/gallery") return Promise.resolve([]);
       return durableApiFallback(path, init, route);
     });
@@ -3255,7 +3241,7 @@ describe("MobileApp generation queue", () => {
           instance_id: render ? "render-id" : "studio-id",
         });
       if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path === "/api/gallery") return Promise.resolve([]);
       return durableApiFallback(path, init, route);
     });
@@ -3316,7 +3302,7 @@ describe("MobileApp generation queue", () => {
           instance_id: render ? "render-id" : "studio-id",
         });
       if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path === "/api/gallery") return Promise.resolve([]);
       return durableApiFallback(path, init, route);
     });
@@ -3674,11 +3660,11 @@ describe("MobileApp generation queue", () => {
 
     expect(admittedRequests()).toHaveLength(1);
     expect(openStreams[0]?.options.target).toEqual(target);
-    expect(openStreams[0]?.options.body).toMatchObject({
+    expect(admittedRequests()[0]).toMatchObject({
       prompt: "first prompt",
       model: studioModel.name,
     });
-    expect(openStreams[0]?.options.body.source_image).toMatch(/^fitted:/);
+    expect(admittedRequests()[0]?.source_image).toMatch(/^fitted:/);
   });
 
   it("rechecks the iPhone media budget after source preprocessing", async () => {
@@ -3910,7 +3896,7 @@ describe("MobileApp generation queue", () => {
       expect.any(Object),
     );
     expect(admittedRequests()).toHaveLength(1);
-    expect(openStreams[0]?.options.body.edit_images).toEqual(["FITTED_TARGET", "REFERENCE"]);
+    expect(admittedRequests()[0]?.edit_images).toEqual(["FITTED_TARGET", "REFERENCE"]);
     expect(liveForm.imageAttachments).toEqual(["TARGET", "REFERENCE"]);
   });
 
@@ -4378,8 +4364,8 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
     await flushPromises();
 
-    expect(openStreams.filter((stream) => stream.path === "/api/generate/stream")).toHaveLength(2);
-    expect(openStreams[0]!.options.body.prompt).toBe("edited after preprocessing failed");
+    expect(admittedRequests()).toHaveLength(2);
+    expect(admittedRequests()[0]!.prompt).toBe("edited after preprocessing failed");
   });
 
   it("does not steal focus when delayed prepared submission finishes after the user moves", async () => {
@@ -8014,7 +8000,7 @@ describe("MobileApp gallery", () => {
       }
       if (path === "/api/status") return Promise.resolve({ ...status, hostname: "plato" });
       if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path === "/api/gallery") return Promise.resolve([print]);
       return durableApiFallback(path, init, requestTarget);
     });
@@ -8089,7 +8075,7 @@ describe("MobileApp gallery", () => {
       }
       if (path === "/api/status") return Promise.resolve({ ...status, hostname: "plato" });
       if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path === "/api/gallery") {
         return Promise.resolve(baseUrl === recoveredTarget.baseUrl ? [print] : []);
       }
@@ -8937,7 +8923,7 @@ describe("MobileApp gallery", () => {
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([sequenceModel]);
-      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path.startsWith("/api/capabilities/chain-limits")) {
         return Promise.resolve({
           model: sequenceModel.name,
@@ -10202,7 +10188,7 @@ describe("MobileApp automatic generation routing", () => {
         return Promise.resolve(
           render ? (options.renderModels ?? [model]) : (options.studioModels ?? [model]),
         );
-      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path === "/api/gallery") return Promise.resolve([]);
       if (path === "/api/activity")
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
@@ -10287,7 +10273,7 @@ describe("MobileApp automatic generation routing", () => {
       if (route.baseUrl === renderTarget.baseUrl) return Promise.reject(new Error("offline"));
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path === "/api/gallery") return Promise.resolve([]);
       if (path === "/api/activity")
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
@@ -10391,7 +10377,7 @@ describe("MobileApp automatic generation routing", () => {
     await flushPromises();
 
     await develop();
-    expect(openStreams).toHaveLength(0);
+    expect(admittedRequests()).toHaveLength(0);
     const failure = wrapper.get("[data-test='mobile-generation-error']").text();
     expect(failure).toContain("Studio");
     expect(failure).toContain("Render");
@@ -10451,7 +10437,7 @@ describe("MobileApp automatic sequence routing", () => {
           instance_id: render ? "render-id" : "studio-id",
         });
       if (path === "/api/models") return Promise.resolve([sequenceModel]);
-      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path === "/api/gallery") return Promise.resolve([]);
       if (path === "/api/activity")
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
@@ -10549,7 +10535,7 @@ describe("MobileApp routing target consistency", () => {
           instance_id: render ? "render-id" : "studio-id",
         });
       if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path === "/api/gallery") return Promise.resolve([]);
       if (path === "/api/queue") return Promise.resolve({ entries: [] });
       if (path === "/api/activity")
@@ -10607,7 +10593,7 @@ describe("MobileApp routing target consistency", () => {
     vi.useFakeTimers();
     try {
       await develop();
-      expect(openStreams).toHaveLength(0);
+      expect(admittedRequests()).toHaveLength(0);
       await vi.advanceTimersByTimeAsync(2_000);
       await flushPromises();
     } finally {
@@ -11206,7 +11192,7 @@ describe("MobileApp Create title", () => {
     apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model, sequenceModel]);
-      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path === "/api/gallery") return Promise.resolve([]);
       if (path.startsWith("/api/capabilities/chain-limits")) {
         return Promise.resolve({
@@ -11302,9 +11288,12 @@ describe("MobileApp Create File under", () => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model, sequenceModel]);
       if (path === "/api/capabilities") {
-        return Promise.resolve(
-          organize ? filingCapabilities : { gallery: { can_delete: true, organize: false } },
-        );
+        return Promise.resolve({
+          ...durableQueueCapabilities,
+          ...(organize
+            ? filingCapabilities
+            : { gallery: { can_delete: true, organize: false } }),
+        });
       }
       if (path === "/api/gallery") return Promise.resolve([]);
       if (path === "/api/gallery/collections") {
@@ -11388,8 +11377,8 @@ describe("MobileApp Create File under", () => {
     // The title still rides; only the filing is withheld from a machine that
     // would reject it.
     expect(admittedRequests()[0]?.title).toBe("Smurfs");
-    expect(openStreams[0]?.options.body.tags).toBeUndefined();
-    expect(openStreams[0]?.options.body.collection).toBeUndefined();
+    expect(admittedRequests()[0]?.tags).toBeUndefined();
+    expect(admittedRequests()[0]?.collection).toBeUndefined();
   });
 
   it("files a one-shot print under the ghost tag and the title-matched collection", async () => {
@@ -11405,7 +11394,7 @@ describe("MobileApp Create File under", () => {
 
     expect(admittedRequests()[0]?.tags).toEqual(["smurfs"]);
     // Always by name: the routed machine resolves or creates it by slug.
-    expect(openStreams[0]?.options.body.collection).toEqual({ name: "Smurfs" });
+    expect(admittedRequests()[0]?.collection).toEqual({ name: "Smurfs" });
   });
 
   it("carries a tag typed in the sheet and honours a removed ghost chip", async () => {
@@ -11424,7 +11413,7 @@ describe("MobileApp Create File under", () => {
     await flushPromises();
 
     expect(admittedRequests()[0]?.tags).toEqual(["kodak"]);
-    expect(openStreams[0]?.options.body.collection).toBeUndefined();
+    expect(admittedRequests()[0]?.collection).toBeUndefined();
   });
 
   it("drops the ghost tag when the Settings auto-tag preference is off", async () => {
@@ -11441,7 +11430,7 @@ describe("MobileApp Create File under", () => {
     await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
 
-    expect(openStreams[0]?.options.body.tags).toBeUndefined();
+    expect(admittedRequests()[0]?.tags).toBeUndefined();
     // The collection match is a separate decision and still applies.
     expect(admittedRequests()[0]?.collection).toEqual({ name: "Smurfs" });
   });
@@ -11460,7 +11449,7 @@ describe("MobileApp Create File under", () => {
 
     expect(admittedRequests()).toHaveLength(3);
     for (const stream of openStreams) {
-      expect(stream.options.body.title).toBe("Smurfs");
+      expect(request.title).toBe("Smurfs");
       expect(stream.options.body.tags).toEqual(["smurfs"]);
       expect(stream.options.body.collection).toEqual({ name: "Smurfs" });
     }
@@ -11663,9 +11652,9 @@ describe("MobileApp Create File under", () => {
     await flushPromises();
 
     expect(admittedRequests()).toHaveLength(1);
-    expect(openStreams[0]?.options.body.title).toBe("Smurfs");
-    expect(openStreams[0]?.options.body.tags).toEqual(["smurfs"]);
-    expect(openStreams[0]?.options.body.collection).toEqual({ name: "Smurfs" });
+    expect(admittedRequests()[0]?.title).toBe("Smurfs");
+    expect(admittedRequests()[0]?.tags).toEqual(["smurfs"]);
+    expect(admittedRequests()[0]?.collection).toEqual({ name: "Smurfs" });
   });
 
   it("refuses an over-long title at the tap instead of blaming the source", async () => {
@@ -12123,7 +12112,7 @@ describe("MobileApp identity photo", () => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve(models);
       if (path === "/api/gallery") return Promise.resolve(gallery);
-      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path === "/api/activity") {
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
       }
@@ -12611,7 +12600,7 @@ describe("MobileApp identity photo", () => {
           render ? { ...identityModel, supports_identity: false } : identityModel,
         ]);
       }
-      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
       if (path === "/api/gallery") return Promise.resolve([]);
       if (path === "/api/activity") {
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
@@ -12650,7 +12639,7 @@ describe("MobileApp identity photo", () => {
     await attachPhoto();
     await develop("a portrait on an old machine");
 
-    expect(openStreams).toHaveLength(0);
+    expect(admittedRequests()).toHaveLength(0);
     const status = wrapper.get("[data-test='mobile-generation-summary']").text();
     expect(status).toContain("older Mold");
     expect(status).toContain("Nothing was queued.");
