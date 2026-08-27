@@ -884,7 +884,6 @@ async function resolveFeasibleWithPreview(
         return {
           candidate,
           preview: null,
-          legacyUnsupported: false,
           telemetryOnly: false,
           knownMissingModel: false,
           error: "machine disappeared from the host registry",
@@ -923,7 +922,6 @@ async function resolveFeasibleWithPreview(
           return {
             candidate,
             preview: null,
-            legacyUnsupported: false,
             telemetryOnly: !knownMissingModel,
             knownMissingModel,
             error: null,
@@ -934,7 +932,6 @@ async function resolveFeasibleWithPreview(
         return {
           candidate,
           preview,
-          legacyUnsupported: false,
           telemetryOnly: false,
           knownMissingModel: false,
           error: null,
@@ -950,9 +947,6 @@ async function resolveFeasibleWithPreview(
         return {
           candidate,
           preview: null,
-          legacyUnsupported:
-            error instanceof ApiError &&
-            (error.status === 404 || error.status === 405),
           telemetryOnly: false,
           knownMissingModel: false,
           error: probeError,
@@ -1058,26 +1052,29 @@ async function resolveFeasibleWithPreview(
     }
   }
 
+  // A `unsupported` preview is a NON-AUTHORITATIVE answer, not an old server:
+  // chain and local utility plans are documented to answer it, so the machine
+  // is still routable when the caller does not require authority.
   const unsupportedIds = probes
     .filter(
-      (probe) =>
-        probe.legacyUnsupported ||
-        classifyPlacementPreview(probe.preview) === "unsupported",
+      (probe) => classifyPlacementPreview(probe.preview) === "unsupported",
     )
     .map((probe) => probe.candidate.id);
-  const legacy = hosts.value.filter(
+  const nonAuthoritative = hosts.value.filter(
     (candidate) =>
       unsupportedIds.includes(candidate.id) &&
       (candidate.id === ORIGIN_HOST_ID || candidate.status === "ready"),
   );
-  if (!requireAuthoritative && legacy.length > 0) {
-    const originRoutable = legacy.map((host) =>
+  if (!requireAuthoritative && nonAuthoritative.length > 0) {
+    // The origin is routable before its first status poll lands: a single-host
+    // deployment must be able to submit on first paint.
+    const originRoutable = nonAuthoritative.map((host) =>
       host.id === ORIGIN_HOST_ID ? { ...host, status: "ready" as const } : host,
     );
-    const legacyModelIds = hostsForModel(model).filter((id) =>
+    const routableModelIds = hostsForModel(model).filter((id) =>
       unsupportedIds.includes(id),
     );
-    const route = resolveRoute(originRoutable, selection, legacyModelIds);
+    const route = resolveRoute(originRoutable, selection, routableModelIds);
     if (route)
       return {
         kind: "route",
@@ -1136,7 +1133,6 @@ async function resolveFeasibleWithPreview(
       const classification = classifyPlacementPreview(probe.preview);
       return (
         !probe.knownMissingModel &&
-        (requireAuthoritative || !probe.legacyUnsupported) &&
         (!probe.preview ||
           classification === "invalid" ||
           (requireAuthoritative && classification === "unsupported"))
@@ -1147,8 +1143,7 @@ async function resolveFeasibleWithPreview(
       label: probe.candidate.label,
       error:
         requireAuthoritative &&
-        (probe.legacyUnsupported ||
-          classifyPlacementPreview(probe.preview) === "unsupported")
+        classifyPlacementPreview(probe.preview) === "unsupported"
           ? "does not provide the authoritative placement preview required for reference media"
           : (probe.error ??
             "returned an invalid authoritative placement-preview response"),
@@ -1282,7 +1277,6 @@ async function revalidateFeasibleWithPreview(
   }
   const capturedInstanceId = captured.instanceId ?? null;
   let preview: GenerationPlacementPreview | null = null;
-  let legacyUnsupported = false;
   const submission = generationHostSubmissionPolicy(
     { kind: "pinned", hostId: route.hostId },
     {
@@ -1294,7 +1288,7 @@ async function revalidateFeasibleWithPreview(
     outputKind,
   );
   try {
-    if (submission.routing === "legacy_placement") {
+    if (submission.routing === "placement_preview") {
       preview = await previewFor(
         {
           baseUrl: route.target.baseUrl,
@@ -1304,28 +1298,21 @@ async function revalidateFeasibleWithPreview(
       );
     }
   } catch (error) {
-    if (
-      error instanceof ApiError &&
-      (error.status === 404 || error.status === 405)
-    ) {
-      legacyUnsupported = true;
-    } else {
-      return {
-        kind: "unreachable",
-        perHost: [
-          {
-            hostId: route.hostId,
-            label: route.label,
-            error:
-              error instanceof ApiError
-                ? `HTTP ${error.status}: ${error.message}`
-                : error instanceof Error
-                  ? error.message
-                  : String(error),
-          },
-        ],
-      };
-    }
+    return {
+      kind: "unreachable",
+      perHost: [
+        {
+          hostId: route.hostId,
+          label: route.label,
+          error:
+            error instanceof ApiError
+              ? `HTTP ${error.status}: ${error.message}`
+              : error instanceof Error
+                ? error.message
+                : String(error),
+        },
+      ],
+    };
   }
   readRegistry();
   readTarget();
@@ -1357,11 +1344,9 @@ async function revalidateFeasibleWithPreview(
     return { kind: "transient", perHost: [] };
   }
   const classification =
-    submission.routing !== "legacy_placement"
-      ? "planned"
-      : legacyUnsupported
-        ? "unsupported"
-        : classifyPlacementPreview(preview);
+    submission.routing === "placement_preview"
+      ? classifyPlacementPreview(preview)
+      : "planned";
   if (classification === "temporarily_unavailable") {
     return {
       kind: "transient",

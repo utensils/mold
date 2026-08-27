@@ -274,17 +274,9 @@ export interface ServerCapabilities {
     can_reorder?: boolean;
     /** Running singleton generations accept cooperative cancellation. */
     cooperative_cancellation?: boolean;
-    /** The host journals admitted generations, keeps them across a restart,
-     * and runs them whether or not a client is still attached. Absent on
-     * servers that predate the durable queue. */
-    durable_queue?: boolean;
-    /** Atomic heterogeneous admission, including singleton requests. */
-    heterogeneous_batch?: boolean;
+    /** The batch chunk limit for durable admission. Its presence IS the
+     * durable-generation contract; there is no separate version probe. */
     heterogeneous_batch_max_outputs?: number | null;
-    /** Enriched durable outcomes, by-client recovery and bulk reconciliation. */
-    durable_batch_outcomes?: boolean;
-    /** Queue-first durable admission; version 2 defers model preparation. */
-    admission_protocol_version?: number | null;
   };
   /** One server-wide, authenticated lifecycle stream. */
   events?: { available?: boolean };

@@ -2,9 +2,7 @@ import { computed, onUnmounted, reactive, ref, watch, type Ref } from "vue";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import {
   cancelQueueJob,
-  fetchQueue,
   generateChainStream,
-  generateStream,
   listGalleryFrom,
   type StreamTarget,
 } from "../api";
@@ -15,17 +13,11 @@ import type {
   GenerateRequestWire,
   SseChainCompleteEvent,
   SseCompleteEvent,
-  SseProgressEvent,
 } from "../types";
 import type { ChainRoutingDecision } from "../lib/chainRouting";
 import type { HostRoute } from "../lib/hostRouting";
 import { TargetStreamSlots } from "@studio/lib/targetStreamSlots";
 import { createUuid } from "@studio/lib/id";
-import {
-  prepareReferenceUploads,
-  requestNeedsReferenceUpload,
-  type ReferenceUploadLease,
-} from "@studio/api/referenceUploads";
 import { redactGenerationMediaForPersistence } from "@studio/lib/generationMedia";
 import { getHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { toast } from "../lib/toasts";
@@ -37,7 +29,6 @@ import { blobToBase64 } from "../lib/base64";
 import { inferFormatFromName, type OutputFormat } from "../types";
 import { apiHeaders, type ApiTarget } from "@studio/api/client";
 import {
-  mergeQueueEntries,
   mutateQueueJobOnExpectedInstance,
   retryQueueJobRecoveringAmbiguity,
 } from "@studio/api/queuePlan";
@@ -257,170 +248,9 @@ function serverErrorMessage(body: string | undefined): string | null {
   return body.trim() || null;
 }
 
-/**
- * Whether a terminal SSE error frame says the host KEPT this generation.
- * A durable-queue host ends the stream of a job it retained across a restart
- * with `{ retained: true, code: "server_restarting" }`; the work is still
- * queued there and will land in that host's gallery. Older servers never send
- * the field, so an absent or malformed body stays a hard failure.
- */
-function terminalErrorRetained(body: string | undefined): boolean {
-  if (!body) return false;
-  try {
-    const parsed = JSON.parse(body) as { retained?: unknown };
-    return parsed.retained === true;
-  } catch {
-    return false;
-  }
-}
-
-/** How long the post-close durability lookup may take before the job settles
- *  as an ordinary failure. The socket just died, so the host may well be gone;
- *  the row must not sit in `running` waiting on a request that never answers. */
-const RETENTION_LOOKUP_TIMEOUT_MS = 4_000;
-
-/**
- * Per-job durability, captured when the `queued` event arrives — while the row
- * demonstrably exists — and read later if the stream dies.
- *
- * Asking AFTER the close is a race the job can lose by succeeding: if the
- * transport drops once rendering has finished, the server has already removed
- * the row, and the absent row reads as "not durable" for output that is
- * sitting in the Library. Keyed by client job id, outside Pinia state (it is
- * plumbing, and the value is a promise).
- */
-const durabilityByJob = new Map<string, Promise<boolean>>();
-
-/** Take the host's answer while the row is still there to be asked about. */
-function captureJobDurability(
-  job: Job,
-  target: StreamTarget | undefined,
-): void {
-  if (!job.serverId || durabilityByJob.has(job.id)) return;
-  const answer = hostJournalledJob(job.serverId, target);
-  durabilityByJob.set(job.id, answer);
-  // Mirror it onto the job so consumers that never see this map — queue
-  // reconciliation above all — can tell "the host kept it" from "it vanished".
-  void answer.then((durable) => {
-    if (durable) job.durable = true;
-  });
-}
-
-/**
- * Whether the host's queue still holds `serverId` AND journalled it.
- *
- * Deliberately per-job rather than `capabilities.queue.durable_queue`: a host
- * that can promise durability still reports `durable: false` for a job it
- * excluded at admission — no gallery target, reference-upload media, or a
- * request over the journal's payload ceiling, which a large inline base64
- * source image can reach. Any failure resolves `false`, so an unreachable
- * host, a vanished row, or an older server all keep the hard failure.
- */
-async function hostJournalledJob(
-  serverId: string,
-  target: StreamTarget | undefined,
-): Promise<boolean> {
-  try {
-    const signal = AbortSignal.timeout(RETENTION_LOOKUP_TIMEOUT_MS);
-    let listing = await fetchQueue(target, signal);
-    const seenCursors = new Set<string>();
-    for (;;) {
-      const entry = mergeQueueEntries(
-        listing.entries,
-        listing.live_only_entries ?? [],
-      ).find((candidate) => candidate.id === serverId);
-      if (entry) return entry.durable === true;
-      const cursor = listing.page?.next_cursor;
-      const limit = listing.page?.limit;
-      if (!cursor || !limit) return false;
-      if (seenCursors.has(cursor)) return false;
-      seenCursors.add(cursor);
-      listing = await fetchQueue(target, signal, { limit, cursor });
-    }
-  } catch {
-    return false;
-  }
-}
-
 function markWorkStarted(job: Job) {
   job.workStarted = true;
   job.progress.queuePosition = null;
-}
-
-function applyProgress(job: Job, evt: SseProgressEvent) {
-  job.lastProgressAt = Date.now();
-  const p = job.progress;
-  switch (evt.type) {
-    case "dependency_wait":
-      p.stage = `Waiting for ${evt.dependency}`;
-      break;
-    case "download_progress": {
-      const percent =
-        evt.bytes_total > 0
-          ? Math.round((evt.bytes_downloaded / evt.bytes_total) * 100)
-          : 0;
-      p.stage = `Downloading ${evt.filename} (${percent}%)`;
-      break;
-    }
-    case "download_done":
-      p.stage = `Dependency ready: ${evt.filename}`;
-      break;
-    case "pull_complete":
-      p.stage = `Dependency ready: ${evt.model}`;
-      break;
-    case "stage_start":
-      markWorkStarted(job);
-      p.stage = evt.name;
-      break;
-    case "stage_done":
-      markWorkStarted(job);
-      p.stage = `${evt.name} (done)`;
-      p.elapsedMs = evt.elapsed_ms;
-      break;
-    case "stage_progress":
-      markWorkStarted(job);
-      p.stage = `${evt.name} ${evt.current}/${evt.total}`;
-      break;
-    case "info":
-      // Dimension warnings are emitted before the server queues the job, so
-      // an info event only proves real work has started if the job has
-      // already passed through a queued event.
-      if (p.queuePosition !== null || job.workStarted) markWorkStarted(job);
-      p.stage = evt.message;
-      break;
-    case "denoise_step":
-      markWorkStarted(job);
-      p.stage = "Denoising";
-      p.step = evt.step;
-      p.totalSteps = evt.total;
-      p.elapsedMs = evt.elapsed_ms;
-      break;
-    case "preview":
-      // A latent preview only exists once denoising is underway.
-      markWorkStarted(job);
-      p.stage = "Denoising";
-      p.step = evt.step;
-      p.totalSteps = evt.total;
-      job.previewUrl = `data:image/png;base64,${evt.image}`;
-      break;
-    case "queued":
-      p.stage = `Queued (position ${evt.position})`;
-      p.queuePosition = evt.position;
-      if (!job.serverId) {
-        job.serverId = evt.id;
-      }
-      break;
-    case "weight_load":
-      markWorkStarted(job);
-      p.stage = `Loading ${evt.component}`;
-      p.weightBytesLoaded = evt.bytes_loaded;
-      p.weightBytesTotal = evt.bytes_total;
-      break;
-    case "cache_hit":
-      markWorkStarted(job);
-      p.stage = `Cache hit: ${evt.resource}`;
-      break;
-  }
 }
 
 /** Chain progress events come from a separate SSE stream shape than the
@@ -1032,13 +862,11 @@ function fireComplete(job: Job) {
 }
 
 function recordSuccessfulSettlement(job: Job) {
-  durabilityByJob.delete(job.id);
   job.settledAt = Date.now();
   canvasErrorJobId.value = null;
 }
 
 function recordFailedSettlement(job: Job) {
-  durabilityByJob.delete(job.id);
   job.state = "error";
   job.settledAt = Date.now();
   job.previewUrl = null;
@@ -1057,7 +885,6 @@ function failRunningJob(id: string, error: string) {
 function settleDetachedJob(id: string, note: string) {
   const job = jobs.value.find((candidate) => candidate.id === id);
   if (!job || job.state !== "running") return;
-  durabilityByJob.delete(id);
   job.error = note;
   job.state = "error";
   job.settledAt = Date.now();
@@ -1118,7 +945,7 @@ export const __testing__ = {
   initializePersistedState,
   persistJobs,
   STORAGE_KEY,
-  durableRequestIneligibility,
+  generationRefusal,
   durablePersistenceSafeRequest,
   reconcileDurableHost,
   handleDurableEvent,
@@ -1197,32 +1024,32 @@ function routeSignature(route: HostRoute): string {
   ]);
 }
 
-function durableRequestIneligibility(
-  request: GenerateRequestWire | ChainRequestWire,
-  decision: ChainRoutingDecision,
+/**
+ * The named reason this print cannot be queued, or `null` when it can. Every
+ * generation is admitted through `POST /api/generation-batches`, so a reason
+ * here is a refusal the caller shows the user — never a signal to submit the
+ * request somewhere else.
+ */
+function generationRefusal(
+  request: GenerateRequestWire,
   route: HostRoute | null,
 ): string | null {
-  if (decision.kind === "chain" || isPrebuiltChainRequest(request)) {
-    return "sequences use their dedicated durable lifecycle";
+  if (!route) return "no machine is selected for this print.";
+  if (!route.instanceId) {
+    return `${route.label} has not reported its server instance yet.`;
   }
-  if (!route) return "the host does not advertise durable generation outcomes";
-  if (!route.instanceId) return "the host instance is unknown";
-  const generation = request as GenerateRequestWire;
-  const admission = generationHostSubmissionPolicy(
+  const policy = generationHostSubmissionPolicy(
     { kind: "pinned", hostId: route.hostId },
     {
       hostId: route.hostId,
       queue: route.durableGeneration,
       durableMedia: route.durableMedia,
     },
-    route.modelFamily
-      ? { ...generation, family: route.modelFamily }
-      : generation,
-  ).admission;
-  if (admission !== "canonical_durable") {
-    return "the host does not advertise encrypted durable support for this request";
-  }
-  return null;
+    route.modelFamily ? { ...request, family: route.modelFamily } : request,
+  );
+  return policy.admission === "canonical_durable"
+    ? null
+    : `${route.label} cannot queue this print: ${policy.refusal}.`;
 }
 
 function routeApiTarget(route: HostRoute): ApiTarget {
@@ -1708,29 +1535,37 @@ async function admitDurableBatch(
   }
 }
 
+/**
+ * Admit every print through the one durable route. A request this machine
+ * cannot carry is refused by name and NOTHING is queued.
+ */
 function submitDurableJobs(
   requests: readonly GenerateRequestWire[],
   decision: ChainRoutingDecision,
-  route: HostRoute,
+  route: HostRoute | null,
 ): string[] {
+  if (requests.length === 0) return [];
+  for (const request of requests) {
+    const refusal = generationRefusal(request, route);
+    if (refusal !== null) throw new Error(refusal);
+  }
+  const host = route!;
+  const limit = canonicalGenerationBatchLimit(host.durableGeneration)!;
   selectedJobId.value = null;
   canvasErrorJobId.value = null;
-  const limit = canonicalGenerationBatchLimit(route.durableGeneration);
-  if (limit === null)
-    throw new Error("This host does not support durable generation admission.");
   const admitted: Job[] = [];
   for (const requestChunk of chunkGenerationBatchRequests(requests, limit)) {
     const clientBatchId = createUuid();
     const tracker = createGenerationBatchTracker({
-      hostId: route.hostId,
-      expectedInstanceId: route.instanceId!,
+      hostId: host.hostId,
+      expectedInstanceId: host.instanceId!,
       clientBatchId,
       submittedAtMs: Date.now(),
     });
     const chunkJobs = requestChunk.map((request, offset) =>
-      createJobRecord(request, decision, route, {
+      createJobRecord(request, decision, host, {
         clientBatchId,
-        expectedInstanceId: route.instanceId!,
+        expectedInstanceId: host.instanceId!,
         serverBatchId: null,
         childIndex: offset + 1,
       }),
@@ -1740,14 +1575,11 @@ function submitDurableJobs(
     durableTrackers.set(clientBatchId, tracker);
     // Journal each independently idempotent chunk before its POST leaves.
     persistDurableRecoveryBatch(clientBatchId);
-    void admitDurableBatch(route, clientBatchId, requestChunk);
+    void admitDurableBatch(host, clientBatchId, requestChunk);
   }
   jobs.value = [...admitted, ...jobs.value];
-  durableRoutes.set(route.hostId, {
-    ...route,
-    target: { ...route.target },
-  });
-  ensureDurableEventSession(route);
+  durableRoutes.set(host.hostId, { ...host, target: { ...host.target } });
+  ensureDurableEventSession(host);
   return admitted.map((job) => job.id);
 }
 
@@ -2008,10 +1840,7 @@ function recoverDurableLifecycle(): void {
               typeof window === "undefined" ? "" : window.location.origin,
           },
       instanceId: durable.expectedInstanceId,
-      durableGeneration: {
-        heterogeneous_batch: true,
-        durable_batch_outcomes: true,
-      },
+      durableGeneration: { heterogeneous_batch_max_outputs: 1 },
       eventsAvailable: true,
     };
     durableRoutes.set(hostId, route);
@@ -2057,30 +1886,22 @@ function submitJobs(
   decision: ChainRoutingDecision = { kind: "single" },
   route: HostRoute | null = null,
 ): string[] {
-  if (
-    requests.length > 0 &&
-    requests.every(
-      (request) =>
-        durableRequestIneligibility(request, decision, route) === null,
-    )
-  ) {
-    return submitDurableJobs(requests, decision, route!);
-  }
-  return requests.map((request) => submitJob(request, decision, route, false));
+  return submitDurableJobs(requests, decision, route);
 }
 
+/**
+ * Sequences only. Every generation is admitted through
+ * `POST /api/generation-batches`; there is no attached generation stream left
+ * to fall back to, so a request this machine cannot carry durably is refused
+ * by `submitDurableJobs` rather than re-routed here.
+ */
 function submitJob(
   req: GenerateRequestWire | ChainRequestWire,
   decision: ChainRoutingDecision = { kind: "single" },
   route: HostRoute | null = null,
-  allowDurable = true,
 ): string {
-  if (
-    allowDurable &&
-    !isPrebuiltChainRequest(req) &&
-    durableRequestIneligibility(req, decision, route) === null
-  ) {
-    return submitDurableJobs([req], decision, route!)[0]!;
+  if (decision.kind !== "chain" && !isPrebuiltChainRequest(req)) {
+    return submitDurableJobs([req as GenerateRequestWire], decision, route)[0]!;
   }
   selectedJobId.value = null;
   canvasErrorJobId.value = null;
@@ -2107,59 +1928,10 @@ function submitJob(
           : err.status === 0
             ? (message ?? "generation failed")
             : `HTTP ${err.status}${message ? `: ${message}` : ""}`;
-      // A terminal frame is self-describing and per-job by construction: the
-      // host sends `retained` only for a job it actually kept.
-      if (err.status === 0 && terminalErrorRetained(err.body)) {
-        settleDetachedJob(job.id, job.error ?? "");
-        return;
-      }
       recordFailedSettlement(job);
       return;
     }
     job.error = err.message ?? "network error";
-    // The socket died with no terminal frame, so the host never got to say
-    // whether it kept this job. Ask it — per job, because a host that can
-    // promise durability still excludes some jobs at admission and a false
-    // "it will finish" is worse than a failure the user can simply retry.
-    void settleFramelessClose(job, job.error, req);
-  };
-
-  /** Resolve a frameless close against the answer captured at `queued` time.
-   *  Anything short of a `durable: true` row — an unreachable host, a vanished
-   *  row, an unadmitted job, a host that never promised durability — keeps the
-   *  hard failure that has always been the behaviour here.
-   *
-   *  Deliberately NOT gated on the route's advertised `durable_queue`: a
-   *  single-host page submits with no route at all (`normalizeSubmitRoute`
-   *  collapses the origin to `null`), which is the common deployment, and
-   *  requiring one would leave the default path permanently unreachable. The
-   *  row's own `durable` flag is the stronger per-job answer anyway — only a
-   *  host with the durable queue ever reports it — so asking for it directly
-   *  is both correct for the origin and correct for a routed host whose
-   *  capabilities were never read. */
-  const settleFramelessClose = async (
-    job: Job,
-    note: string,
-    request: GenerateRequestWire | ChainRequestWire,
-  ) => {
-    const durable =
-      !!job.serverId &&
-      !requestNeedsReferenceUpload(request as GenerateRequestWire) &&
-      // Captured at `queued`, never asked now: by this point a job that
-      // SUCCEEDED has already had its row removed, and asking would read that
-      // absence as "not durable" for a print already in the Library.
-      (await (durabilityByJob.get(job.id) ?? Promise.resolve(false)));
-    // The lookup is asynchronous: a cancellation can be confirmed, or a late
-    // completion can land, while it is in flight. Re-check before EITHER
-    // settlement — replacing a confirmed cancellation with an error is as
-    // wrong as replacing it with a detached note.
-    if (job.state !== "running") return;
-    if (durable) {
-      // Soft settle: the row stops moving and keeps its note, but the canvas
-      // never claims a print failed that the host is still going to render.
-      settleDetachedJob(job.id, note);
-      return;
-    }
     recordFailedSettlement(job);
   };
 
@@ -2195,66 +1967,6 @@ function submitJob(
       job.error =
         "internal: ChainRequestWire submitted with non-chain routing decision";
       recordFailedSettlement(job);
-    } else {
-      let lease: ReferenceUploadLease<GenerateRequestWire> | null = null;
-      try {
-        let transportRequest = req;
-        if (requestNeedsReferenceUpload(req)) {
-          if (!route) {
-            throw new Error(
-              "MiniMax H3 reference uploads require a frozen authenticated host route.",
-            );
-          }
-          const prepared = await prepareReferenceUploads({
-            target: {
-              baseUrl: route.target.baseUrl,
-              apiKey: route.target.apiKey ?? null,
-            },
-            expectedInstanceId: route.instanceId ?? "",
-            capabilities: route.referenceUploads,
-            request: req,
-            signal: controller.signal,
-          });
-          lease = prepared;
-          transportRequest = prepared.request;
-        }
-        job.streamStarted = true;
-        await generateStream(
-          transportRequest,
-          {
-            onProgress: (evt) => {
-              applyProgress(job, evt);
-              // `queued` is the first event the server emits per request, and
-              // the one moment the durable row is guaranteed to be listable.
-              if (evt.type === "queued")
-                captureJobDurability(job, route?.target);
-            },
-            onComplete: (evt) => {
-              job.result = evt;
-              job.state = "done";
-              recordSuccessfulSettlement(job);
-              job.previewUrl = null;
-              if (evt.gpu !== null && evt.gpu !== undefined)
-                job.progress.gpu = evt.gpu;
-              fireComplete(job);
-              scheduleAutoRemoveOnDone(id);
-            },
-            onError: onErrorCommon,
-            onRequestWarnings: surfaceRequestWarnings,
-          },
-          controller.signal,
-          route?.target,
-        );
-      } catch (error) {
-        if (!controller.signal.aborted && job.state === "running") {
-          onErrorCommon({
-            kind: "network",
-            message: error instanceof Error ? error.message : String(error),
-          });
-        }
-      } finally {
-        if (lease) void lease.cancel().catch(() => undefined);
-      }
     }
   };
 
@@ -2283,7 +1995,6 @@ function routeForDetachedJob(job: Job): StreamTarget | undefined {
 
 function markCancellationConfirmed(job: Job): void {
   if (job.state !== "running") return;
-  durabilityByJob.delete(job.id);
   job.controller.abort();
   job.state = "canceled";
   job.cancelling = false;
@@ -2438,7 +2149,6 @@ function clearDoneJobs() {
 }
 
 function removeJob(id: string) {
-  durabilityByJob.delete(id);
   const removed = jobs.value.find((job) => job.id === id);
   if (removed?.durableBatch) {
     const clientBatchId = removed.durableBatch.clientBatchId;

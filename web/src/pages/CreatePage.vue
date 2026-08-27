@@ -55,8 +55,6 @@ import { createUuid } from "@studio/lib/id";
 import { confirmCancellation } from "@studio/lib/cancellationRetry";
 import { validatePrintTitle } from "@studio/lib/libraryOrganization";
 import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
-import { requestNeedsReferenceUpload } from "@studio/api/referenceUploads";
-import { supportsDurableGenerationLifecycle } from "@studio/api/generationAdmission";
 import {
   expansionTaskForRequest,
   type ExpandTask,
@@ -622,21 +620,18 @@ function cloneRoute(route: HostRoute | null): HostRoute | null {
   return route ? { ...route, target: { ...route.target } } : null;
 }
 
+/** Every print is admitted against a concrete machine, the origin included:
+ * durable admission reconciles against that machine's instance identity, so a
+ * route is never collapsed away here. */
 function normalizeSubmitRoute(
   route: HostRoute | null,
-  request?: GenerateRequestWire,
+  _request?: GenerateRequestWire,
 ): HostRoute | null {
-  const normalized =
-    route?.hostId === "origin" &&
-    !(request && requestNeedsReferenceUpload(request)) &&
-    !supportsDurableGenerationLifecycle(route.durableGeneration)
-      ? null
-      : route;
-  if (!normalized) return null;
-  const modelFamily = (normalized.modelFamily ?? currentFamily.value).trim();
+  if (!route) return null;
+  const modelFamily = (route.modelFamily ?? currentFamily.value).trim();
   return {
-    ...normalized,
-    target: { ...normalized.target },
+    ...route,
+    target: { ...route.target },
     ...(modelFamily ? { modelFamily } : {}),
   };
 }
@@ -3685,6 +3680,18 @@ function feasibilityMessage(
     .join(" ");
 }
 
+/** A print this machine cannot queue is refused by name and nothing is
+ * queued — there is no second submission path to fall through to. */
+function submitOrRefuse(submit: () => void): boolean {
+  try {
+    submit();
+    return true;
+  } catch (error) {
+    toast("error", error instanceof Error ? error.message : String(error));
+    return false;
+  }
+}
+
 function requestCopyCount(request: GenerateRequestWire): number {
   return Math.max(1, Math.floor(request.batch_size ?? 1));
 }
@@ -3702,7 +3709,9 @@ function submitRequestCopies(
   };
   const copies = requestCopyCount(request);
   if (copies === 1) {
-    stream.submit(request, decision, normalizeSubmitRoute(route, request));
+    submitOrRefuse(() =>
+      stream.submit(request, decision, normalizeSubmitRoute(route, request)),
+    );
     return;
   }
 
@@ -3719,7 +3728,13 @@ function submitRequestCopies(
     batch_count: copies,
     seed: baseSeed + index,
   }));
-  stream.submitBatch(requests, decision, normalizeSubmitRoute(route, request));
+  submitOrRefuse(() =>
+    stream.submitBatch(
+      requests,
+      decision,
+      normalizeSubmitRoute(route, request),
+    ),
+  );
 }
 
 /** True while a Generate click is being routed/admitted. The feasibility
@@ -4426,11 +4441,17 @@ async function queueVariations() {
       };
       return request;
     });
-    stream.submitBatch(
-      requests,
-      prepared.decision,
-      normalizeSubmitRoute(revalidated.route, requests[0]),
-    );
+    if (
+      !submitOrRefuse(() =>
+        stream.submitBatch(
+          requests,
+          prepared.decision,
+          normalizeSubmitRoute(revalidated.route, requests[0]),
+        ),
+      )
+    ) {
+      return;
+    }
     variations.value = [];
     preparedBatch.value = null;
   } finally {

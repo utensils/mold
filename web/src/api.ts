@@ -355,26 +355,6 @@ export async function fetchGenerationEstimate(
   );
 }
 
-export async function generateStream(
-  req: GenerateRequestWire,
-  handlers: GenerateStreamHandlers,
-  signal?: AbortSignal,
-  target?: StreamTarget,
-): Promise<void> {
-  await postSseJsonStream<
-    GenerateRequestWire,
-    SseProgressEvent,
-    SseCompleteEvent
-  >({
-    url: `${targetBase(target)}/api/generate/stream`,
-    body: req,
-    signal,
-    headers: targetHeaders(target),
-    handlers,
-    silentCloseMessage: "stream closed before completion",
-  });
-}
-
 export interface UpscaleStreamHandlers {
   onProgress: (evt: SseProgressEvent) => void;
   onComplete: (evt: SseUpscaleCompleteEvent) => void;
