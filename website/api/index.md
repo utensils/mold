@@ -1181,7 +1181,9 @@ rest of the chain wire format. Omitted overlays keep the job's current value.
 `batch_id` / `batch_index` / `batch_count` provenance are inherited from the
 original request and cannot be changed — create a fresh job for those. The
 amended candidate must still pass every create-time gate: `normalise()`,
-the family/audio check, and the durable-job `output_format = "mp4"` rule.
+the family/audio check, and the video-format rule (`mp4`, `gif`, `webp`, or
+`apng`; the job's own artifact is always stitched as MP4 and the gallery print
+is transcoded to the requested format at finalization).
 
 **Response** — `202 Accepted`. The body is the updated `ChainJobSummary`
 flattened, plus `preserved_stages`:
