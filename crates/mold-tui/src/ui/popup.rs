@@ -1546,7 +1546,7 @@ mod tests {
                 warning_message: None,
                 model_description: String::new(),
                 last_output_path: None,
-                held_retries: Vec::new(),
+                held_batch: None,
                 prompt_transform_token: 0,
             },
             gallery: crate::app::GalleryState::default(),

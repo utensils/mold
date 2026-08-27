@@ -214,6 +214,10 @@ pub async fn run_generation(
             let client = crate::hosts::client_for(&url, api_key.as_deref());
             match try_canonical_remote_batch(CanonicalBatchInput {
                 client: &client,
+                host: crate::app::HeldHost {
+                    url: url.clone(),
+                    api_key: api_key.clone(),
+                },
                 params: &params,
                 prompt: &prompt,
                 negative_prompt: &negative_prompt,
@@ -723,6 +727,9 @@ fn batch_child_state_label(state: &GenerationBatchChildState) -> &'static str {
 
 struct CanonicalBatchInput<'a> {
     client: &'a MoldClient,
+    /// The route `client` was built from, kept beside it so a held child can
+    /// be retried on the host that admitted it.
+    host: crate::app::HeldHost,
     params: &'a GenerateParams,
     prompt: &'a str,
     negative_prompt: &'a Option<String>,
@@ -831,6 +838,7 @@ async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> Canonical
     finish_canonical_batch(
         report,
         input.client,
+        input.host.clone(),
         BatchSubmission {
             prompt: input.prompt,
             negative_prompt: input.negative_prompt.as_deref(),
@@ -848,13 +856,15 @@ async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> Canonical
 /// this is the only place a TUI retry can come from: the Machines queue lanes
 /// list rows with no batch identity at all.
 pub async fn retry_held_prints(
-    url: String,
-    api_key: Option<String>,
-    held: Vec<crate::app::HeldPrintRetry>,
-    submission: OwnedBatchSubmission,
+    held: crate::app::HeldBatch,
     tx: mpsc::UnboundedSender<BackgroundEvent>,
 ) {
-    let client = crate::hosts::client_for(&url, api_key.as_deref());
+    let crate::app::HeldBatch {
+        host,
+        submission,
+        retries: held,
+    } = held;
+    let client = crate::hosts::client_for(&host.url, host.api_key.as_deref());
     let mut authorities: Vec<mold_core::GenerationBatchAuthority> = Vec::new();
     let mut failures = Vec::new();
     for entry in &held {
@@ -909,6 +919,7 @@ pub async fn retry_held_prints(
         prompt: submission.prompt,
         negative_prompt: submission.negative_prompt,
         model: submission.model,
+        host,
     });
     if !failures.is_empty() {
         let _ = tx.send(BackgroundEvent::Error(failures.join("; ")));
@@ -917,6 +928,7 @@ pub async fn retry_held_prints(
 
 /// [`BatchSubmission`] with owned strings, for the retry task that outlives
 /// the form it was read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedBatchSubmission {
     pub prompt: String,
     pub negative_prompt: Option<String>,
@@ -990,6 +1002,7 @@ struct BatchSubmission<'a> {
 async fn finish_canonical_batch(
     report: mold_core::durable_generation::CanonicalGenerationReport,
     client: &MoldClient,
+    host: crate::app::HeldHost,
     submission: BatchSubmission<'_>,
     tx: &mpsc::UnboundedSender<BackgroundEvent>,
 ) -> CanonicalBatchResult {
@@ -1008,6 +1021,7 @@ async fn finish_canonical_batch(
         prompt: submission.prompt.to_string(),
         negative_prompt: submission.negative_prompt.map(str::to_string),
         model: submission.model.to_string(),
+        host,
     });
 
     if report.orchestration_failures.is_empty() {
@@ -1863,6 +1877,10 @@ mod tests {
         // Port 1 is not listening: the capability read fails to connect.
         let client = MoldClient::new("http://127.0.0.1:1");
         let result = try_canonical_remote_batch(CanonicalBatchInput {
+            host: crate::app::HeldHost {
+                url: "http://127.0.0.1:1".into(),
+                api_key: None,
+            },
             client: &client,
             params: &params,
             prompt: "two prints",
@@ -1916,6 +1934,10 @@ mod tests {
             finish_canonical_batch(
                 report,
                 &MoldClient::new("http://127.0.0.1:1"),
+                crate::app::HeldHost {
+                    url: "http://127.0.0.1:1".into(),
+                    api_key: None,
+                },
                 BatchSubmission {
                     prompt: "a held print",
                     negative_prompt: None,
@@ -1998,6 +2020,10 @@ mod tests {
                 // Unreachable on purpose: hydration is best effort and must
                 // never turn a completed print into a failure.
                 &MoldClient::new("http://127.0.0.1:1"),
+                crate::app::HeldHost {
+                    url: "http://127.0.0.1:1".into(),
+                    api_key: None,
+                },
                 BatchSubmission {
                     prompt: "a finished print",
                     negative_prompt: Some("blurry"),

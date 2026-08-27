@@ -94,6 +94,10 @@ pub enum BackgroundEvent {
         prompt: String,
         negative_prompt: Option<String>,
         model: String,
+        /// The host that admitted the batch. A held child can only be retried
+        /// there — the retry fence is that instance's authority — whatever
+        /// machine the form points at by the time the user presses `^T`.
+        host: HeldHost,
     },
     /// Generation or background task failed.
     Error(String),
@@ -1347,11 +1351,13 @@ pub struct GenerateState {
     /// strip's "done · saved to …" line. None when saving is disabled or
     /// the server kept the file.
     pub last_output_path: Option<std::path::PathBuf>,
-    /// Held children of the batch this client last submitted, with the
-    /// admission authority `POST /api/queue/{id}/retry` fences on. Cleared by
-    /// the next submission — a retry is offered for work this session still
-    /// owns, never for a row somebody else admitted.
-    pub held_retries: Vec<HeldPrintRetry>,
+    /// The batch this client last submitted that still has held children,
+    /// for `^T`. Replaced by the next batch that settles and cleared by the
+    /// next submission — a retry is offered for work this session still
+    /// owns, never for a row somebody else admitted — and deliberately NOT
+    /// cleared when a retry fails: the children stay retryable on the host,
+    /// so the user must be able to press `^T` again once the cause is fixed.
+    pub held_batch: Option<HeldBatch>,
     /// Monotonic fence for async Expand/Remix results.
     pub prompt_transform_token: u64,
 }
@@ -1362,6 +1368,49 @@ pub struct HeldPrintRetry {
     pub authority: mold_core::GenerationBatchAuthority,
     pub job_id: String,
     pub index: u32,
+}
+
+/// The authenticated route of the host that admitted a batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldHost {
+    pub url: String,
+    pub api_key: Option<String>,
+}
+
+/// Everything a retry needs and nothing the form can change underneath it:
+/// the admitting host (the retry fence is that instance's authority), the
+/// submission prompt history must record for the print the host actually
+/// renders, and the children still held.
+#[derive(Debug, Clone)]
+pub struct HeldBatch {
+    pub host: HeldHost,
+    pub submission: crate::backend::OwnedBatchSubmission,
+    pub retries: Vec<HeldPrintRetry>,
+}
+
+impl HeldBatch {
+    /// The batch a settled report leaves behind for `^T`, or `None` when no
+    /// child is retryable.
+    pub fn from_outcomes(
+        host: HeldHost,
+        submission: crate::backend::OwnedBatchSubmission,
+        outcomes: &[DurableGenerationChildOutcome],
+    ) -> Option<Self> {
+        let retries = outcomes
+            .iter()
+            .filter(|outcome| outcome.retryable)
+            .map(|outcome| HeldPrintRetry {
+                authority: outcome.authority.clone(),
+                job_id: outcome.job_id.clone(),
+                index: outcome.index,
+            })
+            .collect::<Vec<_>>();
+        (!retries.is_empty()).then_some(Self {
+            host,
+            submission,
+            retries,
+        })
+    }
 }
 
 impl GenerateState {
@@ -2388,7 +2437,7 @@ impl App {
                 warning_message: None,
                 model_description,
                 last_output_path: None,
-                held_retries: Vec::new(),
+                held_batch: None,
                 prompt_transform_token: 0,
             },
             gallery: GalleryState::default(),
@@ -7534,6 +7583,9 @@ impl App {
         }
 
         self.generate.generating = true;
+        // A new submission owns the pane; held children of the previous batch
+        // are no longer this session's work to retry.
+        self.generate.held_batch = None;
         self.generate.batch_remaining = self.generate.params.batch;
         self.generate.error_message = None;
         // An advisory describes the print that produced it.
@@ -7605,50 +7657,22 @@ impl App {
         if self.generate.generating {
             return;
         }
-        let held = self.generate.held_retries.clone();
-        if held.is_empty() {
+        // The held batch carries its own host and submission; the form and
+        // the Machines target may have moved on, and neither can retry a row
+        // another instance admitted or should record a prompt that never
+        // rendered. It is NOT cleared here: a failed retry leaves the children
+        // held on the host, and the settling report replaces it.
+        let Some(held) = self.generate.held_batch.clone() else {
             self.generate.error_message =
                 Some("No held prints from this session to retry".to_string());
             return;
-        }
-        use crate::hosts::GenTarget;
-        let (url, api_key) = match &self.target {
-            GenTarget::Host(id) => match self.machines.registry.get(id) {
-                Some(entry) => (entry.url.clone(), crate::hosts::api_key_for(id)),
-                None => {
-                    self.generate.error_message = Some(format!(
-                        "Machine '{id}' is no longer saved. Pick a target in Machines (4)."
-                    ));
-                    return;
-                }
-            },
-            _ => match self.server_url.clone() {
-                Some(url) => (
-                    url,
-                    std::env::var("MOLD_API_KEY")
-                        .ok()
-                        .filter(|key| !key.is_empty()),
-                ),
-                None => {
-                    self.generate.error_message =
-                        Some("No server to retry held prints on".to_string());
-                    return;
-                }
-            },
         };
         self.generate.generating = true;
         self.generate.error_message = None;
-        self.generate.held_retries.clear();
         self.generate.progress.mark_generation_start();
-        let submission = crate::backend::OwnedBatchSubmission {
-            prompt: self.generate.prompt.lines().join("\n").trim().to_string(),
-            negative_prompt: Some(self.generate.negative_prompt.lines().join("\n"))
-                .filter(|text| !text.is_empty()),
-            model: self.generate.params.model.clone(),
-        };
         let tx = self.bg_tx.clone();
         self.tokio_handle.spawn(async move {
-            crate::backend::retry_held_prints(url, api_key, held, submission, tx).await;
+            crate::backend::retry_held_prints(held, tx).await;
         });
     }
 
@@ -8464,6 +8488,7 @@ impl App {
                     prompt,
                     negative_prompt,
                     model,
+                    host,
                 } => {
                     self.generate.generating = false;
                     self.generate.batch_remaining = 0;
@@ -8473,15 +8498,16 @@ impl App {
 
                     let mut failures = Vec::new();
                     let mut completed = 0_usize;
-                    self.generate.held_retries.clear();
+                    self.generate.held_batch = HeldBatch::from_outcomes(
+                        host,
+                        crate::backend::OwnedBatchSubmission {
+                            prompt: prompt.clone(),
+                            negative_prompt: negative_prompt.clone(),
+                            model: model.clone(),
+                        },
+                        &outcomes,
+                    );
                     for outcome in outcomes {
-                        if outcome.retryable {
-                            self.generate.held_retries.push(HeldPrintRetry {
-                                authority: outcome.authority.clone(),
-                                job_id: outcome.job_id.clone(),
-                                index: outcome.index,
-                            });
-                        }
                         if let Some(seed) = outcome.seed {
                             self.generate.last_seed = Some(seed);
                             // Advance exactly as a singleton does, so a batch
@@ -9385,6 +9411,68 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
 
 #[cfg(test)]
 mod tests {
+    mod held_batch {
+        use super::super::*;
+
+        fn outcome(index: u32, retryable: bool) -> DurableGenerationChildOutcome {
+            DurableGenerationChildOutcome {
+                index,
+                job_id: format!("job-{index}"),
+                authority: mold_core::GenerationBatchAuthority {
+                    batch_id: "batch".into(),
+                    client_batch_id: "client".into(),
+                    instance_id: "instance".into(),
+                },
+                filename: None,
+                original_filename: None,
+                error: retryable.then(|| "model missing".to_string()),
+                retryable,
+                seed: None,
+                generation_time_ms: None,
+                preview_bytes: None,
+            }
+        }
+
+        fn host() -> HeldHost {
+            HeldHost {
+                url: "http://admitting:7680".into(),
+                api_key: Some("key".into()),
+            }
+        }
+
+        fn submission() -> crate::backend::OwnedBatchSubmission {
+            crate::backend::OwnedBatchSubmission {
+                prompt: "the prompt that rendered".into(),
+                negative_prompt: None,
+                model: "flux-dev:q8".into(),
+            }
+        }
+
+        /// A retry goes to the host that admitted the batch with the
+        /// submission that batch rendered — never to the current target or
+        /// the current form — and only the held children ride along.
+        #[test]
+        fn a_held_batch_keeps_the_admitting_host_and_submission() {
+            let held = HeldBatch::from_outcomes(
+                host(),
+                submission(),
+                &[outcome(1, false), outcome(2, true), outcome(3, true)],
+            )
+            .expect("two children are held");
+            assert_eq!(held.host, host());
+            assert_eq!(held.submission.prompt, "the prompt that rendered");
+            assert_eq!(
+                held.retries.iter().map(|r| r.index).collect::<Vec<_>>(),
+                vec![2, 3]
+            );
+        }
+
+        #[test]
+        fn a_batch_with_nothing_retryable_holds_nothing() {
+            assert!(HeldBatch::from_outcomes(host(), submission(), &[outcome(1, false)]).is_none());
+        }
+    }
+
     use super::*;
     use base64::Engine as _;
 
@@ -10593,7 +10681,7 @@ mod tests {
                 warning_message: None,
                 model_description: String::new(),
                 last_output_path: None,
-                held_retries: Vec::new(),
+                held_batch: None,
                 prompt_transform_token: 0,
             },
             gallery: GalleryState::default(),
@@ -14926,7 +15014,7 @@ mod tests {
             warning_message: None,
             model_description: String::new(),
             last_output_path: None,
-            held_retries: Vec::new(),
+            held_batch: None,
             prompt_transform_token: 0,
         };
 
@@ -14993,7 +15081,7 @@ mod tests {
             warning_message: None,
             model_description: String::new(),
             last_output_path: None,
-            held_retries: Vec::new(),
+            held_batch: None,
             prompt_transform_token: 0,
         };
 
@@ -15041,7 +15129,7 @@ mod tests {
             warning_message: None,
             model_description: String::new(),
             last_output_path: None,
-            held_retries: Vec::new(),
+            held_batch: None,
             prompt_transform_token: 0,
         };
 

@@ -220,6 +220,37 @@ pub struct JobRegistry {
 /// Cheap-cloneable handle. Workers and routes pass this around by value.
 pub type SharedJobRegistry = Arc<JobRegistry>;
 
+/// Every fed job's progress channel.
+///
+/// A durable child has no attached observer of its own — the snapshot
+/// `GET /api/queue/{id}/preview` serves is the ONE channel every surface
+/// reads — so the channel a worker sends progress on is a relay that folds
+/// every `Progress` frame into that snapshot and forwards every message to
+/// the attached SSE observer when there is one. Producers keep sending to
+/// `progress_tx` exactly as they always did, from the denoise loop to the
+/// model pull, the dependency wait, the queue position and the H3 phases;
+/// none of them knows the registry, and none can bypass it.
+pub fn progress_relay(
+    registry: &SharedJobRegistry,
+    job_id: &str,
+    observer: Option<tokio::sync::mpsc::UnboundedSender<crate::state::SseMessage>>,
+) -> tokio::sync::mpsc::UnboundedSender<crate::state::SseMessage> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let registry = Arc::clone(registry);
+    let job_id = job_id.to_string();
+    tokio::spawn(async move {
+        while let Some(message) = rx.recv().await {
+            if let crate::state::SseMessage::Progress(event) = &message {
+                registry.record_progress(&job_id, event);
+            }
+            if let Some(observer) = observer.as_ref() {
+                let _ = observer.send(message);
+            }
+        }
+    });
+    tx
+}
+
 impl JobRegistry {
     pub fn new() -> SharedJobRegistry {
         Arc::new(Self {
@@ -974,6 +1005,64 @@ impl JobRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The relay is what makes the snapshot complete: a frame sent on the
+    /// job's `progress_tx` lands in the registry whether or not anyone is
+    /// attached, and an attached observer still sees every message.
+    #[tokio::test]
+    async fn a_progress_relay_folds_every_frame_and_forwards_to_the_observer() {
+        let registry: SharedJobRegistry = JobRegistry::new();
+        registry.register("relayed", "flux-dev:q8");
+        let (observer_tx, mut observer_rx) = tokio::sync::mpsc::unbounded_channel();
+        let progress_tx = progress_relay(&registry, "relayed", Some(observer_tx));
+
+        progress_tx
+            .send(crate::state::SseMessage::Progress(
+                SseProgressEvent::DenoiseStep {
+                    step: 3,
+                    total: 20,
+                    elapsed_ms: 0,
+                },
+            ))
+            .unwrap();
+        let forwarded = tokio::time::timeout(std::time::Duration::from_secs(2), observer_rx.recv())
+            .await
+            .expect("the observer sees the frame")
+            .expect("channel open");
+        assert!(matches!(
+            forwarded,
+            crate::state::SseMessage::Progress(SseProgressEvent::DenoiseStep {
+                step: 3,
+                total: 20,
+                ..
+            })
+        ));
+        let snapshot = registry
+            .progress_snapshot("relayed")
+            .flatten()
+            .expect("the frame folded into the snapshot");
+        assert_eq!((snapshot.step, snapshot.total), (Some(3), Some(20)));
+
+        // No observer: the snapshot is still fed.
+        registry.register("quiet", "flux-dev:q8");
+        let quiet_tx = progress_relay(&registry, "quiet", None);
+        quiet_tx
+            .send(crate::state::SseMessage::Progress(
+                SseProgressEvent::DenoiseStep {
+                    step: 1,
+                    total: 4,
+                    elapsed_ms: 0,
+                },
+            ))
+            .unwrap();
+        for _ in 0..50 {
+            if registry.progress_snapshot("quiet").flatten().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(registry.progress_snapshot("quiet").flatten().is_some());
+    }
 
     #[test]
     fn register_appends_in_fifo_order_with_queued_state() {

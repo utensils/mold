@@ -28,16 +28,15 @@ fn progress_to_sse(event: mold_inference::ProgressEvent) -> SseProgressEvent {
     event.into()
 }
 
+/// Forward an engine progress event to the job's channel. The channel is
+/// the registry relay (`job_registry::progress_relay`), so the fold into the
+/// `/api/queue/{id}/preview` snapshot happens there for every producer alike.
 fn forward_generation_progress(
-    registry: &crate::job_registry::SharedJobRegistry,
-    job_id: &str,
     tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
     event: mold_inference::ProgressEvent,
 ) {
-    let event = progress_to_sse(event);
-    registry.record_progress(job_id, &event);
     if let Some(tx) = tx {
-        let _ = tx.send(SseMessage::Progress(event));
+        let _ = tx.send(SseMessage::Progress(progress_to_sse(event)));
     }
 }
 
@@ -2092,10 +2091,8 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     // Install progress capture before crossing into spawn_blocking. The live
     // registry snapshot is useful even when the submitting SSE receiver is
     // gone, so queue selection can still follow the render from another client.
-    let registry = state.job_registry.clone();
-    let job_id = job.id.clone();
     cached_engine.engine.set_on_progress(Box::new(move |event| {
-        forward_generation_progress(&registry, &job_id, progress_tx.as_ref(), event);
+        forward_generation_progress(progress_tx.as_ref(), event);
     }));
 
     #[cfg(feature = "metrics")]

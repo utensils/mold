@@ -1330,44 +1330,52 @@ async fn feed_available(
             result_tx,
             outcome_rx,
         } = crate::job_supervisor::supervise_job(row.id.clone(), cancel);
-        let progress_tx = match observer {
+        // Every job gets a progress channel: the registry relay that folds
+        // each frame into the `/api/queue/{id}/preview` snapshot, with the
+        // attached SSE observer, when there is one, as a second reader.
+        let (observer_tx, sse_outcome_rx) = match observer {
             Some(observer) => match observer.mode() {
                 crate::queue_media_ingress::ObserverMode::Raw => {
                     observer.deliver(crate::queue_media_ingress::AttachedObserver::Raw {
                         outcome: outcome_rx,
                         warnings: preparation_warnings,
                     });
-                    None
+                    (None, None)
                 }
                 crate::queue_media_ingress::ObserverMode::Sse(_) => {
-                    let (progress_tx, messages) = tokio::sync::mpsc::unbounded_channel();
-                    for warning in preparation_warnings.all() {
-                        let _ = progress_tx.send(crate::state::SseMessage::Progress(
-                            mold_core::SseProgressEvent::Info {
-                                message: warning.to_string(),
-                            },
-                        ));
-                    }
-                    let cancellation_tx = progress_tx.clone();
-                    tokio::spawn(async move {
-                        if let Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) =
-                            outcome_rx.await
-                        {
-                            let _ = cancellation_tx.send(crate::state::SseMessage::Error(
-                                mold_core::SseErrorEvent::cancelled("cancelled".to_string()),
-                            ));
-                        }
-                    });
+                    let (observer_tx, messages) = tokio::sync::mpsc::unbounded_channel();
                     observer
                         .deliver(crate::queue_media_ingress::AttachedObserver::Sse { messages });
-                    Some(progress_tx)
+                    let warnings = preparation_warnings
+                        .all()
+                        .map(|warning| warning.to_string())
+                        .collect::<Vec<_>>();
+                    (Some(observer_tx), Some((outcome_rx, warnings)))
                 }
             },
             None => {
                 drop(outcome_rx);
-                None
+                (None, None)
             }
         };
+        let progress_tx =
+            crate::job_registry::progress_relay(&state.job_registry, &row.id, observer_tx);
+        if let Some((outcome_rx, warnings)) = sse_outcome_rx {
+            for message in warnings {
+                let _ = progress_tx.send(crate::state::SseMessage::Progress(
+                    mold_core::SseProgressEvent::Info { message },
+                ));
+            }
+            let cancellation_tx = progress_tx.clone();
+            tokio::spawn(async move {
+                if let Ok(crate::job_supervisor::SupervisedOutcome::Cancelled) = outcome_rx.await {
+                    let _ = cancellation_tx.send(crate::state::SseMessage::Error(
+                        mold_core::SseErrorEvent::cancelled("cancelled".to_string()),
+                    ));
+                }
+            });
+        }
+        let progress_tx = Some(progress_tx);
         let id = row.id.clone();
         let job = GenerationJob {
             id: id.clone(),
@@ -3529,6 +3537,42 @@ mod tests {
             .held_reason
             .as_deref()
             .is_some_and(|reason| reason.contains("could not be deserialized")));
+    }
+
+    /// The relay is the mechanism every progress producer already feeds: a
+    /// frame sent on the job's `progress_tx` is in the snapshot the surfaces
+    /// poll, whether or not an observer is attached.
+    #[tokio::test]
+    async fn every_fed_job_carries_a_progress_relay_into_its_snapshot() {
+        let (state, mut rx) = state(1);
+        admit(&state, 1);
+
+        let (report, job) = one_feeder_pass(&state, &mut rx).await;
+        assert_eq!(report.submitted, 1);
+        let job = job.expect("the row is fed to a worker");
+        let progress_tx = job
+            .progress_tx
+            .as_ref()
+            .expect("a fed job always has a progress channel, observer or not");
+        progress_tx
+            .send(crate::state::SseMessage::Progress(
+                mold_core::SseProgressEvent::DenoiseStep {
+                    step: 2,
+                    total: 8,
+                    elapsed_ms: 0,
+                },
+            ))
+            .unwrap();
+        let mut folded = None;
+        for _ in 0..100 {
+            folded = state.job_registry.progress_snapshot(&job.id).flatten();
+            if folded.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let folded = folded.expect("the frame reached the snapshot every surface polls");
+        assert_eq!((folded.step, folded.total), (Some(2), Some(8)));
     }
 
     /// A directory that is simply absent is not a directory that moved. The
