@@ -606,6 +606,14 @@ export interface QueueEntry {
   target_gpu?: number | null;
   /** Why the host parked this job. Present only for `state: "held"`. */
   held_reason?: string | null;
+  /** Terminal error text for a held or failed job. */
+  error?: string | null;
+  /** The generation settings the job was admitted with (`OutputMetadata` shape). */
+  metadata?: unknown;
+  seed_pinned?: boolean | null;
+  /** Whether this row was resumed from the durable queue after a restart. */
+  replayed?: boolean | null;
+  dispatch_attempts?: number | null;
   /** Whether the host journalled THIS job and will run it across a restart.
    * Additive and deliberately per-job: a host that advertises
    * `queue.durable_queue` still reports `false` for a job it excluded at
