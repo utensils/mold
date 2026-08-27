@@ -42,18 +42,18 @@ export type GenerationSubmissionOutputKind = "generation" | "sequence";
  * Whether this machine speaks the durable submission contract at all.
  *
  * Deliberately HOST-level and blind to the request: the durable protocol
- * carries source media, LoRAs, `hdr_exr_dir`, identity photos, and H3's
- * ordered references, so a client-side per-trait fence could only ever refuse
- * work the server would have taken. The server's own typed admission refusal
- * — surfaced through `isDefiniteGenerationAdmissionRejection` — is the single
- * authority for anything it cannot take.
+ * carries source media, LoRAs, identity photos, and H3's ordered references,
+ * so a client-side per-trait fence could only ever refuse work the server
+ * would have taken. The ONE host-level fact is the durable queue itself.
+ * `durable_media` is deliberately not required here: a host whose encrypted
+ * media store is degraded still admits every media-free print and refuses a
+ * media-carrying one by name (`503 DURABLE_MEDIA_UNAVAILABLE`), and that typed
+ * refusal — surfaced through `isDefiniteGenerationAdmissionRejection` — is the
+ * single authority for anything it cannot take.
  */
 function hostContractRefusal(host: GenerationSubmissionHost): string | null {
   if (canonicalGenerationBatchLimit(host.queue) === null) {
     return "this machine does not advertise the durable generation queue";
-  }
-  if (!host.durableMedia) {
-    return "this machine does not advertise durable request media";
   }
   return null;
 }

@@ -270,7 +270,23 @@ export async function routeAutomaticMobileGeneration(
           chain: options.chain,
           target: automaticTargetPolicy(options.policy),
         });
-        if (submission.routing === "telemetry_only") {
+        if (submission.admission === "refused" && submission.routing !== "placement_preview") {
+          // The machine cannot admit this print at all; keep it out of the
+          // ranking rather than letting Develop throw at submit.
+          probes.push({
+            ...candidate,
+            route,
+            roundTripMs: elapsed(),
+            preview: null,
+            error: submission.refusal ?? "this machine cannot admit the print",
+            telemetryOnly: false,
+          });
+          return;
+        }
+        if (
+          submission.routing === "telemetry_only" ||
+          (submission.routing === "none" && !options.chain)
+        ) {
           const observation = {
             ...candidate,
             route,

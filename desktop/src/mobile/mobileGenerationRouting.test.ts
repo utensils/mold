@@ -201,6 +201,21 @@ describe("mobile automatic generation routing", () => {
     expect(previewChainPlacement).not.toHaveBeenCalled();
   });
 
+  it("keeps a machine that refuses the durable contract out of Auto", async () => {
+    const studio = host("studio");
+    const render = host("render");
+    const result = await routeAutomaticMobileGeneration({
+      ...options([candidate(studio, { queueDepth: 0 }), candidate(render, { queueDepth: 5 })]),
+      // The emptier machine advertises no durable queue: it would refuse at
+      // Develop, so the busier one that speaks the contract wins.
+      routeForHost: (candidate) =>
+        candidate.id === "studio" ? routeForHost(candidate) : canonicalRouteForHost(candidate),
+    });
+
+    expect(result).toMatchObject({ kind: "route", host: { id: "render" } });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+  });
+
   it("returns a download recovery when canonical telemetry knows every candidate is missing", async () => {
     const studio = host("studio");
     const result = await routeAutomaticMobileGeneration({

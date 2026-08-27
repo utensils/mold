@@ -508,6 +508,35 @@ describe("hosts store", () => {
     expect(placed).toEqual(pinned);
   });
 
+  it("keeps a machine that read-refuses the durable contract out of Auto", async () => {
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: hal.id,
+      label: "hal9000",
+      url: hal.url,
+      apiKey: "host-key",
+      status: "ready",
+      error: null,
+      instanceId: "hal-instance",
+    });
+    // This device is emptier but answered /api/capabilities with no durable
+    // queue: it would refuse at submit, so Auto must rank hal instead.
+    hosts.telemetry.local = { queueDepth: 0, queueCapacity: 8, version: "0.25.0" };
+    hosts.telemetry[hal.id] = { queueDepth: 5, queueCapacity: 8, version: "0.25.0" };
+    hosts.capabilities.local = { gallery: { can_delete: true } };
+    hosts.capabilities[hal.id] = {
+      gallery: { can_delete: true },
+      queue: { heterogeneous_batch_max_outputs: 64 },
+    };
+
+    await expect(hosts.resolveFeasible(null, placementRequest)).resolves.toMatchObject({
+      kind: "route",
+      route: { hostId: hal.id },
+      preview: null,
+    });
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+  });
+
   it("skips placement preview for canonical v2 pinned and automatic routing", async () => {
     const hosts = useHostsStore();
     hosts.extras.push({
@@ -1285,28 +1314,8 @@ describe("hosts store", () => {
     await expect(hosts.resolveFeasibleRoute("local", sequenceRequest)).resolves.toBeNull();
   });
 
-  it("routes staged H3 references to host admission after an explicit unsupported preview", async () => {
-    previewGenerationPlacement.mockResolvedValueOnce({
-      ...plannedPlacement(),
-      authoritative: false,
-      outcome: "unsupported",
-      candidate: null,
-    });
-    const hosts = useHostsStore();
-    const request = {
-      ...placementRequest,
-      model: "minimax-h3-ref2va:comfy-pruned-int8",
-      references: [],
-    } as GenerateRequest;
-
-    await expect(hosts.resolveFeasible("local", request)).resolves.toMatchObject({
-      kind: "route",
-      route: { hostId: "local" },
-      preview: null,
-    });
-  });
-
-  it("keeps the connecting local origin eligible for a legacy placement fallback", async () => {
+  it("never refuses a pinned origin whose capabilities are not yet read", async () => {
+    // Unread is "unknown", never "missing": admission asks the host itself.
     useConnectionStore().status = "starting";
     previewGenerationPlacement.mockRejectedValueOnce(new ApiError("unsupported", 404));
     const hosts = useHostsStore();

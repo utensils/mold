@@ -90,10 +90,6 @@ describe("generation submission policy", () => {
         { queue: { heterogeneous_batch_max_outputs: 0 } },
         "this machine does not advertise the durable generation queue",
       ],
-      [
-        { durableMedia: null },
-        "this machine does not advertise durable request media",
-      ],
     ];
     for (const [overrides, refusal] of cases) {
       expect(

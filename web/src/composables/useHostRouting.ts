@@ -909,6 +909,27 @@ async function resolveFeasibleWithPreview(
           outputKind,
         );
         if (
+          submission.admission === "refused" &&
+          submission.routing !== "placement_preview" &&
+          capabilitiesByHost.value[candidate.id] !== undefined
+        ) {
+          // Only a READ capability snapshot can refuse: an unread one is
+          // "unknown", never "missing", and admission asks the host itself.
+          // The machine cannot admit this print at all (no durable queue, no
+          // encrypted media store, …). Rank it as an error observation so
+          // Auto never picks a host that would refuse at submit. A sequence
+          // is "refused" here by design — it is created through the chain-job
+          // route — and still routes on its placement preview.
+          return {
+            candidate,
+            preview: null,
+            telemetryOnly: false,
+            knownMissingModel: false,
+            error: submission.refusal ?? "this machine cannot admit the print",
+            roundTripMs: Math.max(0, performance.now() - started),
+          };
+        }
+        if (
           submission.routing === "telemetry_only" ||
           submission.routing === "none"
         ) {

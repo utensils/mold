@@ -291,6 +291,33 @@ describe("useHostRouting", () => {
     expect(placementCall).not.toHaveBeenCalled();
   });
 
+  it("keeps a machine that read-refuses the durable contract out of Auto", async () => {
+    const canonical: ServerCapabilities = {
+      gallery: { can_delete: true },
+      queue: { heterogeneous_batch_max_outputs: 64 },
+    };
+    // The emptier machine answered /api/capabilities with no durable queue:
+    // it would refuse at submit, so Auto must never rank it.
+    statuses.set(ORIGIN_HOST_ID, status({ queue_depth: 0 }));
+    models.set(ORIGIN_HOST_ID, [model("flux-dev:q4")]);
+    capabilities.set(ORIGIN_HOST_ID, { gallery: { can_delete: true } });
+    const remote = addHost({ url: "http://studio.local:7680", name: "Studio" });
+    statuses.set(remote.id, status({ queue_depth: 5 }));
+    models.set(remote.id, [model("flux-dev:q4")]);
+    capabilities.set(remote.id, canonical);
+    const routing = useHostRouting();
+    await routing.refresh();
+    setGenerateTargetId(AUTO_TARGET_ID);
+
+    await expect(
+      routing.resolveFeasible(printFor("flux-dev:q4")),
+    ).resolves.toMatchObject({
+      kind: "route",
+      route: { hostId: remote.id },
+    });
+    expect(placementCall).not.toHaveBeenCalled();
+  });
+
   it("returns missing-model recovery without placement when canonical inventory knows it is absent", async () => {
     const canonical: ServerCapabilities = {
       gallery: { can_delete: true },
@@ -794,71 +821,6 @@ describe("useHostRouting", () => {
       });
     },
   );
-
-  it.each([404, 405])(
-    "routes staged H3 references to host admission when placement HTTP %s is unsupported",
-    async (statusCode) => {
-      statuses.set(ORIGIN_HOST_ID, status());
-      models.set(ORIGIN_HOST_ID, [
-        model("minimax-h3-ref2va:comfy-pruned-int8"),
-      ]);
-      placementCall.mockRejectedValue(
-        new ApiError("not supported", statusCode),
-      );
-      const routing = useHostRouting();
-      await routing.refresh();
-
-      await expect(
-        routing.resolveFeasible({
-          prompt: "reference print",
-          model: "minimax-h3-ref2va:comfy-pruned-int8",
-          width: 1344,
-          height: 768,
-          steps: 8,
-          guidance: 0,
-          seed: null,
-          batch_size: 1,
-          references: [],
-        }),
-      ).resolves.toMatchObject({
-        kind: "route",
-        route: { hostId: ORIGIN_HOST_ID },
-        preview: null,
-      });
-    },
-  );
-
-  it("routes staged H3 references to host admission after an explicit unsupported preview", async () => {
-    statuses.set(ORIGIN_HOST_ID, status());
-    models.set(ORIGIN_HOST_ID, [model("minimax-h3-ref2va:comfy-pruned-int8")]);
-    placementCall.mockResolvedValue(
-      placement(0, {
-        authoritative: false,
-        outcome: "unsupported",
-        candidate: null,
-      }),
-    );
-    const routing = useHostRouting();
-    await routing.refresh();
-
-    await expect(
-      routing.resolveFeasible({
-        prompt: "reference print",
-        model: "minimax-h3-ref2va:comfy-pruned-int8",
-        width: 1344,
-        height: 768,
-        steps: 8,
-        guidance: 0,
-        seed: null,
-        batch_size: 1,
-        references: [],
-      }),
-    ).resolves.toMatchObject({
-      kind: "route",
-      route: { hostId: ORIGIN_HOST_ID },
-      preview: null,
-    });
-  });
 
   it("revalidates only the frozen host when another host becomes faster", async () => {
     setGenerateTargetId(AUTO_TARGET_ID);

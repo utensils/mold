@@ -887,6 +887,26 @@ export const useHostsStore = defineStore("hosts", {
                   ? "sequence"
                   : "generation",
               );
+              if (
+                submission.admission === "refused" &&
+                submission.routing !== "placement_preview" &&
+                this.capabilities[host.id] !== undefined
+              ) {
+                // Only a READ capability snapshot can refuse: an unread one
+                // is "unknown", never "missing", and admission asks the host.
+                // The machine cannot admit this print at all; an error
+                // observation keeps it out of Auto / Most capable rather than
+                // letting the ranker pick a host that refuses at submit.
+                probes.push({
+                  host,
+                  preview: null,
+                  error: new Error(submission.refusal ?? "this machine cannot admit the print"),
+                  telemetryOnly: false,
+                  knownMissingModel: false,
+                  roundTripMs: Math.max(0, performance.now() - started),
+                });
+                return;
+              }
               if (submission.routing === "telemetry_only" || submission.routing === "none") {
                 const models = useHostModelsStore();
                 const knownMissingModel =
