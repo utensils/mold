@@ -26,6 +26,8 @@ pub const DISTILLED_Q4: &str = "ltx-2.5-22b-distilled:q4";
 pub const DISTILLED_Q5: &str = "ltx-2.5-22b-distilled:q5";
 pub const DISTILLED_Q6: &str = "ltx-2.5-22b-distilled:q6";
 pub const DISTILLED_Q8: &str = "ltx-2.5-22b-distilled:q8";
+pub const GGUF_RUNTIME_UNAVAILABLE_REASON: &str =
+    "LTX-2.5 GGUF download and header qualification are available, but the native quantized joint audio/video transformer runtime is not implemented yet";
 const DISTILLED_GGUF_VARIANTS: &[&str] = &[
     DISTILLED_Q3_K_S,
     DISTILLED_Q3,
@@ -439,7 +441,7 @@ impl Ltx25ModelPaths {
     }
 
     pub fn qualify(&self) -> std::io::Result<()> {
-        crate::ltx25_probe::validate_ltx25_transformer_gemma(&self.transformer, &self.gemma)?;
+        crate::ltx25_probe::validate_ltx25_transformer_gemma_any(&self.transformer, &self.gemma)?;
         crate::ltx25_probe::probe_ltx25_video_vae(&self.video_vae)?;
         crate::ltx25_probe::validate_ltx25_audio_components(&self.audio_vae)?;
         crate::ltx25_probe::validate_ltx25_duration_head(&self.duration_head)?;

@@ -16,6 +16,7 @@ pub mod expand;
 pub mod expand_prompts;
 pub mod format;
 pub mod generation_profile;
+pub mod gguf_probe;
 pub mod identity;
 pub mod install_error;
 pub mod lambda;

@@ -37,8 +37,19 @@ duration head, and spatial and temporal upscalers. `/api/models` marks a pack
 Auto and Most capable routing exclude a host that explicitly reports an
 incomplete pack.
 
-All weights are gated and downloaded from the official
-[`Lightricks/LTX-2.5`](https://huggingface.co/Lightricks/LTX-2.5) repository.
+Seven transformer-only GGUF tiers from
+[`Abiray/LTX-2.5-Distilled-GGUF`](https://huggingface.co/Abiray/LTX-2.5-Distilled-GGUF)
+are also pinned: `:q3-k-s`, `:q3` (Q3_K_M), `:q4-k-s`, `:q4` (Q4_K_M),
+`:q5`, `:q6`, and `:q8`. They reuse the official packed INT8 Gemma 4, Conv
+VAE, audio VAE/vocoder, duration head, and both latent upscalers. The tiers
+currently install, repair, inventory, and header-qualify as download-only
+rows; Mold reports `runtime_available: false` until its native quantized joint
+audio/video transformer path is complete. LoRAs are rejected before queueing
+for these GGUF variants.
+
+Official companion weights are gated and downloaded from
+[`Lightricks/LTX-2.5`](https://huggingface.co/Lightricks/LTX-2.5). The public
+GGUF mirror does not remove the underlying LTX-2.x license obligations.
 See the [license boundary](architecture/ltx-2.5-license.md) before commercial
 use or redistribution.
 
@@ -95,6 +106,8 @@ not claimed as executed Metal qualification by this report:
 
 Deferred and fail-closed:
 
+- native execution of the seven LTX-2.5 GGUF transformer tiers while the
+  QTensor joint A/V loader and quantized residency pricing are implemented;
 - BF16 execution on Metal; its approximately 71.4 GB split packs remain
   downloadable and checksum-qualified;
 - the diffusion-video-VAE packs, which are BF16 and therefore part of the

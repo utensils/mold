@@ -255,6 +255,11 @@ fn annotate_ltx25_runtime_readiness(catalog: &mut [ModelInfoExtended], config: &
         if !mold_core::ltx25_manifest::is_contract_manifest(&entry.info.name) {
             continue;
         }
+        if mold_core::ltx25_manifest::is_gguf_manifest(&entry.info.name) {
+            entry.runtime_available = Some(false);
+            entry.runtime_unavailable_reason =
+                Some(mold_core::ltx25_manifest::GGUF_RUNTIME_UNAVAILABLE_REASON.to_string());
+        }
         if !entry.downloaded {
             entry.runtime_ready = Some(false);
             entry.runtime_readiness_error = Some(
@@ -2258,6 +2263,29 @@ mod tests {
             .runtime_readiness_error
             .as_deref()
             .is_some_and(|reason| reason.contains("incomplete")));
+    }
+
+    #[test]
+    fn ltx25_gguf_rows_are_visible_downloads_with_an_honest_runtime_gate() {
+        let config = Config::default();
+        let mut catalog = build_model_catalog(&config, None, false);
+
+        annotate_ltx25_runtime_readiness(&mut catalog, &config);
+
+        let rows = catalog
+            .iter()
+            .filter(|entry| mold_core::ltx25_manifest::is_gguf_manifest(&entry.info.name))
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 7);
+        for row in rows {
+            assert_eq!(row.runtime_available, Some(false), "{}", row.info.name);
+            assert_eq!(
+                row.runtime_unavailable_reason.as_deref(),
+                Some(mold_core::ltx25_manifest::GGUF_RUNTIME_UNAVAILABLE_REASON),
+                "{}",
+                row.info.name
+            );
+        }
     }
 
     fn neutral_catalog_intent() -> mold_catalog::synthesis::CatalogModelIntent {
