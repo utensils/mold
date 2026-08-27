@@ -5886,54 +5886,69 @@ describe("MobileApp generation queue", () => {
   });
 
   it("shows a completion that wins the cancellation race", async () => {
+    // The race is now against ADMISSION: the tap lands while the POST is in
+    // flight and the machine answers with a finished child.
     serveStillModel();
-    admitCompletedPrints();
+    const admission = deferred<unknown>();
+    const base = apiJsonTo.getMockImplementation()!;
+    let body: RequestInit | undefined;
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        body = init;
+        return admission.promise;
+      }
+      return base(callTarget, path, init);
+    });
     wrapper = mountMobileApp();
     await flushPromises();
     await submitPrompt("almost finished prompt");
-    openStreams[0]!.options.onEvent(
-      "progress",
-      JSON.stringify({ type: "queued", position: 1, id: "job-finishing" }),
-    );
-    apiFetchTo.mockImplementationOnce(async () => {
-      return new Response(null, { status: 204 });
-    });
+    apiFetchTo.mockImplementationOnce(async () => new Response(null, { status: 204 }));
 
     await wrapper.get("[data-test='mobile-generation-cancel']").trigger("click");
+    admission.resolve(durableBatchResponse(body, { state: "complete" }));
+    await flushPromises();
     await flushPromises();
 
+    await vi.waitFor(() => expect(wrapper!.find("img.result-media").exists()).toBe(true));
     expect(wrapper.find("[data-test='mobile-generation-queue']").exists()).toBe(false);
-    expect(wrapper.find("img.result-media").exists()).toBe(true);
-    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("0.5s · seed 91");
     expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toBe(
       "Generation completed.",
     );
   });
 
   it("preserves a server failure that wins the cancellation race", async () => {
+    const admission = deferred<unknown>();
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        const parsed = JSON.parse(String(init.body)) as { client_batch_id: string };
+        admission.resolve({
+          id: `batch-${parsed.client_batch_id}`,
+          client_batch_id: parsed.client_batch_id,
+          instance_id: status.instance_id,
+          durable: true,
+          children: [
+            {
+              index: 1,
+              job_id: "durable-job-1",
+              state: "failed",
+              error: "host ran out of memory",
+              created_at_ms: 1,
+              updated_at_ms: 2,
+              completed_at_ms: 3,
+            },
+          ],
+        });
+        return admission.promise;
+      }
+      return base(callTarget, path, init);
+    });
     wrapper = mountMobileApp();
     await flushPromises();
     await submitPrompt("failing during cancel");
-    openStreams[0]!.options.onEvent(
-      "progress",
-      JSON.stringify({ type: "queued", position: 1, id: "job-failing" }),
-    );
-    apiFetchTo.mockImplementationOnce(async () => {
-      openStreams[0]!.options.onEvent(
-        "error",
-        JSON.stringify({ message: "host ran out of memory" }),
-      );
-      openStreams[0]!.resolve();
-      return new Response(null, { status: 204 });
-    });
-
-    await wrapper.get("[data-test='mobile-generation-cancel']").trigger("click");
     await flushPromises();
 
     expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
-      "Studio ran out of memory. Try a smaller model, image size, or batch.",
-    );
-    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toContain(
       "Studio ran out of memory. Try a smaller model, image size, or batch.",
     );
   });

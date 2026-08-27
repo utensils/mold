@@ -2135,7 +2135,10 @@ function syncDurableGenerationJobs(): void {
       } else if (lifecycle.phase === "failed") {
         job.status = "error";
         job.cancelling = false;
-        job.error = lifecycle.error ?? "Generation failed";
+        // The machine's own sentence, run through the shared describer so an
+        // out-of-memory failure still reads as the actionable advice it did
+        // when the same outcome arrived on a stream.
+        job.error = durableFailureMessage(lifecycle.error, job.hostLabel);
         job.settledAtMs ??= lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs;
       } else if (lifecycle.phase === "cancelled") {
         job.status = "error";
@@ -2547,6 +2550,18 @@ const waitingRowCount = computed(
       row.print ? row.print.status === "queued" : row.sequence.state === "queued",
     ).length,
 );
+/**
+ * A durable child's failure, in the words the user should read. The machine's
+ * own sentence goes through the shared describer so an out-of-memory outcome
+ * still carries its actionable advice — the same treatment it got when the
+ * failure arrived on a stream.
+ */
+function durableFailureMessage(error: string | null | undefined, hostLabel: string | null): string {
+  const detail = error?.trim();
+  if (!detail) return "Generation failed";
+  return describeTransportError(new Error(detail), hostLabel);
+}
+
 const activityCounts = computed(() => ({
   running: runningRowCount.value,
   waiting: waitingRowCount.value,
@@ -2974,7 +2989,7 @@ async function processDurableGenerationTerminalEffects(): Promise<void> {
             generationAnnouncement.value = "Generation cancelled.";
           });
         } else {
-          const detail = lifecycle.error ?? "Generation failed";
+          const detail = durableFailureMessage(lifecycle.error, job.hostLabel);
           effects.push(() => {
             setGenerationStatus(detail, true);
             generationAnnouncement.value = `Generation failed. ${detail}`;
