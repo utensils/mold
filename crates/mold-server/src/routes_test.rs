@@ -6349,24 +6349,148 @@ mod tests {
         );
     }
 
-    /// A request trait the durable protocol cannot represent is refused by
-    /// name. There is no second pipeline to absorb it, so the refusal is the
-    /// whole answer and nothing is journalled.
+    /// `hdr_exr_dir` is refused for a reason that predates durability and has
+    /// nothing to do with it: it names an output directory on the machine
+    /// doing inference, and an HTTP client may not choose one. The refusal
+    /// keeps its own actionable wording and happens BEFORE acceptance, so a
+    /// caller gets a `422` it can act on rather than a job that holds.
     #[tokio::test(flavor = "current_thread")]
-    async fn an_unrepresentable_direct_trait_is_refused_by_name() {
+    async fn a_client_supplied_hdr_directory_is_refused_before_acceptance() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let (mut state, _rx) = durable_state(db, root.path());
         install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let mut body: serde_json::Value =
+            serde_json::from_str(&generate_body("hdr from a client", 64, 64)).unwrap();
+        body["hdr_exr_dir"] = serde_json::json!("/trusted/output");
+
+        let refused = app_with_state(state)
+            .oneshot(json_request("POST", "/api/generate", body))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let refused = json_body(refused).await;
+        assert_eq!(refused["code"], "VALIDATION_ERROR");
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("--local"),
+            "{refused}"
+        );
+        assert!(journal.list_all().is_empty());
+    }
+
+    /// Ordered references still refuse, and the reason is their one-use upload
+    /// authority rather than a protocol version. Nothing reaches SQLite: the
+    /// point of the refusal is that those handles are never written down.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ordered_references_refuse_without_persisting_their_handles() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
         let mut request: GenerateRequest =
             serde_json::from_str(&generate_body("ordered references", 64, 64)).unwrap();
         request.references = Some(Vec::new());
 
         let Err(error) = crate::routes::direct_durable_admission(&state, &mut request).await else {
-            panic!("ordered references cannot be persisted durably");
+            panic!("one-use reference authority cannot be persisted");
         };
         assert_eq!(error.code, "DURABLE_MEDIA_REFERENCES_UNSUPPORTED");
-        assert!(state.queue_journal.list_all().is_empty());
+        assert!(error.error.contains("one-use"), "{}", error.error);
+        assert!(journal.list_all().is_empty());
+    }
+
+    /// A LoRA beside conditioning media is an ordinary durable request.
+    ///
+    /// It used to be refused by name: durable media protocol v1 could not
+    /// carry the LoRA's server-local path, so `DURABLE_MEDIA_LORA_UNSUPPORTED`
+    /// took out every img2img, inpaint, control and video-source render that
+    /// used one. `lora.path` is a request field like `model` — it is persisted
+    /// with the rest of the request and re-validated at dispatch.
+    #[tokio::test(flavor = "current_thread")]
+    async fn media_with_a_lora_is_admitted_durably() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) =
+            durable_state_with_engine(db, root.path(), MockEngine::ready_for_model("flux-dev:q4"));
+        install_authoritative_v2(&mut state);
+        let adapter = root.path().join("adapter.safetensors");
+        std::fs::write(&adapter, b"lora").unwrap();
+
+        let mut request: GenerateRequest = serde_json::from_str(&generate_body_for_model(
+            "img2img with a lora",
+            "flux-dev:q4",
+            64,
+            64,
+        ))
+        .unwrap();
+        request.source_image = Some(minimal_png());
+        request.lora = Some(mold_core::LoraWeight {
+            path: adapter.display().to_string(),
+            scale: 0.8,
+            expert: None,
+        });
+
+        assert!(
+            crate::routes::direct_durable_admission(&state, &mut request)
+                .await
+                .is_ok(),
+            "a LoRA beside conditioning media is an ordinary durable request"
+        );
+    }
+
+    /// The persisted request keeps the LoRA, and dispatch re-validates the
+    /// path it names. A LoRA that vanished between admission and replay is a
+    /// HELD row that says so — never a silent drop, and never a render with
+    /// the adapter missing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_vanished_lora_holds_its_row_by_name() {
+        // A LoRA needs a model whose family merges one, and admission infers
+        // the family from the model name, so the fixture engine answers to a
+        // real FLUX identity rather than `mock-model`.
+        const MODEL: &str = "flux-dev:q4";
+        let (state, rx, gallery_root) = durable_test_state(MockEngine::ready_for_model(MODEL));
+        spawn_durable_runtime(&state, rx);
+        let adapter = gallery_root.path().join("adapter.safetensors");
+        std::fs::write(&adapter, b"lora").unwrap();
+        let app = app_with_state(state.clone());
+
+        let mut body: serde_json::Value = serde_json::from_str(&generate_body_for_model(
+            "a print with a lora",
+            MODEL,
+            64,
+            64,
+        ))
+        .unwrap();
+        body["lora"] = serde_json::json!({
+            "path": adapter.display().to_string(),
+            "scale": 0.8,
+        });
+        // The adapter disappears after the request is composed but before the
+        // feeder prepares it — the replay-after-restart shape, compressed.
+        std::fs::remove_file(&adapter).unwrap();
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(20),
+            app.oneshot(json_request("POST", "/api/generate", body)),
+        )
+        .await
+        .expect("a vanished adapter must settle the request")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let settled = json_body(response).await;
+        let child = &settled["children"][0];
+        assert_eq!(child["state"], "held", "{settled}");
+        assert_eq!(child["retryable"], true, "{settled}");
+        let reason = child["error"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains("adapter.safetensors"),
+            "the hold must name the LoRA that vanished: {settled}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6845,11 +6969,11 @@ mod tests {
             assert!(journal.cancel_id(&row.id).unwrap());
         }
 
+        // One-over-N atomicity is asked with a trait that still refuses:
+        // ordered references. A LoRA beside media used to serve here and no
+        // longer refuses at all — it is an ordinary durable request.
         let mut refused = media;
-        refused["lora"] = serde_json::json!({
-            "path": "must-not-be-resolved.safetensors",
-            "scale": 1.0
-        });
+        refused["references"] = serde_json::json!([]);
         let rejected = app
             .oneshot(json_request(
                 "POST",
@@ -6869,7 +6993,7 @@ mod tests {
         assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
             json_body(rejected).await["code"],
-            "DURABLE_MEDIA_LORA_UNSUPPORTED"
+            "DURABLE_MEDIA_REFERENCES_UNSUPPORTED"
         );
         assert!(journal.list_all().is_empty());
         let owner = journal.owner_uuid().unwrap();
@@ -6921,16 +7045,19 @@ mod tests {
         hdr["hdr_exr_dir"] = serde_json::json!(hdr_sentinel);
 
         for path in ["/api/generate", "/api/generate/stream"] {
+            // `hdr_exr_dir` keeps its own older refusal — an HTTP client may
+            // not name an output directory on the inference machine — so the
+            // code differs from the reference one while the guarantee this
+            // test exists for, that neither reaches SQLite, is unchanged.
             for (request, expected_code) in [
                 (&references, "DURABLE_MEDIA_REFERENCES_UNSUPPORTED"),
-                (&hdr, "DURABLE_MEDIA_HDR_UNSUPPORTED"),
+                (&hdr, "VALIDATION_ERROR"),
             ] {
                 let response = app
                     .clone()
                     .oneshot(
                         Request::post(path)
                             .header("content-type", "application/json")
-                            .header("x-mold-operation-id", uuid::Uuid::new_v4().to_string())
                             .body(Body::from(request.to_string()))
                             .unwrap(),
                     )
@@ -10928,12 +11055,15 @@ mod tests {
             .await
             .unwrap();
 
-        // The durable protocol cannot persist an HDR output directory, so the
-        // refusal is its own typed code rather than a generic validation one.
-        // Either way `hdr_exr_dir` never crosses the request boundary.
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = json_body(resp).await;
-        assert_eq!(body["code"], "DURABLE_MEDIA_HDR_UNSUPPORTED");
+        assert_eq!(body["code"], "VALIDATION_ERROR");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("hdr_exr_dir") && error.contains("--local")),
+            "got: {body}"
+        );
     }
 
     #[tokio::test]

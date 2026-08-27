@@ -437,6 +437,10 @@ impl DurableMediaAdmission {
             // of the MODEL and does not depend on the request's shape: telling
             // a caller its `strength` is wrong for a checkpoint this build
             // cannot run at all answers the wrong question.
+            crate::routes::reject_client_supplied_hdr_output(&request).map_err(|mut error| {
+                error.error = format!("requests[{}]: {}", offset + 1, error.error);
+                error
+            })?;
             if authority.is_none() {
                 let family = crate::routes::require_server_model_activation(state, &request.model)
                     .await
@@ -880,44 +884,45 @@ pub(crate) fn durable_media_preflight(
             "durable request media cannot be hydrated securely on this platform",
         ));
     }
+    // `references`, `hdr_exr_dir` and "a LoRA beside conditioning media" were
+    // refused here by durable media protocol v1, which could not carry them.
+    // None of the three was ever an invariant:
+    //
+    // * A LoRA is an ordinary request field. `lora.path` names a server-local
+    //   adapter exactly as `model` names a checkpoint, it is persisted with
+    //   the rest of the request, and dispatch re-validates it — a LoRA that
+    //   vanished between admission and replay HOLDS its row by name rather
+    //   than rendering without the adapter. Refusing the pair took out every
+    //   img2img, inpaint, control and video-source render that used one.
+    // * `hdr_exr_dir` is refused for a better, older reason that has nothing
+    //   to do with durability: it names an output directory on the inference
+    //   machine and an HTTP client may not choose one. That refusal lives in
+    //   `routes::reject_client_supplied_hdr_output` and keeps its actionable
+    //   "re-run with --local" wording.
+    // Ordered references are the one that still refuses, and it is a
+    // DIFFERENT kind of limit from the two above. Their upload handles are
+    // one-use bearer secrets that `mold.db` must never hold, and the live
+    // admission path (`record_batch_with_media`) writes a journal row for
+    // every child it accepts — there is no producer for a row-less one, so
+    // "admit it as `durable: false`" needs a second dispatch route into
+    // `state.queue`, not a flag. Refusing by name is the honest interim: a
+    // client is told exactly what this host cannot persist instead of having
+    // its one-use handles written to disk.
     if request.references.is_some() {
         return Err(typed_refusal(
             "DURABLE_MEDIA_REFERENCES_UNSUPPORTED",
-            "ordered references require temporary replay authority",
-        ));
-    }
-    if request.hdr_exr_dir.is_some() {
-        return Err(typed_refusal(
-            "DURABLE_MEDIA_HDR_UNSUPPORTED",
-            "HDR output authority is not supported by the durable media protocol",
-        ));
-    }
-    if request_has_durable_media(request) && (request.lora.is_some() || request.loras.is_some()) {
-        return Err(typed_refusal(
-            "DURABLE_MEDIA_LORA_UNSUPPORTED",
-            "media and LoRA inputs cannot share the durable media protocol",
+            "ordered references carry one-use upload authority the durable queue cannot persist",
         ));
     }
     Ok(())
 }
 
 fn durable_media_batch_preflight(requests: &[mold_core::GenerateRequest]) -> Result<(), ApiError> {
-    let batch_has_media = requests.iter().any(request_has_durable_media);
     for (offset, request) in requests.iter().enumerate() {
         durable_media_preflight(request).map_err(|mut error| {
             error.error = format!("requests[{}]: {}", offset + 1, error.error);
             error
         })?;
-        if batch_has_media && (request.lora.is_some() || request.loras.is_some()) {
-            return Err(ApiError::with_code(
-                format!(
-                    "requests[{}]: media batches cannot persist local LoRA authority",
-                    offset + 1
-                ),
-                "DURABLE_MEDIA_LORA_UNSUPPORTED",
-                StatusCode::UNPROCESSABLE_ENTITY,
-            ));
-        }
     }
     Ok(())
 }
@@ -1173,28 +1178,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn mixed_media_batch_refuses_media_free_lora_before_persistable_bytes_exist() {
-        const SENTINEL: &str = "/private/local-adapter-sentinel.safetensors";
-        let mut lora_sibling = request();
-        lora_sibling.lora = Some(mold_core::LoraWeight {
-            path: SENTINEL.to_string(),
-            scale: 1.0,
-            expert: None,
-        });
-        assert!(durable_media_batch_preflight(&[lora_sibling.clone()]).is_ok());
-
-        let mut media = request();
-        media.source_image = Some(vec![1, 2, 3]);
-        let requests = vec![media, lora_sibling];
-        let persistable = durable_media_batch_preflight(&requests)
-            .map(|()| serde_json::to_vec(&requests).unwrap());
-        let refusal = persistable.unwrap_err();
-        assert_eq!(refusal.code, "DURABLE_MEDIA_LORA_UNSUPPORTED");
-        assert!(!format!("{refusal:?}").contains(SENTINEL));
-    }
-
     #[test]
     fn media_free_ordinary_lora_batch_remains_valid() {
         let mut lora = request();
@@ -1204,20 +1187,6 @@ mod tests {
             expert: None,
         });
         assert!(durable_media_batch_preflight(&[lora]).is_ok());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn media_plus_lora_remains_typed_refused() {
-        let mut request = request();
-        request.lora = Some(mold_core::LoraWeight {
-            path: "adapter.safetensors".to_string(),
-            scale: 1.0,
-            expert: None,
-        });
-        request.source_image = Some(vec![1, 2, 3]);
-        let refusal = durable_media_preflight(&request).unwrap_err();
-        assert_eq!(refusal.code, "DURABLE_MEDIA_LORA_UNSUPPORTED");
     }
 
     #[cfg(windows)]
@@ -1265,8 +1234,12 @@ mod tests {
         assert_eq!(sealing.await.unwrap().unwrap(), 17);
     }
 
+    /// References keep a refusal — their one-use upload authority cannot be
+    /// written down — while H3, `hdr_exr_dir` and a LoRA beside media do not.
+    /// `hdr_exr_dir` is refused elsewhere, by the older rule that an HTTP
+    /// client may not name an output directory on the inference machine.
     #[test]
-    fn h3_is_admissible_while_references_and_hdr_keep_stable_refusals() {
+    fn only_one_use_reference_authority_refuses_here() {
         let mut h3 = request();
         h3.model = mold_core::minimax_h3::FL2VA_COMFY.to_string();
         durable_media_preflight(&h3).expect("H3 uses sealed durable replay authority");
@@ -1286,9 +1259,18 @@ mod tests {
 
         let mut hdr = request();
         hdr.hdr_exr_dir = Some("private-output".to_string());
-        assert_eq!(
-            durable_media_preflight(&hdr).unwrap_err().code,
-            "DURABLE_MEDIA_HDR_UNSUPPORTED"
-        );
+        durable_media_preflight(&hdr)
+            .expect("hdr_exr_dir is refused by the local-only rule, not by durability");
+
+        let mut media_lora = request();
+        media_lora.source_image = Some(vec![1, 2, 3]);
+        media_lora.lora = Some(mold_core::LoraWeight {
+            path: "adapter.safetensors".to_string(),
+            scale: 1.0,
+            expert: None,
+        });
+        durable_media_preflight(&media_lora)
+            .expect("a LoRA beside media is an ordinary durable request");
+        assert!(durable_media_batch_preflight(&[media_lora]).is_ok());
     }
 }

@@ -303,13 +303,18 @@ the requests that need it, with HTTP 503 `DURABLE_MEDIA_UNAVAILABLE`; a
 media-free request is unaffected. There is no `X-Mold-Operation-Id` header and
 no attached, non-durable fallback.
 
-A request the durable protocol cannot represent is refused by name with HTTP
-422: `DURABLE_MEDIA_REFERENCES_UNSUPPORTED` (ordered MiniMax H3 references),
-`DURABLE_MEDIA_HDR_UNSUPPORTED` (`hdr_exr_dir`), and
-`DURABLE_MEDIA_LORA_UNSUPPORTED` (a LoRA combined with conditioning media —
-`source_image`, `id_image`, `mask_image`, `control_image`, `source_video`,
-keyframes, or audio). `POST /api/generate` additionally refuses
-`batch_size != 1` with `DIRECT_BATCH_UNSUPPORTED`; submit siblings through
+A LoRA combined with conditioning media is an ordinary durable request:
+`lora.path` is persisted with the rest of the request and re-validated when the
+job is dispatched, so an adapter that was moved or deleted in the meantime holds
+its row with a reason naming the file rather than rendering without it.
+
+Two request traits are refused with HTTP 422, for reasons that are not about
+protocol versions. `DURABLE_MEDIA_REFERENCES_UNSUPPORTED` — ordered MiniMax H3
+references carry one-use upload authority the durable queue must never write
+down. And `hdr_exr_dir` names an output directory on the machine doing
+inference, which an HTTP client may not choose; re-run the CLI with `--local`.
+`POST /api/generate` additionally refuses `batch_size != 1` with
+`DIRECT_BATCH_UNSUPPORTED`; submit siblings through
 `POST /api/generation-batches`.
 
 `POST /api/generation-batches/status` is rate-limited as a read operation;
