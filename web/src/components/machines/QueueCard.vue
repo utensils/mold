@@ -49,6 +49,7 @@ const modelLabel = (name: string) => modelDisplayNameForId(name, props.models);
 
 const emit = defineEmits<{
   cancel: [id: string];
+  inspect: [id: string];
   setLane: [id: string, gpu: number | null];
   move: [id: string, position: number];
   togglePause: [];
@@ -152,7 +153,15 @@ function queuedIndexOf(id: string): number {
           >
             {{ entry.state }}
           </BadgePill>
-          <span class="qc__model">{{ modelLabel(entry.model) }}</span>
+          <button
+            type="button"
+            class="qc__model"
+            data-test="queue-inspect"
+            :aria-label="`Job details for ${modelLabel(entry.model)}`"
+            @click="emit('inspect', entry.id)"
+          >
+            {{ modelLabel(entry.model) }}
+          </button>
           <span
             v-if="entry.state === 'held' && entry.held_reason"
             class="qc__held"
@@ -315,12 +324,23 @@ function queuedIndexOf(id: string): number {
 .qc__model {
   flex: 1;
   min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
   font-family: var(--f-mono);
   font-size: 12.5px;
   color: var(--rebate);
+  text-align: left;
+  cursor: pointer;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.qc__model:hover,
+.qc__model:focus-visible {
+  color: var(--sel-ink, var(--safelight));
+  text-decoration: underline;
 }
 
 .qc__lane {

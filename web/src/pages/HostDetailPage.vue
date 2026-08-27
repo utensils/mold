@@ -27,6 +27,17 @@ import {
 } from "@studio/lib/modelDisplay";
 import StatusDot from "../components/machines/StatusDot.vue";
 import QueueCard from "../components/machines/QueueCard.vue";
+import QueueEntryDetail from "@studio/components/QueueEntryDetail.vue";
+import {
+  queueEntryDetailModel,
+  type QueueDetailMetadata,
+} from "@studio/lib/queueEntryDetail";
+import {
+  settingsRestoreMetadata,
+  watchSelectedQueuePreview,
+  type QueueJobPreview,
+} from "@studio/api/generationSelection";
+import { setGenerationHandoff } from "../composables/useGenerationHandoff";
 import {
   cancelQueueJob,
   cancelAllHostQueue,
@@ -65,7 +76,12 @@ import {
 import { ApiHttpError, reorderQueueJob, updateQueueJobTargetGpu } from "../api";
 import { requestConfirm, requestText, toast } from "../lib/toasts";
 import { subscribeToDeviceSnapshots } from "../lib/deviceEvents";
-import type { DownloadJobWire, ModelInfoExtended, QueueEntry } from "../types";
+import type {
+  DownloadJobWire,
+  ModelInfoExtended,
+  OutputMetadata,
+  QueueEntry,
+} from "../types";
 import { setDeviceEnabled } from "@studio/api/devices";
 
 const route = useRoute();
@@ -545,6 +561,99 @@ async function onCancel(id: string) {
       (pending) => pending !== id,
     );
   }
+}
+
+// ── Queue row detail ─────────────────────────────────────────────────────
+const inspectedId = ref<string | null>(null);
+const inspectError = ref<string | null>(null);
+const inspectPreview = ref<QueueJobPreview | null>(null);
+const inspectNowMs = ref(Date.now());
+let stopInspectPreview: (() => void) | null = null;
+let inspectTimer: ReturnType<typeof setInterval> | null = null;
+
+const inspectedEntry = computed(
+  () => queue.value.find((entry) => entry.id === inspectedId.value) ?? null,
+);
+
+const inspectedModel = computed(() => {
+  const entry = inspectedEntry.value;
+  if (!entry) return null;
+  return queueEntryDetailModel({
+    entry,
+    hostLabel: host.value?.name || host.value?.url || "this machine",
+    modelLabel: modelDisplayNameForId(entry.model, models.value),
+    nowMs: inspectNowMs.value,
+    plan: queuePlan.value,
+    metadata:
+      (entry.metadata as QueueDetailMetadata | null | undefined) ?? null,
+    mine: false,
+    canCancelRunning: caps.value?.queue?.cooperative_cancellation === true,
+  });
+});
+
+// Elapsed and estimate lines are wall-clock; the 4 s host poll is too coarse.
+watch(inspectedId, (id) => {
+  inspectError.value = null;
+  inspectPreview.value = null;
+  stopInspectPreview?.();
+  stopInspectPreview = null;
+  if (inspectTimer !== null) clearInterval(inspectTimer);
+  inspectTimer = null;
+  if (id === null) return;
+  inspectNowMs.value = Date.now();
+  inspectTimer = setInterval(() => (inspectNowMs.value = Date.now()), 1_000);
+
+  const entry = host.value;
+  const row = queue.value.find((candidate) => candidate.id === id);
+  if (!entry || row?.state !== "running") return;
+  stopInspectPreview = watchSelectedQueuePreview(
+    hostApiTarget(entry),
+    id,
+    (preview) => (inspectPreview.value = preview),
+    750,
+    () => (inspectPreview.value = null),
+  );
+});
+
+onBeforeUnmount(() => {
+  stopInspectPreview?.();
+  if (inspectTimer !== null) clearInterval(inspectTimer);
+});
+
+async function reuseInspected() {
+  const entry = inspectedEntry.value;
+  const metadata = entry?.metadata as OutputMetadata | null | undefined;
+  if (!entry || !metadata) return;
+  const pinned = entry.seed_pinned ?? metadata.seed !== 0;
+  setGenerationHandoff({
+    metadata: settingsRestoreMetadata(metadata, { seedPinned: pinned }),
+    seedPinned: pinned,
+    queueSelection: {
+      hostId: hostId.value,
+      jobId: entry.id,
+      running: entry.state === "running",
+    },
+  });
+  inspectedId.value = null;
+  await router.push("/create");
+}
+
+async function cancelInspected() {
+  const entry = inspectedEntry.value;
+  if (!entry) return;
+  inspectError.value = null;
+  const accepted = await requestConfirm({
+    title: entry.state === "running" ? "Stop this job?" : "Cancel this job?",
+    body:
+      entry.state === "running"
+        ? "The machine stops at its next safe point and nothing is saved."
+        : "It leaves the queue and is not rendered.",
+    confirmLabel: entry.state === "running" ? "Stop job" : "Cancel job",
+    danger: true,
+  });
+  if (!accepted) return;
+  await onCancel(entry.id);
+  inspectedId.value = null;
 }
 
 async function onSetLane(id: string, gpu: number | null) {
@@ -1067,6 +1176,7 @@ onBeforeUnmount(() => {
           :paused="paused"
           :dimmed="reconnecting"
           @cancel="onCancel"
+          @inspect="inspectedId = $event"
           @set-lane="onSetLane"
           @move="onMove"
           @toggle-pause="onTogglePause"
@@ -1122,6 +1232,27 @@ onBeforeUnmount(() => {
       <!-- Specialized capability detail reads below the live instruments. -->
       <MinimaxH3InventoryPanel :hosts="h3Host" heading="H3 on this machine" />
     </template>
+    <aside
+      v-if="inspectedModel"
+      class="md-queue-detail"
+      role="dialog"
+      aria-modal="false"
+      :aria-label="`Queued job — ${inspectedModel.modelLabel}`"
+      data-test="queue-entry-drawer"
+    >
+      <QueueEntryDetail
+        :model="inspectedModel"
+        :preview="inspectPreview"
+        :cancelling="
+          inspectedEntry ? cancellingIds.includes(inspectedEntry.id) : false
+        "
+        :error="inspectError"
+        confirm="delegate"
+        @close="inspectedId = null"
+        @reuse="reuseInspected"
+        @cancel="cancelInspected"
+      />
+    </aside>
   </div>
 </template>
 
@@ -1463,6 +1594,18 @@ onBeforeUnmount(() => {
 
 .md-downloads {
   margin-top: 16px;
+}
+
+.md-queue-detail {
+  position: fixed;
+  inset-block: 0;
+  inset-inline-end: 0;
+  z-index: 40;
+  display: flex;
+  width: min(384px, 100%);
+  flex-direction: column;
+  border-inline-start: 1px solid var(--edge);
+  background: var(--bench);
 }
 
 .md-dl__list {

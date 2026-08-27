@@ -604,6 +604,79 @@ describe("HostDetailPage — telemetry", () => {
   });
 });
 
+describe("HostDetailPage — queue row detail", () => {
+  it("opens one queue row in full and reuses its settings in Create", async () => {
+    queueEntries = [
+      {
+        ...queued("srv-1", 2),
+        model: "qwen-image:bf16",
+        metadata: {
+          prompt: "a lighthouse at dusk",
+          model: "qwen-image:bf16",
+          seed: 0,
+          steps: 28,
+          guidance: 3.5,
+          width: 1328,
+          height: 1328,
+        },
+      } as QueueEntry,
+    ];
+    const w = await mountDetail();
+    expect(w.find('[data-test="queue-entry-drawer"]').exists()).toBe(false);
+
+    await w.get('[data-test="queue-inspect"]').trigger("click");
+    await flushPromises();
+    const drawer = w.get('[data-test="queue-entry-drawer"]');
+    expect(drawer.get('[data-test="queue-detail-prompt"]').text()).toBe(
+      "a lighthouse at dusk",
+    );
+    expect(drawer.text()).toContain("1328×1328");
+    // Seed 0 with no `seed_pinned` means the host chose it.
+    expect(drawer.text()).toContain("Random");
+    // The shared waiting vocabulary, not a raw position.
+    expect(drawer.text()).toContain("#2 in line");
+
+    await drawer.get('[data-test="queue-detail-reuse"]').trigger("click");
+    await flushPromises();
+    expect(routerPush).toHaveBeenCalledWith("/create");
+    expect(w.find('[data-test="queue-entry-drawer"]').exists()).toBe(false);
+  });
+
+  it("still reports a row whose request the durable listing has not loaded", async () => {
+    queueEntries = [queued("srv-2", 0)];
+    const w = await mountDetail();
+    await w.get('[data-test="queue-inspect"]').trigger("click");
+    await flushPromises();
+
+    const drawer = w.get('[data-test="queue-entry-drawer"]');
+    expect(drawer.text()).not.toMatch(/upgrade/i);
+    expect(
+      drawer.get('[data-test="queue-detail-settings-notice"]').text(),
+    ).toMatch(/once this machine loads the job/i);
+    expect(drawer.get('[data-test="queue-detail-facts"]').text()).toContain(
+      "Next up",
+    );
+    expect(
+      drawer.get('[data-test="queue-detail-reuse"]').attributes("disabled"),
+    ).toBeDefined();
+  });
+
+  it("confirms before cancelling from the drawer", async () => {
+    queueEntries = [queued("srv-3", 0)];
+    const w = await mountDetail();
+    await w.get('[data-test="queue-inspect"]').trigger("click");
+    await flushPromises();
+
+    await w.get('[data-test="queue-detail-cancel"]').trigger("click");
+    await flushPromises();
+    expect(requestConfirm).toHaveBeenCalled();
+    expect(cancelQueueJob).toHaveBeenCalledWith(
+      expect.objectContaining({ id: routeHolder.id }),
+      "srv-3",
+    );
+  });
+});
+
 describe("HostDetailPage — queue", () => {
   it("pages by host capacity and exposes the durable tail on demand", async () => {
     poll.status.value = makeStatus({ queue_capacity: 2 });
