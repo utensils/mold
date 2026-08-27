@@ -1,15 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  planGenerationSubmission,
+  generationHostSubmissionPolicy,
   truthfulGenerationPhase,
   type GenerationSubmissionHost,
 } from "./generationSubmissionPolicy";
-
-const legacyQueue = {
-  heterogeneous_batch: true,
-  heterogeneous_batch_max_outputs: 64,
-  durable_batch_outcomes: true,
-};
 
 function canonicalHost(
   hostId: string,
@@ -17,7 +11,7 @@ function canonicalHost(
 ): GenerationSubmissionHost {
   return {
     hostId,
-    queue: { ...legacyQueue, admission_protocol_version: 2 },
+    queue: { heterogeneous_batch_max_outputs: 64 },
     durableMedia: {
       protocol_version: 2,
       encrypted_at_rest: true,
@@ -39,147 +33,117 @@ describe("generation submission policy", () => {
       { model: "minimax-h3-ref2va", references: [] },
     ]) {
       expect(
-        planGenerationSubmission({
-          target: { kind: "pinned", hostId: "hal" },
-          hosts: [canonicalHost("hal")],
+        generationHostSubmissionPolicy(
+          { kind: "pinned", hostId: "hal" },
+          canonicalHost("hal"),
           request,
-        }).hosts[0],
-      ).toMatchObject({
-        compatibility: "canonical_v2",
+        ),
+      ).toEqual({
         routing: "none",
+        admission: "canonical_durable",
+        refusal: null,
+      });
+    }
+  });
+
+  it("fans automatic routing through cache-only probes", () => {
+    for (const target of [{ kind: "auto" }, { kind: "capable" }] as const) {
+      expect(
+        generationHostSubmissionPolicy(target, canonicalHost("hal"), {
+          model: "wan22",
+          prompt: "clip",
+        }),
+      ).toMatchObject({
+        routing: "telemetry_only",
         admission: "canonical_durable",
       });
     }
   });
 
-  it("fans automatic routing through cache-only probes on v2 hosts", () => {
-    const plan = planGenerationSubmission({
-      target: { kind: "auto" },
-      hosts: [canonicalHost("hal"), canonicalHost("studio")],
-      request: { model: "wan22", prompt: "clip" },
-    });
-    expect(plan.hosts.map(({ hostId, routing }) => [hostId, routing])).toEqual([
-      ["hal", "telemetry_only"],
-      ["studio", "telemetry_only"],
-    ]);
-  });
-
-  it("keeps request traits outside protocol v2 on the attached transport", () => {
-    const cases = [
-      { model: "flux-dev", hdr_exr_dir: "/private/hdr" },
-      { model: "flux-dev", source_image: "frame", lora: "local.safetensors" },
-      {
-        model: "flux-dev",
-        source_image: "frame",
-        loras: [{ path: "local.safetensors" }],
-      },
-      { model: "minimax-h3-ref2va", references: [{ image: "frame" }] },
-    ];
-    for (const request of cases) {
-      const host = canonicalHost("hal", {
-        durableMedia: {
-          ...canonicalHost("hal").durableMedia!,
-          h3_references: false,
+  it("refuses a request trait by name instead of routing it elsewhere", () => {
+    const cases: Array<[object, Partial<GenerationSubmissionHost>, string]> = [
+      [
+        { model: "flux-dev", hdr_exr_dir: "/private/hdr" },
+        {},
+        "an HDR EXR output directory cannot be queued",
+      ],
+      [
+        { model: "flux-dev", source_image: "frame", lora: "local.safetensors" },
+        {},
+        "a LoRA cannot be combined with source media in a queued print",
+      ],
+      [
+        {
+          model: "flux-dev",
+          source_image: "frame",
+          loras: [{ path: "local.safetensors" }],
         },
-      });
+        {},
+        "a LoRA cannot be combined with source media in a queued print",
+      ],
+      [
+        { model: "minimax-h3-ref2va", references: [{ image: "frame" }] },
+        {
+          durableMedia: {
+            ...canonicalHost("hal").durableMedia!,
+            h3_references: false,
+          },
+        },
+        "this machine cannot store reference media durably",
+      ],
+      [
+        { model: "flux-dev", id_image: "face" },
+        {
+          durableMedia: {
+            ...canonicalHost("hal").durableMedia!,
+            identity: false,
+          },
+        },
+        "this machine cannot store identity photos durably",
+      ],
+      [
+        { family: "minimax-h3", model: "hf:opaque", prompt: "still" },
+        {
+          durableMedia: {
+            ...canonicalHost("hal").durableMedia!,
+            private_h3: false,
+          },
+        },
+        "this machine cannot store MiniMax H3 request media durably",
+      ],
+      [
+        { model: "flux-dev", source_image: "frame" },
+        { durableMedia: null },
+        "this machine cannot store request media durably",
+      ],
+      [
+        { model: "flux-dev", prompt: "still" },
+        { queue: null },
+        "this machine does not advertise the durable generation queue",
+      ],
+    ];
+    for (const [request, overrides, refusal] of cases) {
       expect(
-        planGenerationSubmission({
-          target: { kind: "pinned", hostId: "hal" },
-          hosts: [host],
+        generationHostSubmissionPolicy(
+          { kind: "pinned", hostId: "hal" },
+          canonicalHost("hal", overrides),
           request,
-        }).hosts[0],
-      ).toMatchObject({
-        compatibility: "legacy",
-        admission: "legacy_attached",
-      });
+        ),
+      ).toEqual({ routing: "none", admission: "refused", refusal });
     }
   });
 
-  it("keeps old and incompletely capable hosts on explicit legacy paths", () => {
-    const plan = planGenerationSubmission({
-      target: { kind: "auto" },
-      hosts: [
-        { hostId: "old", queue: legacyQueue },
-        canonicalHost("no-media-v2", {
-          durableMedia: {
-            protocol_version: 1,
-            encrypted_at_rest: true,
-            generate_request_media: true,
-            identity: true,
-            h3_references: false,
-            private_h3: false,
-          },
-        }),
-      ],
-      request: { model: "opaque", source_image: "frame" },
-    });
-    expect(plan.hosts).toMatchObject([
-      {
-        hostId: "old",
-        compatibility: "legacy",
-        routing: "legacy_placement",
-        admission: "legacy_attached",
-      },
-      {
-        hostId: "no-media-v2",
-        compatibility: "legacy",
-        routing: "legacy_placement",
-        admission: "legacy_durable",
-      },
-    ]);
-  });
-
-  it("keeps an opaque H3 family attached on a legacy host", () => {
+  it("keeps sequences on the chain-job route with its placement preview", () => {
     expect(
-      planGenerationSubmission({
-        target: { kind: "pinned", hostId: "old" },
-        hosts: [
-          {
-            hostId: "old",
-            queue: legacyQueue,
-            durableMedia: {
-              protocol_version: 1,
-              encrypted_at_rest: true,
-              generate_request_media: true,
-              identity: true,
-              h3_references: false,
-              private_h3: false,
-            },
-          },
-        ],
-        request: {
-          family: "minimax-h3",
-          model: "hf:opaque-h3-checkpoint",
-          source_image: "frame",
-        },
-      }).hosts[0],
+      generationHostSubmissionPolicy(
+        { kind: "pinned", hostId: "hal" },
+        canonicalHost("hal"),
+        { model: "ltx-2", stages: [] },
+        "sequence",
+      ),
     ).toMatchObject({
-      compatibility: "legacy",
-      routing: "legacy_placement",
-      admission: "legacy_attached",
-    });
-  });
-
-  it("filters a pinned plan to its frozen host", () => {
-    const plan = planGenerationSubmission({
-      target: { kind: "pinned", hostId: "studio" },
-      hosts: [canonicalHost("hal"), canonicalHost("studio")],
-      request: { model: "qwen-image" },
-    });
-    expect(plan.hosts.map((host) => host.hostId)).toEqual(["studio"]);
-  });
-
-  it("keeps sequences on their existing typed admission contract", () => {
-    expect(
-      planGenerationSubmission({
-        target: { kind: "pinned", hostId: "hal" },
-        hosts: [canonicalHost("hal")],
-        request: { model: "ltx-2", stages: [] },
-        outputKind: "sequence",
-      }).hosts[0],
-    ).toMatchObject({
-      compatibility: "legacy",
-      routing: "legacy_placement",
+      routing: "placement_preview",
+      admission: "refused",
     });
   });
 

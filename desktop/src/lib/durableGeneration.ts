@@ -39,8 +39,9 @@ export interface DurableGenerationRecoveryEnvelope {
   records: DurableGenerationRecoveryRecord[];
 }
 
-/** Decide against the exact frozen host capability through the same transport
- * policy used by placement routing. */
+/** Decide against the exact frozen host capability through the one shared
+ * submission policy. A request this machine cannot carry durably is refused,
+ * never re-routed to a second submission path. */
 export function requestIsEligibleForDurableGeneration(
   request: GenerateRequest,
   queue: DurableGenerationQueueCapabilities | null | undefined,
@@ -56,7 +57,7 @@ export function requestIsEligibleForDurableGeneration(
         ...(durableMedia === undefined ? {} : { durableMedia }),
       },
       modelFamily ? { ...request, family: modelFamily } : request,
-    ).admission !== "legacy_attached"
+    ).admission === "canonical_durable"
   );
 }
 

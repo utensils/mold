@@ -1,6 +1,4 @@
 import { ApiError, apiJsonTo, type ApiTarget } from "./client";
-import { requestCarriesGenerationMedia } from "../lib/generationMedia";
-import { isMinimaxH3Identity } from "../lib/minimaxH3Identity";
 
 export type GenerationLifecyclePhase =
   | "accepted"
@@ -23,7 +21,7 @@ export interface GenerationBatchChild {
   state: GenerationLifecyclePhase;
   /** Server-owned fence for POST /api/queue/{job_id}/retry. */
   retryable?: boolean | null;
-  /** Legacy human-readable failure retained for mixed-version callers. */
+  /** Human-readable failure the lifecycle presents beside `terminal_error`. */
   error?: string | null;
   created_at_ms: number;
   updated_at_ms: number;
@@ -93,14 +91,16 @@ export function isDefiniteGenerationAdmissionRejection(
 }
 
 export interface DurableGenerationQueueCapabilities {
-  heterogeneous_batch?: boolean;
+  /** The batch chunk limit. Its presence IS the durable-queue contract. */
   heterogeneous_batch_max_outputs?: number | null;
-  durable_batch_outcomes?: boolean;
-  /** Version 2 admits durably before model-family preparation begins. */
-  admission_protocol_version?: number | null;
 }
 
-/** Exact additive wire shape of `mold_core::DurableMediaCapabilities`. */
+/**
+ * Exact additive wire shape of `mold_core::DurableMediaCapabilities`. Each
+ * boolean is a capability the request traits are fenced against;
+ * `protocol_version` is carried for parity with the server struct and is
+ * deliberately not gated on — client and server ship together.
+ */
 export interface DurableMediaCapabilities {
   protocol_version: number;
   encrypted_at_rest: boolean;
@@ -110,51 +110,19 @@ export interface DurableMediaCapabilities {
   private_h3: boolean;
 }
 
-/** Network responses are untrusted even when their TypeScript projection is
- * typed. A partial/malformed v1 record must never enable durable media. */
-export function isDurableMediaCapabilitiesV1(
-  value: unknown,
-): value is DurableMediaCapabilities & { protocol_version: 1 } {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
-  }
-  const record = value as Record<string, unknown>;
-  return (
-    record.protocol_version === 1 &&
-    typeof record.encrypted_at_rest === "boolean" &&
-    typeof record.generate_request_media === "boolean" &&
-    typeof record.identity === "boolean" &&
-    typeof record.h3_references === "boolean" &&
-    typeof record.private_h3 === "boolean"
-  );
-}
-
 /**
- * Mixed-version capability fence for the complete streamless lifecycle.
- * `heterogeneous_batch` alone only promises the older admission endpoint;
- * it does not promise ambiguity recovery or terminal outcomes.
+ * The advertised batch chunk limit, or `null` when this machine does not
+ * advertise the durable generation queue at all. Network responses are
+ * untrusted even when their TypeScript projection is typed, so a malformed
+ * or absent limit never enables durable admission.
  */
-export function supportsDurableGenerationLifecycle(
-  queue: DurableGenerationQueueCapabilities | null | undefined,
-): boolean {
-  return (
-    queue?.heterogeneous_batch === true && queue.durable_batch_outcomes === true
-  );
-}
-
 export function canonicalGenerationBatchLimit(
   queue: DurableGenerationQueueCapabilities | null | undefined,
 ): number | null {
-  if (
-    !supportsDurableGenerationLifecycle(queue) ||
-    !Number.isSafeInteger(queue?.admission_protocol_version) ||
-    (queue?.admission_protocol_version ?? 0) < 2 ||
-    !Number.isSafeInteger(queue?.heterogeneous_batch_max_outputs) ||
-    (queue?.heterogeneous_batch_max_outputs ?? 0) < 1
-  ) {
-    return null;
-  }
-  return queue!.heterogeneous_batch_max_outputs!;
+  const limit = queue?.heterogeneous_batch_max_outputs;
+  return Number.isSafeInteger(limit) && (limit as number) >= 1
+    ? (limit as number)
+    : null;
 }
 
 export function chunkGenerationBatchRequests<T>(
@@ -169,59 +137,6 @@ export function chunkGenerationBatchRequests<T>(
     chunks.push(requests.slice(offset, offset + limit));
   }
   return chunks;
-}
-
-function requestFieldIsPresent(
-  request: Record<string, unknown>,
-  field: string,
-): boolean {
-  return request[field] !== undefined && request[field] !== null;
-}
-
-/**
- * Per-request mixed-version fence for the streamless lifecycle. Media-free
- * requests keep using ordinary durable admission on older hosts. A request
- * whose replay depends on media requires the exact encrypted v1 contract;
- * absence or an unknown version never guesses.
- *
- * MiniMax H3/reference authority, HDR directories and media combined with a
- * LoRA remain outside v1 even if a future host advertises broader H3 bits.
- */
-export function supportsDurableRequest(
-  queue: DurableGenerationQueueCapabilities | null | undefined,
-  durableMedia: unknown,
-  request: object,
-): boolean {
-  if (!supportsDurableGenerationLifecycle(queue)) return false;
-
-  const record = request as Record<string, unknown>;
-  const model = typeof record.model === "string" ? record.model : null;
-  if (isMinimaxH3Identity(null, model)) return false;
-  if (requestFieldIsPresent(record, "references")) return false;
-
-  const carriesMedia = requestCarriesGenerationMedia(request);
-  if (!carriesMedia) return true;
-
-  if (
-    !isDurableMediaCapabilitiesV1(durableMedia) ||
-    durableMedia.encrypted_at_rest !== true ||
-    durableMedia.generate_request_media !== true
-  ) {
-    return false;
-  }
-
-  if (
-    requestFieldIsPresent(record, "hdr_exr_dir") ||
-    requestFieldIsPresent(record, "lora") ||
-    requestFieldIsPresent(record, "loras")
-  ) {
-    return false;
-  }
-
-  const carriesIdentity =
-    requestFieldIsPresent(record, "id_image") ||
-    requestFieldIsPresent(record, "id_images");
-  return !carriesIdentity || durableMedia.identity === true;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

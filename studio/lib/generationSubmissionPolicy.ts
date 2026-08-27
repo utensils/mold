@@ -1,8 +1,5 @@
 import {
   canonicalGenerationBatchLimit,
-  isDurableMediaCapabilitiesV1,
-  supportsDurableGenerationLifecycle,
-  supportsDurableRequest,
   type DurableGenerationQueueCapabilities,
   type DurableMediaCapabilities,
   type GenerationBatchChild,
@@ -19,21 +16,26 @@ export interface GenerationSubmissionHost {
   durableMedia?: DurableMediaCapabilities | null;
 }
 
+/**
+ * `placement_preview` belongs to sequences alone — a chain job is planned
+ * before it is created. A generation is admitted durably and is never
+ * previewed for placement; `telemetry_only` is the read-only probe an
+ * automatic target fans out purely to rank machines.
+ */
 export type GenerationRoutingMode =
-  "none" | "telemetry_only" | "legacy_placement";
+  "none" | "telemetry_only" | "placement_preview";
 
-export type GenerationAdmissionTransport =
-  "canonical_durable" | "legacy_durable" | "legacy_attached";
+/**
+ * A generation is admitted through `POST /api/generation-batches` or it is
+ * refused by name. There is no attached-stream transport to fall back to.
+ */
+export type GenerationAdmissionTransport = "canonical_durable" | "refused";
 
 export interface GenerationHostSubmissionPolicy {
-  compatibility: "canonical_v2" | "legacy";
   routing: GenerationRoutingMode;
   admission: GenerationAdmissionTransport;
-}
-
-export interface GenerationSubmissionPlan {
-  target: GenerationTargetPolicy;
-  hosts: Array<GenerationSubmissionHost & GenerationHostSubmissionPolicy>;
+  /** Named, user-facing reason whenever `admission` is "refused". */
+  refusal: string | null;
 }
 
 export type GenerationSubmissionOutputKind = "generation" | "sequence";
@@ -46,81 +48,57 @@ function fieldPresent(
 }
 
 /**
- * Protocol-v2 media is one complete replay contract. Request traits select
- * independently versioned guarantees; H3 additionally carries an explicit
+ * Durable media is one complete replay contract. Request traits select
+ * independently advertised guarantees; H3 additionally carries an explicit
  * private durable contract even when the particular request is media-free.
- * The server remains authoritative for model preparation.
+ * A trait the host does not cover is REFUSED by name — never routed to a
+ * second submission path. The server remains authoritative for model
+ * preparation and for every execution check.
  */
-function supportsCanonicalRequest(
+function generationRefusal(
   host: GenerationSubmissionHost,
   request: object,
-): boolean {
-  if (
-    !supportsDurableGenerationLifecycle(host.queue) ||
-    canonicalGenerationBatchLimit(host.queue) === null ||
-    !Number.isSafeInteger(host.queue?.admission_protocol_version) ||
-    (host.queue?.admission_protocol_version ?? 0) < 2
-  ) {
-    return false;
+): string | null {
+  if (canonicalGenerationBatchLimit(host.queue) === null) {
+    return "this machine does not advertise the durable generation queue";
   }
   const record = request as Record<string, unknown>;
-  const h3 = isMinimaxH3Identity(
-    typeof record.family === "string" ? record.family : null,
-    typeof record.model === "string" ? record.model : null,
-  );
+  if (fieldPresent(record, "hdr_exr_dir")) {
+    return "an HDR EXR output directory cannot be queued";
+  }
   const carriesMedia = requestCarriesGenerationMedia(request);
-  if (fieldPresent(record, "hdr_exr_dir")) return false;
   if (
     carriesMedia &&
     (fieldPresent(record, "lora") || fieldPresent(record, "loras"))
   ) {
-    return false;
+    return "a LoRA cannot be combined with source media in a queued print";
   }
-  if (!carriesMedia && !h3) return true;
+  const h3 = isMinimaxH3Identity(
+    typeof record.family === "string" ? record.family : null,
+    typeof record.model === "string" ? record.model : null,
+  );
+  if (!carriesMedia && !h3) return null;
   const media = host.durableMedia;
   if (
     !media ||
-    !Number.isSafeInteger(media.protocol_version) ||
-    media.protocol_version < 2 ||
     media.encrypted_at_rest !== true ||
     media.generate_request_media !== true
   ) {
-    return false;
+    return "this machine cannot store request media durably";
   }
-  if (h3 && media.private_h3 !== true) return false;
+  if (h3 && media.private_h3 !== true) {
+    return "this machine cannot store MiniMax H3 request media durably";
+  }
   if (
     (fieldPresent(record, "id_image") || fieldPresent(record, "id_images")) &&
     media.identity !== true
   ) {
-    return false;
+    return "this machine cannot store identity photos durably";
   }
   if (fieldPresent(record, "references") && media.h3_references !== true) {
-    return false;
+    return "this machine cannot store reference media durably";
   }
-  return true;
-}
-
-function legacyAdmission(
-  host: GenerationSubmissionHost,
-  request: object,
-): GenerationAdmissionTransport {
-  const record = request as Record<string, unknown>;
-  if (
-    isMinimaxH3Identity(
-      typeof record.family === "string" ? record.family : null,
-      typeof record.model === "string" ? record.model : null,
-    )
-  ) {
-    return "legacy_attached";
-  }
-  // Protocol v1 is intentionally exact. An unknown future media protocol must
-  // not accidentally activate the legacy replay implementation.
-  const durableMedia = isDurableMediaCapabilitiesV1(host.durableMedia)
-    ? host.durableMedia
-    : undefined;
-  return supportsDurableRequest(host.queue, durableMedia, request)
-    ? "legacy_durable"
-    : "legacy_attached";
+  return null;
 }
 
 export function generationHostSubmissionPolicy(
@@ -129,44 +107,21 @@ export function generationHostSubmissionPolicy(
   request: object,
   outputKind: GenerationSubmissionOutputKind = "generation",
 ): GenerationHostSubmissionPolicy {
-  if (outputKind === "generation" && supportsCanonicalRequest(host, request)) {
+  if (outputKind === "sequence") {
     return {
-      compatibility: "canonical_v2",
-      routing: target.kind === "pinned" ? "none" : "telemetry_only",
-      admission: "canonical_durable",
+      routing: "placement_preview",
+      admission: "refused",
+      refusal: "a sequence is created through the chain-job route",
     };
   }
+  const refusal = generationRefusal(host, request);
+  if (refusal !== null) {
+    return { routing: "none", admission: "refused", refusal };
+  }
   return {
-    compatibility: "legacy",
-    routing: "legacy_placement",
-    admission: legacyAdmission(host, request),
-  };
-}
-
-/** One pure decision point shared by desktop, web, and phone orchestrators. */
-export function planGenerationSubmission(input: {
-  target: GenerationTargetPolicy;
-  hosts: readonly GenerationSubmissionHost[];
-  request: object;
-  outputKind?: GenerationSubmissionOutputKind;
-}): GenerationSubmissionPlan {
-  const pinnedHostId =
-    input.target.kind === "pinned" ? input.target.hostId : null;
-  const hosts =
-    pinnedHostId === null
-      ? [...input.hosts]
-      : input.hosts.filter((host) => host.hostId === pinnedHostId);
-  return {
-    target: input.target,
-    hosts: hosts.map((host) => ({
-      ...host,
-      ...generationHostSubmissionPolicy(
-        input.target,
-        host,
-        input.request,
-        input.outputKind,
-      ),
-    })),
+    routing: target.kind === "pinned" ? "none" : "telemetry_only",
+    admission: "canonical_durable",
+    refusal: null,
   };
 }
 
