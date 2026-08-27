@@ -376,7 +376,10 @@ fn claim_next(
                 // live observer and turns a print into a `202` the caller has
                 // to reconcile — which is what two concurrent `/api/generate`
                 // requests used to do to each other.
-                None if journal.owns_cancellable_row(&job_id).unwrap_or(false) => {
+                // A transient SQLite error answers "unknown", and unknown
+                // defers: discarding on a busy database would detach a live
+                // observer and hand the caller a 202 for a print that renders.
+                None if journal.owns_cancellable_row(&job_id).unwrap_or(true) => {
                     ingress.defer_claimed_hint(&job_id);
                 }
                 None => ingress.discard_hint(&job_id),

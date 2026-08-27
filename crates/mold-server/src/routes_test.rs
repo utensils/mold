@@ -6513,6 +6513,35 @@ mod tests {
         assert!(capabilities["queue"]["heterogeneous_batch_max_outputs"].is_null());
     }
 
+    /// A host can never refuse one route for a reason it accepts on another:
+    /// with generation unavailable (every device disabled), the batch route
+    /// refuses NEW work exactly as `/api/generate` does, instead of parking
+    /// rows nothing will run.
+    #[tokio::test(flavor = "current_thread")]
+    async fn unavailable_generation_refuses_new_batch_work_on_the_batch_route_too() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db, root.path());
+        install_authoritative_v2(&mut state);
+        state.set_generation_unavailable("every device is disabled");
+        let journal = state.queue_journal.clone();
+        let response = app_with_state(state)
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [serde_json::from_str::<serde_json::Value>(
+                        &generate_body("nothing can run this", 64, 64)
+                    ).unwrap()],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(journal.list_all().is_empty(), "nothing was parked");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn output_disabled_batch_admission_is_a_typed_unavailable_response() {
         let root = tempfile::tempdir().unwrap();
@@ -7050,7 +7079,11 @@ mod tests {
         assert_eq!(journal.list_all().len(), 1);
         let persisted: GenerateRequest =
             serde_json::from_str(&journal.list_all()[0].request_json).unwrap();
-        assert_eq!(persisted.batch_id.as_deref(), Some(canonical.as_str()));
+        // The operation converged on one canonical client id, but a plain
+        // child is never stamped as a prepared sibling: `batch_id` is the
+        // prepared-expansion contract and only a caller that prepared
+        // variations supplies it.
+        assert_eq!(persisted.batch_id, None);
 
         let retry = app
             .clone()

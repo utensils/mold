@@ -764,7 +764,11 @@ pub(crate) fn run_gc_pass(
             if deps.claims.is_claimed(&row.id) {
                 continue;
             }
-            if settled(row.state) && now_ms.saturating_sub(row.updated_at_ms) < grace_ms {
+            // An ephemeral job that has not settled is a print someone is
+            // waiting for — queued behind another render, or running. The
+            // deleted shim held a claim for the job's whole life; nothing
+            // does now, so the sweep must never take an unsettled one.
+            if !settled(row.state) || now_ms.saturating_sub(row.updated_at_ms) < grace_ms {
                 continue;
             }
             let remove_lock = {
@@ -775,12 +779,8 @@ pub(crate) fn run_gc_pass(
                         continue;
                     }
                 };
-                let within_grace = settled(current.state)
-                    && now_ms.saturating_sub(current.updated_at_ms) < grace_ms;
-                if current.state == ChainJobState::Running
-                    || deps.claims.is_claimed(&row.id)
-                    || within_grace
-                {
+                let within_grace = now_ms.saturating_sub(current.updated_at_ms) < grace_ms;
+                if !settled(current.state) || deps.claims.is_claimed(&row.id) || within_grace {
                     false
                 } else {
                     if current.job_dir.exists() {
@@ -840,7 +840,9 @@ pub(crate) fn startup_gc_sweep(db: &MetadataDb, jobs_root: &Path) -> anyhow::Res
         let Ok(manifest) = ChainJobManifest::read_from_dir(&job_dir) else {
             continue;
         };
-        if manifest.ephemeral && row.state != ChainJobState::Running {
+        // Only a SETTLED ephemeral job is debris. A queued one is a print
+        // the runner resumes; an interrupted one is reported, not deleted.
+        if manifest.ephemeral && settled(row.state) {
             if job_dir.exists() {
                 std::fs::remove_dir_all(&job_dir).with_context(|| {
                     format!(
@@ -1650,7 +1652,7 @@ fn execute_job_inner(
                 authority.persist_atomic(&job.job_dir)?;
             }
         }
-        let output = match finalize_job(deps, job, &mut manifest) {
+        let (output, gallery_filename) = match finalize_job(deps, job, &mut manifest) {
             Ok(Some(output)) => output,
             Ok(None) => {
                 set_cancelled(db, deps, &job.id)?;
@@ -1664,8 +1666,14 @@ fn execute_job_inner(
             }
         };
         let take = manifest.finalizes.len() as u32;
-        deps.events
-            .publish(&job.id, ChainJobEvent::Finalized { output, take });
+        deps.events.publish(
+            &job.id,
+            ChainJobEvent::Finalized {
+                output,
+                take,
+                gallery_filename,
+            },
+        );
         deps.events.publish_then_remove(
             &job.id,
             ChainJobEvent::StateChanged {
@@ -1961,11 +1969,14 @@ fn resume_carry_from_disk(
 /// here from the EFFECTIVE script. Legacy stages (`raw_segment == false`)
 /// pass through exactly as before — their segments were trimmed/blended at
 /// write time — so mixed legacy+raw jobs finalize correctly.
+/// Stitch, publish, and record one take. Returns the job-relative artifact
+/// path beside the gallery filename the print was published under (`None`
+/// when the host has no gallery output), or `None` when cancelled.
 fn finalize_job(
     deps: &RunnerDeps,
     job: &ChainJobRow,
     manifest: &mut ChainJobManifest,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<(String, Option<String>)>> {
     let db = deps
         .db
         .as_ref()
@@ -2187,6 +2198,7 @@ fn finalize_job(
     }
     publish_file_idempotently(&staged_output, &output_path, &video_bytes)?;
 
+    let mut published_gallery_filename: Option<String> = None;
     // An ephemeral job publishes its print like any other — it IS the print,
     // rendered in pieces — but records no `chain_job_id`. That field means
     // "there is an authored sequence behind this print you can reopen", and
@@ -2214,34 +2226,37 @@ fn finalize_job(
             // its way out through the response. With the print fetched from
             // the gallery there is no response to do it in, so it is done
             // here or `mold run --frames 200 --format gif` gets an MP4.
+            // The transcode is deliberately NON-fatal: the render exists and
+            // is correct, only its container is not what was asked for, and a
+            // finished multi-clip render must never be marked failed because
+            // a decoder could not read its own MP4 back. The MP4 is published
+            // instead, and the WARN says so.
             let (gallery_bytes, gallery_format) = if effective.output_format == OutputFormat::Mp4 {
                 (
                     std::borrow::Cow::Borrowed(video_bytes.as_slice()),
                     OutputFormat::Mp4,
                 )
             } else {
-                let (_, frames) =
-                    mold_inference::ltx2::media::decode_video_frames_from_path(&output_path)
-                        .with_context(|| {
-                            format!(
-                                "decoding stitched chain output '{}' for {:?} transcode",
-                                output_path.display(),
-                                effective.output_format
-                            )
-                        })?;
-                let encoded = mold_inference::chain::encode_chain_frames(
-                    &frames,
-                    effective.fps,
-                    effective.output_format,
-                    None,
-                )
-                .with_context(|| {
-                    format!("transcoding chain output to {:?}", effective.output_format)
-                })?;
-                for warning in &encoded.warnings {
-                    tracing::warn!(job = %job.id, "{}", warning.message());
+                match transcode_chain_output(&output_path, effective.fps, effective.output_format) {
+                    Ok(encoded) => {
+                        for warning in &encoded.warnings {
+                            tracing::warn!(job = %job.id, "{}", warning.message());
+                        }
+                        (std::borrow::Cow::Owned(encoded.bytes), encoded.format)
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            job = %job.id,
+                            requested = ?effective.output_format,
+                            error = %format!("{error:#}"),
+                            "chain output transcode failed; publishing the stitched MP4 instead"
+                        );
+                        (
+                            std::borrow::Cow::Borrowed(video_bytes.as_slice()),
+                            OutputFormat::Mp4,
+                        )
+                    }
                 }
-                (std::borrow::Cow::Owned(encoded.bytes), encoded.format)
             };
             let metadata =
                 effective.stitched_output_metadata(gallery_format, frame_count, Some(&provenance));
@@ -2252,6 +2267,7 @@ fn finalize_job(
                 .sum();
             let gallery_filename =
                 chain_gallery_filename(&job.id, take, metadata.title.as_deref(), gallery_format);
+            published_gallery_filename = Some(gallery_filename.clone());
             save_video_to_dir_named(
                 output_dir,
                 &gallery_filename,
@@ -2272,6 +2288,7 @@ fn finalize_job(
     let output = format!("final/output-{take}.mp4");
     manifest.finalizes.push(FinalizeRecord {
         output: output.clone(),
+        gallery_filename: published_gallery_filename.clone(),
         at_unix_ms: now,
         stage_seeds: manifest
             .stage_status
@@ -2293,7 +2310,24 @@ fn finalize_job(
     if !completed {
         bail!("chain finalization lost running->completed CAS");
     }
-    Ok(Some(output))
+    Ok(Some((output, published_gallery_filename)))
+}
+
+/// Decode the stitched MP4 back and encode it in the requested video format.
+fn transcode_chain_output(
+    artifact: &Path,
+    fps: u32,
+    format: OutputFormat,
+) -> anyhow::Result<mold_inference::chain::EncodedChainVideo> {
+    let (_, frames) = mold_inference::ltx2::media::decode_video_frames_from_path(artifact)
+        .with_context(|| {
+            format!(
+                "decoding stitched chain output '{}' for {format:?} transcode",
+                artifact.display()
+            )
+        })?;
+    mold_inference::chain::encode_chain_frames(&frames, fps, format, None)
+        .with_context(|| format!("transcoding chain output to {format:?}"))
 }
 
 /// Gallery filename for a durable chain job's stitched print.
@@ -5681,11 +5715,12 @@ mod tests {
         )
         .unwrap());
 
-        let second = finalize_job(&deps, &row, &mut manifest)
+        let (second, second_gallery) = finalize_job(&deps, &row, &mut manifest)
             .unwrap()
             .expect("not cancelled");
 
         assert_eq!(second, "final/output-2.mp4");
+        assert_eq!(second_gallery, None, "no gallery output was configured");
         let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
         assert_eq!(manifest.finalizes.len(), 2);
         assert_eq!(manifest.finalizes[0].stage_seeds, vec![first_seed]);
@@ -8091,6 +8126,48 @@ mod tests {
         assert!(chain_jobs::get_job(db, &old.id).unwrap().is_none());
         assert!(chain_jobs::get_job(db, &claimed.id).unwrap().is_some());
         assert!(claimed.job_dir.exists());
+    }
+
+    /// A queued ephemeral job is a print someone is waiting for. The deleted
+    /// shim held a claim for the job's whole life; nothing does now, so the
+    /// sweep — Clean up disk, the daily tick, the startup pass — must never
+    /// take a job that has not settled, however old its row is.
+    #[test]
+    fn gc_never_sweeps_an_unsettled_ephemeral_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let jobs_root = dir.path().join("jobs");
+        let queued = persist_job(
+            &db,
+            &jobs_root.join("01JBR55QUEUEDEPH"),
+            "01JBR55QUEUEDEPH",
+            &req,
+            ChainJobState::Queued,
+        );
+        let mut manifest = ChainJobManifest::read_from_dir(&queued.job_dir).unwrap();
+        manifest.ephemeral = true;
+        manifest.write_atomic(&queued.job_dir).unwrap();
+        chain_jobs::update_job_state(&db, &queued.id, ChainJobState::Queued, None, 1_000).unwrap();
+
+        let deps = deps(
+            db,
+            jobs_root.clone(),
+            Arc::new(FakeExecutor {
+                calls: AtomicUsize::new(0),
+                cancel_on_progress: AtomicBool::new(false),
+            }),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        let long_after = 1_000 + (EPHEMERAL_GRACE_SECS as i64 + 1) * 1_000;
+        let outcome = run_gc_pass(&deps, 7, long_after, false).unwrap();
+        assert_eq!(outcome.swept_ephemeral_jobs, 0);
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let startup = startup_gc_sweep(db, &jobs_root).unwrap();
+        assert_eq!(startup.swept_ephemeral_jobs, 0);
+        assert!(chain_jobs::get_job(db, &queued.id).unwrap().is_some());
+        assert!(queued.job_dir.exists());
     }
 
     #[test]

@@ -1730,59 +1730,36 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    /// Every request trait the durable protocol cannot represent is refused
-    /// BY NAME. There is no attached path left to absorb them, so a caller
-    /// that is told "no" must be told which field caused it.
+    /// The client gates on the MACHINE alone: a host that advertises the
+    /// durable queue admits every request shape — media, a LoRA beside it,
+    /// identity — and the server's typed refusal answers for anything it
+    /// cannot take. A host with no durable queue is refused by name.
     #[test]
-    fn an_unrepresentable_request_trait_is_refused_by_name() {
-        use mold_core::CanonicalRefusal::UnsupportedRequestTrait;
+    fn the_client_gate_reads_only_the_machines_durable_queue() {
         let capabilities = canonical_batch_capabilities(64);
         let mut source = ordinary_request();
         source.source_image = Some(vec![1, 2, 3]);
-        assert_eq!(
-            capabilities.canonical_generation_batch_limit(std::slice::from_ref(&source)),
-            Ok(64)
-        );
-
-        let mut no_media = capabilities.clone();
-        no_media.durable_media = None;
-        assert_eq!(
-            no_media.canonical_generation_batch_limit(&[source.clone()]),
-            Err(UnsupportedRequestTrait {
-                index: 1,
-                trait_name: "restart-safe request media"
-            })
-        );
-
-        // A LoRA beside media is an ordinary durable request: `lora.path` is a
-        // request field the host persists and re-validates at dispatch, and
-        // refusing the pair took out every img2img render that used one.
         source.lora = Some(LoraWeight {
             path: "adapter.safetensors".into(),
             scale: 1.0,
             expert: None,
         });
         assert_eq!(
-            capabilities.canonical_generation_batch_limit(&[source]),
+            capabilities.canonical_generation_batch_limit(std::slice::from_ref(&source)),
             Ok(64)
         );
-
-        // Ordered references and `hdr_exr_dir` are the SERVER's calls to make
-        // — one-use upload authority and a server-local output directory — so
-        // the client submits and lets the host answer by name rather than
-        // second-guessing it from a capability bit.
-        let mut references = ordinary_request();
-        references.references = Some(Vec::new());
+        let mut no_media = capabilities.clone();
+        no_media.durable_media = None;
         assert_eq!(
-            capabilities.canonical_generation_batch_limit(&[references]),
-            Ok(64)
+            no_media.canonical_generation_batch_limit(&[source.clone()]),
+            Ok(64),
+            "durable media is the server's per-request refusal, not a client fence"
         );
-
-        let mut hdr = ordinary_request();
-        hdr.hdr_exr_dir = Some("/trusted/output".into());
+        let mut no_queue = capabilities;
+        no_queue.queue.heterogeneous_batch_max_outputs = None;
         assert_eq!(
-            capabilities.canonical_generation_batch_limit(&[hdr]),
-            Ok(64)
+            no_queue.canonical_generation_batch_limit(&[source]),
+            Err(mold_core::CanonicalRefusal::GenerationUnavailable)
         );
     }
 

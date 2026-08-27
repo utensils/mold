@@ -84,3 +84,38 @@ async fn retake_chain_job_409_surfaces_splice_rejection_body() {
         "error should include server body, got: {msg}",
     );
 }
+
+/// `finalized.output` is the job-relative MP4 amend/retake decode; the print a
+/// client fetches is `gallery_filename`. Every chain run hydrates from this
+/// value, so reading the artifact path here 404s on the gallery route.
+#[tokio::test]
+async fn stream_chain_job_events_hands_back_the_gallery_filename() {
+    let server = MockServer::start().await;
+    let body = concat!(
+        "event: chain_job\n",
+        "data: {\"type\":\"finalizing\",\"total_frames\":97}\n\n",
+        "event: chain_job\n",
+        "data: {\"type\":\"finalized\",\"output\":\"final/output-1.mp4\",\"take\":1,\"gallery_filename\":\"mold-chain-abc-take-1.gif\"}\n\n",
+        "event: chain_job\n",
+        "data: {\"type\":\"state_changed\",\"state\":\"completed\",\"error\":null}\n\n",
+    );
+    Mock::given(method("GET"))
+        .and(path("/api/chain-jobs/job-1/events"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let outcome = MoldClient::new(&server.uri())
+        .stream_chain_job_events("job-1", tx)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome.state,
+        mold_core::chain_job::ChainJobState::Completed
+    );
+    assert_eq!(outcome.output.as_deref(), Some("mold-chain-abc-take-1.gif"));
+}

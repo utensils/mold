@@ -780,7 +780,9 @@ impl DurableMediaAdmission {
 /// Admission identity and logical sibling identity are separate. A client may
 /// split one large Batch N across several idempotent operations, so supplied
 /// global provenance must survive each operation unchanged. Requests without
-/// provenance receive a local operation-scoped group for older callers.
+/// provenance are ordinary siblings and are never stamped: `batch_id` /
+/// `batch_index` / `batch_count` ARE the prepared-expansion contract, so only
+/// a client that prepared variations supplies them.
 fn normalize_batch_provenance(
     requests: &mut [mold_core::GenerateRequest],
     client_batch_id: &str,
@@ -791,24 +793,14 @@ fn normalize_batch_provenance(
         request.batch_id.is_some() || request.batch_index.is_some() || request.batch_count.is_some()
     });
     if !supplied {
-        // A DIRECT one-shot is not a batch. `batch_id`/`batch_index`/
-        // `batch_count` ARE the prepared-expansion contract, and they flow into
-        // `OutputMetadata` and the Library — synthesising them for an ordinary
-        // `/api/generate` makes "was this a prepared variation?" unanswerable to
-        // every gallery and reuse consumer, and stops a one-shot print's
-        // metadata being byte-identical to a pre-durable build's. An explicit
-        // `/api/generation-batches` call keeps its provenance even at one child,
-        // because that caller asked for a batch.
-        if direct_one_shot {
-            return Ok(());
-        }
-        let count = u32::try_from(requests.len())
-            .map_err(|_| ApiError::validation("requests contains too many children"))?;
-        for (offset, request) in requests.iter_mut().enumerate() {
-            request.batch_id = Some(client_batch_id.to_string());
-            request.batch_index = Some(offset as u32 + 1);
-            request.batch_count = Some(count);
-        }
+        // Neither a direct one-shot nor a plain Batch N is a prepared set.
+        // `batch_id`/`batch_index`/`batch_count` flow into `OutputMetadata`
+        // and the Library, where they mean "this print was a prepared
+        // variation" — synthesising them here makes that question
+        // unanswerable to every gallery and reuse consumer and changes what a
+        // plain `--batch 4` records. Only a caller that prepared variations
+        // supplies them, and then they survive unchanged.
+        let _ = (client_batch_id, direct_one_shot);
         return Ok(());
     }
 

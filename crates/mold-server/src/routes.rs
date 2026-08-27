@@ -2541,6 +2541,29 @@ async fn admit_generation_batch(
             StatusCode::SERVICE_UNAVAILABLE,
         ));
     }
+    // A host can never refuse one route for a reason it accepts on another:
+    // maintenance mode (every device disabled) refuses `/api/generate`, so it
+    // refuses NEW batch work too rather than parking rows nothing will run. An
+    // idempotent replay of an operation this host already holds still answers
+    // with that operation — nothing new is queued, and a client reconciling a
+    // lost response must not be told the host is unavailable for its own work.
+    if let Err(unavailable) = ensure_generation_available(&state) {
+        let client_batch_id = canonical_client_batch_id(&body.client_batch_id)?;
+        let journal = state.queue_journal.clone();
+        let existing = spawn_queue_read(move || {
+            journal
+                .durable_generation_batch_by_client(&client_batch_id)
+                .map_err(anyhow::Error::msg)
+        })
+        .await?;
+        return match existing {
+            Some(detail) => Ok((
+                StatusCode::OK,
+                Json(generation_batch_status(&state.instance_id, detail)),
+            )),
+            None => Err(unavailable),
+        };
+    }
     let admission = state
         .queue_journal
         .queue_media_admission()
@@ -2811,11 +2834,6 @@ fn canonical_generation_batch_status_ids(
     path = "/api/generate",
     tag = "generation",
     request_body = mold_core::GenerateRequest,
-    params((
-        "X-Mold-Operation-Id" = Option<String>,
-        Header,
-        description = "UUID idempotency key for encrypted durable request media"
-    )),
     responses(
         (status = 200, description = "Generated media bytes with the matching image/video Content-Type"),
         (status = 202, description = "Durable singleton accepted; reconcile the returned batch status", body = mold_core::GenerationBatchStatus),
@@ -3872,10 +3890,6 @@ pub(crate) fn requested_sse_completion_payload(
         "X-Mold-SSE-Payload" = Option<String>,
         Header,
         description = "Set to metadata-only to omit encoded media and return the saved gallery filename"
-    ), (
-        "X-Mold-Operation-Id" = Option<String>,
-        Header,
-        description = "UUID idempotency key for encrypted durable request media"
     )),
     responses(
         (status = 200, description = "SSE event stream with progress and result"),
@@ -5946,6 +5960,9 @@ fn job_entry_from_durable_row(
         dispatch_attempts: row.dispatch_attempts,
         replay_seen: row.replay_seen,
         held_reason: row.held_reason,
+        // The queue row does not carry the hold's retryable bit; the listing
+        // path reads it from the batch child. Retry is fenced server-side, so
+        // a non-retryable row answers 409 rather than re-dispatching.
         retryable: true,
         created_at_ms: row.created_at_ms,
     };

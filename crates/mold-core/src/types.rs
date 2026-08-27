@@ -9192,13 +9192,6 @@ pub enum CanonicalRefusal {
     GenerationUnavailable,
     /// The host advertises a zero-output limit.
     ZeroOutputLimit,
-    /// A request asks for a trait the host cannot represent.
-    UnsupportedRequestTrait {
-        /// One-based position in the supplied slice.
-        index: usize,
-        /// The trait, named for the caller.
-        trait_name: &'static str,
-    },
 }
 
 impl std::fmt::Display for CanonicalRefusal {
@@ -9209,10 +9202,6 @@ impl std::fmt::Display for CanonicalRefusal {
                 write!(formatter, "this host does not admit generation")
             }
             Self::ZeroOutputLimit => write!(formatter, "this host admits zero outputs per batch"),
-            Self::UnsupportedRequestTrait { index, trait_name } => write!(
-                formatter,
-                "request {index} needs {trait_name}, which this host does not support"
-            ),
         }
     }
 }
@@ -9222,8 +9211,9 @@ impl std::error::Error for CanonicalRefusal {}
 impl ServerCapabilities {
     /// Exact shared Rust-client gate for canonical durable Batch N admission.
     /// Returns the host's per-operation child limit, or the named reason the
-    /// requests are not representable. Web/desktop/mobile mirror this matrix
-    /// in `studio/lib/generationSubmissionPolicy.ts`.
+    /// requests are not representable. Gates on the MACHINE alone — the
+    /// durable queue — exactly as `studio/lib/generationSubmissionPolicy.ts`
+    /// does; the server's typed refusal is the authority for the request.
     pub fn canonical_generation_batch_limit(
         &self,
         requests: &[GenerateRequest],
@@ -9239,41 +9229,13 @@ impl ServerCapabilities {
         if limit == 0 {
             return Err(CanonicalRefusal::ZeroOutputLimit);
         }
-        for (position, request) in requests.iter().enumerate() {
-            let index = position + 1;
-            let refuse =
-                |trait_name| Err(CanonicalRefusal::UnsupportedRequestTrait { index, trait_name });
-            if request.batch_size != 1 {
-                return refuse("server-side batch expansion");
-            }
-            let h3 = crate::minimax_h3::task_for_model(&request.model).is_some();
-            let media = request.has_durable_media_inputs();
-            // `references` is deliberately absent from this gate. Ordered
-            // references carry one-use upload handles that `mold.db` must
-            // never hold, so the host admits them through this same path and
-            // marks the child `durable: false` — not restart-safe, but
-            // admitted. `h3_references` says which of those two it is, and a
-            // client must not refuse on it.
-            if media || h3 {
-                let Some(capabilities) = self.durable_media.as_ref() else {
-                    return refuse("restart-safe request media");
-                };
-                if capabilities.protocol_version < 2
-                    || !capabilities.encrypted_at_rest
-                    || !capabilities.generate_request_media
-                {
-                    return refuse("restart-safe request media");
-                }
-                if h3 && !capabilities.private_h3 {
-                    return refuse("durable MiniMax H3 admission");
-                }
-                if (request.id_image.is_some() || request.id_images.is_some())
-                    && !capabilities.identity
-                {
-                    return refuse("durable identity photographs");
-                }
-            }
-        }
+        // Deliberately blind to the request: the durable protocol carries
+        // media, LoRAs, identity photos, and H3, and the server's own typed
+        // admission refusal is the single authority for anything it cannot
+        // take. A client-side per-trait fence could only ever refuse work the
+        // host would have accepted, and diverge from web/desktop/iPhone,
+        // which gate on the machine alone.
+        let _ = requests;
         Ok(limit)
     }
 }

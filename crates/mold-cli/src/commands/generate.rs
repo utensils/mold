@@ -6426,30 +6426,22 @@ mod audio_batch_passthrough_tests {
         assert!(error.to_string().contains("after 5 attempts"));
     }
 
-    /// A media-carrying request needs the encrypted store advertised; a
-    /// media-free one does not. Both answers are typed.
+    /// The client gates on the machine's durable queue alone; a media-carrying
+    /// request is admitted whatever the encrypted-media capability says and
+    /// the server's typed refusal answers for it.
     #[test]
-    fn media_admission_follows_the_advertised_durable_media_contract() {
-        use mold_core::CanonicalRefusal::UnsupportedRequestTrait;
+    fn media_admission_gates_on_the_machine_not_the_request() {
         let mut capabilities = ServerCapabilities::default();
         capabilities.queue.heterogeneous_batch_max_outputs = Some(64);
         let request: GenerateRequest = serde_json::from_str(
             r#"{"prompt":"print","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0}"#,
         )
         .unwrap();
-        assert_eq!(
-            capabilities.canonical_generation_batch_limit(std::slice::from_ref(&request)),
-            Ok(64)
-        );
-
         let mut media = request.clone();
         media.source_image = Some(vec![1, 2, 3]);
         assert_eq!(
             capabilities.canonical_generation_batch_limit(&[media.clone()]),
-            Err(UnsupportedRequestTrait {
-                index: 1,
-                trait_name: "restart-safe request media"
-            })
+            Ok(64)
         );
         capabilities.durable_media = Some(mold_core::DurableMediaCapabilities::v2(false));
         assert_eq!(

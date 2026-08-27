@@ -1152,8 +1152,10 @@ stitched print, with full per-clip provenance. What differs:
 - **its print records no `chain_job_id`**, so "Reuse settings" restores a
   one-shot rather than opening the clip rail for a job that no longer exists.
 
-Chain jobs require `output_format: "mp4"`. Stitching and its audio mux are
-MP4-native; convert the finished print if you need GIF, WebP or APNG.
+Chain jobs accept every video `output_format`. Stitching and its audio mux are
+MP4-native, so the job's own artifact is always MP4 (amend and retake decode
+it) and the gallery print is transcoded to the requested mp4, gif, webp, or
+apng at finalization; the `finalized` event names it in `gallery_filename`.
 
 Endpoints:
 

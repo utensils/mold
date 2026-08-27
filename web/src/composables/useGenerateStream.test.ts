@@ -931,7 +931,11 @@ describe("auto-remove completed jobs", () => {
       ),
     ).toBe(true);
     emitChainJobEvent({ type: "snapshot", job: chainJobDetail() });
-    emitChainJobEvent({ type: "finalized", output: "stitched.mp4" });
+    emitChainJobEvent({
+      type: "finalized",
+      output: "final/output-1.mp4",
+      gallery_filename: "stitched.mp4",
+    });
     await flushDurable();
     await flushDurable();
 

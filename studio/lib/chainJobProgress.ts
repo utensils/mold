@@ -85,6 +85,17 @@ function isTerminal(state: ChainJobState): boolean {
  * frame. The live value is always returned so the caller keeps one authority
  * for the job rather than a second parallel reduction.
  */
+function snapshotFinalized(job: {
+  finalizes?: ReadonlyArray<{
+    gallery_filename?: string | null;
+    take?: number;
+  }> | null;
+}): ChainJobFinalized | null {
+  const last = job.finalizes?.at(-1);
+  if (!last?.gallery_filename) return null;
+  return { output: last.gallery_filename, take: last.take ?? null };
+}
+
 export function reduceChainJobFrame(
   previous: ChainJobLive,
   event: ChainJobEvent,
@@ -107,7 +118,12 @@ export function reduceChainJobFrame(
             estimated_total_frames: estimatedChainFrames(live),
           },
         ],
-        // A job that is already terminal when we attach still has to settle.
+        // A job that is already terminal when we attach still has to settle,
+        // and its print is then in the manifest's last finalize record — the
+        // only place the gallery filename exists after the stream is gone.
+        finalized: isTerminal(event.job.state)
+          ? snapshotFinalized(event.job)
+          : live.finalized,
         terminal: isTerminal(event.job.state)
           ? { state: event.job.state, error: event.job.error ?? null }
           : null,
@@ -151,9 +167,15 @@ export function reduceChainJobFrame(
         ],
       };
     case "finalized":
+      // `output` is the job-relative MP4 artifact amend/retake decode; the
+      // print a client fetches is the gallery filename, in the requested
+      // format. A host with no gallery output publishes nothing to fetch.
       return {
         ...base,
-        finalized: { output: event.output ?? null, take: event.take ?? null },
+        finalized: {
+          output: event.gallery_filename ?? null,
+          take: event.take ?? null,
+        },
       };
     case "state_changed":
       return {

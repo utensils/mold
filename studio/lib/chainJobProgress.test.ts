@@ -127,7 +127,12 @@ describe("reduceChainJobFrame", () => {
   it("surfaces the finalized filename and never a progress frame", () => {
     const { last, progress } = run([
       { type: "snapshot", job: detail() },
-      { type: "finalized", output: "stitched.mp4", take: 2 },
+      {
+        type: "finalized",
+        output: "final/output-2.mp4",
+        gallery_filename: "stitched.mp4",
+        take: 2,
+      },
     ]);
     expect(last.finalized).toEqual({ output: "stitched.mp4", take: 2 });
     expect(progress).toHaveLength(1);

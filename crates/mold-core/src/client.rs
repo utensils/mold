@@ -827,6 +827,12 @@ impl MoldClient {
                                 .sum(),
                         });
                         if crate::chain_job::settled(job.summary.state) {
+                            // A job that settled before we subscribed carries
+                            // its print in the manifest, not in a frame.
+                            outcome.output = job
+                                .finalizes
+                                .last()
+                                .and_then(|record| record.gallery_filename.clone());
                             return Ok(outcome);
                         }
                     }
@@ -857,7 +863,9 @@ impl MoldClient {
                     ChainJobEvent::Finalizing { total_frames } => {
                         let _ = progress_tx.send(ChainProgressEvent::Stitching { total_frames });
                     }
-                    ChainJobEvent::Finalized { output, .. } => outcome.output = Some(output),
+                    ChainJobEvent::Finalized {
+                        gallery_filename, ..
+                    } => outcome.output = gallery_filename,
                     ChainJobEvent::StateChanged { state, error } => {
                         outcome.state = state;
                         if error.is_some() {

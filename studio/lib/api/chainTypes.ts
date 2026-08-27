@@ -223,7 +223,7 @@ export type ChainJobEvent =
     }
   | { type: "yielded" }
   | { type: "finalizing"; total_frames?: number }
-  | { type: "finalized"; output?: string; take?: number }
+  | { type: "finalized"; output?: string; take?: number; gallery_filename?: string | null }
   | { type: "state_changed"; state: ChainJobState; error?: string | null };
 
 export interface ChainLimits {

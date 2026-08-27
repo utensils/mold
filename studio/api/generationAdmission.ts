@@ -282,6 +282,9 @@ export function parseGenerationBatchStatus(
         ? {}
         : { completed_at_ms: raw.completed_at_ms as number | null }),
       ...(raw.error === undefined ? {} : { error: raw.error as string | null }),
+      ...(typeof raw.error_code === "string"
+        ? { error_code: raw.error_code }
+        : {}),
       ...(raw.terminal_error === undefined
         ? {}
         : { terminal_error: raw.terminal_error }),
