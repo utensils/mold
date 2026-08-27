@@ -12,6 +12,7 @@ const effectMocks = vi.hoisted(() => ({
   notifyGenerated: vi.fn(),
   notifyGenerationFailed: vi.fn(),
   streamableMediaUrl: vi.fn().mockResolvedValue("blob:durable-result"),
+  evictMedia: vi.fn(),
   fetchGalleryMediaBytes: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3])),
   saveOutputBytes: vi.fn().mockResolvedValue("saved.png"),
 }));
@@ -29,6 +30,7 @@ vi.mock("../lib/gallery/media", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/gallery/media")>()),
   streamableMediaUrl: effectMocks.streamableMediaUrl,
   fetchGalleryMediaBytes: effectMocks.fetchGalleryMediaBytes,
+  evictMedia: effectMocks.evictMedia,
 }));
 vi.mock("../lib/ipc", () => ({
   ipc: { saveOutputBytes: effectMocks.saveOutputBytes },
@@ -50,6 +52,7 @@ import { ApiError, apiFetchTo, apiJsonTo } from "../lib/api/client";
 import { runWithConcurrency, useGenerationStore } from "./generation";
 import { useHostsStore } from "./hosts";
 import { useToastStore } from "./toasts";
+import { useAppPrefsStore } from "./appPrefs";
 import type { GenerateRequest } from "../lib/api/types";
 import { DURABLE_GENERATION_STORAGE_KEY } from "../lib/durableGeneration";
 import {
@@ -626,6 +629,132 @@ describe("submitBatch connection cap", () => {
       );
     },
   );
+
+  /** One durable remote print driven to completion on hal9000. */
+  async function completeRemotePrint(
+    store: ReturnType<typeof useGenerationStore>,
+    options: { mirror: boolean },
+  ) {
+    useHostsStore().extras = [
+      {
+        id: "hal9000",
+        label: "hal9000",
+        url: "http://hal9000:7680",
+        apiKey: "fresh-key",
+        status: "ready",
+        error: null,
+        instanceId: "instance-1",
+      },
+    ];
+    store.attachSharedDurableEventHost("hal9000");
+    let clientBatchId = "";
+    const status = (state: "queued" | "complete") => ({
+      id: "batch-1",
+      client_batch_id: clientBatchId,
+      instance_id: "instance-1",
+      durable: true,
+      children: [
+        {
+          index: 1,
+          job_id: "job-1",
+          state,
+          created_at_ms: 1,
+          updated_at_ms: state === "complete" ? 3 : 2,
+          ...(state === "complete"
+            ? { completed_at_ms: 3, result: { filename: "finished.png" } }
+            : {}),
+        },
+      ],
+    });
+    durableApi.admit.mockImplementation(async (_target, body) => {
+      clientBatchId = (body as { client_batch_id: string }).client_batch_id;
+      return status("queued");
+    });
+    durableApi.reconcile.mockImplementation(async () => ({
+      instance_id: "instance-1",
+      batches: [status("complete")],
+      missing: { client_batch_ids: [], batch_ids: [] },
+    }));
+    const submitted = store.submitBatch(
+      {
+        prompt: "remote print",
+        model: "flux-dev:q4",
+        width: 64,
+        height: 64,
+        steps: 4,
+        guidance: 3,
+        seed: 1,
+        batch_size: 1,
+        output_format: "png",
+      } as GenerateRequest,
+      1,
+      {
+        hostId: "hal9000",
+        label: "hal9000",
+        kind: "remote",
+        target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+        instanceId: "instance-1",
+        heterogeneousBatchMaxOutputs: 64,
+        mirrorRemoteOutput: options.mirror,
+      },
+    );
+    await flushPromises();
+    store.onDurableEvent("hal9000", "authority", '{"instance_id":"instance-1"}');
+    await flushPromises();
+    store.onDurableEvent(
+      "hal9000",
+      "event",
+      '{"type":"job_state_committed","id":"committed-before-client-map"}',
+    );
+    await submitted.settled;
+    await flushPromises();
+    return submitted.jobs[0]!;
+  }
+
+  it("skips the local mirror when the save-remote-outputs preference is off", async () => {
+    useAppPrefsStore().settings = { saveRemoteOutputs: false } as never;
+    const store = useGenerationStore();
+    const job = await completeRemotePrint(store, { mirror: true });
+    expect(job.status).toBe("complete");
+    expect(effectMocks.fetchGalleryMediaBytes).not.toHaveBeenCalled();
+    expect(effectMocks.saveOutputBytes).not.toHaveBeenCalled();
+  });
+
+  it("keeps an iPhone-style remote job remote without mirroring into this device's gallery", async () => {
+    const store = useGenerationStore();
+    const job = await completeRemotePrint(store, { mirror: false });
+    expect(job.status).toBe("complete");
+    expect(effectMocks.saveOutputBytes).not.toHaveBeenCalled();
+  });
+
+  it("renews the remote result URL through the ticketed media path and evicts on a forced retry", async () => {
+    const store = useGenerationStore();
+    effectMocks.streamableMediaUrl.mockResolvedValue(
+      "http://hal9000:7680/api/gallery/media/finished.png?ticket=t&expires=4102444800",
+    );
+    const job = await completeRemotePrint(store, { mirror: false });
+    await flushPromises();
+    expect(effectMocks.streamableMediaUrl).toHaveBeenCalledWith(
+      "/api/gallery/image/finished.png",
+      expect.objectContaining({
+        target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+        cacheKey: "hal9000",
+      }),
+    );
+    expect(job.resultUrl).toBe(
+      "http://hal9000:7680/api/gallery/media/finished.png?ticket=t&expires=4102444800",
+    );
+    expect(job.resultUrlExpiresAt).toBe(4102444800 * 1000);
+    expect(job.resultUrl).not.toContain("fresh-key");
+
+    // A forced retry discards the cached entry first, or a revoked Blob
+    // would be handed back forever.
+    await store.refreshRemoteResultUrl(job.clientId, true);
+    expect(effectMocks.evictMedia).toHaveBeenCalledWith(
+      "/api/gallery/image/finished.png",
+      "hal9000",
+    );
+  });
 
   it("uses host events as hints and bulk status as the only terminal authority", async () => {
     const store = useGenerationStore();
