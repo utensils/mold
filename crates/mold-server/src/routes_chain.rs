@@ -21,7 +21,6 @@ use mold_core::chain_job::{settled, ChainJobEvent, ChainJobState};
 use mold_core::{OutputFormat, OutputMetadata, VideoData};
 use mold_db::MetadataDb;
 use std::convert::Infallible;
-use tokio_stream::StreamExt as _;
 
 use crate::chain_job_runner::{ChainJobRunnerHandle, EphemeralClaimGuard};
 use crate::model_manager::ExistingModelAuthority;
@@ -1307,6 +1306,7 @@ pub async fn generate_chain_stream(
     let state_clone = state.clone();
     let db_holder = state.metadata_db.clone();
     let tx_for_task = tx.clone();
+    let task_shutdown = state.events.shutdown_token();
     let handle = state
         .chain_jobs
         .as_ref()
@@ -1371,7 +1371,12 @@ pub async fn generate_chain_stream(
         };
         let mut terminal: Option<(ChainJobState, Option<String>)> = None;
         while terminal.is_none() {
-            match live.recv().await {
+            let delivery = tokio::select! {
+                biased;
+                _ = task_shutdown.cancelled() => return,
+                delivery = live.recv() => delivery,
+            };
+            match delivery {
                 Ok(event) => {
                     if let Some(progress) = map_job_event_to_legacy(&event, &job_id) {
                         let _ = tx_for_task.send(ChainSseMessage::Progress(progress));
@@ -1474,8 +1479,19 @@ pub async fn generate_chain_stream(
     });
     drop(tx); // ensure only the task holds the sender
 
-    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx)
-        .map(|msg| Ok::<_, Infallible>(chain_sse_event(msg)));
+    let stream_shutdown = state.events.shutdown_token();
+    let stream = async_stream::stream! {
+        let mut rx = rx;
+        loop {
+            let message = tokio::select! {
+                biased;
+                _ = stream_shutdown.cancelled() => break,
+                message = rx.recv() => message,
+            };
+            let Some(message) = message else { break };
+            yield Ok::<_, Infallible>(chain_sse_event(message));
+        }
+    };
 
     // The filing advisory rides the response headers, which are sent before
     // the first SSE frame — the same `x-mold-request-warning` the one-shot
@@ -2662,6 +2678,45 @@ mod tests {
             .as_str()
             .is_some_and(|value| value.ends_with(".mp4")));
         assert!(complete["metadata"].is_object());
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_an_idle_legacy_chain_stream() {
+        use futures::StreamExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("mold-home");
+        let _home_guard = MoldHomeGuard::set(&home);
+        let db = MetadataDb::open_in_memory().unwrap();
+        let output_dir = dir.path().join("gallery");
+        let handle = Arc::new(crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests());
+        let state = state_with_db_and_handle(db, handle.clone(), &output_dir);
+
+        let sse = generate_chain_stream(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(req(OutputFormat::Mp4)),
+        )
+        .await
+        .unwrap();
+        let response = sse.into_response();
+        let mut body = response.into_body().into_data_stream();
+        let initial = tokio::time::timeout(std::time::Duration::from_secs(1), body.next())
+            .await
+            .expect("legacy chain stream should emit its snapshot")
+            .expect("legacy chain stream should remain open")
+            .expect("legacy chain snapshot should be readable");
+        assert!(String::from_utf8_lossy(&initial).contains("event: progress"));
+
+        let row = wait_for_single_chain_job(state.metadata_db.as_ref().as_ref().unwrap()).await;
+        wait_for_bus_subscription(&handle, &row.id).await;
+
+        state.events.shutdown();
+
+        let end = tokio::time::timeout(std::time::Duration::from_secs(1), body.next())
+            .await
+            .expect("idle legacy chain stream should close during shutdown");
+        assert!(end.is_none());
     }
 
     #[tokio::test]

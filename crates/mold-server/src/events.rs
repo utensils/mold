@@ -21,6 +21,7 @@ const BROADCAST_BUFFER: usize = 64;
 
 pub struct EventBroadcaster {
     tx: broadcast::Sender<ServerEvent>,
+    shutdown: tokio_util::sync::CancellationToken,
 }
 
 /// What the host-wide SSE stream must do with one broadcast delivery.
@@ -48,7 +49,10 @@ pub(crate) fn classify_delivery(
 impl EventBroadcaster {
     pub fn new() -> Arc<Self> {
         let (tx, _rx) = broadcast::channel(BROADCAST_BUFFER);
-        Arc::new(Self { tx })
+        Arc::new(Self {
+            tx,
+            shutdown: tokio_util::sync::CancellationToken::new(),
+        })
     }
 
     /// Publish an event. Synchronous — safe to call from `spawn_blocking`
@@ -60,6 +64,16 @@ impl EventBroadcaster {
 
     pub fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
         self.tx.subscribe()
+    }
+
+    /// End every open-ended SSE subscription before Axum starts its HTTP
+    /// drain. Finite request streams keep their normal completion semantics.
+    pub fn shutdown(&self) {
+        self.shutdown.cancel();
+    }
+
+    pub fn shutdown_token(&self) -> tokio_util::sync::CancellationToken {
+        self.shutdown.clone()
     }
 }
 
@@ -119,5 +133,17 @@ mod tests {
             }
             other => panic!("normal event was changed by delivery classification: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn shutdown_wakes_all_event_stream_waiters() {
+        let events = EventBroadcaster::new();
+        let first = events.shutdown_token();
+        let second = events.shutdown_token();
+
+        events.shutdown();
+
+        first.cancelled().await;
+        second.cancelled().await;
     }
 }

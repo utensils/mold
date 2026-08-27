@@ -12134,6 +12134,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn shutdown_closes_idle_chain_job_event_stream() {
+        use futures::StreamExt as _;
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = MoldHomeGuard::set(home.path());
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        seed_chain_job(&db, home.path(), "shutdown-events", ChainJobState::Queued);
+        let mut state = AppState::for_tests();
+        state.metadata_db = Arc::new(Some(db));
+        state.chain_jobs = Some(Arc::new(
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        ));
+        let response = app_with_state(state.clone())
+            .oneshot(
+                Request::get("/api/chain-jobs/shutdown-events/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        let first = tokio::time::timeout(Duration::from_secs(1), body.next())
+            .await
+            .expect("snapshot should arrive before shutdown");
+        assert!(first.is_some());
+
+        state.events.shutdown();
+
+        let end = tokio::time::timeout(Duration::from_secs(1), body.next())
+            .await
+            .expect("chain event stream did not close after shutdown");
+        assert!(end.is_none());
+    }
+
     #[cfg(not(feature = "mp4"))]
     #[tokio::test]
     async fn create_chain_job_rejects_audio_when_mp4_feature_is_disabled() {
@@ -14224,6 +14259,52 @@ mod tests {
             frame,
             "event: event\ndata: {\"type\":\"job_queued\",\"id\":\"j1\",\"model\":\"flux-dev:q4\"}\n\n"
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_idle_server_subscription_streams() {
+        use futures::StreamExt as _;
+
+        for path in [
+            "/api/events",
+            "/api/downloads/stream",
+            "/api/resources/stream",
+        ] {
+            let state = AppState::empty(
+                mold_core::Config::default(),
+                crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+                AppState::empty_gpu_pool_for_test(),
+                200,
+            );
+            let response = app_with_state(state.clone())
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "path: {path}");
+            let mut body = response.into_body().into_data_stream();
+
+            if path != "/api/resources/stream" {
+                let initial = tokio::time::timeout(Duration::from_secs(1), body.next())
+                    .await
+                    .unwrap_or_else(|_| panic!("{path} did not emit its initial frame"));
+                assert!(initial.is_some(), "{path} closed before becoming idle");
+            }
+
+            let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+            let waiter = tokio::spawn(async move {
+                let _ = waiting_tx.send(());
+                body.next().await
+            });
+            waiting_rx.await.unwrap();
+            tokio::task::yield_now().await;
+            state.events.shutdown();
+
+            let end = tokio::time::timeout(Duration::from_secs(1), waiter)
+                .await
+                .unwrap_or_else(|_| panic!("{path} did not close after shutdown"))
+                .expect("subscription waiter should not panic");
+            assert!(end.is_none(), "{path} yielded another frame after shutdown");
+        }
     }
 
     #[tokio::test]
