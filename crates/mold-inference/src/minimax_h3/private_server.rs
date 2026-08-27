@@ -2207,9 +2207,10 @@ fn prepare_reviewed_h3_private_fl2va_admission(
             qwen_parameter_bytes: qwen_memory.source_parameter_bytes,
             qwen_host_resident_parameter_bytes: qwen_memory.host_resident_parameter_bytes,
             qwen_device_resident_parameter_bytes: qwen_memory.device_resident_parameter_bytes,
-            // Request-derived for Ref2VA, the reviewed grant verbatim for
-            // FL2VA — the same seam the budget builder charges through, so
-            // the freeze-time projection comparison cannot drift.
+            // Request-derived for both tasks — FL2VA clamped by its reviewed
+            // grant, Ref2VA refused past its provisional one — through the
+            // same seam the budget builder charges from, so the freeze-time
+            // projection comparison cannot drift.
             qwen_activation_workspace_bytes: qwen_activation_workspace_demand_bytes(
                 &admission_request.request,
                 runtime_qualification

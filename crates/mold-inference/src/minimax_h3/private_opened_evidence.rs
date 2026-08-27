@@ -1592,9 +1592,11 @@ pub(crate) const FL2VA_OBSERVED_QWEN_SEQUENCE_ROWS: u64 = 2_033 + 4_032;
 /// The Qwen activation workspace one request charges into its exact budget
 /// and freezes into its factory authority.
 ///
-/// FL2VA keeps the reviewed grant verbatim: its envelope caps the Qwen
-/// sequence at the rows the grant was measured over, so the flat figure IS
-/// the request figure. Ref2VA's profile grant is a flat provisional ceiling
+/// FL2VA pays for its own conditioner sequence, CLAMPED by the reviewed
+/// grant: its envelope caps the Qwen sequence 15 rows above the sequence the
+/// grant was measured over, so the reviewed shape still charges the flat
+/// figure byte for byte while a smaller canvas stops paying for the largest
+/// one's vision pads. Ref2VA's profile grant is a flat provisional ceiling
 /// while the request's Qwen sequence varies by an order of magnitude with
 /// the ordered reference set, so charging the grant as a constant
 /// undercharges any request past the grant's sizing point (three
@@ -1606,27 +1608,6 @@ pub(crate) const FL2VA_OBSERVED_QWEN_SEQUENCE_ROWS: u64 = 2_033 + 4_032;
 /// rather than an undercharged admit. Admission and the frozen-plan reopen
 /// both derive through here, so the freeze-time projection comparison
 /// cannot drift.
-/// Host peak of the conditioner phase.
-///
-/// The conditioner is LOADED and then RUN. Its staging buffers are freed
-/// before the first forward allocates an activation, so the two transients
-/// cannot coexist and the phase peak takes the larger — never their sum. The
-/// parameters are the one term live across both halves and are charged once.
-///
-/// Summing them charged one host peak for two disjoint moments, which on the
-/// released compact stack is 742 MiB of a budget that has refused real renders
-/// on a 62 GB host.
-fn qwen_conditioner_phase_host_peak(
-    resident_bytes: u64,
-    load_transient_bytes: u64,
-    forward_transient_bytes: u64,
-) -> Result<u64> {
-    checked_sum([
-        resident_bytes,
-        load_transient_bytes.max(forward_transient_bytes),
-    ])
-}
-
 pub(crate) fn qwen_activation_workspace_demand_bytes(
     request: &H3FactoryPreparedRequestInput,
     granted_qwen_activation_workspace_bytes: u64,
@@ -2109,15 +2090,18 @@ fn build_canonical_private_fl2va_target_budget(
         transformer_alive_metadata_host_bytes,
         vae_memory.peak_host_io_buffer_bytes,
     ])?;
-    let qwen_encode_phase_host_bytes = qwen_conditioner_phase_host_peak(
-        checked_sum([
+    // Through the shared authority `validate_target_budget` re-derives from,
+    // so the granted budget and its re-derivation cannot state two policies.
+    let qwen_encode_phase_host_bytes = crate::h3_factory::qwen_encode_phase_host_bytes(
+        crate::h3_factory::H3QwenEncodeHostTerms {
             attempt_host_bytes,
             qwen_alive_metadata_host_bytes,
             qwen_host_parameter_bytes,
             text_modality_tags_host_bytes,
-        ])?,
-        qwen_host_load_staging_bytes,
-        checked_sum([qwen_host_activation_bytes, qwen_host_output_state_bytes])?,
+            qwen_host_load_staging_bytes,
+            qwen_host_activation_bytes,
+            qwen_host_output_state_bytes,
+        },
     )?;
     let qwen_transfer_phase_host_bytes = checked_sum([
         attempt_host_bytes,
@@ -2614,11 +2598,26 @@ mod tests {
         // While tensor k is staged twice, only params[0..k) are resident, and
         // that sum is at most `total - size(k)`. So the load peak is bounded by
         // `total + size(k)` <= `total + max`, never `total + 2 * max`.
-        let load = qwen_conditioner_phase_host_peak(parameters, staging, 0).unwrap();
+        let peak = |resident: u64, load_transient: u64, forward_transient: u64| {
+            crate::h3_factory::qwen_encode_phase_host_bytes(
+                crate::h3_factory::H3QwenEncodeHostTerms {
+                    attempt_host_bytes: 0,
+                    qwen_alive_metadata_host_bytes: 0,
+                    qwen_host_parameter_bytes: resident,
+                    text_modality_tags_host_bytes: 0,
+                    qwen_host_load_staging_bytes: load_transient,
+                    qwen_host_activation_bytes: forward_transient,
+                    qwen_host_output_state_bytes: 0,
+                },
+            )
+            .unwrap()
+        };
+
+        let load = peak(parameters, staging, 0);
         assert_eq!(load, parameters + staging);
 
         // The forward's activation and the load's staging never coexist.
-        let forward = qwen_conditioner_phase_host_peak(parameters, staging, activation).unwrap();
+        let forward = peak(parameters, staging, activation);
         assert_eq!(forward, parameters + activation);
         assert!(
             forward < parameters + 2 * staging + activation,
