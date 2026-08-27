@@ -1,6 +1,6 @@
 import { reactive } from "vue";
 import { defineStore } from "pinia";
-import { apiFetchTo, apiJsonTo, currentTarget, type ApiTarget } from "../lib/api/client";
+import { apiFetchTo, currentTarget, type ApiTarget } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
 import {
   evictMedia,
@@ -10,7 +10,7 @@ import {
 } from "../lib/gallery/media";
 import { ipc } from "../lib/ipc";
 import { notifyGenerated, notifyGenerationFailed } from "../lib/notify";
-import { describeTransportError, isTransportFailure } from "../lib/api/errors";
+import { describeTransportError } from "../lib/api/errors";
 import {
   isInterruptedGenerationError,
   reconcileInterruptedGenerationJobs,
@@ -43,12 +43,7 @@ import {
   newJob,
   type Job,
 } from "../lib/generationJob";
-import {
-  prepareReferenceUploads,
-  requestNeedsReferenceUpload,
-  type ReferenceUploadCapabilities,
-  type ReferenceUploadLease,
-} from "@studio/api/referenceUploads";
+import { type ReferenceUploadCapabilities } from "@studio/api/referenceUploads";
 import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
 import { blobToBase64 } from "@studio/lib/base64";
 import {
@@ -58,6 +53,7 @@ import {
   isDefiniteGenerationAdmissionRejection,
   lookupGenerationBatchByClientId,
   reconcileGenerationBatches,
+  type DurableGenerationQueueCapabilities,
   type DurableMediaCapabilities,
   type GenerationBatchStatus,
 } from "@studio/api/generationAdmission";
@@ -75,7 +71,7 @@ import {
   loadDurableGenerationRecovery,
   parseEventAuthority,
   parseEventResync,
-  requestIsEligibleForDurableGeneration,
+  generationRefusalReason,
   saveDurableGenerationRecovery,
   type DurableGenerationRecoveryRecord,
 } from "../lib/durableGeneration";
@@ -120,19 +116,11 @@ export interface JobRoute {
   /** Exact server installation and upload protocol captured at submit time. */
   instanceId?: string | null;
   referenceUploads?: ReferenceUploadCapabilities | null;
-  heterogeneousBatch?: boolean;
+  /** The frozen host's durable batch chunk limit. Its presence IS the durable
+   * generation contract. */
   heterogeneousBatchMaxOutputs?: number | null;
-  durableBatchOutcomes?: boolean;
-  /** Version 2 acknowledges durable work before model preparation. */
-  admissionProtocolVersion?: number | null;
   durableMedia?: DurableMediaCapabilities | null;
   modelFamily?: string | null;
-}
-
-interface ReferenceUploadAuthority {
-  target: ApiTarget;
-  instanceId: string;
-  capabilities: ReferenceUploadCapabilities | null;
 }
 
 /** Filesystem-safe local filename for a saved output. */
@@ -444,7 +432,6 @@ function releaseSettledJob(job: Job): void {
   }
   if (job.previewUrl) URL.revokeObjectURL(job.previewUrl);
   targets.delete(job.clientId);
-  referenceUploadAuthorities.delete(job.clientId);
   chainRoutes.delete(job.clientId);
 }
 
@@ -465,6 +452,37 @@ function resultUrlExpiry(url: string): number | null {
   } catch {
     return null;
   }
+}
+
+/** The frozen route's queue capability, in the one shape the shared policy
+ * reads. The chunk limit's presence IS the durable-generation contract. */
+function routeQueueCapabilities(route: JobRoute | null): DurableGenerationQueueCapabilities {
+  return { heterogeneous_batch_max_outputs: route?.heterogeneousBatchMaxOutputs ?? null };
+}
+
+/** The named reason this batch cannot be queued on its frozen machine, or
+ * `null` when it can. */
+function generationRouteRefusal(
+  route: JobRoute | null,
+  plans: readonly GenerateRequest[],
+): string | null {
+  if (!route) return "No machine is selected for this print.";
+  if (!route.instanceId) {
+    return `${route.label} has not reported its server instance yet.`;
+  }
+  if (canonicalGenerationBatchLimit(routeQueueCapabilities(route)) === null) {
+    return `${route.label} does not advertise the durable generation queue.`;
+  }
+  for (const plan of plans) {
+    const reason = generationRefusalReason(
+      plan,
+      routeQueueCapabilities(route),
+      route.durableMedia,
+      route.modelFamily,
+    );
+    if (reason !== null) return `${route.label} cannot queue this print: ${reason}.`;
+  }
+  return null;
 }
 
 export const useGenerationStore = defineStore("generation", {
@@ -1245,6 +1263,13 @@ export const useGenerationStore = defineStore("generation", {
       const size = Math.max(1, Math.floor(batchSize));
       const baseSeed = resolveBaseSeed(req.seed);
       const plans = planBatchRequests(req, size, baseSeed, requestOptions);
+      if (chainRouting?.kind !== "chain") {
+        // Every print is admitted through the durable queue. A machine that
+        // cannot carry this request is refused BY NAME with nothing queued —
+        // there is no attached stream left to fall back to.
+        const refusal = generationRouteRefusal(route, plans);
+        if (refusal !== null) throw new Error(refusal);
+      }
       const batchId = this.nextBatchId++;
       this.pendingConsumerBatchIds.push(batchId);
       const jobs = plans.map((plan) => {
@@ -1258,13 +1283,6 @@ export const useGenerationStore = defineStore("generation", {
           job.retainEncodedResult = route.retainEncodedResult ?? true;
           job.metadataOnlyCompletion = route.metadataOnlyCompletion ?? false;
           targets.set(job.clientId, route.target);
-          if (requestNeedsReferenceUpload(plan)) {
-            referenceUploadAuthorities.set(job.clientId, {
-              target: { ...route.target },
-              instanceId: route.instanceId ?? "",
-              capabilities: route.referenceUploads ?? null,
-            });
-          }
         } else {
           // Unrouted = the local primary engine — its prints are already in
           // this device's gallery, so they never trigger the remote auto-save.
@@ -1298,39 +1316,11 @@ export const useGenerationStore = defineStore("generation", {
         if (chainRouting?.kind === "chain") chainRoutes.set(job.clientId, chainRouting);
         return job;
       });
-      const durableAdmission =
-        route?.heterogeneousBatch === true &&
-        route.durableBatchOutcomes === true &&
-        !!route.instanceId &&
-        canonicalGenerationBatchLimit({
-          heterogeneous_batch: true,
-          heterogeneous_batch_max_outputs: route.heterogeneousBatchMaxOutputs ?? null,
-          durable_batch_outcomes: true,
-          admission_protocol_version: route.admissionProtocolVersion ?? null,
-        }) !== null &&
-        chainRouting?.kind !== "chain" &&
-        plans.every((plan) =>
-          requestIsEligibleForDurableGeneration(
-            plan,
-            {
-              heterogeneous_batch: route.heterogeneousBatch === true,
-              heterogeneous_batch_max_outputs: route.heterogeneousBatchMaxOutputs ?? null,
-              durable_batch_outcomes: route.durableBatchOutcomes === true,
-              ...(route.admissionProtocolVersion === undefined
-                ? {}
-                : { admission_protocol_version: route.admissionProtocolVersion }),
-            },
-            route.durableMedia,
-            route.modelFamily,
-          ),
-        );
-      if (durableAdmission) {
-        const limit = canonicalGenerationBatchLimit({
-          heterogeneous_batch: true,
-          heterogeneous_batch_max_outputs: route.heterogeneousBatchMaxOutputs ?? null,
-          durable_batch_outcomes: true,
-          admission_protocol_version: route.admissionProtocolVersion ?? null,
-        })!;
+      if (chainRouting?.kind !== "chain") {
+        // `generationRouteRefusal` above already proved the machine and its
+        // durable contract for every plan in this batch.
+        const host = route!;
+        const limit = canonicalGenerationBatchLimit(routeQueueCapabilities(host))!;
         const chunks = chunkGenerationBatchRequests(plans, limit).map(
           (requestChunk, chunkIndex) => {
             const offset = chunkIndex * limit;
@@ -1338,14 +1328,14 @@ export const useGenerationStore = defineStore("generation", {
             const clientBatchId = durableClientBatchId();
             const record: DurableGenerationRecoveryRecord = {
               tracker: createGenerationBatchTracker({
-                hostId: route.hostId,
-                expectedInstanceId: route.instanceId!,
+                hostId: host.hostId,
+                expectedInstanceId: host.instanceId!,
                 clientBatchId,
                 submittedAtMs: Date.now(),
               }),
-              hostLabel: route.label,
-              hostKind: route.kind,
-              mirrorRemoteOutput: route.mirrorRemoteOutput ?? true,
+              hostLabel: host.label,
+              hostKind: host.kind,
+              mirrorRemoteOutput: host.mirrorRemoteOutput ?? true,
               children: requestChunk.map((plan, index) =>
                 durableChildSummary(plan, index + 1, jobChunk[index]!.clientId),
               ),
@@ -1406,59 +1396,7 @@ export const useGenerationStore = defineStore("generation", {
         }
         return this.streamJob(job, plans[i]!, admissionResolvers[i]);
       });
-      const legacyServerAdmission =
-        size > 1 &&
-        requestOptions.batchId !== undefined &&
-        route?.heterogeneousBatch === true &&
-        route.durableBatchOutcomes !== true &&
-        (route.heterogeneousBatchMaxOutputs == null ||
-          size <= route.heterogeneousBatchMaxOutputs) &&
-        chainRouting?.kind !== "chain" &&
-        !plans.some(requestNeedsReferenceUpload);
-      const submit = legacyServerAdmission
-        ? (async () => {
-            const target = route!.target;
-            const body = {
-              client_batch_id: requestOptions.batchId!,
-              requests: plans,
-            };
-            let admitted: GenerationBatchStatus;
-            try {
-              admitted = await apiJsonTo<GenerationBatchStatus>(target, "/api/generation-batches", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(body),
-              });
-            } catch (error) {
-              if (!isTransportFailure(error)) throw error;
-              admitted = await apiJsonTo<GenerationBatchStatus>(target, "/api/generation-batches", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(body),
-              });
-            }
-            if (admitted.children.length !== jobs.length) {
-              throw new Error(
-                `The host admitted ${admitted.children.length} of ${jobs.length} prepared variations.`,
-              );
-            }
-            for (const [index, job] of jobs.entries()) {
-              const child = admitted.children[index]!;
-              if (child.index !== index + 1 || !child.job_id) {
-                throw new Error("The host returned an invalid prepared-batch child mapping.");
-              }
-              job.id = child.job_id;
-              job.streamStarted = true;
-              job.status = "error";
-              job.error = "The generation stream closed before completion.";
-              job.interrupted = true;
-              job.retainedByHost = true;
-            }
-            await this.reconcileInterrupted(jobs);
-          })().finally(() => {
-            for (const resolve of admissionResolvers) resolve();
-          })
-        : runWithConcurrency(tasks, MAX_STREAMS_PER_TARGET);
+      const submit = runWithConcurrency(tasks, MAX_STREAMS_PER_TARGET);
       const settled = submit
         .catch((error) => {
           for (const job of jobs) {
@@ -1818,7 +1756,6 @@ export const useGenerationStore = defineStore("generation", {
       sharedDurableEventHosts.clear();
       durableRecoveryLoaded = false;
       targets.clear();
-      referenceUploadAuthorities.clear();
       chainRoutes.clear();
       this.pendingConsumerBatchIds = [];
       this.selectedClientId = null;
@@ -1853,46 +1790,23 @@ export const useGenerationStore = defineStore("generation", {
       }
 
       let streamError: unknown = null;
-      let lease: ReferenceUploadLease<GenerateRequest> | null = null;
       const chainRoute = chainRoutes.get(job.clientId);
-      const path = chainRoute ? "/api/generate/chain/stream" : "/api/generate/stream";
-      let transportRequest = req;
-      if (requestNeedsReferenceUpload(req)) {
-        try {
-          if (chainRoute) {
-            throw new Error(
-              "MiniMax H3 reference media cannot be submitted through a chain route.",
-            );
-          }
-          const authority = referenceUploadAuthorities.get(job.clientId);
-          if (!authority) {
-            throw new Error(
-              "MiniMax H3 reference uploads require a frozen authenticated host route.",
-            );
-          }
-          const prepared = await prepareReferenceUploads({
-            target: authority.target,
-            expectedInstanceId: authority.instanceId,
-            capabilities: authority.capabilities,
-            request: req,
-            signal: abort.signal,
-          });
-          lease = prepared;
-          transportRequest = prepared.request;
-        } catch (error) {
-          onAdmitted();
-          if (!abort.signal.aborted && !jobHasSettled(job)) {
-            settleJob(job, "error");
-            job.interrupted = false;
-            job.error = error instanceof Error ? error.message : String(error);
-          }
-          releaseStreamSlot();
-          aborts.delete(job.clientId);
-          return;
+      if (!chainRoute) {
+        // Only a sequence opens a held stream. A print is admitted through the
+        // durable queue by `submitBatch`, which never reaches this path.
+        onAdmitted();
+        if (!abort.signal.aborted && !jobHasSettled(job)) {
+          settleJob(job, "error");
+          job.interrupted = false;
+          job.error = "internal: a print reached the sequence stream path.";
         }
+        releaseStreamSlot();
+        aborts.delete(job.clientId);
+        return;
       }
+      const path = "/api/generate/chain/stream";
       job.streamStarted = true;
-      const body = chainRoute ? buildAutoChainRequest(req, chainRoute) : transportRequest;
+      const body = buildAutoChainRequest(req, chainRoute);
       // Freeze the exact host this stream opens against. Submit already
       // snapshots the primary, but a job admitted while nothing was connected
       // has no route recorded — and `sseStream` would then resolve the primary
@@ -2088,7 +2002,6 @@ export const useGenerationStore = defineStore("generation", {
         streamError = error;
       });
       onAdmitted();
-      if (lease) void lease.cancel().catch(() => undefined);
       if (!abort.signal.aborted && !jobHasSettled(job)) {
         settleJob(job, "error");
         job.interrupted = streamError === null || streamError instanceof TypeError;
@@ -2118,7 +2031,6 @@ const aborts = new Map<number, AbortController>();
 const targets = new Map<number, ApiTarget>();
 
 /** Per-attempt authority for one-use H3 ingress, never Pinia/persistence. */
-const referenceUploadAuthorities = new Map<number, ReferenceUploadAuthority>();
 
 /** Automatic-chain routing snapshot for endpoint selection and cancellation. */
 const chainRoutes = new Map<number, AutoChainRoutingDecision>();

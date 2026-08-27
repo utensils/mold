@@ -3567,7 +3567,16 @@ async function generate() {
     }
     // Submitting while another print develops queues server-side; each job
     // snapshots its own model + params, so tweaking the form afterwards is safe.
-    const { settled } = generation.submitBatch(request, batch, route, chainRouting, requestOptions);
+    // A machine that cannot carry this print refuses it by name and queues
+    // nothing; there is no second submission path to fall through to.
+    let settled: ReturnType<typeof generation.submitBatch>["settled"];
+    try {
+      ({ settled } = generation.submitBatch(request, batch, route, chainRouting, requestOptions));
+    } catch (error) {
+      toasts.push(error instanceof Error ? error.message : String(error), "error");
+      preparedSubmitting.value = false;
+      return;
+    }
     const acceptedSubmissionId = ++latestAcceptedSubmissionId;
     missingModel.value = null;
     if (preparedSubmission) {

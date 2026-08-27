@@ -113,21 +113,16 @@ export function mobileIdentityFileSizeRefusal(size: number, budgetBytes: number)
  *
  * `form.identitySupported` is snapshotted from ONE deduplicated fleet row,
  * but under Auto / Most capable the placement fan-out may freeze a different
- * owner. That machine's own `/api/models` row is the authority, and a server
- * old enough to answer the placement preview with 404/405 would ignore the
- * additive identity fields entirely. Either way the print would render a
- * stranger's face, so it is refused inline and nothing is queued.
+ * owner. That machine's own `/api/models` row is the authority. Routing to a
+ * machine that does not advertise it would render a stranger's face, so it is
+ * refused inline and nothing is queued.
  */
 export function mobileIdentityRouteRefusal(input: {
   carriesIdentity: boolean;
   hostLabel: string;
   hostAdvertisesIdentity: boolean;
-  legacyPlacement?: boolean;
 }): string | null {
   if (!input.carriesIdentity) return null;
-  if (input.legacyPlacement) {
-    return `${input.hostLabel} is running an older Mold that would ignore the ${IDENTITY_PHOTO_LABEL.toLowerCase()}. Update it, choose another machine, or remove the photo. Nothing was queued.`;
-  }
   if (!input.hostAdvertisesIdentity) {
     return `${input.hostLabel} doesn't advertise identity support for this model, so it would render without the face. Choose another machine or remove the ${IDENTITY_PHOTO_LABEL.toLowerCase()}. Nothing was queued.`;
   }

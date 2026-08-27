@@ -1,4 +1,3 @@
-import { ApiError } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import type { HostRoute } from "../stores/hosts";
 import {
@@ -22,7 +21,6 @@ import {
 } from "@studio/lib/generationSubmissionPolicy";
 import { modelPresenceOnHost } from "@studio/lib/modelInstallTargets";
 import type { MobileHost } from "./hosts";
-import { mobileIdentityRouteRefusal } from "./identity";
 
 /** One immutable routing candidate assembled by the mobile surface. */
 export interface MobileGenerationRoutingCandidate {
@@ -39,7 +37,6 @@ interface MobileRoutingObservation {
   roundTripMs: number;
   preview: GenerationPlacementPreview | null;
   error: unknown;
-  legacyUnsupported: boolean;
   telemetryOnly: boolean;
 }
 
@@ -49,7 +46,6 @@ export type MobileAutomaticRoute =
       host: MobileHost;
       route: HostRoute;
       placement: GenerationPlacementPreview | null;
-      legacyUnsupported: boolean;
     }
   | { kind: "missing_model"; host: MobileHost; route: HostRoute; model: string }
   | { kind: "error"; message: string }
@@ -59,7 +55,6 @@ export type MobilePinnedPlacement =
   | {
       kind: "placement";
       placement: GenerationPlacementPreview | null;
-      legacyUnsupported: boolean;
     }
   | { kind: "missing_model"; model: string }
   | { kind: "error"; message: string }
@@ -165,10 +160,7 @@ export function mobileGenerationSubmissionPolicy(options: {
     {
       hostId: options.route.hostId,
       queue: {
-        heterogeneous_batch: options.route.heterogeneousBatch === true,
         heterogeneous_batch_max_outputs: options.route.heterogeneousBatchMaxOutputs ?? null,
-        durable_batch_outcomes: options.route.durableBatchOutcomes === true,
-        admission_protocol_version: options.route.admissionProtocolVersion ?? null,
       },
       durableMedia: options.route.durableMedia ?? null,
     },
@@ -207,10 +199,9 @@ export async function previewPinnedMobileGeneration(
         model: options.model ?? String(options.request.model ?? ""),
       };
     }
-    return { kind: "placement", placement: null, legacyUnsupported: false };
+    return { kind: "placement", placement: null };
   }
   let placement: GenerationPlacementPreview | null = null;
-  let legacyUnsupported = false;
   try {
     placement = options.chain
       ? await previewChainPlacement(options.route.target, options.request, options.copies, {
@@ -221,50 +212,26 @@ export async function previewPinnedMobileGeneration(
         });
   } catch (error) {
     if (!isCurrent()) return { kind: "abandoned" };
-    if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
-      if (options.requireAuthoritative) {
-        return {
-          kind: "error",
-          message:
-            mobileIdentityRouteRefusal({
-              carriesIdentity: Boolean(options.request.id_image),
-              hostLabel: options.route.label,
-              hostAdvertisesIdentity: true,
-              legacyPlacement: true,
-            }) ??
-            `${options.route.label} does not provide the authoritative placement preview required for reference media. Nothing was queued.`,
-        };
-      }
-      legacyUnsupported = true;
-    } else {
-      return {
-        kind: "error",
-        message: describeTransportError(error, options.route.label),
-      };
-    }
+    return {
+      kind: "error",
+      message: describeTransportError(error, options.route.label),
+    };
   }
   if (!isCurrent()) return { kind: "abandoned" };
   const classification = classifyPlacementPreview(placement);
   if (options.requireAuthoritative && classification === "unsupported") {
     return {
       kind: "error",
-      message:
-        mobileIdentityRouteRefusal({
-          carriesIdentity: Boolean(options.request.id_image),
-          hostLabel: options.route.label,
-          hostAdvertisesIdentity: true,
-          legacyPlacement: true,
-        }) ??
-        `${options.route.label} does not provide the authoritative placement preview required for reference media. Nothing was queued.`,
+      message: `${options.route.label} does not provide the authoritative placement preview required for reference media. Nothing was queued.`,
     };
   }
-  if (!legacyUnsupported && classification !== "unsupported" && classification !== "planned") {
+  if (classification !== "unsupported" && classification !== "planned") {
     return {
       kind: "error",
       message: mobilePlacementFailure(placement, options.route.label, options.subject),
     };
   }
-  return { kind: "placement", placement, legacyUnsupported };
+  return { kind: "placement", placement };
 }
 
 /**
@@ -311,7 +278,6 @@ export async function routeAutomaticMobileGeneration(
             roundTripMs: elapsed(),
             preview: null,
             error: null,
-            legacyUnsupported: false,
             telemetryOnly: true,
           };
           if (
@@ -342,7 +308,6 @@ export async function routeAutomaticMobileGeneration(
           roundTripMs: elapsed(),
           preview,
           error: null,
-          legacyUnsupported: false,
           telemetryOnly: false,
         });
         if (classifyPlacementPreview(preview) === "planned") resolveFirstPlanned();
@@ -353,9 +318,6 @@ export async function routeAutomaticMobileGeneration(
           roundTripMs: elapsed(),
           preview: null,
           error: probeError,
-          legacyUnsupported:
-            probeError instanceof ApiError &&
-            (probeError.status === 404 || probeError.status === 405),
           telemetryOnly: false,
         });
       } finally {
@@ -389,32 +351,22 @@ export async function routeAutomaticMobileGeneration(
       ? [{ host: probe.view, roundTripMs: probe.roundTripMs, probe }]
       : [],
   );
+  // A print is answered from the captured queue/GPU snapshot and a sequence
+  // from its placement plan; one fan-out is never a mix of the two.
   const telemetryOnly = settledProbes.filter((probe) => probe.telemetryOnly);
   if (telemetryOnly.length > 0) {
-    // A mixed fleet cannot compare a telemetry-only v2 answer with a legacy
-    // execution projection. Once a v2 candidate exists, choose from every
-    // usable answer using the already-captured queue/GPU snapshot; legacy-only
-    // fleets retain their exact placement comparator below.
-    const usable = [...telemetryOnly, ...planned.map((entry) => entry.probe)];
+    const views = telemetryOnly.map((probe) => probe.view);
     const chosen =
       options.policy === CAPABLE_TARGET_ID
-        ? pickMostCapableHost(
-            usable.map((probe) => probe.view),
-            null,
-            { lowestIdWins: true },
-          )
-        : pickAutoHost(
-            usable.map((probe) => probe.view),
-            { lowestIdWins: true },
-          );
+        ? pickMostCapableHost(views, null, { lowestIdWins: true })
+        : pickAutoHost(views, { lowestIdWins: true });
     if (chosen) {
-      const probe = usable.find((entry) => entry.view.id === chosen.id)!;
+      const probe = telemetryOnly.find((entry) => entry.view.id === chosen.id)!;
       return {
         kind: "route",
         host: probe.host,
         route: probe.route,
         placement: probe.preview,
-        legacyUnsupported: false,
       };
     }
   }
@@ -435,7 +387,6 @@ export async function routeAutomaticMobileGeneration(
       host: winner.probe.host,
       route: winner.probe.route,
       placement: winner.probe.preview,
-      legacyUnsupported: false,
     };
   }
   if (knownMissing.length > 0) {
@@ -457,23 +408,25 @@ export async function routeAutomaticMobileGeneration(
     }
   }
 
-  const legacy = settledProbes.filter(
-    (probe) => probe.legacyUnsupported || classifyPlacementPreview(probe.preview) === "unsupported",
+  // An `unsupported` plan is a NON-AUTHORITATIVE answer, not an old machine:
+  // chain and local utility plans are documented to answer it, so the machine
+  // stays routable when the caller does not require authority.
+  const nonAuthoritative = settledProbes.filter(
+    (probe) => classifyPlacementPreview(probe.preview) === "unsupported",
   );
-  if (!options.requireAuthoritative && !carriesIdentity && legacy.length > 0) {
-    const views = legacy.map((probe) => probe.view);
+  if (!options.requireAuthoritative && !carriesIdentity && nonAuthoritative.length > 0) {
+    const views = nonAuthoritative.map((probe) => probe.view);
     const fallback =
       options.policy === CAPABLE_TARGET_ID
         ? pickMostCapableHost(views, null, { lowestIdWins: true })
         : pickAutoHost(views, { lowestIdWins: true });
     if (fallback) {
-      const probe = legacy.find((entry) => entry.host.id === fallback.id)!;
+      const probe = nonAuthoritative.find((entry) => entry.host.id === fallback.id)!;
       return {
         kind: "route",
         host: probe.host,
         route: probe.route,
         placement: null,
-        legacyUnsupported: true,
       };
     }
   }

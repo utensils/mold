@@ -4,7 +4,6 @@ import type {
   DurableMediaCapabilities,
   GenerationBatchStatusResponse,
 } from "@studio/api/generationAdmission";
-import { supportsDurableRequest } from "@studio/api/generationAdmission";
 import { generationHostSubmissionPolicy } from "@studio/lib/generationSubmissionPolicy";
 import {
   buildGenerationBatchStatusRequest,
@@ -16,7 +15,6 @@ import {
   type GenerationLifecycleAction,
   type GenerationLifecycleJob,
 } from "@studio/lib/generationLifecycle";
-import { isMinimaxH3Identity } from "@studio/lib/minimaxH3Authoring";
 
 export const MOBILE_DURABLE_GENERATIONS_KEY = "mold.mobile.durable-generations.v1";
 
@@ -220,44 +218,39 @@ export function saveMobileDurableGenerationRecoveries(
   }
 }
 
-/** Decide against the exact frozen host capability. Unsupported media stays
- * on the authenticated legacy stream; automatic chains keep their existing
- * durable sequence protocol. */
-export function useMobileDurableGenerationLifecycle(input: {
+/**
+ * The named reason this print cannot be queued on the exact frozen machine,
+ * or `null` when it can. Every print is admitted through the durable queue or
+ * refused by name; an automatic sequence keeps its own durable chain protocol
+ * and is answered `null` here so the caller routes it there.
+ */
+export function mobileDurableGenerationRefusal(input: {
   queue: DurableGenerationQueueCapabilities | null | undefined;
   durableMedia?: DurableMediaCapabilities | null | undefined;
   requests: readonly GenerateRequest[];
-  chain: boolean;
+  hostLabel: string;
+  instanceId?: string | null | undefined;
   modelFamily?: string | null;
-}): boolean {
-  const canonicalV2 =
-    input.queue?.admission_protocol_version != null && input.queue.admission_protocol_version >= 2;
-  if (canonicalV2) {
-    return (
-      !input.chain &&
-      input.requests.length > 0 &&
-      input.requests.every(
-        (request) =>
-          generationHostSubmissionPolicy(
-            { kind: "pinned", hostId: "frozen" },
-            {
-              hostId: "frozen",
-              queue: input.queue ?? null,
-              durableMedia: input.durableMedia ?? null,
-            },
-            request,
-          ).admission === "canonical_durable",
-      )
-    );
+}): string | null {
+  if (!input.instanceId?.trim()) {
+    return `${input.hostLabel} has not reported its server instance yet. Nothing was queued.`;
   }
-  return (
-    !input.chain &&
-    input.requests.length > 0 &&
-    !input.requests.some((request) => isMinimaxH3Identity(input.modelFamily, request.model)) &&
-    input.requests.every((request) =>
-      supportsDurableRequest(input.queue, input.durableMedia, request),
-    )
-  );
+  if (input.requests.length === 0) return "There is nothing to queue.";
+  for (const request of input.requests) {
+    const policy = generationHostSubmissionPolicy(
+      { kind: "pinned", hostId: "frozen" },
+      {
+        hostId: "frozen",
+        queue: input.queue ?? null,
+        durableMedia: input.durableMedia ?? null,
+      },
+      input.modelFamily ? { ...request, family: input.modelFamily } : request,
+    );
+    if (policy.admission !== "canonical_durable") {
+      return `${input.hostLabel} cannot queue this print: ${policy.refusal}. Nothing was queued.`;
+    }
+  }
+  return null;
 }
 
 export function mobileDurablePresentations(

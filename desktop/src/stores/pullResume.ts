@@ -88,20 +88,33 @@ export const usePullResumeStore = defineStore("pullResume", {
         // The resumed submit must not fail silently — the last thing the
         // user saw was a promise that it would generate.
         const generation = useGenerationStore();
-        const submission = pending.requestOptions
-          ? generation.submitBatch(
-              pending.request,
-              pending.batch,
-              pending.route,
-              pending.chainRouting ?? null,
-              pending.requestOptions,
-            )
-          : generation.submitBatch(
-              pending.request,
-              pending.batch,
-              pending.route,
-              pending.chainRouting ?? null,
-            );
+        let submission: ReturnType<typeof generation.submitBatch>;
+        try {
+          submission = pending.requestOptions
+            ? generation.submitBatch(
+                pending.request,
+                pending.batch,
+                pending.route,
+                pending.chainRouting ?? null,
+                pending.requestOptions,
+              )
+            : generation.submitBatch(
+                pending.request,
+                pending.batch,
+                pending.route,
+                pending.chainRouting ?? null,
+              );
+        } catch (error) {
+          // The machine refused the resumed print by name. The user was
+          // promised a generation, so say why instead of failing silently.
+          useToastStore().push(
+            `Resumed generation of ${pending.model} was refused — ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            "error",
+          );
+          return;
+        }
         void submission.settled.then((jobs) => {
           for (const warning of new Set(jobs.flatMap((job) => job.requestWarnings))) {
             useToastStore().push(warning, "warning");

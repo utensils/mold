@@ -39,26 +39,35 @@ export interface DurableGenerationRecoveryEnvelope {
   records: DurableGenerationRecoveryRecord[];
 }
 
-/** Decide against the exact frozen host capability through the one shared
- * submission policy. A request this machine cannot carry durably is refused,
- * never re-routed to a second submission path. */
+/** The named reason this request cannot be queued on the exact frozen host,
+ * or `null` when it can. Every generation is admitted through the durable
+ * queue, so a reason here is a refusal the surface shows the user — never a
+ * signal to submit the request somewhere else. */
+export function generationRefusalReason(
+  request: GenerateRequest,
+  queue: DurableGenerationQueueCapabilities | null | undefined,
+  durableMedia: DurableMediaCapabilities | null | undefined,
+  modelFamily?: string | null,
+): string | null {
+  const policy = generationHostSubmissionPolicy(
+    { kind: "pinned", hostId: "frozen" },
+    {
+      hostId: "frozen",
+      ...(queue === undefined ? {} : { queue }),
+      ...(durableMedia === undefined ? {} : { durableMedia }),
+    },
+    modelFamily ? { ...request, family: modelFamily } : request,
+  );
+  return policy.admission === "canonical_durable" ? null : policy.refusal;
+}
+
 export function requestIsEligibleForDurableGeneration(
   request: GenerateRequest,
   queue: DurableGenerationQueueCapabilities | null | undefined,
   durableMedia: DurableMediaCapabilities | null | undefined,
   modelFamily?: string | null,
 ): boolean {
-  return (
-    generationHostSubmissionPolicy(
-      { kind: "pinned", hostId: "frozen" },
-      {
-        hostId: "frozen",
-        ...(queue === undefined ? {} : { queue }),
-        ...(durableMedia === undefined ? {} : { durableMedia }),
-      },
-      modelFamily ? { ...request, family: modelFamily } : request,
-    ).admission === "canonical_durable"
-  );
+  return generationRefusalReason(request, queue, durableMedia, modelFamily) === null;
 }
 
 export function durableChildSummary(

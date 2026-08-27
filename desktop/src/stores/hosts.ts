@@ -192,13 +192,9 @@ export interface HostRoute {
   instanceId?: string | null;
   /** Frozen authenticated reference-ingress contract for this exact host. */
   referenceUploads?: ReferenceUploadCapabilities | null;
-  /** Exact host supports one durable heterogeneous prepared-batch admission. */
-  heterogeneousBatch?: boolean;
+  /** The exact host's durable batch chunk limit. Its presence IS the durable
+   * generation contract. */
   heterogeneousBatchMaxOutputs?: number | null;
-  /** Exact host exposes idempotent admission plus durable terminal outcomes. */
-  durableBatchOutcomes?: boolean;
-  /** Version 2 acknowledges durable work before model preparation. */
-  admissionProtocolVersion?: number | null;
   /** Exact host encrypts and durably replays supported request media. */
   durableMedia?: DurableMediaCapabilities | null;
   /** Authoritative family of the model frozen for this submission. */
@@ -246,6 +242,9 @@ export type FeasibleRouteResult =
   | { kind: "transient"; perHost: HostProbeFailure[] }
   | { kind: "mixed"; perHost: HostFeasibilityFailure[] };
 
+/** The ONE projection of a machine plus its advertised capabilities into a
+ * frozen submission route. Both the placement path and the pinned-target path
+ * read it, so they cannot disagree about what a host can carry. */
 function hostRoute(host: HostView, capabilities?: ServerCapabilities): HostRoute | null {
   if (!host.baseUrl) return null;
   return {
@@ -256,14 +255,7 @@ function hostRoute(host: HostView, capabilities?: ServerCapabilities): HostRoute
     instanceId: host.instanceId,
     referenceUploads: capabilities?.reference_uploads ?? null,
     ...(capabilities?.durable_media ? { durableMedia: capabilities.durable_media } : {}),
-    heterogeneousBatch: capabilities?.queue?.heterogeneous_batch === true,
     heterogeneousBatchMaxOutputs: capabilities?.queue?.heterogeneous_batch_max_outputs ?? null,
-    ...(capabilities?.queue?.durable_batch_outcomes === true ? { durableBatchOutcomes: true } : {}),
-    ...(capabilities?.queue?.admission_protocol_version != null
-      ? {
-          admissionProtocolVersion: capabilities.queue.admission_protocol_version,
-        }
-      : {}),
   };
 }
 
@@ -718,29 +710,7 @@ export const useHostsStore = defineStore("hosts", {
         chosen = pickAutoHost(withModel.length > 0 ? withModel : routable);
       }
       if (!chosen?.baseUrl) return null;
-      return {
-        hostId: chosen.id,
-        label: chosen.label,
-        kind: chosen.kind,
-        target: { baseUrl: chosen.baseUrl, apiKey: chosen.apiKey },
-        instanceId: chosen.instanceId,
-        referenceUploads: this.capabilities[chosen.id]?.reference_uploads ?? null,
-        ...(this.capabilities[chosen.id]?.durable_media
-          ? { durableMedia: this.capabilities[chosen.id]!.durable_media! }
-          : {}),
-        heterogeneousBatch: this.capabilities[chosen.id]?.queue?.heterogeneous_batch === true,
-        heterogeneousBatchMaxOutputs:
-          this.capabilities[chosen.id]?.queue?.heterogeneous_batch_max_outputs ?? null,
-        ...(this.capabilities[chosen.id]?.queue?.durable_batch_outcomes === true
-          ? { durableBatchOutcomes: true }
-          : {}),
-        ...(this.capabilities[chosen.id]?.queue?.admission_protocol_version != null
-          ? {
-              admissionProtocolVersion:
-                this.capabilities[chosen.id]!.queue!.admission_protocol_version,
-            }
-          : {}),
-      };
+      return hostRoute(chosen, this.capabilities[chosen.id] ?? undefined);
     },
     async resolveFeasible(
       selection: string | null,

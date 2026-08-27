@@ -467,7 +467,7 @@ import {
   reduceMobileDurableGenerationRecovery,
   resolveMobileDurableHost,
   saveMobileDurableGenerationRecoveries,
-  useMobileDurableGenerationLifecycle,
+  mobileDurableGenerationRefusal,
   type MobileDurableGenerationPresentation,
   type MobileDurableGenerationRecovery,
 } from "./mobileGenerationRecovery";
@@ -1085,11 +1085,11 @@ const hostProbes = new Map<
 const knownHostReachability = new Set<string>();
 const generation = useGenerationStore();
 /**
- * Ordinary media-free prints admitted through the durable batch endpoint.
- * The Pinia generation store remains the legacy POST-SSE implementation used
- * by old hosts, chains, identity and every request carrying media. Keeping the
- * durable runtime local to MobileApp prevents the desktop shell from silently
- * inheriting phone recovery or native-credential policy.
+ * Every print is admitted through the durable batch endpoint. The Pinia
+ * generation store now serves only auto-chained SEQUENCES, which keep their
+ * own held chain stream. Keeping the durable runtime local to MobileApp
+ * prevents the desktop shell from silently inheriting phone recovery or
+ * native-credential policy.
  */
 const durableGenerationRecoveries = ref<MobileDurableGenerationRecovery[]>(
   loadMobileDurableGenerationRecoveries(localStorage),
@@ -2781,10 +2781,7 @@ function routeForMobileHost(host: MobileHost): HostRoute {
     ...(serverCapabilities[host.id]?.durable_media
       ? { durableMedia: serverCapabilities[host.id]!.durable_media! }
       : {}),
-    heterogeneousBatch: queue?.heterogeneous_batch === true,
     heterogeneousBatchMaxOutputs: queue?.heterogeneous_batch_max_outputs ?? null,
-    durableBatchOutcomes: queue?.durable_batch_outcomes === true,
-    admissionProtocolVersion: queue?.admission_protocol_version ?? null,
   };
 }
 
@@ -3260,12 +3257,11 @@ async function submitMobileDurableGeneration(input: {
   requests: GenerateRequest[];
 }): Promise<void> {
   const limit = canonicalGenerationBatchLimit({
-    heterogeneous_batch: input.route.heterogeneousBatch === true,
     heterogeneous_batch_max_outputs: input.route.heterogeneousBatchMaxOutputs ?? null,
-    durable_batch_outcomes: input.route.durableBatchOutcomes === true,
-    admission_protocol_version: input.route.admissionProtocolVersion ?? null,
   });
-  if (limit === null) throw new Error("This host does not support durable generation admission.");
+  if (limit === null) {
+    throw new Error(`${input.route.label} does not advertise the durable generation queue.`);
+  }
   await Promise.all(
     chunkGenerationBatchRequests(input.requests, limit).map((requests) =>
       submitMobileDurableGenerationChunk({ route: input.route, requests }),
@@ -4475,7 +4471,6 @@ async function submitMobileSequence(): Promise<void> {
       ...chainFilingFields(requestForm),
     };
     let preview: GenerationPlacementPreview | null = null;
-    let legacyUnsupported = false;
     if (automatic) {
       const routed = await routeAutomaticGeneration({
         request: request as unknown as Record<string, unknown>,
@@ -4500,22 +4495,13 @@ async function submitMobileSequence(): Promise<void> {
       target = { ...mobileHostTarget(host) };
       frozenRoute = routed.route;
       preview = routed.placement;
-      legacyUnsupported = routed.legacyUnsupported;
     } else {
-      try {
-        preview = await previewChainPlacement(
-          target,
-          request as unknown as Record<string, unknown>,
-          1,
-          { signal },
-        );
-      } catch (error) {
-        if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
-          legacyUnsupported = true;
-        } else {
-          throw error;
-        }
-      }
+      preview = await previewChainPlacement(
+        target,
+        request as unknown as Record<string, unknown>,
+        1,
+        { signal },
+      );
     }
     const classification: string = classifyPlacementPreview(preview);
     if (!isCurrent()) return;
@@ -4524,7 +4510,7 @@ async function submitMobileSequence(): Promise<void> {
       promptForMissingGenerationModel(missingModel.model, host, frozenRoute);
       return;
     }
-    if (!legacyUnsupported && classification !== "unsupported" && classification !== "planned") {
+    if (classification !== "unsupported" && classification !== "planned") {
       throw new Error(mobilePlacementFailure(preview, host.name, "sequence"));
     }
     const fenceHost = automatic
@@ -6154,7 +6140,6 @@ async function generate(): Promise<void> {
     generationSubmissionPhase.value = "placement";
   }
   let placement: GenerationPlacementPreview | null = null;
-  let legacyUnsupported = false;
   const previewRequest =
     chainRouting.kind === "chain"
       ? previewRequestForSiblingFanout(
@@ -6193,7 +6178,6 @@ async function generate(): Promise<void> {
     // recovery, and the connection fence — reads this exact route.
     route = routed.route;
     placement = routed.placement;
-    legacyUnsupported = routed.legacyUnsupported;
   } else {
     const preview = await previewPinnedMobileGeneration({
       route,
@@ -6224,7 +6208,6 @@ async function generate(): Promise<void> {
       return;
     }
     placement = preview.placement;
-    legacyUnsupported = preview.legacyUnsupported;
   }
   if (!submissionAttempt.isCurrent()) {
     releasePreparedSubmission();
@@ -6243,13 +6226,11 @@ async function generate(): Promise<void> {
   // The last word on identity, applied to the machine that was actually
   // frozen — a pinned one, or the fan-out's winner. `form.identitySupported`
   // came from one deduplicated picker row and cannot answer for this machine,
-  // and a legacy placement fallback would ignore the fields outright. Either
-  // way the print would come back as someone else, so nothing is queued.
+  // so the print would come back as someone else; nothing is queued.
   const identityRefusal = mobileIdentityRouteRefusal({
     carriesIdentity: Boolean(request.id_image),
     hostLabel: route.label,
     hostAdvertisesIdentity: hostAdvertisesIdentity(route.hostId, request.model),
-    legacyPlacement: legacyUnsupported,
   });
   if (identityRefusal) {
     setGenerationStatus(identityRefusal, true);
@@ -6289,21 +6270,24 @@ async function generate(): Promise<void> {
     resolveBaseSeed(request.seed),
     requestOptions,
   );
-  const durableLifecycle =
-    Boolean(route.instanceId?.trim()) &&
-    useMobileDurableGenerationLifecycle({
-      queue: {
-        heterogeneous_batch: route.heterogeneousBatch === true,
-        heterogeneous_batch_max_outputs: route.heterogeneousBatchMaxOutputs ?? null,
-        durable_batch_outcomes: route.durableBatchOutcomes === true,
-        admission_protocol_version: route.admissionProtocolVersion ?? null,
-      },
+  if (chainRouting.kind !== "chain") {
+    // Every print is admitted through the durable queue. A machine that cannot
+    // carry it is refused BY NAME with nothing queued — there is no attached
+    // stream left to fall back to.
+    const refusal = mobileDurableGenerationRefusal({
+      queue: { heterogeneous_batch_max_outputs: route.heterogeneousBatchMaxOutputs ?? null },
       durableMedia: route.durableMedia,
       requests: durablePlans,
-      chain: chainRouting.kind === "chain",
+      hostLabel: route.label,
+      instanceId: route.instanceId,
       modelFamily: form.family,
     });
-  if (durableLifecycle) {
+    if (refusal !== null) {
+      setGenerationStatus(refusal, true);
+      generationAnnouncement.value = refusal;
+      releasePreparedSubmission();
+      return;
+    }
     const admission = submitMobileDurableGeneration({ route, requests: durablePlans });
     const admissionBackgroundTask = submissionAttempt.handoffBackgroundTask();
     void admission.finally(() => admissionBackgroundTask.release());
@@ -6334,7 +6318,6 @@ async function generate(): Promise<void> {
         target: { ...route.target },
         instanceId: route.instanceId ?? null,
         referenceUploads: route.referenceUploads ?? null,
-        heterogeneousBatch: route.heterogeneousBatch ?? false,
         heterogeneousBatchMaxOutputs: route.heterogeneousBatchMaxOutputs ?? null,
         mirrorRemoteOutput: false,
         retainEncodedResult: false,
