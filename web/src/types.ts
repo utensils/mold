@@ -729,6 +729,11 @@ export interface ChainStageWire {
 
 export interface ChainRequestWire {
   model: string;
+  /** An auto-chained one-shot: the machine renders and stitches it, records
+   * the print with stage seeds but no chain job id, and deletes the job's
+   * artifacts afterwards. Absent for an authored sequence, which is durable
+   * and belongs in History. */
+  ephemeral?: boolean;
   /** Title for the STITCHED print — a sequence renders one print, so this
    * titles that print and never an intermediate clip. Additive. */
   title?: string | null;
