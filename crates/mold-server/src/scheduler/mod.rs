@@ -681,7 +681,11 @@ fn observe_preparation_refresh(
 /// the per-device direction the sample moved.
 const CAPACITY_PARK_REFRESH_SIGNATURE: &str = "capacity-park";
 
-fn park_retry_delay_ms(attempts: u8) -> u64 {
+/// How long a preparation refresh must observe the same signal before it
+/// re-runs. One ladder for both refresh kinds — a capacity park and a moved
+/// capacity sample — because they are the same question asked of different
+/// evidence, and two copies would drift.
+fn preparation_refresh_delay_ms(attempts: u8) -> u64 {
     PREPARATION_RETRY_BASE_MS
         .saturating_mul(1_u64 << u32::from(attempts.min(4)))
         .clamp(PREPARATION_REFRESH_STABILITY_MS, PREPARATION_RETRY_MAX_MS)
@@ -3259,7 +3263,7 @@ impl Coordinator {
                     &mut pending.preparation_refresh_observation,
                     vec![(CAPACITY_PARK_REFRESH_SIGNATURE.to_string(), 1)],
                     now_ms,
-                    park_retry_delay_ms(pending.preparation_retry_attempts),
+                    preparation_refresh_delay_ms(pending.preparation_retry_attempts),
                 ) {
                     refresh.insert(id.clone());
                 }
@@ -3270,9 +3274,7 @@ impl Coordinator {
                 pending.preparation_refresh_observation = None;
                 continue;
             }
-            let delay = PREPARATION_RETRY_BASE_MS
-                .saturating_mul(1_u64 << u32::from(pending.preparation_retry_attempts.min(4)))
-                .clamp(PREPARATION_REFRESH_STABILITY_MS, PREPARATION_RETRY_MAX_MS);
+            let delay = preparation_refresh_delay_ms(pending.preparation_retry_attempts);
             if observe_preparation_refresh(
                 &mut pending.preparation_refresh_observation,
                 signature,
