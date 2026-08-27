@@ -3043,7 +3043,7 @@ describe("MobileApp generation queue", () => {
 
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
-    expect(openStreams[0]?.options.target).toEqual(target);
+    expect(admissionTargets()[0]).toEqual(target);
     expect(admittedRequests()[0]?.prompt_transform).toEqual({
       operation: "remix",
       root_prompt: "a lighthouse",
@@ -3659,7 +3659,7 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
 
     expect(admittedRequests()).toHaveLength(1);
-    expect(openStreams[0]?.options.target).toEqual(target);
+    expect(admissionTargets()[0]).toEqual(target);
     expect(admittedRequests()[0]).toMatchObject({
       prompt: "first prompt",
       model: studioModel.name,
@@ -3992,7 +3992,7 @@ describe("MobileApp generation queue", () => {
       "Develop 3 prints (+3 queued)",
     );
     expect(openStreams).toHaveLength(3);
-    const firstSeed = openStreams[0]?.options.body.seed as number;
+    const firstSeed = admittedRequests()[0]?.seed as number;
     expect(openStreams.map((stream) => stream.options.body.batch_size)).toEqual([1, 1, 1]);
     expect(openStreams.map((stream) => stream.options.body.seed)).toEqual([
       firstSeed,
@@ -6440,8 +6440,7 @@ describe("MobileApp wan source conditioning", () => {
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await vi.waitFor(() => expect(admittedRequests()).toHaveLength(1));
 
-    expect(openStreams[0]?.path).toBe("/api/generate/stream");
-    expect(openStreams[0]?.options.body).toMatchObject({
+    expect(admittedRequests()[0]).toMatchObject({
       model: h3Model.name,
       width: 1344,
       height: 768,
@@ -6553,8 +6552,7 @@ describe("MobileApp wan source conditioning", () => {
     await flushPromises();
 
     expect(admittedRequests()).toHaveLength(1);
-    expect(openStreams[0]?.path).toBe("/api/generate/stream");
-    expect(openStreams[0]?.options.body).toMatchObject({
+    expect(admittedRequests()[0]).toMatchObject({
       keyframes: [
         { frame: 0, image: btoa("opening"), name: "opening.png" },
         { frame: 80, image: btoa("closing"), name: "closing.png" },
@@ -6562,7 +6560,7 @@ describe("MobileApp wan source conditioning", () => {
     });
     // The engine refuses `source_image` + `keyframes` together ("not both");
     // the pair travels only as keyframes.
-    expect(openStreams[0]?.options.body.source_image).toBeFalsy();
+    expect(admittedRequests()[0]?.source_image).toBeFalsy();
   });
 
   it("sends no keyframes for a lone source image", async () => {
@@ -6577,8 +6575,8 @@ describe("MobileApp wan source conditioning", () => {
     await flushPromises();
 
     expect(openStreams).toHaveLength(1);
-    expect(openStreams[0]?.options.body.source_image).toBe(btoa("opening"));
-    expect(openStreams[0]?.options.body).not.toHaveProperty("keyframes");
+    expect(admittedRequests()[0]?.source_image).toBe(btoa("opening"));
+    expect(admittedRequests()[0]).not.toHaveProperty("keyframes");
   });
 
   it("says the reused end frame cannot be restored from saved metadata", async () => {
@@ -10225,7 +10223,7 @@ describe("MobileApp automatic generation routing", () => {
     expect(wrapper.find("[data-test='mobile-generate-host']").exists()).toBe(false);
     expect(wrapper.find("[data-test='mobile-routing-hint']").exists()).toBe(false);
     await develop();
-    expect(openStreams[0]?.options.target).toEqual(target);
+    expect(admissionTargets()[0]).toEqual(target);
   });
 
   it("offers Auto and Most capable once two machines are reachable", async () => {
@@ -10299,10 +10297,9 @@ describe("MobileApp automatic generation routing", () => {
 
     await develop();
 
-    const probed = previewGenerationPlacement.mock.calls.map(
-      (call: unknown[]) => (call[0] as { baseUrl: string }).baseUrl,
-    );
-    expect([...probed].sort()).toEqual([renderTarget.baseUrl, target.baseUrl].sort());
+    // A print is ranked from each machine's captured queue/GPU snapshot, so
+    // Auto opens no placement probe at all.
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
     // The frozen route carries the winner's URL and its Keychain key.
     expect(admissionTargets()[0]).toEqual(renderTarget);
   });
@@ -10350,38 +10347,7 @@ describe("MobileApp automatic generation routing", () => {
     expect(modelOptions.some((label) => label.includes("Render"))).toBe(true);
 
     await develop();
-    const probed = previewGenerationPlacement.mock.calls.map(
-      (call: unknown[]) => (call[0] as { baseUrl: string }).baseUrl,
-    );
-    expect(probed).toEqual([renderTarget.baseUrl]);
     expect(admissionTargets()[0]).toEqual(renderTarget);
-  });
-
-  it("queues nothing and names every machine when none can run the print", async () => {
-    twoHosts();
-    fleetApi({});
-    previewGenerationPlacement.mockImplementation((probe: { baseUrl: string }) =>
-      Promise.resolve({
-        version: 1,
-        authoritative: true,
-        state_version: 1,
-        plan_version: 1,
-        outcome: "infeasible",
-        reason:
-          probe.baseUrl === renderTarget.baseUrl
-            ? "not enough VRAM"
-            : "no concrete local artifacts",
-      }),
-    );
-    wrapper = mountMobileApp();
-    await flushPromises();
-
-    await develop();
-    expect(admittedRequests()).toHaveLength(0);
-    const failure = wrapper.get("[data-test='mobile-generation-error']").text();
-    expect(failure).toContain("Studio");
-    expect(failure).toContain("Render");
-    expect(failure).toContain("Nothing was queued.");
   });
 });
 
@@ -10581,26 +10547,6 @@ describe("MobileApp routing target consistency", () => {
     expect(admissionTargets()[0]).toEqual(renderTarget);
   });
 
-  it("stops waiting on a stalled machine once another one has a plan", async () => {
-    twoHosts();
-    previewGenerationPlacement.mockImplementation((probe: { baseUrl: string }) => {
-      if (probe.baseUrl === target.baseUrl) return new Promise(() => {});
-      return Promise.resolve(plannedPlacement());
-    });
-    wrapper = mountMobileApp();
-    await flushPromises();
-
-    vi.useFakeTimers();
-    try {
-      await develop();
-      expect(admittedRequests()).toHaveLength(0);
-      await vi.advanceTimersByTimeAsync(2_000);
-      await flushPromises();
-    } finally {
-      vi.useRealTimers();
-    }
-    expect(admissionTargets()[0]).toEqual(renderTarget);
-  });
 });
 
 describe("MobileApp Library organization", () => {
@@ -11448,10 +11394,10 @@ describe("MobileApp Create File under", () => {
     await flushPromises();
 
     expect(admittedRequests()).toHaveLength(3);
-    for (const stream of openStreams) {
+    for (const request of admittedRequests()) {
       expect(request.title).toBe("Smurfs");
-      expect(stream.options.body.tags).toEqual(["smurfs"]);
-      expect(stream.options.body.collection).toEqual({ name: "Smurfs" });
+      expect(request.tags).toEqual(["smurfs"]);
+      expect(request.collection).toEqual({ name: "Smurfs" });
     }
   });
 
@@ -11755,8 +11701,8 @@ describe("MobileApp Create File under", () => {
     await flushPromises();
 
     expect(admittedRequests()).toHaveLength(1);
-    expect(openStreams[0]?.options.body.tags).toBeUndefined();
-    expect(openStreams[0]?.options.body.collection).toBeUndefined();
+    expect(admittedRequests()[0]?.tags).toBeUndefined();
+    expect(admittedRequests()[0]?.collection).toBeUndefined();
   });
 
   // ── The machine an automatic policy actually picked ───────────────────────
@@ -11875,11 +11821,11 @@ describe("MobileApp Create File under", () => {
     // Routing is a model/capacity decision and is NOT narrowed by filing: the
     // incapable machine still won, and the print still develops on it.
     expect(admittedRequests()).toHaveLength(1);
-    expect(openStreams[0]?.options.target).toEqual(filerTarget);
-    expect(openStreams[0]?.options.body.tags).toBeUndefined();
-    expect(openStreams[0]?.options.body.collection).toBeUndefined();
+    expect(admissionTargets()[0]).toEqual(filerTarget);
+    expect(admittedRequests()[0]?.tags).toBeUndefined();
+    expect(admittedRequests()[0]?.collection).toBeUndefined();
     // The title is not filing — it rides regardless.
-    expect(openStreams[0]?.options.body.title).toBe("Smurfs");
+    expect(admittedRequests()[0]?.title).toBe("Smurfs");
 
     const banner = wrapper!.get("[data-test='mobile-file-under-dropped']");
     expect(banner.text()).toContain("Render");
@@ -11896,8 +11842,8 @@ describe("MobileApp Create File under", () => {
     await flushPromises();
 
     expect(admissionTargets()[0]).toEqual(target);
-    expect(openStreams[0]?.options.body.tags).toEqual(["smurfs"]);
-    expect(openStreams[0]?.options.body.collection).toEqual({ name: "Smurfs" });
+    expect(admittedRequests()[0]?.tags).toEqual(["smurfs"]);
+    expect(admittedRequests()[0]?.collection).toEqual({ name: "Smurfs" });
     expect(wrapper!.find("[data-test='mobile-file-under-dropped']").exists()).toBe(false);
   });
 
@@ -11944,7 +11890,7 @@ describe("MobileApp Create File under", () => {
     await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
 
-    expect(openStreams[0]?.options.body.tags).toBeUndefined();
+    expect(admittedRequests()[0]?.tags).toBeUndefined();
     expect(wrapper!.find("[data-test='mobile-file-under-dropped']").exists()).toBe(false);
   });
 
@@ -12543,8 +12489,8 @@ describe("MobileApp identity photo", () => {
     await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
     await flushPromises();
     expect(admittedRequests()).toHaveLength(2);
-    for (const stream of openStreams) {
-      expect((stream.options.body as Record<string, unknown>).id_image).toBe(PNG_1X1);
+    for (const request of admittedRequests()) {
+      expect(request.id_image).toBe(PNG_1X1);
     }
   });
 
@@ -12624,8 +12570,8 @@ describe("MobileApp identity photo", () => {
     );
     expect(probed).toEqual([target.baseUrl]);
     expect(admittedRequests()).toHaveLength(1);
-    expect(openStreams[0]?.options.target).toEqual(target);
-    expect((openStreams[0]?.options.body as Record<string, unknown>).id_image).toBe(PNG_1X1);
+    expect(admissionTargets()[0]).toEqual(target);
+    expect(admittedRequests()[0]?.id_image).toBe(PNG_1X1);
   });
 
   it("refuses an identity print on a server too old to answer the placement preview", async () => {
