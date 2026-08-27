@@ -110,10 +110,14 @@ describe("HostQueuePanel", () => {
     const { wrapper } = await mountPanel([], [queued("srv-0", 1, 0)]);
     const generation = useGenerationStore();
     generation.jobs.push({
-      ...({} as never),
       clientId: 7,
       id: "srv-0",
-      request: { prompt: "a red bicycle", model: "flux2-klein", width: 1024, height: 1024 },
+      request: {
+        prompt: "a red bicycle",
+        model: "flux2-klein",
+        width: 1024,
+        height: 1024,
+      },
     } as never);
     await flushPromises();
 
