@@ -2863,6 +2863,75 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.find("[data-test='swipe-action-retry']").exists()).toBe(true);
   });
 
+  it("drops a hold's error and Retry once the child is developing", async () => {
+    let clientBatchId = "";
+    let state = "held";
+    const child = () => ({
+      index: 1,
+      job_id: "resumed-job",
+      state,
+      retryable: state === "held",
+      error: state === "held" ? "model is not downloaded" : undefined,
+      error_code: state === "held" ? "UNKNOWN_MODEL" : undefined,
+      created_at_ms: 10,
+      updated_at_ms: state === "held" ? 11 : 12,
+    });
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({ events: { available: true }, ...durableQueueCapabilities });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        clientBatchId = JSON.parse(String(init.body)).client_batch_id as string;
+        return Promise.resolve({
+          id: "resumed-batch",
+          client_batch_id: clientBatchId,
+          instance_id: "studio-id",
+          durable: true,
+          children: [child()],
+        });
+      }
+      if (path === "/api/generation-batches/status" && init?.method === "POST") {
+        return Promise.resolve({
+          instance_id: "studio-id",
+          batches: [
+            {
+              id: "resumed-batch",
+              client_batch_id: clientBatchId,
+              instance_id: "studio-id",
+              durable: true,
+              children: [child()],
+            },
+          ],
+          missing: { client_batch_ids: [], batch_ids: [] },
+        });
+      }
+      return durableApiFallback(path, init, callTarget);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("held then resumed");
+    expect(wrapper.find("[data-test='swipe-action-retry']").exists()).toBe(true);
+
+    // The retry moved the child straight to running before any snapshot
+    // showed it queued: the hold is over, so its error and Retry go with it.
+    state = "running";
+    openStreams
+      .find((stream) => stream.path === "/api/events")!
+      .options.onEvent("event", JSON.stringify({ type: "job_started", id: "resumed-job" }));
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-generation-held-error']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='swipe-action-retry']").exists()).toBe(false);
+  });
+
   it("retries only an explicitly retryable held child on its exact authenticated host", async () => {
     let clientBatchId = "";
     const heldBatch = () => ({

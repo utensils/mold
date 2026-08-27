@@ -50,10 +50,13 @@ export function applyDurablePresentation(job: Job, p: GenerationChildPresentatio
       job.status = "queued";
       job.stage = p.label;
       job.cancelling = true;
+      clearHold(job);
       return;
     case "running":
+      // A retry can move a held child straight to running; the hold is over.
       job.status = "loading";
       job.stage = p.label;
+      clearHold(job);
       return;
     case "complete":
       return;
