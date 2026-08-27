@@ -9583,15 +9583,25 @@ pub async fn stream_downloads(
     // freshly-mounted SPA paints current state without waiting for the
     // next delta.
     let rx = state.downloads.subscribe();
+    let shutdown = state.events.shutdown_token();
     let initial = state.downloads.listing().await;
     let snapshot_event = mold_core::types::DownloadEvent::Snapshot { listing: initial };
 
     let stream = async_stream::stream! {
+        if shutdown.is_cancelled() {
+            return;
+        }
         let data = serde_json::to_string(&snapshot_event).unwrap_or_else(|_| "{}".to_string());
         yield Ok::<_, std::convert::Infallible>(Event::default().event("download").data(data));
 
         let mut bs = BroadcastStream::new(rx);
-        while let Some(item) = bs.next().await {
+        loop {
+            let item = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                item = bs.next() => item,
+            };
+            let Some(item) = item else { break };
             match item {
                 Ok(event) => {
                     let data = serde_json::to_string(&event)
@@ -9636,16 +9646,26 @@ async fn get_resources_stream(
     use tokio_stream::wrappers::BroadcastStream;
 
     let rx = state.resources.subscribe();
+    let shutdown = state.events.shutdown_token();
     // Attach the cached `latest` snapshot as the first frame so clients
     // don't wait up to one full tick for their initial value.
     let initial = state.resources.latest();
 
     let stream = async_stream::stream! {
+        if shutdown.is_cancelled() {
+            return;
+        }
         if let Some(snap) = initial {
             yield Ok::<_, Infallible>(snapshot_to_sse(&snap));
         }
         let mut bs = BroadcastStream::new(rx);
-        while let Some(item) = bs.next().await {
+        loop {
+            let item = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                item = bs.next() => item,
+            };
+            let Some(item) = item else { break };
             match item {
                 Ok(snap) => yield Ok(snapshot_to_sse(&snap)),
                 // Lag is normal for slow clients — skip dropped frames
@@ -9696,11 +9716,21 @@ async fn stream_events(
     use tokio_stream::wrappers::BroadcastStream;
 
     let rx = state.events.subscribe();
+    let shutdown = state.events.shutdown_token();
     let instance_id = state.instance_id.clone();
     let stream = async_stream::stream! {
+        if shutdown.is_cancelled() {
+            return;
+        }
         yield Ok::<_, Infallible>(event_authority_to_sse(instance_id.as_str()));
         let mut bs = BroadcastStream::new(rx);
-        while let Some(item) = bs.next().await {
+        loop {
+            let item = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                item = bs.next() => item,
+            };
+            let Some(item) = item else { break };
             match crate::events::classify_delivery(item) {
                 crate::events::BroadcastDelivery::Event(event) => {
                     yield Ok::<_, Infallible>(server_event_to_sse(&event));
