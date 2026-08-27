@@ -92,6 +92,11 @@ pub(crate) fn spawn(
         // unrelated accepted work; SQLite claims and durable queue ranks keep
         // ownership unique and scheduler ordering stable.
         let worker_count = state.queue_capacity.clamp(1, 8);
+        tracing::info!(
+            capacity = state.queue_capacity,
+            workers = worker_count,
+            "durable generation queue feeder started"
+        );
         let mut workers = tokio::task::JoinSet::new();
         let publication = Arc::new(tokio::sync::Notify::new());
         for _ in 0..worker_count {
@@ -117,10 +122,6 @@ async fn run_with_retry_delay(
     retry_delay: std::time::Duration,
     publication: Arc<tokio::sync::Notify>,
 ) {
-    tracing::info!(
-        capacity = state.queue_capacity,
-        "durable generation queue feeder started"
-    );
     let current_output_dir = {
         let config = state.config.read().await;
         (!state.is_output_disabled(&config)).then(|| config.effective_output_dir())
