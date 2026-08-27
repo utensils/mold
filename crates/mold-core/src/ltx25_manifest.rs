@@ -511,7 +511,6 @@ mod tests {
                     manifest.name
                 );
             }
-            assert!(manifest.files.iter().any(|file| file.gated));
             if is_gguf_manifest(&manifest.name) {
                 let transformer = manifest
                     .files
@@ -521,6 +520,13 @@ mod tests {
                 assert_eq!(transformer.hf_repo, GGUF_REPO);
                 assert!(!transformer.gated);
                 assert!(transformer.hf_filename.ends_with(".gguf"));
+                assert!(manifest
+                    .files
+                    .iter()
+                    .filter(|file| file.component != ModelComponent::Transformer)
+                    .all(|file| file.gated));
+            } else {
+                assert!(manifest.files.iter().all(|file| file.gated));
             }
         }
     }

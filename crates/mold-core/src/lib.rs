@@ -89,7 +89,7 @@ pub use model_policy::{
     model_activation_available, model_artifact_activation, require_model_acquisition,
     require_model_activation, require_model_artifact_activation,
     require_registered_manifest_activation, ActivationRefusal, ModelAccessCapabilities,
-    ModelAccessRestriction, ModelActivation, ModelActivationError,
+    ModelAccessRestriction, ModelActivation, ModelActivationError, LTX25_GGUF_RUNTIME_UNAVAILABLE,
     MINIMAX_H3_AUTHORIZATION_ISSUE_URL, MINIMAX_H3_AUTHORIZATION_REQUIRED,
     MINIMAX_H3_LICENSE_SHA256, MINIMAX_H3_LICENSE_URL, MINIMAX_H3_RUNTIME_UNAVAILABLE,
 };

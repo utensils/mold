@@ -144,7 +144,7 @@ pub fn probe_ltx25_gguf_transformer(path: &Path) -> std::io::Result<Ltx25Transfo
     let audio_ff_bias = gguf_metadata_path(&header, &["config", "transformer", "audio_ff_bias"])
         .or_else(|| gguf_metadata_path(&header, &["config", "audio_ff_bias"]))
         .and_then(|value| value.as_bool());
-    if ff_bias != Some(false) || audio_ff_bias == Some(false) {
+    if ff_bias != Some(false) || audio_ff_bias != Some(true) {
         return Err(invalid_data(
             path,
             "LTX-2.5 GGUF must set ff_bias=false and keep audio_ff_bias=true",
@@ -184,13 +184,13 @@ pub fn probe_ltx25_gguf_transformer(path: &Path) -> std::io::Result<Ltx25Transfo
 
     let video = require_gguf_tensor(path, &header, "caption_projection.linear_2.weight")?;
     let audio = require_gguf_tensor(path, &header, "audio_caption_projection.linear_2.weight")?;
-    if video.shape.len() != 2 || !video.shape.contains(&4096) {
+    if video.shape.as_slice() != [4096, 4096] {
         return Err(invalid_data(
             path,
             format!("expected video width 4096, got shape {:?}", video.shape),
         ));
     }
-    if audio.shape.len() != 2 || !audio.shape.contains(&2048) {
+    if audio.shape.as_slice() != [2048, 2048] {
         return Err(invalid_data(
             path,
             format!("expected audio width 2048, got shape {:?}", audio.shape),

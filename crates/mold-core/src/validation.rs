@@ -7958,7 +7958,10 @@ mod tests {
             expert: None,
         });
 
-        let error = validate_generate_request(&req).unwrap_err();
+        let admission_error = validate_generate_request(&req).unwrap_err();
+        assert!(admission_error.contains(crate::LTX25_GGUF_RUNTIME_UNAVAILABLE));
+
+        let error = validate_generate_request_after_activation(&req, None).unwrap_err();
         assert!(error.contains("LoRAs are not supported with LTX-2.5 GGUF"));
         assert!(error.contains("before queueing"));
     }
