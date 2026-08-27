@@ -343,6 +343,38 @@ const stillModel: ModelEntry = {
   description: "Image model",
 };
 
+/**
+ * Hold every durable admission so a test can settle its prints at a moment of
+ * its own choosing — the durable stand-in for driving an SSE completion frame.
+ */
+function heldAdmissions(): {
+  count: () => number;
+  settle: (state?: string, filenames?: readonly string[]) => void;
+} {
+  const pending: Array<{ init: RequestInit; resolve: (value: unknown) => void }> = [];
+  const base = apiJsonTo.getMockImplementation()!;
+  apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+    if (path === "/api/generation-batches" && init?.method === "POST") {
+      return new Promise((resolve) => pending.push({ init, resolve }));
+    }
+    return base(callTarget, path, init);
+  });
+  return {
+    count: () => pending.length,
+    settle(state = "complete", filenames: readonly string[] = []) {
+      const settling = pending.splice(0, pending.length);
+      for (const [index, entry] of settling.entries()) {
+        entry.resolve(
+          durableBatchResponse(entry.init, {
+            state,
+            ...(filenames[index] === undefined ? {} : { filenames: [filenames[index]!] }),
+          }),
+        );
+      }
+    },
+  };
+}
+
 /** Serve one still checkpoint, leaving every other path on the default mock. */
 function serveStillModel(): void {
   const base = apiJsonTo.getMockImplementation()!;
@@ -5975,6 +6007,7 @@ describe("MobileApp generation queue", () => {
       return durableApiFallback(path, init, callTarget);
     });
 
+    const admissions = heldAdmissions();
     wrapper = mountMobileApp();
     await flushPromises();
     await submitPrompt("first gallery prompt");
@@ -5982,21 +6015,7 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
     await vi.waitFor(() => expect(galleryResolvers).toHaveLength(1));
 
-    for (const [index, stream] of openStreams.entries()) {
-      stream.options.onEvent(
-        "complete",
-        JSON.stringify({
-          image: btoa(`generated-${index}`),
-          format: "png",
-          width: 768,
-          height: 512,
-          seed_used: index + 1,
-          generation_time_ms: 500,
-          model: model.name,
-        }),
-      );
-      stream.resolve();
-    }
+    admissions.settle("complete", ["first.png", "second.png"]);
     await flushPromises();
 
     expect(galleryCalls).toBe(1);
@@ -6028,7 +6047,7 @@ describe("MobileApp generation queue", () => {
       return durableApiFallback(path, init, callTarget);
     });
 
-    admitCompletedPrints();
+    const admissions = heldAdmissions();
     wrapper = mountMobileApp();
     await flushPromises();
     await submitPrompt("refresh after older page");
@@ -6046,6 +6065,7 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
     expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
 
+    admissions.settle();
     await flushPromises();
     expect(galleryCalls).toBe(1);
 
@@ -8523,7 +8543,8 @@ describe("MobileApp gallery", () => {
   });
 
   it("defers completion refreshes until an open viewer closes", async () => {
-    admitCompletedPrints();
+    // Hold admission so the print settles while the viewer is already open.
+    const admissions = heldAdmissions();
     wrapper = mountMobileApp();
     await flushPromises();
     await fieldControl("Prompt").setValue("complete behind the viewer");
@@ -8536,6 +8557,8 @@ describe("MobileApp gallery", () => {
     await wrapper.get("[data-test='gallery-item']").trigger("click");
     await flushPromises();
 
+    admissions.settle();
+    await flushPromises();
     await flushPromises();
 
     expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toBe(
