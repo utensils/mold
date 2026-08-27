@@ -304,11 +304,13 @@ media-free request is unaffected. There is no `X-Mold-Operation-Id` header and
 no attached, non-durable fallback.
 
 A request the durable protocol cannot represent is refused by name with HTTP
-422: `DURABLE_MEDIA_REFERENCES_UNSUPPORTED` (ordered MiniMax H3 references),
-`DURABLE_MEDIA_HDR_UNSUPPORTED` (`hdr_exr_dir`), and
-`DURABLE_MEDIA_LORA_UNSUPPORTED` (a LoRA combined with conditioning media —
+422: `DURABLE_MEDIA_REFERENCES_UNSUPPORTED` (ordered MiniMax H3 references) and
+`DURABLE_MEDIA_HDR_UNSUPPORTED` (`hdr_exr_dir`, which is local-only and was
+never accepted over the API). A LoRA combined with conditioning media —
 `source_image`, `id_image`, `mask_image`, `control_image`, `source_video`,
-keyframes, or audio). `POST /api/generate` additionally refuses
+keyframes, or audio — is admitted: the adapter path and scale are sealed in the
+encrypted media set beside the media and restored before the print is
+planned. `POST /api/generate` additionally refuses
 `batch_size != 1` with `DIRECT_BATCH_UNSUPPORTED`; submit siblings through
 `POST /api/generation-batches`.
 

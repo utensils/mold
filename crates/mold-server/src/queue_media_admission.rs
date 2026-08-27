@@ -892,32 +892,15 @@ pub(crate) fn durable_media_preflight(
             "HDR output authority is not supported by the durable media protocol",
         ));
     }
-    if request_has_durable_media(request) && (request.lora.is_some() || request.loras.is_some()) {
-        return Err(typed_refusal(
-            "DURABLE_MEDIA_LORA_UNSUPPORTED",
-            "media and LoRA inputs cannot share the durable media protocol",
-        ));
-    }
     Ok(())
 }
 
 fn durable_media_batch_preflight(requests: &[mold_core::GenerateRequest]) -> Result<(), ApiError> {
-    let batch_has_media = requests.iter().any(request_has_durable_media);
     for (offset, request) in requests.iter().enumerate() {
         durable_media_preflight(request).map_err(|mut error| {
             error.error = format!("requests[{}]: {}", offset + 1, error.error);
             error
         })?;
-        if batch_has_media && (request.lora.is_some() || request.loras.is_some()) {
-            return Err(ApiError::with_code(
-                format!(
-                    "requests[{}]: media batches cannot persist local LoRA authority",
-                    offset + 1
-                ),
-                "DURABLE_MEDIA_LORA_UNSUPPORTED",
-                StatusCode::UNPROCESSABLE_ENTITY,
-            ));
-        }
     }
     Ok(())
 }
@@ -1175,11 +1158,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn mixed_media_batch_refuses_media_free_lora_before_persistable_bytes_exist() {
-        const SENTINEL: &str = "/private/local-adapter-sentinel.safetensors";
+    fn mixed_media_batch_admits_a_lora_sibling() {
         let mut lora_sibling = request();
         lora_sibling.lora = Some(mold_core::LoraWeight {
-            path: SENTINEL.to_string(),
+            path: "/private/local-adapter.safetensors".to_string(),
             scale: 1.0,
             expert: None,
         });
@@ -1187,12 +1169,7 @@ mod tests {
 
         let mut media = request();
         media.source_image = Some(vec![1, 2, 3]);
-        let requests = vec![media, lora_sibling];
-        let persistable = durable_media_batch_preflight(&requests)
-            .map(|()| serde_json::to_vec(&requests).unwrap());
-        let refusal = persistable.unwrap_err();
-        assert_eq!(refusal.code, "DURABLE_MEDIA_LORA_UNSUPPORTED");
-        assert!(!format!("{refusal:?}").contains(SENTINEL));
+        assert!(durable_media_batch_preflight(&[media, lora_sibling]).is_ok());
     }
 
     #[test]
@@ -1206,9 +1183,11 @@ mod tests {
         assert!(durable_media_batch_preflight(&[lora]).is_ok());
     }
 
+    /// img2img with an adapter is an ordinary print; the durable store seals
+    /// the LoRA record beside the media rather than refusing the pair.
     #[cfg(unix)]
     #[test]
-    fn media_plus_lora_remains_typed_refused() {
+    fn media_plus_lora_is_admitted() {
         let mut request = request();
         request.lora = Some(mold_core::LoraWeight {
             path: "adapter.safetensors".to_string(),
@@ -1216,8 +1195,7 @@ mod tests {
             expert: None,
         });
         request.source_image = Some(vec![1, 2, 3]);
-        let refusal = durable_media_preflight(&request).unwrap_err();
-        assert_eq!(refusal.code, "DURABLE_MEDIA_LORA_UNSUPPORTED");
+        durable_media_preflight(&request).expect("media and a LoRA share the durable path");
     }
 
     #[cfg(windows)]

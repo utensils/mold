@@ -6845,11 +6845,47 @@ mod tests {
             assert!(journal.cancel_id(&row.id).unwrap());
         }
 
-        let mut refused = media;
-        refused["lora"] = serde_json::json!({
-            "path": "must-not-be-resolved.safetensors",
-            "scale": 1.0
+        // A LoRA beside the media is an ordinary img2img-with-adapter print:
+        // it seals with the media and commits like any other sibling.
+        let mut with_adapter = media.clone();
+        // Ordinary validation still applies: an adapter needs a LoRA-capable
+        // family, and the mock engine's model is not one.
+        with_adapter["model"] = serde_json::json!("flux-dev");
+        with_adapter["lora"] = serde_json::json!({
+            "path": "adapter.safetensors",
+            "scale": 0.8
         });
+        let accepted = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [
+                        serde_json::from_str::<serde_json::Value>(
+                            &generate_body("plain beside adapter", 64, 64)
+                        ).unwrap(),
+                        with_adapter
+                    ],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].media_set_id.is_none());
+        assert!(rows[1].media_set_id.is_some());
+        for row in rows {
+            assert!(journal.cancel_id(&row.id).unwrap());
+        }
+
+        // Preflight is one-over-N atomic: a sibling the protocol cannot
+        // represent refuses the whole batch before any row or media
+        // obligation exists.
+        let mut refused = media;
+        refused["hdr_exr_dir"] = serde_json::json!("must-not-be-resolved");
         let rejected = app
             .oneshot(json_request(
                 "POST",
@@ -6869,7 +6905,7 @@ mod tests {
         assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
             json_body(rejected).await["code"],
-            "DURABLE_MEDIA_LORA_UNSUPPORTED"
+            "DURABLE_MEDIA_HDR_UNSUPPORTED"
         );
         assert!(journal.list_all().is_empty());
         let owner = journal.owner_uuid().unwrap();

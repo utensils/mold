@@ -670,21 +670,14 @@ pub fn extract_request_media(
             ProcessPrivateAuthority::ResolvedReferenceStaging,
         ));
     }
-    // Scheduler V2 resolves exact adapter paths/scales before the worker lease,
-    // while durable media hydration is intentionally deferred. HDR likewise
-    // carries a local output authority rather than replayable input media.
-    // Keep their lossless field mapping covered below, but do not advertise a
-    // public durable path until admission owns a safe pre-dispatch projection.
-    if request.lora.is_some() {
-        return Err(QueueMediaError::UnsupportedPreDispatchAuthority(
-            QueueMediaRole::Lora,
-        ));
-    }
-    if request.loras.is_some() {
-        return Err(QueueMediaError::UnsupportedPreDispatchAuthority(
-            QueueMediaRole::Loras,
-        ));
-    }
+    // A LoRA is a server-local adapter path plus a scale. It seals as JSON
+    // beside the conditioning media and is rehydrated by the feeder BEFORE
+    // `prepare_generation_after_durable_ack`, which is where the scheduler
+    // resolves exact adapter paths — so a replayed print plans with the
+    // adapter it was admitted with rather than a stripped request. HDR EXR
+    // output is a local-only authority the server API refuses at its own
+    // boundary, exactly as it did before the durable path; it stays
+    // unsupported here as well.
     if request.hdr_exr_dir.is_some() {
         return Err(QueueMediaError::UnsupportedPreDispatchAuthority(
             QueueMediaRole::HdrExrDir,
@@ -1107,26 +1100,26 @@ pub fn into_seal_media(
     // its Drop guard can scrub the full set on error. Serialized keyframes stay
     // zeroizing until their bytes move into the successful result.
     validate_record_topology(&media.records)?;
-    for record in &media.records {
-        match &record.payload {
-            QueueMediaPayload::Reference(_) => {
-                return Err(QueueMediaError::UnsupportedPreDispatchAuthority(
-                    QueueMediaRole::References,
-                ));
-            }
-            QueueMediaPayload::Lora(_) => {
-                return Err(QueueMediaError::UnsupportedPreDispatchAuthority(
-                    record.role,
-                ));
-            }
-            _ => {}
-        }
+    if media
+        .records
+        .iter()
+        .any(|record| matches!(record.payload, QueueMediaPayload::Reference(_)))
+    {
+        return Err(QueueMediaError::UnsupportedPreDispatchAuthority(
+            QueueMediaRole::References,
+        ));
     }
-    let mut serialized_keyframes = media
+    // Keyframes and LoRA weights are structured records; both seal as their
+    // JSON encoding and stay zeroizing until the bytes move into the result.
+    let mut serialized_json = media
         .records
         .iter()
         .map(|record| match &record.payload {
             QueueMediaPayload::Keyframe(value) => serde_json::to_vec(value)
+                .map(zeroize::Zeroizing::new)
+                .map(Some)
+                .map_err(QueueMediaError::Serialize),
+            QueueMediaPayload::Lora(value) => serde_json::to_vec(value)
                 .map(zeroize::Zeroizing::new)
                 .map(Some)
                 .map_err(QueueMediaError::Serialize),
@@ -1165,9 +1158,9 @@ pub fn into_seal_media(
     };
 
     let mut sealed = Vec::with_capacity(media.records.len());
-    for ((record, serialized_keyframe), opened_path) in std::mem::take(&mut media.records)
+    for ((record, serialized_record), opened_path) in std::mem::take(&mut media.records)
         .into_iter()
-        .zip(&mut serialized_keyframes)
+        .zip(&mut serialized_json)
         .zip(opened_paths)
     {
         let role = record.role.wire_label();
@@ -1194,17 +1187,17 @@ pub fn into_seal_media(
                 }
             }
             QueueMediaPayload::Text(value) => SealMedia::bytes(role, position, value.into_bytes()),
-            QueueMediaPayload::Keyframe(_) => SealMedia::bytes(
+            QueueMediaPayload::Keyframe(_) | QueueMediaPayload::Lora(_) => SealMedia::bytes(
                 role,
                 position,
                 std::mem::take(
-                    serialized_keyframe
+                    serialized_record
                         .as_mut()
-                        .expect("keyframe serialization was precomputed")
+                        .expect("structured record serialization was precomputed")
                         .as_mut(),
                 ),
             ),
-            QueueMediaPayload::Reference(_) | QueueMediaPayload::Lora(_) => {
+            QueueMediaPayload::Reference(_) => {
                 unreachable!("unsupported payloads were rejected before moving plaintext")
             }
         };
@@ -1266,6 +1259,11 @@ pub(crate) fn decrypted_media_into_opaque(
                     let result = serde_json::from_slice(&bytes);
                     bytes.zeroize();
                     QueueMediaPayload::Keyframe(result.map_err(QueueMediaError::Deserialize)?)
+                }
+                QueueMediaRole::Lora | QueueMediaRole::Loras => {
+                    let result = serde_json::from_slice(&bytes);
+                    bytes.zeroize();
+                    QueueMediaPayload::Lora(result.map_err(QueueMediaError::Deserialize)?)
                 }
                 _ => {
                     bytes.zeroize();
@@ -2161,44 +2159,92 @@ mod tests {
     }
 
     #[test]
-    fn pre_dispatch_lora_and_hdr_authority_remain_non_durable() {
-        let base = serde_json::json!({
+    fn pre_dispatch_hdr_authority_remains_non_durable() {
+        let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
             "prompt": "pre-dispatch authority",
             "model": "mock",
             "width": 64,
             "height": 64,
-            "steps": 1
-        });
-        for (field, value, expected) in [
-            (
-                "lora",
-                serde_json::json!({ "path": "/private/one.safetensors", "scale": 0.5 }),
-                QueueMediaRole::Lora,
-            ),
-            (
-                "loras",
-                serde_json::json!([{ "path": "/private/two.safetensors", "scale": 0.7 }]),
-                QueueMediaRole::Loras,
-            ),
-            (
-                "hdr_exr_dir",
-                serde_json::json!("/private/hdr"),
-                QueueMediaRole::HdrExrDir,
-            ),
-        ] {
-            let mut value_request = base.clone();
-            value_request[field] = value;
-            let request: mold_core::GenerateRequest =
-                serde_json::from_value(value_request).unwrap();
-            assert!(matches!(
-                extract_request_media(
-                    format!("job-{field}"),
-                    request,
-                    &ProcessPrivateAuthorities::none()
-                ),
-                Err(QueueMediaError::UnsupportedPreDispatchAuthority(actual)) if actual == expected
-            ));
-        }
+            "steps": 1,
+            "hdr_exr_dir": "/private/hdr"
+        }))
+        .unwrap();
+        assert!(matches!(
+            extract_request_media("job-hdr", request, &ProcessPrivateAuthorities::none()),
+            Err(QueueMediaError::UnsupportedPreDispatchAuthority(
+                QueueMediaRole::HdrExrDir
+            ))
+        ));
+    }
+
+    /// A LoRA beside conditioning media is the ordinary img2img-with-adapter
+    /// print. It used to work only because it fell back to the non-durable
+    /// path; the durable path now seals the adapter record as JSON beside the
+    /// media and hands it back whole, scale and expert included.
+    #[test]
+    fn lora_beside_media_seals_as_json_and_rehydrates_losslessly() {
+        let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "adapter beside media",
+            "model": "mock",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "source_image": "c291cmNlLWJ5dGVz",
+            "lora": { "path": "/private/one.safetensors", "scale": 0.5 },
+            "loras": [
+                { "path": "/private/two.safetensors", "scale": 0.7, "expert": "high" },
+                { "path": "/private/three.safetensors", "scale": 1.25 }
+            ]
+        }))
+        .unwrap();
+        let expected = request.clone();
+        let extracted =
+            extract_request_media("job-lora", request, &ProcessPrivateAuthorities::none()).unwrap();
+
+        let json: serde_json::Value = serde_json::from_str(extracted.request_json()).unwrap();
+        assert!(
+            json.get("lora").is_none(),
+            "the adapter path never enters the durable JSON"
+        );
+        assert!(json.get("loras").is_none());
+        assert!(!extracted.request_json().contains("safetensors"));
+
+        let (request_json, media) = extracted.into_parts();
+        let sealed = into_seal_media(media).unwrap();
+        let lora_records = sealed
+            .iter()
+            .filter(|item| item.role == "lora" || item.role == "loras")
+            .count();
+        assert_eq!(
+            lora_records, 4,
+            "one scalar record, one presence record, two items"
+        );
+
+        let restored = {
+            let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+                "prompt": "adapter beside media",
+                "model": "mock",
+                "width": 64,
+                "height": 64,
+                "steps": 1,
+                "source_image": "c291cmNlLWJ5dGVz",
+                "lora": { "path": "/private/one.safetensors", "scale": 0.5 },
+                "loras": [
+                    { "path": "/private/two.safetensors", "scale": 0.7, "expert": "high" },
+                    { "path": "/private/three.safetensors", "scale": 1.25 }
+                ]
+            }))
+            .unwrap();
+            extract_request_media("job-lora", request, &ProcessPrivateAuthorities::none())
+                .unwrap()
+                .rehydrate("job-lora")
+                .unwrap()
+        };
+        assert_eq!(
+            serde_json::to_value(&restored).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        let _ = request_json;
     }
 
     #[test]
