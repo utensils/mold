@@ -349,6 +349,10 @@ const stillModel: ModelEntry = {
  */
 function heldAdmissions(): {
   count: () => number;
+  settleAt: (
+    index: number,
+    options?: { state?: string; filename?: string | null; error?: string },
+  ) => void;
   settle: (state?: string, filenames?: readonly string[]) => void;
 } {
   const pending: Array<{ init: RequestInit; resolve: (value: unknown) => void }> = [];
@@ -359,17 +363,57 @@ function heldAdmissions(): {
     }
     return base(callTarget, path, init);
   });
+  /** Answer ONE held admission, in submission order. */
+  function settleAt(
+    index: number,
+    options: { state?: string; filename?: string | null; error?: string } = {},
+  ): void {
+    const entry = pending[index];
+    if (!entry) throw new Error(`No held admission at ${index}`);
+    pending[index] = undefined as never;
+    const parsed = JSON.parse(String(entry.init.body)) as {
+      client_batch_id: string;
+      requests: unknown[];
+    };
+    const state = options.state ?? "complete";
+    const now = Date.now();
+    entry.resolve({
+      id: `batch-${parsed.client_batch_id}`,
+      client_batch_id: parsed.client_batch_id,
+      instance_id: status.instance_id,
+      durable: true,
+      children: parsed.requests.map((_request, offset) => ({
+        index: offset + 1,
+        job_id: `durable-job-${index + 1}-${offset + 1}`,
+        state,
+        created_at_ms: now,
+        updated_at_ms: now + 1,
+        ...(options.error === undefined ? {} : { error: options.error }),
+        ...(state === "complete" || state === "failed" || state === "cancelled"
+          ? { completed_at_ms: now + 2 }
+          : {}),
+        ...(state === "complete"
+          ? {
+              result:
+                options.filename === null
+                  ? {}
+                  : { filename: options.filename ?? "saved print.png" },
+            }
+          : {}),
+      })),
+    });
+  }
+
   return {
     count: () => pending.length,
+    settleAt,
     settle(state = "complete", filenames: readonly string[] = []) {
-      const settling = pending.splice(0, pending.length);
-      for (const [index, entry] of settling.entries()) {
-        entry.resolve(
-          durableBatchResponse(entry.init, {
-            state,
-            ...(filenames[index] === undefined ? {} : { filenames: [filenames[index]!] }),
-          }),
-        );
+      for (let index = 0; index < pending.length; index += 1) {
+        if (!pending[index]) continue;
+        settleAt(index, {
+          state,
+          ...(filenames[index] === undefined ? {} : { filename: filenames[index]! }),
+        });
       }
     },
   };
@@ -5526,36 +5570,22 @@ describe("MobileApp generation queue", () => {
 
   it("keeps a completed result visible while a queued sibling settles independently", async () => {
     serveStillModel();
+    const admissions = heldAdmissions();
     wrapper = mountMobileApp();
     await flushPromises();
 
     await submitPrompt("finished prompt");
     await submitPrompt("failing prompt");
-    openStreams[1]?.options.onEvent(
-      "progress",
-      JSON.stringify({ type: "queued", position: 1, id: "job-failing" }),
-    );
-    openStreams[0]?.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: btoa("generated-image"),
-        format: "png",
-        width: 768,
-        height: 512,
-        seed_used: 42,
-        generation_time_ms: 1_250,
-        model: model.name,
-      }),
-    );
-    openStreams[0]?.resolve();
+    admissions.settleAt(0, { filename: "finished.png" });
+    await flushPromises();
     await flushPromises();
 
-    expect(wrapper.find("img.result-media").exists()).toBe(true);
+    await vi.waitFor(() => expect(wrapper!.find("img.result-media").exists()).toBe(true));
     expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(1);
     expect(wrapper.get("[data-test='mobile-generation-job']").text()).toContain("failing prompt");
 
-    openStreams[1]?.options.onEvent("error", JSON.stringify({ message: "host ran out of memory" }));
-    openStreams[1]?.resolve();
+    admissions.settleAt(1, { state: "failed", error: "host ran out of memory" });
+    await flushPromises();
     await flushPromises();
 
     expect(wrapper.find("[data-test='mobile-generation-queue']").exists()).toBe(false);
@@ -5657,31 +5687,26 @@ describe("MobileApp generation queue", () => {
 
   it("promotes the last of simultaneous completions before pruning older results", async () => {
     serveStillModel();
+    // Resolve each print's media by its own filename so the promoted result
+    // is identifiable — a durable print has no encoded payload to tell apart.
+    streamableMediaUrl.mockImplementation((path: string) =>
+      Promise.resolve(`https://studio/media/${String(path).split("/").pop()}`),
+    );
+    const admissions = heldAdmissions();
     wrapper = mountMobileApp();
     await flushPromises();
 
     await submitPrompt("first simultaneous prompt");
     await submitPrompt("second simultaneous prompt");
-    for (const [index, stream] of openStreams.entries()) {
-      stream.options.onEvent(
-        "complete",
-        JSON.stringify({
-          image: btoa(`generated-${index}`),
-          format: "png",
-          width: 768,
-          height: 512,
-          seed_used: index + 1,
-          generation_time_ms: 500,
-          model: model.name,
-        }),
-      );
-      stream.resolve();
-    }
+    admissions.settle("complete", ["first.png", "second.png"]);
+    await flushPromises();
     await flushPromises();
 
-    expect(wrapper.get("img.result-media").attributes("src")).toBe("blob:thumbnail-2");
-    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("0.5s · seed 2");
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:thumbnail-1");
+    await vi.waitFor(() =>
+      expect(wrapper!.get("img.result-media").attributes("src")).toBe(
+        "https://studio/media/second.png",
+      ),
+    );
   });
 
   it("streams a metadata-only generated video from the host", async () => {
@@ -5705,35 +5730,24 @@ describe("MobileApp generation queue", () => {
 
   it("does not show an older result when the latest saved result has no filename", async () => {
     serveStillModel();
-    admitCompletedPrints();
+    const admissions = heldAdmissions();
     wrapper = mountMobileApp();
     await flushPromises();
 
     await submitPrompt("first successful prompt");
+    admissions.settleAt(0, { filename: "first.png" });
     await flushPromises();
-    expect(wrapper.find("img.result-media").exists()).toBe(true);
+    await vi.waitFor(() => expect(wrapper!.find("img.result-media").exists()).toBe(true));
 
     await submitPrompt("metadata without a file");
-    openStreams[1]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: "",
-        format: "png",
-        width: 768,
-        height: 512,
-        seed_used: 2,
-        generation_time_ms: 500,
-        model: model.name,
-      }),
-    );
-    openStreams[1]!.resolve();
+    admissions.settleAt(1, { filename: null });
+    await flushPromises();
     await flushPromises();
 
+    // The machine settled this child without recording a saved file, so the
+    // canvas shows nothing rather than the PREVIOUS print's media.
     expect(wrapper.find(".result-media").exists()).toBe(false);
-    expect(wrapper.get(".result-preview-error").text()).toContain("saved result URL");
-    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
-      "saved result URL",
-    );
+    expect(wrapper.html()).not.toContain("first.png");
   });
 
   it("shows ticket failures and lets the user retry the preview", async () => {
@@ -6305,7 +6319,7 @@ describe("MobileApp generation queue", () => {
       return durableApiFallback(path, init, callTarget);
     });
 
-    admitCompletedPrints();
+    const admissions = heldAdmissions();
     wrapper = mountMobileApp();
     await flushPromises();
     await submitPrompt("refresh after an early viewer close");
@@ -6319,6 +6333,7 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='gallery-item']").trigger("click");
     await flushPromises();
 
+    admissions.settle();
     await flushPromises();
     expect(galleryCalls).toBe(1);
 
@@ -7060,11 +7075,6 @@ describe("MobileApp foreground resume", () => {
     await fieldControl("Prompt").setValue(prompt);
     await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
-  }
-
-  function killStream(index = 0, message = "Load failed"): void {
-    openStreams[index]!.options.onClose?.(new TypeError(message) as Error);
-    openStreams[index]!.resolve();
   }
 
   it("renders the finished print the machine saved while the app was away", async () => {
