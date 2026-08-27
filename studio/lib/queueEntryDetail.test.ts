@@ -3,6 +3,7 @@ import {
   QUEUE_SETTINGS_PENDING_NOTICE,
   queueEntryDetailModel,
   type QueueDetailMetadata,
+  type QueueEntryDetailInput,
 } from "./queueEntryDetail";
 import type { QueueEntry, QueuePlan } from "../api/queuePlan";
 
@@ -28,9 +29,7 @@ const metadata: QueueDetailMetadata = {
   height: 1024,
 };
 
-function model(
-  input: Parameters<typeof queueEntryDetailModel>[0] = {} as never,
-) {
+function model(input: Partial<QueueEntryDetailInput> = {}) {
   return queueEntryDetailModel({
     entry: entry(),
     hostLabel: "plato",

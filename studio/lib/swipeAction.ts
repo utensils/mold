@@ -101,7 +101,7 @@ export function moveSwipe(
 
   const dx = point.x - state.startX;
   const dy = point.y - state.startY;
-  let phase = state.phase;
+  let phase: SwipePhase = state.phase;
   if (phase === "undecided") {
     if (Math.abs(dx) < SWIPE_AXIS_LOCK_PX && Math.abs(dy) < SWIPE_AXIS_LOCK_PX)
       return { ...state, phase, captured: false };

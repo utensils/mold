@@ -269,7 +269,7 @@ function settingsGroups(
   const fps = finite(metadata.fps);
   const batchIndex = finite(metadata.batch_index);
   const batchCount = finite(metadata.batch_count);
-  return present([
+  const groups: (QueueDetailGroup | null)[] = [
     group("Output", [
       width !== null && height !== null
         ? { label: "Size", value: `${width}×${height}`, mono: true }
@@ -342,7 +342,8 @@ function settingsGroups(
             mono: true,
           },
     ]),
-  ]).filter(
+  ];
+  return groups.filter(
     (entryGroup): entryGroup is QueueDetailGroup => entryGroup !== null,
   );
 }

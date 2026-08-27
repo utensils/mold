@@ -7,13 +7,16 @@
  * standalone Jobs view and the Machines host-detail page so both surfaces
  * manage the queue identically. Single-GPU hosts keep the flat list.
  */
-import { computed, ref, watch } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import QueueEntryDrawer from "../jobs/QueueEntryDrawer.vue";
+import ConfirmDialog from "../shell/ConfirmDialog.vue";
 import { useGenerationStore, jobPhase, jobProgress, type Job } from "../../stores/generation";
 import { type HostView } from "../../stores/hosts";
 import { queueWaitCode, resolveQueueWait } from "@studio/lib/queuePosition";
+import { queueEntryDetailModel, type QueueDetailMetadata } from "@studio/lib/queueEntryDetail";
+import { watchSelectedQueuePreview, type QueueJobPreview } from "@studio/api/generationSelection";
 import { enrichQueueEntries, useJobsStore, type EnrichedQueueEntry } from "../../stores/jobs";
 import { useHostsStore } from "../../stores/hosts";
 import { useHostModelsStore } from "../../stores/hostModels";
@@ -222,8 +225,13 @@ async function togglePause() {
   }
 }
 
-// ── Row info drawer (state + submitted settings → Generate) ───────────────
+// ── Row info drawer (everything the host says about one queued job) ───────
 const queueDetail = ref<EnrichedQueueEntry | null>(null);
+const detailError = ref<string | null>(null);
+const detailPreview = ref<QueueJobPreview | null>(null);
+const detailNowMs = ref(Date.now());
+let stopPreview: (() => void) | null = null;
+let nowTimer: ReturnType<typeof setInterval> | null = null;
 
 // Each poll rebuilds the entry objects — keep an open drawer tracking its job
 // by id so state/elapsed stay live.
@@ -233,6 +241,73 @@ watch(flatEntries, (entries) => {
   if (!open) return;
   const updated = entries.find((entry) => entry.id === open.id);
   queueDetail.value = updated ?? null;
+});
+
+function closeDetail(): void {
+  queueDetail.value = null;
+}
+
+/** A row this app submitted carries its exact request here, which is the one
+ *  thing that closes the durable listing's payload-free window client-side. */
+function localMetadataFor(entry: EnrichedQueueEntry): QueueDetailMetadata | null {
+  return (ownJob(entry)?.request as QueueDetailMetadata | undefined) ?? null;
+}
+
+/** Retry needs the durable batch authority, which lives with the client that
+ *  submitted the job — the generation store owns it, keyed by clientId. */
+function retryAuthorityFor(entry: EnrichedQueueEntry): number | null {
+  const job = ownJob(entry);
+  return job && job.retryable && !job.retrying ? job.clientId : null;
+}
+
+const queueDetailModel = computed(() => {
+  const entry = queueDetail.value;
+  if (!entry) return null;
+  return queueEntryDetailModel({
+    entry,
+    hostLabel: props.host.label,
+    modelLabel: modelLabel(entry.model),
+    nowMs: detailNowMs.value,
+    plan: snapshot.value?.plan ?? null,
+    metadata: (entry.metadata as QueueDetailMetadata | null | undefined) ?? null,
+    localMetadata: localMetadataFor(entry),
+    mine: entry.mine,
+    canCancelRunning: caps.value?.canCancelRunning === true,
+    retryAuthority: retryAuthorityFor(entry),
+  });
+});
+
+// The drawer's elapsed and estimate lines are wall-clock, so they need their
+// own tick — the 5 s queue poll is far too coarse to watch a job run.
+watch(
+  () => queueDetail.value?.id ?? null,
+  (id) => {
+    detailError.value = null;
+    detailPreview.value = null;
+    stopPreview?.();
+    stopPreview = null;
+    if (nowTimer !== null) clearInterval(nowTimer);
+    nowTimer = null;
+    if (id === null) return;
+    detailNowMs.value = Date.now();
+    nowTimer = setInterval(() => (detailNowMs.value = Date.now()), 1_000);
+
+    const entry = queueDetail.value;
+    const target = jobs.targetFor(props.host);
+    if (!entry || entry.state !== "running" || !target) return;
+    stopPreview = watchSelectedQueuePreview(
+      target,
+      id,
+      (preview) => (detailPreview.value = preview),
+      750,
+      () => (detailPreview.value = null),
+    );
+  },
+);
+
+onUnmounted(() => {
+  stopPreview?.();
+  if (nowTimer !== null) clearInterval(nowTimer);
 });
 
 /** Unpinned seeds restore as random; `seed_pinned` disambiguates seed 0. */
@@ -253,7 +328,56 @@ function loadQueueSettings(metadata: OutputMetadata) {
       : { metadata: restored },
   );
   queueDetail.value = null;
-  void router.push("/generate");
+  void router.push("/create");
+}
+
+/** Reuse takes whichever settings the model resolved — the host's own, or
+ *  this app's copy of the request it submitted. */
+function reuseFromDrawer(): void {
+  const entry = queueDetail.value;
+  if (!entry) return;
+  const metadata =
+    (entry.metadata as OutputMetadata | null | undefined) ??
+    (localMetadataFor(entry) as OutputMetadata | null) ??
+    null;
+  if (!metadata) return;
+  loadQueueSettings(metadata);
+}
+
+// Cancelling from the drawer is destructive and names the job, so it takes the
+// shared plain ConfirmDialog rather than the row's inline two-step.
+const confirmCancel = ref<EnrichedQueueEntry | null>(null);
+
+function cancelFromDrawer(): void {
+  const entry = queueDetail.value;
+  if (!entry) return;
+  detailError.value = null;
+  confirmCancel.value = entry;
+}
+
+async function cancelConfirmed(): Promise<void> {
+  const entry = confirmCancel.value;
+  confirmCancel.value = null;
+  if (!entry) return;
+  try {
+    await cancelEntry(entry);
+    queueDetail.value = null;
+  } catch (error) {
+    detailError.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function retryFromDrawer(): Promise<void> {
+  const entry = queueDetail.value;
+  if (!entry) return;
+  const clientId = retryAuthorityFor(entry);
+  if (clientId === null) return;
+  detailError.value = null;
+  try {
+    await generation.retryHeld(clientId);
+  } catch (error) {
+    detailError.value = error instanceof Error ? error.message : String(error);
+  }
 }
 </script>
 
@@ -423,14 +547,30 @@ function loadQueueSettings(metadata: OutputMetadata) {
     </p>
 
     <QueueEntryDrawer
-      v-if="queueDetail"
-      :entry="queueDetail"
-      :model-label="modelLabel(queueDetail.model)"
-      :host-label="host.label"
-      :state-code="entryCode(queueDetail)"
-      :elapsed="entryElapsed(queueDetail)"
-      @close="queueDetail = null"
-      @load="loadQueueSettings"
+      v-if="queueDetailModel"
+      :model="queueDetailModel"
+      :preview="detailPreview"
+      :cancelling="queueDetail ? cancellingIds.includes(queueDetail.id) : false"
+      :retrying="queueDetail ? ownJob(queueDetail)?.retrying === true : false"
+      :error="detailError"
+      @close="closeDetail"
+      @reuse="reuseFromDrawer"
+      @cancel="cancelFromDrawer"
+      @retry="retryFromDrawer"
+    />
+
+    <ConfirmDialog
+      :open="confirmCancel !== null"
+      :title="confirmCancel?.state === 'running' ? 'Stop this job?' : 'Cancel this job?'"
+      :message="`${confirmCancel ? modelLabel(confirmCancel.model) : ''} on ${host.label}. ${
+        confirmCancel?.state === 'running'
+          ? 'The machine stops at its next safe point and nothing is saved.'
+          : 'It leaves the queue and is not rendered.'
+      }`"
+      :confirm-label="confirmCancel?.state === 'running' ? 'Stop job' : 'Cancel job'"
+      danger
+      @confirm="cancelConfirmed"
+      @cancel="confirmCancel = null"
     />
   </div>
 </template>

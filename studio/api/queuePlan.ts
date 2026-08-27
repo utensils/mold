@@ -28,6 +28,12 @@ export interface QueueEntry {
   metadata?: unknown;
   seed_pinned?: boolean | null;
   durable?: boolean | null;
+  /** Whether this row was resumed from the journal rather than submitted by a
+   * live client (additive; absent on older servers). */
+  replayed?: boolean | null;
+  /** How many times a worker has claimed this row for execution. Diagnoses a
+   * held row (additive; absent on older servers). */
+  dispatch_attempts?: number | null;
   held_reason?: string | null;
   /** Durable preparation error. Present on held protocol-v2 rows. */
   error?: string | null;
