@@ -237,7 +237,7 @@ export async function previewPinnedMobileGeneration(
 /**
  * Ask every eligible machine for a placement plan and freeze one exact route.
  * Candidate eligibility remains a surface concern; this module owns only the
- * asynchronous fan-out, legacy policy, and deterministic winner selection.
+ * asynchronous fan-out and deterministic winner selection.
  */
 export async function routeAutomaticMobileGeneration(
   options: RouteAutomaticMobileGenerationOptions,

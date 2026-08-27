@@ -430,8 +430,8 @@ export interface UseGenerateStream {
     decision?: ChainRoutingDecision,
     route?: HostRoute | null,
   ) => string;
-  /** Admit sibling requests in one durable parent when the frozen host
-   * supports it; otherwise preserve the legacy per-job stream behavior. */
+  /** Admit every sibling request in one durable parent on the frozen host,
+   * or refuse the whole batch by name with nothing queued. */
   submitBatch: (
     requests: readonly GenerateRequestWire[],
     decision?: ChainRoutingDecision,
@@ -458,7 +458,7 @@ const STORAGE_KEY = "mold.generate.jobs";
 
 /// Maximum number of *settled* (done/error/canceled) jobs we keep in the
 /// ordinary localStorage rail. Actionable durable batches use independently
-/// projected recovery records; legacy running jobs remain in this rail.
+/// projected recovery records; running sequences remain in this rail.
 /// Past this cap, oldest settled jobs are forgotten on the next persist
 /// cycle. Completed media itself lives in the gallery DB.
 const SETTLED_HISTORY_CAP = 10;
@@ -1589,7 +1589,7 @@ async function runDurableReconciliation(
 ): Promise<void> {
   const route = durableRoutes.get(hostId);
   if (!route) return;
-  // One authoritative gallery snapshot is shared by every legacy completion
+  // One authoritative gallery snapshot is shared by every completion settled
   // in this REST reconciliation wave. The next wave invalidates it.
   durableGallerySnapshots.delete(hostId);
   const current = [...durableTrackers.values()].filter(

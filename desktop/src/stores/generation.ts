@@ -1238,7 +1238,7 @@ export const useGenerationStore = defineStore("generation", {
         persistDurableRecords();
       }
 
-      // A lost POST response is never permission to use the legacy endpoint.
+      // A lost POST response is never permission to submit a second time.
       // Recover by idempotency key, then (only when the server explicitly says
       // it is missing) repeat the same durable admission.
       try {
@@ -1378,7 +1378,7 @@ export const useGenerationStore = defineStore("generation", {
         // first chunk POST leaves. If Web Storage rejects the write, retain
         // every UUID and instance fence in memory and continue through this durable path;
         // a client-side quota/privacy failure cannot veto valid host work or
-        // redirect it into the legacy endpoint.
+        // redirect it into a second submission.
         persistDurableRecords();
         const admitted = Promise.all(
           chunks.map(({ record, requestChunk }) => this.admitDurableRecord(record, requestChunk)),

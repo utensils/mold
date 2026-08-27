@@ -846,7 +846,6 @@ export const useHostsStore = defineStore("hosts", {
           host: HostView;
           preview: Awaited<ReturnType<typeof previewGenerationPlacement>> | null;
           error: unknown;
-          legacyUnsupported: boolean;
           telemetryOnly: boolean;
           knownMissingModel: boolean;
           roundTripMs: number;
@@ -901,7 +900,6 @@ export const useHostsStore = defineStore("hosts", {
                   host,
                   preview: null,
                   error: null,
-                  legacyUnsupported: false,
                   telemetryOnly: !knownMissingModel,
                   knownMissingModel,
                   roundTripMs: Math.max(0, performance.now() - started),
@@ -936,7 +934,6 @@ export const useHostsStore = defineStore("hosts", {
                 host,
                 preview,
                 error: null,
-                legacyUnsupported: false,
                 telemetryOnly: false,
                 knownMissingModel: false,
                 roundTripMs: Math.max(0, performance.now() - started),
@@ -950,8 +947,6 @@ export const useHostsStore = defineStore("hosts", {
                 host,
                 preview: null,
                 error,
-                legacyUnsupported:
-                  error instanceof ApiError && (error.status === 404 || error.status === 405),
                 telemetryOnly: false,
                 knownMissingModel: false,
                 roundTripMs: Math.max(0, performance.now() - started),
@@ -1008,7 +1003,6 @@ export const useHostsStore = defineStore("hosts", {
               error: new Error(
                 `Auto placement timed out after ${Math.round(autoDeadlineMs / 1000)} seconds; retry or select this machine explicitly for a longer cold check`,
               ),
-              legacyUnsupported: false,
               telemetryOnly: false,
               knownMissingModel: false,
               roundTripMs: autoDeadlineMs,
@@ -1093,30 +1087,33 @@ export const useHostsStore = defineStore("hosts", {
           if (route) return { kind: "route", route, preview: planned[0]!.preview };
         }
 
+        // An `unsupported` plan is a NON-AUTHORITATIVE answer, not an old
+        // machine: chain and local utility plans are documented to answer it,
+        // so the machine stays routable when authority is not required.
         const unsupportedIds = settledProbes
-          .filter(
-            (probe) =>
-              probe.legacyUnsupported || classifyPlacementPreview(probe.preview) === "unsupported",
-          )
+          .filter((probe) => classifyPlacementPreview(probe.preview) === "unsupported")
           .map((probe) => probe.host.id);
-        const legacy = candidates
+        const nonAuthoritative = candidates
           .filter((host) => unsupportedIds.includes(host.id))
           .map((host) => ({
             ...host,
             gpu: strongestRoutableGpu(this.telemetry[host.id]),
           }));
-        if (!requireAuthoritative && legacy.length > 0) {
+        if (!requireAuthoritative && nonAuthoritative.length > 0) {
           const modelHostIds = useHostModelsStore()
             .hostsFor(request.model)
             .filter((id) => unsupportedIds.includes(id));
-          let chosen: (typeof legacy)[number] | null;
+          let chosen: (typeof nonAuthoritative)[number] | null;
           if (selection === "capable") {
-            chosen = pickMostCapableHost(legacy, modelHostIds.length > 0 ? modelHostIds : null);
+            chosen = pickMostCapableHost(
+              nonAuthoritative,
+              modelHostIds.length > 0 ? modelHostIds : null,
+            );
           } else if (selection !== null && this.all.some((host) => host.id === selection)) {
-            chosen = legacy.find((host) => host.id === selection) ?? null;
+            chosen = nonAuthoritative.find((host) => host.id === selection) ?? null;
           } else {
-            const withModel = legacy.filter((host) => modelHostIds.includes(host.id));
-            chosen = pickAutoHost(withModel.length > 0 ? withModel : legacy);
+            const withModel = nonAuthoritative.filter((host) => modelHostIds.includes(host.id));
+            chosen = pickAutoHost(withModel.length > 0 ? withModel : nonAuthoritative);
           }
           const route = chosen ? hostRoute(chosen, this.capabilities[chosen.id]) : null;
           if (route) return { kind: "route", route, preview: null };
@@ -1139,10 +1136,7 @@ export const useHostsStore = defineStore("hosts", {
               },
             ];
           }
-          if (
-            requireAuthoritative &&
-            (probe.legacyUnsupported || classification === "unsupported")
-          ) {
+          if (requireAuthoritative && classification === "unsupported") {
             return [
               {
                 kind: "unreachable",
@@ -1153,7 +1147,7 @@ export const useHostsStore = defineStore("hosts", {
               },
             ];
           }
-          if (probe.error && !probe.legacyUnsupported) {
+          if (probe.error) {
             return [
               {
                 kind: "unreachable",

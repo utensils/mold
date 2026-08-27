@@ -132,7 +132,7 @@ export function saveDurableGenerationRecovery(
     // Web Storage can synchronously reject writes in privacy mode or when its
     // quota is exhausted. Recovery then degrades to this process's in-memory
     // UUID/instance tracker; it must never become permission to skip durable
-    // server admission or fall back to a second, legacy submission.
+    // server admission or fall back to a second submission.
     return false;
   }
 }
