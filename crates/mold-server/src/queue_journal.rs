@@ -1626,20 +1626,20 @@ impl QueueJournal {
         Ok(generation_queue::get(db, id)?.is_some_and(|row| row.owner_uuid == owner))
     }
 
-    /// Which batch a durable row belongs to, when it belongs to one.
+    /// Project ONE owned durable row exactly as the paged listing projects it.
     ///
-    /// The paged listing gets this from its own join; a single-job read has no
-    /// page to join against, so it asks here. Both read the same two tables,
-    /// so the identity a client composes a retry from cannot depend on which
-    /// route it came in through.
-    pub fn batch_identity_for_job(
+    /// The payload-carrying `GenerationQueueRow` has no `retryable` column and
+    /// no batch identity, so a single-job read that derived either from it
+    /// could only guess. This is the same query the page runs, narrowed to one
+    /// id, so the two can never disagree.
+    pub fn row_projection(
         &self,
-        job_id: &str,
-    ) -> anyhow::Result<Option<generation_batches::QueueRowBatchIdentity>> {
+        id: &str,
+    ) -> anyhow::Result<Option<generation_queue::GenerationQueueProjection>> {
         let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
             return Ok(None);
         };
-        generation_batches::identity_for_job(db, owner, job_id)
+        generation_queue::projection_for(db, owner, id)
     }
 
     /// Rows this server owns, oldest first. Backs the `held` listing.

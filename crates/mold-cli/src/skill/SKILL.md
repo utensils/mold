@@ -548,7 +548,7 @@ against `MOLD_HOST` (with `MOLD_API_KEY`); there is deliberately no local
 fallback, because a queue belongs to one serving host.
 
 ```bash
-mold queue list [--held] [--json]     # GET /api/queue — JOB · STATE · MODEL · BATCH · PROMPT · ADMITTED
+mold queue list [--held] [--json]     # GET /api/queue (every page) — JOB · STATE · MODEL · BATCH · PROMPT · ADMITTED
 mold queue show <JOB-ID> [--json]     # GET /api/queue/{id} + /preview + /api/generation-batches/{batch}
 mold queue cancel <JOB-ID>...         # DELETE /api/queue/{id}
 mold queue cancel --all [--yes]       # DELETE /api/queue — queued rows only; confirms [y/N] unless --yes
@@ -567,6 +567,12 @@ position — `no_idle_device`, `warm_wait`, `lower_priority_opening`, and
 `dependency_wait` are ordinary serialization and fall through. A reason this
 build has never heard of reads `Waiting on the host`, never a raw underscored
 identifier.
+
+Every operator action walks the durable continuation cursor
+(`MoldClient::list_queue_all`), never one page: `GET /api/queue` is bounded by
+the host's `queue_capacity`, so "nothing is held" off a single page is an
+answer about the first page rather than about the queue. `--held` narrows the
+table and `--json` through one application point.
 
 Retry needs the whole authority (`instance_id`, `batch_id`,
 `client_batch_id`, `job_id`). Only the instance belongs to the server, so

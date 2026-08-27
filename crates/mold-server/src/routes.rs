@@ -6070,39 +6070,43 @@ async fn get_queue_job(
                 item
             })
     });
-    // Batch membership is durable, so a live registry row carries none of it.
-    // Asked once, before either branch, so the identity a client composes a
-    // retry from does not depend on whether the row happens to be hydrated.
-    let batch = if state.queue_journal.is_enabled() {
+    // Batch membership and the hold's `retryable` bit are durable state that
+    // no live registry row carries, and neither can be derived from the
+    // payload row. The projection is read once, before either branch, so a
+    // job describes itself the same way whether or not it is hydrated.
+    let (projection, window) = if state.queue_journal.is_enabled() {
         let journal = state.queue_journal.clone();
         let lookup_id = id.clone();
-        spawn_queue_read(move || journal.batch_identity_for_job(&lookup_id)).await?
+        let limit = state.queue_capacity;
+        spawn_queue_read(move || {
+            let projection = journal.row_projection(&lookup_id)?;
+            // The position comes from the SAME bounded durable window
+            // `GET /api/queue` pages by default, so the two agree; a row
+            // beyond that window has no position either listing can name and
+            // reports the window's own length.
+            let window = journal.projection_page(None, limit)?;
+            Ok((projection, Some(window)))
+        })
+        .await?
     } else {
-        None
+        (None, None)
     };
     if let Some(mut job) = state.job_registry.entry(&id) {
-        job.batch_id = batch.as_ref().map(|batch| batch.batch_id.clone());
-        job.client_batch_id = batch.as_ref().map(|batch| batch.client_batch_id.clone());
-        job.batch_index = batch.as_ref().map(|batch| batch.batch_index);
+        if let Some(projection) = projection.as_ref() {
+            job.batch_id = projection.batch_id.clone();
+            job.client_batch_id = projection.client_batch_id.clone();
+            job.batch_index = projection.batch_index;
+        }
         return Ok(Json(QueueJobEntry { job, work_item }));
     }
-    if !state.queue_journal.is_enabled() {
+    let (Some(projection), Some(window)) = (projection, window) else {
         return Err(ApiError::queue_job_not_found(format!(
             "queue job {id} is not queued on this server"
         )));
-    }
+    };
     let journal = state.queue_journal.clone();
     let row_id = id.clone();
-    let limit = state.queue_capacity;
-    // The position comes from the SAME bounded durable window `GET /api/queue`
-    // pages by default, so the two agree; a row beyond that window has no
-    // position either listing can name and reports the window's own length.
-    let (row, window) = spawn_queue_read(move || {
-        let row = journal.row(&row_id)?;
-        let window = journal.projection_page(None, limit)?;
-        Ok((row, window))
-    })
-    .await?;
+    let row = spawn_queue_read(move || journal.row(&row_id)).await?;
     let Some(row) = row else {
         return Err(ApiError::queue_job_not_found(format!(
             "queue job {id} is not queued on this server"
@@ -6111,20 +6115,22 @@ async fn get_queue_job(
     let position = window
         .rows
         .iter()
-        .position(|projected| projected.id == row.id)
+        .position(|projected| projected.id == projection.id)
         .unwrap_or(window.rows.len());
     Ok(Json(QueueJobEntry {
-        job: job_entry_from_durable_row(row, batch, position),
+        job: job_entry_from_durable_row(projection, &row, position),
         work_item,
     }))
 }
 
-/// Project one durable row, deriving the settings the payload-free projection
-/// cannot carry. The derivation is the durable feeder's own, so a job read
-/// here and the same job after replay describe themselves identically.
+/// Project one durable row, adding the settings the payload-free projection
+/// deliberately cannot carry. The derivation is the durable feeder's own, so a
+/// job read here and the same job after replay describe themselves
+/// identically; everything else comes from the projection, so a single-job
+/// read and the listing cannot disagree about state, holds, or retryability.
 fn job_entry_from_durable_row(
-    row: mold_db::generation_queue::GenerationQueueRow,
-    batch: Option<mold_db::generation_batches::QueueRowBatchIdentity>,
+    projection: mold_db::generation_queue::GenerationQueueProjection,
+    row: &mold_db::generation_queue::GenerationQueueRow,
     position: usize,
 ) -> crate::job_registry::JobEntry {
     let metadata = serde_json::from_str::<mold_core::GenerateRequest>(&row.request_json)
@@ -6137,24 +6143,6 @@ fn job_entry_from_durable_row(
                 mold_core::build_info::version_string(),
             ))
         });
-    let projection = mold_db::generation_queue::GenerationQueueProjection {
-        id: row.id,
-        state: row.state,
-        model: row.model,
-        target_gpu: row.target_gpu,
-        seed_pinned: row.seed_pinned,
-        dispatch_attempts: row.dispatch_attempts,
-        replay_seen: row.replay_seen,
-        held_reason: row.held_reason,
-        // The queue row does not carry the hold's retryable bit; the listing
-        // path reads it from the batch child. Retry is fenced server-side, so
-        // a non-retryable row answers 409 rather than re-dispatching.
-        retryable: true,
-        created_at_ms: row.created_at_ms,
-        batch_id: batch.as_ref().map(|batch| batch.batch_id.clone()),
-        client_batch_id: batch.as_ref().map(|batch| batch.client_batch_id.clone()),
-        batch_index: batch.as_ref().map(|batch| batch.batch_index),
-    };
     let mut entry = job_entry_from_durable_projection(projection, position);
     entry.metadata = metadata;
     entry

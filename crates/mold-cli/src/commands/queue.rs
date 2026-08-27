@@ -53,20 +53,45 @@ pub(crate) struct QueueRow {
     pub(crate) progress: Option<QueueJobProgress>,
 }
 
+/// Read the WHOLE queue, not one page.
+///
+/// `GET /api/queue` is bounded by the host's `queue_capacity`, so a backlog
+/// longer than that has a tail no single page can see. Every operator action
+/// here is exhaustive — "nothing is held", "that job is not held", "N waiting
+/// jobs" — and each of those would otherwise be an answer about the first
+/// page rather than about the queue.
 async fn fetch_rows(client: &MoldClient, held_only: bool) -> Result<Vec<QueueRow>> {
-    let listing = client
-        .list_queue()
-        .await
-        .with_context(|| format!("could not read the queue on {}", client.host()))?;
+    let listing = fetch_listing(client, held_only).await?;
     let plan = listing.plan.clone();
     let mut rows = Vec::new();
     for entry in listing.entries {
-        if held_only && entry.state != STATE_HELD {
-            continue;
-        }
         rows.push(build_row(client, entry, plan.as_ref()).await);
     }
     Ok(rows)
+}
+
+/// The whole queue as the host described it, narrowed by `--held`.
+///
+/// The filter is applied here, once, so the table and `--json` can never
+/// disagree about what `--held` selected.
+async fn fetch_listing(
+    client: &MoldClient,
+    held_only: bool,
+) -> Result<mold_core::QueueListingWire> {
+    let mut listing = client
+        .list_queue_all()
+        .await
+        .with_context(|| format!("could not read the queue on {}", client.host()))?;
+    narrow_to_held(&mut listing, held_only);
+    Ok(listing)
+}
+
+/// Apply `--held`. Pure, and the single application point, so the table and
+/// `--json` cannot disagree about what the flag selected.
+pub(crate) fn narrow_to_held(listing: &mut mold_core::QueueListingWire, held_only: bool) {
+    if held_only {
+        listing.entries.retain(|entry| entry.state == STATE_HELD);
+    }
 }
 
 async fn build_row(
@@ -93,12 +118,10 @@ async fn build_row(
 
 async fn queue_list(client: &MoldClient, held: bool, json: bool) -> Result<()> {
     if json {
-        // The raw server document, not a re-serialization of the table's own
-        // view: `--json` exists so a script reads what the host actually said.
-        let listing = client
-            .list_queue()
-            .await
-            .with_context(|| format!("could not read the queue on {}", client.host()))?;
+        // The server's own rows, not a re-serialization of the table's view:
+        // `--json` exists so a script reads what the host actually said. Only
+        // `--held` narrows it, and it narrows both forms identically.
+        let listing = fetch_listing(client, held).await?;
         println!("{}", serde_json::to_string_pretty(&listing)?);
         return Ok(());
     }
@@ -544,7 +567,11 @@ pub(crate) fn render_detail(
             "Retryable",
             match row.entry.retryable {
                 Some(true) => "yes".to_string(),
-                _ => "no — needs operator repair".to_string(),
+                Some(false) => "no — needs operator repair".to_string(),
+                // The host reports this bit for every hold. Absence is an
+                // unexpected shape, not a refusal, and saying so beats
+                // inventing either answer.
+                None => "not reported".to_string(),
             },
         );
     }
@@ -711,6 +738,42 @@ mod tests {
             render_listing(&rows, true, 1_000).contains("no reason reported"),
             "an unexplained hold must still be legible"
         );
+    }
+
+    #[test]
+    fn the_held_filter_narrows_the_json_exactly_as_it_narrows_the_table() {
+        let mut listing = mold_core::QueueListingWire {
+            entries: vec![
+                entry("running", "running", 0),
+                entry("held", "held", 1),
+                entry("queued", "queued", 2),
+            ],
+            ..Default::default()
+        };
+        let mut untouched = listing.clone();
+        narrow_to_held(&mut untouched, false);
+        assert_eq!(untouched.entries.len(), 3);
+        narrow_to_held(&mut listing, true);
+        assert_eq!(
+            listing
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["held"]
+        );
+    }
+
+    #[test]
+    fn a_hold_whose_retryable_bit_is_missing_says_so_rather_than_guessing() {
+        colored::control::set_override(false);
+        let text = render_detail(
+            &row(entry("job", "held", 0), QueueWaitStatus::Position(0)),
+            None,
+            None,
+            1_000,
+        );
+        assert!(text.contains("not reported"), "{text}");
     }
 
     #[test]

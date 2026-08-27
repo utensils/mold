@@ -239,6 +239,19 @@ const QUEUE_PROJECTION_AFTER_SQL: &str = "
      ORDER BY q.created_at, q.rowid
      LIMIT ?4";
 
+/// The same projection for exactly one owned row, so a single-job read and
+/// the paged listing describe a row identically — including the persisted
+/// `retryable` bit, which the payload-carrying `GenerationQueueRow` does not
+/// hold and which a caller must never assume.
+const QUEUE_PROJECTION_BY_ID_SQL: &str = "
+    SELECT q.id, q.state, q.model, q.target_gpu, q.seed_pinned,
+           q.dispatch_attempts, q.replay_seen, q.held_reason, q.retryable, q.created_at,
+           q.rowid, c.batch_id, c.batch_index, b.client_batch_id
+      FROM generation_queue AS q
+      LEFT JOIN generation_batch_children AS c ON c.job_id = q.id
+      LEFT JOIN generation_batches AS b ON b.id = c.batch_id
+     WHERE q.id = ?1 AND q.owner_uuid = ?2";
+
 /// Payload-free stable scan used to complete a bounded hydrated reorder with
 /// every queued row that still lives only in SQLite.
 const QUEUE_REORDER_CANDIDATES_SQL: &str = "
@@ -662,6 +675,22 @@ pub fn list_projection_page(
             .flatten();
         let rows = rows_with_keys.into_iter().map(|(row, _)| row).collect();
         Ok(GenerationQueueProjectionPage { rows, next_cursor })
+    })
+}
+
+/// Project ONE owned row. `None` means this owner has no such row — the same
+/// answer [`get`] filtered by owner would give.
+pub fn projection_for(
+    db: &MetadataDb,
+    owner_uuid: &str,
+    id: &str,
+) -> Result<Option<GenerationQueueProjection>> {
+    db.with_conn(|conn| {
+        conn.query_row(QUEUE_PROJECTION_BY_ID_SQL, params![id, owner_uuid], |row| {
+            projection_page_row(row).map(|(projection, _)| projection)
+        })
+        .optional()
+        .map_err(Into::into)
     })
 }
 
@@ -2158,6 +2187,34 @@ mod tests {
         assert_eq!(unbatched.batch_id, None);
         assert_eq!(unbatched.client_batch_id, None);
         assert_eq!(unbatched.batch_index, None);
+    }
+
+    #[test]
+    fn the_single_row_projection_agrees_with_the_page_including_retryable() {
+        // `GenerationQueueRow` has no `retryable` column, so a single-job read
+        // that synthesized one could only guess — and guessing "yes" told an
+        // operator to retry a row the retry endpoint refuses.
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut held = row("held", "owner-a", 10);
+        held.state = QueueRowState::Held;
+        held.held_reason = Some("publication authority is invalid".into());
+        insert(&db, &held).unwrap();
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE generation_queue SET retryable = 0 WHERE id = 'held'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let page = list_projection_page(&db, "owner-a", None, 10).unwrap();
+        let single = projection_for(&db, "owner-a", "held").unwrap().unwrap();
+        assert_eq!(single, page.rows[0]);
+        assert!(!single.retryable);
+        // Another owner's row is not this owner's to read.
+        assert!(projection_for(&db, "owner-b", "held").unwrap().is_none());
+        assert!(projection_for(&db, "owner-a", "nope").unwrap().is_none());
     }
 
     #[test]

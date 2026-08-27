@@ -1402,6 +1402,43 @@ impl MoldClient {
         self.fetch_queue_listing(Some(limit), cursor).await
     }
 
+    /// Walk every durable continuation page and return the whole queue.
+    ///
+    /// [`Self::list_queue`] returns ONE bounded page, which is right for a
+    /// poller reconciling live cards. It is wrong for anything exhaustive: a
+    /// backlog longer than the host's `queue_capacity` silently loses its
+    /// tail, so "nothing is held" and "that job is not held" become answers
+    /// about the first page rather than about the queue. Reserved for
+    /// explicit operator actions; periodic consumers keep polling one page.
+    ///
+    /// `page` and `live_only_entries` are dropped from the result: they
+    /// describe one page's position in a walk that is now finished, and
+    /// keeping either would invite a caller to page again from the middle.
+    pub async fn list_queue_all(&self) -> Result<QueueListingWire> {
+        let mut listing = self.list_queue().await?;
+        let mut entries = std::mem::take(&mut listing.entries);
+        let plan = listing.plan.take();
+        let mut seen_cursors = std::collections::HashSet::new();
+        while let Some(cursor) = listing
+            .page
+            .as_ref()
+            .and_then(|page| page.next_cursor.clone())
+        {
+            let limit = listing.page.as_ref().map_or(0, |page| page.limit);
+            if !seen_cursors.insert(cursor.clone()) {
+                anyhow::bail!("host repeated a queue continuation cursor");
+            }
+            listing = self.list_queue_page(limit, Some(&cursor)).await?;
+            entries.append(&mut listing.entries);
+        }
+        Ok(QueueListingWire {
+            entries,
+            live_only_entries: Vec::new(),
+            plan,
+            page: None,
+        })
+    }
+
     /// Resolve one exact job through bounded pages. This is reserved for an
     /// explicit per-job action/probe; periodic consumers use only
     /// [`Self::list_queue`] and never walk the durable journal.
@@ -3323,6 +3360,72 @@ mod tests {
         assert!(crate::QueueJobEntryWire::default()
             .retry_request("instance-a")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn list_queue_all_walks_every_continuation_page() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "version": "0.25.0",
+                "models_loaded": [],
+                "gpu_info": null,
+                "uptime_secs": 1,
+                "queue_capacity": 1
+            })))
+            .mount(&server)
+            .await;
+        let row = |id: &str| {
+            serde_json::json!({
+                "id": id,
+                "model": "flux-dev:q8",
+                "state": "held",
+                "started_at_unix_ms": 1_u64,
+                "position": 0
+            })
+        };
+        Mock::given(method("GET"))
+            .and(path("/api/queue"))
+            .and(query_param("cursor", "page-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [row("tail")],
+                "page": { "limit": 1, "offset": 1, "returned": 1 }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/queue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [row("head")],
+                "plan": { "plan_version": 1, "state_version": 1, "optimizer_state": "idle", "work_items": [] },
+                "page": { "limit": 1, "offset": 0, "returned": 1, "next_cursor": "page-2" }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        // One page is what a poller wants and is deliberately not the whole
+        // queue: the tail row is invisible to it.
+        let one_page = client.list_queue().await.unwrap();
+        assert_eq!(one_page.entries.len(), 1);
+
+        let all = client.list_queue_all().await.unwrap();
+        assert_eq!(
+            all.entries
+                .iter()
+                .map(|e| e.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["head", "tail"]
+        );
+        assert!(all.plan.is_some(), "the first page's plan is retained");
+        assert!(
+            all.page.is_none(),
+            "a finished walk must not offer a middle to resume from"
+        );
     }
 
     #[tokio::test]

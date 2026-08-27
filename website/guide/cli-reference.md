@@ -170,8 +170,10 @@ position. Ordinary serialization on a busy host — no idle device, a warm
 wait, a lower-priority opening — keeps the row counting rather than reading
 as a fault.
 
-Held rows are listed again beneath the table with the server's own error
-sentence and whether a retry is allowed. `mold queue retry` composes the full
+`mold queue list` and `mold queue retry --held` walk every durable
+continuation page, so a backlog longer than the host's queue window is not
+silently truncated. Held rows are listed again beneath the table with the
+server's own error sentence and whether a retry is allowed. `mold queue retry` composes the full
 retry authority (serving instance, batch, client batch, job) from the row's
 own `batch_id` / `client_batch_id`; a hold that needs operator repair is
 refused by name rather than silently skipped. `--json` prints the raw server

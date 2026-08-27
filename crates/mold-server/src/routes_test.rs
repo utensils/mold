@@ -5872,6 +5872,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_single_job_read_reports_the_hold_s_own_retryable_bit() {
+        // The payload row carries no `retryable` column, so the single-job
+        // route used to synthesize one as `true` — telling an operator to
+        // retry a row `POST /api/queue/{id}/retry` answers 409 for.
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        admit_one_durable_batch(&state, "needs-repair", "batch-repair");
+        assert_eq!(
+            mold_db::generation_batches::hold_owned(
+                db.as_ref().as_ref().unwrap(),
+                &owner,
+                "needs-repair",
+                None,
+                "publication authority is invalid",
+                None,
+                false,
+                600,
+            )
+            .unwrap(),
+            mold_db::generation_batches::OwnedHold::Held
+        );
+        let app = app_with_state(state);
+
+        let listing = json_body(
+            app.clone()
+                .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(listing["entries"][0]["retryable"], false);
+
+        let detail = json_body(
+            app.oneshot(
+                Request::get("/api/queue/needs-repair")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(detail["job"]["state"], "held");
+        assert_eq!(
+            detail["job"]["retryable"], false,
+            "the single-job read must not promise a retry the retry route refuses"
+        );
+        assert_eq!(detail["job"]["error"], "publication authority is invalid");
+        // The settings the payload-free listing cannot carry still arrive.
+        assert!(detail["job"]["metadata"]["prompt"].is_string());
+    }
+
+    #[tokio::test]
     async fn retryable_dependency_hold_is_visible_and_resumes_through_the_retry_api() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
