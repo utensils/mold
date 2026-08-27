@@ -320,6 +320,7 @@ use crate::queue::clean_error_message;
         list_devices,
         patch_device,
         list_queue,
+        get_queue_job,
         get_queue_job_preview,
         patch_queue_job,
         cancel_queue_job,
@@ -467,6 +468,7 @@ use crate::queue::clean_error_message;
         UnloadRequest,
         mold_core::ModelRemovalResponse,
         mold_core::KeptComponent,
+        QueueJobEntry,
         QueuePatchRequest,
         QueuePauseResponse,
         QueueCancelAllResponse,
@@ -758,7 +760,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/queue/resume", post(resume_queue))
         .route(
             "/api/queue/:id",
-            patch(patch_queue_job).delete(cancel_queue_job),
+            get(get_queue_job)
+                .patch(patch_queue_job)
+                .delete(cancel_queue_job),
         )
         .route("/api/queue/:id/retry", post(retry_queue_job))
         .route(
@@ -6114,6 +6118,123 @@ async fn list_queue(
         plan: listing.plan,
         page,
     }))
+}
+
+/// One queued job in full: its entry and, when the planner has placed it, the
+/// plan's own work item for it.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+struct QueueJobEntry {
+    job: crate::job_registry::JobEntry,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    work_item: Option<mold_core::QueueWorkItem>,
+}
+
+/// Read ONE queued job, settings included.
+///
+/// `GET /api/queue` cannot answer this. Its durable projection is
+/// payload-free on purpose — `QUEUE_PROJECTION_FIRST_PAGE_SQL` never selects
+/// `request_json`, because a listing must not read a request body per row — so
+/// `job_entry_from_durable_projection` hardcodes `metadata: None` and every
+/// durably admitted job shows no settings at all for the whole pre-dispatch
+/// window. Asking about one job is the opposite case: reading one body is
+/// exactly the point.
+///
+/// The registry answers when the job is live, because it already holds the
+/// metadata the submitting request derived. Otherwise the journal row is read
+/// and its metadata derived from `request_json` the same way the durable
+/// feeder derives it at replay — media excluded by `OutputMetadata`'s own
+/// shape, and never a secret.
+#[utoipa::path(
+    get,
+    path = "/api/queue/{id}",
+    tag = "queue",
+    params(("id" = String, Path, description = "Queue job id")),
+    responses(
+        (status = 200, description = "Queue job detail", body = QueueJobEntry),
+        (status = 404, description = "Queue job not found"),
+    )
+)]
+async fn get_queue_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<QueueJobEntry>, ApiError> {
+    let work_item = state.scheduled_work.latest_plan().and_then(|plan| {
+        plan.work_items
+            .into_iter()
+            .find(|item| item.work_id == id)
+            .map(|mut item| {
+                item.normalize_planned_lane_for_presentation();
+                item
+            })
+    });
+    if let Some(job) = state.job_registry.entry(&id) {
+        return Ok(Json(QueueJobEntry { job, work_item }));
+    }
+    if !state.queue_journal.is_enabled() {
+        return Err(ApiError::queue_job_not_found(format!(
+            "queue job {id} is not queued on this server"
+        )));
+    }
+    let journal = state.queue_journal.clone();
+    let row_id = id.clone();
+    let limit = state.queue_capacity;
+    // The position comes from the SAME bounded durable window `GET /api/queue`
+    // pages by default, so the two agree; a row beyond that window has no
+    // position either listing can name and reports the window's own length.
+    let (row, window) = spawn_queue_read(move || {
+        let row = journal.row(&row_id)?;
+        let window = journal.projection_page(None, limit)?;
+        Ok((row, window))
+    })
+    .await?;
+    let Some(row) = row else {
+        return Err(ApiError::queue_job_not_found(format!(
+            "queue job {id} is not queued on this server"
+        )));
+    };
+    let position = window
+        .rows
+        .iter()
+        .position(|projected| projected.id == row.id)
+        .unwrap_or(window.rows.len());
+    Ok(Json(QueueJobEntry {
+        job: job_entry_from_durable_row(row, position),
+        work_item,
+    }))
+}
+
+/// Project one durable row, deriving the settings the payload-free projection
+/// cannot carry. The derivation is the durable feeder's own, so a job read
+/// here and the same job after replay describe themselves identically.
+fn job_entry_from_durable_row(
+    row: mold_db::generation_queue::GenerationQueueRow,
+    position: usize,
+) -> crate::job_registry::JobEntry {
+    let metadata = serde_json::from_str::<mold_core::GenerateRequest>(&row.request_json)
+        .ok()
+        .map(|request| {
+            Box::new(mold_core::OutputMetadata::from_generate_request(
+                &request,
+                request.seed.unwrap_or(0),
+                request.scheduler,
+                mold_core::build_info::version_string(),
+            ))
+        });
+    let projection = mold_db::generation_queue::GenerationQueueProjection {
+        id: row.id,
+        state: row.state,
+        model: row.model,
+        target_gpu: row.target_gpu,
+        seed_pinned: row.seed_pinned,
+        dispatch_attempts: row.dispatch_attempts,
+        replay_seen: row.replay_seen,
+        held_reason: row.held_reason,
+        retryable: true,
+        created_at_ms: row.created_at_ms,
+    };
+    let mut entry = job_entry_from_durable_projection(projection, position);
+    entry.metadata = metadata;
+    entry
 }
 
 #[derive(Debug, Default, Deserialize)]

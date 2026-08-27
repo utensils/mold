@@ -22,3 +22,9 @@
   clamped so the reviewed shape is unchanged. At the reviewed 1344x768 shape
   the host charge falls from 22.89 GB to 21.34 GB; smaller canvases fall
   further.
+- **`GET /api/queue/:id` returns one queued job in full.** The queue listing is
+  payload-free by construction — it never reads a request body per row — so a
+  durably admitted job showed no settings at all until it was dispatched. The
+  new endpoint reads that one body and returns the same metadata shape a
+  replayed job describes itself with, plus the planner's work item for the job;
+  unknown ids return `404`.

@@ -5477,6 +5477,104 @@ mod tests {
         .unwrap();
     }
 
+    /// A durably admitted job must be able to say what it is going to render.
+    ///
+    /// The queue projection is payload-free by construction — its SQL never
+    /// selects `request_json` — so the listing hardcodes `metadata: None` and
+    /// every durable job showed NO settings at all for its entire pre-dispatch
+    /// window, which on this family is minutes. `GET /api/queue/:id` reads the
+    /// one body the listing must not, and derives the same metadata shape the
+    /// durable feeder derives at replay.
+    #[tokio::test]
+    async fn one_queue_job_reports_the_settings_the_payload_free_listing_cannot() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        mold_db::generation_queue::insert(
+            db.as_ref().as_ref().unwrap(),
+            &mold_db::generation_queue::GenerationQueueRow {
+                id: "durable-only".to_string(),
+                owner_uuid: owner,
+                state: mold_db::generation_queue::QueueRowState::Queued,
+                model: "flux-dev:q8".to_string(),
+                request_json: serde_json::json!({
+                    "prompt": "a lighthouse in a storm",
+                    "model": "flux-dev:q8",
+                    "width": 1024,
+                    "height": 768,
+                    "steps": 28,
+                    "guidance": 3.5,
+                    "seed": 4242,
+                })
+                .to_string(),
+                media_set_id: None,
+                admission_authority: None,
+                output_dir: root.path().to_path_buf(),
+                target_gpu: None,
+                target_device_id: None,
+                completion_payload: "full".to_string(),
+                seed_pinned: true,
+                dispatch_attempts: 0,
+                replay_seen: 0,
+                held_reason: None,
+                created_at_ms: 1_000,
+                updated_at_ms: 1_000,
+                started_at_ms: None,
+            },
+        )
+        .unwrap();
+
+        // The listing still carries no settings — that is the property this
+        // endpoint exists to work around, not a bug to fix there.
+        let listing = app_with_state(state.clone())
+            .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(listing.status(), StatusCode::OK);
+        let listed = json_body(listing).await;
+        let row = listed["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == "durable-only")
+            .expect("the durable row is listed");
+        assert!(
+            row.get("metadata").is_none(),
+            "the payload-free listing must not start reading request bodies: {row}"
+        );
+
+        let detail = app_with_state(state.clone())
+            .oneshot(
+                Request::get("/api/queue/durable-only")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail.status(), StatusCode::OK);
+        let detail = json_body(detail).await;
+        assert_eq!(detail["job"]["id"], "durable-only");
+        assert_eq!(detail["job"]["model"], "flux-dev:q8");
+        assert_eq!(detail["job"]["durable"], true);
+        let metadata = &detail["job"]["metadata"];
+        assert_eq!(metadata["prompt"], "a lighthouse in a storm");
+        assert_eq!(metadata["width"], 1024);
+        assert_eq!(metadata["height"], 768);
+        assert_eq!(metadata["steps"], 28);
+        assert_eq!(metadata["seed"], 4242);
+
+        let missing = app_with_state(state)
+            .oneshot(
+                Request::get("/api/queue/no-such-job")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
     #[tokio::test]
     async fn paginated_queue_reads_payload_free_pages_and_keeps_live_only_work_visible() {
         let root = tempfile::tempdir().unwrap();
