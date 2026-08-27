@@ -214,6 +214,120 @@ const print: GalleryImage = {
   },
 };
 
+let durableJobSequence = 0;
+
+/** The host's answer to `POST /api/generation-batches`: one accepted child per
+ * submitted request. Every print is admitted here — there is no attached
+ * generation stream left to fall back to. */
+function durableBatchResponse(
+  init: RequestInit | undefined,
+  overrides: { instanceId?: string; state?: string; filenames?: readonly string[] } = {},
+): Record<string, unknown> {
+  const body = JSON.parse(String(init?.body)) as {
+    client_batch_id: string;
+    requests: unknown[];
+  };
+  const now = Date.now();
+  const state = overrides.state ?? durableAdmission.state;
+  const filenames = overrides.filenames ?? durableAdmission.filenames;
+  return {
+    id: `batch-${body.client_batch_id}`,
+    client_batch_id: body.client_batch_id,
+    instance_id: overrides.instanceId ?? status.instance_id,
+    durable: true,
+    children: body.requests.map((_request, index) => ({
+      index: index + 1,
+      job_id: `durable-job-${++durableJobSequence}`,
+      state,
+      created_at_ms: now,
+      updated_at_ms: now + 1,
+      ...(state === "complete"
+        ? {
+            completed_at_ms: now + 2,
+            result: { filename: filenames[index] ?? filenames[0] ?? "saved print.png" },
+          }
+        : {}),
+    })),
+  };
+}
+
+/**
+ * How the shared host answers admission. A print has no held stream any more,
+ * so a test that needs a finished print says so here before it submits — the
+ * completion is metadata-only and its media comes from the host gallery.
+ */
+let durableAdmission: { state: string; filenames: readonly string[] } = {
+  state: "accepted",
+  filenames: [],
+};
+
+/**
+ * What a current machine answers for anything a test does not handle itself.
+ * Every print now goes through durable admission, so a test that only cares
+ * about the request it submits still needs the machine to advertise the queue
+ * and accept the batch.
+ */
+function durableApiFallback(
+  path: string,
+  init?: RequestInit,
+  callTarget?: unknown,
+): Promise<unknown> {
+  // Scoped to the primary machine on purpose: a test that probes a SECOND
+  // host's reachability still gets the rejection it is pinning.
+  if (
+    path === "/api/capabilities" &&
+    (callTarget as { baseUrl?: string } | undefined)?.baseUrl === target.baseUrl
+  ) {
+    return Promise.resolve(durableQueueCapabilities);
+  }
+  if (path === "/api/generation-batches" && init?.method === "POST") {
+    return Promise.resolve(durableBatchResponse(init));
+  }
+  if (path === "/api/generation-batches/status") {
+    return Promise.resolve({
+      instance_id: status.instance_id,
+      batches: [],
+      missing: { client_batch_ids: [], batch_ids: [] },
+    });
+  }
+  return Promise.reject(new Error(`Unexpected API path: ${path}`));
+}
+
+/** Finish every print this submission admits, naming its saved gallery file. */
+function admitCompletedPrints(...filenames: string[]): void {
+  durableAdmission = { state: "complete", filenames };
+}
+
+/** Every request body the phone actually admitted, in submission order. A
+ * print carries no held stream any more, so this is where its wire shape is
+ * read. */
+function admittedRequests(): Array<Record<string, unknown>> {
+  return admittedBatches().flatMap((body) => body.requests as Array<Record<string, unknown>>);
+}
+
+/** The exact authenticated machine each admission was posted to. */
+function admissionTargets(): unknown[] {
+  return admissionCalls().map((call) => call[0]);
+}
+
+/** The admission bodies themselves, for tests that assert chunking. */
+function admittedBatches(): Array<{ client_batch_id: string; requests: unknown[] }> {
+  return admissionCalls().map((call) => JSON.parse(String((call[2] as RequestInit).body)));
+}
+
+/** Every `POST /api/generation-batches` the phone actually made. */
+function admissionCalls(): unknown[][] {
+  return (apiJsonTo.mock.calls as unknown[][]).filter(
+    (call) =>
+      call[1] === "/api/generation-batches" &&
+      (call[2] as RequestInit | undefined)?.method === "POST",
+  );
+}
+
+/** The capability block a current machine advertises: the batch chunk limit's
+ * presence IS the durable-generation contract. */
+const durableQueueCapabilities = { queue: { heterogeneous_batch_max_outputs: 64 } };
+
 let wrapper: VueWrapper | null = null;
 let objectUrlSequence = 0;
 const openStreams: Array<{
@@ -304,14 +418,29 @@ beforeEach(() => {
     .mockImplementation((command: string) =>
       Promise.resolve(command === "keychain_get_api_key" ? target.apiKey : null),
     );
-  apiJsonTo.mockReset().mockImplementation((_target: unknown, path: string) => {
-    if (path === "/api/status") return Promise.resolve(status);
-    if (path === "/api/models") return Promise.resolve([model]);
-    if (path === "/api/gallery") return Promise.resolve([print]);
-    if (path === "/api/activity")
-      return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
-    return Promise.reject(new Error(`Unexpected API path: ${path}`));
-  });
+  durableJobSequence = 0;
+  durableAdmission = { state: "accepted", filenames: [] };
+  apiJsonTo
+    .mockReset()
+    .mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/capabilities") return Promise.resolve(durableQueueCapabilities);
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        return Promise.resolve(durableBatchResponse(init));
+      }
+      if (path === "/api/generation-batches/status") {
+        return Promise.resolve({
+          instance_id: status.instance_id,
+          batches: [],
+          missing: { client_batch_ids: [], batch_ids: [] },
+        });
+      }
+      if (path === "/api/activity")
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      return durableApiFallback(path, init, callTarget);
+    });
   apiFetchTo
     .mockReset()
     .mockImplementation(async (requestTarget: unknown, path: string, init?: RequestInit) => {
@@ -421,14 +550,14 @@ describe("MobileApp sequence generation", () => {
       default_fps: 24,
       frame_step: 4,
     };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([h3, wan]);
       if (path === "/api/gallery") return Promise.resolve([]);
       if (path === "/api/activity") {
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -584,7 +713,7 @@ describe("MobileApp sequence generation", () => {
         token: "mobile-background-placement-failure",
       }),
     );
-    expect(openStreams).toHaveLength(0);
+    expect(admittedRequests()).toHaveLength(0);
   });
 
   it("cancels a placement-pending submission when prompt work takes authority", async () => {
@@ -609,11 +738,11 @@ describe("MobileApp sequence generation", () => {
 
   it("cancels source preparation and releases Generate when prompt work takes authority", async () => {
     const imageModel: ModelEntry = { ...model, name: "flux:image", family: "flux" };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([imageModel]);
       if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     const preprocess = deferred<{ source: string | null; mask: string | null; changed: boolean }>();
     applySourceFitPreprocess.mockReturnValueOnce(preprocess.promise);
@@ -647,11 +776,11 @@ describe("MobileApp sequence generation", () => {
       return Promise.resolve(null);
     });
     const imageModel: ModelEntry = { ...model, name: "flux:image", family: "flux" };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([imageModel]);
       if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     const preprocess = deferred<{ source: string | null; mask: string | null; changed: boolean }>();
     applySourceFitPreprocess.mockReturnValueOnce(preprocess.promise);
@@ -685,7 +814,7 @@ describe("MobileApp sequence generation", () => {
       name: "AutoencoderKLMiniMaxH3",
       family: "minimax-h3",
     };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model, restrictedModel]);
       if (path === "/api/capabilities") {
@@ -708,7 +837,7 @@ describe("MobileApp sequence generation", () => {
       if (path === "/api/activity") {
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -723,7 +852,7 @@ describe("MobileApp sequence generation", () => {
   });
 
   it("shows active work started by another client with host attribution", async () => {
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -744,7 +873,7 @@ describe("MobileApp sequence generation", () => {
           ],
         });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -768,7 +897,7 @@ describe("MobileApp sequence generation", () => {
       width: 1024,
       height: 576,
     };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(pagedStatus);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -810,7 +939,7 @@ describe("MobileApp sequence generation", () => {
       if (path === "/api/queue/foreign-job/preview") {
         return Promise.resolve({ image: "UFJFVklFVw==", step: 7, total: 18 });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -856,7 +985,7 @@ describe("MobileApp sequence generation", () => {
       name: "ltx-video-0.9.8-2b-distilled:bf16",
       family: "ltx-video",
     };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([priorModel, sequenceModel]);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -907,7 +1036,7 @@ describe("MobileApp sequence generation", () => {
           },
         });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     wrapper = mountMobileApp(pinia);
     await flushPromises();
@@ -935,7 +1064,7 @@ describe("MobileApp sequence generation", () => {
   });
 
   it("refuses to restore a stale queue row after the server instance changes", async () => {
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -959,7 +1088,7 @@ describe("MobileApp sequence generation", () => {
       if (path === "/api/queue") {
         return Promise.reject(new Error("queue must not be read from the replacement instance"));
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -996,7 +1125,7 @@ describe("MobileApp sequence generation", () => {
       return Promise.resolve(null);
     });
     localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([sequenceModel]);
       if (path === "/api/capabilities") return Promise.resolve({});
@@ -1019,7 +1148,7 @@ describe("MobileApp sequence generation", () => {
       if (path === "/api/chain-jobs/sequence-job-1") {
         return new Promise(() => {});
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     apiFetchTo.mockImplementation(
       async (requestTarget: unknown, path: string, init?: RequestInit) => {
@@ -1122,7 +1251,7 @@ describe("MobileApp sequence generation", () => {
       supports_sequence: true,
     };
     localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([sequenceModel]);
       if (path === "/api/capabilities") return Promise.resolve({});
@@ -1146,7 +1275,7 @@ describe("MobileApp sequence generation", () => {
       if (path === "/api/chain-jobs/sequence-job-2") {
         return new Promise(() => {});
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     previewChainPlacement.mockResolvedValueOnce({
       ...plannedPlacement(),
@@ -1194,7 +1323,7 @@ describe("MobileApp sequence generation", () => {
     });
     localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
     let finishCreate!: (value: { job_id: string }) => void;
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([sequenceModel]);
       if (path === "/api/capabilities") return Promise.resolve({});
@@ -1214,7 +1343,7 @@ describe("MobileApp sequence generation", () => {
       if (path === "/api/chain-jobs" && init?.method === "POST") {
         return new Promise((resolve) => (finishCreate = resolve));
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     previewChainPlacement.mockResolvedValue({
       ...plannedPlacement(),
@@ -1276,7 +1405,7 @@ describe("MobileApp sequence generation", () => {
         jobId: "saved-sequence",
       }),
     );
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") {
         return Promise.resolve({ ...status, instance_id: undefined });
       }
@@ -1296,7 +1425,7 @@ describe("MobileApp sequence generation", () => {
         });
       }
       if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -1324,7 +1453,7 @@ describe("MobileApp Output field", () => {
   };
 
   function installModels(entries: ModelEntry[]): void {
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve(entries);
       if (path === "/api/capabilities") return Promise.resolve({});
@@ -1347,7 +1476,7 @@ describe("MobileApp Output field", () => {
         return Promise.resolve({ job_id: "sequence-job-1" });
       }
       if (path.startsWith("/api/chain-jobs/")) return new Promise(() => {});
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
   }
 
@@ -1474,7 +1603,7 @@ describe("MobileApp Output field", () => {
   });
 
   it("guides to Video + Models in Discover when no chain-capable model is installed", async () => {
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/capabilities") return Promise.resolve({});
@@ -1484,7 +1613,7 @@ describe("MobileApp Output field", () => {
       if (path.startsWith("/api/capabilities/chain-limits")) {
         return Promise.reject(new Error("not a chain model"));
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -1736,7 +1865,7 @@ describe("MobileApp generation queue", () => {
   }
 
   it("submits a pinned canonical-v2 request without showing or calling placement", async () => {
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -1744,10 +1873,7 @@ describe("MobileApp generation queue", () => {
         return Promise.resolve({
           events: { available: true },
           queue: {
-            heterogeneous_batch: true,
             heterogeneous_batch_max_outputs: 64,
-            durable_batch_outcomes: true,
-            admission_protocol_version: 2,
           },
         });
       }
@@ -1772,7 +1898,7 @@ describe("MobileApp generation queue", () => {
           ],
         });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -1791,7 +1917,7 @@ describe("MobileApp generation queue", () => {
 
   it("confirms and tracks the exact model download when a pinned v2 host is missing it", async () => {
     let installed = false;
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve(installed ? [model] : []);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -1799,10 +1925,7 @@ describe("MobileApp generation queue", () => {
         return Promise.resolve({
           events: { available: true },
           queue: {
-            heterogeneous_batch: true,
             heterogeneous_batch_max_outputs: 64,
-            durable_batch_outcomes: true,
-            admission_protocol_version: 2,
           },
         });
       }
@@ -1827,7 +1950,7 @@ describe("MobileApp generation queue", () => {
           ],
         });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     const pullResponse = deferred<string | null>();
     startCatalogDownload.mockReturnValue(pullResponse.promise);
@@ -1916,7 +2039,7 @@ describe("MobileApp generation queue", () => {
       default_frames: 25,
       default_fps: 30,
     };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([]);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -1924,17 +2047,14 @@ describe("MobileApp generation queue", () => {
         return Promise.resolve({
           events: { available: true },
           queue: {
-            heterogeneous_batch: true,
             heterogeneous_batch_max_outputs: 64,
-            durable_batch_outcomes: true,
-            admission_protocol_version: 2,
           },
         });
       }
       if (path === "/api/activity") {
         return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     const pinia = createPinia();
     wrapper = mountMobileApp(pinia);
@@ -1975,7 +2095,7 @@ describe("MobileApp generation queue", () => {
         }>;
       }) => void
     >();
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -1983,10 +2103,7 @@ describe("MobileApp generation queue", () => {
         return Promise.resolve({
           events: { available: true },
           queue: {
-            heterogeneous_batch: true,
             heterogeneous_batch_max_outputs: 64,
-            durable_batch_outcomes: true,
-            admission_protocol_version: 2,
           },
         });
       }
@@ -1997,7 +2114,7 @@ describe("MobileApp generation queue", () => {
         const clientBatchId = JSON.parse(String(init.body)).client_batch_id as string;
         return new Promise((resolve) => pendingAdmissions.set(clientBatchId, resolve));
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -2035,7 +2152,7 @@ describe("MobileApp generation queue", () => {
   it.each(["QuotaExceededError", "SecurityError"])(
     "admits once through the durable endpoint and warns when recovery storage raises %s",
     async (name) => {
-      apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
         if (path === "/api/status") return Promise.resolve(status);
         if (path === "/api/models") return Promise.resolve([model]);
         if (path === "/api/gallery") return Promise.resolve([print]);
@@ -2043,10 +2160,7 @@ describe("MobileApp generation queue", () => {
           return Promise.resolve({
             events: { available: true },
             queue: {
-              heterogeneous_batch: true,
               heterogeneous_batch_max_outputs: 64,
-              durable_batch_outcomes: true,
-              admission_protocol_version: 2,
             },
           });
         }
@@ -2071,7 +2185,7 @@ describe("MobileApp generation queue", () => {
             ],
           });
         }
-        return Promise.reject(new Error(`Unexpected API path: ${path}`));
+        return durableApiFallback(path, init, callTarget);
       });
 
       wrapper = mountMobileApp();
@@ -2117,7 +2231,7 @@ describe("MobileApp generation queue", () => {
       source_image: "optional",
     };
     let admittedBody: Record<string, unknown> | null = null;
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([imageModel]);
       if (path === "/api/gallery") return Promise.resolve([]);
@@ -2125,10 +2239,7 @@ describe("MobileApp generation queue", () => {
         return Promise.resolve({
           events: { available: true },
           queue: {
-            heterogeneous_batch: true,
             heterogeneous_batch_max_outputs: 64,
-            durable_batch_outcomes: true,
-            admission_protocol_version: 2,
           },
           durable_media: {
             protocol_version: 2,
@@ -2162,7 +2273,7 @@ describe("MobileApp generation queue", () => {
           ],
         });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -2205,7 +2316,7 @@ describe("MobileApp generation queue", () => {
           },
         ],
       });
-      apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+      apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
         if (path === "/api/status") return Promise.resolve(status);
         if (path === "/api/models") return Promise.resolve([model]);
         if (path === "/api/gallery") return Promise.resolve([print]);
@@ -2213,10 +2324,7 @@ describe("MobileApp generation queue", () => {
           return Promise.resolve({
             events: { available: true },
             queue: {
-              heterogeneous_batch: true,
               heterogeneous_batch_max_outputs: 64,
-              durable_batch_outcomes: true,
-              admission_protocol_version: 2,
             },
           });
         }
@@ -2238,7 +2346,7 @@ describe("MobileApp generation queue", () => {
             missing: { client_batch_ids: [], batch_ids: [] },
           });
         }
-        return Promise.reject(new Error(`Unexpected API path: ${path}`));
+        return durableApiFallback(path, init, callTarget);
       });
 
       wrapper = mountMobileApp();
@@ -2285,7 +2393,7 @@ describe("MobileApp generation queue", () => {
       ],
     });
     let statusReads = 0;
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -2293,10 +2401,7 @@ describe("MobileApp generation queue", () => {
         return Promise.resolve({
           events: { available: true },
           queue: {
-            heterogeneous_batch: true,
             heterogeneous_batch_max_outputs: 64,
-            durable_batch_outcomes: true,
-            admission_protocol_version: 2,
           },
         });
       }
@@ -2316,7 +2421,7 @@ describe("MobileApp generation queue", () => {
           missing: { client_batch_ids: [], batch_ids: [] },
         });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -2350,7 +2455,7 @@ describe("MobileApp generation queue", () => {
 
   it("retires a durable tracker when the event authority reports a replacement instance", async () => {
     let clientBatchId = "";
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -2358,10 +2463,7 @@ describe("MobileApp generation queue", () => {
         return Promise.resolve({
           events: { available: true },
           queue: {
-            heterogeneous_batch: true,
             heterogeneous_batch_max_outputs: 64,
-            durable_batch_outcomes: true,
-            admission_protocol_version: 2,
           },
         });
       }
@@ -2386,7 +2488,7 @@ describe("MobileApp generation queue", () => {
           ],
         });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -2411,7 +2513,7 @@ describe("MobileApp generation queue", () => {
   });
 
   it("describes a held durable child as action-required rather than resource waiting", async () => {
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -2419,10 +2521,7 @@ describe("MobileApp generation queue", () => {
         return Promise.resolve({
           events: { available: true },
           queue: {
-            heterogeneous_batch: true,
             heterogeneous_batch_max_outputs: 64,
-            durable_batch_outcomes: true,
-            admission_protocol_version: 2,
           },
         });
       }
@@ -2448,7 +2547,7 @@ describe("MobileApp generation queue", () => {
           ],
         });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -2486,7 +2585,7 @@ describe("MobileApp generation queue", () => {
         },
       ],
     });
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -2494,10 +2593,7 @@ describe("MobileApp generation queue", () => {
         return Promise.resolve({
           events: { available: true },
           queue: {
-            heterogeneous_batch: true,
             heterogeneous_batch_max_outputs: 64,
-            durable_batch_outcomes: true,
-            admission_protocol_version: 2,
           },
         });
       }
@@ -2515,7 +2611,7 @@ describe("MobileApp generation queue", () => {
           missing: { client_batch_ids: [], batch_ids: [] },
         });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -2583,7 +2679,7 @@ describe("MobileApp generation queue", () => {
         },
       ],
     });
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -2591,10 +2687,7 @@ describe("MobileApp generation queue", () => {
         return Promise.resolve({
           events: { available: true },
           queue: {
-            heterogeneous_batch: true,
             heterogeneous_batch_max_outputs: 64,
-            durable_batch_outcomes: true,
-            admission_protocol_version: 2,
           },
         });
       }
@@ -2612,7 +2705,7 @@ describe("MobileApp generation queue", () => {
           missing: { client_batch_ids: [], batch_ids: [] },
         });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     streamableMediaUrl.mockResolvedValue("https://studio/exact-host/racing.png");
 
@@ -2648,7 +2741,7 @@ describe("MobileApp generation queue", () => {
           }
         : {}),
     });
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -2656,10 +2749,7 @@ describe("MobileApp generation queue", () => {
         return Promise.resolve({
           events: { available: true },
           queue: {
-            heterogeneous_batch: true,
             heterogeneous_batch_max_outputs: 64,
-            durable_batch_outcomes: true,
-            admission_protocol_version: 2,
           },
         });
       }
@@ -2691,7 +2781,7 @@ describe("MobileApp generation queue", () => {
           missing: { client_batch_ids: [], batch_ids: [] },
         });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -2709,7 +2799,7 @@ describe("MobileApp generation queue", () => {
 
   it("chunks a prepared Batch N at the durable host limit", async () => {
     const admittedChunks: Array<Array<Record<string, unknown>>> = [];
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -2717,10 +2807,7 @@ describe("MobileApp generation queue", () => {
         return Promise.resolve({
           events: { available: true },
           queue: {
-            heterogeneous_batch: true,
             heterogeneous_batch_max_outputs: 1,
-            durable_batch_outcomes: true,
-            admission_protocol_version: 2,
           },
         });
       }
@@ -2747,7 +2834,7 @@ describe("MobileApp generation queue", () => {
           })),
         });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -2790,7 +2877,7 @@ describe("MobileApp generation queue", () => {
         },
       ],
     });
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -2798,10 +2885,7 @@ describe("MobileApp generation queue", () => {
         return Promise.resolve({
           events: { available: true },
           queue: {
-            heterogeneous_batch: true,
             heterogeneous_batch_max_outputs: 64,
-            durable_batch_outcomes: true,
-            admission_protocol_version: 2,
           },
         });
       }
@@ -2820,7 +2904,7 @@ describe("MobileApp generation queue", () => {
           missing: { client_batch_ids: [], batch_ids: [] },
         });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     apiFetchTo.mockResolvedValue({
       blob: () => Promise.resolve(new Blob(["durable-image"], { type: "image/png" })),
@@ -2894,7 +2978,7 @@ describe("MobileApp generation queue", () => {
 
     expect(openStreams).toHaveLength(1);
     // The shared kit's cinematic preset templates the prompt into the look.
-    expect(openStreams[0]?.options.body.prompt).toBe(
+    expect(admittedRequests()[0]?.prompt).toBe(
       "cinematic film still of a red fox in snow, cinematic lighting, anamorphic, dramatic mood, subtle film grain",
     );
     // The composition is applied to a draft clone at submit — the live prompt stays the user's words.
@@ -2974,7 +3058,7 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
     expect(openStreams[0]?.options.target).toEqual(target);
-    expect(openStreams[0]?.options.body.prompt_transform).toEqual({
+    expect(admittedRequests()[0]?.prompt_transform).toEqual({
       operation: "remix",
       root_prompt: "a lighthouse",
       source_prompt: "a lighthouse",
@@ -3014,12 +3098,12 @@ describe("MobileApp generation queue", () => {
 
     await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
     await flushPromises();
-    expect(openStreams).toHaveLength(2);
-    expect(openStreams.map((stream) => stream.options.body.original_prompt)).toEqual([
+    expect(admittedRequests()).toHaveLength(2);
+    expect(admittedRequests().map((request) => request.original_prompt)).toEqual([
       "a train in the desert",
       "a train in the desert",
     ]);
-    expect(openStreams.map((stream) => stream.options.body.prompt_transform)).toEqual([
+    expect(admittedRequests().map((request) => request.prompt_transform)).toEqual([
       expect.objectContaining({
         operation: "remix",
         source_prompt: "a train in the desert",
@@ -3054,11 +3138,11 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
     await flushPromises();
 
-    expect(openStreams.map((stream) => stream.options.body.original_prompt)).toEqual([
+    expect(admittedRequests().map((request) => request.original_prompt)).toEqual([
       "a lighthouse",
       "a lighthouse",
     ]);
-    expect(openStreams[0]?.options.body.prompt_transform).toMatchObject({
+    expect(admittedRequests()[0]?.prompt_transform).toMatchObject({
       root_prompt: "a lighthouse",
       source_prompt: "a lighthouse · prepared 1",
       source_kind: "current",
@@ -3098,7 +3182,7 @@ describe("MobileApp generation queue", () => {
           : null,
       ),
     );
-    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string, init?: RequestInit) => {
       const render = route.baseUrl === renderTarget.baseUrl;
       if (path === "/api/status")
         return Promise.resolve({
@@ -3109,7 +3193,7 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/capabilities") return Promise.resolve({});
       if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, route);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -3126,7 +3210,7 @@ describe("MobileApp generation queue", () => {
     );
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
-    expect(openStreams[0]?.options.target).toEqual(renderTarget);
+    expect(admissionTargets()[0]).toEqual(renderTarget);
   });
 
   it("carries an applied single Remix across hosts but still stales semantic edits", async () => {
@@ -3162,7 +3246,7 @@ describe("MobileApp generation queue", () => {
           : null,
       ),
     );
-    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string, init?: RequestInit) => {
       const render = route.baseUrl === renderTarget.baseUrl;
       if (path === "/api/status")
         return Promise.resolve({
@@ -3173,7 +3257,7 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/capabilities") return Promise.resolve({});
       if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, route);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -3224,7 +3308,7 @@ describe("MobileApp generation queue", () => {
           : null,
       ),
     );
-    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string, init?: RequestInit) => {
       const render = route.baseUrl === renderTarget.baseUrl;
       if (path === "/api/status")
         return Promise.resolve({
@@ -3234,7 +3318,7 @@ describe("MobileApp generation queue", () => {
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/capabilities") return Promise.resolve({});
       if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, route);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -3259,11 +3343,11 @@ describe("MobileApp generation queue", () => {
       display_name: "Juggernaut XL - Ragnarok",
       description: "Juggernaut XL - Ragnarok by RunDiffusion",
     };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model, catalogModel]);
       if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -3286,8 +3370,8 @@ describe("MobileApp generation queue", () => {
 
     await stale.get("[data-test='mobile-develop-expanded-anyway']").trigger("click");
     await flushPromises();
-    expect(openStreams).toHaveLength(1);
-    expect(openStreams[0]?.options.body).toMatchObject({
+    expect(admittedRequests()).toHaveLength(1);
+    expect(admittedRequests()[0]).toMatchObject({
       model: catalogModel.name,
       prompt: "a lighthouse · prepared 1",
       original_prompt: "a lighthouse",
@@ -3316,7 +3400,7 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
     expect(openStreams).toHaveLength(1);
     // …and exactly once — the cleared chip can't merge it a second time.
-    expect(openStreams[0]?.options.body.negative_prompt).toBe(
+    expect(admittedRequests()[0]?.negative_prompt).toBe(
       "text, anime, cartoon, graphic, washed out",
     );
   });
@@ -3356,7 +3440,7 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
     await flushPromises();
     // Reviewed prompts ship verbatim — the prepared submit path never suffixes.
-    expect(openStreams.map((stream) => stream.options.body.prompt)).toEqual([
+    expect(admittedRequests().map((request) => request.prompt)).toEqual([
       "three storm studies · prepared 1",
       "three storm studies · prepared 2",
       "three storm studies · prepared 3",
@@ -3483,11 +3567,11 @@ describe("MobileApp generation queue", () => {
       default_steps: 24,
       default_guidance: 3.5,
     };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([imageModel, model]);
       if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -3501,8 +3585,8 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.get("[data-test='mobile-resolution-tier-dims']").text()).toBe("768 × 512 px");
 
     await submitPrompt("use the video defaults");
-    expect(openStreams).toHaveLength(1);
-    expect(openStreams[0]?.options.body).toMatchObject({
+    expect(admittedRequests()).toHaveLength(1);
+    expect(admittedRequests()[0]).toMatchObject({
       model: model.name,
       width: 768,
       height: 512,
@@ -3540,20 +3624,22 @@ describe("MobileApp generation queue", () => {
         },
       ]),
     );
-    apiJsonTo.mockImplementation((apiTarget: { baseUrl: string }, path: string) => {
-      const remote = apiTarget.baseUrl === renderTarget.baseUrl;
-      if (path === "/api/status") {
-        return Promise.resolve({
-          ...status,
-          hostname: remote ? "render" : "studio",
-          instance_id: remote ? "render-id" : "studio-id",
-        });
-      }
-      if (path === "/api/models") return Promise.resolve([remote ? renderModel : studioModel]);
-      if (path === "/api/gallery") return Promise.resolve([]);
-      if (path.startsWith("/api/catalog/installed")) return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
-    });
+    apiJsonTo.mockImplementation(
+      (apiTarget: { baseUrl: string }, path: string, init?: RequestInit) => {
+        const remote = apiTarget.baseUrl === renderTarget.baseUrl;
+        if (path === "/api/status") {
+          return Promise.resolve({
+            ...status,
+            hostname: remote ? "render" : "studio",
+            instance_id: remote ? "render-id" : "studio-id",
+          });
+        }
+        if (path === "/api/models") return Promise.resolve([remote ? renderModel : studioModel]);
+        if (path === "/api/gallery") return Promise.resolve([]);
+        if (path.startsWith("/api/catalog/installed")) return Promise.resolve([]);
+        return durableApiFallback(path, init, apiTarget);
+      },
+    );
 
     let finishPreprocess!: () => void;
     applySourceFitPreprocess.mockImplementationOnce(
@@ -3586,7 +3672,7 @@ describe("MobileApp generation queue", () => {
     finishPreprocess();
     await flushPromises();
 
-    expect(openStreams).toHaveLength(1);
+    expect(admittedRequests()).toHaveLength(1);
     expect(openStreams[0]?.options.target).toEqual(target);
     expect(openStreams[0]?.options.body).toMatchObject({
       prompt: "first prompt",
@@ -3636,20 +3722,26 @@ describe("MobileApp generation queue", () => {
         { id: "render-id", name: "Render", baseUrl: remoteTarget.baseUrl, online: false },
       ]),
     );
-    apiJsonTo.mockImplementation((apiTarget: { baseUrl: string }, path: string) => {
-      const remote = apiTarget.baseUrl === remoteTarget.baseUrl;
-      if (path === "/api/status") {
-        return Promise.resolve({
-          ...status,
-          hostname: remote ? "render" : "studio",
-          instance_id: remote ? "render-id" : "studio-id",
-        });
-      }
-      if (path === "/api/models") return Promise.resolve([remote ? remoteModel : model]);
-      if (path === "/api/gallery") return Promise.resolve([]);
-      if (path.startsWith("/api/catalog/installed")) return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
-    });
+    apiJsonTo.mockImplementation(
+      (apiTarget: { baseUrl: string }, path: string, init?: RequestInit) => {
+        const remote = apiTarget.baseUrl === remoteTarget.baseUrl;
+        // This machine's capability probe fails: the labels below pin that.
+        if (path === "/api/capabilities") {
+          return Promise.reject(new Error("capabilities unavailable"));
+        }
+        if (path === "/api/status") {
+          return Promise.resolve({
+            ...status,
+            hostname: remote ? "render" : "studio",
+            instance_id: remote ? "render-id" : "studio-id",
+          });
+        }
+        if (path === "/api/models") return Promise.resolve([remote ? remoteModel : model]);
+        if (path === "/api/gallery") return Promise.resolve([]);
+        if (path.startsWith("/api/catalog/installed")) return Promise.resolve([]);
+        return durableApiFallback(path, init, apiTarget);
+      },
+    );
 
     wrapper = mountMobileApp();
     await flushPromises();
@@ -3705,11 +3797,11 @@ describe("MobileApp generation queue", () => {
       name: "ltx-2-19b-distilled:fp8",
       family: "ltx2",
     };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([chainModel]);
       if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -3753,11 +3845,11 @@ describe("MobileApp generation queue", () => {
       name: "ltx-video-0.9.8-13b-dev:bf16",
       family: "ltx-video",
     };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([qwen, video]);
       if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -3785,11 +3877,11 @@ describe("MobileApp generation queue", () => {
       default_width: 1024,
       default_height: 1024,
     };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([qwen]);
       if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     applySourceFitPreprocess.mockResolvedValueOnce({
       source: "FITTED_TARGET",
@@ -3817,7 +3909,7 @@ describe("MobileApp generation queue", () => {
       }),
       expect.any(Object),
     );
-    expect(openStreams).toHaveLength(1);
+    expect(admittedRequests()).toHaveLength(1);
     expect(openStreams[0]?.options.body.edit_images).toEqual(["FITTED_TARGET", "REFERENCE"]);
     expect(liveForm.imageAttachments).toEqual(["TARGET", "REFERENCE"]);
   });
@@ -3869,11 +3961,11 @@ describe("MobileApp generation queue", () => {
       name: "controlnet-canny-sd15",
       family: "controlnet",
     };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([upscaler, controlNet, imageModel]);
       if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -3997,13 +4089,13 @@ describe("MobileApp generation queue", () => {
         expect.objectContaining({ signal: expect.any(AbortSignal) }),
       );
 
-      apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
         if (path === "/api/status") {
           return Promise.resolve({ ...status, instance_id: "replacement-instance" });
         }
         if (path === "/api/models") return Promise.resolve([model]);
         if (path === "/api/gallery") return Promise.resolve([print]);
-        return Promise.reject(new Error(`Unexpected API path: ${path}`));
+        return durableApiFallback(path, init, callTarget);
       });
       window.dispatchEvent(new Event("pageshow"));
       await flushPromises();
@@ -4015,136 +4107,42 @@ describe("MobileApp generation queue", () => {
     },
   );
 
-  it.each([
-    [
-      "authoritative infeasible",
-      {
-        version: 1,
-        authoritative: false,
-        state_version: 2,
-        plan_version: 2,
-        outcome: "infeasible",
-        candidate: null,
-        reason: "insufficient_vram",
-      },
-    ],
-    ["null", null],
-    ["malformed", {}],
-    [
-      "contradictory unsupported",
-      {
-        version: 1,
-        authoritative: true,
-        state_version: 2,
-        plan_version: 2,
-        outcome: "unsupported",
-      },
-    ],
-    ["HTTP 401", new ApiError("unauthorized", 401)],
-    ["HTTP 403", new ApiError("forbidden", 403)],
-    ["HTTP 426", new ApiError("upgrade", 426)],
-    ["HTTP 500", new ApiError("failed", 500)],
-  ])(
-    "preserves prepared Batch N and opens zero streams for %s placement",
-    async (_case, result) => {
-      wrapper = mountMobileApp();
-      await flushPromises();
-      await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
-      await fieldControl("Prompt").setValue("preserved storm pair");
-      await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
-      await flushPromises();
-      if (result instanceof Error) {
-        previewGenerationPlacement.mockRejectedValueOnce(result);
-      } else {
-        previewGenerationPlacement.mockResolvedValueOnce(result);
+  it("preserves prepared Batch N and queues nothing when the machine refuses the print", async () => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      // A machine that advertises no durable queue cannot take the print, and
+      // there is no attached stream left to fall back to.
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
       }
-
-      await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
-      await flushPromises();
-
-      expect(openStreams).toHaveLength(0);
-      expect(wrapper.find("[data-test='mobile-prepared-expansion']").exists()).toBe(true);
-      expect(
-        wrapper.get("[data-test='mobile-develop-prepared']").attributes("disabled"),
-      ).toBeUndefined();
-    },
-  );
-
-  it.each([
-    [
-      "authoritative infeasibility",
-      {
-        version: 1,
-        authoritative: true,
-        state_version: 2,
-        plan_version: 2,
-        outcome: "infeasible",
-        candidate: null,
-        reason: "model is missing a component",
-        missing_components: [
-          {
-            kind: "vae",
-            name: "ae.safetensors",
-            present: false,
-            repair_model: model.name,
-          },
-        ],
-      },
-      "Studio cannot run this print: model is missing a component. Missing components: ae.safetensors. Nothing was queued.",
-    ],
-    [
-      "temporary scheduler failure",
-      {
-        version: 1,
-        authoritative: false,
-        state_version: 2,
-        plan_version: 2,
-        outcome: "temporarily_unavailable",
-        candidate: null,
-        reason: "scheduler snapshot changed",
-      },
-      "Studio could not compute a placement plan right now. Reason: scheduler snapshot changed. Try again. Nothing was queued.",
-    ],
-    [
-      "malformed infeasible metadata",
-      {
-        version: 1,
-        authoritative: true,
-        state_version: 2,
-        plan_version: 2,
-        outcome: "infeasible",
-        candidate: null,
-        reason: "model is missing a component",
-        missing_components: [
-          {
-            kind: "vae",
-            name: "",
-            present: false,
-            repair_model: model.name,
-          },
-        ],
-      },
-      "Studio returned an invalid placement response.",
-    ],
-    ["malformed preview", {}, "Studio returned an invalid placement response."],
-  ])("names %s without discarding prepared work", async (_case, result, expected) => {
+      return durableApiFallback(path, init, callTarget);
+    });
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("preserved storm pair");
     await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
     await flushPromises();
-    previewGenerationPlacement.mockResolvedValueOnce(result);
 
     await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
     await flushPromises();
 
-    expect(wrapper.text()).toContain(expected);
+    expect(wrapper.text()).toContain("does not advertise the durable generation queue");
+    expect(wrapper.text()).toContain("Nothing was queued.");
+    expect(admittedRequests()).toHaveLength(0);
     expect(openStreams).toHaveLength(0);
+    // The reviewed set survives, and Develop stays live so it can be retried.
     expect(wrapper.find("[data-test='mobile-prepared-expansion']").exists()).toBe(true);
+    expect(
+      wrapper.get("[data-test='mobile-develop-prepared']").attributes("disabled"),
+    ).toBeUndefined();
   });
 
   it("identifies a failed middle prepared sibling by variation and reviewed prompt", async () => {
+    admitCompletedPrints();
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
@@ -4159,21 +4157,8 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
     await flushPromises();
 
-    openStreams[0]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: btoa("first"),
-        format: "png",
-        width: 768,
-        height: 512,
-        seed_used: 1,
-        generation_time_ms: 500,
-        model: model.name,
-      }),
-    );
-    openStreams[0]!.resolve();
     await flushPromises();
-    expect(openStreams).toHaveLength(3);
+    expect(admittedRequests()).toHaveLength(3);
     openStreams[1]!.options.onEvent("error", JSON.stringify({ message: "host ran out of memory" }));
     openStreams[1]!.resolve();
     openStreams[2]!.options.onEvent(
@@ -4200,6 +4185,7 @@ describe("MobileApp generation queue", () => {
   });
 
   it("keeps a prepared sibling live when cancellation is unconfirmed", async () => {
+    admitCompletedPrints();
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
@@ -4214,21 +4200,8 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
     await flushPromises();
 
-    openStreams[0]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: btoa("first"),
-        format: "png",
-        width: 768,
-        height: 512,
-        seed_used: 1,
-        generation_time_ms: 500,
-        model: model.name,
-      }),
-    );
-    openStreams[0]!.resolve();
     await flushPromises();
-    expect(openStreams).toHaveLength(3);
+    expect(admittedRequests()).toHaveLength(3);
     const cancelRow = wrapper
       .findAll("[data-test='mobile-generation-job']")
       .find((row) => row.text().includes("cancelled dusk"))!;
@@ -4298,11 +4271,11 @@ describe("MobileApp generation queue", () => {
 
   it("invalidates quick Batch 1 submission when Undo wins deferred preprocessing", async () => {
     const imageModel: ModelEntry = { ...model, name: "flux:image", family: "flux" };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([imageModel]);
       if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     let finishPreprocess!: () => void;
     applySourceFitPreprocess.mockImplementationOnce(
@@ -4335,11 +4308,11 @@ describe("MobileApp generation queue", () => {
 
   it("lets Discard cancel a prepared batch while source preprocessing is pending", async () => {
     const imageModel: ModelEntry = { ...model, name: "flux:image", family: "flux" };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([imageModel]);
       if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     let finishPreprocess!: () => void;
     applySourceFitPreprocess.mockImplementationOnce(
@@ -4374,11 +4347,11 @@ describe("MobileApp generation queue", () => {
 
   it("unlocks preserved prepared work after preprocessing fails and allows retry", async () => {
     const imageModel: ModelEntry = { ...model, name: "flux:image", family: "flux" };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([imageModel]);
       if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     applySourceFitPreprocess.mockRejectedValueOnce(new Error("upscaler unavailable"));
     wrapper = mountMobileApp();
@@ -4411,11 +4384,11 @@ describe("MobileApp generation queue", () => {
 
   it("does not steal focus when delayed prepared submission finishes after the user moves", async () => {
     const imageModel: ModelEntry = { ...model, name: "flux:image", family: "flux" };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([imageModel]);
       if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     let finishPreprocess!: () => void;
     applySourceFitPreprocess.mockImplementationOnce(
@@ -4981,11 +4954,11 @@ describe("MobileApp generation queue", () => {
     expect(openStreams).toHaveLength(0);
 
     const imageModel: ModelEntry = { ...model, name: "flux:image", family: "flux" };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([imageModel]);
       if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     let finishPreprocess!: () => void;
     applySourceFitPreprocess.mockImplementationOnce(
@@ -5156,7 +5129,7 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
 
-    expect(openStreams[0]?.options.body).toMatchObject({ seed: 1234 });
+    expect(admittedRequests()[0]).toMatchObject({ seed: 1234 });
     await wrapper.get("[data-test='mobile-seed-mode-random']").trigger("click");
     expect(wrapper.find("[data-test='mobile-seed-input']").exists()).toBe(false);
   });
@@ -5236,8 +5209,8 @@ describe("MobileApp generation queue", () => {
     );
     await flushPromises();
 
-    expect(openStreams).toHaveLength(2);
-    expect(openStreams.map((stream) => stream.options.body.prompt)).toEqual([
+    expect(admittedRequests()).toHaveLength(2);
+    expect(admittedRequests().map((request) => request.prompt)).toEqual([
       "first prompt",
       "second prompt",
     ]);
@@ -5289,7 +5262,7 @@ describe("MobileApp generation queue", () => {
   });
 
   it("counts a queued print's live place in line rather than its submit slot", async () => {
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -5310,7 +5283,7 @@ describe("MobileApp generation queue", () => {
             work_items: [],
           },
         });
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -5338,7 +5311,7 @@ describe("MobileApp generation queue", () => {
     // Reported from a 1-GPU host with five z-image jobs queued: the waiting
     // rows rendered the scheduler's own `no idle device` string, which just
     // means the one GPU is busy — normal serialization, not a fault.
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
@@ -5370,7 +5343,7 @@ describe("MobileApp generation queue", () => {
             ],
           },
         });
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -5476,24 +5449,10 @@ describe("MobileApp generation queue", () => {
     apiFetchTo.mockResolvedValueOnce({
       blob: () => Promise.resolve(new Blob(["generated-image"], { type: "image/png" })),
     } as Response);
+    admitCompletedPrints("saved print.png");
     wrapper = mountMobileApp();
     await flushPromises();
     await submitPrompt("save this print");
-
-    openStreams[0]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: "",
-        format: "png",
-        filename: "saved print.png",
-        width: 768,
-        height: 512,
-        seed_used: 42,
-        generation_time_ms: 1_250,
-        model: model.name,
-      }),
-    );
-    openStreams[0]!.resolve();
     await flushPromises();
 
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/image/saved%20print.png");
@@ -5510,27 +5469,11 @@ describe("MobileApp generation queue", () => {
       .mockResolvedValueOnce({
         blob: () => Promise.resolve(new Blob(["upscaled-image"], { type: "image/png" })),
       } as Response);
+    admitCompletedPrints("saved-original.png", "saved-upscaled.png");
     wrapper = mountMobileApp();
     await flushPromises();
     await submitPrompt("save both versions");
 
-    openStreams[0]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: "",
-        format: "png",
-        original_filename: "saved-original.png",
-        filename: "saved-upscaled.png",
-        width: 1536,
-        height: 1024,
-        original_width: 768,
-        original_height: 512,
-        seed_used: 42,
-        generation_time_ms: 1_250,
-        model: model.name,
-      }),
-    );
-    openStreams[0]!.resolve();
     await flushPromises();
 
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/image/saved-original.png");
@@ -5576,26 +5519,13 @@ describe("MobileApp generation queue", () => {
         autoSavePhotos: false,
       }),
     );
+    admitCompletedPrints("remote only.png");
     wrapper = mountMobileApp();
     await flushPromises();
     apiFetchTo.mockClear();
     invoke.mockClear();
     await submitPrompt("keep this remote");
 
-    openStreams[0]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: "",
-        format: "png",
-        filename: "remote only.png",
-        width: 768,
-        height: 512,
-        seed_used: 42,
-        generation_time_ms: 1_250,
-        model: model.name,
-      }),
-    );
-    openStreams[0]!.resolve();
     await flushPromises();
 
     expect(apiFetchTo).not.toHaveBeenCalledWith(target, "/api/gallery/image/remote%20only.png");
@@ -5631,26 +5561,11 @@ describe("MobileApp generation queue", () => {
   });
 
   it("streams a metadata-only generated video from the host", async () => {
+    admitCompletedPrints("generated clip.mp4");
     wrapper = mountMobileApp();
     await flushPromises();
 
     await submitPrompt("stream this video");
-    openStreams[0]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: "",
-        format: "mp4",
-        filename: "generated clip.mp4",
-        width: 768,
-        height: 512,
-        seed_used: 23,
-        generation_time_ms: 500,
-        model: model.name,
-        video_frames: 121,
-        video_fps: 30,
-      }),
-    );
-    openStreams[0]!.resolve();
     await flushPromises();
 
     expect(streamableMediaUrl).toHaveBeenCalledWith("/api/gallery/image/generated%20clip.mp4", {
@@ -5665,23 +5580,11 @@ describe("MobileApp generation queue", () => {
   });
 
   it("does not show an older result when the latest saved result has no filename", async () => {
+    admitCompletedPrints();
     wrapper = mountMobileApp();
     await flushPromises();
 
     await submitPrompt("first successful prompt");
-    openStreams[0]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: btoa("first-result"),
-        format: "png",
-        width: 768,
-        height: 512,
-        seed_used: 1,
-        generation_time_ms: 500,
-        model: model.name,
-      }),
-    );
-    openStreams[0]!.resolve();
     await flushPromises();
     expect(wrapper.find("img.result-media").exists()).toBe(true);
 
@@ -5712,24 +5615,11 @@ describe("MobileApp generation queue", () => {
     streamableMediaUrl
       .mockRejectedValueOnce(new Error("The host refused the media ticket."))
       .mockResolvedValueOnce("https://studio/media/retried-image");
+    admitCompletedPrints("ticketed image.png");
     wrapper = mountMobileApp();
     await flushPromises();
 
     await submitPrompt("ticketed image");
-    openStreams[0]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: "",
-        format: "png",
-        filename: "ticketed image.png",
-        width: 768,
-        height: 512,
-        seed_used: 4,
-        generation_time_ms: 500,
-        model: model.name,
-      }),
-    );
-    openStreams[0]!.resolve();
     await flushPromises();
 
     expect(wrapper.get(".result-preview-error").text()).toContain("refused the media ticket");
@@ -5753,24 +5643,11 @@ describe("MobileApp generation queue", () => {
     streamableMediaUrl
       .mockResolvedValueOnce("https://studio/media/video?media_token=old&expires=1")
       .mockResolvedValueOnce("https://studio/media/video?media_token=new&expires=4102444800");
+    admitCompletedPrints("renew this video.mp4");
     wrapper = mountMobileApp();
     await flushPromises();
 
     await submitPrompt("renew this video");
-    openStreams[0]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: "",
-        format: "mp4",
-        filename: "renew this video.mp4",
-        width: 768,
-        height: 512,
-        seed_used: 5,
-        generation_time_ms: 500,
-        model: model.name,
-      }),
-    );
-    openStreams[0]!.resolve();
     await flushPromises();
     expect(wrapper.get("video.result-media").attributes("src")).toContain("media_token=old");
 
@@ -5784,24 +5661,11 @@ describe("MobileApp generation queue", () => {
   it("bounds automatic media recovery and exposes a manual retry", async () => {
     const unchangedUrl = "https://studio/media/missing?media_token=unchanged&expires=4102444800";
     streamableMediaUrl.mockResolvedValueOnce(unchangedUrl).mockResolvedValueOnce(unchangedUrl);
+    admitCompletedPrints("missing.png");
     wrapper = mountMobileApp();
     await flushPromises();
 
     await submitPrompt("missing generated image");
-    openStreams[0]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: "",
-        format: "png",
-        filename: "missing.png",
-        width: 768,
-        height: 512,
-        seed_used: 6,
-        generation_time_ms: 500,
-        model: model.name,
-      }),
-    );
-    openStreams[0]!.resolve();
     await flushPromises();
 
     const originalImage = wrapper.get("img.result-media").element;
@@ -5830,24 +5694,11 @@ describe("MobileApp generation queue", () => {
     const unchangedUrl =
       "https://studio/media/missing-video?media_token=unchanged&expires=4102444800";
     streamableMediaUrl.mockResolvedValueOnce(unchangedUrl).mockResolvedValueOnce(unchangedUrl);
+    admitCompletedPrints("missing-video.mp4");
     wrapper = mountMobileApp();
     await flushPromises();
 
     await submitPrompt("missing generated video");
-    openStreams[0]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: "",
-        format: "mp4",
-        filename: "missing-video.mp4",
-        width: 768,
-        height: 512,
-        seed_used: 7,
-        generation_time_ms: 500,
-        model: model.name,
-      }),
-    );
-    openStreams[0]!.resolve();
     await flushPromises();
 
     const originalVideo = wrapper.get("video.result-media").element;
@@ -5870,24 +5721,11 @@ describe("MobileApp generation queue", () => {
     const unchangedUrl =
       "https://studio/media/missing-video?media_token=unchanged&expires=4102444800";
     streamableMediaUrl.mockResolvedValue(unchangedUrl);
+    admitCompletedPrints("missing-video.mp4");
     wrapper = mountMobileApp();
     await flushPromises();
 
     await submitPrompt("persistently missing generated video");
-    openStreams[0]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: "",
-        format: "mp4",
-        filename: "missing-video.mp4",
-        width: 768,
-        height: 512,
-        seed_used: 7,
-        generation_time_ms: 500,
-        model: model.name,
-      }),
-    );
-    openStreams[0]!.resolve();
     await flushPromises();
 
     for (const delay of [250, 750, 1_500]) {
@@ -5953,6 +5791,7 @@ describe("MobileApp generation queue", () => {
   });
 
   it("shows a completion that wins the cancellation race", async () => {
+    admitCompletedPrints();
     wrapper = mountMobileApp();
     await flushPromises();
     await submitPrompt("almost finished prompt");
@@ -5961,19 +5800,6 @@ describe("MobileApp generation queue", () => {
       JSON.stringify({ type: "queued", position: 1, id: "job-finishing" }),
     );
     apiFetchTo.mockImplementationOnce(async () => {
-      openStreams[0]!.options.onEvent(
-        "complete",
-        JSON.stringify({
-          image: btoa("finished-during-cancel"),
-          format: "png",
-          width: 768,
-          height: 512,
-          seed_used: 91,
-          generation_time_ms: 500,
-          model: model.name,
-        }),
-      );
-      openStreams[0]!.resolve();
       return new Response(null, { status: 204 });
     });
 
@@ -6021,7 +5847,7 @@ describe("MobileApp generation queue", () => {
     let galleryCalls = 0;
     let galleryInFlight = 0;
     let maxGalleryInFlight = 0;
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") {
@@ -6035,7 +5861,7 @@ describe("MobileApp generation queue", () => {
           });
         });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -6081,16 +5907,17 @@ describe("MobileApp generation queue", () => {
       timestamp: print.timestamp - index,
     }));
     let galleryCalls = 0;
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") {
         galleryCalls += 1;
         return Promise.resolve(prints);
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
+    admitCompletedPrints();
     wrapper = mountMobileApp();
     await flushPromises();
     await submitPrompt("refresh after older page");
@@ -6108,19 +5935,6 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
     expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
 
-    openStreams[0]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: btoa("generated-before-refresh"),
-        format: "png",
-        width: 768,
-        height: 512,
-        seed_used: 12,
-        generation_time_ms: 500,
-        model: model.name,
-      }),
-    );
-    openStreams[0]!.resolve();
     await flushPromises();
     expect(galleryCalls).toBe(1);
 
@@ -6140,11 +5954,11 @@ describe("MobileApp generation queue", () => {
       filename: `print-${index}.mp4`,
       timestamp: print.timestamp - index,
     }));
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve(prints);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     let thumbnailCall = 0;
     apiFetchTo.mockImplementation(() => {
@@ -6174,11 +5988,11 @@ describe("MobileApp generation queue", () => {
       filename: `large-library-${index}.png`,
       timestamp: print.timestamp - index,
     }));
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve(prints);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -6204,11 +6018,11 @@ describe("MobileApp generation queue", () => {
         filename: `stalled-pagination-print-${index}.mp4`,
         timestamp: print.timestamp - index,
       }));
-      apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
         if (path === "/api/status") return Promise.resolve(status);
         if (path === "/api/models") return Promise.resolve([model]);
         if (path === "/api/gallery") return Promise.resolve(prints);
-        return Promise.reject(new Error(`Unexpected API path: ${path}`));
+        return durableApiFallback(path, init, callTarget);
       });
       let thumbnailCall = 0;
       let stalledSignal: AbortSignal | undefined;
@@ -6262,11 +6076,11 @@ describe("MobileApp generation queue", () => {
         filename: `retry-pagination-print-${index}.mp4`,
         timestamp: print.timestamp - index,
       }));
-      apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
         if (path === "/api/status") return Promise.resolve(status);
         if (path === "/api/models") return Promise.resolve([model]);
         if (path === "/api/gallery") return Promise.resolve(prints);
-        return Promise.reject(new Error(`Unexpected API path: ${path}`));
+        return durableApiFallback(path, init, callTarget);
       });
       const attempts = new Map<string, number>();
       apiFetchTo.mockImplementation((_target, path) => {
@@ -6306,11 +6120,11 @@ describe("MobileApp generation queue", () => {
       filename: `unmount-pagination-print-${index}.mp4`,
       timestamp: print.timestamp - index,
     }));
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve(prints);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     const lateThumbnail = deferred<Response>();
     let pendingSignal: AbortSignal | undefined;
@@ -6350,16 +6164,17 @@ describe("MobileApp generation queue", () => {
       timestamp: print.timestamp - index,
     }));
     let galleryCalls = 0;
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") {
         galleryCalls += 1;
         return Promise.resolve(prints);
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
+    admitCompletedPrints();
     wrapper = mountMobileApp();
     await flushPromises();
     await submitPrompt("refresh after an early viewer close");
@@ -6373,19 +6188,6 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='gallery-item']").trigger("click");
     await flushPromises();
 
-    openStreams[0]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: btoa("generated-before-refresh"),
-        format: "png",
-        width: 768,
-        height: 512,
-        seed_used: 13,
-        generation_time_ms: 500,
-        model: model.name,
-      }),
-    );
-    openStreams[0]!.resolve();
     await flushPromises();
     expect(galleryCalls).toBe(1);
 
@@ -6415,7 +6217,7 @@ describe("MobileApp wan source conditioning", () => {
   };
 
   function serveWan(entry: ModelEntry, gallery: GalleryImage[] = []): void {
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([entry]);
       if (path === "/api/gallery") return Promise.resolve(gallery);
@@ -6423,7 +6225,7 @@ describe("MobileApp wan source conditioning", () => {
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
       }
       if (path.startsWith("/api/catalog/installed")) return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
   }
 
@@ -6650,7 +6452,7 @@ describe("MobileApp wan source conditioning", () => {
     };
     await fieldControl("Prompt").setValue("a pickup crossing a desert at dusk");
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
-    await vi.waitFor(() => expect(openStreams).toHaveLength(1));
+    await vi.waitFor(() => expect(admittedRequests()).toHaveLength(1));
 
     expect(openStreams[0]?.path).toBe("/api/generate/stream");
     expect(openStreams[0]?.options.body).toMatchObject({
@@ -6764,7 +6566,7 @@ describe("MobileApp wan source conditioning", () => {
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
 
-    expect(openStreams).toHaveLength(1);
+    expect(admittedRequests()).toHaveLength(1);
     expect(openStreams[0]?.path).toBe("/api/generate/stream");
     expect(openStreams[0]?.options.body).toMatchObject({
       keyframes: [
@@ -6837,15 +6639,17 @@ describe("MobileApp wan source conditioning", () => {
 
 describe("MobileApp transport error copy", () => {
   it("humanizes a dead connection when saving a host", async () => {
-    apiJsonTo.mockImplementation((apiTarget: { baseUrl: string }, path: string) => {
-      if (apiTarget.baseUrl.includes("render.local")) {
-        return Promise.reject(new TypeError("Load failed"));
-      }
-      if (path === "/api/status") return Promise.resolve(status);
-      if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
-    });
+    apiJsonTo.mockImplementation(
+      (apiTarget: { baseUrl: string }, path: string, init?: RequestInit) => {
+        if (apiTarget.baseUrl.includes("render.local")) {
+          return Promise.reject(new TypeError("Load failed"));
+        }
+        if (path === "/api/status") return Promise.resolve(status);
+        if (path === "/api/models") return Promise.resolve([model]);
+        if (path === "/api/gallery") return Promise.resolve([]);
+        return durableApiFallback(path, init, apiTarget);
+      },
+    );
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
@@ -6861,15 +6665,17 @@ describe("MobileApp transport error copy", () => {
 
   it("keeps an empty-bodied auth failure visible with API-key copy", async () => {
     const { ApiError } = await import("../lib/api/client");
-    apiJsonTo.mockImplementation((apiTarget: { baseUrl: string }, path: string) => {
-      if (apiTarget.baseUrl.includes("render.local")) {
-        return Promise.reject(new ApiError("", 401));
-      }
-      if (path === "/api/status") return Promise.resolve(status);
-      if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
-    });
+    apiJsonTo.mockImplementation(
+      (apiTarget: { baseUrl: string }, path: string, init?: RequestInit) => {
+        if (apiTarget.baseUrl.includes("render.local")) {
+          return Promise.reject(new ApiError("", 401));
+        }
+        if (path === "/api/status") return Promise.resolve(status);
+        if (path === "/api/models") return Promise.resolve([model]);
+        if (path === "/api/gallery") return Promise.resolve([]);
+        return durableApiFallback(path, init, apiTarget);
+      },
+    );
     wrapper = mountMobileApp();
     await flushPromises();
     await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
@@ -6896,12 +6702,12 @@ describe("MobileApp transport error copy", () => {
 
   it("reloads models automatically when the app returns to the foreground", async () => {
     let hostReachable = false;
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (!hostReachable) return Promise.reject(new TypeError("Load failed"));
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -7130,12 +6936,12 @@ describe("MobileApp foreground resume", () => {
   }
 
   it("renders the finished print when resuming after the stream died mid-generation", async () => {
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/queue") return Promise.resolve({ entries: [] });
       if (path === "/api/gallery") return Promise.resolve([resumedPrint]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -7161,7 +6967,7 @@ describe("MobileApp foreground resume", () => {
 
   it("keeps a queued job running after iOS suspends its stream", async () => {
     let queueCalls = 0;
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/queue") {
@@ -7183,7 +6989,7 @@ describe("MobileApp foreground resume", () => {
         });
       }
       if (path === "/api/gallery") return Promise.resolve([resumedPrint]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -7227,7 +7033,7 @@ describe("MobileApp foreground resume", () => {
 
   it("re-attaches to a print still developing on the host and completes it", async () => {
     let queueCalls = 0;
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/queue") {
@@ -7240,7 +7046,7 @@ describe("MobileApp foreground resume", () => {
         });
       }
       if (path === "/api/gallery") return Promise.resolve([resumedPrint]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -7261,25 +7067,12 @@ describe("MobileApp foreground resume", () => {
     streamableMediaUrl
       .mockResolvedValueOnce("https://studio/media/video?media_token=old&expires=1")
       .mockResolvedValueOnce("https://studio/media/video?media_token=new&expires=4102444800");
+    admitCompletedPrints("renew on resume.mp4");
     wrapper = mountMobileApp();
     await flushPromises();
     await fieldControl("Prompt").setValue("renew on resume");
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
-    openStreams[0]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: "",
-        format: "mp4",
-        filename: "renew on resume.mp4",
-        width: 768,
-        height: 512,
-        seed_used: 5,
-        generation_time_ms: 500,
-        model: model.name,
-      }),
-    );
-    openStreams[0]!.resolve();
     await flushPromises();
     expect(wrapper.get("video.result-media").attributes("src")).toContain("media_token=old");
 
@@ -7588,7 +7381,7 @@ describe("MobileApp primary navigation", () => {
       filename: `deep-scroll-${index}.png`,
       timestamp: print.timestamp - index,
     }));
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve(manyPrints);
@@ -7599,7 +7392,7 @@ describe("MobileApp primary navigation", () => {
           items: [],
         });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -7661,7 +7454,7 @@ describe("MobileApp gallery", () => {
       new Blob(["cached thumbnail"], { type: "image/webp" }),
     );
     const liveGallery = deferred<GalleryImage[]>();
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status")
         return Promise.resolve({ ...status, instance_id: "studio-instance" });
       if (path === "/api/models") return Promise.resolve([model]);
@@ -7673,7 +7466,7 @@ describe("MobileApp gallery", () => {
           observed_at_unix_ms: 1,
           items: [],
         });
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -7776,7 +7569,7 @@ describe("MobileApp gallery", () => {
     const lateModels = deferred<ModelEntry[]>();
     let statusCalls = 0;
     let modelCalls = 0;
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") {
         statusCalls += 1;
         return statusCalls === 1 ? Promise.reject(new Error("offline")) : lateStatus.promise;
@@ -7789,7 +7582,7 @@ describe("MobileApp gallery", () => {
       if (path === "/api/activity") {
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     apiFetchTo.mockRejectedValue(new Error("offline"));
 
@@ -7816,14 +7609,14 @@ describe("MobileApp gallery", () => {
 
   it("closes during Use as source and ignores its late media response", async () => {
     const still: GalleryImage = { ...print, filename: "source.png", format: "png" };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([still]);
       if (path === "/api/activity") {
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -7859,7 +7652,7 @@ describe("MobileApp gallery", () => {
     await vi.waitFor(() => expect(wrapper?.find("[data-test='gallery-item']").exists()).toBe(true));
     await wrapper.get("[data-test='gallery-item']").trigger("click");
     const statusCalls = apiJsonTo.mock.calls.filter(([, path]) => path === "/api/status").length;
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((_callTarget: unknown, path: string, _init?: RequestInit) => {
       if (path === "/api/status") return Promise.reject(new Error("offline"));
       if (path === "/api/activity") {
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
@@ -8079,14 +7872,14 @@ describe("MobileApp gallery", () => {
       "thumbnail",
       new Blob(["cached thumbnail"], { type: "image/webp" }),
     );
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status" || path === "/api/gallery") {
         return Promise.reject(new Error("offline"));
       }
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/activity")
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     apiFetchTo.mockRejectedValue(new Error("offline"));
 
@@ -8120,7 +7913,7 @@ describe("MobileApp gallery", () => {
     await storeCachedGallery("old-instance", [print]);
     const galleryResponse = deferred<GalleryImage[]>();
     let replacement = false;
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") {
         return Promise.resolve({
           ...status,
@@ -8132,7 +7925,7 @@ describe("MobileApp gallery", () => {
       if (path === "/api/activity") {
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -8165,13 +7958,13 @@ describe("MobileApp gallery", () => {
         original_prompt: "a previous prompt that did not render this print",
       },
     };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([promptless]);
       if (path === "/api/activity")
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -8213,7 +8006,7 @@ describe("MobileApp gallery", () => {
         },
       ]),
     );
-    apiJsonTo.mockImplementation((requestTarget: unknown, path: string) => {
+    apiJsonTo.mockImplementation((requestTarget: unknown, path: string, init?: RequestInit) => {
       const baseUrl = (requestTarget as { baseUrl: string }).baseUrl;
       if (baseUrl === offlineTarget.baseUrl) {
         if (path === "/api/status") return Promise.reject(new Error("offline"));
@@ -8223,7 +8016,7 @@ describe("MobileApp gallery", () => {
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/capabilities") return Promise.resolve({});
       if (path === "/api/gallery") return Promise.resolve([print]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, requestTarget);
     });
 
     wrapper = mountMobileApp();
@@ -8238,7 +8031,7 @@ describe("MobileApp gallery", () => {
   it("settles a host whose capabilities endpoint stalls instead of leaving the Library loading", async () => {
     vi.useFakeTimers();
     try {
-      apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
         if (path === "/api/status") return Promise.resolve(status);
         if (path === "/api/models") return Promise.resolve([model]);
         // The capabilities read never settles: the host deadline alone must
@@ -8247,7 +8040,7 @@ describe("MobileApp gallery", () => {
         if (path === "/api/gallery") return Promise.resolve([print]);
         if (path === "/api/activity")
           return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
-        return Promise.reject(new Error(`Unexpected API path: ${path}`));
+        return durableApiFallback(path, init, callTarget);
       });
 
       wrapper = mountMobileApp();
@@ -8286,7 +8079,7 @@ describe("MobileApp gallery", () => {
     );
     const recoveredProbe = deferred<ServerStatus>();
     let halcyonProbeCount = 0;
-    apiJsonTo.mockImplementation((requestTarget: unknown, path: string) => {
+    apiJsonTo.mockImplementation((requestTarget: unknown, path: string, init?: RequestInit) => {
       const baseUrl = (requestTarget as { baseUrl: string }).baseUrl;
       if (baseUrl === recoveredTarget.baseUrl && path === "/api/status") {
         halcyonProbeCount += 1;
@@ -8300,7 +8093,7 @@ describe("MobileApp gallery", () => {
       if (path === "/api/gallery") {
         return Promise.resolve(baseUrl === recoveredTarget.baseUrl ? [print] : []);
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, requestTarget);
     });
 
     wrapper = mountMobileApp();
@@ -8435,11 +8228,11 @@ describe("MobileApp gallery", () => {
       { ...print, filename: "second.png", timestamp: print.timestamp - 1 },
       { ...print, filename: "third.png", timestamp: print.timestamp - 2 },
     ];
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve(prints);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -8575,8 +8368,12 @@ describe("MobileApp gallery", () => {
         },
       ]),
     );
-    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string, init?: RequestInit) => {
       const render = route.baseUrl === renderTarget.baseUrl;
+      // This machine's capability probe fails: the labels below pin that.
+      if (path === "/api/capabilities") {
+        return Promise.reject(new Error("capabilities unavailable"));
+      }
       if (path === "/api/status") {
         return Promise.resolve({
           ...status,
@@ -8588,7 +8385,7 @@ describe("MobileApp gallery", () => {
       if (path === "/api/gallery") {
         return Promise.resolve([{ ...print, timestamp: print.timestamp + (render ? 1 : 0) }]);
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, route);
     });
     apiFetchTo.mockImplementation((_route, _path, init?: RequestInit) =>
       Promise.resolve(
@@ -8641,8 +8438,12 @@ describe("MobileApp gallery", () => {
       [renderTarget.baseUrl, { filename: "middle.mp4", timestamp: 3_000 }],
       [archiveTarget.baseUrl, { filename: "oldest.mp4", timestamp: 0 }],
     ]);
-    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string, init?: RequestInit) => {
       const host = routes.find((candidate) => candidate.baseUrl === route.baseUrl)!;
+      // This machine's capability probe fails: the labels below pin that.
+      if (path === "/api/capabilities") {
+        return Promise.reject(new Error("capabilities unavailable"));
+      }
       if (path === "/api/status") {
         return Promise.resolve({
           ...status,
@@ -8661,7 +8462,7 @@ describe("MobileApp gallery", () => {
           },
         ]);
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, route);
     });
     apiFetchTo.mockImplementation((_route, _path, init?: RequestInit) =>
       Promise.resolve(
@@ -8692,6 +8493,7 @@ describe("MobileApp gallery", () => {
   });
 
   it("defers completion refreshes until an open viewer closes", async () => {
+    admitCompletedPrints();
     wrapper = mountMobileApp();
     await flushPromises();
     await fieldControl("Prompt").setValue("complete behind the viewer");
@@ -8704,19 +8506,6 @@ describe("MobileApp gallery", () => {
     await wrapper.get("[data-test='gallery-item']").trigger("click");
     await flushPromises();
 
-    openStreams[0]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: btoa("completed behind viewer"),
-        format: "png",
-        width: 768,
-        height: 512,
-        seed_used: 61,
-        generation_time_ms: 500,
-        model: model.name,
-      }),
-    );
-    openStreams[0]!.resolve();
     await flushPromises();
 
     expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toBe(
@@ -8807,14 +8596,14 @@ describe("MobileApp gallery", () => {
       frame_offset: 1,
       default_fps: 24,
     };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([nightlyModel]);
       if (path === "/api/gallery") return Promise.resolve([nightlyPrint]);
       if (path === "/api/activity") {
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -8851,14 +8640,14 @@ describe("MobileApp gallery", () => {
         source_fit: { mode: "crop-fill", alignX: "right", alignY: "top" },
       },
     };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([sourcePrint]);
       if (path === "/api/activity") {
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     restoreGenerationSourceMedia.mockResolvedValue({
       draftId: "source-portrait",
@@ -8897,26 +8686,12 @@ describe("MobileApp gallery", () => {
   });
 
   it("opens the latest generated image in the full-screen print viewer when tapped", async () => {
+    admitCompletedPrints("expand-this-result.png");
     wrapper = mountMobileApp();
     await flushPromises();
     await fieldControl("Prompt").setValue("expand this result");
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
-    openStreams[0]!.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: btoa("generated image"),
-        format: "png",
-        filename: "expand-this-result.png",
-        width: 768,
-        height: 512,
-        seed_used: 9,
-        generation_time_ms: 500,
-        model: model.name,
-        metadata: print.metadata,
-      }),
-    );
-    openStreams[0]!.resolve();
     await flushPromises();
 
     await wrapper.get("[data-test='mobile-generated-result']").trigger("click");
@@ -8932,7 +8707,7 @@ describe("MobileApp gallery", () => {
       JSON.stringify({ "studio-id": print.timestamp - 1 }),
     );
     localStorage.setItem("mold.mobile.library-visited.v1", "true");
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") {
@@ -8950,7 +8725,7 @@ describe("MobileApp gallery", () => {
           },
         ]);
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     wrapper = mountMobileApp();
@@ -8969,11 +8744,11 @@ describe("MobileApp gallery", () => {
 
   it("uses a still gallery print as the selected model's source image", async () => {
     const still = { ...print, filename: "source print.png", format: "png" as const };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([still]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     apiFetchTo.mockResolvedValue({
       blob: () => Promise.resolve(new Blob(["source bytes"], { type: "image/png" })),
@@ -9016,11 +8791,11 @@ describe("MobileApp gallery", () => {
       supports_audio: true,
     };
     const still = { ...print, filename: "ordered subject.png", format: "png" as const };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([ref2vaModel]);
       if (path === "/api/gallery") return Promise.resolve([still]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     apiFetchTo.mockResolvedValue({
       headers: new Headers({ "content-type": "image/png" }),
@@ -9046,11 +8821,11 @@ describe("MobileApp gallery", () => {
 
   it("rejects an oversized gallery source before reading or base64 expansion", async () => {
     const still = { ...print, filename: "huge source.png", format: "png" as const };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([still]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     const readBlob = vi.fn(() => Promise.resolve(new Blob(["should not be read"])));
     apiFetchTo.mockImplementation((_target: unknown, path: string) =>
@@ -9103,7 +8878,7 @@ describe("MobileApp gallery", () => {
         },
       ]),
     );
-    apiJsonTo.mockImplementation((requestTarget: unknown, path: string) => {
+    apiJsonTo.mockImplementation((requestTarget: unknown, path: string, init?: RequestInit) => {
       const baseUrl = (requestTarget as { baseUrl: string }).baseUrl;
       if (path === "/api/gallery") {
         return Promise.resolve(baseUrl === remoteTarget.baseUrl ? [print] : []);
@@ -9114,7 +8889,7 @@ describe("MobileApp gallery", () => {
       if (baseUrl === remoteTarget.baseUrl) return Promise.reject(new Error("models offline"));
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, requestTarget);
     });
 
     wrapper = mountMobileApp();
@@ -9159,7 +8934,7 @@ describe("MobileApp gallery", () => {
         },
       },
     };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([sequenceModel]);
       if (path === "/api/capabilities") return Promise.resolve({});
@@ -9178,7 +8953,7 @@ describe("MobileApp gallery", () => {
       }
       if (path === "/api/gallery") return Promise.resolve([sequencePrint]);
       if (path === "/api/chain-jobs") return Promise.resolve({ jobs: [] });
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     const pinia = createPinia();
@@ -9228,11 +9003,11 @@ describe("MobileApp gallery", () => {
         },
       },
     };
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([sequenceModel]);
       if (path === "/api/gallery") return Promise.resolve([h3Sequence]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
 
     const pinia = createPinia();
@@ -9282,8 +9057,12 @@ describe("MobileApp gallery", () => {
         },
       ]),
     );
-    apiJsonTo.mockImplementation((requestTarget: unknown, path: string) => {
+    apiJsonTo.mockImplementation((requestTarget: unknown, path: string, init?: RequestInit) => {
       const baseUrl = (requestTarget as { baseUrl: string }).baseUrl;
+      // This machine's capability probe fails: the labels below pin that.
+      if (path === "/api/capabilities") {
+        return Promise.reject(new Error("capabilities unavailable"));
+      }
       if (path === "/api/status") {
         return Promise.resolve({
           ...status,
@@ -9300,7 +9079,7 @@ describe("MobileApp gallery", () => {
             : [],
         );
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, requestTarget);
     });
 
     wrapper = mountMobileApp();
@@ -9542,7 +9321,7 @@ describe("MobileApp host and catalog coordination", () => {
       instance_id: "pair-id",
       hostname: "pair-host",
     });
-    apiJsonTo.mockImplementation((requestTarget: unknown, path: string) => {
+    apiJsonTo.mockImplementation((requestTarget: unknown, path: string, init?: RequestInit) => {
       const baseUrl = (requestTarget as { baseUrl: string }).baseUrl;
       if (path === "/api/status" && baseUrl === "http://pair.local:7680") {
         return Promise.resolve({ ...status, instance_id: "pair-id", hostname: "pair-host" });
@@ -9550,7 +9329,7 @@ describe("MobileApp host and catalog coordination", () => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, requestTarget);
     });
 
     await scanFromMachines();
@@ -9615,7 +9394,7 @@ describe("MobileApp host and catalog coordination", () => {
               remoteProbes.push({ resolve, reject, signal: init?.signal });
             });
           }
-          return Promise.reject(new Error(`Unexpected API path: ${path}`));
+          return durableApiFallback(path, init, requestTarget);
         },
       );
 
@@ -9652,8 +9431,12 @@ describe("MobileApp host and catalog coordination", () => {
 
   it("opens Catalog on the viewed host without changing the generation host", async () => {
     installTwoHosts();
-    apiJsonTo.mockImplementation((requestTarget: unknown, path: string) => {
+    apiJsonTo.mockImplementation((requestTarget: unknown, path: string, init?: RequestInit) => {
       const baseUrl = (requestTarget as { baseUrl: string }).baseUrl;
+      // This machine's capability probe fails: the labels below pin that.
+      if (path === "/api/capabilities") {
+        return Promise.reject(new Error("capabilities unavailable"));
+      }
       if (path === "/api/status") {
         return Promise.resolve({
           ...status,
@@ -9664,9 +9447,9 @@ describe("MobileApp host and catalog coordination", () => {
       if (path === "/api/catalog/families") return Promise.resolve({ families: [] });
       if (path.startsWith("/api/catalog/search")) return Promise.resolve({ entries: [] });
       if (path === "/api/queue") return Promise.resolve({ entries: [] });
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, requestTarget);
     });
-    apiFetchTo.mockImplementation((_target: unknown, path: string) => {
+    apiFetchTo.mockImplementation((_callTarget: unknown, path: string, _init?: RequestInit) => {
       if (path === "/api/models") {
         return Promise.resolve({ json: () => Promise.resolve([model]) } as Response);
       }
@@ -9700,16 +9483,16 @@ describe("MobileApp host and catalog coordination", () => {
   it("keeps the catalog download stream alive off-tab and refreshes Generate models", async () => {
     const pulledModel = { ...model, name: "ltx2:new-download" };
     let downloadFinished = false;
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") {
         return Promise.resolve(downloadFinished ? [model, pulledModel] : [model]);
       }
       if (path === "/api/catalog/families") return Promise.resolve({ families: [] });
       if (path.startsWith("/api/catalog/search")) return Promise.resolve({ entries: [] });
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
-    apiFetchTo.mockImplementation((_target: unknown, path: string) => {
+    apiFetchTo.mockImplementation((_callTarget: unknown, path: string, _init?: RequestInit) => {
       if (path === "/api/models") {
         return Promise.resolve({ json: () => Promise.resolve([model]) } as Response);
       }
@@ -9750,7 +9533,7 @@ describe("MobileApp host and catalog coordination", () => {
       instance_id: "pair-id",
       hostname: "pair-host",
     });
-    apiJsonTo.mockImplementation((requestTarget: unknown, path: string) => {
+    apiJsonTo.mockImplementation((requestTarget: unknown, path: string, init?: RequestInit) => {
       const baseUrl = (requestTarget as { baseUrl: string }).baseUrl;
       if (path === "/api/status" && baseUrl === "http://pair.local:7680") {
         return Promise.resolve({ ...status, instance_id: "pair-id", hostname: "pair-host" });
@@ -9758,7 +9541,7 @@ describe("MobileApp host and catalog coordination", () => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/gallery") return Promise.resolve([print]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, requestTarget);
     });
 
     wrapper = mountMobileApp();
@@ -9802,23 +9585,25 @@ describe("MobileApp machines telemetry", () => {
   }
 
   it("mirrors VRAM usage and queue depth on an online host card", async () => {
-    apiJsonTo.mockReset().mockImplementation((_target: unknown, path: string) => {
-      if (path === "/api/status")
-        return Promise.resolve({
-          ...status,
-          gpu_info: {
-            name: "RTX 4090",
-            vram_total_mb: 24_000,
-            vram_used_mb: 9_840,
-            backend: "cuda",
-          },
-          queue_depth: 2,
-          queue_capacity: 8,
-        } satisfies ServerStatus);
-      if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/gallery") return Promise.resolve([print]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
-    });
+    apiJsonTo
+      .mockReset()
+      .mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+        if (path === "/api/status")
+          return Promise.resolve({
+            ...status,
+            gpu_info: {
+              name: "RTX 4090",
+              vram_total_mb: 24_000,
+              vram_used_mb: 9_840,
+              backend: "cuda",
+            },
+            queue_depth: 2,
+            queue_capacity: 8,
+          } satisfies ServerStatus);
+        if (path === "/api/models") return Promise.resolve([model]);
+        if (path === "/api/gallery") return Promise.resolve([print]);
+        return durableApiFallback(path, init, callTarget);
+      });
 
     wrapper = mountMobileApp();
     await flushPromises();
@@ -9844,22 +9629,24 @@ describe("MobileApp machines telemetry", () => {
       queue_depth: 2,
       queue_capacity: 8,
     };
-    apiJsonTo.mockReset().mockImplementation((_target: unknown, path: string) => {
-      if (path === "/api/status") {
-        return failing
-          ? Promise.reject(new Error("status timeout"))
-          : Promise.resolve(currentStatus);
-      }
-      if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/capabilities") {
-        return Promise.resolve({ gallery: { can_delete: true, organize: true } });
-      }
-      if (path === "/api/gallery") return Promise.resolve([print]);
-      if (path === "/api/activity") {
-        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
-      }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
-    });
+    apiJsonTo
+      .mockReset()
+      .mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+        if (path === "/api/status") {
+          return failing
+            ? Promise.reject(new Error("status timeout"))
+            : Promise.resolve(currentStatus);
+        }
+        if (path === "/api/models") return Promise.resolve([model]);
+        if (path === "/api/capabilities") {
+          return Promise.resolve({ gallery: { can_delete: true, organize: true } });
+        }
+        if (path === "/api/gallery") return Promise.resolve([print]);
+        if (path === "/api/activity") {
+          return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+        }
+        return durableApiFallback(path, init, callTarget);
+      });
 
     wrapper = mountMobileApp();
     await flushPromises();
@@ -9917,30 +9704,32 @@ describe("MobileApp machines telemetry", () => {
         },
       ]),
     );
-    apiJsonTo.mockReset().mockImplementation((_target: unknown, path: string) => {
-      if (path === "/api/status") {
-        return Promise.resolve({
-          ...status,
-          instance_id: replacement ? "replacement-id" : "studio-id",
-          gpu_info: {
-            name: "RTX 4090",
-            vram_total_mb: 24_000,
-            vram_used_mb: 9_840,
-            backend: "cuda",
-          },
-          queue_depth: 2,
-        } satisfies ServerStatus);
-      }
-      if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/capabilities") {
-        return Promise.resolve({ gallery: { can_delete: true, organize: true } });
-      }
-      if (path === "/api/gallery") return Promise.resolve([print]);
-      if (path === "/api/activity") {
-        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
-      }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
-    });
+    apiJsonTo
+      .mockReset()
+      .mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+        if (path === "/api/status") {
+          return Promise.resolve({
+            ...status,
+            instance_id: replacement ? "replacement-id" : "studio-id",
+            gpu_info: {
+              name: "RTX 4090",
+              vram_total_mb: 24_000,
+              vram_used_mb: 9_840,
+              backend: "cuda",
+            },
+            queue_depth: 2,
+          } satisfies ServerStatus);
+        }
+        if (path === "/api/models") return Promise.resolve([model]);
+        if (path === "/api/capabilities") {
+          return Promise.resolve({ gallery: { can_delete: true, organize: true } });
+        }
+        if (path === "/api/gallery") return Promise.resolve([print]);
+        if (path === "/api/activity") {
+          return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+        }
+        return durableApiFallback(path, init, callTarget);
+      });
 
     wrapper = mountMobileApp();
     await flushPromises();
@@ -9961,38 +9750,40 @@ describe("MobileApp machines telemetry", () => {
   });
 
   it("aggregates every GPU on a host card", async () => {
-    apiJsonTo.mockReset().mockImplementation((_target: unknown, path: string) => {
-      if (path === "/api/status")
-        return Promise.resolve({
-          ...status,
-          gpu_info: {
-            name: "RTX 3090",
-            vram_total_mb: 24_000,
-            vram_used_mb: 10_000,
-            backend: "cuda",
-          },
-          gpus: [
-            {
-              ordinal: 0,
+    apiJsonTo
+      .mockReset()
+      .mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+        if (path === "/api/status")
+          return Promise.resolve({
+            ...status,
+            gpu_info: {
               name: "RTX 3090",
-              vram_total_bytes: 24_000_000_000,
-              vram_used_bytes: 10_000_000_000,
-              state: "generating",
+              vram_total_mb: 24_000,
+              vram_used_mb: 10_000,
+              backend: "cuda",
             },
-            {
-              ordinal: 1,
-              name: "NVIDIA B200",
-              vram_total_bytes: 80_000_000_000,
-              vram_used_bytes: 20_000_000_000,
-              state: "idle",
-            },
-          ],
-          queue_depth: 1,
-        } satisfies ServerStatus);
-      if (path === "/api/models") return Promise.resolve([model]);
-      if (path === "/api/gallery") return Promise.resolve([print]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
-    });
+            gpus: [
+              {
+                ordinal: 0,
+                name: "RTX 3090",
+                vram_total_bytes: 24_000_000_000,
+                vram_used_bytes: 10_000_000_000,
+                state: "generating",
+              },
+              {
+                ordinal: 1,
+                name: "NVIDIA B200",
+                vram_total_bytes: 80_000_000_000,
+                vram_used_bytes: 20_000_000_000,
+                state: "idle",
+              },
+            ],
+            queue_depth: 1,
+          } satisfies ServerStatus);
+        if (path === "/api/models") return Promise.resolve([model]);
+        if (path === "/api/gallery") return Promise.resolve([print]);
+        return durableApiFallback(path, init, callTarget);
+      });
 
     wrapper = mountMobileApp();
     await flushPromises();
@@ -10398,7 +10189,7 @@ describe("MobileApp automatic generation routing", () => {
     studioModels?: ModelEntry[];
     renderModels?: ModelEntry[];
   }): void {
-    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string, init?: RequestInit) => {
       const render = route.baseUrl === renderTarget.baseUrl;
       if (path === "/api/status")
         return Promise.resolve({
@@ -10415,7 +10206,7 @@ describe("MobileApp automatic generation routing", () => {
       if (path === "/api/gallery") return Promise.resolve([]);
       if (path === "/api/activity")
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, route);
     });
   }
 
@@ -10492,7 +10283,7 @@ describe("MobileApp automatic generation routing", () => {
 
   it("hides the automatic options again while only one machine answers", async () => {
     twoHosts();
-    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string, init?: RequestInit) => {
       if (route.baseUrl === renderTarget.baseUrl) return Promise.reject(new Error("offline"));
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
@@ -10500,7 +10291,7 @@ describe("MobileApp automatic generation routing", () => {
       if (path === "/api/gallery") return Promise.resolve([]);
       if (path === "/api/activity")
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, route);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -10508,7 +10299,7 @@ describe("MobileApp automatic generation routing", () => {
     expect(hostOptions()).toEqual(["studio-id", "render-id"]);
     expect(wrapper.find("[data-test='mobile-routing-hint']").exists()).toBe(false);
     await develop();
-    expect(openStreams[0]?.options.target).toEqual(target);
+    expect(admissionTargets()[0]).toEqual(target);
   });
 
   it("Auto asks every candidate and freezes the soonest plan's machine", async () => {
@@ -10527,7 +10318,7 @@ describe("MobileApp automatic generation routing", () => {
     );
     expect([...probed].sort()).toEqual([renderTarget.baseUrl, target.baseUrl].sort());
     // The frozen route carries the winner's URL and its Keychain key.
-    expect(openStreams[0]?.options.target).toEqual(renderTarget);
+    expect(admissionTargets()[0]).toEqual(renderTarget);
   });
 
   it("Most capable prefers the CUDA machine even when it plans later", async () => {
@@ -10555,7 +10346,7 @@ describe("MobileApp automatic generation routing", () => {
     await flushPromises();
 
     await develop();
-    expect(openStreams[0]?.options.target).toEqual(renderTarget);
+    expect(admissionTargets()[0]).toEqual(renderTarget);
   });
 
   it("routes only to machines that already have the model", async () => {
@@ -10577,7 +10368,7 @@ describe("MobileApp automatic generation routing", () => {
       (call: unknown[]) => (call[0] as { baseUrl: string }).baseUrl,
     );
     expect(probed).toEqual([renderTarget.baseUrl]);
-    expect(openStreams[0]?.options.target).toEqual(renderTarget);
+    expect(admissionTargets()[0]).toEqual(renderTarget);
   });
 
   it("queues nothing and names every machine when none can run the print", async () => {
@@ -10680,7 +10471,7 @@ describe("MobileApp automatic sequence routing", () => {
       if (path === "/api/chain-jobs" && init?.method === "POST")
         return Promise.resolve({ job_id: "sequence-job-1" });
       if (path === "/api/chain-jobs/sequence-job-1") return new Promise(() => {});
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, route);
     });
     previewChainPlacement.mockImplementation((probe: { baseUrl: string }) => {
       const preview = plannedPlacement();
@@ -10749,7 +10540,7 @@ describe("MobileApp routing target consistency", () => {
           : null,
       ),
     );
-    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string, init?: RequestInit) => {
       const render = route.baseUrl === renderTarget.baseUrl;
       if (path === "/api/status")
         return Promise.resolve({
@@ -10763,7 +10554,7 @@ describe("MobileApp routing target consistency", () => {
       if (path === "/api/queue") return Promise.resolve({ entries: [] });
       if (path === "/api/activity")
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, route);
     });
   }
 
@@ -10801,7 +10592,7 @@ describe("MobileApp routing target consistency", () => {
     ).toBe("render-id");
     expect(localStorage.getItem("mold.mobile.generate-target.v1")).toBe("render-id");
     await develop();
-    expect(openStreams[0]?.options.target).toEqual(renderTarget);
+    expect(admissionTargets()[0]).toEqual(renderTarget);
   });
 
   it("stops waiting on a stalled machine once another one has a plan", async () => {
@@ -10822,7 +10613,7 @@ describe("MobileApp routing target consistency", () => {
     } finally {
       vi.useRealTimers();
     }
-    expect(openStreams[0]?.options.target).toEqual(renderTarget);
+    expect(admissionTargets()[0]).toEqual(renderTarget);
   });
 });
 
@@ -10872,7 +10663,7 @@ describe("MobileApp Library organization", () => {
 
   function installLibraryApi(): void {
     libraryCollectionHidden = false;
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/capabilities") return Promise.resolve(organizedCapabilities);
@@ -10910,7 +10701,7 @@ describe("MobileApp Library organization", () => {
       }
       if (path === "/api/activity")
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     // Thumbnails read blobs; organization mutations read empty JSON bodies.
     apiFetchTo.mockImplementation(() =>
@@ -11049,7 +10840,7 @@ describe("MobileApp Library organization", () => {
 
   it("falls back to a readable collection member when its explicit cover is unavailable", async () => {
     installLibraryApi();
-    apiFetchTo.mockImplementation((_target: unknown, path: string) => {
+    apiFetchTo.mockImplementation((_callTarget: unknown, path: string, _init?: RequestInit) => {
       if (path.includes("cover.png")) return Promise.reject(new Error("cover host offline"));
       return Promise.resolve({
         status: 200,
@@ -11222,7 +11013,7 @@ describe("MobileApp Library organization", () => {
         },
       ]),
     );
-    apiJsonTo.mockImplementation((requestTarget: unknown, path: string) => {
+    apiJsonTo.mockImplementation((requestTarget: unknown, path: string, init?: RequestInit) => {
       const fromPlato = (requestTarget as { baseUrl: string }).baseUrl === platoTarget.baseUrl;
       if (path === "/api/status") {
         return Promise.resolve(
@@ -11241,7 +11032,7 @@ describe("MobileApp Library organization", () => {
       }
       if (path === "/api/activity")
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, requestTarget);
     });
     apiFetchTo.mockImplementation(() =>
       Promise.resolve({
@@ -11391,12 +11182,12 @@ describe("MobileApp Create title", () => {
     await flushPromises();
 
     expect(openStreams).toHaveLength(1);
-    expect(openStreams[0]?.options.body.title).toBe("Grain test 01");
+    expect(admittedRequests()[0]?.title).toBe("Grain test 01");
 
     await fieldControl("Title").setValue("   ");
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
-    expect(openStreams).toHaveLength(2);
+    expect(admittedRequests()).toHaveLength(2);
     expect(openStreams[1]?.options.body.title).toBeUndefined();
   });
 
@@ -11412,7 +11203,7 @@ describe("MobileApp Create title", () => {
       default_frames: 25,
       default_fps: 30,
     };
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model, sequenceModel]);
       if (path === "/api/capabilities") return Promise.resolve({});
@@ -11437,7 +11228,7 @@ describe("MobileApp Create title", () => {
       if (path.startsWith("/api/chain-jobs/")) return new Promise(() => {});
       if (path === "/api/activity")
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -11507,7 +11298,7 @@ describe("MobileApp Create File under", () => {
   };
 
   function installFilingApi(organize = true): void {
-    apiJsonTo.mockImplementation((_target: unknown, path: string, init?: RequestInit) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve([model, sequenceModel]);
       if (path === "/api/capabilities") {
@@ -11551,7 +11342,7 @@ describe("MobileApp Create File under", () => {
       if (path.startsWith("/api/chain-jobs/")) return new Promise(() => {});
       if (path === "/api/activity")
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
   }
 
@@ -11596,7 +11387,7 @@ describe("MobileApp Create File under", () => {
 
     // The title still rides; only the filing is withheld from a machine that
     // would reject it.
-    expect(openStreams[0]?.options.body.title).toBe("Smurfs");
+    expect(admittedRequests()[0]?.title).toBe("Smurfs");
     expect(openStreams[0]?.options.body.tags).toBeUndefined();
     expect(openStreams[0]?.options.body.collection).toBeUndefined();
   });
@@ -11612,7 +11403,7 @@ describe("MobileApp Create File under", () => {
     await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
 
-    expect(openStreams[0]?.options.body.tags).toEqual(["smurfs"]);
+    expect(admittedRequests()[0]?.tags).toEqual(["smurfs"]);
     // Always by name: the routed machine resolves or creates it by slug.
     expect(openStreams[0]?.options.body.collection).toEqual({ name: "Smurfs" });
   });
@@ -11632,7 +11423,7 @@ describe("MobileApp Create File under", () => {
     await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
 
-    expect(openStreams[0]?.options.body.tags).toEqual(["kodak"]);
+    expect(admittedRequests()[0]?.tags).toEqual(["kodak"]);
     expect(openStreams[0]?.options.body.collection).toBeUndefined();
   });
 
@@ -11652,7 +11443,7 @@ describe("MobileApp Create File under", () => {
 
     expect(openStreams[0]?.options.body.tags).toBeUndefined();
     // The collection match is a separate decision and still applies.
-    expect(openStreams[0]?.options.body.collection).toEqual({ name: "Smurfs" });
+    expect(admittedRequests()[0]?.collection).toEqual({ name: "Smurfs" });
   });
 
   it("gives every prepared Batch N sibling the same filing", async () => {
@@ -11667,7 +11458,7 @@ describe("MobileApp Create File under", () => {
     await wrapper!.get("[data-test='mobile-develop-prepared']").trigger("click");
     await flushPromises();
 
-    expect(openStreams).toHaveLength(3);
+    expect(admittedRequests()).toHaveLength(3);
     for (const stream of openStreams) {
       expect(stream.options.body.title).toBe("Smurfs");
       expect(stream.options.body.tags).toEqual(["smurfs"]);
@@ -11871,7 +11662,7 @@ describe("MobileApp Create File under", () => {
     fitting.resolve({ source: "c3JjCg==", mask: null, changed: false });
     await flushPromises();
 
-    expect(openStreams).toHaveLength(1);
+    expect(admittedRequests()).toHaveLength(1);
     expect(openStreams[0]?.options.body.title).toBe("Smurfs");
     expect(openStreams[0]?.options.body.tags).toEqual(["smurfs"]);
     expect(openStreams[0]?.options.body.collection).toEqual({ name: "Smurfs" });
@@ -11912,7 +11703,7 @@ describe("MobileApp Create File under", () => {
     await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
 
-    expect(openStreams[0]?.options.body.collection).toEqual({ name: "Smurfs" });
+    expect(admittedRequests()[0]?.collection).toEqual({ name: "Smurfs" });
     expect(form.fileUnderMatch).toBeNull();
   });
 
@@ -11940,7 +11731,7 @@ describe("MobileApp Create File under", () => {
         { ...filer, online: false },
       ]),
     );
-    apiJsonTo.mockImplementation((probe: unknown, path: string) => {
+    apiJsonTo.mockImplementation((probe: unknown, path: string, init?: RequestInit) => {
       const isFiler = (probe as { baseUrl?: string } | undefined)?.baseUrl === filer.baseUrl;
       if (path === "/api/status") {
         return Promise.resolve(
@@ -11961,7 +11752,7 @@ describe("MobileApp Create File under", () => {
       if (path === "/api/gallery/tags") return Promise.resolve([]);
       if (path === "/api/activity")
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, target);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -11974,7 +11765,7 @@ describe("MobileApp Create File under", () => {
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
 
-    expect(openStreams).toHaveLength(1);
+    expect(admittedRequests()).toHaveLength(1);
     expect(openStreams[0]?.options.body.tags).toBeUndefined();
     expect(openStreams[0]?.options.body.collection).toBeUndefined();
   });
@@ -12019,7 +11810,7 @@ describe("MobileApp Create File under", () => {
 
   /** Both machines hold the model; only Studio can organize. */
   function fleetFilingApi(): void {
-    apiJsonTo.mockImplementation((probe: { baseUrl: string }, path: string) => {
+    apiJsonTo.mockImplementation((probe: { baseUrl: string }, path: string, init?: RequestInit) => {
       const render = probe.baseUrl === filerTarget.baseUrl;
       if (path === "/api/status")
         return Promise.resolve({
@@ -12055,7 +11846,7 @@ describe("MobileApp Create File under", () => {
       if (path === "/api/gallery/tags") return Promise.resolve([]);
       if (path === "/api/activity")
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, target);
     });
   }
 
@@ -12094,7 +11885,7 @@ describe("MobileApp Create File under", () => {
 
     // Routing is a model/capacity decision and is NOT narrowed by filing: the
     // incapable machine still won, and the print still develops on it.
-    expect(openStreams).toHaveLength(1);
+    expect(admittedRequests()).toHaveLength(1);
     expect(openStreams[0]?.options.target).toEqual(filerTarget);
     expect(openStreams[0]?.options.body.tags).toBeUndefined();
     expect(openStreams[0]?.options.body.collection).toBeUndefined();
@@ -12115,7 +11906,7 @@ describe("MobileApp Create File under", () => {
     await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
 
-    expect(openStreams[0]?.options.target).toEqual(target);
+    expect(admissionTargets()[0]).toEqual(target);
     expect(openStreams[0]?.options.body.tags).toEqual(["smurfs"]);
     expect(openStreams[0]?.options.body.collection).toEqual({ name: "Smurfs" });
     expect(wrapper!.find("[data-test='mobile-file-under-dropped']").exists()).toBe(false);
@@ -12138,7 +11929,7 @@ describe("MobileApp Create File under", () => {
     await wrapper!.get("[data-test='mobile-develop-prepared']").trigger("click");
     await flushPromises();
 
-    expect(openStreams).toHaveLength(3);
+    expect(admittedRequests()).toHaveLength(3);
     for (const stream of openStreams) {
       expect(stream.options.target).toEqual(filerTarget);
       expect(stream.options.body.title).toBe("Smurfs");
@@ -12206,7 +11997,7 @@ describe("MobileApp Create File under", () => {
     await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
 
-    expect(openStreams).toHaveLength(2);
+    expect(admittedRequests()).toHaveLength(2);
     expect(openStreams[1]?.options.body.tags).toEqual(["smurfs"]);
     expect(wrapper!.find("[data-test='mobile-file-under-dropped']").exists()).toBe(false);
   });
@@ -12265,7 +12056,7 @@ describe("MobileApp Create File under", () => {
       if (path.startsWith("/api/chain-jobs/")) return new Promise(() => {});
       if (path === "/api/activity")
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, target);
     });
     wrapper = mountMobileApp();
     await flushPromises();
@@ -12328,7 +12119,7 @@ describe("MobileApp identity photo", () => {
   };
 
   function serveIdentity(models: ModelEntry[], gallery: GalleryImage[] = []): void {
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
       if (path === "/api/status") return Promise.resolve(status);
       if (path === "/api/models") return Promise.resolve(models);
       if (path === "/api/gallery") return Promise.resolve(gallery);
@@ -12337,7 +12128,7 @@ describe("MobileApp identity photo", () => {
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
       }
       if (path.startsWith("/api/catalog/installed")) return Promise.resolve([]);
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, callTarget);
     });
   }
 
@@ -12473,7 +12264,7 @@ describe("MobileApp identity photo", () => {
     ).toBeUndefined();
 
     await develop("a parked identity print");
-    expect(openStreams).toHaveLength(1);
+    expect(admittedRequests()).toHaveLength(1);
     const parked = openStreams[0]!.options.body as Record<string, unknown>;
     expect(parked.id_image).toBeUndefined();
     expect(parked.id_image_name).toBeUndefined();
@@ -12496,7 +12287,7 @@ describe("MobileApp identity photo", () => {
 
     await develop();
 
-    const body = openStreams[0]!.options.body as Record<string, unknown>;
+    const body = admittedRequests()[0]! as Record<string, unknown>;
     expect(body.id_image).toBe(PNG_1X1);
     expect(body.id_image_name).toBe("ada.png");
     expect(body.id_weight).toBe(0.75);
@@ -12520,7 +12311,7 @@ describe("MobileApp identity photo", () => {
 
     await develop();
 
-    const body = openStreams[0]!.options.body as Record<string, unknown>;
+    const body = admittedRequests()[0]! as Record<string, unknown>;
     expect(body.id_image).toBe(PNG_1X1);
     expect(body.id_weight).toBeUndefined();
     expect(body.id_start_step).toBeUndefined();
@@ -12599,7 +12390,7 @@ describe("MobileApp identity photo", () => {
     await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
     await flushPromises();
 
-    expect(openStreams).toHaveLength(2);
+    expect(admittedRequests()).toHaveLength(2);
     for (const stream of openStreams) {
       const body = stream.options.body as Record<string, unknown>;
       expect(body.id_image).toBe(PNG_1X1);
@@ -12762,7 +12553,7 @@ describe("MobileApp identity photo", () => {
     ).toBeUndefined();
     await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
     await flushPromises();
-    expect(openStreams).toHaveLength(2);
+    expect(admittedRequests()).toHaveLength(2);
     for (const stream of openStreams) {
       expect((stream.options.body as Record<string, unknown>).id_image).toBe(PNG_1X1);
     }
@@ -12805,7 +12596,7 @@ describe("MobileApp identity photo", () => {
           : null,
       ),
     );
-    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string) => {
+    apiJsonTo.mockImplementation((route: { baseUrl: string }, path: string, init?: RequestInit) => {
       const render = route.baseUrl === renderTarget.baseUrl;
       if (path === "/api/status") {
         return Promise.resolve({
@@ -12825,7 +12616,7 @@ describe("MobileApp identity photo", () => {
       if (path === "/api/activity") {
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
       }
-      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      return durableApiFallback(path, init, route);
     });
     // Render would win on speed alone.
     previewGenerationPlacement.mockImplementation((probe: { baseUrl: string }) => {
@@ -12843,7 +12634,7 @@ describe("MobileApp identity photo", () => {
       (call: unknown[]) => (call[0] as { baseUrl: string }).baseUrl,
     );
     expect(probed).toEqual([target.baseUrl]);
-    expect(openStreams).toHaveLength(1);
+    expect(admittedRequests()).toHaveLength(1);
     expect(openStreams[0]?.options.target).toEqual(target);
     expect((openStreams[0]?.options.body as Record<string, unknown>).id_image).toBe(PNG_1X1);
   });

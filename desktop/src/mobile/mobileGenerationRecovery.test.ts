@@ -13,7 +13,7 @@ import {
   reduceMobileDurableGenerationRecovery,
   resolveMobileDurableHost,
   saveMobileDurableGenerationRecoveries,
-  useMobileDurableGenerationLifecycle,
+  mobileDurableGenerationRefusal,
 } from "./mobileGenerationRecovery";
 
 function request(index = 1): GenerateRequest {
@@ -72,10 +72,7 @@ describe("mobile durable generation recovery", () => {
     private_h3: false,
   };
   const canonicalQueue = {
-    heterogeneous_batch: true,
     heterogeneous_batch_max_outputs: 64,
-    durable_batch_outcomes: true,
-    admission_protocol_version: 2,
   };
   const durableMediaV2 = {
     ...durableMedia,
@@ -84,10 +81,14 @@ describe("mobile durable generation recovery", () => {
   };
 
   it("admits singleton and Batch N while repeated submissions add no client-side queue cap", () => {
-    const queue = { heterogeneous_batch: true, durable_batch_outcomes: true };
     expect(
-      useMobileDurableGenerationLifecycle({ queue, requests: [request()], chain: false }),
-    ).toBe(true);
+      mobileDurableGenerationRefusal({
+        queue: canonicalQueue,
+        requests: [request()],
+        hostLabel: "Render",
+        instanceId: "instance-1",
+      }),
+    ).toBeNull();
     const records = Array.from({ length: 257 }, (_, index) =>
       recovery(`client-${index}`, [request(index + 1)]),
     );
@@ -96,8 +97,44 @@ describe("mobile durable generation recovery", () => {
     expect(recovery("batch", batchRequests).presentations).toHaveLength(batchRequests.length);
   });
 
-  it("routes supported media durably only with the exact v1 host capability", () => {
-    const queue = { heterogeneous_batch: true, durable_batch_outcomes: true };
+  it("refuses a machine that has not reported its server instance", () => {
+    for (const instanceId of [undefined, null, "", "   "]) {
+      expect(
+        mobileDurableGenerationRefusal({
+          queue: canonicalQueue,
+          requests: [request()],
+          hostLabel: "Render",
+          instanceId,
+        }),
+      ).toBe("Render has not reported its server instance yet. Nothing was queued.");
+    }
+  });
+
+  it("refuses a machine that does not advertise the durable generation queue", () => {
+    expect(
+      mobileDurableGenerationRefusal({
+        queue: null,
+        requests: [request()],
+        hostLabel: "Render",
+        instanceId: "instance-1",
+      }),
+    ).toBe(
+      "Render cannot queue this print: this machine does not advertise the durable generation queue. Nothing was queued.",
+    );
+  });
+
+  it("has nothing to say about an empty submission", () => {
+    expect(
+      mobileDurableGenerationRefusal({
+        queue: canonicalQueue,
+        requests: [],
+        hostLabel: "Render",
+        instanceId: "instance-1",
+      }),
+    ).toBe("There is nothing to queue.");
+  });
+
+  it("admits supported media only against the machine's own durable-media contract", () => {
     for (const media of [
       { id_image: "face" },
       { id_images: ["face-a", "face-b"] },
@@ -113,68 +150,87 @@ describe("mobile durable generation recovery", () => {
       { extend_video_path: "/host/video.mp4" },
     ]) {
       expect(
-        useMobileDurableGenerationLifecycle({
-          queue,
+        mobileDurableGenerationRefusal({
+          queue: canonicalQueue,
           durableMedia,
           requests: [{ ...request(), ...media } as GenerateRequest],
-          chain: false,
+          hostLabel: "Render",
+          instanceId: "instance-1",
         }),
-      ).toBe(true);
+      ).toBeNull();
       expect(
-        useMobileDurableGenerationLifecycle({
-          queue,
+        mobileDurableGenerationRefusal({
+          queue: canonicalQueue,
           durableMedia: undefined,
           requests: [{ ...request(), ...media } as GenerateRequest],
-          chain: false,
+          hostLabel: "Render",
+          instanceId: "instance-1",
         }),
-      ).toBe(false);
+      ).toBe(
+        "Render cannot queue this print: this machine cannot store request media durably. Nothing was queued.",
+      );
     }
-    for (const excluded of [
-      { references: [{ image: { authority: "inline", data: "h3" } }] },
-      { source_image: "source", lora: { path: "adapter", scale: 1 } },
-      { source_image: "source", loras: [] },
-      { hdr_exr_dir: "/host/exr" },
-    ])
-      expect(
-        useMobileDurableGenerationLifecycle({
-          queue,
-          durableMedia,
-          requests: [{ ...request(), ...excluded } as GenerateRequest],
-          chain: false,
-        }),
-      ).toBe(false);
-    expect(useMobileDurableGenerationLifecycle({ queue, requests: [request()], chain: true })).toBe(
-      false,
-    );
-    expect(
-      useMobileDurableGenerationLifecycle({
-        queue,
-        durableMedia,
-        requests: [{ ...request(), model: "minimax-h3-fl2va:official-bf16" }],
-        chain: false,
-      }),
-    ).toBe(false);
-    expect(
-      useMobileDurableGenerationLifecycle({
-        queue,
-        durableMedia,
-        requests: [{ ...request(), model: "hf:opaque-h3-checkpoint" }],
-        chain: false,
-        modelFamily: "minimax-h3",
-      }),
-    ).toBe(false);
   });
 
-  it("admits H3 and ordinary media through the same canonical v2 decision", () => {
+  it("names the exact trait it refuses instead of routing the print elsewhere", () => {
+    const cases: Array<[Partial<GenerateRequest>, string]> = [
+      [
+        { references: [{ image: { authority: "inline", data: "h3" } }] as never },
+        "this machine cannot store reference media durably",
+      ],
+      [
+        { source_image: "source", lora: { path: "adapter", scale: 1 } as never },
+        "a LoRA cannot be combined with source media in a queued print",
+      ],
+      [
+        { source_image: "source", loras: [] as never },
+        "a LoRA cannot be combined with source media in a queued print",
+      ],
+      [{ hdr_exr_dir: "/host/exr" } as never, "an HDR EXR output directory cannot be queued"],
+      [
+        { model: "minimax-h3-fl2va:official-bf16" },
+        "this machine cannot store MiniMax H3 request media durably",
+      ],
+    ];
+    for (const [overrides, reason] of cases) {
+      expect(
+        mobileDurableGenerationRefusal({
+          queue: canonicalQueue,
+          durableMedia,
+          requests: [{ ...request(), ...overrides } as GenerateRequest],
+          hostLabel: "Render",
+          instanceId: "instance-1",
+        }),
+      ).toBe(`Render cannot queue this print: ${reason}. Nothing was queued.`);
+    }
+  });
+
+  it("reads the frozen model family, not just the checkpoint id", () => {
+    expect(
+      mobileDurableGenerationRefusal({
+        queue: canonicalQueue,
+        durableMedia,
+        requests: [{ ...request(), model: "hf:opaque-h3-checkpoint" }],
+        hostLabel: "Render",
+        instanceId: "instance-1",
+        modelFamily: "minimax-h3",
+      }),
+    ).toBe(
+      "Render cannot queue this print: this machine cannot store MiniMax H3 request media durably. Nothing was queued.",
+    );
+  });
+
+  it("admits H3 and ordinary media through the same durable decision", () => {
     for (const model of ["flux-dev", "ltx-2", "minimax-h3-fl2va:official-bf16"]) {
       expect(
-        useMobileDurableGenerationLifecycle({
+        mobileDurableGenerationRefusal({
           queue: canonicalQueue,
           durableMedia: durableMediaV2,
           requests: [{ ...request(), model, source_image: "source" }],
-          chain: false,
+          hostLabel: "Render",
+          instanceId: "instance-1",
         }),
-      ).toBe(true);
+      ).toBeNull();
     }
   });
 
