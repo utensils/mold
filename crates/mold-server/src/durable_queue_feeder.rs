@@ -573,14 +573,7 @@ async fn register_claimed_runtime(
             request,
             order.target_gpu,
             order.target_device_id.as_deref(),
-            |device_id| {
-                state
-                    .gpu_pool
-                    .workers
-                    .iter()
-                    .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
-                    .map(|worker| worker.gpu.ordinal)
-            },
+            |device_id| crate::queue_journal::resolve_pinned_ordinal(state, device_id),
         );
         if order.target_gpu.is_some() && target_gpu.is_none() {
             tracing::warn!(
@@ -978,14 +971,7 @@ async fn feed_available(
             &mut request,
             row.target_gpu,
             row.target_device_id.as_deref(),
-            |device_id| {
-                state
-                    .gpu_pool
-                    .workers
-                    .iter()
-                    .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
-                    .map(|worker| worker.gpu.ordinal)
-            },
+            |device_id| crate::queue_journal::resolve_pinned_ordinal(state, device_id),
         );
         let deferred_media = if let Some(set_id) = row.media_set_id.as_ref() {
             let Some(lifecycle) = state.queue_journal.queue_media_lifecycle() else {
@@ -3489,5 +3475,135 @@ mod tests {
 
         tokio::time::advance(mold_db::METADATA_DB_BUSY_TIMEOUT).await;
         assert_eq!(waiting.await.unwrap(), FeederControl::Continue);
+    }
+
+    async fn one_feeder_pass(
+        state: &AppState,
+        rx: &mut tokio::sync::mpsc::Receiver<GenerationJob>,
+    ) -> (FeederReport, Option<GenerationJob>) {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let current_output = state.config.try_read().unwrap().effective_output_dir();
+        let mut arbiter = FeederArbiter::default();
+        let publication = Arc::new(tokio::sync::Notify::new());
+        let report = feed_available(
+            state,
+            Some(&current_output),
+            &shutdown,
+            &mut arbiter,
+            &publication,
+        )
+        .await;
+        (report, rx.try_recv().ok())
+    }
+
+    /// Fail closed: a request this build cannot read is parked for
+    /// inspection, never guessed at and never silently dropped.
+    #[tokio::test]
+    async fn an_unreadable_durable_request_is_held_by_the_feeder() {
+        let (state, mut rx) = state(1);
+        admit(&state, 1);
+        state
+            .metadata_db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE generation_queue SET request_json = '{\"prompt\":' WHERE id = 'job-0'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let (report, job) = one_feeder_pass(&state, &mut rx).await;
+
+        assert_eq!(report.held, 1);
+        assert_eq!(report.submitted, 0);
+        assert!(
+            job.is_none(),
+            "an unreadable request never reaches a worker"
+        );
+        let row = state.queue_journal.list_all().pop().unwrap();
+        assert_eq!(row.state, mold_db::generation_queue::QueueRowState::Held);
+        assert!(row
+            .held_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("could not be deserialized")));
+    }
+
+    /// A directory that is simply absent is not a directory that moved. The
+    /// save helpers create it on demand, so holding every retained job
+    /// because somebody tidied up the gallery — or a mount came back empty —
+    /// would park work that runs perfectly well.
+    #[tokio::test]
+    async fn a_missing_gallery_directory_is_recreated_before_dispatch() {
+        let (state, mut rx) = state(1);
+        admit(&state, 1);
+        let gallery = state.config.try_read().unwrap().effective_output_dir();
+        std::fs::remove_dir_all(&gallery).unwrap();
+
+        let (report, job) = one_feeder_pass(&state, &mut rx).await;
+
+        assert_eq!(report.held, 0, "nothing should be parked");
+        assert_eq!(report.submitted, 1);
+        assert!(gallery.is_dir(), "the configured gallery is made again");
+        let mut job = job.expect("the job is dispatched into the recreated gallery");
+        assert_eq!(job.id, "job-0");
+        assert_eq!(job.output_dir.as_deref(), Some(gallery.as_path()));
+        job.journal.take().unwrap().complete_before_dispatch();
+        state.job_registry.remove(&job.id);
+        state.queue.decrement();
+    }
+
+    /// A failure to CHECK the idempotence gate is not "nothing was completed".
+    /// Reading it as an empty result would re-render every job whose print
+    /// already exists, and those duplicates are unmergeable because output
+    /// filenames are wall-clock. So the pass sends nothing, releases the
+    /// claim, and leaves the row's replay budget untouched for the retry.
+    #[tokio::test]
+    async fn an_unverifiable_idempotence_gate_sends_nothing_and_spends_no_replay_budget() {
+        let (state, mut rx) = state(1);
+        admit(&state, 2);
+        state.queue_journal.fail_completion_lookup_for_tests();
+
+        let (report, job) = one_feeder_pass(&state, &mut rx).await;
+
+        assert_eq!(report.stop, FeederStop::RecoverableFailure);
+        assert_eq!(report.submitted, 0, "nothing may be rendered unverified");
+        assert!(job.is_none());
+        assert!(rx.try_recv().is_err());
+        let rows = state.queue_journal.list_all();
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["job-0", "job-1"]
+        );
+        assert!(rows
+            .iter()
+            .all(|row| row.state == mold_db::generation_queue::QueueRowState::Queued));
+        assert!(
+            rows.iter().all(|row| row.replay_seen == 0),
+            "the retry must get a full budget"
+        );
+        let claimed: i64 = state
+            .metadata_db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM generation_queue WHERE claim_token IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(claimed, 0, "the claim is released for the in-process retry");
+        assert_eq!(
+            state.queue.pending(),
+            0,
+            "no runtime reservation survives the failed pass"
+        );
     }
 }

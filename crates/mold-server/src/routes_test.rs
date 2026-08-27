@@ -8358,9 +8358,61 @@ mod tests {
         assert!(journal.list_all().is_empty());
     }
 
+    /// Boot the durable feeder the way `run_server` does: recover the prior
+    /// runtime's claims, then spawn the feeder. The caller stops it with
+    /// `stop_feeder`.
+    async fn boot_feeder(
+        state: &AppState,
+    ) -> (
+        tokio_util::sync::CancellationToken,
+        tokio::task::JoinHandle<()>,
+    ) {
+        crate::durable_queue_feeder::recover_runtime(state)
+            .await
+            .expect("durable runtime recovery");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let feeder = crate::durable_queue_feeder::spawn(state.clone(), shutdown.clone());
+        (shutdown, feeder)
+    }
+
+    async fn stop_feeder(
+        shutdown: tokio_util::sync::CancellationToken,
+        feeder: tokio::task::JoinHandle<()>,
+    ) {
+        shutdown.cancel();
+        feeder.await.unwrap();
+    }
+
+    /// Receive the next hydrated job and settle it so the single runtime slot
+    /// frees for the next one. With `queue_capacity = 1` the feeder hydrates
+    /// strictly in durable order, which is what these tests assert.
+    async fn receive_and_settle(
+        state: &AppState,
+        rx: &mut tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
+    ) -> crate::state::GenerationJob {
+        let mut job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("hydrated job")
+            .expect("open queue");
+        assert!(
+            state
+                .job_registry
+                .snapshot()
+                .entries
+                .iter()
+                .any(|entry| entry.id == job.id),
+            "a hydrated job is registered under its original id, so /api/queue and \
+             /api/events see resumed jobs with no new event type"
+        );
+        job.journal.take().unwrap().complete_before_dispatch();
+        state.job_registry.remove(&job.id);
+        state.queue.decrement();
+        job
+    }
+
     /// The end-to-end shape: admit jobs, fence, drop the coordinator, rebuild
-    /// `AppState` on the same DB, replay. The rows come back under their
-    /// original ids, in submit order, through the ordinary queue.
+    /// `AppState` on the same DB, boot the feeder. The rows come back under
+    /// their original ids, in submit order, through the ordinary queue.
     #[tokio::test]
     async fn retained_generations_replay_in_order_under_their_original_ids() {
         let output_dir = tempfile::tempdir().unwrap();
@@ -8368,23 +8420,13 @@ mod tests {
         let submitted = seed_retained_jobs(db.clone(), output_dir.path(), 3).await;
 
         // A fresh server on the same database.
-        let (state, mut rx) = durable_state(db.clone(), output_dir.path());
-        let report = crate::queue_journal::replay(&state, true).await;
-
-        assert_eq!(report.resumed, 3);
-        assert_eq!(report.held, 0);
-        assert_eq!(report.already_completed, 0);
+        let (mut state, mut rx) = durable_state(db.clone(), output_dir.path());
+        state.queue_capacity = 1;
+        let (shutdown, feeder) = boot_feeder(&state).await;
 
         let mut replayed = Vec::new();
         for _ in 0..3 {
-            let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-                .await
-                .expect("replayed job")
-                .expect("open queue");
-            assert!(
-                job.journal.is_some(),
-                "a replayed job keeps owning its durable row"
-            );
+            let job = receive_and_settle(&state, &mut rx).await;
             assert!(
                 job.progress_tx.is_none(),
                 "a replayed job has no client to stream to"
@@ -8392,18 +8434,11 @@ mod tests {
             replayed.push(job.id);
         }
         assert_eq!(replayed, submitted);
-        assert_eq!(
-            state
-                .job_registry
-                .snapshot()
-                .entries
-                .iter()
-                .map(|entry| entry.id.clone())
-                .collect::<Vec<_>>(),
-            submitted,
-            "replay re-registers under the original ids, so /api/queue and \
-             /api/events see resumed jobs with no new event type"
+        assert!(
+            state.queue_journal.list_all().is_empty(),
+            "every retained row was hydrated exactly once"
         );
+        stop_feeder(shutdown, feeder).await;
     }
 
     #[tokio::test]
@@ -8461,8 +8496,7 @@ mod tests {
             workers: vec![gpu_worker_stub_with_stable_id(7, STABLE_ID)].into(),
         });
         install_worker_registry(&mut state);
-        let report = crate::queue_journal::replay(&state, true).await;
-        assert_eq!(report.resumed, 1);
+        let (shutdown, feeder) = boot_feeder(&state).await;
         let mut replayed = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("direct replay")
@@ -8495,6 +8529,7 @@ mod tests {
         replayed.journal.take().unwrap().discard();
         state.job_registry.remove(&submitted_id);
         state.queue.decrement();
+        stop_feeder(shutdown, feeder).await;
     }
 
     #[tokio::test]
@@ -8651,17 +8686,13 @@ mod tests {
             submitted
         };
 
-        let (state, mut rx) = durable_state(db.clone(), output_dir.path());
-        let report = crate::queue_journal::replay(&state, true).await;
-        assert_eq!(report.resumed, 3);
+        let (mut state, mut rx) = durable_state(db.clone(), output_dir.path());
+        state.queue_capacity = 1;
+        let (shutdown, feeder) = boot_feeder(&state).await;
 
         let mut replayed = Vec::new();
         for _ in 0..3 {
-            let job = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-                .await
-                .expect("replayed job")
-                .expect("open queue");
-            replayed.push(job.id);
+            replayed.push(receive_and_settle(&state, &mut rx).await.id);
         }
         assert_eq!(
             replayed,
@@ -8670,8 +8701,9 @@ mod tests {
                 submitted[0].clone(),
                 submitted[1].clone()
             ],
-            "replay must honour the reorder, not the admission order"
+            "the feeder must honour the reorder, not the admission order"
         );
+        stop_feeder(shutdown, feeder).await;
     }
 
     /// The CPU-only worker is a separate publication path from the GPU one, so
@@ -8722,31 +8754,33 @@ mod tests {
         .await
         .expect("a published generation clears its durable row");
 
-        // The saved print carries the queue job that produced it, which is
-        // what makes replay idempotent.
-        let saved: Vec<String> = db
+        // The saved print carries the queue job that produced it, projected
+        // into the indexed columns the feeder's idempotence gate matches on
+        // (`find_completed_output`), which is what keeps a restart from
+        // rendering it twice.
+        let saved: Vec<(Option<String>, Option<String>, Option<i64>)> = db
             .as_ref()
             .as_ref()
             .unwrap()
             .with_conn(|conn| {
-                let mut stmt = conn
-                    .prepare("SELECT json_extract(metadata_json, '$.job_id') FROM generations")?;
-                let rows = stmt.query_map([], |row| row.get::<_, Option<String>>(0))?;
-                Ok(rows.filter_map(|row| row.ok().flatten()).collect())
+                let mut stmt = conn.prepare(
+                    "SELECT json_extract(metadata_json, '$.job_id'),
+                            queue_job_id, queue_job_metadata_state
+                       FROM generations",
+                )?;
+                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(anyhow::Error::from)
             })
             .unwrap();
         assert_eq!(saved.len(), 1, "one print, carrying one job id: {saved:?}");
-        assert!(!saved[0].is_empty());
+        let (recorded, projected, projected_state) = &saved[0];
+        assert!(recorded.as_deref().is_some_and(|id| !id.is_empty()));
         assert_eq!(
-            mold_db::generation_queue::find_completed_job_ids(
-                db.as_ref().as_ref().unwrap(),
-                &saved
-            )
-            .unwrap()
-            .len(),
-            1,
-            "replay's idempotence gate must recognise a CPU-rendered print"
+            projected, recorded,
+            "the feeder's idempotence gate must recognise a CPU-rendered print"
         );
+        assert_eq!(*projected_state, Some(1));
 
         feeder_shutdown.cancel();
         feeder.await.unwrap();
@@ -8755,11 +8789,10 @@ mod tests {
     }
 
     /// A maintenance boot (`MOLD_GPUS=none`) has no dispatch owner at all, so
-    /// there is nothing to replay INTO. Attempting it anyway sent every job
-    /// into a dropped receiver, and the failed send dropped the ticket with a
-    /// fresh boot's fence still down — deleting the whole queue on a routine
-    /// maintenance restart, which is precisely what this feature exists to
-    /// prevent.
+    /// `run_server` recovers the prior runtime's claims and spawns no feeder.
+    /// Nothing is hydrated, every row survives, and — because recovery only
+    /// charges rows that were claimed or running — the untouched backlog
+    /// spends none of its replay budget on a boot that could not run it.
     #[tokio::test]
     async fn a_boot_with_no_dispatch_owner_replays_nothing_and_keeps_every_row() {
         let output_dir = tempfile::tempdir().unwrap();
@@ -8767,11 +8800,12 @@ mod tests {
         let submitted = seed_retained_jobs(db.clone(), output_dir.path(), 2).await;
 
         let (state, mut rx) = durable_state(db.clone(), output_dir.path());
-        let report = crate::queue_journal::replay(&state, false).await;
+        crate::durable_queue_feeder::recover_runtime(&state)
+            .await
+            .unwrap();
 
-        assert_eq!(report.resumed, 0);
-        assert_eq!(report.held, 0);
         assert!(rx.try_recv().is_err());
+        assert!(state.job_registry.snapshot().entries.is_empty());
         let rows = state.queue_journal.list_all();
         assert_eq!(
             rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
@@ -8783,8 +8817,8 @@ mod tests {
         );
     }
 
-    /// The independent guard: whatever the reason a resubmission fails, the
-    /// job never reached a worker, so its row must survive for the next boot
+    /// The independent guard: whatever the reason a hydration fails, the job
+    /// never reached a worker, so its row must survive for the next boot
     /// rather than be deleted by the ticket's ordinary drop.
     #[tokio::test]
     async fn a_job_that_cannot_be_resubmitted_keeps_its_row() {
@@ -8792,13 +8826,17 @@ mod tests {
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let submitted = seed_retained_jobs(db.clone(), output_dir.path(), 2).await;
 
-        let (state, rx) = durable_state(db.clone(), output_dir.path());
-        // Exactly the maintenance shape: the dispatch owner is gone, so every
-        // send fails — but we ask for a replay anyway.
+        let (mut state, rx) = durable_state(db.clone(), output_dir.path());
+        // The dispatch owner is gone, so every send fails — but the feeder
+        // runs anyway. Its one worker stops on the closed transport.
+        state.queue_capacity = 1;
         drop(rx);
-        let report = crate::queue_journal::replay(&state, true).await;
+        let (_shutdown, feeder) = boot_feeder(&state).await;
+        tokio::time::timeout(Duration::from_secs(5), feeder)
+            .await
+            .expect("a closed transport stops the feeder")
+            .unwrap();
 
-        assert_eq!(report.resumed, 0);
         let rows = state.queue_journal.list_all();
         assert_eq!(
             rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
@@ -8855,26 +8893,29 @@ mod tests {
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let submitted = seed_retained_jobs(db.clone(), output_dir.path(), 2).await;
 
-        let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+        let (mut state, mut rx) = durable_state(db.clone(), output_dir.path());
+        state.queue_capacity = 1;
         // The configured path is unchanged; the directory itself is gone.
         // Removed after the fixture builds, or it would just recreate it.
         std::fs::remove_dir_all(durable_gallery_dir(output_dir.path())).unwrap();
-        let report = crate::queue_journal::replay(&state, true).await;
+        let (shutdown, feeder) = boot_feeder(&state).await;
 
-        assert_eq!(report.held, 0, "nothing should be parked");
-        assert_eq!(report.resumed, 2);
-        assert!(durable_gallery_dir(output_dir.path()).is_dir());
         let mut replayed = Vec::new();
         for _ in 0..2 {
-            replayed.push(
-                tokio::time::timeout(Duration::from_secs(5), rx.recv())
-                    .await
-                    .expect("replayed job")
-                    .expect("open queue")
-                    .id,
+            let job = receive_and_settle(&state, &mut rx).await;
+            assert_eq!(
+                job.output_dir.as_deref(),
+                Some(durable_gallery_dir(output_dir.path()).as_path())
             );
+            replayed.push(job.id);
         }
         assert_eq!(replayed, submitted);
+        assert!(durable_gallery_dir(output_dir.path()).is_dir());
+        assert!(
+            state.queue_journal.list_all().is_empty(),
+            "nothing was parked"
+        );
+        stop_feeder(shutdown, feeder).await;
     }
 
     /// A maintenance boot owes work it deliberately does not register, so
@@ -8888,9 +8929,11 @@ mod tests {
         let submitted = seed_retained_jobs(db.clone(), output_dir.path(), 2).await;
 
         let (state, _rx) = durable_state(db.clone(), output_dir.path());
-        // No dispatch owner: replay returns without registering anything.
-        let report = crate::queue_journal::replay(&state, false).await;
-        assert_eq!(report.resumed, 0);
+        // No dispatch owner: the runtime is recovered and no feeder spawns,
+        // so nothing is registered.
+        crate::durable_queue_feeder::recover_runtime(&state)
+            .await
+            .unwrap();
         assert!(state.job_registry.snapshot().entries.is_empty());
 
         let listing = json_body(
@@ -8931,30 +8974,67 @@ mod tests {
     /// completed". Reading it as an empty result would re-render every job
     /// whose print already exists, and those duplicates are unmergeable
     /// because output filenames are wall-clock — so one malformed
-    /// `metadata_json` would defeat the whole guarantee.
+    /// `metadata_json` would defeat the whole guarantee. The feeder releases
+    /// the claim and retries later; until then nothing is rendered and the
+    /// row's replay budget is untouched.
     #[tokio::test]
-    async fn replay_renders_nothing_when_the_idempotence_gate_cannot_be_checked() {
+    async fn the_feeder_hydrates_nothing_when_the_idempotence_gate_cannot_be_checked() {
         let output_dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let submitted = seed_retained_jobs(db.clone(), output_dir.path(), 2).await;
 
-        let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+        let (mut state, mut rx) = durable_state(db.clone(), output_dir.path());
+        // One feeder worker, so the injected failure is the only pass that
+        // runs before the retry delay.
+        state.queue_capacity = 1;
         state.queue_journal.fail_completion_lookup_for_tests();
-        let report = crate::queue_journal::replay(&state, true).await;
+        let (shutdown, feeder) = boot_feeder(&state).await;
 
-        assert_eq!(report.resumed, 0, "nothing may be rendered unverified");
-        assert_eq!(report.skipped_unverified, 2);
-        assert!(rx.try_recv().is_err());
+        // The pass is over once the injected failure was consumed and the
+        // claim it took has been handed back.
+        let claim_db = db.clone();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let claimed = claim_db
+                    .as_ref()
+                    .as_ref()
+                    .unwrap()
+                    .with_conn(|conn| {
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM generation_queue WHERE claim_token IS NOT NULL",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .map_err(anyhow::Error::from)
+                    })
+                    .unwrap();
+                if !state
+                    .queue_journal
+                    .completion_lookup_failure_pending_for_tests()
+                    && claimed == 0
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the failed pass releases its claim");
 
+        assert!(rx.try_recv().is_err(), "nothing may be rendered unverified");
         let rows = state.queue_journal.list_all();
         assert_eq!(
             rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
             submitted
         );
+        assert!(rows
+            .iter()
+            .all(|row| row.state == mold_db::generation_queue::QueueRowState::Queued));
         assert!(
             rows.iter().all(|row| row.replay_seen == 0),
-            "the next boot must get a full budget to try again"
+            "the retry must get a full budget to try again"
         );
+        stop_feeder(shutdown, feeder).await;
     }
 
     /// A job that finished between its last save and the crash must not be
@@ -8971,30 +9051,40 @@ mod tests {
             .unwrap();
 
         // The print landed; only the journal delete was lost.
+        let gallery = mold_db::canonical_dir_string(&durable_gallery_dir(output_dir.path()));
         db.as_ref()
             .as_ref()
             .unwrap()
             .with_conn(|conn| {
                 conn.execute(
-                    &format!(
-                        "INSERT INTO generations
-                            (filename, output_dir, created_at_ms, format, model, metadata_json)
-                         VALUES ('done.png', '/gallery', 1, 'png', 'mock-model',
-                                 '{{\"job_id\":\"{finished_id}\"}}')"
+                    "INSERT INTO generations
+                        (filename, output_dir, created_at_ms, format, model, metadata_json,
+                         queue_job_id, queue_job_metadata_state)
+                     VALUES ('done.png', ?1, ?2, 'png', 'mock-model', ?3, ?4, 1)",
+                    (
+                        gallery.as_str(),
+                        mold_core::time::now_epoch_ms(),
+                        format!("{{\"job_id\":\"{finished_id}\"}}"),
+                        finished_id.as_str(),
                     ),
-                    [],
                 )?;
                 Ok(())
             })
             .unwrap();
 
         let (state, mut rx) = durable_state(db.clone(), output_dir.path());
-        let report = crate::queue_journal::replay(&state, true).await;
+        let (shutdown, feeder) = boot_feeder(&state).await;
 
-        assert_eq!(report.already_completed, 1);
-        assert_eq!(report.resumed, 0);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !state.queue_journal.list_all().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the already-published row is settled without a render");
         assert!(rx.try_recv().is_err(), "nothing may be resubmitted");
-        assert!(state.queue_journal.list_all().is_empty());
+        assert!(state.job_registry.snapshot().entries.is_empty());
+        stop_feeder(shutdown, feeder).await;
     }
 
     /// Fail closed: a request this build cannot read is parked for inspection,
@@ -9032,14 +9122,22 @@ mod tests {
         )
         .unwrap();
 
-        let report = crate::queue_journal::replay(&state, true).await;
+        let (shutdown, feeder) = boot_feeder(&state).await;
 
-        assert_eq!(report.held, 1);
-        assert_eq!(report.resumed, 0);
+        let row = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let row = state.queue_journal.list_all().pop().unwrap();
+                if row.state == mold_db::generation_queue::QueueRowState::Held {
+                    break row;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the unreadable row is held");
         assert!(rx.try_recv().is_err());
-        let row = state.queue_journal.list_all().pop().unwrap();
-        assert_eq!(row.state, mold_db::generation_queue::QueueRowState::Held);
         assert!(row.held_reason.is_some());
+        stop_feeder(shutdown, feeder).await;
     }
 
     /// Another installation sharing this MOLD_HOME owns its own rows.
@@ -9073,12 +9171,36 @@ mod tests {
         )
         .unwrap();
 
-        let (state, mut rx) = durable_state(db.clone(), output_dir.path());
-        let report = crate::queue_journal::replay(&state, true).await;
+        // Our own, younger row proves the feeder walked past the foreign one
+        // rather than simply not having run yet.
+        let submitted = seed_retained_jobs(db.clone(), output_dir.path(), 1).await;
 
-        assert_eq!(report.resumed, 0);
+        let (state, mut rx) = durable_state(db.clone(), output_dir.path());
+        let (shutdown, feeder) = boot_feeder(&state).await;
+        let mut ours = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("our own row is hydrated")
+            .expect("open queue");
+        assert_eq!(ours.id, submitted[0]);
         assert!(rx.try_recv().is_err());
-        assert!(state.queue_journal.list_all().is_empty());
+
+        let theirs = mold_db::generation_queue::get(db.as_ref().as_ref().unwrap(), "theirs")
+            .unwrap()
+            .expect("the foreign row is untouched");
+        assert_eq!(
+            theirs.state,
+            mold_db::generation_queue::QueueRowState::Queued
+        );
+        assert_eq!(theirs.replay_seen, 0);
+        assert_eq!(
+            state.queue_journal.list_all().len(),
+            1,
+            "the foreign row is not ours to list either"
+        );
+        ours.journal.take().unwrap().discard();
+        state.job_registry.remove(&ours.id);
+        state.queue.decrement();
+        stop_feeder(shutdown, feeder).await;
     }
 
     /// `durable_queue` promises that a queued job survives a restart. A host
@@ -9190,9 +9312,13 @@ mod tests {
         assert_eq!(live["dispatch_attempts"], 0);
 
         // Park it the way an exhausted attempt cap would.
-        state
-            .queue_journal
-            .hold_id(&job_id, "dispatch attempts exhausted");
+        mold_db::generation_queue::hold(
+            db.as_ref().as_ref().unwrap(),
+            &job_id,
+            "dispatch attempts exhausted",
+            mold_core::time::now_epoch_ms(),
+        )
+        .unwrap();
         state.job_registry.remove(&job_id);
 
         let listing = json_body(

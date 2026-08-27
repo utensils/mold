@@ -10,9 +10,11 @@
 //! moments. `dispatch_attempts` is incremented by the same statement that
 //! claims the row for execution ([`mark_dispatched`]), so a job that waits
 //! behind a long render through ten deploys is charged zero and a job that
-//! kills the process during its own load is held. `replay_seen` is incremented
-//! once per boot that replays the row, which is the only bound on a row that
-//! loops without ever being claimed.
+//! kills the process during its own load is held. `replay_seen` is charged by
+//! startup recovery ([`recover_runtime_claims_and_charge_replays`]) once per
+//! boot that finds the row claimed, running, or already charged — never for
+//! the untouched backlog behind them — which is the only bound on a row that
+//! keeps entering the runtime window without ever running.
 //!
 //! Free functions over [`MetadataDb`], matching `chain_jobs.rs`.
 
@@ -24,19 +26,6 @@ use rusqlite::{params, OptionalExtension, Row};
 
 use crate::db::MetadataDb;
 use crate::generation_queue_media::{self, QueueMediaObligation};
-
-const COMPLETED_JOB_ID_LOOKUP_SQL: &str = "SELECT 1 FROM generations
-      WHERE queue_job_metadata_state = 1
-        AND queue_job_id = ?1
-      LIMIT 1";
-
-const INVALID_JOB_METADATA_LOOKUP_SQL: &str = "SELECT 1 FROM generations
-      WHERE queue_job_metadata_state = 0
-      LIMIT 1";
-
-const UNKNOWN_JOB_METADATA_LOOKUP_SQL: &str = "SELECT metadata_json FROM generations
-      WHERE queue_job_metadata_state IS NULL
-      ORDER BY id";
 
 const COMPLETED_OUTPUT_LOOKUP_SQL: &str = "SELECT filename FROM generations
       WHERE output_dir = ?1
@@ -768,24 +757,6 @@ pub fn find_owned_ids(
     })
 }
 
-/// Rows eligible for replay: this installation's, not held, oldest first.
-pub fn list_replayable(db: &MetadataDb, owner_uuid: &str) -> Result<Vec<GenerationQueueRow>> {
-    db.with_conn(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT id, owner_uuid, state, model, request_json, output_dir,
-                    target_gpu, target_device_id, completion_payload, seed_pinned,
-                    dispatch_attempts, replay_seen, held_reason, created_at, updated_at,
-                    started_at, media_set_id, admission_authority
-             FROM generation_queue
-             WHERE owner_uuid = ?1 AND state IN ('queued', 'running')
-             ORDER BY created_at, rowid",
-        )?;
-        let rows = stmt.query_map(params![owner_uuid], row_to_queue_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
-    })
-}
-
 /// Claim a row for execution: one statement that flips it to `running`,
 /// charges an attempt, stamps `started_at`, and returns the new attempt count.
 ///
@@ -1078,23 +1049,6 @@ pub fn hold_claimed(
     })
 }
 
-/// Charge one boot's replay against a row and return the new count.
-pub fn bump_replay_seen(db: &MetadataDb, id: &str, now_ms: i64) -> Result<Option<u32>> {
-    db.with_conn(|conn| {
-        conn.query_row(
-            "UPDATE generation_queue
-                SET replay_seen = replay_seen + 1,
-                    updated_at = ?2
-              WHERE id = ?1
-          RETURNING replay_seen",
-            params![id, now_ms],
-            |row| row.get::<_, i64>(0).map(|count| count as u32),
-        )
-        .optional()
-        .map_err(Into::into)
-    })
-}
-
 /// Park a row: listed by `GET /api/queue`, never auto-run.
 pub fn hold(db: &MetadataDb, id: &str, reason: &str, now_ms: i64) -> Result<bool> {
     db.with_conn(|conn| {
@@ -1192,13 +1146,6 @@ pub fn hold_media_jobs(
 
 /// Flip every `running` row this installation owns back to `queued`.
 ///
-/// A `running` row at boot means the process died mid-dispatch; the state
-/// column records what to do next, so it becomes `queued` again. Mirrors
-/// `chain_job_runner`'s startup flip.
-pub fn requeue_running(db: &MetadataDb, owner_uuid: &str, now_ms: i64) -> Result<usize> {
-    Ok(recover_runtime_claims(db, owner_uuid, now_ms)?.running_requeued)
-}
-
 /// Startup recovery for runtime-only ownership.
 ///
 /// All running rows are replayable after a process death, including legacy
@@ -1747,51 +1694,6 @@ pub fn set_output_dir(db: &MetadataDb, id: &str, output_dir: &str, now_ms: i64) 
     })
 }
 
-/// Which of `ids` already produced a gallery row.
-///
-/// The idempotence gate for replay: a print records the queue job that made it
-/// in `OutputMetadata.job_id`, which lands in `generations.metadata_json`.
-/// Without this, replay duplicates prints — output filenames are wall-clock,
-/// so no client-side dedupe can merge them afterwards.
-pub fn find_completed_job_ids(db: &MetadataDb, ids: &[String]) -> Result<HashSet<String>> {
-    if ids.is_empty() {
-        return Ok(HashSet::new());
-    }
-    db.with_conn(|conn| {
-        let mut found = HashSet::new();
-        let invalid: Option<i64> = conn
-            .query_row(INVALID_JOB_METADATA_LOOKUP_SQL, [], |row| row.get(0))
-            .optional()?;
-        ensure!(
-            invalid.is_none(),
-            "gallery contains malformed queue publication metadata"
-        );
-
-        let requested = ids.iter().map(String::as_str).collect::<HashSet<_>>();
-        let mut unknown = conn.prepare(UNKNOWN_JOB_METADATA_LOOKUP_SQL)?;
-        let unknown_rows = unknown.query_map([], |row| row.get::<_, Option<String>>(0))?;
-        for metadata_json in unknown_rows {
-            let Some(metadata_json) = metadata_json? else {
-                continue;
-            };
-            if let Some(job_id) = parse_queue_job_id(&metadata_json)? {
-                if requested.contains(job_id.as_str()) {
-                    found.insert(job_id);
-                }
-            }
-        }
-
-        let mut stmt = conn.prepare(COMPLETED_JOB_ID_LOOKUP_SQL)?;
-        for id in ids {
-            let hit: Option<i64> = stmt.query_row(params![id], |row| row.get(0)).optional()?;
-            if hit.is_some() {
-                found.insert(id.clone());
-            }
-        }
-        Ok(found)
-    })
-}
-
 /// Exact gallery identity recovered for a durable child that published its
 /// output before its queue authority was deleted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2066,36 +1968,47 @@ mod tests {
         );
     }
 
+    /// This owner's rows the feeder may still claim, in claim order: every
+    /// row that is not held, oldest first with `rowid` breaking ties.
+    fn claimable(db: &MetadataDb, owner: &str) -> Vec<GenerationQueueRow> {
+        list_all(db, owner)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.state != QueueRowState::Held)
+            .collect()
+    }
+
+    fn claimable_ids(db: &MetadataDb, owner: &str) -> Vec<String> {
+        claimable(db, owner).into_iter().map(|row| row.id).collect()
+    }
+
     #[test]
-    fn list_replayable_orders_same_millisecond_inserts_by_insertion() {
+    fn list_all_orders_same_millisecond_inserts_by_insertion() {
         let db = MetadataDb::open_in_memory().unwrap();
         for id in ["first", "second", "third"] {
             insert(&db, &row(id, "owner-a", 500)).unwrap();
         }
 
-        let ids: Vec<String> = list_replayable(&db, "owner-a")
-            .unwrap()
-            .into_iter()
-            .map(|row| row.id)
-            .collect();
-        assert_eq!(ids, vec!["first", "second", "third"]);
+        assert_eq!(claimable_ids(&db, "owner-a"), ["first", "second", "third"]);
     }
 
     #[test]
-    fn list_replayable_is_scoped_to_the_owner_and_skips_held_rows() {
+    fn list_all_is_scoped_to_the_owner_and_keeps_held_rows() {
         let db = MetadataDb::open_in_memory().unwrap();
         insert(&db, &row("mine", "owner-a", 1)).unwrap();
         insert(&db, &row("theirs", "owner-b", 2)).unwrap();
         insert(&db, &row("parked", "owner-a", 3)).unwrap();
         hold(&db, "parked", "dispatch attempts exhausted", 9).unwrap();
 
-        let ids: Vec<String> = list_replayable(&db, "owner-a")
-            .unwrap()
-            .into_iter()
-            .map(|row| row.id)
-            .collect();
-        assert_eq!(ids, vec!["mine"]);
-        assert_eq!(list_all(&db, "owner-a").unwrap().len(), 2);
+        assert_eq!(claimable_ids(&db, "owner-a"), ["mine"]);
+        assert_eq!(
+            list_all(&db, "owner-a")
+                .unwrap()
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            ["mine", "parked"]
+        );
     }
 
     #[test]
@@ -2333,26 +2246,6 @@ mod tests {
     }
 
     #[test]
-    fn replays_without_a_dispatch_never_charge_a_dispatch_attempt() {
-        let db = MetadataDb::open_in_memory().unwrap();
-        insert(&db, &row("job-1", "owner-a", 1)).unwrap();
-
-        for boot in 1..=3 {
-            assert_eq!(
-                bump_replay_seen(&db, "job-1", boot).unwrap(),
-                Some(boot as u32)
-            );
-        }
-
-        let after = get(&db, "job-1").unwrap().unwrap();
-        assert_eq!(
-            after.dispatch_attempts, 0,
-            "a job that only ever waited must not be charged for running"
-        );
-        assert_eq!(after.state, QueueRowState::Queued);
-    }
-
-    #[test]
     fn requeue_running_returns_interrupted_rows_to_the_queue() {
         let db = MetadataDb::open_in_memory().unwrap();
         insert(&db, &row("job-1", "owner-a", 1)).unwrap();
@@ -2360,7 +2253,12 @@ mod tests {
         mark_dispatched(&db, "job-1", 10).unwrap();
         mark_dispatched(&db, "job-2", 10).unwrap();
 
-        assert_eq!(requeue_running(&db, "owner-a", 20).unwrap(), 1);
+        assert_eq!(
+            recover_runtime_claims(&db, "owner-a", 20)
+                .unwrap()
+                .running_requeued,
+            1
+        );
         let mine = get(&db, "job-1").unwrap().unwrap();
         assert_eq!(mine.state, QueueRowState::Queued);
         assert_eq!(mine.started_at_ms, None);
@@ -2396,11 +2294,7 @@ mod tests {
         .unwrap();
         assert_eq!(moved, 3);
 
-        let ids: Vec<String> = list_replayable(&db, "owner-a")
-            .unwrap()
-            .into_iter()
-            .map(|row| row.id)
-            .collect();
+        let ids = claimable_ids(&db, "owner-a");
         assert_eq!(ids, vec!["third", "first", "second"]);
         assert_eq!(
             get(&db, "parked").unwrap().unwrap().created_at_ms,
@@ -2491,7 +2385,7 @@ mod tests {
         .unwrap();
         assert_eq!(moved, 3, "the prefix plus omitted queued tail were moved");
 
-        let replayable = list_replayable(&db, "owner-a").unwrap();
+        let replayable = claimable(&db, "owner-a");
         assert_eq!(
             replayable
                 .iter()
@@ -2855,6 +2749,45 @@ mod tests {
         );
     }
 
+    /// Another installation sharing this `mold.db` owns its own rows. The
+    /// feeder's claim is the only thing that ever hands a durable row to a
+    /// runtime, so owner scoping has to hold at this primitive, not in some
+    /// listing above it.
+    #[test]
+    fn claim_next_is_scoped_to_the_owner() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert(&db, &row("theirs", "owner-b", 1)).unwrap();
+        insert(&db, &row("mine", "owner-a", 2)).unwrap();
+
+        let claim = claim_next(&db, "owner-a", "token-a", 10)
+            .unwrap()
+            .expect("our own row is claimable");
+        assert_eq!(claim.row.id, "mine");
+        assert!(
+            claim_next(&db, "owner-a", "token-a-2", 11)
+                .unwrap()
+                .is_none(),
+            "the older foreign row is never handed to this owner's runtime"
+        );
+
+        let theirs = get(&db, "theirs").unwrap().unwrap();
+        assert_eq!(theirs.state, QueueRowState::Queued);
+        let claim_token: Option<String> = db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT claim_token FROM generation_queue WHERE id = 'theirs'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(
+            claim_token, None,
+            "the foreign row keeps its own claim slot"
+        );
+    }
+
     #[test]
     fn repeated_claim_next_is_bounded_and_preserves_existing_queue_order() {
         let db = MetadataDb::open_in_memory().unwrap();
@@ -2869,8 +2802,7 @@ mod tests {
             assert_eq!(claim.row.id, format!("job-{index}"));
         }
         assert_eq!(
-            list_replayable(&db, "owner-a")
-                .unwrap()
+            claimable(&db, "owner-a")
                 .into_iter()
                 .filter(|row| row.state == QueueRowState::Queued)
                 .count(),
@@ -3028,11 +2960,7 @@ mod tests {
         assert_eq!(position, 0);
         assert_eq!(projection.id, "deep");
         assert_eq!(projection.target_gpu, Some(3));
-        let replay = list_replayable(&db, "owner-a")
-            .unwrap()
-            .into_iter()
-            .map(|row| row.id)
-            .collect::<Vec<_>>();
+        let replay = claimable_ids(&db, "owner-a");
         assert_eq!(replay, ["deep", "first", "second", "tail"]);
         let deep = get(&db, "deep").unwrap().unwrap();
         assert_eq!(deep.target_gpu, Some(3));
@@ -3041,11 +2969,7 @@ mod tests {
         drop(db);
         let db = MetadataDb::open(&path).unwrap();
         assert_eq!(
-            list_replayable(&db, "owner-a")
-                .unwrap()
-                .into_iter()
-                .map(|row| row.id)
-                .collect::<Vec<_>>(),
+            claimable_ids(&db, "owner-a"),
             ["deep", "first", "second", "tail"],
             "the acknowledged order is identical after reopening SQLite"
         );
@@ -3075,11 +2999,7 @@ mod tests {
             }
         ));
         assert_eq!(
-            list_replayable(&db, "owner-a")
-                .unwrap()
-                .into_iter()
-                .map(|row| row.id)
-                .collect::<Vec<_>>(),
+            claimable_ids(&db, "owner-a"),
             ["first", "second", "tail", "deep"]
         );
         assert_eq!(get(&db, "deep").unwrap().unwrap().target_gpu, None);
@@ -3123,14 +3043,7 @@ mod tests {
         .unwrap();
         assert!(patch_owned_queued(&db, "owner-a", "deep", &patch).is_err());
         assert_eq!(get(&db, "deep").unwrap().unwrap().target_gpu, None);
-        assert_eq!(
-            list_replayable(&db, "owner-a")
-                .unwrap()
-                .into_iter()
-                .map(|row| row.id)
-                .collect::<Vec<_>>(),
-            ["first", "deep"]
-        );
+        assert_eq!(claimable_ids(&db, "owner-a"), ["first", "deep"]);
     }
 
     #[test]
@@ -3142,7 +3055,7 @@ mod tests {
         claim_by_id(&db, "owner-a", "handoff", "feeder-claim", 600)
             .unwrap()
             .unwrap();
-        let before = list_replayable(&db, "owner-a").unwrap();
+        let before = claimable(&db, "owner-a");
 
         let outcome = patch_owned_queued(
             &db,
@@ -3160,7 +3073,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome, OwnedQueuedPatchOutcome::NotQueued);
-        assert_eq!(list_replayable(&db, "owner-a").unwrap(), before);
+        assert_eq!(claimable(&db, "owner-a"), before);
         let handoff = get(&db, "handoff").unwrap().unwrap();
         assert_eq!(handoff.target_gpu, None);
         assert_eq!(handoff.target_device_id, None);
@@ -3215,27 +3128,13 @@ mod tests {
         let live = get(&db, "live").unwrap().unwrap();
         assert_eq!(live.target_gpu, Some(4));
         assert_eq!(live.target_device_id.as_deref(), Some("cuda:stable-live"));
-        assert_eq!(
-            list_replayable(&db, "owner-a")
-                .unwrap()
-                .into_iter()
-                .map(|row| row.id)
-                .collect::<Vec<_>>(),
-            ["live", "first", "tail"]
-        );
+        assert_eq!(claimable_ids(&db, "owner-a"), ["live", "first", "tail"]);
 
         recover_runtime_claims(&db, "owner-a", 800).unwrap();
         let live = get(&db, "live").unwrap().unwrap();
         assert_eq!(live.target_gpu, Some(4));
         assert_eq!(live.target_device_id.as_deref(), Some("cuda:stable-live"));
-        assert_eq!(
-            list_replayable(&db, "owner-a")
-                .unwrap()
-                .into_iter()
-                .map(|row| row.id)
-                .collect::<Vec<_>>(),
-            ["live", "first", "tail"]
-        );
+        assert_eq!(claimable_ids(&db, "owner-a"), ["live", "first", "tail"]);
 
         assert_eq!(
             patch_owned_claimed_queued(
@@ -3292,11 +3191,7 @@ mod tests {
         assert_eq!(claim_token.as_deref(), Some("exact-claim"));
         assert_eq!(get(&db, "claimed").unwrap().unwrap().target_gpu, Some(2));
         assert_eq!(
-            list_replayable(&db, "owner-a")
-                .unwrap()
-                .into_iter()
-                .map(|row| row.id)
-                .collect::<Vec<_>>(),
+            claimable_ids(&db, "owner-a"),
             ["claimed", "tail", "unclaimed"]
         );
     }
@@ -3365,7 +3260,7 @@ mod tests {
         claim_by_id(&db, "owner-a", "live", "registry-claim", 600)
             .unwrap()
             .unwrap();
-        let before = list_replayable(&db, "owner-a").unwrap();
+        let before = claimable(&db, "owner-a");
         db.with_conn(|conn| {
             conn.execute_batch(
                 "CREATE TRIGGER reject_live_reorder
@@ -3391,7 +3286,7 @@ mod tests {
             },
         );
         assert!(result.is_err());
-        assert_eq!(list_replayable(&db, "owner-a").unwrap(), before);
+        assert_eq!(claimable(&db, "owner-a"), before);
         let live = get(&db, "live").unwrap().unwrap();
         assert_eq!(live.target_gpu, None);
         assert_eq!(live.target_device_id, None);
@@ -3409,41 +3304,10 @@ mod tests {
     }
 
     #[test]
-    fn find_completed_job_ids_matches_the_saved_metadata_key() {
-        let db = MetadataDb::open_in_memory().unwrap();
-        db.with_conn(|conn| {
-            conn.execute(
-                "INSERT INTO generations
-                    (filename, output_dir, created_at_ms, format, model, metadata_json)
-                 VALUES ('a.png', '/gallery', 1, 'png', 'flux-dev:q4', ?1)",
-                params![r#"{"job_id":"done","seed":7}"#],
-            )?;
-            conn.execute(
-                "INSERT INTO generations
-                    (filename, output_dir, created_at_ms, format, model, metadata_json)
-                 VALUES ('b.png', '/gallery', 2, 'png', 'flux-dev:q4', ?1)",
-                params![r#"{"seed":8}"#],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-
-        let found =
-            find_completed_job_ids(&db, &["done".to_string(), "pending".to_string()]).unwrap();
-        assert_eq!(found, HashSet::from(["done".to_string()]));
-        assert!(find_completed_job_ids(&db, &[]).unwrap().is_empty());
-    }
-
-    #[test]
     fn publication_lookup_query_plans_are_index_bounded() {
         let db = MetadataDb::open_in_memory().unwrap();
         db.with_conn(|conn| {
             let plans = [
-                (
-                    format!("EXPLAIN QUERY PLAN {COMPLETED_JOB_ID_LOOKUP_SQL}"),
-                    vec![rusqlite::types::Value::Text("job".to_string())],
-                    "generations_queue_job_id",
-                ),
                 (
                     format!("EXPLAIN QUERY PLAN {COMPLETED_OUTPUT_LOOKUP_SQL}"),
                     vec![
@@ -3459,11 +3323,6 @@ mod tests {
                         rusqlite::types::Value::Integer(1),
                     ],
                     "generations_output_invalid_queue_metadata",
-                ),
-                (
-                    format!("EXPLAIN QUERY PLAN {INVALID_JOB_METADATA_LOOKUP_SQL}"),
-                    vec![],
-                    "generations_invalid_queue_metadata",
                 ),
                 (
                     format!("EXPLAIN QUERY PLAN {COMPLETED_OUTPUT_UNKNOWN_METADATA_SQL}"),
