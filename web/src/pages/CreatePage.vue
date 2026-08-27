@@ -3696,11 +3696,13 @@ function requestCopyCount(request: GenerateRequestWire): number {
   return Math.max(1, Math.floor(request.batch_size ?? 1));
 }
 
+/** False when the machine refused the print — nothing was queued, so the
+ * caller must keep the reviewed rewrite rather than clearing it. */
 function submitRequestCopies(
   base: GenerateRequestWire,
   decision: ReturnType<typeof decideGenerateRequestRouting>,
   route: HostRoute | null,
-): void {
+): boolean {
   // Batch N shares ONE File under choice, exactly like it shares the prompt
   // and the title: every sibling lands with the same tags and collection.
   const request: GenerateRequestWire = {
@@ -3709,10 +3711,9 @@ function submitRequestCopies(
   };
   const copies = requestCopyCount(request);
   if (copies === 1) {
-    submitOrRefuse(() =>
+    return submitOrRefuse(() =>
       stream.submit(request, decision, normalizeSubmitRoute(route, request)),
     );
-    return;
   }
 
   const batchId = createUuid();
@@ -3728,7 +3729,7 @@ function submitRequestCopies(
     batch_count: copies,
     seed: baseSeed + index,
   }));
-  submitOrRefuse(() =>
+  return submitOrRefuse(() =>
     stream.submitBatch(
       requests,
       decision,
@@ -4011,7 +4012,7 @@ async function onSubmitInner(
     ),
   });
   if (!accepted || !isCurrent()) return;
-  submitRequestCopies(req, decision, route);
+  if (!submitRequestCopies(req, decision, route)) return;
   quickPrepared.value = null;
   // Push to history immediately so ↑ recalls it before the server round-trips.
   composerCardRef.value?.record(req.prompt);
