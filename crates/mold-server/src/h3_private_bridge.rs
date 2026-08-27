@@ -2126,6 +2126,22 @@ pub(crate) fn private_prepare_host_shortfall(
     }
 }
 
+/// The device half of the same typed question. A device shortfall cannot be
+/// answered by releasing mold's own cache — eviction supplies host bytes —
+/// but it CAN be answered by waiting for the card, which is a park, not a
+/// hold.
+#[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+pub(crate) fn private_prepare_device_shortfall(
+    error: &mold_inference::H3PrivateFl2VaPrepareError,
+) -> Option<mold_inference::H3PrivateDeviceHeadroomShortfall> {
+    match error {
+        mold_inference::H3PrivateFl2VaPrepareError::InsufficientDeviceHeadroom(shortfall) => {
+            Some(*shortfall)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
 fn private_uat_path(name: &str, fallback: std::path::PathBuf) -> std::path::PathBuf {
     std::env::var_os(name)

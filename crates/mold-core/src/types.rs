@@ -3452,6 +3452,14 @@ pub enum QueueBlockedReason {
     AggregateHostRamReserved,
     ExecutionPlanIncompatible,
     DependencyWait,
+    /// This job's own dependency preparation is running right now.
+    ///
+    /// Distinct from `DependencyWait`, which is every other reason a job is
+    /// not ready. A preparation that authenticates tens of gigabytes of
+    /// weights is minutes long on a spinning-disk model store, and reporting
+    /// it as a generic wait is what left an idle GPU looking idle for no
+    /// stated reason.
+    Preparing,
     WarmWait,
     QueuePaused,
     MaintenanceMode,
@@ -3478,6 +3486,7 @@ impl QueueBlockedReason {
             Self::AggregateHostRamReserved => "aggregate_host_ram_reserved",
             Self::ExecutionPlanIncompatible => "execution_plan_incompatible",
             Self::DependencyWait => "dependency_wait",
+            Self::Preparing => "preparing",
             Self::WarmWait => "warm_wait",
             Self::QueuePaused => "queue_paused",
             Self::MaintenanceMode => "maintenance_mode",
@@ -3519,6 +3528,7 @@ impl<'de> Deserialize<'de> for QueueBlockedReason {
             "aggregate_host_ram_reserved" => Self::AggregateHostRamReserved,
             "execution_plan_incompatible" => Self::ExecutionPlanIncompatible,
             "dependency_wait" => Self::DependencyWait,
+            "preparing" => Self::Preparing,
             "warm_wait" => Self::WarmWait,
             "queue_paused" => Self::QueuePaused,
             "maintenance_mode" => Self::MaintenanceMode,
@@ -3589,6 +3599,21 @@ impl<'de> Deserialize<'de> for QueueActivityPhase {
             _ => Self::Unknown(value),
         })
     }
+}
+
+/// What a running dependency preparation is currently working through.
+///
+/// Additive and best-effort: only preparations that report component progress
+/// (today, MiniMax H3's artifact authentication pass) fill it in, and an older
+/// server omits it entirely.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct QueuePreparationProgress {
+    /// Human-readable component being prepared, supplied by the preparer.
+    pub component: String,
+    pub bytes_done: u64,
+    /// `0` means the pass reports no size — render the component name alone,
+    /// never a percentage.
+    pub bytes_total: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -3691,6 +3716,13 @@ pub struct QueueWorkItem {
     pub assignment_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warm_wait_deadline_unix_ms: Option<u64>,
+    /// How long this job's dependency preparation has been running. Present
+    /// only while `blocked_reason` is `preparing`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation_elapsed_ms: Option<u64>,
+    /// What that preparation is working through, when it reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation_progress: Option<QueuePreparationProgress>,
     #[serde(default)]
     #[schema(value_type = String)]
     pub activity_phase: QueueActivityPhase,

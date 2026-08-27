@@ -1065,6 +1065,25 @@ impl PartialEq for IdentityPin {
     }
 }
 
+/// One queued generation held back by memory that another render is using.
+///
+/// The question a park answers is about the RESOURCE, never about who happens
+/// to be busy at the instant admission sampled: "could this machine ever run
+/// this?". A shortfall the hardware can satisfy waits for the fleet to settle;
+/// one it cannot is refused immediately, with both numbers. Deciding on the
+/// busy set instead made the outcome a race — a host shortfall observed while
+/// every worker was momentarily idle became a permanent hold, and a device
+/// shortfall never waited at all.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CapacityPark {
+    /// The typed shortfall's own sentence, retained so a park that outlives an
+    /// idle grace is refused with its numbers rather than "never scheduled".
+    pub reason: String,
+    /// Devices whose settling could change the answer. Preparation re-runs
+    /// once none of them is busy.
+    pub retry_after_devices: BTreeSet<String>,
+}
+
 /// Concrete engine inputs produced by asynchronous dependency preparation.
 ///
 /// The map is keyed by stable runtime device id because mixed-capacity hosts
@@ -1080,17 +1099,16 @@ pub struct PreparedExecutionInputs {
     /// at least one sibling succeeded. These omissions are retryable; they
     /// must not silently become the device set for the lifetime of the job.
     pub retryable_device_failures: BTreeMap<String, String>,
-    /// Active GPU owners whose transient host allocations prevented exact
-    /// dependency admission.
+    /// A memory shortfall this hardware could satisfy once the fleet settles.
     ///
-    /// Preparation leaves the generation queued while any named owner is
-    /// busy, then retries once those owners settle. Placement preview turns
-    /// this marker into a non-authoritative answer so compatible clients take
-    /// their established direct-queue fallback. This is distinct from an
-    /// ordinary retryable device failure: polling admission while a long H3
-    /// render still owns the same host bytes would repeatedly hash the full
-    /// artifact set without changing the answer.
-    pub host_memory_retry_after_devices: BTreeSet<String>,
+    /// Preparation leaves the generation queued rather than refusing it, and
+    /// retries once every named device is idle. Placement preview turns this
+    /// marker into a non-authoritative answer so compatible clients take their
+    /// established direct-queue fallback. This is distinct from an ordinary
+    /// retryable device failure: polling admission while a long render still
+    /// owns the memory would repeatedly hash the full artifact set without
+    /// changing the answer.
+    pub capacity_park: Option<CapacityPark>,
     /// Runtime-only catalog config synthesized from an installed sidecar.
     ///
     /// The scheduler applies this overlay when the current config lacks the
@@ -6455,7 +6473,7 @@ mod tests {
                 },
             )]),
             retryable_device_failures: BTreeMap::new(),
-            host_memory_retry_after_devices: Default::default(),
+            capacity_park: None,
             model_config_overlay: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -6545,7 +6563,7 @@ mod tests {
                 },
             )]),
             retryable_device_failures: BTreeMap::new(),
-            host_memory_retry_after_devices: Default::default(),
+            capacity_park: None,
             model_config_overlay: Some(Arc::new(model_config)),
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -6607,7 +6625,7 @@ mod tests {
                 },
             )]),
             retryable_device_failures: BTreeMap::new(),
-            host_memory_retry_after_devices: Default::default(),
+            capacity_park: None,
             model_config_overlay: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,
@@ -7077,7 +7095,7 @@ mod tests {
                 },
             )]),
             retryable_device_failures: BTreeMap::new(),
-            host_memory_retry_after_devices: Default::default(),
+            capacity_park: None,
             model_config_overlay: None,
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             h3_private_ingress_grant: None,

@@ -1398,7 +1398,9 @@ mod tests {
         .expect_err("replaced bytes must never be served from the memo");
         assert!(reads > 0, "a replaced artifact must be re-read");
         assert!(
-            error.to_string().contains("failed to hash private H3 artifact")
+            error
+                .to_string()
+                .contains("failed to hash private H3 artifact")
                 || format!("{error:#}").contains("SHA-256 mismatch"),
             "unexpected refusal: {error:#}"
         );

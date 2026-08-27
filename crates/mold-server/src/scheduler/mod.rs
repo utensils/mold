@@ -616,6 +616,19 @@ struct PendingGeneration {
     /// Place in line this job's client was last told about, so a drained queue
     /// re-announces exactly once per actual move. `None` until first observed.
     announced_position: Option<usize>,
+    /// The memory park this job is held by, retained ACROSS its own
+    /// re-preparation.
+    ///
+    /// `prepared_inputs` is dropped every time the job is re-prepared, so a
+    /// park kept only there is forgotten once a second on an idle machine —
+    /// and the idle grace that bounds the wait can never accrue. Cleared by
+    /// the first preparation that admits.
+    capacity_park: Option<crate::execution_plan::CapacityPark>,
+    /// When this job's dependency preparation started, so the queue can say
+    /// how long it has been running. `None` unless one is in flight.
+    preparation_started_ms: Option<u64>,
+    /// What that preparation is working through, published by the preparer.
+    preparation_progress: crate::variant_dependencies::PreparationProgressSink,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -661,6 +674,17 @@ fn observe_preparation_refresh(
             false
         }
     }
+}
+
+/// One signature value for every capacity park, because the park itself is
+/// the change being observed — unlike a capacity refresh, whose signature is
+/// the per-device direction the sample moved.
+const CAPACITY_PARK_REFRESH_SIGNATURE: &str = "capacity-park";
+
+fn park_retry_delay_ms(attempts: u8) -> u64 {
+    PREPARATION_RETRY_BASE_MS
+        .saturating_mul(1_u64 << u32::from(attempts.min(4)))
+        .clamp(PREPARATION_REFRESH_STABILITY_MS, PREPARATION_RETRY_MAX_MS)
 }
 
 fn dispatch_retry_delay_ms(round: u8) -> u64 {
@@ -1332,6 +1356,9 @@ fn queue_plan_semantically_equal(
         // equality would publish a plan event every second forever.
         plan.host_memory = None;
         for work in &mut plan.work_items {
+            // Another live clock reading. The progress BYTES stay, because a
+            // preparation that has moved is a real change worth publishing.
+            work.preparation_elapsed_ms = None;
             let duration = work
                 .estimated_start_unix_ms
                 .zip(work.estimated_finish_unix_ms)
@@ -1666,6 +1693,9 @@ impl Coordinator {
                 unschedulable_since_ms: None,
                 unschedulable_reason: None,
                 announced_position: None,
+                capacity_park: None,
+                preparation_started_ms: None,
+                preparation_progress: Default::default(),
             },
         );
         self.mutate(immediate);
@@ -1803,6 +1833,31 @@ impl Coordinator {
         }
     }
 
+    /// Every job whose dependency preparation is in flight right now.
+    fn preparing_views(&self) -> BTreeMap<String, PreparingView> {
+        let now_ms = monotonic_ms();
+        self.pending
+            .iter()
+            .filter(|(_, pending)| pending.preparation == PreparationState::Preparing)
+            .map(|(id, pending)| {
+                (
+                    id.clone(),
+                    PreparingView {
+                        elapsed_ms: pending
+                            .preparation_started_ms
+                            .map(|started| now_ms.saturating_sub(started))
+                            .unwrap_or_default(),
+                        progress: pending
+                            .preparation_progress
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+
     fn start_needed_preparations(&mut self) {
         let ids = self
             .pending
@@ -1815,6 +1870,17 @@ impl Coordinator {
                 continue;
             };
             pending.preparation = PreparationState::Preparing;
+            pending.preparation_started_ms = Some(monotonic_ms());
+            *pending
+                .preparation_progress
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            let preparation_progress = pending.preparation_progress.clone();
+            tracing::info!(
+                job_id = %id,
+                model = %pending.job.request.model,
+                "preparing generation dependencies"
+            );
             let state = self.state.clone();
             let request = pending.job.request.clone();
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
@@ -1863,12 +1929,14 @@ impl Coordinator {
                 frozen_identity,
                 frozen_identity_warning,
                 queue_media_projection,
+                preparation_progress: Some(preparation_progress),
             };
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             let context = crate::variant_dependencies::DependencyPreparationContext {
                 frozen_identity,
                 frozen_identity_warning,
                 queue_media_projection,
+                preparation_progress: Some(preparation_progress),
                 ..context
             };
             let preparer = self.preparer.clone();
@@ -1928,14 +1996,29 @@ impl Coordinator {
                 if pending.preparation != PreparationState::Preparing {
                     return;
                 }
+                tracing::info!(
+                    job_id = %work_id,
+                    model = %pending.job.request.model,
+                    elapsed_ms = pending
+                        .preparation_started_ms
+                        .map(|started| monotonic_ms().saturating_sub(started))
+                        .unwrap_or_default(),
+                    "generation dependencies prepared"
+                );
+                pending.preparation_started_ms = None;
                 compose_prepared_generation(pending, *prepared);
                 pending.preparation = PreparationState::Ready;
                 pending.preparation_refresh_observation = None;
-                if pending
+                pending.capacity_park = pending
                     .prepared_inputs
                     .as_ref()
-                    .is_none_or(|inputs| inputs.retryable_device_failures.is_empty())
-                {
+                    .and_then(|inputs| inputs.capacity_park.clone());
+                // A park is not an admission. Resetting the attempt ladder on
+                // one would leave a machine that can never hold the job
+                // re-preparing it at the memory ticker's own 1 Hz forever.
+                if pending.prepared_inputs.as_ref().is_none_or(|inputs| {
+                    inputs.retryable_device_failures.is_empty() && inputs.capacity_park.is_none()
+                }) {
                     pending.preparation_retry_attempts = 0;
                 }
                 self.mutate(immediate);
@@ -2310,6 +2393,9 @@ impl Coordinator {
                                         unschedulable_since_ms: None,
                                         unschedulable_reason: None,
                                         announced_position: None,
+                                        capacity_park: None,
+                                        preparation_started_ms: None,
+                                        preparation_progress: Default::default(),
                                     },
                                 );
                             }
@@ -2335,6 +2421,9 @@ impl Coordinator {
                                     unschedulable_since_ms: None,
                                     unschedulable_reason: None,
                                     announced_position: None,
+                                    capacity_park: None,
+                                    preparation_started_ms: None,
+                                    preparation_progress: Default::default(),
                                 },
                             );
                         }
@@ -2908,14 +2997,12 @@ impl Coordinator {
         pending: &PendingGeneration,
         device_facts: &[crate::execution_plan::DeviceFact],
     ) -> Result<Vec<crate::execution_plan::ResolvedExecutionPlan>, GenerationPlanFailure> {
-        if pending
+        if let Some(park) = pending
             .prepared_inputs
             .as_ref()
-            .is_some_and(|prepared| !prepared.host_memory_retry_after_devices.is_empty())
+            .and_then(|prepared| prepared.capacity_park.as_ref())
         {
-            return Err(GenerationPlanFailure::Transient(
-                "waiting for active GPU work to release host memory".to_string(),
-            ));
+            return Err(GenerationPlanFailure::Transient(park.reason.clone()));
         }
         let config = self.state.config.try_read().map_err(|_| {
             GenerationPlanFailure::Transient(
@@ -3151,12 +3238,29 @@ impl Coordinator {
                 pending.preparation_refresh_observation = None;
                 continue;
             };
-            if !prepared.host_memory_retry_after_devices.is_empty() {
-                pending.preparation_refresh_observation = None;
-                if prepared
-                    .host_memory_retry_after_devices
-                    .is_disjoint(&busy_worker_devices)
-                {
+            if let Some(park) = prepared.capacity_park.as_ref() {
+                if !park.retry_after_devices.is_disjoint(&busy_worker_devices) {
+                    pending.preparation_refresh_observation = None;
+                    continue;
+                }
+                // The busy -> idle edge is the whole point of the park, so the
+                // first retry after it is immediate. Every retry after that
+                // pays the ordinary refresh backoff: a park now turns on the
+                // resource question rather than on a busy set, so a machine
+                // that can never hold this job would otherwise re-run the
+                // whole admission at the memory ticker's 1 Hz forever, and
+                // `settle_unschedulable_generations` could never bound it.
+                if pending.preparation_retry_attempts == 0 {
+                    pending.preparation_refresh_observation = None;
+                    refresh.insert(id.clone());
+                    continue;
+                }
+                if observe_preparation_refresh(
+                    &mut pending.preparation_refresh_observation,
+                    vec![(CAPACITY_PARK_REFRESH_SIGNATURE.to_string(), 1)],
+                    now_ms,
+                    park_retry_delay_ms(pending.preparation_retry_attempts),
+                ) {
                     refresh.insert(id.clone());
                 }
                 continue;
@@ -3386,10 +3490,13 @@ impl Coordinator {
         // direction.
         let idle = self.leases.is_empty()
             && !self.state.job_registry.has_running()
-            && !self
-                .pending
-                .values()
-                .any(|pending| pending.preparation != PreparationState::Ready)
+            && !self.pending.values().any(|pending| {
+                // A PARKED job's own re-preparation is the wait being bounded,
+                // and it holds no device and no allocation. Counting it busy
+                // would reset the grace every time the park retried, which is
+                // exactly how a job waits forever on an idle machine.
+                pending.preparation != PreparationState::Ready && pending.capacity_park.is_none()
+            })
             && !self.state.gpu_pool.workers.iter().any(|worker| {
                 worker.in_flight.load(Ordering::SeqCst) > 0
                     || worker.legacy_pending.load(Ordering::SeqCst) > 0
@@ -3400,6 +3507,12 @@ impl Coordinator {
             .pending
             .iter()
             .map(|(id, pending)| {
+                // A retained park is already a typed answer about this
+                // machine's ceiling, so it is reported whatever preparation
+                // state the job is currently in — including its own retry.
+                if let Some(park) = pending.capacity_park.as_ref() {
+                    return (id.clone(), Some(park.reason.clone()));
+                }
                 if pending.preparation != PreparationState::Ready {
                     return (id.clone(), None);
                 }
@@ -5245,6 +5358,9 @@ impl Coordinator {
                                     unschedulable_since_ms: None,
                                     unschedulable_reason: None,
                                     announced_position: None,
+                                    capacity_park: None,
+                                    preparation_started_ms: None,
+                                    preparation_progress: Default::default(),
                                 },
                             );
                             self.unavailable.insert(device_id.clone());
@@ -5608,6 +5724,7 @@ impl Coordinator {
             &self.state.gpu_pool,
             &self.leases,
             &confidence,
+            &self.preparing_views(),
             dirty_since,
         );
         wire.host_memory = self.memory.wire_snapshot();
@@ -6144,12 +6261,27 @@ fn queue_blocked_reason(reason: BlockedReason) -> mold_core::QueueBlockedReason 
     }
 }
 
+/// What the coordinator knows about a job whose preparation is in flight.
+///
+/// `Preparing` is deliberately its own wire reason. Every other not-ready
+/// state answers "something else has to happen first"; this one answers "this
+/// job's own work is running", and on a spinning-disk model store an H3
+/// artifact pass makes that difference minutes long (#1272's rule: a queued
+/// generation is schedulable, running, or ANSWERED — `Preparing` is the state
+/// that rule never named).
+#[derive(Clone, Debug, Default)]
+struct PreparingView {
+    elapsed_ms: u64,
+    progress: Option<mold_core::QueuePreparationProgress>,
+}
+
 fn queue_plan_projection(
     snapshot: &PlannerSnapshot,
     plan: &Plan,
     pool: &crate::gpu_pool::GpuPool,
     leases: &BTreeMap<String, ActiveLease>,
     confidence_by_work: &BTreeMap<String, mold_core::QueueEstimateConfidence>,
+    preparing: &BTreeMap<String, PreparingView>,
     dirty_since: Option<Instant>,
 ) -> mold_core::QueuePlan {
     let unix_now = std::time::SystemTime::now()
@@ -6164,17 +6296,20 @@ fn queue_plan_projection(
         pool,
         leases,
         confidence_by_work,
+        preparing,
         dirty_since,
         unix_now,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn queue_plan_projection_at_unix(
     snapshot: &PlannerSnapshot,
     plan: &Plan,
     pool: &crate::gpu_pool::GpuPool,
     leases: &BTreeMap<String, ActiveLease>,
     confidence_by_work: &BTreeMap<String, mold_core::QueueEstimateConfidence>,
+    preparing: &BTreeMap<String, PreparingView>,
     dirty_since: Option<Instant>,
     unix_now: u64,
 ) -> mold_core::QueuePlan {
@@ -6242,6 +6377,8 @@ fn queue_plan_projection_at_unix(
                 blocked_reason: None,
                 assignment_reason: Some(snake_debug(lease.assignment_reason)),
                 warm_wait_deadline_unix_ms: None,
+                preparation_elapsed_ms: None,
+                preparation_progress: None,
                 activity_phase: if lease.accepted && host_utility {
                     mold_core::QueueActivityPhase::Cpu
                 } else if lease.accepted {
@@ -6284,8 +6421,19 @@ fn queue_plan_projection_at_unix(
                     .iter()
                     .find(|blocked| blocked.work_id == work.id);
                 let warm_wait = plan.warm_waits.iter().find(|wait| wait.work_id == work.id);
-                let legacy_reason = blocked
-                    .map(|blocked| snake_debug(blocked.reason))
+                // The planner reports every not-ready job as `NotReady`; only
+                // the coordinator knows which of them is not-ready because its
+                // own preparation is running right now.
+                let preparing = blocked
+                    .filter(|blocked| blocked.reason == BlockedReason::NotReady)
+                    .and_then(|_| preparing.get(work.id.as_str()));
+                let legacy_reason = preparing
+                    .map(|_| {
+                        mold_core::QueueBlockedReason::Preparing
+                            .as_str()
+                            .to_string()
+                    })
+                    .or_else(|| blocked.map(|blocked| snake_debug(blocked.reason)))
                     .or_else(|| warm_wait.map(|_| "warm_wait".to_string()))
                     .or_else(|| {
                         plan.immediate_leases
@@ -6352,13 +6500,18 @@ fn queue_plan_projection_at_unix(
                         .cloned()
                         .unwrap_or_default(),
                     reason: legacy_reason,
-                    blocked_reason: blocked.map(|blocked| queue_blocked_reason(blocked.reason)),
+                    blocked_reason: match preparing {
+                        Some(_) => Some(mold_core::QueueBlockedReason::Preparing),
+                        None => blocked.map(|blocked| queue_blocked_reason(blocked.reason)),
+                    },
                     assignment_reason: plan
                         .immediate_leases
                         .iter()
                         .find(|lease| lease.work_id == work.id)
                         .map(|lease| snake_debug(lease.reason)),
                     warm_wait_deadline_unix_ms: warm_wait.map(|wait| to_unix(wait.deadline_ms)),
+                    preparation_elapsed_ms: preparing.map(|view| view.elapsed_ms),
+                    preparation_progress: preparing.and_then(|view| view.progress.clone()),
                     activity_phase: if warm_wait.is_some() {
                         mold_core::QueueActivityPhase::WarmWait
                     } else if blocked.is_some() {
@@ -9516,6 +9669,7 @@ mod tests {
                 "active-a".to_string(),
                 mold_core::QueueEstimateConfidence::Medium,
             )]),
+            &BTreeMap::new(),
             None,
         );
 
@@ -9604,6 +9758,7 @@ mod tests {
             &pool,
             &leases,
             &BTreeMap::new(),
+            &BTreeMap::new(),
             None,
         );
         assert_eq!(active.work_items.len(), 1);
@@ -9660,6 +9815,7 @@ mod tests {
             &queued_snapshot,
             &queued_plan,
             &pool,
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             None,
@@ -14122,6 +14278,96 @@ mod tests {
         );
     }
 
+    /// A minutes-long preparation must be visible AS a preparation.
+    ///
+    /// The planner reports every not-ready job as `NotReady`, which the wire
+    /// renamed `dependency_wait` — the same reason a job waiting on a
+    /// download gets. An H3 artifact pass on a spinning-disk model store is
+    /// minutes of that, with an idle GPU and nothing in the log, which is
+    /// exactly the "answered by nothing" state #1272 set out to close.
+    #[test]
+    fn a_preparing_generation_reports_its_own_reason_elapsed_time_and_progress() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = GpuPool {
+            workers: vec![worker].into(),
+        };
+        let mut work = WorkSnapshot::new(
+            "preparing-h3",
+            0,
+            vec![CandidatePlacement::new("cuda:0", "h3-plan", 1)],
+        )
+        .with_ready(false);
+        work.kind = WorkKind::Generation;
+        let snapshot = PlannerSnapshot::new(
+            3,
+            3,
+            monotonic_ms(),
+            64 << 30,
+            vec![DeviceSnapshot::idle("cuda:0", 24 << 30)],
+            vec![work],
+        );
+        let plan = Planner::default().plan(&snapshot).unwrap();
+
+        let unprepared = queue_plan_projection_at_unix(
+            &snapshot,
+            &plan,
+            &pool,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+            1_000_000,
+        );
+        assert_eq!(
+            unprepared.work_items[0].blocked_reason,
+            Some(mold_core::QueueBlockedReason::DependencyWait),
+            "not-ready for any other reason keeps the established wire reason"
+        );
+        assert_eq!(unprepared.work_items[0].preparation_elapsed_ms, None);
+
+        let preparing = queue_plan_projection_at_unix(
+            &snapshot,
+            &plan,
+            &pool,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::from([(
+                "preparing-h3".to_string(),
+                PreparingView {
+                    elapsed_ms: 214_000,
+                    progress: Some(mold_core::QueuePreparationProgress {
+                        component: "Verifying MiniMax H3 artifacts".to_string(),
+                        bytes_done: 15_000_000_000,
+                        bytes_total: 37_000_000_000,
+                    }),
+                },
+            )]),
+            None,
+            1_000_000,
+        );
+        let item = &preparing.work_items[0];
+        assert_eq!(
+            item.blocked_reason,
+            Some(mold_core::QueueBlockedReason::Preparing)
+        );
+        assert_eq!(item.reason.as_deref(), Some("preparing"));
+        assert_eq!(item.preparation_elapsed_ms, Some(214_000));
+        let progress = item
+            .preparation_progress
+            .as_ref()
+            .expect("a reporting preparation must name what it is working through");
+        assert_eq!(progress.component, "Verifying MiniMax H3 artifacts");
+        assert_eq!(progress.bytes_done, 15_000_000_000);
+
+        let wire = serde_json::to_value(item).unwrap();
+        assert_eq!(wire["blocked_reason"], "preparing");
+        assert_eq!(wire["preparation_elapsed_ms"], 214_000);
+        assert_eq!(
+            wire["preparation_progress"]["bytes_total"],
+            37_000_000_000_u64
+        );
+    }
+
     struct SelectiveBlockingPreparer {
         release_blocked: Arc<tokio::sync::Notify>,
     }
@@ -14159,10 +14405,13 @@ mod tests {
             .unwrap()
             .preparation = PreparationState::Preparing;
         worker.in_flight.store(1, Ordering::SeqCst);
-        let mut deferred = crate::execution_plan::PreparedExecutionInputs::default();
-        deferred
-            .host_memory_retry_after_devices
-            .insert(device_id.clone());
+        let deferred = crate::execution_plan::PreparedExecutionInputs {
+            capacity_park: Some(crate::execution_plan::CapacityPark {
+                reason: "private H3 admission needs at least 1 host byte".to_string(),
+                retry_after_devices: [device_id.clone()].into_iter().collect(),
+            }),
+            ..Default::default()
+        };
         coordinator.handle_preparation_event(
             PreparationEvent::Ready {
                 work_id: "waiting-h3".to_string(),
@@ -14200,6 +14449,129 @@ mod tests {
             coordinator.pending["waiting-h3"].preparation,
             PreparationState::Ready
         );
+        coordinator.stop_preparations().await;
+    }
+
+    /// Park a synthetic generation exactly as H3 admission does, and hand back
+    /// the coordinator plus the client's result channel.
+    async fn parked_h3_coordinator(
+        reason: &str,
+    ) -> (
+        Coordinator,
+        Arc<GpuWorker>,
+        tokio::sync::oneshot::Receiver<Result<crate::state::GenerationJobResult, String>>,
+    ) {
+        let (worker, _worker_rx) = test_worker(0);
+        let device_id = worker_device_id(&worker);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(2);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 2);
+        state.job_registry.register("parked-h3", "minimax-h3-fl2va");
+        let (job, result) = fake_generation("parked-h3");
+        queue.submit(job, 2).await.unwrap();
+
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        coordinator
+            .pending
+            .get_mut("parked-h3")
+            .unwrap()
+            .preparation = PreparationState::Preparing;
+        let parked = crate::execution_plan::PreparedExecutionInputs {
+            capacity_park: Some(crate::execution_plan::CapacityPark {
+                reason: reason.to_string(),
+                retry_after_devices: [device_id].into_iter().collect(),
+            }),
+            ..Default::default()
+        };
+        coordinator.handle_preparation_event(
+            PreparationEvent::Ready {
+                work_id: "parked-h3".to_string(),
+                prepared: Box::new(PreparedGeneration {
+                    execution_inputs: Some(parked),
+                    ..Default::default()
+                }),
+            },
+            &mut immediate,
+        );
+        (coordinator, worker, result)
+    }
+
+    /// #1272's rule reaches the park: a job mold is holding is either
+    /// schedulable, running, or ANSWERED. A park is a retry while the fleet
+    /// can still change the answer, and once nothing is running it has to
+    /// become a refusal that names the numbers it was parked on — not an
+    /// indefinite `dependency_wait` on an idle GPU.
+    #[tokio::test]
+    async fn a_park_that_survives_an_idle_grace_is_refused_with_its_shortfall_numbers() {
+        let reason = "private H3 canonical target needs at least 6780000000 device bytes, \
+                      exceeding the 5450000000 byte device admission sample";
+        let (mut coordinator, worker, mut result) = parked_h3_coordinator(reason).await;
+        coordinator.unschedulable_idle_grace_ms = 0;
+        assert_eq!(worker.in_flight.load(Ordering::SeqCst), 0);
+
+        assert!(coordinator.settle_unschedulable_generations());
+        assert!(!coordinator.pending.contains_key("parked-h3"));
+        let error = match result.try_recv().expect("a bounded park must be answered") {
+            Ok(_) => panic!("a park must not settle as a completed print"),
+            Err(error) => error,
+        };
+        assert!(error.contains("6780000000"), "{error}");
+        assert!(error.contains("5450000000"), "{error}");
+        coordinator.stop_preparations().await;
+    }
+
+    /// The other half of the same rule: a job waiting behind running work is
+    /// waiting for something real, and bounding it would refuse a print the
+    /// machine is about to be able to render.
+    #[tokio::test]
+    async fn a_park_is_never_settled_while_a_device_is_busy() {
+        let (mut coordinator, worker, mut result) =
+            parked_h3_coordinator("private H3 admission needs at least 1 host byte").await;
+        coordinator.unschedulable_idle_grace_ms = 0;
+        worker.in_flight.store(1, Ordering::SeqCst);
+
+        assert!(!coordinator.settle_unschedulable_generations());
+        assert!(coordinator.pending.contains_key("parked-h3"));
+        assert!(
+            result.try_recv().is_err(),
+            "a busy host must answer nothing"
+        );
+        coordinator.stop_preparations().await;
+    }
+
+    /// A park survives its OWN re-preparation. `prepared_inputs` is dropped on
+    /// every retry, so a park kept only there is forgotten once a second and
+    /// the idle grace never accrues — which is exactly how a job waits forever
+    /// on an idle machine.
+    #[tokio::test]
+    async fn a_park_is_retained_across_its_own_repreparation() {
+        let (mut coordinator, _worker, _result) =
+            parked_h3_coordinator("private H3 admission needs at least 1 host byte").await;
+        coordinator.unschedulable_idle_grace_ms = 60_000;
+
+        assert!(coordinator.reset_stale_preparations());
+        let pending = &coordinator.pending["parked-h3"];
+        assert_eq!(pending.preparation, PreparationState::Preparing);
+        assert!(pending.prepared_inputs.is_none());
+        assert!(
+            pending.capacity_park.is_some(),
+            "a re-preparing park must still be a retained answer"
+        );
+        // Its own retry must not read as the machine being busy, or the grace
+        // this park is bounded by could never start.
+        assert!(!coordinator.settle_unschedulable_generations());
+        assert!(coordinator.pending["parked-h3"]
+            .unschedulable_since_ms
+            .is_some());
         coordinator.stop_preparations().await;
     }
 

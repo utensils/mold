@@ -1696,7 +1696,7 @@ mod tests {
                 authority_fingerprint: "prepared".to_string(),
                 by_device: BTreeMap::new(),
                 retryable_device_failures: BTreeMap::new(),
-                host_memory_retry_after_devices: Default::default(),
+                capacity_park: None,
                 model_config_overlay: None,
                 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 h3_private_ingress_grant: None,

@@ -4551,10 +4551,10 @@ async fn placement_preview_for_request_authenticated(
             return Ok(response);
         }
     };
-    if !prepared.host_memory_retry_after_devices.is_empty() {
+    if prepared.capacity_park.is_some() {
         return Ok(unavailable(
             "unsupported",
-            "MiniMax H3 placement is waiting for active GPU work to release host memory; the request may be queued through the compatible fallback"
+            "MiniMax H3 placement is waiting for active GPU work to release memory; the request may be queued through the compatible fallback"
                 .to_string(),
         ));
     }
