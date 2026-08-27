@@ -1026,14 +1026,16 @@ function routeSignature(route: HostRoute): string {
 
 /**
  * The named reason this print cannot be queued, or `null` when it can. Every
- * generation is admitted through `POST /api/generation-batches`, so a reason
- * here is a refusal the caller shows the user — never a signal to submit the
- * request somewhere else.
+ * generation is admitted through `POST /api/generation-batches`; there is no
+ * second submission path, so a reason here is a refusal the caller shows the
+ * user rather than a signal to route the request somewhere else.
+ *
+ * It is host-level on purpose. The durable protocol carries source media,
+ * LoRAs, `hdr_exr_dir`, identity photos, and H3's ordered references, so the
+ * server's own typed admission refusal is the only authority for a request it
+ * cannot take.
  */
-function generationRefusal(
-  request: GenerateRequestWire,
-  route: HostRoute | null,
-): string | null {
+function generationRefusal(route: HostRoute | null): string | null {
   if (!route) return "no machine is selected for this print.";
   if (!route.instanceId) {
     return `${route.label} has not reported its server instance yet.`;
@@ -1045,7 +1047,6 @@ function generationRefusal(
       queue: route.durableGeneration,
       durableMedia: route.durableMedia,
     },
-    route.modelFamily ? { ...request, family: route.modelFamily } : request,
   );
   return policy.admission === "canonical_durable"
     ? null
@@ -1545,10 +1546,8 @@ function submitDurableJobs(
   route: HostRoute | null,
 ): string[] {
   if (requests.length === 0) return [];
-  for (const request of requests) {
-    const refusal = generationRefusal(request, route);
-    if (refusal !== null) throw new Error(refusal);
-  }
+  const refusal = generationRefusal(route);
+  if (refusal !== null) throw new Error(refusal);
   const host = route!;
   const limit = canonicalGenerationBatchLimit(host.durableGeneration)!;
   selectedJobId.value = null;

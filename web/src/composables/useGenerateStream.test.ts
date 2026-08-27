@@ -126,6 +126,14 @@ const durableRoute: HostRoute = {
   target: { baseUrl: "http://render-box:7680", apiKey: "secret" },
   instanceId: "instance-1",
   durableGeneration: { heterogeneous_batch_max_outputs: 64 },
+  durableMedia: {
+    protocol_version: 2,
+    encrypted_at_rest: true,
+    generate_request_media: true,
+    identity: true,
+    h3_references: true,
+    private_h3: true,
+  },
   eventsAvailable: true,
 };
 
@@ -1203,6 +1211,14 @@ describe("useGenerateStream host routing", () => {
     ...studioRoute,
     instanceId: "instance-1",
     durableGeneration: { heterogeneous_batch_max_outputs: 64 },
+    durableMedia: {
+      protocol_version: 2,
+      encrypted_at_rest: true,
+      generate_request_media: true,
+      identity: true,
+      h3_references: true,
+      private_h3: true,
+    },
     eventsAvailable: true,
   };
 
@@ -1242,6 +1258,14 @@ describe("useGenerateStream host routing", () => {
         {
           ...studioRoute,
           durableGeneration: { heterogeneous_batch_max_outputs: 64 },
+          durableMedia: {
+            protocol_version: 2,
+            encrypted_at_rest: true,
+            generate_request_media: true,
+            identity: true,
+            h3_references: true,
+            private_h3: true,
+          },
         },
       ),
     ).toThrow("Studio has not reported its server instance yet.");

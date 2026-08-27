@@ -6277,10 +6277,8 @@ async function generate(): Promise<void> {
     const refusal = mobileDurableGenerationRefusal({
       queue: { heterogeneous_batch_max_outputs: route.heterogeneousBatchMaxOutputs ?? null },
       durableMedia: route.durableMedia,
-      requests: durablePlans,
       hostLabel: route.label,
       instanceId: route.instanceId,
-      modelFamily: form.family,
     });
     if (refusal !== null) {
       setGenerationStatus(refusal, true);

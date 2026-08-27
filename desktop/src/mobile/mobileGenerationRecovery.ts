@@ -219,38 +219,31 @@ export function saveMobileDurableGenerationRecoveries(
 }
 
 /**
- * The named reason this print cannot be queued on the exact frozen machine,
- * or `null` when it can. Every print is admitted through the durable queue or
- * refused by name; an automatic sequence keeps its own durable chain protocol
- * and is answered `null` here so the caller routes it there.
+ * The named reason this machine cannot be queued to, or `null` when it can.
+ * Host-level by construction: the durable protocol carries every request
+ * trait, so the server's typed admission refusal is the only authority for
+ * what it cannot take.
  */
 export function mobileDurableGenerationRefusal(input: {
   queue: DurableGenerationQueueCapabilities | null | undefined;
   durableMedia?: DurableMediaCapabilities | null | undefined;
-  requests: readonly GenerateRequest[];
   hostLabel: string;
   instanceId?: string | null | undefined;
-  modelFamily?: string | null;
 }): string | null {
   if (!input.instanceId?.trim()) {
     return `${input.hostLabel} has not reported its server instance yet. Nothing was queued.`;
   }
-  if (input.requests.length === 0) return "There is nothing to queue.";
-  for (const request of input.requests) {
-    const policy = generationHostSubmissionPolicy(
-      { kind: "pinned", hostId: "frozen" },
-      {
-        hostId: "frozen",
-        queue: input.queue ?? null,
-        durableMedia: input.durableMedia ?? null,
-      },
-      input.modelFamily ? { ...request, family: input.modelFamily } : request,
-    );
-    if (policy.admission !== "canonical_durable") {
-      return `${input.hostLabel} cannot queue this print: ${policy.refusal}. Nothing was queued.`;
-    }
-  }
-  return null;
+  const policy = generationHostSubmissionPolicy(
+    { kind: "pinned", hostId: "frozen" },
+    {
+      hostId: "frozen",
+      queue: input.queue ?? null,
+      durableMedia: input.durableMedia ?? null,
+    },
+  );
+  return policy.admission === "canonical_durable"
+    ? null
+    : `${input.hostLabel} cannot queue this print: ${policy.refusal}. Nothing was queued.`;
 }
 
 export function mobileDurablePresentations(

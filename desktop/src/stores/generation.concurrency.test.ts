@@ -262,6 +262,14 @@ describe("submitBatch connection cap", () => {
         target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
         instanceId: "instance-1",
         heterogeneousBatchMaxOutputs: 64,
+        durableMedia: {
+          protocol_version: 2,
+          encrypted_at_rest: true,
+          generate_request_media: true,
+          identity: true,
+          h3_references: true,
+          private_h3: true,
+        },
         mirrorRemoteOutput: false,
       });
       await flushPromises();
@@ -339,6 +347,14 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatchMaxOutputs: 64,
+      durableMedia: {
+        protocol_version: 2,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        h3_references: true,
+        private_h3: true,
+      },
     });
     await flushPromises();
     expect(submitted.jobs[0]).toMatchObject({ retryable: true, id: "held-job" });
@@ -393,6 +409,14 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatchMaxOutputs: 64,
+      durableMedia: {
+        protocol_version: 2,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        h3_references: true,
+        private_h3: true,
+      },
     });
     await flushPromises();
 
@@ -461,6 +485,14 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatchMaxOutputs: 2,
+      durableMedia: {
+        protocol_version: 2,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        h3_references: true,
+        private_h3: true,
+      },
       mirrorRemoteOutput: false,
     };
 
@@ -533,6 +565,14 @@ describe("submitBatch connection cap", () => {
         target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
         instanceId: "instance-1",
         heterogeneousBatchMaxOutputs: 64,
+        durableMedia: {
+          protocol_version: 2,
+          encrypted_at_rest: true,
+          generate_request_media: true,
+          identity: true,
+          h3_references: true,
+          private_h3: true,
+        },
         mirrorRemoteOutput: false,
       });
       await flushPromises();
@@ -601,6 +641,14 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatchMaxOutputs: 64,
+      durableMedia: {
+        protocol_version: 2,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        h3_references: true,
+        private_h3: true,
+      },
       mirrorRemoteOutput: true,
     });
     await flushPromises();
@@ -706,6 +754,14 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatchMaxOutputs: 64,
+      durableMedia: {
+        protocol_version: 2,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        h3_references: true,
+        private_h3: true,
+      },
       mirrorRemoteOutput: false,
     };
     store.submitBatch(req, 1, route);
@@ -780,6 +836,14 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatchMaxOutputs: 64,
+      durableMedia: {
+        protocol_version: 2,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        h3_references: true,
+        private_h3: true,
+      },
       mirrorRemoteOutput: false,
     });
     await flushPromises();
@@ -855,6 +919,14 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatchMaxOutputs: 64,
+      durableMedia: {
+        protocol_version: 2,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        h3_references: true,
+        private_h3: true,
+      },
       mirrorRemoteOutput: false,
     });
     await flushPromises();
@@ -933,6 +1005,14 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatchMaxOutputs: 64,
+      durableMedia: {
+        protocol_version: 2,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        h3_references: true,
+        private_h3: true,
+      },
       mirrorRemoteOutput: false,
     });
     await submitted.admitted;
@@ -985,6 +1065,14 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatchMaxOutputs: 64,
+      durableMedia: {
+        protocol_version: 2,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        h3_references: true,
+        private_h3: true,
+      },
       mirrorRemoteOutput: false,
     });
     await submitted.settled;
@@ -1058,6 +1146,14 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatchMaxOutputs: 64,
+      durableMedia: {
+        protocol_version: 2,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        h3_references: true,
+        private_h3: true,
+      },
       mirrorRemoteOutput: false,
     });
     await submitted.admitted;
@@ -1133,6 +1229,14 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatchMaxOutputs: 64,
+      durableMedia: {
+        protocol_version: 2,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        h3_references: true,
+        private_h3: true,
+      },
       mirrorRemoteOutput: false,
     });
     await submitted.admitted;
@@ -1484,6 +1588,14 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatchMaxOutputs: 64,
+      durableMedia: {
+        protocol_version: 2,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        h3_references: true,
+        private_h3: true,
+      },
       mirrorRemoteOutput: false,
     });
     await flushPromises();
@@ -1542,6 +1654,14 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
       heterogeneousBatchMaxOutputs: 64,
+      durableMedia: {
+        protocol_version: 2,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        h3_references: true,
+        private_h3: true,
+      },
       mirrorRemoteOutput: false,
     };
 
@@ -1622,41 +1742,46 @@ describe("submitBatch connection cap", () => {
     );
   });
 
-  it("refuses an opaque H3 family the machine has no private contract for", async () => {
+  it("admits an opaque H3 family through the same durable batch", async () => {
+    // The durable protocol carries H3's ordered references; the server's own
+    // typed admission refusal is the only authority for what it cannot take.
+    durableApi.admit.mockImplementation(() => new Promise(() => {}));
     const store = useGenerationStore();
-    expect(() =>
-      store.submitBatch(
-        {
-          ...req,
-          model: "hf:opaque-h3-checkpoint",
-          source_image: "PRIVATE-H3-SOURCE",
+    store.submitBatch(
+      {
+        ...req,
+        model: "hf:opaque-h3-checkpoint",
+        source_image: "PRIVATE-H3-SOURCE",
+      },
+      1,
+      {
+        hostId: "hal9000",
+        label: "hal9000",
+        kind: "remote",
+        target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+        instanceId: "instance-1",
+        heterogeneousBatchMaxOutputs: 64,
+        durableMedia: {
+          protocol_version: 2,
+          encrypted_at_rest: true,
+          generate_request_media: true,
+          identity: true,
+          h3_references: false,
+          private_h3: false,
         },
-        1,
-        {
-          hostId: "hal9000",
-          label: "hal9000",
-          kind: "remote",
-          target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
-          instanceId: "instance-1",
-          heterogeneousBatchMaxOutputs: 64,
-          durableMedia: {
-            protocol_version: 2,
-            encrypted_at_rest: true,
-            generate_request_media: true,
-            identity: true,
-            h3_references: false,
-            private_h3: false,
-          },
-          modelFamily: "minimax-h3",
-        },
-      ),
-    ).toThrow("cannot store MiniMax H3 request media durably");
+        modelFamily: "minimax-h3",
+      },
+    );
     await flushPromises();
 
-    expect(durableApi.admit).not.toHaveBeenCalled();
+    expect(durableApi.admit).toHaveBeenCalledTimes(1);
+    expect(durableApi.admit.mock.calls[0]![1].requests[0]).toMatchObject({
+      model: "hf:opaque-h3-checkpoint",
+      source_image: "PRIVATE-H3-SOURCE",
+    });
     expect(mockSse).not.toHaveBeenCalled();
-    expect(store.jobs).toHaveLength(0);
   });
+
   it("admits canonical v2 H3 through the durable batch transport", async () => {
     durableApi.admit.mockImplementation(() => new Promise(() => {}));
     const store = useGenerationStore();
@@ -1752,6 +1877,14 @@ describe("submitBatch connection cap", () => {
       target: { baseUrl, apiKey: `${hostId}-secret` },
       instanceId: `${hostId}-instance`,
       heterogeneousBatchMaxOutputs: 64,
+      durableMedia: {
+        protocol_version: 2,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        h3_references: true,
+        private_h3: true,
+      },
       mirrorRemoteOutput: false,
       retainEncodedResult: false,
       metadataOnlyCompletion: true,

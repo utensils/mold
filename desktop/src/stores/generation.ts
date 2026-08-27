@@ -476,28 +476,16 @@ function effectiveJobRoute(route: JobRoute | null, model: string | null): JobRou
 }
 
 /** The named reason this batch cannot be queued on its frozen machine, or
- * `null` when it can. */
-function generationRouteRefusal(
-  route: JobRoute | null,
-  plans: readonly GenerateRequest[],
-): string | null {
+ * `null` when it can. Host-level: the durable protocol carries every request
+ * trait, so the server's typed admission refusal is the only authority for
+ * what it cannot take. */
+function generationRouteRefusal(route: JobRoute | null): string | null {
   if (!route) return "No machine is selected for this print.";
   if (!route.instanceId) {
     return `${route.label} has not reported its server instance yet.`;
   }
-  if (canonicalGenerationBatchLimit(routeQueueCapabilities(route)) === null) {
-    return `${route.label} does not advertise the durable generation queue.`;
-  }
-  for (const plan of plans) {
-    const reason = generationRefusalReason(
-      plan,
-      routeQueueCapabilities(route),
-      route.durableMedia,
-      route.modelFamily,
-    );
-    if (reason !== null) return `${route.label} cannot queue this print: ${reason}.`;
-  }
-  return null;
+  const reason = generationRefusalReason(routeQueueCapabilities(route), route.durableMedia);
+  return reason === null ? null : `${route.label} cannot queue this print: ${reason}.`;
 }
 
 export const useGenerationStore = defineStore("generation", {
@@ -1285,7 +1273,7 @@ export const useGenerationStore = defineStore("generation", {
         // Every print is admitted through the durable queue. A machine that
         // cannot carry this request is refused BY NAME with nothing queued —
         // there is no attached stream left to fall back to.
-        const refusal = generationRouteRefusal(route, plans);
+        const refusal = generationRouteRefusal(route);
         if (refusal !== null) throw new Error(refusal);
       }
       const batchId = this.nextBatchId++;

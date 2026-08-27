@@ -77,6 +77,8 @@ function request(prompt = "a patient red fox"): GenerateRequestWire {
   };
 }
 
+// Every shipping machine advertises both halves of the durable contract; the
+// client gates on their presence and nothing about the request.
 const route: HostRoute = {
   hostId: "render-box",
   label: "Render box",
@@ -84,6 +86,14 @@ const route: HostRoute = {
   instanceId: "instance-1",
   durableGeneration: {
     heterogeneous_batch_max_outputs: 64,
+  },
+  durableMedia: {
+    protocol_version: 2,
+    encrypted_at_rest: true,
+    generate_request_media: true,
+    identity: true,
+    h3_references: false,
+    private_h3: false,
   },
   eventsAvailable: true,
 };
@@ -255,27 +265,23 @@ describe("web durable generation lifecycle", () => {
     expect(persisted).not.toContain("PRIVATE-DURABLE-SOURCE");
   });
 
-  it("refuses an opaque H3 family the machine has no private contract for", () => {
+  it("admits an opaque H3 family through the same durable batch", () => {
+    admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
     const stream = useGenerateStream();
     const submitted = request("opaque H3");
     submitted.model = "hf:opaque-h3-checkpoint";
     submitted.source_image = "PRIVATE-H3-SOURCE";
 
-    expect(() =>
-      stream.submit(
-        submitted,
-        { kind: "single" },
-        {
-          ...durableMediaRoute,
-          durableMedia: {
-            ...durableMediaRoute.durableMedia!,
-            private_h3: false,
-          },
-          modelFamily: "minimax-h3",
-        },
-      ),
-    ).toThrow("cannot store MiniMax H3 request media durably");
-    expect(admitGenerationBatch).not.toHaveBeenCalled();
+    stream.submit(
+      submitted,
+      { kind: "single" },
+      {
+        ...durableMediaRoute,
+        modelFamily: "minimax-h3",
+      },
+    );
+
+    expect(admitGenerationBatch).toHaveBeenCalledTimes(1);
     expect(generateStream).not.toHaveBeenCalled();
   });
 
@@ -1269,47 +1275,20 @@ describe("web durable generation lifecycle", () => {
     [
       "a machine with no durable queue",
       { ...route, durableGeneration: null },
-      request(),
       "does not advertise the durable generation queue",
     ],
     [
-      "an identity photo the machine cannot store",
-      route,
-      { ...request("identity"), id_image: "private-face" },
-      "cannot store request media durably",
-    ],
-    [
-      "references the machine cannot store",
-      route,
-      { ...request("references"), references: [] },
-      "cannot store request media durably",
-    ],
-    [
-      "MiniMax H3 on a machine with no durable media at all",
-      route,
-      { ...request(), model: "minimax-h3-fl2va:official-bf16" },
-      "cannot store request media durably",
-    ],
-    [
-      "MiniMax H3 without the private contract",
-      {
-        ...durableMediaRoute,
-        durableMedia: { ...durableMediaRoute.durableMedia!, private_h3: false },
-      },
-      { ...request(), model: "minimax-h3-fl2va:official-bf16" },
-      "cannot store MiniMax H3 request media durably",
+      "a machine with no durable request media",
+      { ...route, durableMedia: null },
+      "does not advertise durable request media",
     ],
   ])(
     "refuses %s by name and queues nothing",
-    (_name, candidateRoute, candidate, reason) => {
+    (_name, candidateRoute, reason) => {
       const stream = useGenerateStream();
 
       expect(() =>
-        stream.submit(
-          candidate as GenerateRequestWire,
-          { kind: "single" },
-          candidateRoute,
-        ),
+        stream.submit(request(), { kind: "single" }, candidateRoute),
       ).toThrow(reason);
       expect(admitGenerationBatch).not.toHaveBeenCalled();
       expect(generateStream).not.toHaveBeenCalled();
@@ -1317,8 +1296,13 @@ describe("web durable generation lifecycle", () => {
     },
   );
 
+  /**
+   * The durable protocol carries every request trait. A client-side per-trait
+   * fence could only refuse work the server would have taken, so the server's
+   * own typed admission refusal is the single authority.
+   */
   it.each(GENERATION_REQUEST_MEDIA_FIELDS)(
-    "refuses a media-bearing %s request the machine cannot store",
+    "admits a media-bearing %s request unchanged",
     (field) => {
       const valueByField: Record<string, unknown> = {
         source_image: "source",
@@ -1337,23 +1321,52 @@ describe("web durable generation lifecycle", () => {
         keyframes: [{ frame: 0, image: "keyframe" }],
         hdr_exr_dir: "/hdr",
       };
+      admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
       const stream = useGenerateStream();
 
-      expect(() =>
-        stream.submit(
-          { ...request(), [field]: valueByField[field] },
-          { kind: "single" },
-          route,
-        ),
-      ).toThrow(
-        field === "hdr_exr_dir"
-          ? "an HDR EXR output directory cannot be queued"
-          : "cannot store request media durably",
+      stream.submit(
+        { ...request(), [field]: valueByField[field] },
+        { kind: "single" },
+        durableMediaRoute,
       );
-      expect(admitGenerationBatch).not.toHaveBeenCalled();
+
+      expect(admitGenerationBatch).toHaveBeenCalledTimes(1);
+      expect(admitGenerationBatch.mock.calls[0]![1].requests[0]).toMatchObject({
+        [field]: valueByField[field],
+      });
       expect(generateStream).not.toHaveBeenCalled();
     },
   );
+
+  it("admits media combined with a LoRA, and an HDR directory, unchanged", () => {
+    admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
+    const stream = useGenerateStream();
+
+    stream.submit(
+      {
+        ...request("lora + media"),
+        source_image: "source",
+        loras: [{ path: "local" }],
+      },
+      { kind: "single" },
+      durableMediaRoute,
+    );
+    stream.submit(
+      { ...request("hdr"), hdr_exr_dir: "/private/hdr" },
+      { kind: "single" },
+      durableMediaRoute,
+    );
+
+    expect(admitGenerationBatch).toHaveBeenCalledTimes(2);
+    expect(admitGenerationBatch.mock.calls[0]![1].requests[0]).toMatchObject({
+      source_image: "source",
+      loras: [{ path: "local" }],
+    });
+    expect(admitGenerationBatch.mock.calls[1]![1].requests[0]).toMatchObject({
+      hdr_exr_dir: "/private/hdr",
+    });
+    expect(generateStream).not.toHaveBeenCalled();
+  });
 
   it("admits every media print immediately — there is no browser stream budget left to drain", () => {
     admitGenerationBatch.mockImplementation(() => new Promise(() => {}));

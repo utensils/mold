@@ -906,7 +906,6 @@ async function resolveFeasibleWithPreview(
             queue: capabilitiesByHost.value[candidate.id]?.queue,
             durableMedia: capabilitiesByHost.value[candidate.id]?.durable_media,
           },
-          request,
           outputKind,
         );
         if (
@@ -1284,7 +1283,6 @@ async function revalidateFeasibleWithPreview(
       queue: capabilitiesByHost.value[route.hostId]?.queue,
       durableMedia: capabilitiesByHost.value[route.hostId]?.durable_media,
     },
-    request,
     outputKind,
   );
   try {

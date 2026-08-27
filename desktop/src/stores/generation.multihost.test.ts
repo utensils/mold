@@ -87,6 +87,14 @@ const halRoute = {
   // carry the machine's instance identity and its advertised chunk limit.
   instanceId: "hal-instance",
   heterogeneousBatchMaxOutputs: 64,
+  durableMedia: {
+    protocol_version: 2,
+    encrypted_at_rest: true,
+    generate_request_media: true,
+    identity: true,
+    h3_references: true,
+    private_h3: true,
+  },
 };
 
 /** The target `admitGenerationBatch` was called against. */
@@ -145,6 +153,14 @@ function readyPrimary(): void {
   hosts.telemetry.local = { instanceId: "local-instance" } as never;
   hosts.capabilities.local = {
     queue: { heterogeneous_batch_max_outputs: 64 },
+    durable_media: {
+      protocol_version: 2,
+      encrypted_at_rest: true,
+      generate_request_media: true,
+      identity: true,
+      h3_references: true,
+      private_h3: true,
+    },
   } as never;
 }
 
@@ -163,6 +179,14 @@ function readyRemote(): void {
   hosts.telemetry["hal9000-7680"] = { instanceId: "hal-instance" } as never;
   hosts.capabilities["hal9000-7680"] = {
     queue: { heterogeneous_batch_max_outputs: 64 },
+    durable_media: {
+      protocol_version: 2,
+      encrypted_at_rest: true,
+      generate_request_media: true,
+      identity: true,
+      h3_references: true,
+      private_h3: true,
+    },
   } as never;
 }
 

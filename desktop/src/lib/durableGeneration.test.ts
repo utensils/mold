@@ -31,78 +31,20 @@ describe("desktop durable generation recovery", () => {
     private_h3: false,
   };
 
-  it("admits a media-free print and media the host actually covers", () => {
-    expect(generationRefusalReason(request(), queue, undefined)).toBeNull();
-    expect(
-      generationRefusalReason(request({ source_image: "bytes" }), queue, durableMedia),
-    ).toBeNull();
+  it("admits every request trait the durable protocol carries", () => {
+    // The server takes media, LoRAs, HDR directories, identity photos, and
+    // H3's ordered references on this route. A client-side per-trait fence
+    // could only refuse work the server would have accepted.
+    expect(generationRefusalReason(queue, durableMedia)).toBeNull();
   });
 
-  it("names the refusal instead of routing the print to a second path", () => {
-    const cases: Array<{
-      request: GenerateRequest;
-      queue?: typeof queue;
-      media?: typeof durableMedia;
-      family?: string;
-      reason: string;
-    }> = [
-      {
-        request: request(),
-        queue: { heterogeneous_batch_max_outputs: 0 },
-        reason: "this machine does not advertise the durable generation queue",
-      },
-      {
-        request: request({ source_image: "bytes" }),
-        reason: "this machine cannot store request media durably",
-      },
-      {
-        request: request({ id_image: "face" }),
-        media: { ...durableMedia, identity: false },
-        reason: "this machine cannot store identity photos durably",
-      },
-      {
-        request: request({ source_image: "bytes", loras: [] }),
-        media: durableMedia,
-        reason: "a LoRA cannot be combined with source media in a queued print",
-      },
-      {
-        request: request({ model: "minimax-h3-ref2va", references: [] }),
-        media: { ...durableMedia, private_h3: true, h3_references: false },
-        reason: "this machine cannot store reference media durably",
-      },
-      {
-        request: request({ model: "hf:opaque-h3-checkpoint", source_image: "bytes" }),
-        media: durableMedia,
-        family: "minimax-h3",
-        reason: "this machine cannot store MiniMax H3 request media durably",
-      },
-      {
-        request: { ...request(), hdr_exr_dir: "/hdr" } as GenerateRequest,
-        media: durableMedia,
-        reason: "an HDR EXR output directory cannot be queued",
-      },
-    ];
-    for (const candidate of cases) {
-      expect(
-        generationRefusalReason(
-          candidate.request,
-          candidate.queue ?? queue,
-          candidate.media,
-          candidate.family,
-        ),
-      ).toBe(candidate.reason);
-    }
-  });
-
-  it("admits H3 through the machine's own private durable contract", () => {
-    expect(
-      generationRefusalReason(
-        request({ model: "hf:opaque-h3-checkpoint", source_image: "bytes" }),
-        queue,
-        { ...durableMedia, private_h3: true },
-        "minimax-h3",
-      ),
-    ).toBeNull();
+  it("names a machine that does not speak the contract", () => {
+    expect(generationRefusalReason({ heterogeneous_batch_max_outputs: 0 }, durableMedia)).toBe(
+      "this machine does not advertise the durable generation queue",
+    );
+    expect(generationRefusalReason(queue, null)).toBe(
+      "this machine does not advertise durable request media",
+    );
   });
 
   it("persists recovery authority without API secrets, prompts, or media", () => {

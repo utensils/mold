@@ -4,8 +4,6 @@ import {
   type DurableMediaCapabilities,
   type GenerationBatchChild,
 } from "../api/generationAdmission";
-import { requestCarriesGenerationMedia } from "./generationMedia";
-import { isMinimaxH3Identity } from "./minimaxH3Identity";
 
 export type GenerationTargetPolicy =
   { kind: "pinned"; hostId: string } | { kind: "auto" } | { kind: "capable" };
@@ -40,63 +38,22 @@ export interface GenerationHostSubmissionPolicy {
 
 export type GenerationSubmissionOutputKind = "generation" | "sequence";
 
-function fieldPresent(
-  request: Record<string, unknown>,
-  field: string,
-): boolean {
-  return request[field] !== undefined && request[field] !== null;
-}
-
 /**
- * Durable media is one complete replay contract. Request traits select
- * independently advertised guarantees; H3 additionally carries an explicit
- * private durable contract even when the particular request is media-free.
- * A trait the host does not cover is REFUSED by name — never routed to a
- * second submission path. The server remains authoritative for model
- * preparation and for every execution check.
+ * Whether this machine speaks the durable submission contract at all.
+ *
+ * Deliberately HOST-level and blind to the request: the durable protocol
+ * carries source media, LoRAs, `hdr_exr_dir`, identity photos, and H3's
+ * ordered references, so a client-side per-trait fence could only ever refuse
+ * work the server would have taken. The server's own typed admission refusal
+ * — surfaced through `isDefiniteGenerationAdmissionRejection` — is the single
+ * authority for anything it cannot take.
  */
-function generationRefusal(
-  host: GenerationSubmissionHost,
-  request: object,
-): string | null {
+function hostContractRefusal(host: GenerationSubmissionHost): string | null {
   if (canonicalGenerationBatchLimit(host.queue) === null) {
     return "this machine does not advertise the durable generation queue";
   }
-  const record = request as Record<string, unknown>;
-  if (fieldPresent(record, "hdr_exr_dir")) {
-    return "an HDR EXR output directory cannot be queued";
-  }
-  const carriesMedia = requestCarriesGenerationMedia(request);
-  if (
-    carriesMedia &&
-    (fieldPresent(record, "lora") || fieldPresent(record, "loras"))
-  ) {
-    return "a LoRA cannot be combined with source media in a queued print";
-  }
-  const h3 = isMinimaxH3Identity(
-    typeof record.family === "string" ? record.family : null,
-    typeof record.model === "string" ? record.model : null,
-  );
-  if (!carriesMedia && !h3) return null;
-  const media = host.durableMedia;
-  if (
-    !media ||
-    media.encrypted_at_rest !== true ||
-    media.generate_request_media !== true
-  ) {
-    return "this machine cannot store request media durably";
-  }
-  if (h3 && media.private_h3 !== true) {
-    return "this machine cannot store MiniMax H3 request media durably";
-  }
-  if (
-    (fieldPresent(record, "id_image") || fieldPresent(record, "id_images")) &&
-    media.identity !== true
-  ) {
-    return "this machine cannot store identity photos durably";
-  }
-  if (fieldPresent(record, "references") && media.h3_references !== true) {
-    return "this machine cannot store reference media durably";
+  if (!host.durableMedia) {
+    return "this machine does not advertise durable request media";
   }
   return null;
 }
@@ -104,7 +61,6 @@ function generationRefusal(
 export function generationHostSubmissionPolicy(
   target: GenerationTargetPolicy,
   host: GenerationSubmissionHost,
-  request: object,
   outputKind: GenerationSubmissionOutputKind = "generation",
 ): GenerationHostSubmissionPolicy {
   if (outputKind === "sequence") {
@@ -114,7 +70,7 @@ export function generationHostSubmissionPolicy(
       refusal: "a sequence is created through the chain-job route",
     };
   }
-  const refusal = generationRefusal(host, request);
+  const refusal = hostContractRefusal(host);
   if (refusal !== null) {
     return { routing: "none", admission: "refused", refusal };
   }

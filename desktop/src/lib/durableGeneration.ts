@@ -39,15 +39,13 @@ export interface DurableGenerationRecoveryEnvelope {
   records: DurableGenerationRecoveryRecord[];
 }
 
-/** The named reason this request cannot be queued on the exact frozen host,
- * or `null` when it can. Every generation is admitted through the durable
- * queue, so a reason here is a refusal the surface shows the user — never a
- * signal to submit the request somewhere else. */
+/** The named reason this machine cannot be queued to, or `null` when it can.
+ * Host-level by construction: the durable protocol carries every request
+ * trait, so the server's typed admission refusal is the only authority for
+ * what it cannot take. */
 export function generationRefusalReason(
-  request: GenerateRequest,
   queue: DurableGenerationQueueCapabilities | null | undefined,
   durableMedia: DurableMediaCapabilities | null | undefined,
-  modelFamily?: string | null,
 ): string | null {
   const policy = generationHostSubmissionPolicy(
     { kind: "pinned", hostId: "frozen" },
@@ -56,7 +54,6 @@ export function generationRefusalReason(
       ...(queue === undefined ? {} : { queue }),
       ...(durableMedia === undefined ? {} : { durableMedia }),
     },
-    modelFamily ? { ...request, family: modelFamily } : request,
   );
   return policy.admission === "canonical_durable" ? null : policy.refusal;
 }

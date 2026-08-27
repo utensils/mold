@@ -164,7 +164,6 @@ export function mobileGenerationSubmissionPolicy(options: {
       },
       durableMedia: options.route.durableMedia ?? null,
     },
-    options.request,
     options.chain ? "sequence" : "generation",
   );
 }

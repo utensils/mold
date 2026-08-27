@@ -883,7 +883,6 @@ export const useHostsStore = defineStore("hosts", {
                     ? { durableMedia: this.capabilities[host.id]!.durable_media! }
                     : {}),
                 },
-                request,
                 Array.isArray((request as ChainRequest).stages) || "total_frames" in request
                   ? "sequence"
                   : "generation",
