@@ -4148,44 +4148,37 @@ describe("MobileApp generation queue", () => {
 
     expect(expandPrompt).not.toHaveBeenCalled();
     expect(wrapper.find("[data-test='mobile-prepared-expansion']").exists()).toBe(false);
-    expect(previewGenerationPlacement).toHaveBeenCalledWith(
-      target,
-      expect.objectContaining({ batch_size: 1 }),
-      3,
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    );
+    // Batch N is admitted as N ordered singleton children in one durable
+    // batch; nothing is previewed for placement and no stream is opened.
+    expect(previewGenerationPlacement).not.toHaveBeenCalled();
+    // Only the machine-wide lifecycle stream is open; no per-print stream is.
+    expect(openStreams.filter((stream) => stream.path !== "/api/events")).toHaveLength(0);
     expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(3);
     expect(wrapper.get("[data-test='mobile-develop-button']").text()).toBe(
       "Develop 3 prints (+3 queued)",
     );
-    expect(openStreams).toHaveLength(3);
-    const firstSeed = admittedRequests()[0]?.seed as number;
-    expect(openStreams.map((stream) => stream.options.body.batch_size)).toEqual([1, 1, 1]);
-    expect(openStreams.map((stream) => stream.options.body.seed)).toEqual([
+
+    const requests = admittedRequests();
+    expect(requests).toHaveLength(3);
+    const firstSeed = requests[0]?.seed as number;
+    expect(requests.map((request) => request.batch_size)).toEqual([1, 1, 1]);
+    expect(requests.map((request) => request.seed)).toEqual([
       firstSeed,
       firstSeed + 1,
       firstSeed + 2,
     ]);
-    expect(openStreams.map((stream) => stream.options.body.prompt)).toEqual([
+    expect(requests.map((request) => request.prompt)).toEqual([
       "three variations of a storm",
       "three variations of a storm",
       "three variations of a storm",
     ]);
-    expect(openStreams.map((stream) => stream.options.body.expand)).toEqual([
+    expect(requests.map((request) => request.expand)).toEqual([undefined, undefined, undefined]);
+    expect(requests.map((request) => request.original_prompt)).toEqual([
       undefined,
       undefined,
       undefined,
     ]);
-    expect(openStreams.map((stream) => stream.options.body.original_prompt)).toEqual([
-      undefined,
-      undefined,
-      undefined,
-    ]);
-    expect(openStreams.map((stream) => stream.options.body.batch_id)).toEqual([
-      undefined,
-      undefined,
-      undefined,
-    ]);
+    expect(requests.map((request) => request.batch_id)).toEqual([undefined, undefined, undefined]);
   });
 
   it("prepares Batch N only from the explicit Expand action", async () => {
@@ -5539,33 +5532,22 @@ describe("MobileApp generation queue", () => {
   });
 
   it("keeps a pre-ID job live when remote cancellation is unconfirmed", async () => {
+    // Cancelled BEFORE the machine answers with a job id: the tap is recorded,
+    // the print stays live, and a completion that lands anyway still shows.
+    serveStillModel();
+    const admissions = heldAdmissions();
     wrapper = mountMobileApp();
     await flushPromises();
     await submitPrompt("cancel before the remote queue id arrives");
 
     await wrapper.get("[data-test='mobile-generation-cancel']").trigger("click");
     await flushPromises();
-    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("Queued");
-    expect(openStreams[0]?.options.signal.aborted).toBe(false);
-    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toContain(
-      "Cancellation failed",
-    );
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("Accepted");
 
-    openStreams[0]?.options.onEvent(
-      "complete",
-      JSON.stringify({
-        image: btoa("finished after failed cancellation"),
-        format: "png",
-        width: 768,
-        height: 512,
-        seed_used: 1,
-        generation_time_ms: 500,
-        model: model.name,
-      }),
-    );
-    openStreams[0]?.resolve();
+    admissions.settleAt(0, { filename: "finished-anyway.png" });
     await flushPromises();
-    expect(wrapper.find("img.result-media").exists()).toBe(true);
+    await flushPromises();
+    await vi.waitFor(() => expect(wrapper!.find("img.result-media").exists()).toBe(true));
   });
 
   it("keeps a completed result visible while a queued sibling settles independently", async () => {
