@@ -674,17 +674,12 @@ pub fn api_key_header_name() -> HeaderValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::env_lock;
     use tower::ServiceExt;
-
-    /// Serialize env var mutations across parallel test threads.
-    fn env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        &LOCK
-    }
 
     #[test]
     fn parse_single_key() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = env_lock();
         unsafe { std::env::set_var("MOLD_API_KEY", "secret123") };
         let state = load_api_keys().unwrap();
         unsafe { std::env::remove_var("MOLD_API_KEY") };
@@ -695,7 +690,7 @@ mod tests {
 
     #[test]
     fn parse_comma_separated_keys() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = env_lock();
         unsafe { std::env::set_var("MOLD_API_KEY", "key1,key2, key3 ") };
         let state = load_api_keys().unwrap();
         unsafe { std::env::remove_var("MOLD_API_KEY") };
@@ -727,7 +722,7 @@ mod tests {
 
     #[test]
     fn parse_file_keys() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = env_lock();
         let dir = std::env::temp_dir().join("mold_test_keys");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("keys.txt");
@@ -745,7 +740,7 @@ mod tests {
 
     #[test]
     fn empty_env_returns_none() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = env_lock();
         unsafe { std::env::set_var("MOLD_API_KEY", "") };
         let state = load_api_keys().unwrap();
         unsafe { std::env::remove_var("MOLD_API_KEY") };
@@ -754,7 +749,7 @@ mod tests {
 
     #[test]
     fn unset_env_returns_none() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = env_lock();
         unsafe { std::env::remove_var("MOLD_API_KEY") };
         let state = load_api_keys().unwrap();
         assert!(state.is_none());

@@ -4044,7 +4044,9 @@ mod tests {
             "a valid private attestation must replace the process-lifetime body read"
         );
 
+        let attested_ctime = crate::test_support::ctime_of(&path);
         std::fs::write(&path, b"tampered model bytes").unwrap();
+        crate::test_support::wait_until_ctime_moves(&path, attested_ctime);
         let changed = crate::secure_file::open_regular_file_no_follow(&path).unwrap();
         let changed_identity = pinned_file_identity(&changed).unwrap();
         assert_ne!(changed_identity, identity);
@@ -4099,7 +4101,9 @@ mod tests {
         verify_pinned_file(&path, &expected, "swapped.bin", "pinned-bundle").unwrap();
         // Same path, same length, different content — the shape of an
         // in-place substitution in a shared models root.
+        let verified_ctime = crate::test_support::ctime_of(&path);
         std::fs::write(&path, b"the fake pinned bytes").unwrap();
+        crate::test_support::wait_until_ctime_moves(&path, verified_ctime);
         let changed_identity =
             pinned_file_identity(&crate::secure_file::open_regular_file_no_follow(&path).unwrap())
                 .unwrap();

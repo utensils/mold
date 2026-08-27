@@ -15493,9 +15493,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn cold_catalog_overlay_survives_full_coordinator_preview_and_config_refresh() {
-        let _env = crate::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = crate::test_support::env_lock();
         let root = tempfile::tempdir().unwrap();
         let install_dir = root.path().join("cv-2937936");
         let primary = install_dir.join("flux2/catalog/model.safetensors");
@@ -15665,7 +15663,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn placement_preview_reports_only_the_selected_devices_pending_downloads() {
+        let _env = crate::test_support::env_lock();
         let root = tempfile::tempdir().unwrap();
         let transformer = root.path().join("transformer.safetensors");
         let vae = root.path().join("vae.safetensors");
@@ -15792,7 +15792,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn exact_placement_preview_is_stable_device_specific_and_read_only() {
+        let _env = crate::test_support::env_lock();
         let root = tempfile::tempdir().unwrap();
         for name in [
             "transformer.safetensors",

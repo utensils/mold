@@ -418,9 +418,7 @@ struct CivitaiTokenGuard {
 
 impl CivitaiTokenGuard {
     fn set(token: &str) -> Self {
-        let lock = crate::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lock = crate::test_support::env_lock();
         let previous = std::env::var_os("CIVITAI_TOKEN");
         unsafe {
             std::env::set_var("CIVITAI_TOKEN", token);
@@ -997,9 +995,7 @@ async fn live_search_forwards_sort_and_keys_cache_per_sort() {
     // token changes (CivitaiTokenGuard tests) mid-test would split the
     // cache and break the upstream call-count expectations. Hold the env
     // lock for the duration.
-    let _env = crate::test_support::env_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env = crate::test_support::env_lock();
 
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1064,9 +1060,7 @@ async fn live_search_defaults_to_downloads_sort() {
     // token changes (CivitaiTokenGuard tests) mid-test would split the
     // cache and break the upstream call-count expectations. Hold the env
     // lock for the duration.
-    let _env = crate::test_support::env_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env = crate::test_support::env_lock();
 
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1196,9 +1190,7 @@ async fn catalog_download_rejects_missing_token_before_enqueuing_companions() {
     // Hold the env lock for the whole test: it exercises the
     // no-credential server path, and other tests (CivitaiTokenGuard)
     // inject CIVITAI_TOKEN under this lock.
-    let _env = crate::test_support::env_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env = crate::test_support::env_lock();
     if std::env::var("CIVITAI_TOKEN").is_ok() {
         // This regression exercises the no-credential server path. Environments
         // that deliberately inject a token cannot represent that state.

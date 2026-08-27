@@ -1285,9 +1285,7 @@ mod tests {
     }
 
     fn with_mold_home<R>(home: &std::path::Path, f: impl FnOnce() -> R) -> R {
-        let _guard = crate::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::test_support::env_lock();
         let prev = std::env::var_os("MOLD_HOME");
         std::env::set_var("MOLD_HOME", home);
         let out = f();

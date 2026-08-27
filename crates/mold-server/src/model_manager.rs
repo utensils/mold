@@ -3141,9 +3141,7 @@ mod tests {
                 "MOLD_TEMPORAL_UPSCALER_PATH",
                 "MOLD_DISTILLED_LORA_PATH",
             ];
-            let lock = crate::test_support::env_lock()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let lock = crate::test_support::env_lock();
             let mut previous = Vec::with_capacity(CLEARED_KEYS.len() + 4);
             for key in ["MOLD_HOME", "MOLD_MODELS_DIR", "HF_HOME", "HF_HUB_CACHE"] {
                 previous.push((key, std::env::var_os(key)));
@@ -3277,6 +3275,7 @@ mod tests {
 
     #[test]
     fn downloaded_ltx25_uses_split_audio_component_for_capability() {
+        let _env = crate::test_support::env_lock();
         let dir = tempfile::tempdir().unwrap();
         let mut config = Config {
             models_dir: dir.path().to_string_lossy().into_owned(),

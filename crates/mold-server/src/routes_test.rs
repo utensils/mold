@@ -32,7 +32,7 @@ mod tests {
     /// Serialize tests that mutate process-global mold env vars.
     /// Uses std::sync::Mutex (not tokio) so it works across independent
     /// tokio runtimes that #[tokio::test] creates per test.
-    fn env_lock() -> &'static std::sync::Mutex<()> {
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         crate::test_support::env_lock()
     }
 
@@ -44,9 +44,7 @@ mod tests {
 
     impl EnvVarGuard {
         fn set(name: &'static str, value: &std::ffi::OsStr) -> Self {
-            let lock = env_lock()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let lock = env_lock();
             let previous = std::env::var_os(name);
             std::env::set_var(name, value);
             Self {
@@ -438,9 +436,7 @@ mod tests {
 
     #[test]
     fn generation_fixture_ignores_process_output_override() {
-        let _env = env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = env_lock();
         let previous = std::env::var_os("MOLD_OUTPUT_DIR");
         unsafe { std::env::set_var("MOLD_OUTPUT_DIR", "/tmp/mold-test-must-not-write") };
 
@@ -593,7 +589,7 @@ mod tests {
 
     impl MoldHomeGuard {
         fn set(path: &std::path::Path) -> Self {
-            let lock = env_lock().lock().unwrap();
+            let lock = env_lock();
             let previous = std::env::var_os("MOLD_HOME");
             std::env::set_var("MOLD_HOME", path);
             Self {
@@ -679,7 +675,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn chain_validation_returns_normalized_plan_without_job_storage() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let models_dir = test_models_dir("chain-estimate");
         populate_manifest_files(&models_dir, "ltx-2-19b-distilled:fp8");
         std::env::set_var("MOLD_MODELS_DIR", &models_dir);
@@ -4096,7 +4092,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn delete_model_removes_exclusively_owned_files() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let models_dir = test_models_dir("delete-model-solo");
         populate_manifest_files(&models_dir, "flux-schnell:q8");
         std::env::set_var("MOLD_MODELS_DIR", &models_dir);
@@ -4138,7 +4134,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn delete_model_keeps_components_shared_with_another_model() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let models_dir = test_models_dir("delete-model-shared");
         // flux-schnell:q8 and flux-dev:q8 share VAE/T5/CLIP under shared/.
         populate_manifest_files(&models_dir, "flux-schnell:q8");
@@ -8443,6 +8439,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_admission_rebinds_a_stable_gpu_after_restart_and_renumbering() {
+        let _env = env_lock();
         const STABLE_ID: &str = "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let output_dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
@@ -10017,7 +10014,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn config_list_reports_values_with_sources() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let (app, _db) = app_with_settings_db();
         let resp = app
             .oneshot(Request::get("/api/config").body(Body::empty()).unwrap())
@@ -10056,7 +10053,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn config_list_marks_env_overridden_keys() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let prev = std::env::var("MOLD_EXPAND").ok();
         std::env::set_var("MOLD_EXPAND", "1");
 
@@ -10277,7 +10274,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn config_put_env_overridden_key_returns_403() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let prev = std::env::var("MOLD_EXPAND").ok();
         std::env::set_var("MOLD_EXPAND", "1");
 
@@ -10407,7 +10404,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn config_profiles_lists_known_profiles_and_active() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let prev = std::env::var("MOLD_PROFILE").ok();
         std::env::remove_var("MOLD_PROFILE");
 
@@ -10448,7 +10445,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn config_put_profile_switches_active_profile() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let prev = std::env::var("MOLD_PROFILE").ok();
         std::env::remove_var("MOLD_PROFILE");
 
@@ -11058,7 +11055,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn list_models_reports_server_disk_and_remaining_download_bytes() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let models_dir = test_models_dir("remote-catalog");
         populate_manifest_files(&models_dir, "flux-schnell:q8");
         std::env::set_var("MOLD_MODELS_DIR", &models_dir);
@@ -11106,7 +11103,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn generate_estimate_returns_server_memory_estimate() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let models_dir = test_models_dir("estimate");
         populate_manifest_files(&models_dir, "sdxl-base:fp16");
         std::env::set_var("MOLD_MODELS_DIR", &models_dir);
@@ -11206,7 +11203,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn generate_estimate_uses_only_eligible_and_explicitly_pinned_gpus() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let models_dir = test_models_dir("estimate-device-selection");
         populate_manifest_files(&models_dir, "sdxl-base:fp16");
         std::env::set_var("MOLD_MODELS_DIR", &models_dir);
@@ -11294,7 +11291,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn model_components_reports_present_and_missing_manifest_assets() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let models_dir = test_models_dir("components");
         let manifest = mold_core::manifest::find_manifest("sdxl-base:fp16").unwrap();
         for file in manifest.files.iter().take(1) {
@@ -11749,7 +11746,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)]
     async fn generate_known_model_not_downloaded_settles_as_a_held_child() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let models_dir = test_models_dir("generate-not-downloaded");
         std::fs::create_dir_all(&models_dir).unwrap();
         std::env::set_var("MOLD_MODELS_DIR", &models_dir);
@@ -12886,7 +12883,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)]
     async fn stream_known_model_not_downloaded_reports_its_code_on_the_error_frame() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let models_dir = test_models_dir("stream-not-downloaded");
         std::fs::create_dir_all(&models_dir).unwrap();
         std::env::set_var("MOLD_MODELS_DIR", &models_dir);
@@ -15002,9 +14999,7 @@ mod tests {
         // `MOLD_OUTPUT_DIR` on every call. Keep the shared environment lock
         // for the full async lifecycle so the disabled-output route tests
         // cannot transiently turn this gallery off underneath a replay.
-        let _env = env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = env_lock();
 
         fn state_for(dir: &std::path::Path) -> AppState {
             let config = mold_core::Config {
@@ -15503,7 +15498,7 @@ mod tests {
         // Route is backed by `MOLD_HOME/cache/previews/<filename>.preview.gif`,
         // so pin MOLD_HOME at a tempdir for the duration of the test — and
         // hold env_lock so parallel tests can't race us.
-        let _lock = env_lock().lock().unwrap();
+        let _lock = env_lock();
         let mold_home = tempfile::tempdir().unwrap();
         let prev = std::env::var("MOLD_HOME").ok();
         unsafe {
@@ -15978,7 +15973,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_model_placement_rejects_malformed_body() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let app = app_empty();
         let resp = app
             .oneshot(
@@ -16001,7 +15996,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_model_placement_rejects_gpu_outside_worker_pool() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
@@ -16816,7 +16811,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_api_resources_returns_snapshot() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let state = AppState::empty(
             mold_core::Config::default(),
             crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
@@ -16857,7 +16852,7 @@ mod tests {
     async fn resource_routes_expose_only_frozen_cuda_visible_inventory() {
         use futures::StreamExt as _;
 
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let visible_uuid = [0xaa; 16];
         let targets = vec![crate::resources::TelemetryTarget::cuda(
             0,
@@ -16941,7 +16936,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_api_resources_stream_sets_sse_content_type() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let state = AppState::empty(
             mold_core::Config::default(),
             crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
@@ -16970,7 +16965,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_api_resources_returns_503_before_first_tick() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_lock();
         let state = AppState::empty(
             mold_core::Config::default(),
             crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),

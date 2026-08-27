@@ -1273,16 +1273,11 @@ mod tests {
         let _rx = state.resources.subscribe();
     }
 
-    /// Serializes every test that touches a process-wide env var via
-    /// `std::env::set_var` — mutating env is global state, so without this
-    /// guard parallel tests would race on the env table.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// Set `name` to `value` (or remove it when `value` is `None`), invoke
     /// `f`, then restore the original value. Lock-serialized so concurrent
     /// tests don't race on the env table.
     fn with_env<R>(name: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::test_support::env_lock();
         let prev = std::env::var(name).ok();
         match value {
             Some(v) => std::env::set_var(name, v),

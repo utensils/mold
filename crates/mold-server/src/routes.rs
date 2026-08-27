@@ -9825,6 +9825,7 @@ fn server_event_to_sse(ev: &mold_core::ServerEvent) -> SseEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::env_lock;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
@@ -10987,11 +10988,6 @@ mod tests {
         assert!(!maintenance.observes_v2_decisions);
     }
 
-    fn env_lock() -> &'static std::sync::Mutex<()> {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        &ENV_LOCK
-    }
-
     #[test]
     fn disk_usage_for_path_picks_longest_matching_mount() {
         let disks = vec![
@@ -11219,7 +11215,7 @@ mod tests {
 
     #[test]
     fn thumbnail_warmup_is_enabled_by_default() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock();
         unsafe {
             std::env::remove_var("MOLD_THUMBNAIL_WARMUP");
         }
@@ -11261,7 +11257,7 @@ mod tests {
 
     #[test]
     fn thumbnail_warmup_accepts_truthy_env_values() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock();
         unsafe {
             std::env::set_var("MOLD_THUMBNAIL_WARMUP", "1");
         }
@@ -11281,7 +11277,7 @@ mod tests {
 
     #[test]
     fn thumbnail_warmup_rejects_falsey_env_values() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock();
         unsafe {
             std::env::set_var("MOLD_THUMBNAIL_WARMUP", "0");
         }

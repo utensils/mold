@@ -3445,9 +3445,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn existing_only_dependency_check_does_not_create_cache_roots() {
-        let _env = crate::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = crate::test_support::env_lock();
         let parent = TempDir::new().unwrap();
         let models_root = parent.path().join("absent-models");
         let hf_home = parent.path().join("absent-hf-home");
@@ -3485,9 +3483,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn preview_and_admission_use_the_same_explicit_models_root() {
-        let _env = crate::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = crate::test_support::env_lock();
         let parent = TempDir::new().unwrap();
         let models_root = parent.path().join("config-owned-models");
         let repo = format!("test/explicit-root-parity-{}", std::process::id());
@@ -3549,9 +3545,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn admission_deduplicates_within_but_never_across_models_roots() {
-        let _env = crate::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = crate::test_support::env_lock();
         let parent = TempDir::new().unwrap();
         let first_root = parent.path().join("first-models");
         let second_root = parent.path().join("second-models");
@@ -3624,7 +3618,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn existing_only_preparation_plans_known_missing_encoder_without_downloading() {
-        let _env = crate::test_support::env_lock().lock().unwrap();
+        let _env = crate::test_support::env_lock();
         let cache = TempDir::new().unwrap();
         std::env::set_var("MOLD_MODELS_DIR", cache.path().join("models"));
         std::env::set_var("HF_HOME", cache.path().join("hf"));
@@ -3788,7 +3782,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn flux2_dev_preserves_checkpoint_native_mistral_dependencies() {
+        let _env = crate::test_support::env_lock();
         let root = TempDir::new().unwrap();
         for name in [
             "transformer.safetensors",
@@ -3881,7 +3877,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn transient_pressure_does_not_remove_a_prepared_sibling() {
+        let _env = crate::test_support::env_lock();
         let (_root, mut config, request) = zimage_case();
         config.qwen3_variant = Some("bf16".to_string());
         let prepared = prepare_local_execution_inputs(
@@ -3920,7 +3918,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn all_temporarily_low_devices_still_materialize_for_later_replanning() {
+        let _env = crate::test_support::env_lock();
         let (_root, mut config, request) = zimage_case();
         config.qwen3_variant = Some("bf16".to_string());
         let low_facts = (0..8)
@@ -3967,7 +3967,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn hard_pin_filters_irrelevant_devices_before_materialization() {
+        let _env = crate::test_support::env_lock();
         let (_root, config, mut request) = zimage_case();
         request.placement = Some(DevicePlacement {
             text_encoders: DeviceRef::device("cuda:1"),
@@ -3997,7 +3999,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn stale_device_pin_remains_hard_infeasible() {
+        let _env = crate::test_support::env_lock();
         let (_root, config, mut request) = zimage_case();
         request.placement = Some(DevicePlacement {
             text_encoders: DeviceRef::device("cuda:gone"),

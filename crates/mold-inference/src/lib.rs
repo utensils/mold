@@ -86,6 +86,8 @@ pub(crate) mod nvfp4;
 pub mod progress;
 #[cfg(test)]
 pub(crate) mod pulid_fixtures;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub(crate) mod quantized_dmmv;
 pub mod qwen_image;

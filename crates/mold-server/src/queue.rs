@@ -7792,11 +7792,8 @@ mod tests {
         );
     }
 
-    /// Serializes every test that mutates queue env vars (process-global).
-    static QUEUE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn with_queue_env<R>(name: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _g = QUEUE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::test_support::env_lock();
         let prev = std::env::var(name).ok();
         match value {
             Some(v) => std::env::set_var(name, v),

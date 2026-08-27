@@ -1701,8 +1701,6 @@ mod tests {
     use std::time::Duration;
     use tower::ServiceExt;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     #[test]
     fn runtime_shutdown_cancels_chains_and_scheduler_before_http_drain() {
         let chains = crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests();
@@ -1756,7 +1754,7 @@ mod tests {
 
     #[test]
     fn shutdown_budget_falls_back_to_the_default_for_nonsense() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::test_support::env_lock();
         std::env::set_var(super::SHUTDOWN_ABORT_SECS_ENV, "90");
         assert_eq!(super::resolve_shutdown_abort_secs(), 90);
         std::env::set_var(super::SHUTDOWN_ABORT_SECS_ENV, "0");
@@ -1878,7 +1876,7 @@ mod tests {
 
     #[test]
     fn invalid_cors_origin_returns_error() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::test_support::env_lock();
         std::env::set_var("MOLD_CORS_ORIGIN", "\nnot-a-header");
         let result = build_cors_layer();
         std::env::remove_var("MOLD_CORS_ORIGIN");
@@ -1887,7 +1885,7 @@ mod tests {
 
     #[test]
     fn valid_cors_origin_builds_layer() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::test_support::env_lock();
         std::env::set_var("MOLD_CORS_ORIGIN", "https://example.com");
         let result = build_cors_layer();
         std::env::remove_var("MOLD_CORS_ORIGIN");
@@ -1897,7 +1895,7 @@ mod tests {
     #[tokio::test]
     async fn configured_origin_preflight_allows_authenticated_device_patch() {
         let cors = {
-            let _lock = ENV_LOCK.lock().unwrap();
+            let _lock = crate::test_support::env_lock();
             std::env::set_var("MOLD_CORS_ORIGIN", "https://studio.example");
             let cors = build_cors_layer().unwrap();
             std::env::remove_var("MOLD_CORS_ORIGIN");

@@ -326,9 +326,7 @@ mod tests {
 
     impl EnvGuard {
         fn new(mold_home: &Path, models_dir: &Path) -> Self {
-            let lock = crate::test_support::env_lock()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let lock = crate::test_support::env_lock();
             let guard = Self {
                 _lock: lock,
                 previous_home: std::env::var("MOLD_HOME").ok(),
