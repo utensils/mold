@@ -1822,14 +1822,11 @@ pub(crate) async fn ensure_model_ready(
                         "recreating loaded engine for request-specific offload policy"
                     );
                 } else {
-                    // Already loaded — just set up progress callback.
-                    if let Some(callback) = progress.clone() {
-                        entry.engine.set_on_progress(Box::new(move |event| {
-                            callback(event);
-                        }));
-                    } else {
-                        entry.engine.clear_on_progress();
-                    }
+                    // Already loaded: nothing is about to be loaded, so there
+                    // is no load progress to report. Leave the engine with no
+                    // callback — the generation installs its own and clears it
+                    // — rather than installing one that only ever gets replaced.
+                    entry.engine.clear_on_progress();
                     return Ok(());
                 }
             }

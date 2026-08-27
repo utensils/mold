@@ -8577,8 +8577,9 @@ mod tests {
         for _ in 0..3 {
             let job = receive_and_settle(&state, &mut rx).await;
             assert!(
-                job.progress_tx.is_none(),
-                "a replayed job has no client to stream to"
+                job.progress_tx.is_some(),
+                "a replayed job has no client to stream to, but it still carries the \
+                 registry relay that feeds the snapshot every surface polls"
             );
             replayed.push(job.id);
         }
@@ -13148,8 +13149,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(progress_set_count.load(Ordering::SeqCst), 2);
-        assert_eq!(progress_clear_count.load(Ordering::SeqCst), 1);
+        // One install per generation, and never one left behind: the resident
+        // engine is cleared when it is picked (nothing loads, so there is no
+        // load progress to report), the generation installs its own callback,
+        // and clears it before the engine goes back to the cache.
+        assert_eq!(progress_set_count.load(Ordering::SeqCst), 1);
+        assert_eq!(progress_clear_count.load(Ordering::SeqCst), 2);
 
         let generate_resp = app
             .oneshot(
@@ -13162,10 +13167,11 @@ mod tests {
             .unwrap();
         assert_eq!(generate_resp.status(), StatusCode::OK);
 
-        // Non-streaming generations now install the shared preview observer too,
-        // and must clear that observer before returning the engine to the cache.
-        assert_eq!(progress_set_count.load(Ordering::SeqCst), 3);
-        assert_eq!(progress_clear_count.load(Ordering::SeqCst), 3);
+        // A non-streaming generation installs the progress callback too — its
+        // steps feed the snapshot `/api/queue/{id}/preview` serves through the
+        // registry relay every job carries — under exactly the same discipline.
+        assert_eq!(progress_set_count.load(Ordering::SeqCst), 2);
+        assert_eq!(progress_clear_count.load(Ordering::SeqCst), 4);
     }
 
     #[tokio::test]
