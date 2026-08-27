@@ -55,6 +55,10 @@ export interface Job {
   requestWarnings: string[];
   /** Structured transport-close marker used by resume reconciliation. */
   interrupted: boolean;
+  /** Settled with `status: "error"` because its outcome is not knowable on
+   *  this authority (the server instance was replaced, or the host disowned
+   *  the record) — advisory, never a failure the strip should label as one. */
+  outcomeUnknown?: boolean;
   /** The host ended this job's stream while KEEPING the job: it journalled the
    *  work, is restarting, and will run it. Reconciliation waits far longer for
    *  a host that said this than for one that merely stopped answering. */

@@ -203,6 +203,30 @@ function seqJob(overrides: Partial<ChainJobSummary> = {}): ChainJobSummary {
   };
 }
 
+describe("ActivityStrip — unknown outcomes", () => {
+  it("labels a print whose authority was lost as advisory, never failed", () => {
+    const generation = useGenerationStore();
+    generation.jobs = [
+      {
+        ...baseJob(),
+        status: "error",
+        outcomeUnknown: true,
+        stage: "Outcome unknown",
+        error: "hal9000 was replaced by a new server instance.",
+        settledAtMs: Date.now(),
+      },
+    ];
+    const wrapper = mount(ActivityStrip);
+    const row = wrapper.get("[data-test='activity-print-attention']");
+    expect(row.get(".ms-activity__state").text()).toBe("Outcome unknown");
+    expect(row.get(".ms-activity__state").classes()).not.toContain("text-stop");
+    expect(row.text()).not.toContain("failed");
+    expect(row.get("[data-test='print-dismiss']").attributes("aria-label")).toBe(
+      "Dismiss print: a lighthouse",
+    );
+  });
+});
+
 describe("ActivityStrip — sequences", () => {
   it("renders in-flight sequence rows from every host, running work first", () => {
     const chains = useChainJobsStore();

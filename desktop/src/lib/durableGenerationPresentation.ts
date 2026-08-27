@@ -73,6 +73,7 @@ export function applyDurablePresentation(job: Job, p: GenerationChildPresentatio
       settle(job, p.message, p.settledAtMs);
       job.stage = p.label;
       job.interrupted = false;
+      job.outcomeUnknown = true;
       return;
   }
 }
