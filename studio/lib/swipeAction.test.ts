@@ -74,18 +74,31 @@ describe("swipe gesture math", () => {
     expect(swipeIsOpen(outcome.state)).toBe(true);
   });
 
-  it("commits a full swipe past the row-width fraction", () => {
+  it("a full swipe from a closed row only reveals the tray", () => {
     const past = config.rowWidth * SWIPE_COMMIT_FRACTION + 20;
     const outcome = endSwipe(drag(-past), config);
+    expect(outcome.commit).toBe(false);
+    expect(outcome.state.offset).toBe(-config.trayWidth);
+    expect(swipeIsOpen(outcome.state)).toBe(true);
+  });
+
+  it("commits a full swipe past the row-width fraction from a revealed tray", () => {
+    const opened = endSwipe(drag(-70), config).state;
+    const past = config.rowWidth * SWIPE_COMMIT_FRACTION + 20;
+    let state = beginSwipe(opened, { x: 300, y: 100 });
+    state = moveSwipe(state, { x: 300 - past, y: 100 }, config);
+    const outcome = endSwipe(state, config);
     expect(outcome.commit).toBe(true);
+    expect(outcome.state.offset).toBe(0);
   });
 
   it("never commits when no action opted into the full swipe", () => {
+    const off = { ...config, commitEnabled: false };
+    const opened = endSwipe(drag(-70, 0, { commitEnabled: false }), off).state;
     const past = config.rowWidth * SWIPE_COMMIT_FRACTION + 20;
-    const outcome = endSwipe(drag(-past, 0, { commitEnabled: false }), {
-      ...config,
-      commitEnabled: false,
-    });
+    let state = beginSwipe(opened, { x: 300, y: 100 });
+    state = moveSwipe(state, { x: 300 - past, y: 100 }, off);
+    const outcome = endSwipe(state, off);
     expect(outcome.commit).toBe(false);
     expect(outcome.state.offset).toBe(-config.trayWidth);
   });

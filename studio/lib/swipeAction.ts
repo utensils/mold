@@ -160,8 +160,13 @@ export function endSwipe(
   if (state.phase !== "horizontal") return settled(state.offset);
 
   const travelled = -state.offset;
+  // A full swipe commits only from a tray that was ALREADY revealed when the
+  // gesture began: the reveal is step one and the tap or the second full
+  // swipe is step two, so a single diagonal scroll past 60% of a running row
+  // can never cancel a render. This is the phone's 44pt two-step cancellation.
   if (
     config.commitEnabled !== false &&
+    state.startOffset < 0 &&
     state.intent >= config.rowWidth * SWIPE_COMMIT_FRACTION
   ) {
     return { state: { ...createSwipeState(), offset: 0 }, commit: true };

@@ -56,7 +56,7 @@ describe("SwipeActionRow", () => {
     expect(surface.attributes("style")).toContain("translateX(-88px)");
   });
 
-  it("commits the opted-in action on a full swipe", async () => {
+  it("a single full swipe from a closed row reveals but never commits", async () => {
     const wrapper = mountRow();
     vi.spyOn(
       wrapper.get('[data-test="swipe-action-row"]').element,
@@ -67,7 +67,53 @@ describe("SwipeActionRow", () => {
     await pointer(wrapper, "pointermove", 80);
     await pointer(wrapper, "pointerup", 80);
 
+    expect(wrapper.emitted("act")).toBeUndefined();
+    expect(
+      wrapper
+        .get('[data-test="swipe-action-row"] > div:last-child')
+        .attributes("style"),
+    ).toContain("translateX(-88px)");
+  });
+
+  it("commits the opted-in action on a second full swipe from the revealed tray", async () => {
+    const wrapper = mountRow();
+    vi.spyOn(
+      wrapper.get('[data-test="swipe-action-row"]').element,
+      "getBoundingClientRect",
+    ).mockReturnValue({ width: 390 } as DOMRect);
+
+    await pointer(wrapper, "pointerdown", 300);
+    await pointer(wrapper, "pointermove", 240);
+    await pointer(wrapper, "pointerup", 240);
+    expect(wrapper.emitted("act")).toBeUndefined();
+
+    await pointer(wrapper, "pointerdown", 380);
+    await pointer(wrapper, "pointermove", 80);
+    await pointer(wrapper, "pointerup", 80);
+
     expect(wrapper.emitted("act")).toEqual([["cancel"]]);
+  });
+
+  it("closes a revealed tray when the pointer lands outside the row", async () => {
+    const wrapper = mountRow();
+    vi.spyOn(
+      wrapper.get('[data-test="swipe-action-row"]').element,
+      "getBoundingClientRect",
+    ).mockReturnValue({ width: 390 } as DOMRect);
+
+    await pointer(wrapper, "pointerdown", 300);
+    await pointer(wrapper, "pointermove", 240);
+    await pointer(wrapper, "pointerup", 240);
+    document.body.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }),
+    );
+    await wrapper.vm.$nextTick();
+
+    expect(
+      wrapper
+        .get('[data-test="swipe-action-row"] > div:last-child')
+        .attributes("style"),
+    ).toContain("translateX(0px)");
   });
 
   it("does not steal a vertical scroll", async () => {

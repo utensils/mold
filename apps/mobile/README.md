@@ -271,11 +271,12 @@ pushed screen opened from the header.
   names rather than opaque `cv:` / `hf:` ids), with rename, retry, select,
   unload, open-in-Models, and forget actions. Queue rows are swipe-to-act
   (`studio/components/SwipeActionRow.vue`, gesture math in
-  `studio/lib/swipeAction.ts`): a right-to-left swipe reveals a 44pt tray and a
-  full swipe past 60% of the row commits **Cancel**, which reaches queued rows
-  always and running singletons where the host advertises cooperative
-  cancellation. The reveal is step one and the tap or full swipe is step two,
-  so the destructive action still takes two deliberate moves, and the tray is
+  `studio/lib/swipeAction.ts`): a right-to-left swipe reveals a 44pt tray, and
+  from that revealed tray a tap or a second full swipe past 60% of the row
+  commits **Cancel**, which reaches queued rows always and running singletons
+  where the host advertises cooperative cancellation. A single gesture from a
+  closed row can only reveal — never cancel — so the destructive action always
+  takes two deliberate moves, and the tray is
   equally reachable from the row's **Actions** button so VoiceOver and hardware
   keyboards never depend on the gesture. The horizontal pan is scoped to the
   row (`touch-action: pan-y`), leaving the list scroll, the Library grid's

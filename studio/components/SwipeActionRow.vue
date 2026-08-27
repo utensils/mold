@@ -2,10 +2,11 @@
 /**
  * A list row with trailing swipe actions, the standard phone list pattern.
  *
- * Right-to-left reveals a tray of 44pt buttons; a full swipe past
- * `SWIPE_COMMIT_FRACTION` of the row commits the action that opted in. The
- * reveal is step one and the tap or the full swipe is step two, so no
- * destructive action ever happens in one gesture.
+ * Right-to-left reveals a tray of 44pt buttons; from a REVEALED tray, a full
+ * swipe past `SWIPE_COMMIT_FRACTION` of the row commits the action that opted
+ * in. The reveal is step one and the tap or the second full swipe is step two,
+ * so no destructive action ever happens in one gesture — a diagonal scroll
+ * across a running row can only open its tray.
  *
  * Every action is also reachable without the gesture: the trailing "Actions"
  * button opens the same tray from the keyboard and from VoiceOver, because a
@@ -14,7 +15,7 @@
  * file only binds it to pointer events. Nothing here is iOS-specific — the
  * Android shell renders the same component.
  */
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   beginSwipe,
   createSwipeState,
@@ -94,6 +95,27 @@ function onPointerUp(event: PointerEvent, cancelled = false): void {
 function close(): void {
   state.value = createSwipeState();
 }
+
+// The tray can gain or lose an action while open (Retry appears once a hold
+// is retryable); keep the revealed offset equal to the tray it now reveals.
+watch(trayWidth, (width) => {
+  if (open.value) state.value = { ...createSwipeState(), offset: -width };
+});
+
+// A pointer landing anywhere outside this row closes its tray, the standard
+// phone list behaviour, so at most one row is ever revealed at a time.
+function onDocumentPointerDown(event: PointerEvent): void {
+  if (!open.value || pointerId.value !== null) return;
+  const target = event.target;
+  if (target instanceof Node && root.value?.contains(target)) return;
+  close();
+}
+onMounted(() =>
+  document.addEventListener("pointerdown", onDocumentPointerDown),
+);
+onBeforeUnmount(() =>
+  document.removeEventListener("pointerdown", onDocumentPointerDown),
+);
 
 function act(id: string): void {
   close();

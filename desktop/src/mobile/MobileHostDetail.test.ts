@@ -586,7 +586,7 @@ describe("MobileHostDetail remote host data", () => {
     expect(row.find("[data-test='swipe-action-cancel']").exists()).toBe(true);
   });
 
-  it("commits the cancel on a full swipe without a second tap", async () => {
+  it("commits the cancel on a second full swipe from the revealed tray, never on one gesture", async () => {
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
     const view = await mountDetail();
@@ -595,27 +595,37 @@ describe("MobileHostDetail remote host data", () => {
       width: 390,
     } as DOMRect);
     const surface = row.get("div:last-child");
+    const fullSwipe = async () => {
+      await surface.trigger("pointerdown", {
+        pointerId: 1,
+        pointerType: "touch",
+        clientX: 380,
+        clientY: 0,
+      });
+      await surface.trigger("pointermove", {
+        pointerId: 1,
+        pointerType: "touch",
+        clientX: 60,
+        clientY: 0,
+      });
+      await surface.trigger("pointerup", {
+        pointerId: 1,
+        pointerType: "touch",
+        clientX: 60,
+        clientY: 0,
+      });
+      await flushPromises();
+    };
 
-    await surface.trigger("pointerdown", {
-      pointerId: 1,
-      pointerType: "touch",
-      clientX: 380,
-      clientY: 0,
-    });
-    await surface.trigger("pointermove", {
-      pointerId: 1,
-      pointerType: "touch",
-      clientX: 60,
-      clientY: 0,
-    });
-    await surface.trigger("pointerup", {
-      pointerId: 1,
-      pointerType: "touch",
-      clientX: 60,
-      clientY: 0,
-    });
-    await flushPromises();
+    // Step one: a full swipe from a closed row only reveals the tray.
+    await fullSwipe();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      `${studio.baseUrl}/api/queue/job-queued`,
+      expect.objectContaining({ method: "DELETE" }),
+    );
 
+    // Step two: the same gesture from the revealed tray commits.
+    await fullSwipe();
     expect(fetchMock).toHaveBeenCalledWith(
       `${studio.baseUrl}/api/queue/job-queued`,
       expect.objectContaining({ method: "DELETE" }),
