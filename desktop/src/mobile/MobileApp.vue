@@ -163,6 +163,7 @@ import {
   type FleetActiveWork,
 } from "@studio/api/activity";
 import {
+  findQueueEntryById,
   listQueue,
   mergeQueueEntries,
   queuePageRequestForCapacity,
@@ -2013,6 +2014,46 @@ function durableHeldIsRetrying(job: Job): boolean {
   return durableGenerationRetryAttempts.has(job.id);
 }
 
+/** Recovered prints whose `request` is still the byte-free presentation stub. */
+const presentationStubClientIds = new Set<number>();
+
+/**
+ * The host's own record of a recovered print: the queue row while it is in
+ * flight, the gallery row once it has published. `null` when the host cannot
+ * answer, in which case the stub stays and nothing is overwritten with it.
+ */
+async function hydrateRecoveredPrintMetadata(
+  job: Job,
+  recovery: MobileDurableGenerationRecovery,
+): Promise<OutputMetadata | null> {
+  const host = resolveMobileDurableHost(recovery, connectedHosts.value);
+  if (!host) return null;
+  const target = mobileHostTarget(host);
+  try {
+    const filename = job.result?.filename;
+    if (job.status === "complete" && filename) {
+      const rows = await apiJsonTo<GalleryImage[]>(
+        target,
+        `/api/gallery?filename=${encodeURIComponent(filename)}`,
+      );
+      const row = Array.isArray(rows) ? rows.find((entry) => entry.filename === filename) : null;
+      if (row?.metadata) {
+        if (job.result) job.result.metadata = row.metadata;
+        job.prompt = row.metadata.prompt ?? job.prompt;
+        return row.metadata;
+      }
+      return null;
+    }
+    if (!job.id) return null;
+    const entry = await findQueueEntryById(target, job.id);
+    const metadata = (entry?.metadata ?? null) as OutputMetadata | null;
+    if (metadata) job.prompt = metadata.prompt ?? job.prompt;
+    return metadata;
+  } catch {
+    return null;
+  }
+}
+
 function presentationRequest(
   presentation: MobileDurableGenerationPresentation,
   prompt = "Recovered print",
@@ -2092,6 +2133,10 @@ function syncDurableGenerationJobs(): void {
         const liveRequest = durableGenerationRequests.get(key);
         job = reactive(newJob(liveRequest ?? presentationRequest(presentation)));
         job.clientId = nextDurableGenerationClientId--;
+        // A print recovered after a relaunch carries only the byte-free
+        // presentation stub; its real settings are hydrated from the host
+        // the first time it is selected.
+        if (!liveRequest) presentationStubClientIds.add(job.clientId);
         job.batchId = job.clientId;
         job.hostId = recovery.tracker.hostId;
         job.hostLabel = host?.name ?? "Saved machine";
@@ -2332,7 +2377,18 @@ async function selectMobilePrint(job: Job): Promise<void> {
   }
   if (epoch !== mobilePrintSelectionEpoch) return;
   const request = job.request;
-  if (request) {
+  if (presentationStubClientIds.has(job.clientId) && durable) {
+    // Queue-selection reuse restores the print's COMPLETE saved metadata,
+    // never the recovery stub: ask the host for its queue row (in flight)
+    // or its gallery row (finished) and apply that through the same mapper
+    // Library ▸ Use as prompt uses.
+    const hydrated = await hydrateRecoveredPrintMetadata(job, durable.recovery);
+    if (epoch !== mobilePrintSelectionEpoch) return;
+    if (hydrated) {
+      presentationStubClientIds.delete(job.clientId);
+      applyMobileGalleryMetadata(form, hydrated, generationModels.value);
+    }
+  } else if (request) {
     if (request.source_image || request.edit_images?.length) {
       preserveRestoredSourceCanvas(request.edit_images?.[0] ?? request.source_image ?? "");
     }
