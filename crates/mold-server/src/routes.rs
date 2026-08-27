@@ -942,7 +942,7 @@ fn merge_request_warnings(
     admitted
 }
 
-async fn require_server_model_activation(
+pub(crate) async fn require_server_model_activation(
     state: &AppState,
     model_name: &str,
 ) -> Result<Option<String>, ApiError> {

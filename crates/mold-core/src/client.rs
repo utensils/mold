@@ -736,6 +736,18 @@ impl MoldClient {
                                 &self.base_url,
                             ));
                         }
+                        // Durable admission accepts before it resolves a
+                        // checkpoint, so "this model is not here" arrives as a
+                        // terminal frame where the attached path answered 404.
+                        // Re-typed here so `classify_generate_error` still
+                        // reaches `PullModelAndRetry` and `mold run` still
+                        // offers the pull.
+                        if error.code.as_deref().is_some_and(|code| {
+                            code == crate::types::SSE_ERROR_CODE_MODEL_NOT_FOUND
+                                || code == crate::types::SSE_ERROR_CODE_UNKNOWN_MODEL
+                        }) {
+                            return Err(MoldError::ModelNotFound(error.message).into());
+                        }
                         // A definitive server failure promises nothing.
                         anyhow::bail!("server error: {}", error.message);
                     }

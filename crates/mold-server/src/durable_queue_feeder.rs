@@ -281,6 +281,7 @@ async fn hold_claimed(
     ingress: Option<&crate::queue_media_ingress::QueueMediaIngress>,
     job_id: &str,
     reason: String,
+    code: Option<String>,
     retryable: bool,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> HoldClaimOutcome {
@@ -297,7 +298,7 @@ async fn hold_claimed(
         Ok(crate::queue_journal::RetainOutcome::Released)
         | Ok(crate::queue_journal::RetainOutcome::Stale) => {
             if let Some(ingress) = ingress {
-                ingress.fail_claimed(job_id, message);
+                ingress.fail_claimed_with_code(job_id, message, code);
             }
             HoldClaimOutcome::Held
         }
@@ -776,9 +777,16 @@ async fn feed_available(
                 Ok(Ok(output)) => completed_output = output,
                 Ok(Err(error)) if error.is_invalid_authority() => {
                     let reason = format!("durable publication authority is invalid: {error}");
-                    let held =
-                        hold_claimed(ticket, ingress.as_deref(), &row.id, reason, false, shutdown)
-                            .await;
+                    let held = hold_claimed(
+                        ticket,
+                        ingress.as_deref(),
+                        &row.id,
+                        reason,
+                        None,
+                        false,
+                        shutdown,
+                    )
+                    .await;
                     drop(reservation);
                     if held == HoldClaimOutcome::Retained {
                         report.stop = FeederStop::RecoverableFailure;
@@ -807,9 +815,16 @@ async fn feed_available(
         if completed_output.is_none() {
             if let Some(error) = db_invalid_authority {
                 let reason = format!("durable publication metadata is invalid: {error}");
-                let held =
-                    hold_claimed(ticket, ingress.as_deref(), &row.id, reason, false, shutdown)
-                        .await;
+                let held = hold_claimed(
+                    ticket,
+                    ingress.as_deref(),
+                    &row.id,
+                    reason,
+                    None,
+                    false,
+                    shutdown,
+                )
+                .await;
                 drop(reservation);
                 if held == HoldClaimOutcome::Retained {
                     report.stop = FeederStop::RecoverableFailure;
@@ -851,6 +866,7 @@ async fn feed_available(
                             ingress.as_deref(),
                             &row.id,
                             "the gallery directory could not be reconciled".into(),
+                            None,
                             false,
                             shutdown,
                         )
@@ -880,6 +896,7 @@ async fn feed_available(
                             ingress.as_deref(),
                             &row.id,
                             "the gallery directory this job targets cannot be created".into(),
+                            None,
                             false,
                             shutdown,
                         )
@@ -900,6 +917,7 @@ async fn feed_available(
                         ingress.as_deref(),
                         &row.id,
                         "server gallery output is disabled".into(),
+                        None,
                         false,
                         shutdown,
                     )
@@ -923,6 +941,7 @@ async fn feed_available(
                     ingress.as_deref(),
                     &row.id,
                     "the recorded request could not be deserialized".into(),
+                    None,
                     false,
                     shutdown,
                 )
@@ -971,9 +990,16 @@ async fn feed_available(
                 Ok(deferred) => Some(deferred),
                 Err(error) if projection_failure_holds(&error) => {
                     let reason = format!("durable media projection is invalid: {error}");
-                    let held =
-                        hold_claimed(ticket, ingress.as_deref(), &row.id, reason, false, shutdown)
-                            .await;
+                    let held = hold_claimed(
+                        ticket,
+                        ingress.as_deref(),
+                        &row.id,
+                        reason,
+                        None,
+                        false,
+                        shutdown,
+                    )
+                    .await;
                     drop(reservation);
                     if held == HoldClaimOutcome::Retained {
                         report.stop = FeederStop::RecoverableFailure;
@@ -1015,9 +1041,16 @@ async fn feed_available(
                     message: reason,
                 })) => {
                     let logged_reason = reason.clone();
-                    let held =
-                        hold_claimed(ticket, ingress.as_deref(), &row.id, reason, false, shutdown)
-                            .await;
+                    let held = hold_claimed(
+                        ticket,
+                        ingress.as_deref(),
+                        &row.id,
+                        reason,
+                        None,
+                        false,
+                        shutdown,
+                    )
+                    .await;
                     drop(reservation);
                     if held == HoldClaimOutcome::Retained {
                         report.stop = FeederStop::RecoverableFailure;
@@ -1033,9 +1066,16 @@ async fn feed_available(
                     message: reason,
                 })) => {
                     let logged_reason = reason.clone();
-                    let held =
-                        hold_claimed(ticket, ingress.as_deref(), &row.id, reason, true, shutdown)
-                            .await;
+                    let held = hold_claimed(
+                        ticket,
+                        ingress.as_deref(),
+                        &row.id,
+                        reason,
+                        None,
+                        true,
+                        shutdown,
+                    )
+                    .await;
                     drop(reservation);
                     if held == HoldClaimOutcome::Retained {
                         report.stop = FeederStop::RecoverableFailure;
@@ -1090,6 +1130,7 @@ async fn feed_available(
                                 ingress.as_deref(),
                                 &row.id,
                                 reason,
+                                None,
                                 false,
                                 shutdown,
                             )
@@ -1156,6 +1197,7 @@ async fn feed_available(
                     ingress.as_deref(),
                     &row.id,
                     reason,
+                    Some(error.code.clone()),
                     retryable,
                     shutdown,
                 )
@@ -1820,6 +1862,7 @@ mod tests {
                 Some(&ingress),
                 &ids[0],
                 "dependency unavailable".into(),
+                None,
                 true,
                 &shutdown,
             )
@@ -1856,6 +1899,7 @@ mod tests {
                 Some(&ingress),
                 &ids[1],
                 "dependency unavailable".into(),
+                None,
                 true,
                 &shutdown,
             )

@@ -411,6 +411,40 @@ impl DurableMediaAdmission {
                 error.error = format!("requests[{}]: {}", offset + 1, error.error);
                 error
             })?;
+            // Model activation is asked BEFORE the row is durably accepted,
+            // because its answers are HTTP contracts a client acts on rather
+            // than transient conditions worth replaying: `451` for a
+            // compliance-gated family, `501 MINIMAX_H3_RUNTIME_UNAVAILABLE`
+            // for a row this build can download but not run, `400` for a model
+            // nobody has. Deferring them to preparation would turn a
+            // documented refusal into an accepted job that quietly holds.
+            // Config-only work, exactly like the LTX-2 control contracts
+            // resolved above it. A private-H3 ingress carries its own
+            // authority and is deliberately skipped, mirroring
+            // `prepare_generation`.
+            //
+            // Asked BEFORE field validation, because activation is a property
+            // of the MODEL and does not depend on the request's shape: telling
+            // a caller its `strength` is wrong for a checkpoint this build
+            // cannot run at all answers the wrong question.
+            if authority.is_none() {
+                let family = crate::routes::require_server_model_activation(state, &request.model)
+                    .await
+                    .map_err(|mut error| {
+                        error.error = format!("requests[{}]: {}", offset + 1, error.error);
+                        error
+                    })?;
+                crate::routes::require_server_generation_request_activation(
+                    state,
+                    &request,
+                    family.as_deref(),
+                )
+                .await
+                .map_err(|mut error| {
+                    error.error = format!("requests[{}]: {}", offset + 1, error.error);
+                    error
+                })?;
+            }
             let validation = if authority.is_some() {
                 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 {

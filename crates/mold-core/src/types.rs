@@ -4408,6 +4408,15 @@ pub struct SseErrorEvent {
 
 /// `SseErrorEvent.code` for a job the host retained across a restart.
 pub const SSE_ERROR_CODE_SERVER_RESTARTING: &str = "server_restarting";
+/// The host admitted the job and then could not resolve its model.
+///
+/// Durable admission accepts before it resolves a checkpoint, so "this model
+/// is not here" arrives as a terminal frame rather than the `404` the attached
+/// path used to answer with. The code is carried so a client's
+/// missing-model classifier still fires and auto-pull still works.
+pub const SSE_ERROR_CODE_MODEL_NOT_FOUND: &str = "MODEL_NOT_FOUND";
+/// As [`SSE_ERROR_CODE_MODEL_NOT_FOUND`], for a model no manifest knows.
+pub const SSE_ERROR_CODE_UNKNOWN_MODEL: &str = "UNKNOWN_MODEL";
 /// A durable direct observer disconnected after admission. The job remains
 /// authoritative in the queue and clients reconcile it by the queued ID.
 pub const SSE_ERROR_CODE_DURABLE_OBSERVER_DETACHED: &str = "durable_observer_detached";
@@ -4421,6 +4430,16 @@ impl SseErrorEvent {
             message: message.into(),
             retained: false,
             code: None,
+        }
+    }
+
+    /// An ordinary failure that carries the server's own error code, so a
+    /// client can branch on it exactly as it branches on an HTTP body's.
+    pub fn failed_with_code(message: impl Into<String>, code: Option<String>) -> Self {
+        Self {
+            message: message.into(),
+            retained: false,
+            code,
         }
     }
 

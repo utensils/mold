@@ -190,6 +190,19 @@ impl QueueMediaIngress {
     /// durable row. SQLite remains authoritative and the row stays visible;
     /// this only prevents the HTTP observer from hanging or seeing silent EOF.
     pub(crate) fn fail_claimed(&self, job_id: &str, message: String) {
+        self.fail_claimed_with_code(job_id, message, None);
+    }
+
+    /// As [`Self::fail_claimed`], carrying the refusal's own code to the SSE
+    /// observer. A durable admission accepts before it resolves a model, so
+    /// `MODEL_NOT_FOUND` reaches an attached client as a coded terminal frame
+    /// instead of the HTTP status the attached path used to answer with.
+    pub(crate) fn fail_claimed_with_code(
+        &self,
+        job_id: &str,
+        message: String,
+        code: Option<String>,
+    ) {
         let Some(claim) = self.take_claimed(job_id) else {
             return;
         };
@@ -204,7 +217,9 @@ impl QueueMediaIngress {
             }
             ObserverMode::Sse(_) => {
                 let (send, receive) = tokio::sync::mpsc::unbounded_channel();
-                let _ = send.send(SseMessage::Error(mold_core::SseErrorEvent::failed(message)));
+                let _ = send.send(SseMessage::Error(
+                    mold_core::SseErrorEvent::failed_with_code(message, code),
+                ));
                 claim.deliver(AttachedObserver::Sse { messages: receive });
             }
         }

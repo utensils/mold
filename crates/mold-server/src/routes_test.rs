@@ -373,11 +373,56 @@ mod tests {
     }
 
     /// Create an app with a running queue worker (needed for generate endpoints).
-    fn app_with(engine: MockEngine) -> axum::Router {
-        let (state, rx) = AppState::with_engine_and_queue(engine);
-        let worker_state = state.clone();
-        tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
-        create_router(state)
+    /// A DURABLE-ready host, which is the only kind that generates.
+    ///
+    /// The gallery lands in the returned `TempDir`, which the caller must keep
+    /// alive for the life of the state — dropping it removes the output
+    /// directory and the queue-owner claim underneath a running feeder.
+    ///
+    /// Every generation fixture in this module goes through here, because
+    /// there is no non-durable path left to submit on: `/api/generate`,
+    /// `/api/generate/stream`, and `/api/generation-batches` all admit through
+    /// `admit_batch`, and a host missing any of the four readiness conjuncts
+    /// answers `503 DURABLE_ADMISSION_UNAVAILABLE` before it reads the request.
+    fn durable_test_state(
+        engine: MockEngine,
+    ) -> (
+        AppState,
+        tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
+        tempfile::TempDir,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, rx) = durable_state_with_engine(db, root.path(), engine);
+        install_authoritative_v2(&mut state);
+        (state, rx, root)
+    }
+
+    /// Run the two tasks a durable admission needs to reach a worker: the
+    /// feeder that hydrates the SQLite row into the runtime queue, and the
+    /// queue worker itself. The direct routes block on the feeder claiming the
+    /// row, so a generation test without a feeder hangs rather than fails.
+    fn spawn_durable_runtime(
+        state: &AppState,
+        rx: tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
+    ) {
+        spawn_durable_feeder(state);
+        tokio::spawn(crate::queue::run_queue_worker(rx, state.clone()));
+    }
+
+    /// The feeder alone, for a test that owns its own worker — or that wants
+    /// the job to sit in the runtime queue rather than run.
+    fn spawn_durable_feeder(state: &AppState) {
+        tokio::spawn(crate::durable_queue_feeder::spawn(
+            state.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        ));
+    }
+
+    fn app_with(engine: MockEngine) -> (axum::Router, tempfile::TempDir) {
+        let (state, rx, root) = durable_test_state(engine);
+        spawn_durable_runtime(&state, rx);
+        (create_router(state), root)
     }
 
     #[tokio::test]
@@ -927,8 +972,11 @@ mod tests {
         state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(scheduled_tx, mode);
     }
 
-    fn app_with_worker_pool(engine: MockEngine, ordinals: &[usize]) -> axum::Router {
-        let mut state = AppState::with_engine(engine);
+    fn app_with_worker_pool(
+        engine: MockEngine,
+        ordinals: &[usize],
+    ) -> (axum::Router, tempfile::TempDir) {
+        let (mut state, _rx, root) = durable_test_state(engine);
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
             workers: ordinals
                 .iter()
@@ -938,7 +986,7 @@ mod tests {
                 .into(),
         });
         install_worker_registry(&mut state);
-        create_router(state)
+        (create_router(state), root)
     }
 
     fn generate_body(prompt: &str, width: u32, height: u32) -> String {
@@ -1135,7 +1183,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_returns_200() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
@@ -1148,7 +1196,7 @@ mod tests {
     /// `MOLD_DB_DISABLE` host as degraded would make the field useless.
     #[tokio::test]
     async fn health_reports_ok_when_no_durable_queue_owner_exists() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
@@ -1171,7 +1219,8 @@ mod tests {
         tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
     ) {
         let db = std::sync::Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let (mut state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let (mut state, rx, _gallery_root) = durable_test_state(MockEngine::ready());
+        spawn_durable_feeder(&state);
         state.output_disabled_override = false;
         state
             .config
@@ -1592,7 +1641,9 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_built_in_control_pairing_is_rejected_before_media_or_queue_work() {
-        let app = app_empty();
+        // A validation refusal needs a host that generates: on one that does
+        // not, every generation request is 503 before its shape is read.
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let response = app
             .oneshot(
                 Request::post("/api/generate")
@@ -1626,7 +1677,9 @@ mod tests {
 
     #[tokio::test]
     async fn guidance_overrides_are_rejected_for_non_ltx2_models() {
-        let app = app_empty();
+        // A validation refusal needs a host that generates: on one that does
+        // not, every generation request is 503 before its shape is read.
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let response = app
             .oneshot(
                 Request::post("/api/generate")
@@ -1656,7 +1709,9 @@ mod tests {
 
     #[tokio::test]
     async fn guidance_overrides_out_of_range_are_rejected_before_queue_work() {
-        let app = app_empty();
+        // A validation refusal needs a host that generates: on one that does
+        // not, every generation request is 503 before its shape is read.
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let response = app
             .oneshot(
                 Request::post("/api/generate")
@@ -1689,7 +1744,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_returns_json() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
             .await
@@ -4848,9 +4903,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
         assert!(body.get("durable_media").is_none());
-        assert_eq!(body["queue"]["admission_protocol_version"], 2);
-        assert_eq!(body["queue"]["heterogeneous_batch"], true);
-        assert_eq!(body["queue"]["durable_batch_outcomes"], true);
+        assert_eq!(body["queue"]["heterogeneous_batch_max_outputs"], 64);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4999,7 +5052,7 @@ mod tests {
 
     #[tokio::test]
     async fn raw_batch_never_enters_legacy_single_result_worker() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = serde_json::json!({
             "prompt": "two cats",
             "model": "mock-model",
@@ -6234,8 +6287,7 @@ mod tests {
                 .unwrap();
             assert_eq!(capabilities.status(), StatusCode::OK);
             let capabilities = json_body(capabilities).await;
-            assert_eq!(capabilities["queue"]["heterogeneous_batch"], false);
-            assert!(capabilities["queue"]["admission_protocol_version"].is_null());
+            assert!(capabilities["queue"]["heterogeneous_batch_max_outputs"].is_null());
             let rejected = app
                 .oneshot(json_request("POST", "/api/generation-batches", body))
                 .await
@@ -6308,8 +6360,7 @@ mod tests {
             .await
             .unwrap();
         let capabilities = json_body(capabilities).await;
-        assert_eq!(capabilities["queue"]["heterogeneous_batch"], false);
-        assert!(capabilities["queue"]["admission_protocol_version"].is_null());
+        assert!(capabilities["queue"]["heterogeneous_batch_max_outputs"].is_null());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6879,32 +6930,6 @@ mod tests {
             serde_json::json!(base64::engine::general_purpose::STANDARD.encode(minimal_png()));
         request["source_image_name"] = serde_json::json!("direct-source.png");
         request.to_string()
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn durable_direct_header_is_validated_before_any_admission() {
-        let root = tempfile::tempdir().unwrap();
-        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let (mut state, _rx) = durable_state(db, root.path());
-        install_authoritative_v2(&mut state);
-        let journal = state.queue_journal.clone();
-        let app = app_with_state(state);
-
-        for path in ["/api/generate", "/api/generate/stream"] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::post(path)
-                        .header("content-type", "application/json")
-                        .header("x-mold-operation-id", "not-a-uuid")
-                        .body(Body::from(durable_direct_media_body("invalid header")))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        }
-        assert!(journal.list_all().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -7593,8 +7618,7 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(capabilities["queue"]["heterogeneous_batch"], true);
-        assert_eq!(capabilities["queue"]["durable_batch_outcomes"], true);
+        assert_eq!(capabilities["queue"]["heterogeneous_batch_max_outputs"], 64);
 
         let client_batch_id = uuid::Uuid::new_v4().to_string();
         let requests = ["complete", "failed"]
@@ -8984,7 +9008,10 @@ mod tests {
     #[tokio::test]
     async fn delete_queue_emits_sse_error_and_closes_the_stream() {
         // No queue worker — the streaming job stays queued until cancelled.
-        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        // The feeder still runs: without it the durable row never reaches the
+        // runtime queue and the attached observer never resolves at all.
+        let (state, _rx, _gallery_root) = durable_test_state(MockEngine::ready());
+        spawn_durable_feeder(&state);
         let app = app_with_state(state.clone());
 
         let resp = app
@@ -9253,14 +9280,10 @@ mod tests {
     /// Engine+queue state (no worker) with an in-memory metadata DB — the
     /// setup for asserting that accepting a generation records history. The
     /// queue receiver is returned so the caller keeps the channel open.
-    fn generating_app_with_history_db() -> (
-        axum::Router,
-        AppState,
-        tokio::sync::mpsc::Receiver<crate::state::GenerationJob>,
-    ) {
-        let (mut state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
-        state.metadata_db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        (app_with_state(state.clone()), state, rx)
+    fn generating_app_with_history_db() -> (axum::Router, AppState, tempfile::TempDir) {
+        let (state, rx, root) = durable_test_state(MockEngine::ready());
+        spawn_durable_runtime(&state, rx);
+        (app_with_state(state.clone()), state, root)
     }
 
     async fn history_prompts(app: &axum::Router) -> Vec<String> {
@@ -9280,7 +9303,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_stream_records_prompt_history_on_accept() {
-        let (app, _state, _rx) = generating_app_with_history_db();
+        let (app, _state, _gallery_root) = generating_app_with_history_db();
 
         let resp = app
             .clone()
@@ -9317,7 +9340,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_stream_dedupes_consecutive_identical_prompts() {
-        let (app, _state, _rx) = generating_app_with_history_db();
+        let (app, _state, _gallery_root) = generating_app_with_history_db();
 
         for _ in 0..3 {
             let resp = app
@@ -9355,7 +9378,7 @@ mod tests {
     async fn blocking_generate_records_prompt_history_on_accept() {
         // No queue worker: submit, verify the history row exists while the
         // job is still queued, then cancel to resolve the blocked request.
-        let (app, state, _rx) = generating_app_with_history_db();
+        let (app, state, _gallery_root) = generating_app_with_history_db();
 
         let gen_app = app.clone();
         let gen_task = tokio::spawn(async move {
@@ -10019,7 +10042,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn status_does_not_block_during_generation() {
         let blocker = Arc::new(GenerateBlocker::default());
-        let app = app_with(MockEngine::blocking_generate(blocker.clone()));
+        let (app, _gallery_root) = app_with(MockEngine::blocking_generate(blocker.clone()));
 
         let generate_task = tokio::spawn({
             let app = app.clone();
@@ -10075,7 +10098,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_models_returns_json_array() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
             .await
@@ -10085,7 +10108,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_models_uses_manifest_defaults_for_unpulled() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
             .await
@@ -10128,7 +10151,7 @@ mod tests {
         // with the `h3` feature runs anything at all, Ref2VA runs on no
         // released build, and the official BF16 references and pruned NVFP4
         // transformers have no engine arm anywhere.
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
             .await
@@ -10249,7 +10272,7 @@ mod tests {
     /// below is.
     #[tokio::test]
     async fn every_unrunnable_h3_row_is_refused_at_generation_with_its_own_reason() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .clone()
             .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
@@ -10280,7 +10303,11 @@ mod tests {
                 "batch_size": 1,
                 "frames": mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
                 "fps": mold_core::minimax_h3::FIXED_FPS,
-                "output_format": "mp4"
+                "output_format": "mp4",
+                // Durable admission validates request fields before it asks
+                // the runtime-availability question, so the probe must be a
+                // request the family would otherwise accept.
+                "strength": 1.0
             })
             .to_string();
             let submit = || {
@@ -10361,7 +10388,7 @@ mod tests {
         use mold_core::minimax_h3::{
             FL2VA_COMFY_NVFP4, FL2VA_OFFICIAL, REF2VA_COMFY_NVFP4, REF2VA_OFFICIAL,
         };
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         for name in [
             FL2VA_OFFICIAL,
             REF2VA_OFFICIAL,
@@ -10413,7 +10440,7 @@ mod tests {
     /// Sequence picker even though the server chains them.
     #[tokio::test]
     async fn list_models_advertise_per_model_sequence_support() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(Request::get("/api/models").body(Body::empty()).unwrap())
             .await
@@ -10731,7 +10758,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn list_models_does_not_block_during_generation() {
         let blocker = Arc::new(GenerateBlocker::default());
-        let app = app_with(MockEngine::blocking_generate(blocker.clone()));
+        let (app, _gallery_root) = app_with(MockEngine::blocking_generate(blocker.clone()));
 
         let generate_task = tokio::spawn({
             let app = app.clone();
@@ -10774,7 +10801,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_empty_prompt_returns_422() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = generate_body("", 768, 768);
         let resp = app
             .oneshot(
@@ -10793,7 +10820,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_stream_qwen_edit_without_image_returns_actionable_422() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = serde_json::json!({
             "prompt": "make the coat blue",
             "model": "qwen-image-edit:q4",
@@ -10818,13 +10845,13 @@ mod tests {
         assert_eq!(body["code"], "VALIDATION_ERROR");
         assert_eq!(
             body["error"],
-            "Qwen Image Edit needs at least one image. Add a Target image and try again."
+            "requests[1]: Qwen Image Edit needs at least one image. Add a Target image and try again."
         );
     }
 
     #[tokio::test]
     async fn generate_zero_width_returns_422() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = generate_body("a cat", 0, 768);
         let resp = app
             .oneshot(
@@ -10842,7 +10869,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_non_multiple_of_16_returns_422() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = generate_body("a cat", 769, 768);
         let resp = app
             .oneshot(
@@ -10860,7 +10887,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_oversized_returns_422() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         // 1408x1408 = ~1.98MP > 1.8MP limit
         let body = generate_body("a cat", 1408, 1408);
         let resp = app
@@ -10879,7 +10906,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_zero_steps_returns_422() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = r#"{"prompt":"a cat","model":"mock-model","width":768,"height":768,"steps":0,"batch_size":1,"output_format":"png"}"#;
         let resp = app
             .oneshot(
@@ -10897,7 +10924,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_rejects_client_supplied_hdr_exr_directory() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = serde_json::json!({
             "prompt": "an HDR sunset",
             "model": "mock-model",
@@ -10918,15 +10945,12 @@ mod tests {
             .await
             .unwrap();
 
+        // The durable protocol cannot persist an HDR output directory, so the
+        // refusal is its own typed code rather than a generic validation one.
+        // Either way `hdr_exr_dir` never crosses the request boundary.
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = json_body(resp).await;
-        assert_eq!(body["code"], "VALIDATION_ERROR");
-        assert!(
-            body["error"]
-                .as_str()
-                .is_some_and(|error| error.contains("hdr_exr_dir") && error.contains("--local")),
-            "got: {body}"
-        );
+        assert_eq!(body["code"], "DURABLE_MEDIA_HDR_UNSUPPORTED");
     }
 
     #[tokio::test]
@@ -11016,7 +11040,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn generate_valid_request_returns_image_bytes() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = generate_body("a glowing robot", 768, 768);
         let resp = app
             .oneshot(
@@ -11044,8 +11068,8 @@ mod tests {
     // ── /api/generate — engine error ─────────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn generate_engine_error_returns_500() {
-        let app = app_with(MockEngine::failing());
+    async fn generate_engine_error_settles_as_a_held_child() {
+        let (app, _gallery_root) = app_with(MockEngine::failing());
         let body = generate_body("a cat", 768, 768);
         let resp = app
             .oneshot(
@@ -11056,18 +11080,28 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        // An ACCEPTED durable job that then fails is reconciliation, not a
+        // 500: the row is authoritative, the client is an observer, and the
+        // failure is reported through the batch status it can re-read.
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
         let body = json_body(resp).await;
-        assert_eq!(body["code"], "INFERENCE_ERROR");
-        assert!(body["error"]
-            .as_str()
-            .unwrap()
-            .contains("mock engine error"));
+        let child = &body["children"][0];
+        // A render that fails leaves the durable row HELD and retryable — the
+        // print is not lost, it is parked with its reason — and that reason is
+        // the engine's own, carried to the client in the reconciliation body.
+        assert_eq!(child["state"], "held");
+        assert!(
+            child["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("mock engine error"),
+            "{body}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn generate_empty_images_returns_500() {
-        let app = app_with(MockEngine::empty_images());
+    async fn generate_empty_images_settles_as_a_held_child() {
+        let (app, _gallery_root) = app_with(MockEngine::empty_images());
         let body = generate_body("a cat", 768, 768);
         let resp = app
             .oneshot(
@@ -11078,60 +11112,86 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
         let body = json_body(resp).await;
-        assert_eq!(body["code"], "INFERENCE_ERROR");
-        assert!(body["error"]
-            .as_str()
-            .unwrap()
-            .contains("returned no images"));
+        let child = &body["children"][0];
+        assert_eq!(child["state"], "held");
+        assert!(
+            child["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("returned no images"),
+            "{body}"
+        );
     }
 
     // ── /api/generate — unknown model ────────────────────────────────────────
 
-    #[tokio::test]
-    async fn generate_unknown_model_returns_400() {
-        let app = app_empty();
+    /// The raw route accepts durably before it resolves a checkpoint, so an
+    /// unknown model settles as a held child reported through the
+    /// reconciliation body rather than as the `400` the attached path answered
+    /// with. The streaming facade keeps a coded frame — see
+    /// `stream_unknown_model_reports_its_code_on_the_error_frame`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn generate_unknown_model_settles_as_a_held_child() {
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = r#"{"prompt":"a cat","model":"nonexistent-model-xyz","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
-        let resp = app
-            .oneshot(
+        let resp = tokio::time::timeout(
+            Duration::from_secs(10),
+            app.oneshot(
                 Request::post("/api/generate")
                     .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            ),
+        )
+        .await
+        .expect("an unresolvable model must settle the request")
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
         let body = json_body(resp).await;
-        assert_eq!(body["code"], "UNKNOWN_MODEL");
+        let child = &body["children"][0];
+        assert_eq!(child["state"], "held");
+        assert_eq!(child["retryable"], true);
+        assert!(
+            child["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("nonexistent-model-xyz"),
+            "{body}"
+        );
     }
 
     // ── /api/generate — known but not downloaded model returns 404 ───────────
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)]
-    async fn generate_known_model_not_downloaded_returns_404() {
+    async fn generate_known_model_not_downloaded_settles_as_a_held_child() {
         let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let models_dir = test_models_dir("generate-not-downloaded");
         std::fs::create_dir_all(&models_dir).unwrap();
         std::env::set_var("MOLD_MODELS_DIR", &models_dir);
 
-        let app = app_empty();
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         // flux-schnell:q8 is a known manifest model but not configured/downloaded
         let body = r#"{"prompt":"a cat","model":"flux-schnell:q8","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
-        let resp = app
-            .oneshot(
+        let resp = tokio::time::timeout(
+            Duration::from_secs(10),
+            app.oneshot(
                 Request::post("/api/generate")
                     .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+            ),
+        )
+        .await
+        .expect("an undownloaded model must settle the request")
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
         let body = json_body(resp).await;
-        assert_eq!(body["code"], "MODEL_NOT_FOUND");
+        let child = &body["children"][0];
+        assert_eq!(child["state"], "held");
+        assert_eq!(child["retryable"], true);
 
         std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(models_dir);
@@ -11164,7 +11224,7 @@ mod tests {
 
     #[tokio::test]
     async fn openapi_json_returns_valid_spec() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(
                 Request::get("/api/openapi.json")
@@ -11515,7 +11575,8 @@ mod tests {
 
     #[tokio::test]
     async fn config_only_h3_generation_is_rejected_before_queueing() {
-        let (state, mut queue_rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let (state, mut queue_rx, _gallery_root) = durable_test_state(MockEngine::ready());
+        spawn_durable_feeder(&state);
         state.config.write().await.models.insert(
             "private-video-model".to_string(),
             mold_core::ModelConfig {
@@ -11556,7 +11617,8 @@ mod tests {
 
     #[tokio::test]
     async fn configured_h3_artifact_path_is_rejected_before_queueing() {
-        let (state, mut queue_rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let (state, mut queue_rx, _gallery_root) = durable_test_state(MockEngine::ready());
+        spawn_durable_feeder(&state);
         state.config.write().await.models.insert(
             "renamed-private-model".to_string(),
             mold_core::ModelConfig {
@@ -11833,7 +11895,7 @@ mod tests {
 
     #[tokio::test]
     async fn docs_returns_html() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(Request::get("/api/docs").body(Body::empty()).unwrap())
             .await
@@ -11855,7 +11917,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stream_valid_request_returns_sse() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = generate_body("a robot", 768, 768);
         let resp = app
             .oneshot(
@@ -11908,7 +11970,8 @@ mod tests {
     /// backwards.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_first_queued_event_is_on_the_registry_scale() {
-        let (state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let (state, rx, _gallery_root) = durable_test_state(MockEngine::ready());
+        spawn_durable_feeder(&state);
         // One generation already occupies the machine, so the two scales
         // disagree: pending count 0, registry index 1.
         state
@@ -11949,7 +12012,7 @@ mod tests {
     /// stays silent rather than announcing a position to a user who is first.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_idle_host_still_seeds_position_zero() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let response = app
             .oneshot(
                 Request::post("/api/generate/stream")
@@ -11971,7 +12034,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_invalid_payload_header_returns_422() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(
                 Request::post("/api/generate/stream")
@@ -11995,7 +12058,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stream_metadata_only_returns_saved_filename_without_base64_media() {
         let output_dir = tempfile::tempdir().unwrap();
-        let (mut state, rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let (mut state, rx, _gallery_root) = durable_test_state(MockEngine::ready());
+        spawn_durable_feeder(&state);
         state.output_disabled_override = false;
         state.config.write().await.output_dir =
             Some(output_dir.path().to_string_lossy().into_owned());
@@ -12054,7 +12118,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_empty_prompt_returns_422() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = generate_body("", 768, 768);
         let resp = app
             .oneshot(
@@ -12070,9 +12134,13 @@ mod tests {
         assert_eq!(body["code"], "VALIDATION_ERROR");
     }
 
-    #[tokio::test]
-    async fn stream_unknown_model_returns_400() {
-        let app = app_empty();
+    /// Durable admission accepts before it resolves a checkpoint, so an
+    /// unknown model is a CODED terminal frame rather than the `400` the
+    /// attached path answered with. The code is what keeps every client's
+    /// missing-model classifier — and therefore auto-pull — working.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stream_unknown_model_reports_its_code_on_the_error_frame() {
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = r#"{"prompt":"a cat","model":"nonexistent-model-xyz","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
         let resp = app
             .oneshot(
@@ -12083,20 +12151,31 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let body = json_body(resp).await;
-        assert_eq!(body["code"], "UNKNOWN_MODEL");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(10),
+            axum::body::to_bytes(resp.into_body(), 1024 * 1024),
+        )
+        .await
+        .expect("an unresolvable model must close the stream")
+        .unwrap();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(text.contains("event: error"), "{text}");
+        assert!(
+            text.contains(mold_core::SSE_ERROR_CODE_UNKNOWN_MODEL),
+            "{text}"
+        );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)]
-    async fn stream_known_model_not_downloaded_returns_404() {
+    async fn stream_known_model_not_downloaded_reports_its_code_on_the_error_frame() {
         let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let models_dir = test_models_dir("stream-not-downloaded");
         std::fs::create_dir_all(&models_dir).unwrap();
         std::env::set_var("MOLD_MODELS_DIR", &models_dir);
 
-        let app = app_empty();
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = r#"{"prompt":"a cat","model":"flux-schnell:q8","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
         let resp = app
             .oneshot(
@@ -12107,9 +12186,20 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        let body = json_body(resp).await;
-        assert_eq!(body["code"], "MODEL_NOT_FOUND");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(10),
+            axum::body::to_bytes(resp.into_body(), 1024 * 1024),
+        )
+        .await
+        .expect("an undownloaded model must close the stream")
+        .unwrap();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(text.contains("event: error"), "{text}");
+        assert!(
+            text.contains(mold_core::SSE_ERROR_CODE_MODEL_NOT_FOUND),
+            "{text}"
+        );
 
         std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(models_dir);
@@ -12117,7 +12207,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stream_engine_error_returns_sse_error() {
-        let app = app_with(MockEngine::failing());
+        let (app, _gallery_root) = app_with(MockEngine::failing());
         let body = generate_body("a cat", 768, 768);
         let resp = app
             .oneshot(
@@ -12147,7 +12237,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stream_empty_images_returns_sse_error() {
-        let app = app_with(MockEngine::empty_images());
+        let (app, _gallery_root) = app_with(MockEngine::empty_images());
         let body = generate_body("a cat", 768, 768);
         let resp = app
             .oneshot(
@@ -12172,7 +12262,7 @@ mod tests {
     async fn reused_engine_clears_progress_callbacks_between_stream_and_generate() {
         let progress_set_count = Arc::new(AtomicUsize::new(0));
         let progress_clear_count = Arc::new(AtomicUsize::new(0));
-        let app = app_with(MockEngine::tracked_progress(
+        let (app, _gallery_root) = app_with(MockEngine::tracked_progress(
             progress_set_count.clone(),
             progress_clear_count.clone(),
         ));
@@ -12214,7 +12304,7 @@ mod tests {
 
     #[tokio::test]
     async fn unload_loaded_model_returns_200() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
         let resp = app
             .oneshot(
                 Request::delete("/api/models/unload")
@@ -12543,8 +12633,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_stream_requests_both_complete() {
         let blocker = Arc::new(GenerateBlocker::default());
-        let (state, rx) =
-            AppState::with_engine_and_queue(MockEngine::blocking_generate(blocker.clone()));
+        let (state, rx, _gallery_root) =
+            durable_test_state(MockEngine::blocking_generate(blocker.clone()));
+        spawn_durable_feeder(&state);
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
         let app = app_with_state(state);
@@ -12618,7 +12709,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn queued_stream_receives_position_event() {
         let model = "sd15:fp16";
-        let (state, rx) = AppState::with_engine_and_queue(MockEngine::ready_for_model(model));
+        let (state, rx, _gallery_root) = durable_test_state(MockEngine::ready_for_model(model));
+        spawn_durable_feeder(&state);
         let queue = state.queue.clone();
         let worker_state = state.clone();
         let app = app_with_state(state);
@@ -12709,7 +12801,7 @@ mod tests {
     /// serialized through the queue.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn non_streaming_generate_queues_correctly() {
-        let app = app_with(MockEngine::ready());
+        let (app, _gallery_root) = app_with(MockEngine::ready());
 
         // Submit two non-streaming requests concurrently
         let resp1 = {
@@ -15322,7 +15414,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_rejects_gpu_outside_worker_pool() {
-        let app = app_with_worker_pool(MockEngine::ready(), &[1]);
+        let (app, _gallery_root) = app_with_worker_pool(MockEngine::ready(), &[1]);
         let body = serde_json::json!({
             "prompt": "a cat",
             "model": "mock-model",
