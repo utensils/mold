@@ -202,17 +202,11 @@ pub async fn run_generation(
     };
     let base_seed = params.seed;
 
-    // Protocol-v2 admission is the common 1..N path. In particular, a pinned
-    // singleton must not pay the legacy placement-preview round trip before it
-    // can enter the durable queue. Capability failure falls through to the
-    // attached path below for mixed-version hosts.
-    // Batch N only, matching the CLI. A singleton keeps the attached SSE path,
-    // which is what feeds `SseProgressEvent::Preview` into the centered
-    // fixed-protocol preview sink CLAUDE.md protects by name — the canonical
-    // path carries no preview frames, only `Info` strings, so routing
-    // singletons through it left remote generation with no preview and no step
-    // progress. Durability is unaffected: `/api/generate` admits through
-    // `direct_durable_admission` on both paths.
+    // Batch N goes through `POST /api/generation-batches`, matching the CLI.
+    // A singleton keeps the `/api/generate/stream` facade, which is what feeds
+    // `SseProgressEvent::Preview` into the centered fixed-protocol preview sink
+    // CLAUDE.md protects by name — the batch path carries no preview frames,
+    // only `Info` strings. Both are the same durable admission underneath.
     if batch > 1 && params.inference_mode != InferenceMode::Local {
         let effective_url = params.host.clone().or_else(|| server_url.clone());
         if let Some(url) = effective_url {
@@ -231,7 +225,6 @@ pub async fn run_generation(
             .await
             {
                 CanonicalBatchResult::Done => return,
-                CanonicalBatchResult::Unsupported => {}
                 CanonicalBatchResult::Error(error) => {
                     let _ = tx.send(BackgroundEvent::Error(error));
                     return;
@@ -622,7 +615,6 @@ enum ServerResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CanonicalBatchResult {
     Done,
-    Unsupported,
     Error(String),
 }
 
@@ -778,15 +770,14 @@ async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> Canonical
         }
     };
 
-    let report = match mold_core::durable_generation::try_canonical_generation_observed(
+    let report = match mold_core::durable_generation::canonical_generation_observed(
         input.client,
         &requests,
         Some(&observer),
     )
     .await
     {
-        Ok(Some(report)) => report,
-        Ok(None) => return CanonicalBatchResult::Unsupported,
+        Ok(report) => report,
         Err(error) => return CanonicalBatchResult::Error(format!("{error:#}")),
     };
 
@@ -1167,25 +1158,13 @@ async fn prepare_local_licensed_dependencies(
     Ok(())
 }
 
-/// Single attempt to generate via server (SSE with blocking fallback).
+/// Single attempt to generate via the durable `/api/generate/stream` facade.
 async fn try_server_generate_once(
     client: &MoldClient,
     req: &GenerateRequest,
     progress_tx: mpsc::UnboundedSender<SseProgressEvent>,
 ) -> Result<GenerateResponse, anyhow::Error> {
-    match client.generate_stream(req, progress_tx).await {
-        Ok(Some(response)) => Ok(response),
-        Ok(None) if requires_secure_generation_stream(req) => {
-            anyhow::bail!(
-                "server lacks secure streaming generation required for one-use MiniMax H3 references; update the server"
-            )
-        }
-        Ok(None) => {
-            // Server doesn't support SSE — try blocking API
-            client.generate(req.clone()).await
-        }
-        Err(e) => Err(e),
-    }
+    client.generate_stream(req, progress_tx).await
 }
 
 async fn run_local_generation(
@@ -1641,9 +1620,6 @@ mod tests {
 
     fn canonical_batch_capabilities(limit: u32) -> ServerCapabilities {
         let mut capabilities = ServerCapabilities::default();
-        capabilities.queue.heterogeneous_batch = true;
-        capabilities.queue.durable_batch_outcomes = true;
-        capabilities.queue.admission_protocol_version = Some(2);
         capabilities.queue.heterogeneous_batch_max_outputs = Some(limit);
         capabilities.durable_media = Some(mold_core::DurableMediaCapabilities::v2(false));
         capabilities
@@ -1654,31 +1630,21 @@ mod tests {
         build_request(&GenerateParams::from_config(&config), "print", &None).unwrap()
     }
 
+    /// A host that advertises no batch limit advertises no generation at all,
+    /// and the refusal must say so rather than degrade to a second path.
     #[test]
-    fn canonical_batch_gate_requires_the_complete_versioned_contract() {
+    fn a_host_with_no_advertised_limit_refuses_generation_by_name() {
         let request = ordinary_request();
         let mut capabilities = canonical_batch_capabilities(17);
         assert_eq!(
             capabilities.canonical_generation_batch_limit(std::slice::from_ref(&request)),
-            Some(17)
+            Ok(17)
         );
 
-        capabilities.queue.admission_protocol_version = Some(1);
-        assert_eq!(
-            capabilities.canonical_generation_batch_limit(std::slice::from_ref(&request)),
-            None
-        );
-        capabilities.queue.admission_protocol_version = Some(3);
-        capabilities.queue.durable_batch_outcomes = false;
-        assert_eq!(
-            capabilities.canonical_generation_batch_limit(std::slice::from_ref(&request)),
-            None
-        );
-        capabilities.queue.durable_batch_outcomes = true;
         capabilities.queue.heterogeneous_batch_max_outputs = None;
         assert_eq!(
             capabilities.canonical_generation_batch_limit(&[request]),
-            None
+            Err(mold_core::CanonicalRefusal::GenerationUnavailable)
         );
     }
 
@@ -1694,7 +1660,7 @@ mod tests {
         assert_eq!(requests[0].seed, Some(42));
         assert_eq!(
             canonical_batch_capabilities(64).canonical_generation_batch_limit(&requests),
-            Some(64)
+            Ok(64)
         );
     }
 
@@ -1747,21 +1713,28 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    /// Every request trait the durable protocol cannot represent is refused
+    /// BY NAME. There is no attached path left to absorb them, so a caller
+    /// that is told "no" must be told which field caused it.
     #[test]
-    fn canonical_batch_gate_uses_media_capabilities_and_preserves_attached_fallbacks() {
+    fn an_unrepresentable_request_trait_is_refused_by_name() {
+        use mold_core::CanonicalRefusal::UnsupportedRequestTrait;
         let capabilities = canonical_batch_capabilities(64);
         let mut source = ordinary_request();
         source.source_image = Some(vec![1, 2, 3]);
         assert_eq!(
             capabilities.canonical_generation_batch_limit(std::slice::from_ref(&source)),
-            Some(64)
+            Ok(64)
         );
 
         let mut no_media = capabilities.clone();
         no_media.durable_media = None;
         assert_eq!(
             no_media.canonical_generation_batch_limit(&[source.clone()]),
-            None
+            Err(UnsupportedRequestTrait {
+                index: 1,
+                trait_name: "restart-safe request media"
+            })
         );
 
         source.lora = Some(LoraWeight {
@@ -1771,19 +1744,31 @@ mod tests {
         });
         assert_eq!(
             capabilities.canonical_generation_batch_limit(&[source]),
-            None
+            Err(UnsupportedRequestTrait {
+                index: 1,
+                trait_name: "a LoRA alongside conditioning media"
+            })
         );
 
         let mut references = ordinary_request();
         references.references = Some(Vec::new());
         assert_eq!(
             capabilities.canonical_generation_batch_limit(&[references]),
-            None
+            Err(UnsupportedRequestTrait {
+                index: 1,
+                trait_name: "durable ordered references"
+            })
         );
 
         let mut hdr = ordinary_request();
         hdr.hdr_exr_dir = Some("/trusted/output".into());
-        assert_eq!(capabilities.canonical_generation_batch_limit(&[hdr]), None);
+        assert_eq!(
+            capabilities.canonical_generation_batch_limit(&[hdr]),
+            Err(UnsupportedRequestTrait {
+                index: 1,
+                trait_name: "HDR EXR output"
+            })
+        );
     }
 
     #[test]

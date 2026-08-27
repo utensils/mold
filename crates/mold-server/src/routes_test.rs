@@ -5945,13 +5945,9 @@ mod tests {
         let mut request: GenerateRequest =
             serde_json::from_str(&generate_body("media-free admission", 64, 64)).unwrap();
 
-        assert!(
-            crate::routes::direct_durable_admission(&state, &mut request, true)
-                .await
-                .unwrap()
-                .is_some(),
-            "encrypted-media readiness must not disable media-free direct admission"
-        );
+        crate::routes::direct_durable_admission(&state, &mut request)
+            .await
+            .expect("encrypted-media readiness must not disable media-free direct admission");
 
         let journal = state.queue_journal.clone();
         let response = app_with_state(state)
@@ -6343,26 +6339,21 @@ mod tests {
         );
     }
 
+    /// A request trait the durable protocol cannot represent is refused by
+    /// name. There is no second pipeline to absorb it, so the refusal is the
+    /// whole answer and nothing is journalled.
     #[tokio::test(flavor = "current_thread")]
-    async fn unsupported_direct_traits_fallback_only_without_an_operation_id() {
+    async fn an_unrepresentable_direct_trait_is_refused_by_name() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let (mut state, _rx) = durable_state(db, root.path());
         install_authoritative_v2(&mut state);
         let mut request: GenerateRequest =
-            serde_json::from_str(&generate_body("attached fallback", 64, 64)).unwrap();
+            serde_json::from_str(&generate_body("ordered references", 64, 64)).unwrap();
         request.references = Some(Vec::new());
 
-        assert!(
-            crate::routes::direct_durable_admission(&state, &mut request, false)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        let error = match crate::routes::direct_durable_admission(&state, &mut request, true).await
-        {
-            Err(error) => error,
-            Ok(_) => panic!("an explicit durable operation must not downgrade"),
+        let Err(error) = crate::routes::direct_durable_admission(&state, &mut request).await else {
+            panic!("ordered references cannot be persisted durably");
         };
         assert_eq!(error.code, "DURABLE_MEDIA_REFERENCES_UNSUPPORTED");
         assert!(state.queue_journal.list_all().is_empty());
@@ -18298,19 +18289,13 @@ mod tests {
         serde_json::from_str(&generate_body("a cat", 64, 64)).unwrap()
     }
 
-    /// Durable DIRECT admission deliberately does not require an authoritative
-    /// scheduler, and this pins that as a contract rather than an oversight.
-    ///
-    /// The durable feeder is spawned on `start_generation_runner` alone and
-    /// runs in legacy and observe dispatch too, so a direct generation on such
-    /// a host is genuinely durable. Requiring V2 here would remove real
-    /// durability from every legacy and observe host in exchange for nothing a
-    /// client can observe — a headerless request receives the same attached
-    /// media bytes either way. The batch PROTOCOL is what needs V2, because
-    /// that is what `capabilities.queue.heterogeneous_batch` advertises, and
-    /// `a_non_authoritative_host_refuses_the_batch_protocol` covers that half.
+    /// ONE admission path. A host that cannot admit durably refuses
+    /// generation on every route rather than silently running a second,
+    /// non-durable pipeline. Scheduler V2 is a conjunct like any other: the
+    /// durable feeder's restart safety is only real when the authoritative
+    /// dispatcher owns the row.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_non_authoritative_host_still_admits_direct_generations_durably() {
+    async fn a_non_authoritative_host_refuses_every_generation_route() {
         for mode in [
             crate::dispatch_mode::DispatchMode::Legacy,
             crate::dispatch_mode::DispatchMode::Observe,
@@ -18321,68 +18306,68 @@ mod tests {
             install_dispatch_mode(&mut state, mode);
 
             let mut request = readiness_request();
-            let admission = crate::routes::direct_durable_admission(&state, &mut request, false)
-                .await
-                .expect("a non-authoritative host still admits durably");
-            assert!(
-                admission.is_some(),
-                "{mode:?}: durable direct admission does not depend on Scheduler V2"
+            let Err(refusal) = crate::routes::direct_durable_admission(&state, &mut request).await
+            else {
+                panic!("a non-authoritative host admits nothing");
+            };
+            assert_eq!(refusal.code, "DURABLE_ADMISSION_UNAVAILABLE", "{mode:?}");
+
+            let app = app_with_state(state);
+            let capabilities = json_body(
+                app.clone()
+                    .oneshot(empty_request("GET", "/api/capabilities"))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(
+                capabilities["queue"]["heterogeneous_batch_max_outputs"],
+                serde_json::Value::Null,
+                "{mode:?}: a refusing host advertises no batch limit"
             );
+
+            let single: serde_json::Value =
+                serde_json::from_str(&generate_body("a cat", 64, 64)).unwrap();
+            for (method, path, body) in [
+                ("POST", "/api/generate", single.clone()),
+                ("POST", "/api/generate/stream", single.clone()),
+                (
+                    "POST",
+                    "/api/generation-batches",
+                    serde_json::json!({
+                        "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                        "requests": [single.clone()],
+                    }),
+                ),
+            ] {
+                let refused = app
+                    .clone()
+                    .oneshot(json_request(method, path, body))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    refused.status(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "{mode:?} {path}"
+                );
+                assert_eq!(
+                    json_body(refused).await["code"],
+                    "DURABLE_ADMISSION_UNAVAILABLE",
+                    "{mode:?} {path}"
+                );
+            }
         }
     }
 
-    /// The batch protocol DOES require V2, and the capability says so, so the
-    /// route must agree with the capability.
+    /// One precedence, one code. The direct and batch routes used to keep
+    /// opposite conjunct orders and two refusal codes for the same host state;
+    /// a client cannot act differently on them, so they are one answer now.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_non_authoritative_host_refuses_the_batch_protocol() {
+    async fn one_refusal_precedence_serves_every_generation_route() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let (mut state, _rx) = durable_state(db, root.path());
-        install_dispatch_mode(&mut state, crate::dispatch_mode::DispatchMode::Legacy);
-        let app = app_with_state(state);
-
-        let capabilities = json_body(
-            app.clone()
-                .oneshot(empty_request("GET", "/api/capabilities"))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(capabilities["queue"]["heterogeneous_batch"], false);
-        assert!(capabilities["queue"]["admission_protocol_version"].is_null());
-
-        let refused = app
-            .oneshot(json_request(
-                "POST",
-                "/api/generation-batches",
-                serde_json::json!({
-                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
-                    "requests": [serde_json::from_str::<serde_json::Value>(
-                        &generate_body("a cat", 64, 64)
-                    ).unwrap()],
-                }),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            json_body(refused).await["code"],
-            "HETEROGENEOUS_BATCH_UNAVAILABLE"
-        );
-    }
-
-    /// The direct and batch routes keep OPPOSITE refusal precedence, and a host
-    /// failing more than one conjunct is where that becomes observable. Direct
-    /// has always answered `DURABLE_ADMISSION_UNAVAILABLE` for disabled gallery
-    /// output; batch has always answered `HETEROGENEOUS_BATCH_UNAVAILABLE`
-    /// because it tests scheduler/journal/admission first. Resolving both from
-    /// one value must not collapse them onto a single order.
-    #[tokio::test(flavor = "current_thread")]
-    async fn direct_and_batch_keep_their_own_refusal_precedence() {
-        let root = tempfile::tempdir().unwrap();
-        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        // Output disabled AND no admission service: both conjuncts unmet, so
-        // each route's own precedence decides which code it reports.
+        // Output disabled AND no admission service: two unmet conjuncts, so
+        // the shared precedence is what decides the reported code.
         let (mut state, _rx) = durable_state_with_admission_policy(
             db,
             root.path(),
@@ -18395,10 +18380,11 @@ mod tests {
         state.output_disabled_override = true;
 
         let mut request = readiness_request();
-        match crate::routes::direct_durable_admission(&state, &mut request, true).await {
-            Ok(_) => panic!("an explicit durable direct request must be refused"),
-            Err(refusal) => assert_eq!(refusal.code, "DURABLE_ADMISSION_UNAVAILABLE"),
-        }
+        let Err(refusal) = crate::routes::direct_durable_admission(&state, &mut request).await
+        else {
+            panic!("a durable direct request must be refused");
+        };
+        assert_eq!(refusal.code, "DURABLE_ADMISSION_UNAVAILABLE");
 
         let refused = app_with_state(state)
             .oneshot(json_request(
@@ -18416,19 +18402,17 @@ mod tests {
         assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             json_body(refused).await["code"],
-            "HETEROGENEOUS_BATCH_UNAVAILABLE"
+            "DURABLE_ADMISSION_UNAVAILABLE"
         );
     }
 
-    /// N1. A degraded encrypted-media store must route a media-carrying request
-    /// to the attached path, not refuse it. This gate ignored
-    /// `explicitly_requested` while the gate six lines below it consulted it, so
-    /// every conditioning field 503'd on a host whose clients were already
-    /// negotiating the attached path — behind a status both client classifiers
-    /// read as transient. The table is the point: the blast radius was every
-    /// conditioning field, not just `source_image`.
+    /// A degraded encrypted-media store refuses the request that needs it.
+    /// There is no attached path to fall back to, and rendering a conditioning
+    /// field the host cannot durably retain is exactly the silent
+    /// non-durability this rule exists to remove. The table is the point: it
+    /// is every conditioning field, not just `source_image`.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_degraded_media_store_falls_back_instead_of_refusing() {
+    async fn a_degraded_media_store_refuses_a_media_carrying_request() {
         const PIXEL: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
         for field in ["source_image", "id_image", "mask_image", "control_image"] {
             let root = tempfile::tempdir().unwrap();
@@ -18449,39 +18433,33 @@ mod tests {
             body[field] = serde_json::Value::String(PIXEL.to_string());
             let mut request: mold_core::GenerateRequest = serde_json::from_value(body).unwrap();
 
-            let admission = crate::routes::direct_durable_admission(&state, &mut request, false)
-                .await
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "{field}: a degraded media store must fall back, got {}",
-                        error.code
-                    )
-                });
-            assert!(
-                admission.is_none(),
-                "{field}: fallback means no durable admission"
-            );
+            let Err(refusal) = crate::routes::direct_durable_admission(&state, &mut request).await
+            else {
+                panic!("{field}: a degraded media store must refuse");
+            };
+            assert_eq!(refusal.code, "DURABLE_MEDIA_UNAVAILABLE", "{field}");
         }
     }
 
     /// The overreach tripwire. `v2_authoritative()` serves five distinct roles
-    /// and only the durability role belongs behind the readiness authority. The
-    /// can-this-host-execute sites are always `|| gpu_pool.worker_count() > 0`;
-    /// folding them into a durability gate takes legacy and observe hosts
-    /// offline, and this fails loudly if that happens.
+    /// and only the durability role belongs behind the readiness authority.
+    /// A plain text-to-image request on an authoritative host must still be
+    /// admitted with the media store degraded — the encrypted store gates
+    /// media, not generation.
     #[tokio::test(flavor = "current_thread")]
-    async fn legacy_dispatch_still_falls_back_rather_than_refusing() {
+    async fn a_degraded_media_store_still_admits_a_mediafree_request() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let (mut state, _rx) = durable_state(db, root.path());
-        install_dispatch_mode(&mut state, crate::dispatch_mode::DispatchMode::Legacy);
+        install_authoritative_v2(&mut state);
+        state.queue_journal.set_durable_media_ready(false);
 
         let mut request = readiness_request();
         assert!(
-            crate::routes::direct_durable_admission(&state, &mut request, false)
+            crate::routes::direct_durable_admission(&state, &mut request)
                 .await
-                .expect("legacy hosts still generate")
-                .is_some()
+                .is_ok(),
+            "a media-free request does not need the encrypted store"
         );
     }
 

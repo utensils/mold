@@ -71,11 +71,6 @@ pub enum CanonicalRetrySubmission {
 
 pub type CanonicalGenerationObserver<'a> = dyn Fn(CanonicalGenerationEvent) + Send + Sync + 'a;
 
-enum CanonicalAdmission {
-    Admitted(GenerationBatchStatus),
-    MissingEndpoint,
-}
-
 fn new_client_batch_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -83,10 +78,13 @@ fn new_client_batch_id() -> String {
 async fn admit_recovering_ambiguity(
     client: &MoldClient,
     request: &GenerationBatchAdmissionRequest,
-) -> Result<CanonicalAdmission> {
+) -> Result<GenerationBatchStatus> {
     match client.admit_generation_batch(request).await {
-        Ok(status) => Ok(CanonicalAdmission::Admitted(status)),
-        Err(error) if is_missing_endpoint_error(&error) => Ok(CanonicalAdmission::MissingEndpoint),
+        Ok(status) => Ok(status),
+        Err(error) if is_missing_endpoint_error(&error) => Err(error).context(
+            "this host does not serve POST /api/generation-batches, which is the only \
+             generation admission path",
+        ),
         Err(error) if is_transient_request_error(&error) => {
             const LOOKUP_ATTEMPTS: u32 = 5;
             let mut last_lookup_error = None;
@@ -96,7 +94,7 @@ async fn admit_recovering_ambiguity(
                     .generation_batch_by_client_id(&request.client_batch_id)
                     .await
                 {
-                    Ok(Some(status)) => return Ok(CanonicalAdmission::Admitted(status)),
+                    Ok(Some(status)) => return Ok(status),
                     Ok(None) => saw_missing = true,
                     Err(lookup) => last_lookup_error = Some(lookup),
                 }
@@ -490,31 +488,31 @@ fn validate_terminal_children(
     Ok(())
 }
 
-pub async fn try_canonical_generation(
+pub async fn canonical_generation(
     client: &MoldClient,
     requests: &[GenerateRequest],
-) -> Result<Option<CanonicalGenerationReport>> {
-    try_canonical_generation_observed(client, requests, None).await
+) -> Result<CanonicalGenerationReport> {
+    canonical_generation_observed(client, requests, None).await
 }
 
-/// Run the canonical protocol-v2 admission, chunking, ambiguity recovery and
-/// durable reconciliation state machine. `Ok(None)` means only that the host
-/// is explicitly old or the request is ineligible for canonical admission.
-pub async fn try_canonical_generation_observed(
+/// Run the canonical admission, chunking, ambiguity recovery and durable
+/// reconciliation state machine.
+///
+/// This is the only generation path. A host that does not serve it, or that
+/// cannot represent one of these requests, is an error naming what it lacks —
+/// never a silent downgrade to a second pipeline.
+pub async fn canonical_generation_observed(
     client: &MoldClient,
     requests: &[GenerateRequest],
     observer: Option<&CanonicalGenerationObserver<'_>>,
-) -> Result<Option<CanonicalGenerationReport>> {
-    let capabilities = match client.server_capabilities().await {
-        Ok(capabilities) => capabilities,
-        Err(error) if is_missing_endpoint_error(&error) => return Ok(None),
-        Err(error) => {
-            return Err(error).context("could not read generation admission capabilities")
-        }
-    };
-    let Some(limit) = capabilities.canonical_generation_batch_limit(requests) else {
-        return Ok(None);
-    };
+) -> Result<CanonicalGenerationReport> {
+    let capabilities = client
+        .server_capabilities()
+        .await
+        .context("could not read generation admission capabilities")?;
+    let limit = capabilities
+        .canonical_generation_batch_limit(requests)
+        .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
 
     let mut report = CanonicalGenerationReport::default();
     let mut admitted = Vec::new();
@@ -526,7 +524,7 @@ pub async fn try_canonical_generation_observed(
             requests: chunk.to_vec(),
         };
         match admit_recovering_ambiguity(client, &admission).await {
-            Ok(CanonicalAdmission::Admitted(status)) => {
+            Ok(status) => {
                 let authority =
                     match GenerationBatchAuthority::from_admission(&status, &client_batch_id) {
                         Ok(authority) => authority,
@@ -548,15 +546,6 @@ pub async fn try_canonical_generation_observed(
                     },
                 );
                 admitted.push((request_offset, admission.requests, status, authority));
-            }
-            Ok(CanonicalAdmission::MissingEndpoint) if admitted.is_empty() => return Ok(None),
-            Ok(CanonicalAdmission::MissingEndpoint) => {
-                let error = format!(
-                    "generation-batch endpoint disappeared after accepting client ids: {}",
-                    report.admitted_client_ids.join(", ")
-                );
-                push_orchestration_failure(&mut report, error);
-                break;
             }
             Err(error) => {
                 push_orchestration_failure(
@@ -610,7 +599,7 @@ pub async fn try_canonical_generation_observed(
             });
         }
     }
-    Ok(Some(report))
+    Ok(report)
 }
 
 /// Admit one caller-supplied idempotency chunk with the same ambiguity
@@ -619,12 +608,7 @@ pub async fn admit_canonical_batch(
     client: &MoldClient,
     request: &GenerationBatchAdmissionRequest,
 ) -> Result<GenerationBatchStatus> {
-    match admit_recovering_ambiguity(client, request).await? {
-        CanonicalAdmission::Admitted(status) => Ok(status),
-        CanonicalAdmission::MissingEndpoint => {
-            anyhow::bail!("generation-batch endpoint is unavailable")
-        }
-    }
+    admit_recovering_ambiguity(client, request).await
 }
 
 #[cfg(test)]
@@ -652,9 +636,6 @@ mod tests {
 
     async fn mount_capabilities(server: &MockServer, max_outputs: u32) {
         let mut capabilities = crate::ServerCapabilities::default();
-        capabilities.queue.heterogeneous_batch = true;
-        capabilities.queue.durable_batch_outcomes = true;
-        capabilities.queue.admission_protocol_version = Some(2);
         capabilities.queue.heterogeneous_batch_max_outputs = Some(max_outputs);
         Mock::given(method("GET"))
             .and(path("/api/capabilities"))
@@ -751,30 +732,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_admission_404_selects_legacy_without_idempotency_lookup() {
-        let server = MockServer::start().await;
-        mount_capabilities(&server, 64).await;
-        Mock::given(method("POST"))
-            .and(path("/api/generation-batches"))
-            .respond_with(ResponseTemplate::new(404))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let result = try_canonical_generation(&MoldClient::new(&server.uri()), &[request("one")])
-            .await
-            .unwrap();
-
-        assert!(result.is_none());
-        assert!(!server
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .any(|request| request.url.path().contains("/by-client/")));
-    }
-
-    #[tokio::test]
     async fn transient_capability_failure_fails_closed() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -784,7 +741,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let error = try_canonical_generation(&MoldClient::new(&server.uri()), &[request("one")])
+        let error = canonical_generation(&MoldClient::new(&server.uri()), &[request("one")])
             .await
             .unwrap_err();
 
@@ -817,9 +774,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let report = try_canonical_generation(&MoldClient::new(&server.uri()), &[request("one")])
+        let report = canonical_generation(&MoldClient::new(&server.uri()), &[request("one")])
             .await
-            .unwrap()
             .unwrap();
 
         assert!(report.authorities.is_empty());
@@ -927,12 +883,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        let report = try_canonical_generation(
+        let report = canonical_generation(
             &MoldClient::new(&server.uri()),
             &[request("one"), request("two")],
         )
         .await
-        .unwrap()
         .unwrap();
 
         assert_eq!(report.failures.len(), 2);
@@ -986,13 +941,12 @@ mod tests {
             }
         };
 
-        let report = try_canonical_generation_observed(
+        let report = canonical_generation_observed(
             &MoldClient::new(&server.uri()),
             &[request("one"), request("two"), request("three")],
             Some(&observer),
         )
         .await
-        .unwrap()
         .unwrap();
 
         assert_eq!(*admitted_offsets.lock().unwrap(), vec![0, 2]);
@@ -1296,25 +1250,5 @@ mod tests {
             .unwrap()
             .iter()
             .any(|event| matches!(event, CanonicalGenerationEvent::Snapshot { .. })));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_host_without_revisions_keeps_publishing_on_exhaustion() {
-        // Degrade, do not hang: with no version to compare there is no
-        // evidence either way, and an unbounded wait is the worse failure.
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/generation-batches/batch-1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(held_batch(0)))
-            .expect(AMBIGUOUS_RETRY_CONFIRM_ATTEMPTS as u64)
-            .mount(&server)
-            .await;
-        let client = MoldClient::new(&server.uri());
-
-        let status = reconcile_ambiguous_retry_observed(&client, &authority(), "job-1", 0, None)
-            .await
-            .unwrap();
-
-        assert_eq!(status.children[0].state, GenerationBatchChildState::Held);
     }
 }

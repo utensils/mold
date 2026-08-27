@@ -8693,19 +8693,12 @@ pub struct QueueCapabilities {
     /// stream died — on this host that job is still going to run.
     #[serde(default)]
     pub durable_queue: bool,
-    /// Server accepts one idempotent heterogeneous prepared-batch admission.
-    #[serde(default)]
-    pub heterogeneous_batch: bool,
+    /// How many singleton children one `POST /api/generation-batches`
+    /// operation accepts. Present exactly when this host generates at all —
+    /// there is one admission path, so its absence means the host refuses
+    /// generation rather than that it offers an older protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heterogeneous_batch_max_outputs: Option<u32>,
-    /// Enriched durable child outcomes plus by-client and bulk
-    /// reconciliation routes are available.
-    #[serde(default)]
-    pub durable_batch_outcomes: bool,
-    /// Version 2 durably admits work before deferred dependency preparation
-    /// and exposes retryable preparation holds through the queue lifecycle.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub admission_protocol_version: Option<u32>,
 }
 
 /// Authenticated, stable-URL reference-media ingress advertised by current
@@ -9152,47 +9145,106 @@ pub struct ServerCapabilities {
     pub licenses: bool,
 }
 
+/// Why a host cannot admit a particular set of requests.
+///
+/// A refusal names the request trait the host does not carry, because that is
+/// the only thing a caller can act on. Host-level absence is
+/// [`Self::GenerationUnavailable`]: there is ONE admission path, so a host
+/// that does not advertise it does not generate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanonicalRefusal {
+    /// No requests were supplied.
+    Empty,
+    /// This host advertises no generation admission at all.
+    GenerationUnavailable,
+    /// The host advertises a zero-output limit.
+    ZeroOutputLimit,
+    /// A request asks for a trait the host cannot represent.
+    UnsupportedRequestTrait {
+        /// One-based position in the supplied slice.
+        index: usize,
+        /// The trait, named for the caller.
+        trait_name: &'static str,
+    },
+}
+
+impl std::fmt::Display for CanonicalRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(formatter, "no requests were supplied"),
+            Self::GenerationUnavailable => {
+                write!(formatter, "this host does not admit generation")
+            }
+            Self::ZeroOutputLimit => write!(formatter, "this host admits zero outputs per batch"),
+            Self::UnsupportedRequestTrait { index, trait_name } => write!(
+                formatter,
+                "request {index} needs {trait_name}, which this host does not support"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CanonicalRefusal {}
+
 impl ServerCapabilities {
     /// Exact shared Rust-client gate for canonical durable Batch N admission.
-    /// Returns the host's per-operation child limit only when every request is
-    /// representable by the advertised protocol. Web/desktop/mobile mirror
-    /// this versioned matrix in `studio/lib/generationSubmissionPolicy.ts`.
-    pub fn canonical_generation_batch_limit(&self, requests: &[GenerateRequest]) -> Option<usize> {
-        if requests.is_empty()
-            || !self.queue.heterogeneous_batch
-            || !self.queue.durable_batch_outcomes
-            || self.queue.admission_protocol_version.unwrap_or(0) < 2
-        {
-            return None;
+    /// Returns the host's per-operation child limit, or the named reason the
+    /// requests are not representable. Web/desktop/mobile mirror this matrix
+    /// in `studio/lib/generationSubmissionPolicy.ts`.
+    pub fn canonical_generation_batch_limit(
+        &self,
+        requests: &[GenerateRequest],
+    ) -> Result<usize, CanonicalRefusal> {
+        if requests.is_empty() {
+            return Err(CanonicalRefusal::Empty);
         }
-        let limit = usize::try_from(self.queue.heterogeneous_batch_max_outputs?).ok()?;
+        let limit = self
+            .queue
+            .heterogeneous_batch_max_outputs
+            .and_then(|limit| usize::try_from(limit).ok())
+            .ok_or(CanonicalRefusal::GenerationUnavailable)?;
         if limit == 0 {
-            return None;
+            return Err(CanonicalRefusal::ZeroOutputLimit);
         }
-        for request in requests {
-            if request.batch_size != 1 || request.hdr_exr_dir.is_some() {
-                return None;
+        for (position, request) in requests.iter().enumerate() {
+            let index = position + 1;
+            let refuse =
+                |trait_name| Err(CanonicalRefusal::UnsupportedRequestTrait { index, trait_name });
+            if request.batch_size != 1 {
+                return refuse("server-side batch expansion");
+            }
+            if request.hdr_exr_dir.is_some() {
+                return refuse("HDR EXR output");
             }
             let h3 = crate::minimax_h3::task_for_model(&request.model).is_some();
             let media = request.has_durable_media_inputs();
             if media && (request.lora.is_some() || request.loras.is_some()) {
-                return None;
+                return refuse("a LoRA alongside conditioning media");
             }
             if media || h3 || request.references.is_some() {
-                let capabilities = self.durable_media.as_ref()?;
+                let Some(capabilities) = self.durable_media.as_ref() else {
+                    return refuse("restart-safe request media");
+                };
                 if capabilities.protocol_version < 2
                     || !capabilities.encrypted_at_rest
                     || !capabilities.generate_request_media
-                    || (h3 && !capabilities.private_h3)
-                    || (request.references.is_some() && !capabilities.h3_references)
-                    || ((request.id_image.is_some() || request.id_images.is_some())
-                        && !capabilities.identity)
                 {
-                    return None;
+                    return refuse("restart-safe request media");
+                }
+                if h3 && !capabilities.private_h3 {
+                    return refuse("durable MiniMax H3 admission");
+                }
+                if request.references.is_some() && !capabilities.h3_references {
+                    return refuse("durable ordered references");
+                }
+                if (request.id_image.is_some() || request.id_images.is_some())
+                    && !capabilities.identity
+                {
+                    return refuse("durable identity photographs");
                 }
             }
         }
-        Some(limit)
+        Ok(limit)
     }
 }
 

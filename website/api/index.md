@@ -294,17 +294,25 @@ route returns HTTP 202 with its `GenerationBatchStatus` instead of an opaque
 clients can enter the same reconciliation path. Queued cancellation emits the
 terminal code `queued_cancelled`.
 
-Durable admission is best-effort on the direct routes. When this host cannot
-admit durably — no queue owner, gallery output disabled, a non-authoritative
-scheduler, an unavailable admission service, or a degraded encrypted-media
-store — `POST /api/generate` and `POST /api/generate/stream` fall back to the
-attached path rather than refusing, because that is what capability discovery
-already told the client to use. Send `X-Mold-Operation-Id` to demand durable
-admission instead: the same conditions then return HTTP 503 with
-`HETEROGENEOUS_BATCH_UNAVAILABLE`, `DURABLE_ADMISSION_UNAVAILABLE` (gallery
-output off), or `DURABLE_MEDIA_UNAVAILABLE` (media-carrying or MiniMax H3
-request against a degraded store). `POST /api/generation-batches` is always an
-explicit durable request and always refuses rather than falling back.
+Durable admission is the only admission. `POST /api/generate`,
+`POST /api/generate/stream`, and `POST /api/generation-batches` are one path
+with three delivery shapes, so a host that cannot admit durably does not
+generate: it returns HTTP 503 `DURABLE_ADMISSION_UNAVAILABLE` on all three,
+with a message naming the unmet requirement — a claimed queue owner, gallery
+output, an authoritative Scheduler V2 dispatcher, and a usable admission
+service. A degraded encrypted-media store is a separate axis and refuses only
+the requests that need it, with HTTP 503 `DURABLE_MEDIA_UNAVAILABLE`; a
+media-free request is unaffected. There is no `X-Mold-Operation-Id` header and
+no attached, non-durable fallback.
+
+A request the durable protocol cannot represent is refused by name with HTTP
+422: `DURABLE_MEDIA_REFERENCES_UNSUPPORTED` (ordered MiniMax H3 references),
+`DURABLE_MEDIA_HDR_UNSUPPORTED` (`hdr_exr_dir`), and
+`DURABLE_MEDIA_LORA_UNSUPPORTED` (a LoRA combined with conditioning media —
+`source_image`, `id_image`, `mask_image`, `control_image`, `source_video`,
+keyframes, or audio). `POST /api/generate` additionally refuses
+`batch_size != 1` with `DIRECT_BATCH_UNSUPPORTED`; submit siblings through
+`POST /api/generation-batches`.
 
 `POST /api/generation-batches/status` is rate-limited as a read operation;
 `POST /api/queue/{id}/retry` is rate-limited with generation because it
@@ -539,9 +547,10 @@ rather than letting the expander invent a prompt) and is not written to prompt
 history.
 :::
 
-Authoritative Scheduler V2 servers advertise canonical admission through
-`queue.heterogeneous_batch`, `queue.durable_batch_outcomes`, and
-`queue.admission_protocol_version = 2`. Clients must also honor the exact
+A host that admits generation advertises `queue.heterogeneous_batch_max_outputs`
+— the per-operation child limit, and the single bit that says this host
+generates at all. Its absence means every generation route returns
+`503 DURABLE_ADMISSION_UNAVAILABLE`. Clients must also honor the exact
 `durable_media` capability for requests carrying source or identity media.
 
 ## `/api/generation-batches`

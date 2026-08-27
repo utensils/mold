@@ -2,8 +2,9 @@
 //! scheduler queue.
 //!
 //! SQLite owns every not-yet-hydrated child. This task is the sole producer
-//! for rows admitted through `/api/generation-batches`; legacy singleton rows
-//! are deliberately excluded by the batch-child ownership join.
+//! for generation, because `/api/generate`, `/api/generate/stream`, and
+//! `/api/generation-batches` are one admission path with three delivery
+//! shapes. Rows without a batch-child row are excluded by the ownership join.
 
 use std::sync::Arc;
 

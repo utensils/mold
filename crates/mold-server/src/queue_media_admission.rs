@@ -669,15 +669,15 @@ impl DurableMediaAdmission {
         let lifecycle = Arc::clone(&self.lifecycle);
         let operation_id = operation_id.to_string();
         let fingerprint = fingerprint.clone();
-        let legacy_operation_id = operation_id.clone();
-        let legacy_fingerprint = fingerprint.clone();
+        let v1_operation_id = operation_id.clone();
+        let v1_fingerprint = fingerprint.clone();
         let receipt = QueueMediaOperationReceipt::parse(detail.batch.request_sha256.clone())
             .map_err(|_| identity_undecidable())?;
-        spawn_admission_blocking("legacy operation receipt verification", move || {
+        spawn_admission_blocking("v1 operation receipt verification", move || {
             let existing = lifecycle
-                .open_operation_receipt(&legacy_operation_id, &receipt)
+                .open_operation_receipt(&v1_operation_id, &receipt)
                 .map_err(|_| identity_undecidable())?;
-            if existing.constant_time_eq(&legacy_fingerprint) {
+            if existing.constant_time_eq(&v1_fingerprint) {
                 Ok(())
             } else {
                 Err(ApiError::with_code(
@@ -699,7 +699,7 @@ impl DurableMediaAdmission {
         let batch_id = detail.batch.id.clone();
         let expected = detail.batch.request_sha256.clone();
         let replacement_for_update = replacement.clone();
-        let migrated = spawn_admission_blocking("legacy operation receipt migration", move || {
+        let migrated = spawn_admission_blocking("v1 operation receipt migration", move || {
             journal.replace_generation_batch_receipt(&batch_id, &expected, &replacement_for_update)
         })
         .await?

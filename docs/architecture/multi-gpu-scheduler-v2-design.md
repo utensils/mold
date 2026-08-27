@@ -164,13 +164,11 @@ chains, utilities, telemetry, placement, and clients.
 - Sibling seeds use `base_seed.wrapping_add(index)`.
 - `batch_id`, one-based `batch_index`, and `batch_count` already flow through
   request and output metadata.
-- Inference pipelines still return one result per engine call. Live direct
+- Inference pipelines still return one result per engine call. Direct
   generation is singleton-only; Batch N is admitted as ordered singleton
-  siblings through `/api/generation-batches`. Legacy multi-output journal rows
-  remain recovery input only rather than a public execution route.
-- Server-owned parent children stage privately and publish through one gallery
-  barrier plus metadata transaction. Existing client-owned sibling requests
-  retain their independent per-output publication contract.
+  siblings through `/api/generation-batches`, which is also what the direct
+  routes admit through. There is no server-owned multi-output parent: sibling
+  requests publish independently, per output.
 
 ### 3.3 Client facts
 
@@ -1412,11 +1410,13 @@ sibling remains independently cancellable and independently publishable.
 There is no parent atomicity retrofit in these phases.
 
 The public live route has since been simplified: `/api/generate` and
-`/api/generate/stream` accept exactly one output. Batch N uses the unversioned
-`/api/generation-batches` contract, which commits 1–64 independently
-cancellable singleton children before preparation. The raw-parent machinery
-below remains only to recover records persisted by older servers; no current
-route creates one.
+`/api/generate/stream` accept exactly one output and are the same durable
+admission as `/api/generation-batches` with an attached raw/SSE observer. That
+contract commits 1–64 independently cancellable singleton children before
+preparation. The raw-parent machinery described below was DELETED: nothing
+creates a parent, and one left on disk by an older server is rolled back by
+the ordinary gallery transaction sweep rather than resumed. The sections below
+are retained as a record of the design that was removed.
 
 ### 12.2 Phase F0 — cancellation and transaction substrate
 
@@ -2399,15 +2399,14 @@ F1 then delivers:
 - logical atomic commit/recovery;
 - fenced retry and cancellation.
 
-The former live raw-parent integration is recovery-only. Current clients admit
-ordered singleton children through `/api/generation-batches`; each child has
-its own durable state, result filename, cancellation, and retry boundary.
-Startup reconciliation of legacy parents reconstructs unfinished children from the
-versioned normalized request, freshly resolves prepared inputs, and resumes
-only when the exact persisted execution-equivalence fingerprint still
-matches. Missing recovery authority, artifact/config drift, or unavailable
-exact execution durably cancels and rolls back the private attempt; an
-all-staged crash converges commit before serving.
+The former live raw-parent integration was removed entirely. Every client
+admits ordered singleton children through `/api/generation-batches` (directly,
+or through the `/api/generate[/stream]` facades); each child has its own
+durable state, result filename, cancellation, and retry boundary. A parent
+left on disk by an older server is not reconstructed or resumed — its
+unpublished staged children are rolled back by
+`batch_transaction::recover_transactions` at startup, exactly like any other
+interrupted publication.
 
 Gates:
 

@@ -19,8 +19,8 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 use crate::commands::durable_generation::{
-    hydrate_canonical_artifact, retry_canonical_child, try_canonical_generation_observed,
-    try_canonical_singleton_artifact, CanonicalGenerationEvent, CanonicalGenerationReport,
+    canonical_generation_observed, canonical_singleton_artifact, hydrate_canonical_artifact,
+    retry_canonical_child, CanonicalGenerationEvent, CanonicalGenerationReport,
     CanonicalRetrySubmission,
 };
 
@@ -69,43 +69,37 @@ fn reconciliation_key(authority: &GenerationBatchAuthority, job_id: &str) -> Str
     .join("|")
 }
 
-async fn generate_with_canonical_fallback(
+async fn generate_canonically(
     client: &MoldClient,
     req: GenerateRequest,
 ) -> std::result::Result<GenerateResponse, String> {
-    match try_canonical_singleton_artifact(client, &req).await {
-        Ok(Some(artifact)) => {
-            let image = image::load_from_memory(&artifact.bytes)
-                .map_err(|error| format!("could not decode durable output: {error}"))?;
-            let (width, height) = image.dimensions();
-            let format = artifact
-                .filename
-                .rsplit_once('.')
-                .and_then(|(_, extension)| extension.parse::<OutputFormat>().ok())
-                .unwrap_or_else(|| artifact.request.resolved_output_format());
-            Ok(GenerateResponse {
-                images: vec![mold_core::ImageData {
-                    data: artifact.bytes,
-                    format,
-                    width,
-                    height,
-                    index: 0,
-                }],
-                video: None,
-                audio: None,
-                generation_time_ms: 0,
-                model: artifact.metadata.model,
-                seed_used: artifact.metadata.seed,
-                gpu: None,
-                request_warnings: Vec::new(),
-            })
-        }
-        Ok(None) => client
-            .generate(req)
-            .await
-            .map_err(|error| format!("mold generation failed: {error}")),
-        Err(error) => Err(format!("mold durable generation failed: {error:#}")),
-    }
+    let artifact = canonical_singleton_artifact(client, &req)
+        .await
+        .map_err(|error| format!("mold durable generation failed: {error:#}"))?;
+    let image = image::load_from_memory(&artifact.bytes)
+        .map_err(|error| format!("could not decode durable output: {error}"))?;
+    let (width, height) = image.dimensions();
+    let format = artifact
+        .filename
+        .rsplit_once('.')
+        .and_then(|(_, extension)| extension.parse::<OutputFormat>().ok())
+        .unwrap_or_else(|| artifact.request.resolved_output_format());
+    Ok(GenerateResponse {
+        images: vec![mold_core::ImageData {
+            data: artifact.bytes,
+            format,
+            width,
+            height,
+            index: 0,
+        }],
+        video: None,
+        audio: None,
+        generation_time_ms: 0,
+        model: artifact.metadata.model,
+        seed_used: artifact.metadata.seed,
+        gpu: None,
+        request_warnings: Vec::new(),
+    })
 }
 
 async fn hydrate_canonical_outcome(
@@ -161,38 +155,15 @@ async fn run_async_generation(
         }
     });
     let canonical =
-        try_canonical_generation_observed(&client, std::slice::from_ref(&req), Some(&event_tx))
-            .await;
+        canonical_generation_observed(&client, std::slice::from_ref(&req), Some(&event_tx)).await;
     drop(event_tx);
     let _ = event_task.await;
     match canonical {
-        Ok(Some(report)) => {
+        Ok(report) => {
             // The shared canonical helper currently returns only after an
             // authoritative terminal child. Keep the local row truthfully
             // queued while it waits rather than fabricating Running.
             finish_canonical_async(&jobs, &local_job_id, report).await;
-        }
-        Ok(None) => {
-            jobs.mark_running(&local_job_id, AsyncGenerationTransport::Legacy)
-                .await;
-            let (progress_tx, mut progress_rx) =
-                tokio::sync::mpsc::unbounded_channel::<SseProgressEvent>();
-            let progress_jobs = jobs.clone();
-            let progress_job_id = local_job_id.clone();
-            let progress_task = tokio::spawn(async move {
-                while let Some(event) = progress_rx.recv().await {
-                    progress_jobs.record_progress(&progress_job_id, event).await;
-                }
-            });
-            let result = match client.generate_stream(&req, progress_tx).await {
-                Ok(Some(response)) => Ok(response),
-                Ok(None) => client.generate(req).await.map_err(|error| {
-                    format!("mold generation failed after non-streaming fallback: {error}")
-                }),
-                Err(error) => Err(format!("mold generation failed: {error}")),
-            };
-            let _ = progress_task.await;
-            jobs.finish(&local_job_id, result).await;
         }
         Err(error) => {
             jobs.finish(
@@ -487,7 +458,7 @@ impl McpServer {
             serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
         let loras = self.resolve_loras(args.loras.take()).await?;
         let req = build_generate_request(args, loras)?;
-        let response = generate_with_canonical_fallback(&self.client, req).await?;
+        let response = generate_canonically(&self.client, req).await?;
         let image = response
             .images
             .first()
@@ -1103,13 +1074,6 @@ impl AsyncJobStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AsyncGenerationTransport {
-    Probing,
-    Canonical,
-    Legacy,
-}
-
 struct CanonicalAsyncSettlement {
     authority: Option<GenerationBatchAuthority>,
     durable_job_id: Option<String>,
@@ -1134,16 +1098,6 @@ impl Default for CanonicalAsyncSettlement {
     }
 }
 
-impl AsyncGenerationTransport {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Probing => "probing",
-            Self::Canonical => "canonical",
-            Self::Legacy => "legacy",
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 struct AsyncGenerationJob {
     id: String,
@@ -1159,7 +1113,6 @@ struct AsyncGenerationJob {
     result: Option<GenerateResponse>,
     canonical_child: Option<GenerationBatchChild>,
     result_error: Option<String>,
-    transport: AsyncGenerationTransport,
     authority: Option<GenerationBatchAuthority>,
     durable_job_id: Option<String>,
     retryable: Option<bool>,
@@ -1184,7 +1137,6 @@ impl AsyncGenerationJob {
             result: None,
             canonical_child: None,
             result_error: None,
-            transport: AsyncGenerationTransport::Probing,
             authority: None,
             durable_job_id: None,
             retryable: None,
@@ -1246,29 +1198,6 @@ impl AsyncJobRegistry {
         Ok(id)
     }
 
-    async fn mark_running(&self, id: &str, transport: AsyncGenerationTransport) {
-        let mut jobs = self.inner.jobs.lock().await;
-        if let Some(job) = jobs.get_mut(id) {
-            let now = now_ms();
-            job.status = AsyncJobStatus::Running;
-            job.transport = transport;
-            job.started_at_ms.get_or_insert(now);
-            job.updated_at_ms = now;
-        }
-    }
-
-    async fn record_progress(&self, id: &str, event: SseProgressEvent) {
-        let mut jobs = self.inner.jobs.lock().await;
-        if let Some(job) = jobs.get_mut(id) {
-            job.status = match event {
-                SseProgressEvent::Queued { .. } => AsyncJobStatus::Queued,
-                _ => AsyncJobStatus::Running,
-            };
-            job.latest_progress = Some(event);
-            job.updated_at_ms = now_ms();
-        }
-    }
-
     async fn finish(&self, id: &str, result: std::result::Result<GenerateResponse, String>) {
         let mut jobs = self.inner.jobs.lock().await;
         if let Some(job) = jobs.get_mut(id) {
@@ -1295,7 +1224,6 @@ impl AsyncJobRegistry {
         let mut jobs = self.inner.jobs.lock().await;
         if let Some(job) = jobs.get_mut(id) {
             let now = now_ms();
-            job.transport = AsyncGenerationTransport::Canonical;
             job.authority = settlement.authority;
             job.durable_job_id = settlement.durable_job_id;
             job.retryable = settlement.retryable;
@@ -1325,7 +1253,6 @@ impl AsyncJobRegistry {
                 authority, status, ..
             } => (authority, status),
             CanonicalGenerationEvent::ReconcileDelayed { authority, error } => {
-                job.transport = AsyncGenerationTransport::Canonical;
                 job.authority = Some(authority);
                 job.error = Some(format!("reconciliation delayed: {error}"));
                 job.updated_at_ms = now_ms();
@@ -1345,10 +1272,7 @@ impl AsyncJobRegistry {
         let job = jobs
             .get_mut(id)
             .ok_or_else(|| format!("unknown async generation job: {id}"))?;
-        if job.transport != AsyncGenerationTransport::Canonical
-            || job.status != AsyncJobStatus::Held
-            || job.retryable != Some(true)
-        {
+        if job.status != AsyncJobStatus::Held || job.retryable != Some(true) {
             return Err(format!("async generation job {id} is not retryable"));
         }
         if job.retry_in_flight {
@@ -1788,7 +1712,6 @@ fn apply_canonical_child_to_job(
     child: &GenerationBatchChild,
 ) {
     let now = now_ms();
-    job.transport = AsyncGenerationTransport::Canonical;
     job.authority = Some(authority);
     job.durable_job_id = Some(child.job_id.clone());
     job.retryable = child.retryable;
@@ -1919,7 +1842,6 @@ fn job_summary_json(job: &AsyncGenerationJob) -> Value {
         "started_at_ms": job.started_at_ms,
         "finished_at_ms": job.finished_at_ms,
         "latest_progress": job.latest_progress,
-        "transport": job.transport.as_str(),
         "expected_instance_id": job.authority.as_ref().map(|authority| &authority.instance_id),
         "server_batch_id": job.authority.as_ref().map(|authority| &authority.batch_id),
         "client_batch_id": job.authority.as_ref().map(|authority| &authority.client_batch_id),
@@ -3117,9 +3039,6 @@ mod tests {
 
     async fn mount_canonical_capabilities(server: &MockServer) {
         let mut capabilities = mold_core::ServerCapabilities::default();
-        capabilities.queue.heterogeneous_batch = true;
-        capabilities.queue.durable_batch_outcomes = true;
-        capabilities.queue.admission_protocol_version = Some(2);
         capabilities.queue.heterogeneous_batch_max_outputs = Some(64);
         Mock::given(method("GET"))
             .and(path("/api/capabilities"))
@@ -3152,7 +3071,6 @@ mod tests {
 
         let job = jobs.get(&local_id).await.unwrap();
         assert_eq!(job.status, AsyncJobStatus::Held);
-        assert_eq!(job.transport, AsyncGenerationTransport::Canonical);
         assert_eq!(
             job.authority
                 .as_ref()
@@ -3977,61 +3895,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn async_mcp_uses_stream_only_after_explicit_legacy_fallback() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/capabilities"))
-            .respond_with(ResponseTemplate::new(404))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let complete = json!({
-            "image": general_purpose::STANDARD.encode([1_u8, 2, 3]),
-            "format": "png",
-            "width": 64,
-            "height": 64,
-            "seed_used": 7,
-            "generation_time_ms": 12,
-            "model": "flux-dev:q4"
-        });
-        Mock::given(method("POST"))
-            .and(path("/api/generate/stream"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(format!("event: complete\ndata: {complete}\n\n")),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let jobs = AsyncJobRegistry::default();
-        let request = transport_request();
-        let local_id = jobs.create(&request).await.unwrap();
-        run_async_generation(
-            MoldClient::new(&server.uri()),
-            jobs.clone(),
-            local_id.clone(),
-            request,
-        )
-        .await;
-
-        let job = jobs.get(&local_id).await.unwrap();
-        assert_eq!(job.status, AsyncJobStatus::Succeeded);
-        assert_eq!(job.transport, AsyncGenerationTransport::Legacy);
-        let requests = server.received_requests().await.unwrap();
-        assert!(requests
-            .iter()
-            .any(|request| request.url.path() == "/api/generate/stream"));
-        assert!(!requests
-            .iter()
-            .any(|request| request.url.path() == "/api/generation-batches"));
-        assert!(!requests
-            .iter()
-            .any(|request| request.url.path() == "/api/generate"));
-    }
-
     #[test]
     fn async_status_summarizes_bounded_stage_progress() {
         assert_eq!(
@@ -4574,8 +4437,6 @@ mod tests {
         };
 
         let id = jobs.create(&req).await.unwrap();
-        jobs.mark_running(&id, AsyncGenerationTransport::Legacy)
-            .await;
         jobs.finish(
             &id,
             Ok(GenerateResponse {

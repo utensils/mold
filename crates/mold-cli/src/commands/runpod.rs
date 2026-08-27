@@ -18,36 +18,17 @@ use mold_core::runpod::{
     NETWORK_VOLUME_MAX_GB, NETWORK_VOLUME_MIN_GB,
 };
 
-use crate::commands::durable_generation::try_canonical_singleton_artifact;
-
-enum RunPodGenerationTransport {
-    Canonical(Box<crate::commands::durable_generation::CanonicalGenerationArtifact>),
-    Legacy(Box<mold_core::GenerateResponse>),
-}
+use crate::commands::durable_generation::{
+    canonical_singleton_artifact, CanonicalGenerationArtifact,
+};
 
 async fn generate_with_runpod_transport(
     client: &mold_core::MoldClient,
     request: &mold_core::GenerateRequest,
-    progress_tx: tokio::sync::mpsc::UnboundedSender<mold_core::types::SseProgressEvent>,
-) -> Result<RunPodGenerationTransport> {
-    if let Some(artifact) = try_canonical_singleton_artifact(client, request)
+) -> Result<CanonicalGenerationArtifact> {
+    canonical_singleton_artifact(client, request)
         .await
-        .with_context(|| "durable generation failed")?
-    {
-        return Ok(RunPodGenerationTransport::Canonical(Box::new(artifact)));
-    }
-    let response = match client
-        .generate_stream(request, progress_tx)
-        .await
-        .with_context(|| "generation failed")?
-    {
-        Some(response) => response,
-        None => client
-            .generate(request.clone())
-            .await
-            .with_context(|| "generation failed (non-stream fallback)")?,
-    };
-    Ok(RunPodGenerationTransport::Legacy(Box::new(response)))
+        .with_context(|| "durable generation failed")
 }
 use crate::theme;
 use crate::AlreadyReported;
@@ -1740,82 +1721,31 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         output_path.display().to_string().cyan()
     );
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<mold_core::types::SseProgressEvent>();
-    let progress_task = tokio::spawn(async move {
-        let mut pb = None;
-        while let Some(ev) = rx.recv().await {
-            let pb = pb.get_or_insert_with(|| {
-                let pb = indicatif::ProgressBar::new_spinner();
-                pb.set_style(
-                    indicatif::ProgressStyle::with_template(&format!(
-                        "{{spinner:.{}}} {{msg}}",
-                        theme::SPINNER_STYLE
-                    ))
-                    .unwrap(),
-                );
-                pb.enable_steady_tick(std::time::Duration::from_millis(80));
-                pb
-            });
-            pb.set_message(format_progress_event(&ev));
-        }
-        if let Some(pb) = pb {
-            pb.finish_and_clear();
-        }
-    });
-    let transport = generate_with_runpod_transport(&http, &req, tx).await;
-    let _ = progress_task.await;
-    let transport = match transport {
-        Ok(transport) => transport,
+    let artifact = match generate_with_runpod_transport(&http, &req).await {
+        Ok(artifact) => artifact,
         Err(error) => {
             let msg = format!("{error:#}");
             let gpu = pod.gpu_name().unwrap_or_default();
             if msg.contains("404") {
                 bail!(
-                    "generation failed: proxy returned 404 on /api/generate. \
-                     The mold binary in the container may not match the host \
-                     GPU ({gpu}). Try `--image-tag latest-sm80` for broad compat, \
-                     or check pod logs via `mold runpod logs {}`.",
+                    "generation failed: the pod does not serve \
+                     POST /api/generation-batches. The mold binary in the \
+                     container may not match the host GPU ({gpu}). Try \
+                     `--image-tag latest-sm80` for broad compat, or check pod \
+                     logs via `mold runpod logs {}`.",
                     pod.id
                 );
             }
             return Err(error);
         }
     };
-    let resp = match transport {
-        RunPodGenerationTransport::Canonical(artifact) => {
-            std::fs::write(&output_path, &artifact.bytes)?;
-            println!(
-                "{} saved {} (durable output {})",
-                theme::icon_done(),
-                output_path.display(),
-                artifact.filename
-            );
-            None
-        }
-        RunPodGenerationTransport::Legacy(response) => Some(*response),
-    };
-
-    if let Some(resp) = resp {
-        if let Some(video) = resp.video {
-            let vid_path = opts.output_dir.join(format!(
-                "runpod-{}-{}.{}",
-                pod.id,
-                short_timestamp(),
-                extension_for_video(video.format)
-            ));
-            std::fs::write(&vid_path, &video.data)?;
-            println!("{} saved {}", theme::icon_done(), vid_path.display());
-        } else if let Some(img) = resp.images.first() {
-            std::fs::write(&output_path, &img.data)?;
-            println!(
-                "{} saved {} ({:.1}s on seed {})",
-                theme::icon_done(),
-                output_path.display(),
-                resp.generation_time_ms as f64 / 1000.0,
-                resp.seed_used,
-            );
-        }
-    }
+    std::fs::write(&output_path, &artifact.bytes)?;
+    println!(
+        "{} saved {} (durable output {})",
+        theme::icon_done(),
+        output_path.display(),
+        artifact.filename
+    );
 
     // Update state + history.
     let mut state = load_state();
@@ -1960,69 +1890,6 @@ pub async fn reap_idle_warm_pod_if_needed() -> bool {
             eprintln!("{} {error:#}", theme::icon_warn());
             false
         }
-    }
-}
-
-fn format_progress_event(ev: &mold_core::types::SseProgressEvent) -> String {
-    use mold_core::types::SseProgressEvent as E;
-    match ev {
-        E::DependencyWait { dependency, reason } => {
-            format!("waiting for dependency {dependency}: {reason}")
-        }
-        E::Preview { step, total, .. } => format!("denoise preview {step}/{total}"),
-        E::StageStart { name } => format!("stage: {name}"),
-        E::StageProgress {
-            name,
-            current,
-            total,
-        } => format!("{name} {current}/{total}"),
-        E::StageDone { name, elapsed_ms } => format!("done: {name} ({elapsed_ms}ms)"),
-        E::Info { message } => message.clone(),
-        E::CacheHit { resource } => format!("cached: {resource}"),
-        E::DenoiseStep { step, total, .. } => format!("denoise {step}/{total}"),
-        E::DownloadProgress {
-            filename,
-            file_index,
-            total_files,
-            bytes_downloaded,
-            bytes_total,
-            ..
-        } => format!(
-            "pull [{file_index}/{total_files}] {filename} {}/{}",
-            human_bytes(*bytes_downloaded),
-            human_bytes(*bytes_total)
-        ),
-        E::DownloadDone {
-            filename,
-            file_index,
-            total_files,
-            ..
-        } => format!("✓ [{file_index}/{total_files}] {filename}"),
-        E::PullComplete { model } => format!("pull complete: {model}"),
-        E::Queued { position, .. } => format!("queued (#{position})"),
-        E::WeightLoad {
-            component,
-            bytes_loaded,
-            bytes_total,
-        } => format!(
-            "loading {component} {}/{}",
-            human_bytes(*bytes_loaded),
-            human_bytes(*bytes_total)
-        ),
-    }
-}
-
-fn human_bytes(b: u64) -> String {
-    mold_core::format::human_bytes_compact(b)
-}
-
-fn extension_for_video(fmt: mold_core::OutputFormat) -> &'static str {
-    match fmt {
-        mold_core::OutputFormat::Mp4 => "mp4",
-        mold_core::OutputFormat::Gif => "gif",
-        mold_core::OutputFormat::Apng => "apng",
-        mold_core::OutputFormat::Webp => "webp",
-        _ => "bin",
     }
 }
 
@@ -2507,9 +2374,6 @@ mod tests {
 
     async fn mount_canonical_capabilities(server: &MockServer) {
         let mut capabilities = mold_core::ServerCapabilities::default();
-        capabilities.queue.heterogeneous_batch = true;
-        capabilities.queue.durable_batch_outcomes = true;
-        capabilities.queue.admission_protocol_version = Some(2);
         capabilities.queue.heterogeneous_batch_max_outputs = Some(64);
         Mock::given(method("GET"))
             .and(path("/api/capabilities"))
@@ -2570,16 +2434,14 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let error = generate_with_runpod_transport(
+        let Err(error) = generate_with_runpod_transport(
             &mold_core::MoldClient::new(&server.uri()),
             &transport_request(),
-            tx,
         )
         .await
-        .err()
-        .expect("held canonical work is not a successful artifact");
+        else {
+            panic!("held canonical work is not a successful artifact");
+        };
 
         assert!(error.to_string().contains("durable generation failed"));
         let requests = server.received_requests().await.unwrap();
@@ -2629,19 +2491,12 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let outcome = generate_with_runpod_transport(
+        let artifact = generate_with_runpod_transport(
             &mold_core::MoldClient::new(&server.uri()),
             &transport_request(),
-            tx,
         )
         .await
-        .unwrap();
-
-        let RunPodGenerationTransport::Canonical(artifact) = outcome else {
-            panic!("protocol v2 must not fall back after durable admission");
-        };
+        .expect("durable admission returns the artifact");
         assert_eq!(artifact.filename, "durable.png");
         assert_eq!(artifact.bytes, [1_u8, 2, 3]);
         assert_eq!(
@@ -2653,60 +2508,6 @@ mod tests {
         assert!(!requests.iter().any(|request| {
             matches!(request.url.path(), "/api/generate" | "/api/generate/stream")
         }));
-    }
-
-    #[tokio::test]
-    async fn runpod_transport_uses_sse_only_after_explicit_legacy_fallback() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/capabilities"))
-            .respond_with(ResponseTemplate::new(404))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let complete = serde_json::json!({
-            "image": base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                [1_u8, 2, 3]
-            ),
-            "format": "png",
-            "width": 64,
-            "height": 64,
-            "seed_used": 7,
-            "generation_time_ms": 12,
-            "model": "flux-dev:q4"
-        });
-        Mock::given(method("POST"))
-            .and(path("/api/generate/stream"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(format!("event: complete\ndata: {complete}\n\n")),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let outcome = generate_with_runpod_transport(
-            &mold_core::MoldClient::new(&server.uri()),
-            &transport_request(),
-            tx,
-        )
-        .await
-        .unwrap();
-
-        assert!(matches!(outcome, RunPodGenerationTransport::Legacy(_)));
-        let requests = server.received_requests().await.unwrap();
-        assert!(requests
-            .iter()
-            .any(|request| request.url.path() == "/api/generate/stream"));
-        assert!(!requests
-            .iter()
-            .any(|request| request.url.path() == "/api/generation-batches"));
-        assert!(!requests
-            .iter()
-            .any(|request| request.url.path() == "/api/generate"));
     }
 
     fn policy_create_options(model: Option<&str>) -> CreateOptions {
@@ -3431,18 +3232,6 @@ mod tests {
     }
 
     #[test]
-    fn extension_for_video_covers_every_format() {
-        assert_eq!(extension_for_video(mold_core::OutputFormat::Mp4), "mp4");
-        assert_eq!(extension_for_video(mold_core::OutputFormat::Gif), "gif");
-        assert_eq!(extension_for_video(mold_core::OutputFormat::Apng), "apng");
-        assert_eq!(extension_for_video(mold_core::OutputFormat::Webp), "webp");
-        // Image formats fall through to the generic bin extension — the helper
-        // is only meaningful for video formats but must not panic on others.
-        assert_eq!(extension_for_video(mold_core::OutputFormat::Png), "bin");
-        assert_eq!(extension_for_video(mold_core::OutputFormat::Jpeg), "bin");
-    }
-
-    #[test]
     fn is_interesting_gpu_matches_the_curated_list() {
         for name in [
             "NVIDIA GeForce RTX 4090",
@@ -3547,105 +3336,6 @@ mod tests {
         assert_eq!(back.pod_id, "pod-old");
         assert!(back.model.is_none());
         assert!(back.prompt.is_none());
-    }
-
-    #[test]
-    fn format_progress_event_renders_every_sse_variant() {
-        use mold_core::types::SseProgressEvent as E;
-
-        assert_eq!(
-            format_progress_event(&E::StageStart {
-                name: "denoise".into()
-            }),
-            "stage: denoise"
-        );
-        assert_eq!(
-            format_progress_event(&E::StageProgress {
-                name: "denoise blocks".into(),
-                current: 7,
-                total: 48,
-            }),
-            "denoise blocks 7/48"
-        );
-        assert_eq!(
-            format_progress_event(&E::StageDone {
-                name: "vae".into(),
-                elapsed_ms: 42
-            }),
-            "done: vae (42ms)"
-        );
-        assert_eq!(
-            format_progress_event(&E::Info {
-                message: "hello".into()
-            }),
-            "hello"
-        );
-        assert_eq!(
-            format_progress_event(&E::CacheHit {
-                resource: "t5".into()
-            }),
-            "cached: t5"
-        );
-        assert_eq!(
-            format_progress_event(&E::DenoiseStep {
-                step: 5,
-                total: 20,
-                elapsed_ms: 100
-            }),
-            "denoise 5/20"
-        );
-        assert_eq!(
-            format_progress_event(&E::PullComplete {
-                model: "flux-dev:q8".into()
-            }),
-            "pull complete: flux-dev:q8"
-        );
-        assert_eq!(
-            format_progress_event(&E::Queued {
-                position: 3,
-                id: String::new(),
-            }),
-            "queued (#3)"
-        );
-
-        // Multi-field variants — assert key substrings rather than full
-        // strings so unrelated formatting tweaks (units, separators) don't
-        // break the test.
-        let dl = format_progress_event(&E::DownloadProgress {
-            filename: "model.safetensors".into(),
-            file_index: 1,
-            total_files: 3,
-            bytes_downloaded: 1024 * 1024,
-            bytes_total: 4 * 1024 * 1024,
-            batch_bytes_downloaded: 1024 * 1024,
-            batch_bytes_total: 4 * 1024 * 1024,
-            batch_elapsed_ms: 500,
-        });
-        assert!(dl.contains("[1/3]"), "got: {dl}");
-        assert!(dl.contains("model.safetensors"), "got: {dl}");
-        assert!(dl.contains("1.0M"), "got: {dl}");
-        assert!(dl.contains("4.0M"), "got: {dl}");
-
-        let done = format_progress_event(&E::DownloadDone {
-            filename: "tokenizer.json".into(),
-            file_index: 2,
-            total_files: 3,
-            batch_bytes_downloaded: 1024,
-            batch_bytes_total: 1024,
-            batch_elapsed_ms: 50,
-        });
-        assert!(done.contains("✓"), "got: {done}");
-        assert!(done.contains("[2/3]"), "got: {done}");
-        assert!(done.contains("tokenizer.json"), "got: {done}");
-
-        let load = format_progress_event(&E::WeightLoad {
-            component: "transformer".into(),
-            bytes_loaded: 512 * 1024 * 1024,
-            bytes_total: 4 * 1024 * 1024 * 1024,
-        });
-        assert!(load.contains("loading transformer"), "got: {load}");
-        assert!(load.contains("512.0M"), "got: {load}");
-        assert!(load.contains("4.0G"), "got: {load}");
     }
 
     #[test]
