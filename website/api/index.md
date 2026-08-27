@@ -785,6 +785,40 @@ start/finish times, confidence, blocked reasons, and the next tentative replan
 deadline. Clients must treat it as advisory: the server revalidates the exact
 execution fingerprint and frozen artifacts before CUDA.
 
+Use `GET /api/queue/:id` to read ONE job in full, settings included:
+
+```bash
+curl http://localhost:7680/api/queue/00000000-0000-0000-0000-000000000000
+```
+
+```json
+{
+  "job": {
+    "id": "00000000-0000-0000-0000-000000000000",
+    "model": "flux-dev:q8",
+    "state": "queued",
+    "position": 3,
+    "durable": true,
+    "metadata": {
+      "prompt": "a lighthouse in a storm",
+      "width": 1024,
+      "steps": 28
+    }
+  },
+  "work_item": { "work_id": "00000000-...", "blocked_reason": "preparing" }
+}
+```
+
+The listing is deliberately payload-free — it never reads a request body per
+row — so a durably admitted job carries no `metadata` there until it is
+dispatched. This endpoint reads that one body and returns the same
+metadata shape a replayed job describes itself with; media payloads are not
+part of it. `work_item` is the planner's own entry for the job when it has
+placed one. Unknown ids return `404` with `QUEUE_JOB_NOT_FOUND`. `position`
+comes from the same bounded durable window the listing pages by default; a row
+beyond that window reports the window's length, exactly as it would be absent
+from the listing's first page.
+
 Use `PATCH /api/queue/:id` to update a queued job's preferred lane and/or its
 0-based position among queued jobs:
 

@@ -1857,6 +1857,20 @@ impl QueueJournal {
         Ok(outcome)
     }
 
+    /// Read ONE durable row in full, payload included.
+    ///
+    /// The queue projection is deliberately payload-free — its SQL never
+    /// selects `request_json`, because a listing must not read a request body
+    /// per row. A caller asking about ONE job is the opposite case: it wants
+    /// exactly that body, to answer what settings the job carries. Synchronous
+    /// for the same reason as [`Self::projection_page`].
+    pub fn row(&self, id: &str) -> anyhow::Result<Option<GenerationQueueRow>> {
+        let (Some(db), Some(owner)) = (self.db(), self.owner_uuid.as_deref()) else {
+            return Ok(None);
+        };
+        Ok(generation_queue::get(db, id)?.filter(|row| row.owner_uuid == owner))
+    }
+
     /// Read one payload-free durable page. This method is synchronous because
     /// SQLite is synchronous; async callers must run it on a blocking worker.
     pub fn projection_page(

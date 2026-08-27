@@ -1757,6 +1757,70 @@ pub fn prepare_h3_private_fl2va_admission(
     }
 }
 
+/// Name and time each phase of one H3 admission.
+///
+/// H3 preparation is a SEQUENCE — contract prechecks, a conditioner support
+/// load, media normalization, a ~37 GB artifact authentication, an adapter
+/// digest, three checkpoint opens, and a budget check — any of which can
+/// dominate a multi-minute `Preparing` window. Reporting only the total tells
+/// an operator that it was slow and never which part was, which is precisely
+/// the state #1272 set out to end one level up.
+///
+/// Emitting through the existing `StageStart`/`StageDone` events rather than
+/// logging here keeps mold-inference out of the server's tracing story: the
+/// caller already installs a callback, and it is the layer that knows the job
+/// id. `Drop` closes whatever phase was open, so a refusal reports the phase
+/// it refused in rather than going silent.
+#[cfg(feature = "mp4")]
+struct H3AdmissionTimeline<'a> {
+    progress: &'a ProgressReporter,
+    current: Option<(&'static str, std::time::Instant)>,
+}
+
+#[cfg(feature = "mp4")]
+impl<'a> H3AdmissionTimeline<'a> {
+    fn new(progress: &'a ProgressReporter) -> Self {
+        Self {
+            progress,
+            current: None,
+        }
+    }
+
+    fn enter(&mut self, name: &'static str) {
+        self.close();
+        self.progress.stage_start(name);
+        self.current = Some((name, std::time::Instant::now()));
+    }
+
+    fn close(&mut self) {
+        if let Some((name, started)) = self.current.take() {
+            self.progress.stage_done(name, started.elapsed());
+        }
+    }
+}
+
+#[cfg(feature = "mp4")]
+impl Drop for H3AdmissionTimeline<'_> {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// Phase names, in the order one admission walks them. Constants because the
+/// server matches on them to decide what to publish, and a typo would silently
+/// produce a phase nobody can correlate with a log line.
+#[cfg(feature = "mp4")]
+mod admission_phase {
+    pub(super) const CONTRACT: &str = "Validating MiniMax H3 request contract";
+    pub(super) const SUPPORT: &str = "Loading MiniMax H3 conditioner support";
+    pub(super) const CONDITIONING: &str = "Normalizing MiniMax H3 conditioning";
+    pub(super) const ARTIFACTS: &str = super::H3_ARTIFACT_VERIFICATION_PROGRESS;
+    pub(super) const ADAPTER: &str = "Authenticating MiniMax H3 adapter";
+    pub(super) const QUALIFICATION: &str = "Minting MiniMax H3 runtime qualification";
+    pub(super) const CHECKPOINTS: &str = "Opening MiniMax H3 checkpoints";
+    pub(super) const ATTEMPT: &str = "Freezing MiniMax H3 execution plan";
+}
+
 #[cfg(feature = "mp4")]
 fn prepare_reviewed_h3_private_fl2va_admission(
     input: H3PrivateFl2VaAdmissionInput<'_>,
@@ -1792,6 +1856,8 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // facts and provenance keep the full tag. Threading the tag into the
     // partition consumers is what refused every Turbo admission with
     // "requires an exact Comfy H3 canonical model name".
+    let mut timeline = H3AdmissionTimeline::new(progress);
+    timeline.enter(admission_phase::CONTRACT);
     let route = admitted_h3_route(&request.model)?;
     let admitted_model = route.admitted_model;
     let partition_model = route.partition_model;
@@ -1889,8 +1955,10 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // CUDA device, and nothing it produces is trusted on its own — the
     // authenticated envelope check below still validates the same request
     // against the record the artifact pass authorizes.
+    timeline.enter(admission_phase::SUPPORT);
     let storage = H3PrivateComfyStorageAuthority::resolve(paths.models_root, admitted_task)?;
     let qwen_support = load_qualified_private_qwen_support(paths.models_root, partition_model)?;
+    timeline.enter(admission_phase::CONDITIONING);
     let mut prepare_observer = H3EngineProgressObserver::new(progress);
     // Conditioning is task-shaped: FL2VA normalizes its boundary endpoints
     // here, Ref2VA decodes and normalizes its ordered references through the
@@ -1957,6 +2025,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // there.
     #[cfg(not(feature = "h3"))]
     precheck_private_h3_record_canvas(&precheck_envelope, request.width, request.height)?;
+    timeline.enter(admission_phase::ARTIFACTS);
     let artifact_report = qualify_private_artifacts_with_control(
         paths.models_root,
         partition_model,
@@ -2014,8 +2083,10 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     // reviewed step count. Selection is by the request's model identity (a
     // reviewed Turbo manifest tag); the env pair survives only as the
     // capture-scope UAT override inside `resolve_turbo_selection`.
+    timeline.enter(admission_phase::ADAPTER);
     let turbo_adapter =
         super::turbo::resolve_turbo_authority_for_request(admitted_model, paths.models_root)?;
+    timeline.enter(admission_phase::QUALIFICATION);
     #[cfg(not(feature = "h3"))]
     let private_compute_capability = compute_capability
         .ok_or_else(|| anyhow!("private H3 reviewed evidence requires one concrete CUDA route"))?;
@@ -2050,6 +2121,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
     )?;
     progress.checkpoint()?;
 
+    timeline.enter(admission_phase::CHECKPOINTS);
     let transformer_cancellation = H3PrivatePreparationCancellation { progress };
     let opened_transformer = open_h3_comfy_published_int8_checkpoint(
         storage.transformer_path(),
@@ -2194,6 +2266,7 @@ fn prepare_reviewed_h3_private_fl2va_admission(
         &base_factory_authority,
         &mut checkpoint,
     )?;
+    timeline.enter(admission_phase::ATTEMPT);
     let prepared_attempt = build_private_fl2va_admission_attempt(
         &execution_fingerprint,
         admission_request.request,

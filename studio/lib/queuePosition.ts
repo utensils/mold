@@ -16,6 +16,56 @@ export interface QueueStatus {
   position: number | null;
   /** Raw scheduler reason this work is parked, or null when it is simply waiting. */
   blockedReason: string | null;
+  /** What a preparing job is working through, when its host reports it. */
+  preparation: QueuePreparation | null;
+}
+
+/** Progress of a job the host is still preparing (weights, references, admission). */
+export interface QueuePreparation {
+  component: string | null;
+  /** 0..1, or null when the preparer reported no byte total. */
+  fraction: number | null;
+  elapsedMs: number | null;
+}
+
+/** The plan's preparation report for a job's work item, if it carries one. */
+function planPreparation(
+  plan: QueuePlan | null | undefined,
+  jobId: string,
+): QueuePreparation | null {
+  if (!plan) return null;
+  const items: readonly QueueWorkItem[] = plan.work_items ?? [];
+  for (const item of items) {
+    if (item.parent_id !== jobId && item.work_id !== jobId) continue;
+    if (item.blocked_reason !== "preparing") continue;
+    const progress = item.preparation_progress ?? null;
+    const total = progress?.bytes_total ?? 0;
+    return {
+      component: progress?.component || null,
+      fraction:
+        progress && total > 0
+          ? Math.min(1, Math.max(0, progress.bytes_done / total))
+          : null,
+      elapsedMs:
+        typeof item.preparation_elapsed_ms === "number" &&
+        Number.isFinite(item.preparation_elapsed_ms)
+          ? item.preparation_elapsed_ms
+          : null,
+    };
+  }
+  return null;
+}
+
+/** "Preparing", or "Preparing · Verifying MiniMax H3 artifacts 41%". */
+export function preparationLabel(
+  preparation: QueuePreparation | null | undefined,
+): string {
+  if (!preparation?.component) return "Preparing";
+  const pct =
+    preparation.fraction === null
+      ? ""
+      : ` ${Math.round(preparation.fraction * 100)}%`;
+  return `Preparing · ${preparation.component}${pct}`;
 }
 
 /** One host's live queue read, in whatever shape the shell already holds. */
@@ -66,6 +116,7 @@ export const QUEUE_BLOCKED_REASONS = [
   "no_schedulable_device",
   "no_idle_device",
   "lower_priority_opening",
+  "preparing",
 ] as const;
 
 export type QueueBlockedReasonId = (typeof QUEUE_BLOCKED_REASONS)[number];
@@ -102,6 +153,7 @@ const BLOCKED_REASON_COPY: Record<QueueBlockedReasonId, string | null> = {
   no_schedulable_device: "No usable device",
   no_idle_device: null,
   lower_priority_opening: null,
+  preparing: "Preparing",
 };
 
 /**
@@ -194,6 +246,7 @@ export function buildQueueStatusIndex(
       index.set(queueStatusKey(source.hostId, entry.id), {
         position: finitePosition(entry.position),
         blockedReason: planBlockedReason(source.plan, entry.id),
+        preparation: planPreparation(source.plan, entry.id),
       });
     }
   }
@@ -242,12 +295,16 @@ export type QueueWaitStatus =
 export interface QueueWaitInput {
   position?: number | null | undefined;
   blockedReason?: string | null | undefined;
+  preparation?: QueuePreparation | null | undefined;
 }
 
 /** Resolve one waiting row. Absent evidence degrades to a plain "Queued". */
 export function resolveQueueWait(
   input: QueueWaitInput | null | undefined,
 ): QueueWaitStatus {
+  if (input?.blockedReason === "preparing") {
+    return { kind: "blocked", label: preparationLabel(input.preparation) };
+  }
   const label = blockedReasonLabel(input?.blockedReason);
   if (label !== null) return { kind: "blocked", label };
   const position = finitePosition(input?.position);

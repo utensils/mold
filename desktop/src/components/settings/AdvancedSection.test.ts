@@ -185,14 +185,14 @@ describe("AdvancedSection device snapshots", () => {
             estimate_confidence: "low",
           },
           {
-            work_id: "desktop-legacy-device",
-            parent_id: "legacy-parent",
+            work_id: "desktop-typed-device",
+            parent_id: "typed-parent",
             work_kind: "generation",
             priority_class: "user",
             queue_rank: 1,
             bypass_count: 0,
             planned_device_id: device.id,
-            planned_lane_kind: null,
+            planned_lane_kind: "device",
             lane_order: 1,
             estimate_confidence: "low",
           },
@@ -214,12 +214,12 @@ describe("AdvancedSection device snapshots", () => {
     expect(wrapper.get('[data-test="other-compute-lane"]').text()).toContain(
       "desktop-future-collision",
     );
-    expect(wrapper.get('[data-test="device-lane"]').text()).toContain("desktop-legacy-device");
+    expect(wrapper.get('[data-test="device-lane"]').text()).toContain("desktop-typed-device");
     expect(wrapper.get('[data-test="device-lane"]').text()).not.toContain(
       "desktop-future-collision",
     );
     expect(wrapper.text().match(/desktop-future-collision/g)).toHaveLength(1);
-    expect(wrapper.text().match(/desktop-legacy-device/g)).toHaveLength(1);
+    expect(wrapper.text().match(/desktop-typed-device/g)).toHaveLength(1);
   });
 
   it("subscribes to the exact authenticated target and refetches on invalidation", async () => {

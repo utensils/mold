@@ -5477,6 +5477,195 @@ mod tests {
         .unwrap();
     }
 
+    /// A durably admitted job must be able to say what it is going to render.
+    ///
+    /// The queue projection is payload-free by construction — its SQL never
+    /// selects `request_json` — so the listing hardcodes `metadata: None` and
+    /// every durable job showed NO settings at all for its entire pre-dispatch
+    /// window, which on this family is minutes. `GET /api/queue/:id` reads the
+    /// one body the listing must not, and derives the same metadata shape the
+    /// durable feeder derives at replay.
+    #[tokio::test]
+    async fn one_queue_job_reports_the_settings_the_payload_free_listing_cannot() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        mold_db::generation_queue::insert(
+            db.as_ref().as_ref().unwrap(),
+            &mold_db::generation_queue::GenerationQueueRow {
+                id: "durable-only".to_string(),
+                owner_uuid: owner,
+                state: mold_db::generation_queue::QueueRowState::Queued,
+                model: "flux-dev:q8".to_string(),
+                request_json: serde_json::json!({
+                    "prompt": "a lighthouse in a storm",
+                    "model": "flux-dev:q8",
+                    "width": 1024,
+                    "height": 768,
+                    "steps": 28,
+                    "guidance": 3.5,
+                    "seed": 4242,
+                })
+                .to_string(),
+                media_set_id: None,
+                admission_authority: None,
+                output_dir: root.path().to_path_buf(),
+                target_gpu: None,
+                target_device_id: None,
+                completion_payload: "full".to_string(),
+                seed_pinned: true,
+                dispatch_attempts: 0,
+                replay_seen: 0,
+                held_reason: None,
+                created_at_ms: 1_000,
+                updated_at_ms: 1_000,
+                started_at_ms: None,
+            },
+        )
+        .unwrap();
+
+        // The listing still carries no settings — that is the property this
+        // endpoint exists to work around, not a bug to fix there.
+        let listing = app_with_state(state.clone())
+            .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(listing.status(), StatusCode::OK);
+        let listed = json_body(listing).await;
+        let row = listed["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == "durable-only")
+            .expect("the durable row is listed");
+        assert!(
+            row.get("metadata").is_none(),
+            "the payload-free listing must not start reading request bodies: {row}"
+        );
+
+        let detail = app_with_state(state.clone())
+            .oneshot(
+                Request::get("/api/queue/durable-only")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail.status(), StatusCode::OK);
+        let detail = json_body(detail).await;
+        assert_eq!(detail["job"]["id"], "durable-only");
+        assert_eq!(detail["job"]["model"], "flux-dev:q8");
+        assert_eq!(detail["job"]["durable"], true);
+        let metadata = &detail["job"]["metadata"];
+        assert_eq!(metadata["prompt"], "a lighthouse in a storm");
+        assert_eq!(metadata["width"], 1024);
+        assert_eq!(metadata["height"], 768);
+        assert_eq!(metadata["steps"], 28);
+        assert_eq!(metadata["seed"], 4242);
+
+        let missing = app_with_state(state)
+            .oneshot(
+                Request::get("/api/queue/no-such-job")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The detail endpoint has to carry the PHASE, or the drawer it exists for
+    /// still cannot say what a minutes-long `Preparing` window is doing.
+    ///
+    /// The work item is matched the way `studio/lib/queuePosition.ts` matches
+    /// it: the entry whose `work_id` IS the job, or — for a batch parent, whose
+    /// plan entries are its children — the first entry naming it as parent.
+    /// Matching only `work_id` answers `null` for exactly the parent a client
+    /// asks about.
+    #[tokio::test]
+    async fn one_queue_job_carries_its_planned_phase_including_for_a_batch_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (state, _rx) = durable_state(db.clone(), root.path());
+        let owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        for id in ["solo-job", "batch-parent"] {
+            mold_db::generation_queue::insert(
+                db.as_ref().as_ref().unwrap(),
+                &mold_db::generation_queue::GenerationQueueRow {
+                    id: id.to_string(),
+                    owner_uuid: owner.clone(),
+                    state: mold_db::generation_queue::QueueRowState::Queued,
+                    model: "minimax-h3-fl2va:comfy-pruned-int8".to_string(),
+                    request_json: serde_json::json!({
+                        "prompt": "a lighthouse in a storm",
+                        "model": "minimax-h3-fl2va:comfy-pruned-int8",
+                        "width": 1344,
+                        "height": 768,
+                    })
+                    .to_string(),
+                    media_set_id: None,
+                    admission_authority: None,
+                    output_dir: root.path().to_path_buf(),
+                    target_gpu: None,
+                    target_device_id: None,
+                    completion_payload: "full".to_string(),
+                    seed_pinned: false,
+                    dispatch_attempts: 0,
+                    replay_seen: 0,
+                    held_reason: None,
+                    created_at_ms: 1_000,
+                    updated_at_ms: 1_000,
+                    started_at_ms: None,
+                },
+            )
+            .unwrap();
+        }
+        let preparing = |work_id: &str, parent_id: &str| mold_core::QueueWorkItem {
+            work_id: work_id.to_string(),
+            parent_id: parent_id.to_string(),
+            work_kind: "generation".to_string(),
+            blocked_reason: Some(mold_core::QueueBlockedReason::Preparing),
+            reason: Some("preparing".to_string()),
+            preparation_elapsed_ms: Some(214_000),
+            preparation_progress: Some(mold_core::QueuePreparationProgress {
+                component: "Verifying MiniMax H3 artifacts".to_string(),
+                bytes_done: 15_000_000_000,
+                bytes_total: 37_000_000_000,
+                phase_elapsed_ms: Some(96_000),
+            }),
+            ..Default::default()
+        };
+        state.scheduled_work.set_queue_work_items_for_tests(vec![
+            preparing("solo-job", "solo-job"),
+            preparing("batch-parent:0", "batch-parent"),
+        ]);
+
+        for id in ["solo-job", "batch-parent"] {
+            let response = app_with_state(state.clone())
+                .oneshot(
+                    Request::get(format!("/api/queue/{id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{id}");
+            let body = json_body(response).await;
+            let item = &body["work_item"];
+            assert_eq!(item["blocked_reason"], "preparing", "{id}: {body}");
+            assert_eq!(item["preparation_elapsed_ms"], 214_000, "{id}");
+            assert_eq!(
+                item["preparation_progress"]["component"], "Verifying MiniMax H3 artifacts",
+                "{id}"
+            );
+            assert_eq!(
+                item["preparation_progress"]["phase_elapsed_ms"], 96_000,
+                "{id}: the phase's own age must survive the round trip"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn paginated_queue_reads_payload_free_pages_and_keeps_live_only_work_visible() {
         let root = tempfile::tempdir().unwrap();

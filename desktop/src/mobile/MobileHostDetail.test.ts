@@ -325,14 +325,14 @@ describe("MobileHostDetail remote host data", () => {
                 estimate_confidence: "low",
               },
               {
-                work_id: "mobile-legacy-device",
-                parent_id: "legacy-parent",
+                work_id: "mobile-typed-device",
+                parent_id: "typed-parent",
                 work_kind: "generation",
                 priority_class: "user",
                 queue_rank: 1,
                 bypass_count: 0,
                 planned_device_id: visible.id,
-                planned_lane_kind: null,
+                planned_lane_kind: "device",
                 lane_order: 1,
                 estimate_confidence: "low",
               },
@@ -348,10 +348,10 @@ describe("MobileHostDetail remote host data", () => {
     expect(view.get('[data-test="other-compute-lane"]').text()).toContain(
       "mobile-future-collision",
     );
-    expect(view.get('[data-test="device-lane"]').text()).toContain("mobile-legacy-device");
+    expect(view.get('[data-test="device-lane"]').text()).toContain("mobile-typed-device");
     expect(view.get('[data-test="device-lane"]').text()).not.toContain("mobile-future-collision");
     expect(view.text().match(/mobile-future-collision/g)).toHaveLength(1);
-    expect(view.text().match(/mobile-legacy-device/g)).toHaveLength(1);
+    expect(view.text().match(/mobile-typed-device/g)).toHaveLength(1);
   });
 
   it("targets the exact remote and renders telemetry, queue, downloads, and installed models", async () => {
