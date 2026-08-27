@@ -1311,14 +1311,20 @@ describe("useGenerateStream host routing", () => {
     serveDurableArtifacts();
     admitGenerationBatch.mockImplementation(
       (_target: unknown, body: { client_batch_id: string }) =>
-        Promise.resolve(durableBatch(body.client_batch_id, ["queued", "queued"])),
+        Promise.resolve(
+          durableBatch(body.client_batch_id, ["queued", "queued"]),
+        ),
     );
     const stream = useGenerateStream();
     const route: HostRoute = {
       ...studioDurableRoute,
       referenceUploads: REFERENCE_UPLOADS,
     };
-    stream.submitBatch([ref2vaInline(1), ref2vaInline(2)], { kind: "single" }, route);
+    stream.submitBatch(
+      [ref2vaInline(1), ref2vaInline(2)],
+      { kind: "single" },
+      route,
+    );
     await flushDurable();
 
     expect(prepareReferenceUploadBatch).toHaveBeenCalledTimes(1);
@@ -1333,15 +1339,19 @@ describe("useGenerateStream host routing", () => {
     ).toHaveLength(2);
     expect(admitGenerationBatch).toHaveBeenCalledTimes(1);
     const body = admitGenerationBatch.mock.calls[0]![1] as {
-      requests: Array<{ references: Array<{ media: Record<string, unknown> }> }>;
+      requests: Array<{
+        references: Array<{ media: Record<string, unknown> }>;
+      }>;
     };
-    expect(body.requests.map((request) => request.references[0]!.media)).toEqual([
+    expect(
+      body.requests.map((request) => request.references[0]!.media),
+    ).toEqual([
       { authority: "upload", handle: "handle-1" },
       { authority: "upload", handle: "handle-2" },
     ]);
-    expect(prepareReferenceUploadBatch.mock.invocationCallOrder[0]).toBeLessThan(
-      admitGenerationBatch.mock.invocationCallOrder[0]!,
-    );
+    expect(
+      prepareReferenceUploadBatch.mock.invocationCallOrder[0],
+    ).toBeLessThan(admitGenerationBatch.mock.invocationCallOrder[0]!);
     // An admitted POST consumed the leases; nothing is released.
     expect(release).not.toHaveBeenCalled();
   });
@@ -1353,7 +1363,10 @@ describe("useGenerateStream host routing", () => {
     let inFlight = 0;
     let maxInFlight = 0;
     admitGenerationBatch.mockImplementation(
-      async (_target: unknown, body: { client_batch_id: string; requests: unknown[] }) => {
+      async (
+        _target: unknown,
+        body: { client_batch_id: string; requests: unknown[] },
+      ) => {
         inFlight += 1;
         maxInFlight = Math.max(maxInFlight, inFlight);
         await Promise.resolve();
@@ -1368,7 +1381,10 @@ describe("useGenerateStream host routing", () => {
     stream.submitBatch(
       [1, 2, 3, 4, 5].map((seed) => ref2vaInline(seed)),
       { kind: "single" },
-      { ...studioDurableRoute, referenceUploads: { ...REFERENCE_UPLOADS, max_active_sessions: 2 } },
+      {
+        ...studioDurableRoute,
+        referenceUploads: { ...REFERENCE_UPLOADS, max_active_sessions: 2 },
+      },
     );
     await flushDurable();
 
@@ -1390,10 +1406,37 @@ describe("useGenerateStream host routing", () => {
       }),
     );
     const stream = useGenerateStream();
-    const id = stream.submit(ref2vaInline(6), { kind: "single" }, {
-      ...studioDurableRoute,
-      referenceUploads: REFERENCE_UPLOADS,
-    });
+    const id = stream.submit(
+      ref2vaInline(6),
+      { kind: "single" },
+      {
+        ...studioDurableRoute,
+        referenceUploads: REFERENCE_UPLOADS,
+      },
+    );
+    await flushDurable();
+
+    expect(release).toHaveBeenCalledTimes(1);
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    expect(job.state).toBe("error");
+  });
+
+  it("releases the chunk's leases when the host confirms nothing was admitted", async () => {
+    prepareReferenceUploadBatch.mockReset();
+    const release = stageReferenceUploads();
+    // An ambiguous transport failure, then the host's own answer: no batch.
+    admitGenerationBatch.mockRejectedValue(new Error("socket hang up"));
+    lookupGenerationBatchByClientId.mockReset();
+    lookupGenerationBatchByClientId.mockResolvedValue({ kind: "missing" });
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      ref2vaInline(8),
+      { kind: "single" },
+      {
+        ...studioDurableRoute,
+        referenceUploads: REFERENCE_UPLOADS,
+      },
+    );
     await flushDurable();
 
     expect(release).toHaveBeenCalledTimes(1);
@@ -1419,7 +1462,9 @@ describe("useGenerateStream host routing", () => {
 
     expect(prepareReferenceUploadBatch).not.toHaveBeenCalled();
     const body = admitGenerationBatch.mock.calls[0]![1] as {
-      requests: Array<{ references: Array<{ media: Record<string, unknown> }> }>;
+      requests: Array<{
+        references: Array<{ media: Record<string, unknown> }>;
+      }>;
     };
     expect(body.requests[0]!.references[0]!.media).toEqual({
       authority: "inline",
@@ -1433,10 +1478,14 @@ describe("useGenerateStream host routing", () => {
       new Error("reference upload session refused: REFERENCE_UPLOAD_QUOTA"),
     );
     const stream = useGenerateStream();
-    const id = stream.submit(ref2vaInline(4), { kind: "single" }, {
-      ...studioDurableRoute,
-      referenceUploads: REFERENCE_UPLOADS,
-    });
+    const id = stream.submit(
+      ref2vaInline(4),
+      { kind: "single" },
+      {
+        ...studioDurableRoute,
+        referenceUploads: REFERENCE_UPLOADS,
+      },
+    );
     await flushDurable();
 
     expect(admitGenerationBatch).not.toHaveBeenCalled();

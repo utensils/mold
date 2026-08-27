@@ -6889,6 +6889,110 @@ mod tests {
         assert_eq!(state.reference_uploads.staged_set_count_for_test(), 0);
     }
 
+    /// A batch is atomic: a sibling refused by name must not have spent the
+    /// upload session of the sibling before it. The refusal names
+    /// `requests[2]`, the first child's handle is still redeemable, and the
+    /// corrected retry admits it.
+    #[cfg(feature = "h3")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_refused_sibling_spends_no_upload_session() {
+        let root = tempfile::tempdir().unwrap();
+        let db_path = root.path().join("mold.db");
+        let db = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
+        let (mut state, _rx) = durable_state_with_engine(
+            db,
+            root.path(),
+            MockEngine::ready_for_model(mold_core::minimax_h3::REF2VA_COMFY),
+        );
+        install_authoritative_v2(&mut state);
+        let app = keyed_app(state.clone());
+        let image = minimal_png();
+        let mut descriptor_request = inline_ref2va_body("uploaded ordered references", &image);
+        descriptor_request["references"][0]["media"] =
+            serde_json::json!({ "authority": "descriptor" });
+        let session = json_body(
+            app.clone()
+                .oneshot(keyed_json_request(
+                    "POST",
+                    "/api/generate/reference-upload-sessions",
+                    serde_json::json!({
+                        "request": descriptor_request.clone(),
+                        "upload_references": [1],
+                    }),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let handle = session["uploads"][0]["handle"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let uploaded = json_body(
+            app.clone()
+                .oneshot(
+                    Request::put("/api/generate/reference-upload")
+                        .header("x-api-key", "test-key")
+                        .header(crate::reference_uploads::UPLOAD_HANDLE_HEADER, &handle)
+                        .header("content-type", "image/png")
+                        .header("content-length", image.len().to_string())
+                        .body(Body::from(image.clone()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let mut upload_request = descriptor_request.clone();
+        upload_request["references"][0]["media"] =
+            serde_json::json!({ "authority": "upload", "handle": handle });
+        upload_request["references"][0]["provenance"]["sha256"] =
+            uploaded["metadata"]["sha256"].clone();
+        let mut invalid_sibling = inline_ref2va_body("a sibling nobody can render", &image);
+        invalid_sibling["width"] = serde_json::json!(0);
+
+        let refused = app
+            .clone()
+            .oneshot(keyed_json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [upload_request.clone(), invalid_sibling],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let error = json_body(refused).await;
+        assert!(
+            error["error"].as_str().unwrap().contains("requests[2]"),
+            "{error}"
+        );
+        assert!(
+            state.reference_uploads.staging_exists(),
+            "the first sibling's session must survive a refusal of the second"
+        );
+
+        let admitted = app
+            .clone()
+            .oneshot(keyed_json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [upload_request],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            admitted.status(),
+            StatusCode::ACCEPTED,
+            "the unspent handle admits the corrected batch"
+        );
+    }
+
     /// Stream one PNG through a request-bound upload session, then admit the
     /// request through the batch route. The one-use handle is consumed inside
     /// admission and never journaled; the session, its staging, and its quota

@@ -447,7 +447,14 @@ impl DurableMediaAdmission {
             }
             (config.effective_output_dir(), config.resolved_media_roots())
         };
-        let mut prepared = Vec::with_capacity(body.requests.len());
+        // Phase one, consuming nothing: every child is normalised, activated
+        // and validated before ANY child's one-use upload session is spent,
+        // and the observer slots are reserved in between. A batch is atomic
+        // (`CLAUDE.md`), so a refusal that names `requests[N]` must leave
+        // every sibling's handle reusable for the retry that fixes N; only a
+        // child's OWN resolution failure — an unknown handle, a digest that
+        // drifted — spends sessions, and that child has to be re-staged anyway.
+        let mut validated = Vec::with_capacity(body.requests.len());
         for (offset, mut request) in body.requests.into_iter().enumerate() {
             #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
             if mold_core::minimax_h3::task_for_model(&request.model).is_some() {
@@ -520,12 +527,37 @@ impl DurableMediaAdmission {
             validation.map_err(|error| {
                 ApiError::validation(format!("requests[{}]: {error}", offset + 1))
             })?;
-            // Every public reference authority — one-use upload handles,
-            // inline bytes, server paths — is consumed here and rewritten to
-            // a descriptor. This is the LAST fallible step before capture, so
-            // a refused request never spends a session, and the FIRST thing
-            // the request is serialized after, so a handle never reaches
-            // durable JSON.
+            validated.push((offset, request, preferred_gpu, reference_scope_sha256));
+        }
+
+        let batch_id = uuid::Uuid::new_v4().to_string();
+        let job_ids = (0..validated.len())
+            .map(|_| uuid::Uuid::new_v4().to_string())
+            .collect::<Vec<_>>();
+        let observers = job_ids
+            .iter()
+            .map(|job_id| observer_mode.and_then(|mode| self.ingress.reserve(job_id, mode)))
+            .collect::<Vec<_>>();
+        if observer_mode.is_some() && observers.iter().any(Option::is_none) {
+            return Err(ApiError::with_code(
+                "direct response capacity is full; retry before the request is admitted",
+                "DIRECT_OBSERVER_CAPACITY_EXCEEDED",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ));
+        }
+        let observer_job_ids = observers
+            .iter()
+            .zip(&job_ids)
+            .filter_map(|(observer, job_id)| observer.as_ref().map(|_| job_id.clone()))
+            .collect::<Vec<_>>();
+
+        // Phase two: every public reference authority — one-use upload
+        // handles, inline bytes, server paths — is consumed here and
+        // rewritten to a descriptor. This is the LAST fallible step before
+        // capture, and the FIRST thing the request is serialized after, so a
+        // handle never reaches durable JSON.
+        let mut prepared = Vec::with_capacity(validated.len());
+        for (offset, mut request, preferred_gpu, reference_scope_sha256) in validated {
             let staged_references = state
                 .reference_uploads
                 .resolve_request(
@@ -560,10 +592,6 @@ impl DurableMediaAdmission {
             });
         }
 
-        let batch_id = uuid::Uuid::new_v4().to_string();
-        let job_ids = (0..prepared.len())
-            .map(|_| uuid::Uuid::new_v4().to_string())
-            .collect::<Vec<_>>();
         let mut seal_inputs = Vec::with_capacity(prepared.len());
         let direct_warnings = observer_mode.map(|_| RequestWarnings::default());
         for (offset, (prepared, job_id)) in prepared.into_iter().zip(&job_ids).enumerate() {
@@ -598,22 +626,6 @@ impl DurableMediaAdmission {
         let receipt_key = Arc::clone(&self.receipt_key);
         let fingerprint_for_seal = fingerprint.clone();
         let operation_id = body.client_batch_id.clone();
-        let observers = job_ids
-            .iter()
-            .map(|job_id| observer_mode.and_then(|mode| self.ingress.reserve(job_id, mode)))
-            .collect::<Vec<_>>();
-        if observer_mode.is_some() && observers.iter().any(Option::is_none) {
-            return Err(ApiError::with_code(
-                "direct response capacity is full; retry before the request is admitted",
-                "DIRECT_OBSERVER_CAPACITY_EXCEEDED",
-                StatusCode::SERVICE_UNAVAILABLE,
-            ));
-        }
-        let observer_job_ids = observers
-            .iter()
-            .zip(&job_ids)
-            .filter_map(|(observer, job_id)| observer.as_ref().map(|_| job_id.clone()))
-            .collect::<Vec<_>>();
         let journal = state.queue_journal.clone();
         let owner_uuid = self.owner_uuid.clone();
         let batch_id_for_db = batch_id.clone();

@@ -1485,6 +1485,7 @@ function rejectDurableAdmission(clientBatchId: string, error: string): void {
 async function recoverAmbiguousAdmission(
   route: HostRoute,
   clientBatchId: string,
+  releaseLeases: () => Promise<void> = async () => {},
 ): Promise<void> {
   try {
     const lookup = await lookupGenerationBatchByClientId(
@@ -1495,7 +1496,11 @@ async function recoverAmbiguousAdmission(
       applyDurableBatchStatus(clientBatchId, lookup.batch);
       return;
     }
-    // The host answered and has no such batch: the POST never committed.
+    // The host answered and has no such batch: the POST never committed,
+    // so the chunk's upload leases were never consumed and go back before
+    // the refusal — otherwise they sit on the host until their TTL and lock
+    // this identity out of its next reference print.
+    await releaseLeases();
     // Waiting longer would only hide the error the host gave for it.
     const tracker = durableTrackers.get(clientBatchId);
     rejectDurableAdmission(
@@ -1529,7 +1534,11 @@ async function admitDurableBatch(
   // POSTs synchronously, exactly as before.
   if (
     requests.some((request) =>
-      requestShouldUseReferenceUploads(request, route.target, route.referenceUploads),
+      requestShouldUseReferenceUploads(
+        request,
+        route.target,
+        route.referenceUploads,
+      ),
     )
   ) {
     try {
@@ -1567,7 +1576,7 @@ async function admitDurableBatch(
       durableTrackers.set(clientBatchId, next);
       applyDurableTracker(next);
     }
-    await recoverAmbiguousAdmission(route, clientBatchId);
+    await recoverAmbiguousAdmission(route, clientBatchId, releaseLeases);
   }
 }
 
@@ -1597,7 +1606,11 @@ function submitDurableJobs(
   // reference-bearing chunks are admitted one after another; ordinary chunks
   // keep leaving in parallel.
   const uploadWork = requests.some((request) =>
-    requestShouldUseReferenceUploads(request, host.target, host.referenceUploads),
+    requestShouldUseReferenceUploads(
+      request,
+      host.target,
+      host.referenceUploads,
+    ),
   );
   let previousChunk: Promise<void> = Promise.resolve();
   selectedJobId.value = null;
