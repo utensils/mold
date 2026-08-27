@@ -1706,6 +1706,16 @@ impl GpuWorker {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = fingerprint.map(str::to_string);
     }
 
+    /// Whether the engine this worker holds is exactly the plan `fingerprint`
+    /// names — the one residency fact warm-hit host accounting reads.
+    pub(crate) fn holds_execution_fingerprint(&self, fingerprint: &str) -> bool {
+        self.resident_execution_fingerprint
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_deref()
+            == Some(fingerprint)
+    }
+
     /// Check if this worker is in a degraded state (3+ consecutive failures, within cooldown).
     ///
     /// When the cooldown has expired we clear the failure counter and the

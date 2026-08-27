@@ -914,6 +914,22 @@ pub struct ResolvedExecutionPlan {
     /// no learned evidence.
     pub learned_vram_envelope_bytes: u64,
     pub predicted_host_increment_bytes: u64,
+    /// Host bytes one request allocates on a device whose resident engine
+    /// already holds this plan (`GpuWorker::holds_execution_fingerprint`).
+    ///
+    /// A CPU-parked encoder is retained for the engine's life — FLUX drops
+    /// its T5 only when `on_gpu` (`flux/pipeline.rs`), so a CPU-placed T5 on
+    /// CUDA never leaves host RAM — and a streamed block file's host copy is
+    /// retained the same way. `MemAvailable`, the ledger's own input, already
+    /// excludes those pages, so charging `predicted_host_increment_bytes` to a
+    /// warm hit double-counts memory the engine is holding and parks the job
+    /// on `insufficient_host_ram` forever while the GPU idles (hal9000,
+    /// 2026-08-27: 9.85 GB of headroom against the 10.5 GB cold figure for a
+    /// resident `flux-dev:q8`; both queued prints dispatched within a second
+    /// of the model being unloaded by hand). Only per-request heaps recur:
+    /// the base transient and LTX-2's CPU Gemma streaming peak, which is a
+    /// forward-loop allocation.
+    pub predicted_warm_host_increment_bytes: u64,
     pub determinism_class: DeterminismClass,
     pub execution_environment: ExecutionEnvironmentDescriptor,
     pub execution_equivalence_fingerprint: ExecutionEquivalenceFingerprint,
@@ -976,6 +992,16 @@ impl ResolvedExecutionPlan {
         match self.device_backend {
             GpuBackend::Metal => 0,
             GpuBackend::Cuda => self.predicted_host_increment_bytes,
+        }
+    }
+
+    /// The host demand a warm hit must prove — see
+    /// [`Self::predicted_warm_host_increment_bytes`]. Zero on Metal for the
+    /// same reason as [`Self::admission_host_demand_bytes`].
+    pub fn admission_warm_host_demand_bytes(&self) -> u64 {
+        match self.device_backend {
+            GpuBackend::Metal => 0,
+            GpuBackend::Cuda => self.predicted_warm_host_increment_bytes,
         }
     }
 }
@@ -1800,6 +1826,9 @@ fn resolve_private_h3_execution_plans(
             admitted_available_vram_bytes: evidence.admitted_available_device_bytes(),
             learned_vram_envelope_bytes: 0,
             predicted_host_increment_bytes: evidence.predicted_host_increment_bytes(),
+            // An H3 attempt is one-shot owner work with no warm engine to
+            // credit, so its warm figure is its cold one.
+            predicted_warm_host_increment_bytes: evidence.predicted_host_increment_bytes(),
             determinism_class,
             execution_environment,
             execution_equivalence_fingerprint,
@@ -2799,6 +2828,10 @@ fn build_plan(
 
     let mut components = BTreeMap::new();
     let mut host_bytes_by_path: BTreeMap<PathBuf, u64> = BTreeMap::new();
+    // The subset of `host_bytes_by_path` a request allocates again on a warm
+    // hit: a streaming encoder's forward-loop heap. A parked encoder's bytes
+    // stay resident in the engine and are already absent from `MemAvailable`.
+    let mut recurring_host_bytes_by_path: BTreeMap<PathBuf, u64> = BTreeMap::new();
     let gemma_anon_peak_anchor =
         ltx2_cpu_gemma_anon_peak_anchor(context.family, context.artifacts, &placements);
     for (role, path) in context.artifacts {
@@ -2830,6 +2863,9 @@ fn build_plan(
                 bytes
             };
             host_bytes_by_path.insert(path.clone(), host);
+            if streams_from_mmap {
+                recurring_host_bytes_by_path.insert(path.clone(), host);
+            }
             (
                 ResolvedComponentPlacement::Cpu,
                 ComponentLoadStrategy::ParkedCpu,
@@ -2888,6 +2924,11 @@ fn build_plan(
 
     let predicted_vram = memory.peak_memory_bytes.max(pending_dependency_peak);
     let predicted_host = host_bytes_by_path
+        .values()
+        .fold(BASE_HOST_TRANSIENT, |total, bytes| {
+            total.saturating_add(*bytes)
+        });
+    let predicted_warm_host = recurring_host_bytes_by_path
         .values()
         .fold(BASE_HOST_TRANSIENT, |total, bytes| {
             total.saturating_add(*bytes)
@@ -2964,6 +3005,7 @@ fn build_plan(
         admitted_available_vram_bytes: device.available_vram_bytes,
         learned_vram_envelope_bytes: 0,
         predicted_host_increment_bytes: predicted_host,
+        predicted_warm_host_increment_bytes: predicted_warm_host,
         determinism_class,
         execution_environment,
         execution_equivalence_fingerprint,
@@ -5002,6 +5044,45 @@ mod tests {
         }));
     }
 
+    /// hal9000, 2026-08-27: `flux-dev:q8` resident on an idle 4090 with its
+    /// 9.79 GB T5 parked in host RAM (FLUX drops an encoder only when it is
+    /// `on_gpu`), `MemAvailable` 19.9 GB, safety floor 10.07 GB → 9.85 GB of
+    /// headroom. The planner charged the warm candidate the cold figure, so two
+    /// queued prints of the very model already loaded sat on
+    /// `insufficient_host_ram` until the model was unloaded by hand — after
+    /// which the cold reload was admitted against 30 GB and paid the load again.
+    #[test]
+    fn a_warm_hit_charges_only_the_recurring_host_transient() {
+        const HAL9000_T5_FP16_BYTES: u64 = 9_787_000_000;
+        const HAL9000_HOST_HEADROOM_BYTES: u64 = 9_853_131_776;
+        let root = TempDir::new().unwrap();
+        sparse_file(&root.path().join("t5.safetensors"), HAL9000_T5_FP16_BYTES);
+        let placement = DevicePlacement {
+            text_encoders: DeviceRef::Cpu,
+            advanced: None,
+        };
+        let plan = resolve_execution_plans(
+            &config(root.path(), "flux2", None),
+            &request(Some(placement)),
+            &devices(&[24 * GIB]),
+            false,
+        )
+        .unwrap()
+        .remove(0);
+
+        assert_eq!(
+            plan.predicted_host_increment_bytes,
+            BASE_HOST_TRANSIENT + HAL9000_T5_FP16_BYTES
+        );
+        assert_eq!(
+            plan.predicted_warm_host_increment_bytes, BASE_HOST_TRANSIENT,
+            "a parked encoder is already in the engine's RSS; a warm hit \
+             reallocates nothing but the transient"
+        );
+        assert!(plan.admission_host_demand_bytes() > HAL9000_HOST_HEADROOM_BYTES);
+        assert!(plan.admission_warm_host_demand_bytes() <= HAL9000_HOST_HEADROOM_BYTES);
+    }
+
     /// A CPU-placed LTX-2 Gemma costs its streaming heap and nothing else.
     ///
     /// The shards stay a memory-mapped `VarBuilder`, so their pages are
@@ -5057,6 +5138,11 @@ mod tests {
         assert_eq!(
             plan.predicted_host_increment_bytes,
             BASE_HOST_TRANSIENT + streaming_heap
+        );
+        assert_eq!(
+            plan.predicted_warm_host_increment_bytes,
+            BASE_HOST_TRANSIENT + streaming_heap,
+            "the streaming heap is a forward-loop allocation and recurs on a warm hit"
         );
     }
 
