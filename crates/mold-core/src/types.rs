@@ -7542,6 +7542,7 @@ mod tests {
                 job_id: "job-1".into(),
                 state: super::GenerationBatchChildState::Complete,
                 error: None,
+                error_code: None,
                 retryable: None,
                 created_at_ms: 10,
                 updated_at_ms: 20,
@@ -8250,6 +8251,12 @@ pub struct GenerationBatchChild {
     pub state: GenerationBatchChildState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Typed cause of a `held` child — the preparation refusal's own code
+    /// (`MODEL_NOT_FOUND`, `UNKNOWN_MODEL`, …) beside its sentence, so a
+    /// client can offer the pull-and-resume instead of matching prose.
+    /// Absent for a hold with no typed cause and for every other state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
     /// True only when an explicitly held durable child may be returned to the
     /// queue through the retry endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]

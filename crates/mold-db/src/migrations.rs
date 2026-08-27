@@ -636,6 +636,10 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 29,
         kind: MigrationKind::Sql(V29_GENERATION_BATCH_CHILD_REVISION),
     },
+    Migration {
+        version: 30,
+        kind: MigrationKind::Sql(V30_GENERATION_BATCH_CHILD_ERROR_CODE),
+    },
 ];
 
 /// #1227 phase 2 moved face-identity extraction from admission onto the
@@ -713,7 +717,7 @@ ALTER TABLE generation_batch_children ADD COLUMN completed_at_ms INTEGER;
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 29;
+pub const SCHEMA_VERSION: i64 = 30;
 
 /// Opaque staged-media ownership for durable queue rows.
 ///
@@ -845,6 +849,18 @@ ALTER TABLE generation_queue ADD COLUMN admission_authority TEXT
 /// clients that predate this column and still order by it.
 const V29_GENERATION_BATCH_CHILD_REVISION: &str = r#"
 ALTER TABLE generation_batch_children ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;
+"#;
+
+/// A held child's typed refusal code beside its human sentence.
+///
+/// The feeder holds a child with the preparation error's `code`
+/// (`MODEL_NOT_FOUND`, `UNKNOWN_MODEL`, …) but only ever persisted the
+/// sentence, so every client's missing-model pull offer — which classifies
+/// on the code — had nothing to read. Additive and nullable: a row held
+/// before this migration reads `NULL`, which a client treats as "no typed
+/// cause". Cleared by the retry route with the sentence.
+const V30_GENERATION_BATCH_CHILD_ERROR_CODE: &str = r#"
+ALTER TABLE generation_batch_children ADD COLUMN error_code TEXT;
 "#;
 
 /// Build a serde-compatible reverse lookup for durable publication recovery.
@@ -1303,7 +1319,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 29);
+        assert_eq!(SCHEMA_VERSION, 30);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -1457,7 +1473,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 29);
+        assert_eq!(SCHEMA_VERSION, 30);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -1594,7 +1610,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 29);
+        assert_eq!(SCHEMA_VERSION, 30);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -1855,7 +1871,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 29);
+        assert_eq!(SCHEMA_VERSION, 30);
     }
 
     #[test]

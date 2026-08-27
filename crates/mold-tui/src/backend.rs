@@ -1700,6 +1700,7 @@ mod tests {
                     job_id: "job-1".into(),
                     state: GenerationBatchChildState::Held,
                     error: Some("dependency unavailable".into()),
+                    error_code: None,
                     retryable: Some(true),
                     created_at_ms: 0,
                     updated_at_ms: 0,

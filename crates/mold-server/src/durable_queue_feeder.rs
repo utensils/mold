@@ -286,12 +286,9 @@ async fn hold_claimed(
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> HoldClaimOutcome {
     let message = reason.clone();
+    let held_code = code.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        if retryable {
-            ticket.hold_retryable(&reason)
-        } else {
-            ticket.hold(&reason)
-        }
+        ticket.hold_with_code(&reason, held_code.as_deref(), retryable)
     })
     .await;
     match outcome {

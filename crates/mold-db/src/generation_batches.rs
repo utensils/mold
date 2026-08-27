@@ -65,6 +65,10 @@ pub struct DurableGenerationBatchChildRow {
     pub batch_index: u32,
     pub state: String,
     pub error: Option<String>,
+    /// Typed cause of a held child (`MODEL_NOT_FOUND`, `UNKNOWN_MODEL`, …),
+    /// persisted beside the sentence so clients can act on it; `None` for a
+    /// hold with no typed cause and for every non-held state.
+    pub error_code: Option<String>,
     pub retryable: bool,
     pub updated_at_ms: i64,
     /// Monotonic per-child version. Every authoritative state transition
@@ -606,12 +610,14 @@ pub fn cancel_owned(
 /// only an unclaimed row. A cancellation request is terminalized instead of
 /// being overwritten with `held`; the queue row is removed in that same
 /// transaction so a 204 cancellation cannot later become replayable work.
+#[allow(clippy::too_many_arguments)] // one transaction's fence tuple plus the hold's reason, code, and retryability
 pub fn hold_owned(
     db: &MetadataDb,
     owner_uuid: &str,
     job_id: &str,
     claim_token: Option<&str>,
     reason: &str,
+    code: Option<&str>,
     retryable: bool,
     now_ms: i64,
 ) -> Result<OwnedHold> {
@@ -696,11 +702,11 @@ pub fn hold_owned(
         }
         let child_updated = conn.execute(
             "UPDATE generation_batch_children
-                SET state = 'held', error = ?2, updated_at_ms = ?3,
+                SET state = 'held', error = ?2, error_code = ?4, updated_at_ms = ?3,
                     revision = revision + 1
               WHERE job_id = ?1
                 AND state NOT IN ('cancelling', 'complete', 'failed', 'cancelled')",
-            params![job_id, reason, now_ms],
+            params![job_id, reason, now_ms, code],
         )?;
         if child_state.is_some() && child_updated != 1 {
             bail!("batch child changed during hold");
@@ -807,7 +813,7 @@ pub fn retry_held_owned(
             // reducer actually reads.
             let child_updated = conn.execute(
                 "UPDATE generation_batch_children
-                    SET state = 'accepted', error = NULL,
+                    SET state = 'accepted', error = NULL, error_code = NULL,
                         updated_at_ms = MAX(?2, updated_at_ms + 1),
                         revision = revision + 1
                   WHERE job_id = ?1 AND state = 'held'",
@@ -1179,7 +1185,7 @@ fn durable_detail_on_conn(
         "SELECT child.batch_id, child.job_id, child.batch_index, child.state,
                 child.error, child.updated_at_ms, child.terminal_error_json,
                 child.result_json, child.completed_at_ms,
-                COALESCE(queue.retryable, 0), child.revision
+                COALESCE(queue.retryable, 0), child.revision, child.error_code
            FROM generation_batch_children child
            LEFT JOIN generation_queue queue ON queue.id = child.job_id
           WHERE child.batch_id = ?1 ORDER BY child.batch_index",
@@ -1198,6 +1204,7 @@ fn durable_detail_on_conn(
                 completed_at_ms: row.get(8)?,
                 retryable: row.get::<_, i64>(9)? != 0,
                 revision: row.get(10)?,
+                error_code: row.get(11)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2193,6 +2200,7 @@ mod tests {
                 "job-0",
                 Some("worker"),
                 "unusable output",
+                None,
                 false,
                 4,
             )
@@ -2530,7 +2538,17 @@ mod tests {
         assert!(restore_child_after_retain(&db, "owner-1", "job-0", 5).unwrap());
         set_child_state(&db, "job-0", "running", None, 6).unwrap();
         assert_eq!(
-            hold_owned(&db, "owner-1", "job-0", None, "operator hold", false, 7).unwrap(),
+            hold_owned(
+                &db,
+                "owner-1",
+                "job-0",
+                None,
+                "operator hold",
+                None,
+                false,
+                7
+            )
+            .unwrap(),
             OwnedHold::Held
         );
         assert!(!restore_child_after_retain(&db, "owner-1", "job-0", 8).unwrap());
@@ -2554,11 +2572,31 @@ mod tests {
         };
 
         assert_eq!(
-            hold_owned(&db, "owner-1", "job-0", None, "dependency failed", true, 2).unwrap(),
+            hold_owned(
+                &db,
+                "owner-1",
+                "job-0",
+                None,
+                "dependency failed",
+                None,
+                true,
+                2
+            )
+            .unwrap(),
             OwnedHold::Held
         );
         assert_eq!(
-            hold_owned(&db, "owner-1", "job-1", None, "corrupt media", false, 2).unwrap(),
+            hold_owned(
+                &db,
+                "owner-1",
+                "job-1",
+                None,
+                "corrupt media",
+                None,
+                false,
+                2
+            )
+            .unwrap(),
             OwnedHold::Held
         );
         assert_eq!(
@@ -2599,7 +2637,17 @@ mod tests {
         };
 
         // Hold and retry at the SAME now_ms — the collision case.
-        hold_owned(&db, "owner-1", "job-0", None, "dependency failed", true, 7).unwrap();
+        hold_owned(
+            &db,
+            "owner-1",
+            "job-0",
+            None,
+            "dependency failed",
+            None,
+            true,
+            7,
+        )
+        .unwrap();
         let held_queue = crate::generation_queue::get(&db, "job-0").unwrap().unwrap();
         let held_child_ms = get_durable(&db, "owner-1", "batch-1")
             .unwrap()
@@ -2642,8 +2690,28 @@ mod tests {
         let day = 86_400_000_i64;
         let now = 40 * day;
 
-        hold_owned(&db, "owner-1", "job-0", None, "old", true, now - 31 * day).unwrap();
-        hold_owned(&db, "owner-1", "job-1", None, "recent", true, now - 3 * day).unwrap();
+        hold_owned(
+            &db,
+            "owner-1",
+            "job-0",
+            None,
+            "old",
+            None,
+            true,
+            now - 31 * day,
+        )
+        .unwrap();
+        hold_owned(
+            &db,
+            "owner-1",
+            "job-1",
+            None,
+            "recent",
+            None,
+            true,
+            now - 3 * day,
+        )
+        .unwrap();
         // job-2 stays queued.
 
         let expired = expired_held(&db, "owner-1", 30, now).unwrap();
@@ -2674,7 +2742,17 @@ mod tests {
         use crate::generation_queue::purge_held;
         let db = MetadataDb::open_in_memory().unwrap();
         insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
-        hold_owned(&db, "owner-1", "job-0", None, "model went missing", true, 5).unwrap();
+        hold_owned(
+            &db,
+            "owner-1",
+            "job-0",
+            None,
+            "model went missing",
+            None,
+            true,
+            5,
+        )
+        .unwrap();
 
         assert!(purge_held(&db, "owner-1", "job-0", 9).unwrap());
         assert!(
@@ -2708,6 +2786,54 @@ mod tests {
         );
     }
 
+    /// A hold persists its typed cause beside the sentence, and a retry
+    /// clears both: the code is what a client acts on (a `MODEL_NOT_FOUND`
+    /// hold gets the pull-and-resume offer), so it must be exactly as
+    /// current as the hold it explains.
+    #[test]
+    fn a_hold_persists_its_code_and_a_retry_clears_it() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
+        hold_owned(
+            &db,
+            "owner-1",
+            "job-0",
+            None,
+            "model 'x' is not downloaded",
+            Some("MODEL_NOT_FOUND"),
+            true,
+            5,
+        )
+        .unwrap();
+        let held = get_durable(&db, "owner-1", "batch-1")
+            .unwrap()
+            .unwrap()
+            .children
+            .remove(0);
+        assert_eq!(held.state, "held");
+        assert_eq!(held.error_code.as_deref(), Some("MODEL_NOT_FOUND"));
+        assert_eq!(held.error.as_deref(), Some("model 'x' is not downloaded"));
+
+        let authority = mold_core::GenerationRetryRequest {
+            instance_id: "instance-1".into(),
+            batch_id: "batch-1".into(),
+            client_batch_id: "client-1".into(),
+            job_id: "job-0".into(),
+        };
+        assert_eq!(
+            retry_held_owned(&db, "owner-1", "instance-1", &authority, 6).unwrap(),
+            OwnedRetry::Retried
+        );
+        let retried = get_durable(&db, "owner-1", "batch-1")
+            .unwrap()
+            .unwrap()
+            .children
+            .remove(0);
+        assert_eq!(retried.state, "accepted");
+        assert_eq!(retried.error_code, None);
+        assert_eq!(retried.error, None);
+    }
+
     #[test]
     fn a_retried_row_wins_the_race_against_its_own_expiry() {
         // The sweeper lists, then purges. A retry landing in between is a
@@ -2715,7 +2841,17 @@ mod tests {
         use crate::generation_queue::purge_held;
         let db = MetadataDb::open_in_memory().unwrap();
         insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
-        hold_owned(&db, "owner-1", "job-0", None, "dependency failed", true, 5).unwrap();
+        hold_owned(
+            &db,
+            "owner-1",
+            "job-0",
+            None,
+            "dependency failed",
+            None,
+            true,
+            5,
+        )
+        .unwrap();
         let authority = mold_core::GenerationRetryRequest {
             instance_id: "instance-1".into(),
             batch_id: "batch-1".into(),
@@ -2741,7 +2877,7 @@ mod tests {
         use crate::generation_queue::purge_held;
         let db = MetadataDb::open_in_memory().unwrap();
         insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
-        hold_owned(&db, "owner-1", "job-0", None, "held", true, 5).unwrap();
+        hold_owned(&db, "owner-1", "job-0", None, "held", None, true, 5).unwrap();
         assert!(!purge_held(&db, "other-owner", "job-0", 9).unwrap());
         assert!(crate::generation_queue::get(&db, "job-0")
             .unwrap()
@@ -2765,7 +2901,17 @@ mod tests {
         let admitted = revision(&db);
         assert_eq!(admitted, 0, "an admitted child starts unversioned");
 
-        hold_owned(&db, "owner-1", "job-0", None, "dependency failed", true, 7).unwrap();
+        hold_owned(
+            &db,
+            "owner-1",
+            "job-0",
+            None,
+            "dependency failed",
+            None,
+            true,
+            7,
+        )
+        .unwrap();
         let held = revision(&db);
         assert!(held > admitted, "hold must advance: {admitted} -> {held}");
 
@@ -2791,7 +2937,17 @@ mod tests {
         // exactly like a retry that landed.
         let db = MetadataDb::open_in_memory().unwrap();
         insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
-        hold_owned(&db, "owner-1", "job-0", None, "dependency failed", true, 2).unwrap();
+        hold_owned(
+            &db,
+            "owner-1",
+            "job-0",
+            None,
+            "dependency failed",
+            None,
+            true,
+            2,
+        )
+        .unwrap();
         let held = get_durable(&db, "owner-1", "batch-1")
             .unwrap()
             .unwrap()
@@ -2823,7 +2979,17 @@ mod tests {
     fn explicit_retry_rejects_replacement_and_batch_identity_without_mutation() {
         let db = MetadataDb::open_in_memory().unwrap();
         insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
-        hold_owned(&db, "owner-1", "job-0", None, "dependency failed", true, 2).unwrap();
+        hold_owned(
+            &db,
+            "owner-1",
+            "job-0",
+            None,
+            "dependency failed",
+            None,
+            true,
+            2,
+        )
+        .unwrap();
         let mut authority = mold_core::GenerationRetryRequest {
             instance_id: "replacement".into(),
             batch_id: "batch-1".into(),
@@ -2861,7 +3027,17 @@ mod tests {
     fn concurrent_explicit_retry_has_one_transactional_winner() {
         let db = Arc::new(MetadataDb::open_in_memory().unwrap());
         insert_or_get(&db, &batch("same"), &rows(1)).unwrap();
-        hold_owned(&db, "owner-1", "job-0", None, "dependency failed", true, 2).unwrap();
+        hold_owned(
+            &db,
+            "owner-1",
+            "job-0",
+            None,
+            "dependency failed",
+            None,
+            true,
+            2,
+        )
+        .unwrap();
         let authority = Arc::new(mold_core::GenerationRetryRequest {
             instance_id: "instance-1".into(),
             batch_id: "batch-1".into(),

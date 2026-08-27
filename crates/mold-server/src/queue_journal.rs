@@ -2642,7 +2642,7 @@ impl QueueTicket {
                 let cap = self.journal.max_dispatch_attempts;
                 let reason =
                     format!("dispatch attempts exhausted ({attempts} > {cap}); held for review");
-                match self.hold_owned(&reason, false, now) {
+                match self.hold_owned(&reason, None, false, now) {
                     Ok(generation_batches::OwnedHold::Held) => {}
                     Ok(generation_batches::OwnedHold::Cancelled) => {
                         return DispatchClaim::Cancelled;
@@ -2686,7 +2686,41 @@ impl QueueTicket {
 
     /// Park the row: listed, never auto-run, and no longer owned by a ticket.
     pub fn hold(mut self, reason: &str) -> RetainOutcome {
-        match self.hold_owned(reason, false, now_ms()) {
+        match self.hold_owned(reason, None, false, now_ms()) {
+            Ok(generation_batches::OwnedHold::Held) => {
+                self.settled = true;
+                RetainOutcome::Released
+            }
+            Ok(generation_batches::OwnedHold::Cancelled) => {
+                self.settled = true;
+                RetainOutcome::Cancelled
+            }
+            Ok(generation_batches::OwnedHold::Fenced) => {
+                self.settled = true;
+                RetainOutcome::Stale
+            }
+            Err(error) => {
+                tracing::warn!(
+                    job = %self.id,
+                    error = %format!("{error:#}"),
+                    "could not hold a durable queue row; returning it to the replay backlog"
+                );
+                self.retain()
+            }
+        }
+    }
+
+    /// Park a deferred-preparation failure with its typed cause. The code is
+    /// what a client acts on (a `MODEL_NOT_FOUND` hold gets the pull offer);
+    /// the sentence is what it shows. `retryable` decides whether the retry
+    /// route may return the row to the queue.
+    pub fn hold_with_code(
+        mut self,
+        reason: &str,
+        code: Option<&str>,
+        retryable: bool,
+    ) -> RetainOutcome {
+        match self.hold_owned(reason, code, retryable, now_ms()) {
             Ok(generation_batches::OwnedHold::Held) => {
                 self.settled = true;
                 RetainOutcome::Released
@@ -2714,7 +2748,7 @@ impl QueueTicket {
     /// request or media. Only these explicitly recoverable holds may be
     /// returned to the queue through the retry API.
     pub fn hold_retryable(mut self, reason: &str) -> RetainOutcome {
-        match self.hold_owned(reason, true, now_ms()) {
+        match self.hold_owned(reason, None, true, now_ms()) {
             Ok(generation_batches::OwnedHold::Held) => {
                 self.settled = true;
                 RetainOutcome::Released
@@ -2744,7 +2778,7 @@ impl QueueTicket {
     /// `running`. A retry ticket keeps the exact claim token and has inert
     /// drop semantics until the caller retries this same transition.
     pub(crate) fn hold_exact(mut self, reason: &str, retryable: bool) -> RetainOutcome {
-        match self.hold_owned(reason, retryable, now_ms()) {
+        match self.hold_owned(reason, None, retryable, now_ms()) {
             Ok(generation_batches::OwnedHold::Held) => {
                 self.settled = true;
                 RetainOutcome::Released
@@ -2776,6 +2810,7 @@ impl QueueTicket {
     fn hold_owned(
         &self,
         reason: &str,
+        code: Option<&str>,
         retryable: bool,
         now: i64,
     ) -> anyhow::Result<generation_batches::OwnedHold> {
@@ -2798,6 +2833,7 @@ impl QueueTicket {
             &self.id,
             self.claim_token.as_deref(),
             reason,
+            code,
             retryable,
             now,
         )?;

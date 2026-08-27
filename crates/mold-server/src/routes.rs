@@ -2477,6 +2477,9 @@ pub(crate) fn generation_batch_status(
                     job_id: child.job_id,
                     state,
                     error: child.error.or(corrupt_state_error),
+                    error_code: (child.state == "held")
+                        .then_some(child.error_code)
+                        .flatten(),
                     retryable: (child.state == "held").then_some(child.retryable),
                     created_at_ms,
                     updated_at_ms: child.updated_at_ms,
@@ -10625,6 +10628,7 @@ mod tests {
                     state: "cancelling".to_string(),
                     error: Some("Cancelled".to_string()),
                     retryable: false,
+                    error_code: None,
                     updated_at_ms: 20,
                     revision: 3,
                     terminal_error_json: None,

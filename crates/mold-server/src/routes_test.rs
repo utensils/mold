@@ -5782,6 +5782,7 @@ mod tests {
                 "retryable-preparation",
                 None,
                 "dependency download failed",
+                None,
                 true,
                 600,
             )
@@ -12568,6 +12569,45 @@ mod tests {
         );
     }
 
+    /// The held child carries the refusal's CODE beside its sentence. The
+    /// feeder always had the code (it rides the SSE error frame) but only
+    /// persisted the sentence, so every client's pull-and-resume offer —
+    /// which classifies on `MODEL_NOT_FOUND` / `UNKNOWN_MODEL` — matched
+    /// nothing against a real host.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_held_child_carries_the_refusal_code_beside_its_sentence() {
+        let (app, _gallery_root) = app_with(MockEngine::ready());
+        let body = r#"{"prompt":"a cat","model":"nonexistent-model-xyz","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
+        let response = tokio::time::timeout(
+            Duration::from_secs(20),
+            app.oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("an unresolvable model must settle the request")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let settled = json_body(response).await;
+        let child = &settled["children"][0];
+        assert_eq!(child["state"], "held", "{settled}");
+        assert_eq!(
+            child["error_code"],
+            mold_core::SSE_ERROR_CODE_UNKNOWN_MODEL,
+            "{settled}"
+        );
+        assert!(
+            child["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("nonexistent-model-xyz"),
+            "{settled}"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)]
     async fn stream_known_model_not_downloaded_reports_its_code_on_the_error_frame() {
@@ -19081,6 +19121,7 @@ mod tests {
                 &job_id,
                 None,
                 "dependency failed",
+                None,
                 true,
                 held_at_ms,
             )
