@@ -288,12 +288,29 @@ open http://localhost:7680/api/docs
 The server includes an `x-mold-seed-used` header with the effective seed on
 singleton responses.
 
-If a durable singleton's attached raw observer disappears after commit, the
-route returns HTTP 202 with its `GenerationBatchStatus` instead of an opaque
-500; reconcile by batch or client operation ID and do not resubmit. SSE emits
+A print that fails while the caller is still attached is the caller's error,
+in the shape this route always had: HTTP 404 with the held child's typed code
+(`MODEL_NOT_FOUND`, `UNKNOWN_MODEL`) for a model the host cannot resolve,
+503 `QUEUE_FULL` for a saturated queue, otherwise 500 `INFERENCE_ERROR`
+carrying the engine's own sentence. The durable row behind it is held, not
+lost, so the error names the job to resume (`POST /api/queue/{job_id}/retry`)
+and the batch to reconcile. SSE delivers the same failure as its terminal
+`error` event, with the same code.
+
+Only when the attached observer disappears after commit does the route return
+HTTP 202 with its `GenerationBatchStatus` instead of an opaque 500; reconcile
+by batch or client operation ID and do not resubmit. SSE emits
 `retained: true`, code `durable_observer_detached`, after its queued job ID so
 clients can enter the same reconciliation path. Queued cancellation emits the
 terminal code `queued_cancelled`.
+
+Both facades accept an optional `X-Mold-Client-Batch-Id` header carrying a
+caller-chosen UUID. It is the batch's `client_batch_id`, so a retry of a lost
+response under the same value is answered with the batch the first attempt
+admitted — HTTP 200 with the `GenerationBatchStatus` as JSON, naming the
+gallery `result.filename` once the print is done — never a second render; a
+changed request under the same id is HTTP 409. Without the header every POST
+is a new print.
 
 Durable admission is the only admission. `POST /api/generate`,
 `POST /api/generate/stream`, and `POST /api/generation-batches` are one path
@@ -357,7 +374,11 @@ any. `404` means the row has left the queue.
   "step": 4,
   "total": 20,
   "stage": "Denoising",
-  "weight_load": { "bytes_loaded": 1, "bytes_total": 2, "component": "transformer" },
+  "weight_load": {
+    "bytes_loaded": 1,
+    "bytes_total": 2,
+    "component": "transformer"
+  },
   "download": {
     "filename": "t5xxl_fp16.safetensors",
     "file_index": 1,

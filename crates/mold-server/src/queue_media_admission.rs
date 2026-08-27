@@ -423,13 +423,10 @@ impl DurableMediaAdmission {
         if let Some(existing) = existing_by_client(state, &body.client_batch_id).await? {
             self.verify_existing_async(state, &body.client_batch_id, &fingerprint, &existing)
                 .await?;
-            if observer_mode.is_some() {
-                return Err(ApiError::with_code(
-                    "this operation is already durable; reconcile it through the queue status endpoint",
-                    "DIRECT_OPERATION_ALREADY_ADMITTED",
-                    StatusCode::CONFLICT,
-                ));
-            }
+            // A replay carries no observer: the print was admitted by an
+            // earlier POST and is answered with that batch on every facade,
+            // which is what makes a client-chosen id idempotent on
+            // `/api/generate` exactly as it is here.
             return Ok(DurableAdmissionOutcome {
                 status_code: StatusCode::OK,
                 status: crate::routes::generation_batch_status(&state.instance_id, existing),
@@ -733,13 +730,6 @@ impl DurableMediaAdmission {
                     .ok_or_else(|| ApiError::internal("idempotent generation batch disappeared"))?;
                 self.verify_existing_async(state, &body.client_batch_id, &fingerprint, &detail)
                     .await?;
-                if observer_mode.is_some() {
-                    return Err(ApiError::with_code(
-                        "this operation is already durable; reconcile it through the queue status endpoint",
-                        "DIRECT_OPERATION_ALREADY_ADMITTED",
-                        StatusCode::CONFLICT,
-                    ));
-                }
                 Ok(DurableAdmissionOutcome {
                     status_code: StatusCode::OK,
                     status: crate::routes::generation_batch_status(&state.instance_id, detail),

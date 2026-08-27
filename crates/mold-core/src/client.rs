@@ -2078,16 +2078,63 @@ async fn error_for_status_with_body(resp: reqwest::Response) -> Result<reqwest::
     Ok(resp)
 }
 
+/// Read a `/api/generate` answer as the media it promises, or say exactly
+/// which of the three non-media answers arrived.
+///
+/// `202` is the attached observer detaching after commit — the print is
+/// still queued and must be reconciled, never resubmitted. A `200` carrying
+/// JSON is the idempotent replay of a `client_batch_id` this host already
+/// admitted: the batch status, with the gallery filename when the print is
+/// done. A non-empty `404` is the singleton contract's own "model not here"
+/// (`MODEL_NOT_FOUND` / `UNKNOWN_MODEL`), surfaced as
+/// [`MoldError::ModelNotFound`] so [`MoldClient::is_model_not_found`] and the
+/// CLI's auto-pull read it as they always have.
 async fn require_direct_media_response(resp: reqwest::Response) -> Result<reqwest::Response> {
-    if resp.status() == StatusCode::ACCEPTED {
-        let status = resp.json::<GenerationBatchStatus>().await?;
-        anyhow::bail!(
-            "durable generation was accepted but its direct observer detached; reconcile batch {} or client operation {}",
-            status.id,
-            status.client_batch_id
-        );
+    match resp.status() {
+        StatusCode::ACCEPTED => {
+            let status = resp.json::<GenerationBatchStatus>().await?;
+            anyhow::bail!(
+                "durable generation was accepted but its direct observer detached; reconcile batch {} or client operation {}",
+                status.id,
+                status.client_batch_id
+            );
+        }
+        StatusCode::OK if response_is_json(&resp) => {
+            let status = resp.json::<GenerationBatchStatus>().await?;
+            let filename = status
+                .children
+                .first()
+                .and_then(|child| child.result.as_ref())
+                .and_then(|result| result.filename.as_deref());
+            match filename {
+                Some(filename) => anyhow::bail!(
+                    "client operation {} was already admitted as batch {}; its print is gallery file {filename}",
+                    status.client_batch_id,
+                    status.id
+                ),
+                None => anyhow::bail!(
+                    "client operation {} was already admitted as batch {}; reconcile it instead of resubmitting",
+                    status.client_batch_id,
+                    status.id
+                ),
+            }
+        }
+        StatusCode::NOT_FOUND => {
+            let body = resp.text().await.unwrap_or_default();
+            if body.is_empty() {
+                anyhow::bail!("the server does not serve POST /api/generate");
+            }
+            Err(MoldError::ModelNotFound(body).into())
+        }
+        _ => error_for_status_with_body(resp).await,
     }
-    error_for_status_with_body(resp).await
+}
+
+fn response_is_json(resp: &reqwest::Response) -> bool {
+    resp.headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/json"))
 }
 
 fn api_error_detail(body: &str) -> String {
@@ -3312,6 +3359,67 @@ mod tests {
             }
         });
         base
+    }
+
+    #[tokio::test]
+    async fn a_replayed_direct_generation_names_its_batch_and_print() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .and(header("content-type", "application/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "batch-1",
+                "client_batch_id": "6c2f3a7e-2d1b-4c58-8a0e-9f1d2b3c4d5e",
+                "instance_id": "server-1",
+                "durable": true,
+                "children": [{
+                    "index": 0,
+                    "job_id": "job-1",
+                    "state": "complete",
+                    "created_at_ms": 1,
+                    "updated_at_ms": 2,
+                    "result": { "filename": "mold-print.png" }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let error = MoldClient::new(&server.uri())
+            .generate(stream_request())
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("batch-1"), "{message}");
+        assert!(message.contains("mold-print.png"), "{message}");
+        assert!(!MoldClient::is_model_not_found(&error));
+    }
+
+    #[tokio::test]
+    async fn a_direct_404_with_a_body_is_a_model_not_found() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "error": "model 'flux-schnell:q8' is not downloaded",
+                "code": crate::SSE_ERROR_CODE_MODEL_NOT_FOUND
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let error = MoldClient::new(&server.uri())
+            .generate(stream_request())
+            .await
+            .unwrap_err();
+        assert!(MoldClient::is_model_not_found(&error), "{error}");
+        assert!(error.to_string().contains("flux-schnell:q8"), "{error}");
     }
 
     fn stream_request() -> GenerateRequest {

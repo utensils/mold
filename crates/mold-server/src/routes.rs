@@ -2398,6 +2398,84 @@ fn durable_reconciliation_response(
     (StatusCode::ACCEPTED, Json(status)).into_response()
 }
 
+/// Header through which a direct-facade caller names its own idempotency
+/// key. It IS the batch's `client_batch_id`: a retry of a lost response under
+/// the same value is answered with the batch the first attempt admitted.
+pub(crate) const CLIENT_BATCH_ID_HEADER: &str = "x-mold-client-batch-id";
+
+/// The `client_batch_id` a direct facade admits under: the caller's own when
+/// it sent one, otherwise a fresh key the caller cannot replay.
+fn direct_client_batch_id(headers: &HeaderMap) -> Result<String, ApiError> {
+    let Some(value) = headers.get(CLIENT_BATCH_ID_HEADER) else {
+        return Ok(uuid::Uuid::new_v4().to_string());
+    };
+    let text = value
+        .to_str()
+        .map_err(|_| ApiError::validation("X-Mold-Client-Batch-Id must be a UUID"))?;
+    canonical_client_batch_id(text)
+        .map_err(|_| ApiError::validation("X-Mold-Client-Batch-Id must be a UUID"))
+}
+
+/// Answer the idempotent replay of a direct facade: the batch an earlier POST
+/// under this `client_batch_id` admitted, as JSON on both facades. A raw
+/// caller reads the gallery filename off the completed child; there is no
+/// second render to stream.
+fn direct_replay_response(status: mold_core::GenerationBatchStatus) -> Response {
+    (StatusCode::OK, Json(status)).into_response()
+}
+
+/// The error a failed direct generation answers with while its caller is
+/// still attached: the singleton contract's own shape — a 404 carrying the
+/// held child's typed code for a model the host cannot resolve, 503 for a
+/// saturated queue, otherwise 500 with the engine's sentence — naming the
+/// durable job the caller can resume, because the row is parked, not lost.
+fn direct_generation_failure(status: &mold_core::GenerationBatchStatus, error: String) -> ApiError {
+    let child = status.children.first();
+    let message = child
+        .and_then(|child| child.error.clone())
+        .filter(|sentence| !sentence.is_empty())
+        .unwrap_or(error);
+    let message = match child {
+        Some(child) if child.retryable == Some(true) => format!(
+            "{message}. Durable job {job} is held and can be resumed with POST /api/queue/{job}/retry, or reconciled as batch {batch}",
+            job = child.job_id,
+            batch = status.id
+        ),
+        Some(child)
+            if matches!(
+                child.state,
+                mold_core::GenerationBatchChildState::Failed
+                    | mold_core::GenerationBatchChildState::Cancelled
+                    | mold_core::GenerationBatchChildState::Held
+            ) =>
+        {
+            format!(
+                "{message}. Durable job {job} settled as {state}; reconcile it as batch {batch}",
+                job = child.job_id,
+                state = format!("{:?}", child.state).to_lowercase(),
+                batch = status.id
+            )
+        }
+        // The refreshed row could not be read: name the identity without
+        // claiming a state this response has not seen.
+        Some(child) => format!(
+            "{message}. Durable job {job} belongs to batch {batch}; reconcile it there",
+            job = child.job_id,
+            batch = status.id
+        ),
+        None => message,
+    };
+    match child.and_then(|child| child.error_code.as_deref()) {
+        Some(
+            code @ (mold_core::SSE_ERROR_CODE_MODEL_NOT_FOUND
+            | mold_core::SSE_ERROR_CODE_UNKNOWN_MODEL),
+        ) => ApiError::with_code(message, code, StatusCode::NOT_FOUND),
+        Some("QUEUE_FULL") => ApiError::queue_full(message),
+        _ if message.contains("queue is full") => ApiError::queue_full(message),
+        _ => ApiError::inference(message),
+    }
+}
+
 const MAX_HETEROGENEOUS_BATCH_OUTPUTS: usize = 64;
 const MAX_GENERATION_BATCH_STATUS_IDENTITIES: usize = 256;
 const GENERATION_BATCH_STATUS_BODY_BYTES: usize = 64 * 1024;
@@ -2878,10 +2956,15 @@ fn canonical_generation_batch_status_ids(
     path = "/api/generate",
     tag = "generation",
     request_body = mold_core::GenerateRequest,
+    params((
+        "X-Mold-Client-Batch-Id" = Option<String>,
+        Header,
+        description = "Optional caller-chosen UUID used as the durable client_batch_id; a replay answers with the admitted batch status"
+    )),
     responses(
-        (status = 200, description = "Generated media bytes with the matching image/video Content-Type"),
-        (status = 202, description = "Durable singleton accepted; reconcile the returned batch status", body = mold_core::GenerationBatchStatus),
-        (status = 404, description = "Model not downloaded"),
+        (status = 200, description = "Generated media bytes with the matching image/video Content-Type; or, for a replayed X-Mold-Client-Batch-Id, the admitted batch status as JSON", body = mold_core::GenerationBatchStatus),
+        (status = 202, description = "Durable singleton accepted but the attached observer detached; reconcile the returned batch status", body = mold_core::GenerationBatchStatus),
+        (status = 404, description = "Model not downloaded or unknown (MODEL_NOT_FOUND / UNKNOWN_MODEL); the held durable job is named in the error"),
         (status = 422, description = "Invalid request parameters"),
         (status = 500, description = "Inference error"),
         (status = 503, description = "Generation queue full"),
@@ -2893,9 +2976,11 @@ async fn generate(
     State(state): State<AppState>,
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     auth_state: Option<Extension<crate::auth::AuthState>>,
+    headers: HeaderMap,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Response, ApiError> {
     mold_core::minimax_h3::canonicalize_request_model(&mut req);
+    let client_batch_id = direct_client_batch_id(&headers)?;
     validate_direct_generation_request(&req)?;
     let admission = direct_durable_admission(&state, &mut req).await?;
     let outcome = admission
@@ -2904,13 +2989,16 @@ async fn generate(
             authenticated.as_ref().map(|Extension(auth)| auth),
             reference_identity(&state, authenticated.as_ref(), auth_state.as_ref()),
             mold_core::GenerationBatchAdmissionRequest {
-                client_batch_id: uuid::Uuid::new_v4().to_string(),
+                client_batch_id,
                 requests: vec![req],
             },
             Some(crate::queue_media_ingress::ObserverMode::Raw),
             SseCompletionPayload::Full,
         )
         .await?;
+    if outcome.status_code == StatusCode::OK {
+        return Ok(direct_replay_response(outcome.status));
+    }
     let status = outcome.status;
     let warnings = outcome.warnings.unwrap_or_default();
     if outcome.observers.len() != status.children.len()
@@ -2959,7 +3047,11 @@ async fn generate(
             ));
         }
     };
-    if result.is_err() {
+    if let Err(error) = result {
+        // The row settled before the worker answered, so the refreshed batch
+        // carries the held child's sentence and typed code; the caller is
+        // still attached, so the failure is ITS error, in the singleton
+        // contract's shape, rather than a reconciliation body.
         let batch_id = status.id.clone();
         let journal = state.queue_journal.clone();
         let refreshed = match spawn_queue_read(move || {
@@ -2971,19 +3063,16 @@ async fn generate(
         {
             Ok(Some(detail)) => generation_batch_status(&state.instance_id, detail),
             Ok(None) => status,
-            Err(error) => {
+            Err(refresh_error) => {
                 tracing::warn!(
                     batch = %status.id,
-                    error = ?error,
-                    "durable generation status refresh failed after acceptance; returning original reconciliation identity"
+                    error = ?refresh_error,
+                    "durable generation status refresh failed after a render error; answering from the admission identity"
                 );
                 status
             }
         };
-        return Ok(durable_reconciliation_response(
-            refreshed,
-            "accepted durable generation ended without a media response",
-        ));
+        return Err(direct_generation_failure(&refreshed, error));
     }
     generation_result_response(result, merge_request_warnings(warnings, deferred_warnings))
 }
@@ -3936,6 +4025,10 @@ pub(crate) fn requested_sse_completion_payload(
         "X-Mold-SSE-Payload" = Option<String>,
         Header,
         description = "Set to metadata-only to omit encoded media and return the saved gallery filename"
+    ), (
+        "X-Mold-Client-Batch-Id" = Option<String>,
+        Header,
+        description = "Optional caller-chosen UUID used as the durable client_batch_id; a replay answers with the admitted batch status as JSON"
     )),
     responses(
         (status = 200, description = "SSE event stream with progress and result"),
@@ -3954,6 +4047,7 @@ async fn generate_stream(
 ) -> Result<Response, ApiError> {
     mold_core::minimax_h3::canonicalize_request_model(&mut req);
     let completion_payload = requested_sse_completion_payload(&headers)?;
+    let client_batch_id = direct_client_batch_id(&headers)?;
     validate_direct_generation_request(&req)?;
     let admission = direct_durable_admission(&state, &mut req).await?;
     let outcome = admission
@@ -3962,7 +4056,7 @@ async fn generate_stream(
             authenticated.as_ref().map(|Extension(auth)| auth),
             reference_identity(&state, authenticated.as_ref(), auth_state.as_ref()),
             mold_core::GenerationBatchAdmissionRequest {
-                client_batch_id: uuid::Uuid::new_v4().to_string(),
+                client_batch_id,
                 requests: vec![req],
             },
             Some(crate::queue_media_ingress::ObserverMode::Sse(
@@ -3971,6 +4065,9 @@ async fn generate_stream(
             completion_payload,
         )
         .await?;
+    if outcome.status_code == StatusCode::OK {
+        return Ok(direct_replay_response(outcome.status));
+    }
     let status = outcome.status;
     if outcome.observers.len() != status.children.len()
         || outcome.observers.iter().any(Option::is_none)

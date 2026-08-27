@@ -7205,16 +7205,22 @@ mod tests {
         .await
         .expect("a vanished adapter must settle the request")
         .unwrap();
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let settled = json_body(response).await;
-        let child = &settled["children"][0];
-        assert_eq!(child["state"], "held", "{settled}");
-        assert_eq!(child["retryable"], true, "{settled}");
-        let reason = child["error"].as_str().unwrap_or_default();
+        // The attached caller gets the hold as its own error — the same 404
+        // shape a missing model takes, which is what the hold is filed as —
+        // naming the adapter and the retryable job the row was parked as.
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let error = json_body(response).await;
+        assert_eq!(
+            error["code"],
+            mold_core::SSE_ERROR_CODE_MODEL_NOT_FOUND,
+            "{error}"
+        );
+        let reason = error["error"].as_str().unwrap_or_default();
         assert!(
             reason.contains("adapter.safetensors"),
-            "the hold must name the LoRA that vanished: {settled}"
+            "the hold must name the LoRA that vanished: {error}"
         );
+        assert!(reason.contains("/retry"), "{error}");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -7911,7 +7917,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn durable_direct_raw_failure_returns_reconciliation_identity() {
+    async fn durable_direct_raw_failure_is_the_held_childs_error() {
         let root = tempfile::tempdir().unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let (mut state, rx) = durable_state_with_engine(db, root.path(), MockEngine::failing());
@@ -7930,25 +7936,18 @@ mod tests {
             ),
         )
         .await
-        .expect("durable raw failure must settle with reconciliation state")
+        .expect("durable raw failure must settle as the caller's error")
         .unwrap();
 
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        // The row is held and retryable; the attached caller is told so in
+        // the singleton contract's own shape, naming the job to resume.
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = json_body(response).await;
-        // The direct facade mints its own idempotency key: there is no
-        // client-supplied operation header any more, and the reconciliation
-        // body is how the caller learns the one it was given.
-        assert!(uuid::Uuid::parse_str(body["client_batch_id"].as_str().unwrap()).is_ok());
-        assert_eq!(body["durable"], true);
-        assert!(body["id"].as_str().is_some_and(|id| !id.is_empty()));
-        assert!(body["children"][0]["job_id"]
-            .as_str()
-            .is_some_and(|id| !id.is_empty()));
-        assert_eq!(body["children"][0]["state"], "held");
-        assert_eq!(body["children"][0]["retryable"], true);
-        assert!(body["children"][0]["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("mock engine error")));
+        assert_eq!(body["code"], "INFERENCE_ERROR", "{body}");
+        let message = body["error"].as_str().unwrap_or_default();
+        assert!(message.contains("mock engine error"), "{body}");
+        assert!(message.contains("POST /api/queue/"), "{body}");
+        assert!(message.contains("/retry"), "{body}");
 
         feeder_shutdown.cancel();
         feeder.await.unwrap();
@@ -7978,18 +7977,18 @@ mod tests {
             ),
         )
         .await
-        .expect("accepted raw failure must return its original identity")
+        .expect("accepted raw failure must answer from its original identity")
         .unwrap();
 
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        // The refreshed row could not be read, so the error carries the
+        // worker's sentence and the admission identity without claiming a
+        // state this response never saw.
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = json_body(response).await;
-        assert!(body["id"].as_str().is_some_and(|id| !id.is_empty()));
-        assert!(body["client_batch_id"]
-            .as_str()
-            .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok()));
-        assert!(body["children"][0]["job_id"]
-            .as_str()
-            .is_some_and(|id| !id.is_empty()));
+        let message = body["error"].as_str().unwrap_or_default();
+        assert!(message.contains("mock engine error"), "{body}");
+        assert!(message.contains("belongs to batch "), "{body}");
+        assert!(!message.contains("/retry"), "{body}");
 
         feeder_shutdown.cancel();
         feeder.await.unwrap();
@@ -12182,40 +12181,149 @@ mod tests {
 
     // ── /api/generate — engine error ─────────────────────────────────────────
 
+    /// A render that fails while the caller is still attached is the
+    /// caller's error, in the shape the singleton contract always had: an
+    /// HTTP error carrying the engine's own sentence. The durable row is
+    /// still HELD and retryable — the print is parked, not lost — so the
+    /// error names the job the caller can resume, and the batch behind the
+    /// client id it sent still answers with the same hold.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn generate_engine_error_settles_as_a_held_child() {
+    async fn generate_engine_error_is_the_childs_error_naming_its_retry() {
         let (app, _gallery_root) = app_with(MockEngine::failing());
         let body = generate_body("a cat", 768, 768);
+        let client_batch_id = "0d4b1b1e-6f8e-4f52-9d4a-6b3e0c1f2a01";
         let resp = app
+            .clone()
             .oneshot(
                 Request::post("/api/generate")
                     .header("content-type", "application/json")
+                    .header("x-mold-client-batch-id", client_batch_id)
                     .body(Body::from(body))
                     .unwrap(),
             )
             .await
             .unwrap();
-        // An ACCEPTED durable job that then fails is reconciliation, not a
-        // 500: the row is authoritative, the client is an observer, and the
-        // failure is reported through the batch status it can re-read.
-        assert_eq!(resp.status(), StatusCode::ACCEPTED);
-        let body = json_body(resp).await;
-        let child = &body["children"][0];
-        // A render that fails leaves the durable row HELD and retryable — the
-        // print is not lost, it is parked with its reason — and that reason is
-        // the engine's own, carried to the client in the reconciliation body.
-        assert_eq!(child["state"], "held");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let error = json_body(resp).await;
+        assert_eq!(error["code"], "INFERENCE_ERROR", "{error}");
+        let message = error["error"].as_str().unwrap_or_default();
+        assert!(message.contains("mock engine error"), "{error}");
+        assert!(message.contains("/api/queue/"), "{error}");
+        assert!(message.contains("/retry"), "{error}");
+
+        let batch = app
+            .oneshot(
+                Request::get(format!(
+                    "/api/generation-batches/by-client/{client_batch_id}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(batch.status(), StatusCode::OK);
+        let batch = json_body(batch).await;
+        let child = &batch["children"][0];
+        assert_eq!(child["state"], "held", "{batch}");
+        assert_eq!(child["retryable"], true, "{batch}");
         assert!(
-            child["error"]
+            message.contains(child["job_id"].as_str().unwrap()),
+            "the error must name the held job: {message} vs {batch}"
+        );
+    }
+
+    /// A client-chosen batch id makes `/api/generate` idempotent exactly as
+    /// the batch route is: the retry of a lost response is answered with
+    /// the batch the first attempt admitted, never a second print.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn generate_replays_a_client_batch_id_with_its_batch_status() {
+        let (app, _gallery_root) = app_with(MockEngine::ready());
+        let body = generate_body("a glowing robot", 768, 768);
+        let client_batch_id = "6c2f3a7e-2d1b-4c58-8a0e-9f1d2b3c4d5e";
+        let first = app
+            .clone()
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .header("x-mold-client-batch-id", client_batch_id)
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(first.headers().get("content-type").unwrap(), "image/png");
+
+        let replay = app
+            .clone()
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .header("x-mold-client-batch-id", client_batch_id)
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        assert!(
+            replay
+                .headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("application/json"),
+            "a replay answers with the batch, not a second render"
+        );
+        let status = json_body(replay).await;
+        assert_eq!(status["client_batch_id"], client_batch_id, "{status}");
+        let child = &status["children"][0];
+        assert_eq!(child["state"], "complete", "{status}");
+        assert!(child["result"]["filename"].is_string(), "{status}");
+
+        // The streaming facade replays the same way.
+        let stream_replay = app
+            .oneshot(
+                Request::post("/api/generate/stream")
+                    .header("content-type", "application/json")
+                    .header("x-mold-client-batch-id", client_batch_id)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stream_replay.status(), StatusCode::OK);
+        let status = json_body(stream_replay).await;
+        assert_eq!(status["children"][0]["state"], "complete", "{status}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn generate_refuses_a_malformed_client_batch_id() {
+        let (app, _gallery_root) = app_with(MockEngine::ready());
+        let resp = app
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .header("x-mold-client-batch-id", "not-a-uuid")
+                    .body(Body::from(generate_body("a cat", 768, 768)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let error = json_body(resp).await;
+        assert!(
+            error["error"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("mock engine error"),
-            "{body}"
+                .contains("X-Mold-Client-Batch-Id"),
+            "{error}"
         );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn generate_empty_images_settles_as_a_held_child() {
+    async fn generate_empty_images_is_an_inference_error_naming_the_held_job() {
         let (app, _gallery_root) = app_with(MockEngine::empty_images());
         let body = generate_body("a cat", 768, 768);
         let resp = app
@@ -12227,61 +12335,19 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = json_body(resp).await;
-        let child = &body["children"][0];
-        assert_eq!(child["state"], "held");
-        assert!(
-            child["error"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("returned no images"),
-            "{body}"
-        );
-    }
-
-    // ── /api/generate — unknown model ────────────────────────────────────────
-
-    /// The raw route accepts durably before it resolves a checkpoint, so an
-    /// unknown model settles as a held child reported through the
-    /// reconciliation body rather than as the `400` the attached path answered
-    /// with. The streaming facade keeps a coded frame — see
-    /// `stream_unknown_model_reports_its_code_on_the_error_frame`.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn generate_unknown_model_settles_as_a_held_child() {
-        let (app, _gallery_root) = app_with(MockEngine::ready());
-        let body = r#"{"prompt":"a cat","model":"nonexistent-model-xyz","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
-        let resp = tokio::time::timeout(
-            Duration::from_secs(10),
-            app.oneshot(
-                Request::post("/api/generate")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body))
-                    .unwrap(),
-            ),
-        )
-        .await
-        .expect("an unresolvable model must settle the request")
-        .unwrap();
-        assert_eq!(resp.status(), StatusCode::ACCEPTED);
-        let body = json_body(resp).await;
-        let child = &body["children"][0];
-        assert_eq!(child["state"], "held");
-        assert_eq!(child["retryable"], true);
-        assert!(
-            child["error"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("nonexistent-model-xyz"),
-            "{body}"
-        );
+        assert_eq!(body["code"], "INFERENCE_ERROR", "{body}");
+        let message = body["error"].as_str().unwrap_or_default();
+        assert!(message.contains("returned no images"), "{body}");
+        assert!(message.contains("/retry"), "{body}");
     }
 
     // ── /api/generate — known but not downloaded model returns 404 ───────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)]
-    async fn generate_known_model_not_downloaded_settles_as_a_held_child() {
+    async fn generate_known_model_not_downloaded_is_a_404_naming_the_held_job() {
         let _lock = env_lock();
         let models_dir = test_models_dir("generate-not-downloaded");
         std::fs::create_dir_all(&models_dir).unwrap();
@@ -12302,11 +12368,18 @@ mod tests {
         .await
         .expect("an undownloaded model must settle the request")
         .unwrap();
-        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        // The singleton contract's 404 — the status the CLI's auto-pull reads
+        // — carrying the held child's code and the job the pull resumes.
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let body = json_body(resp).await;
-        let child = &body["children"][0];
-        assert_eq!(child["state"], "held");
-        assert_eq!(child["retryable"], true);
+        assert_eq!(
+            body["code"],
+            mold_core::SSE_ERROR_CODE_MODEL_NOT_FOUND,
+            "{body}"
+        );
+        let message = body["error"].as_str().unwrap_or_default();
+        assert!(message.contains("flux-schnell:q8"), "{body}");
+        assert!(message.contains("/retry"), "{body}");
 
         std::env::remove_var("MOLD_MODELS_DIR");
         let _ = std::fs::remove_dir_all(models_dir);
@@ -13369,14 +13442,16 @@ mod tests {
     /// which classifies on `MODEL_NOT_FOUND` / `UNKNOWN_MODEL` — matched
     /// nothing against a real host.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_held_child_carries_the_refusal_code_beside_its_sentence() {
+    async fn an_unknown_model_is_a_404_carrying_the_held_childs_code() {
         let (app, _gallery_root) = app_with(MockEngine::ready());
         let body = r#"{"prompt":"a cat","model":"nonexistent-model-xyz","width":768,"height":768,"steps":4,"batch_size":1,"output_format":"png"}"#;
+        let client_batch_id = "3f9a0c2d-5b7e-4a1c-9e8d-7c6b5a4f3e2d";
         let response = tokio::time::timeout(
             Duration::from_secs(20),
-            app.oneshot(
+            app.clone().oneshot(
                 Request::post("/api/generate")
                     .header("content-type", "application/json")
+                    .header("x-mold-client-batch-id", client_batch_id)
                     .body(Body::from(body))
                     .unwrap(),
             ),
@@ -13384,20 +13459,41 @@ mod tests {
         .await
         .expect("an unresolvable model must settle the request")
         .unwrap();
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let settled = json_body(response).await;
+        // The attached caller gets the refusal in the singleton contract's
+        // own shape — a 404 carrying the held child's typed code — so the
+        // CLI's missing-model auto-pull classifies on the status it always
+        // read, while the durable row behind it keeps the same code.
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let error = json_body(response).await;
+        assert_eq!(
+            error["code"],
+            mold_core::SSE_ERROR_CODE_UNKNOWN_MODEL,
+            "{error}"
+        );
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("nonexistent-model-xyz"),
+            "{error}"
+        );
+
+        let batch = app
+            .oneshot(
+                Request::get(format!(
+                    "/api/generation-batches/by-client/{client_batch_id}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let settled = json_body(batch).await;
         let child = &settled["children"][0];
         assert_eq!(child["state"], "held", "{settled}");
         assert_eq!(
             child["error_code"],
             mold_core::SSE_ERROR_CODE_UNKNOWN_MODEL,
-            "{settled}"
-        );
-        assert!(
-            child["error"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("nonexistent-model-xyz"),
             "{settled}"
         );
     }
