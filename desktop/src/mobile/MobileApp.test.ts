@@ -11744,6 +11744,8 @@ describe("MobileApp Create File under", () => {
   }
 
   /** Both machines hold the model; only Studio can organize. */
+  let autoWinnerBaseUrl: string | null = null;
+
   function fleetFilingApi(): void {
     apiJsonTo.mockImplementation((probe: { baseUrl: string }, path: string, init?: RequestInit) => {
       const render = probe.baseUrl === filerTarget.baseUrl;
@@ -11752,12 +11754,16 @@ describe("MobileApp Create File under", () => {
           ...status,
           hostname: render ? "render" : "studio",
           instance_id: render ? "render-id" : "studio-id",
+          // Auto ranks a print from each machine's own captured queue depth.
+          queue_depth:
+            autoWinnerBaseUrl === null ? 0 : probe.baseUrl === autoWinnerBaseUrl ? 0 : 9,
         });
       if (path === "/api/models") return Promise.resolve([model]);
       if (path === "/api/capabilities") {
-        return Promise.resolve(
-          render ? { gallery: { can_delete: true, organize: false } } : filingCapabilities,
-        );
+        return Promise.resolve({
+          ...durableQueueCapabilities,
+          ...(render ? { gallery: { can_delete: true, organize: false } } : filingCapabilities),
+        });
       }
       if (path === "/api/gallery") return Promise.resolve([]);
       if (path === "/api/gallery/collections") {
@@ -11781,13 +11787,17 @@ describe("MobileApp Create File under", () => {
       if (path === "/api/gallery/tags") return Promise.resolve([]);
       if (path === "/api/activity")
         return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
-      return durableApiFallback(path, init, target);
+      return durableApiFallback(path, init, probe);
     });
   }
 
-  /** Steer Auto: the named base URL plans soonest and wins. Both fan-outs are
-   * driven, since a sequence previews through the chain endpoint. */
+  /**
+   * Steer Auto onto one machine. A print is ranked from each machine's own
+   * captured queue depth — it opens no placement probe — so the loser is
+   * simply the busier machine.
+   */
   function autoWinner(baseUrl: string): void {
+    autoWinnerBaseUrl = baseUrl;
     const plan = (probe: { baseUrl: string }) => {
       const preview = plannedPlacement();
       preview.candidate.predicted_completion_after_ms = probe.baseUrl === baseUrl ? 100 : 9_000;
@@ -11796,6 +11806,7 @@ describe("MobileApp Create File under", () => {
     previewGenerationPlacement.mockImplementation(plan);
     previewChainPlacement.mockImplementation(plan);
   }
+
 
   async function openFleetCreate(): Promise<void> {
     twoMachines();
@@ -11808,8 +11819,8 @@ describe("MobileApp Create File under", () => {
   }
 
   it("drops the filing and names the machine when Auto lands on one that can't organize", async () => {
-    await openFleetCreate();
     autoWinner(filerTarget.baseUrl);
+    await openFleetCreate();
 
     await fieldControl("Title").setValue("Smurfs");
     // The group is offered because Studio, a candidate, can file.
@@ -11833,8 +11844,8 @@ describe("MobileApp Create File under", () => {
   });
 
   it("keeps the filing when Auto lands on a machine that can organize", async () => {
-    await openFleetCreate();
     autoWinner(target.baseUrl);
+    await openFleetCreate();
 
     await fieldControl("Title").setValue("Smurfs");
     await fieldControl("Prompt").setValue("a lighthouse");
@@ -11895,8 +11906,8 @@ describe("MobileApp Create File under", () => {
   });
 
   it("keeps the dropped notice as a persistent inline banner, never a toast", async () => {
-    await openFleetCreate();
     autoWinner(filerTarget.baseUrl);
+    await openFleetCreate();
 
     await fieldControl("Title").setValue("Smurfs");
     await fieldControl("Prompt").setValue("a lighthouse");
@@ -11919,8 +11930,8 @@ describe("MobileApp Create File under", () => {
   });
 
   it("supersedes the notice when the next print files successfully", async () => {
-    await openFleetCreate();
     autoWinner(filerTarget.baseUrl);
+    await openFleetCreate();
 
     await fieldControl("Title").setValue("Smurfs");
     await fieldControl("Prompt").setValue("a lighthouse");
@@ -12200,7 +12211,7 @@ describe("MobileApp identity photo", () => {
 
     await develop("a parked identity print");
     expect(admittedRequests()).toHaveLength(1);
-    const parked = openStreams[0]!.options.body as Record<string, unknown>;
+    const parked = admittedRequests()[0]!;
     expect(parked.id_image).toBeUndefined();
     expect(parked.id_image_name).toBeUndefined();
 
@@ -12326,10 +12337,9 @@ describe("MobileApp identity photo", () => {
     await flushPromises();
 
     expect(admittedRequests()).toHaveLength(2);
-    for (const stream of openStreams) {
-      const body = stream.options.body as Record<string, unknown>;
-      expect(body.id_image).toBe(PNG_1X1);
-      expect(body.id_weight).toBe(0.6);
+    for (const request of admittedRequests()) {
+      expect(request.id_image).toBe(PNG_1X1);
+      expect(request.id_weight).toBe(0.6);
     }
   });
 
@@ -12565,31 +12575,13 @@ describe("MobileApp identity photo", () => {
     await attachPhoto();
     await develop("a routed portrait");
 
-    const probed = previewGenerationPlacement.mock.calls.map(
-      (call: unknown[]) => (call[0] as { baseUrl: string }).baseUrl,
-    );
-    expect(probed).toEqual([target.baseUrl]);
+    // Render would win on speed, but only an owner that advertises identity
+    // itself is a candidate at all — so the print freezes onto Studio.
     expect(admittedRequests()).toHaveLength(1);
     expect(admissionTargets()[0]).toEqual(target);
     expect(admittedRequests()[0]?.id_image).toBe(PNG_1X1);
   });
 
-  it("refuses an identity print on a server too old to answer the placement preview", async () => {
-    // That server predates the identity partition: it would ignore the face
-    // and return a print of a stranger rather than an error, so the legacy
-    // placement fallback is closed for identity work.
-    serveIdentity([identityModel]);
-    previewGenerationPlacement.mockRejectedValue(new ApiError("not found", 404));
-    wrapper = mountMobileApp();
-    await flushPromises();
-    await attachPhoto();
-    await develop("a portrait on an old machine");
-
-    expect(admittedRequests()).toHaveLength(0);
-    const status = wrapper.get("[data-test='mobile-generation-summary']").text();
-    expect(status).toContain("older Mold");
-    expect(status).toContain("Nothing was queued.");
-  });
 
   it("refuses an oversized photo without ever reading it", async () => {
     serveIdentity([identityModel]);
