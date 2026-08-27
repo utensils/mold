@@ -1933,8 +1933,6 @@ mod tests {
         }))
         .unwrap();
         for (path, body) in [
-            ("/api/generate/chain", chain_body.clone()),
-            ("/api/generate/chain/stream", chain_body.clone()),
             ("/api/chain-jobs", chain_body),
             ("/api/upscale", upscale_body.clone()),
             ("/api/upscale/stream", upscale_body),
@@ -3226,8 +3224,7 @@ mod tests {
         .unwrap();
 
         for (path, body) in [
-            ("/api/generate/chain", chain_body.clone()),
-            ("/api/generate/chain/stream", chain_body.clone()),
+            ("/api/chain-jobs", chain_body.clone()),
             ("/api/upscale", upscale_body.clone()),
             ("/api/upscale/stream", upscale_body.clone()),
         ] {
