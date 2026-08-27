@@ -33,14 +33,3 @@ export function applyMobileDurablePresentation(
     job.cancelling = opts.cancelRequested;
   }
 }
-
-export interface MobileDurableHold {
-  error: string | null;
-  code: string | null;
-  retryable: boolean;
-}
-
-/** The hold a row is parked on, or `null` for every other arm. */
-export function mobileDurableHeld(p: GenerationChildPresentation): MobileDurableHold | null {
-  return p.kind === "held" ? { error: p.error, code: p.code, retryable: p.retryable } : null;
-}

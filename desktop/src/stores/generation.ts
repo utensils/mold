@@ -67,7 +67,6 @@ import {
 import {
   generationTrackerSettled,
   presentGenerationChild,
-  reconciliationPresentation,
   type GenerationChildPresentation,
 } from "@studio/lib/generationPresentation";
 import { applyDurablePresentation } from "../lib/durableGenerationPresentation";
@@ -1067,18 +1066,18 @@ export const useGenerationStore = defineStore("generation", {
         persistDurableRecords();
         return true;
       };
-      // An unknown outcome is advisory: no notification, no mirror, only the
-      // dismissal bookkeeping below.
-      const unknown =
-        reconciliationPresentation(record.tracker.reconciliation, null).kind === "unknown";
-      const completed = unknown
-        ? []
-        : jobs.filter((job) => job.status === "complete" && job.result?.filename);
+      // A known completion keeps its effects whatever a sibling's authority
+      // did later; an unknown outcome is advisory and announces nothing.
+      const completed = jobs.filter((job) => job.status === "complete" && job.result?.filename);
       if (completed.length > 0 && claim("native-notification")) {
         notifyGenerated(completed[0]!.prompt, completed[0]!.result?.filename);
-      } else if (!unknown) {
+      } else {
         const failed = jobs.find(
-          (job) => job.status === "error" && job.error && !isCancelledError(job.error),
+          (job) =>
+            job.status === "error" &&
+            job.error &&
+            !job.outcomeUnknown &&
+            !isCancelledError(job.error),
         );
         if (failed && claim("native-failure")) {
           notifyGenerationFailed(describeTransportError(failed.error!, failed.hostLabel));

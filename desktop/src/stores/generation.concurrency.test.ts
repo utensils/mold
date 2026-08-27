@@ -418,6 +418,66 @@ describe("submitBatch connection cap", () => {
     expect(queueApi.retryQueueJobRecoveringAmbiguity).not.toHaveBeenCalled();
   });
 
+  it("still announces a completed sibling when the batch loses its authority", async () => {
+    const store = useGenerationStore();
+    const hosts = useHostsStore();
+    hosts.extras = [
+      {
+        id: "hal9000",
+        label: "hal9000",
+        url: "http://hal9000:7680",
+        apiKey: "fresh-key",
+        status: "ready",
+        error: null,
+        instanceId: "instance-1",
+      },
+    ];
+    durableApi.admit.mockImplementation(async (_target, body) => ({
+      id: "mixed-batch",
+      client_batch_id: (body as { client_batch_id: string }).client_batch_id,
+      instance_id: "instance-1",
+      durable: true,
+      children: [
+        {
+          index: 1,
+          job_id: "done-job",
+          state: "complete",
+          created_at_ms: 1,
+          updated_at_ms: 2,
+          completed_at_ms: 2,
+          result: { filename: "done.png" },
+        },
+        { index: 2, job_id: "live-job", state: "queued", created_at_ms: 1, updated_at_ms: 2 },
+      ],
+    }));
+    const submitted = store.submitBatch(req, 2, {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      instanceId: "instance-1",
+      heterogeneousBatchMaxOutputs: 64,
+      durableMedia: {
+        protocol_version: 2,
+        encrypted_at_rest: true,
+        generate_request_media: true,
+        identity: true,
+        h3_references: true,
+        private_h3: true,
+      },
+    });
+    await flushPromises();
+    expect(submitted.jobs[0]).toMatchObject({ status: "complete", id: "done-job" });
+
+    hosts.extras[0]!.instanceId = "replacement-instance";
+    await store.reconcileDurableHost("hal9000");
+    await submitted.settled;
+    expect(submitted.jobs[1]).toMatchObject({ status: "error", outcomeUnknown: true });
+    // The known completion keeps its effects; only the unknown row is silent.
+    expect(effectMocks.notifyGenerated).toHaveBeenCalledTimes(1);
+    expect(effectMocks.notifyGenerationFailed).not.toHaveBeenCalled();
+  });
+
   it("retries a held child with its complete durable admission authority", async () => {
     const store = useGenerationStore();
     const hosts = useHostsStore();

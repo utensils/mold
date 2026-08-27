@@ -2801,6 +2801,68 @@ describe("MobileApp generation queue", () => {
     );
   });
 
+  it("keeps a hold's error and Retry through a same-instance resync", async () => {
+    let clientBatchId = "";
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      if (path === "/api/capabilities") {
+        return Promise.resolve({ events: { available: true }, ...durableQueueCapabilities });
+      }
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "studio-id", observed_at_unix_ms: 1, items: [] });
+      }
+      if (path === "/api/generation-batches" && init?.method === "POST") {
+        clientBatchId = JSON.parse(String(init.body)).client_batch_id as string;
+        return Promise.resolve({
+          id: "gap-batch",
+          client_batch_id: clientBatchId,
+          instance_id: "studio-id",
+          durable: true,
+          children: [
+            {
+              index: 1,
+              job_id: "gap-job",
+              state: "held",
+              retryable: true,
+              error: "model is not downloaded",
+              error_code: "UNKNOWN_MODEL",
+              created_at_ms: 10,
+              updated_at_ms: 11,
+            },
+          ],
+        });
+      }
+      return durableApiFallback(path, init, callTarget);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("held across a gap");
+    expect(wrapper.find("[data-test='swipe-action-retry']").exists()).toBe(true);
+
+    // The gap's bulk read is answered by the fallback's EMPTY response, so the
+    // row stays under a resync overlay — the hold it covers is still the
+    // host's word.
+    openStreams
+      .find((stream) => stream.path === "/api/events")!
+      .options.onEvent(
+        "resync_required",
+        JSON.stringify({ instance_id: "studio-id", missed_events: 1 }),
+      );
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
+      "Re-syncing with host",
+    );
+    expect(wrapper.get("[data-test='mobile-generation-held-error']").text()).toBe(
+      "model is not downloaded",
+    );
+    expect(wrapper.find("[data-test='swipe-action-retry']").exists()).toBe(true);
+  });
+
   it("retries only an explicitly retryable held child on its exact authenticated host", async () => {
     let clientBatchId = "";
     const heldBatch = () => ({

@@ -438,7 +438,6 @@ import {
 import { reconciliationPresentation } from "@studio/lib/generationPresentation";
 import {
   applyMobileDurablePresentation,
-  mobileDurableHeld,
   presentMobileDurableChild,
 } from "./generationPresentation";
 import { chunkGenerationBatchTrackers } from "@studio/lib/generationLifecycle";
@@ -1984,13 +1983,15 @@ function durableRecoveryForJob(job: Job): {
 /** Live preview + step progress for our own running prints (see web). */
 const ownPreviews = new OwnPrintPreviewWatchers();
 
-/** The hold a queue row is parked on, from the shared presentation. */
-function durableHold(job: Job) {
-  const durable = durableRecoveryForJob(job);
-  if (!durable) return null;
-  return mobileDurableHeld(
-    presentMobileDurableChild(durable.recovery, durable.childIndex, job.hostLabel),
-  );
+/** The hold a queue row is parked on. Read off the job the adapter mapped,
+ * not a fresh presentation: a resync overlay deliberately keeps the hold
+ * fields, and re-presenting would hide Retry and re-offer the model pull. */
+function durableHold(
+  job: Job,
+): { error: string | null; code: string | null; retryable: boolean } | null {
+  if (!durableGenerationJobIdentity.has(job.clientId)) return null;
+  if (job.holdError === null && job.holdCode === null) return null;
+  return { error: job.holdError, code: job.holdCode, retryable: job.retryable };
 }
 
 function durableHeldIsRetrying(job: Job): boolean {
@@ -2879,8 +2880,12 @@ function markDurableHostGap(hostId: string, instanceId: string): void {
       : recovery,
   );
   syncDurableGenerationJobs();
-  retireUnknownDurableRecoveries(hostId);
-  persistDurableGenerationRecoveries();
+  // A completion frozen before the gap keeps its effects; only then is the
+  // unknown remainder retired.
+  void processDurableGenerationTerminalEffects().finally(() => {
+    retireUnknownDurableRecoveries(hostId);
+    persistDurableGenerationRecoveries();
+  });
 }
 
 function clearMobileDurableCancelIntent(clientBatchId: string, childIndex: number): void {
@@ -3205,10 +3210,11 @@ async function reconcileMobileDurableHost(
         }
       }
       syncDurableGenerationJobs();
-      retireUnknownDurableRecoveries(hostId);
       persistDurableGenerationRecoveries();
       scheduleMobileDurableCancelIntents();
       await processDurableGenerationTerminalEffects();
+      retireUnknownDurableRecoveries(hostId);
+      persistDurableGenerationRecoveries();
     } catch {
       // A transport failure is not a lifecycle outcome. The retained
       // recovery identity stays queued and the host stream/wake path retries
