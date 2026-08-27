@@ -715,23 +715,26 @@ fn precheck_private_h3_admission_capacity(
     if compute_capability.is_none() {
         let unified_floor = device_floor.max(host_floor);
         if unified_floor > available_device_bytes {
-            bail!(
-                "private H3 Metal admission needs at least {unified_floor} unified-memory bytes \
-                 before any request-specific term, exceeding the {available_device_bytes} byte \
-                 admission sample"
-            )
+            return Err(anyhow!(H3PrivateDeviceHeadroomShortfall {
+                context: "private H3 Metal admission",
+                resource: "unified-memory",
+                required_device_bytes: unified_floor,
+                available_device_bytes,
+            }));
         }
         return Ok(());
     }
-    // Two independent resources, two independent refusals (#1214). The host arm
-    // is additionally typed, because a host shortfall is the one a caller can
-    // act on by releasing its own model cache (#1289).
+    // Two independent resources, two independent refusals (#1214), and BOTH
+    // are typed: a host shortfall is the one a caller can answer by releasing
+    // its own model cache (#1289), and a device shortfall is the one it must
+    // answer by waiting for the card rather than by holding the job forever.
     if device_floor > available_device_bytes {
-        bail!(
-            "private H3 admission needs at least {device_floor} device bytes before any \
-             request-specific term, exceeding the {available_device_bytes} byte device \
-             admission sample"
-        )
+        return Err(anyhow!(H3PrivateDeviceHeadroomShortfall {
+            context: "private H3 admission",
+            resource: "device",
+            required_device_bytes: device_floor,
+            available_device_bytes,
+        }));
     }
     if host_floor > available_host_headroom_bytes {
         return Err(anyhow!(H3PrivateHostHeadroomShortfall {
@@ -834,18 +837,22 @@ fn check_private_h3_target_budget_fits(
     if compute_capability.is_none() {
         let unified_peak = predicted_device_peak_bytes.max(predicted_host_increment_bytes);
         if unified_peak > available_device_bytes {
-            bail!(
-                "private H3 Metal canonical target needs {unified_peak} unified-memory bytes but \
-                 the admission sample offers {available_device_bytes}"
-            )
+            return Err(anyhow!(H3PrivateDeviceHeadroomShortfall {
+                context: "private H3 Metal canonical target",
+                resource: "unified-memory",
+                required_device_bytes: unified_peak,
+                available_device_bytes,
+            }));
         }
         return Ok(());
     }
     if predicted_device_peak_bytes > available_device_bytes {
-        bail!(
-            "private H3 canonical target needs {predicted_device_peak_bytes} device bytes but the \
-             admission sample offers {available_device_bytes}"
-        )
+        return Err(anyhow!(H3PrivateDeviceHeadroomShortfall {
+            context: "private H3 canonical target",
+            resource: "device",
+            required_device_bytes: predicted_device_peak_bytes,
+            available_device_bytes,
+        }));
     }
     if predicted_host_increment_bytes > available_host_headroom_bytes {
         return Err(anyhow!(H3PrivateHostHeadroomShortfall {
@@ -1256,6 +1263,32 @@ pub struct H3PrivateHostHeadroomShortfall {
     pub available_host_headroom_bytes: u64,
 }
 
+/// A refusal that turns on DEVICE memory alone.
+///
+/// The mirror of [`H3PrivateHostHeadroomShortfall`], and typed for the same
+/// reason: the caller's decision is park-or-refuse, and #1272 already paid for
+/// recovering that from prose. Untyped, a device shortfall sampled while
+/// another render transiently held the card became a PERMANENT hold — the
+/// scheduler could not tell it apart from a validation refusal, so a number
+/// that was true for one second answered the job forever.
+///
+/// `resource` is what the refusal names, because Metal has one pool: #1214
+/// requires a refusal to say WHICH resource fell short, and on unified memory
+/// "device" would be a lie about a charge the host shares.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error(
+    "{context} needs at least {required_device_bytes} {resource} bytes, exceeding the \
+     {available_device_bytes} byte {resource} admission sample"
+)]
+pub struct H3PrivateDeviceHeadroomShortfall {
+    /// Which gate refused, so the sentence still reads as prose.
+    pub context: &'static str,
+    /// `"device"` on a discrete card, `"unified-memory"` on Metal.
+    pub resource: &'static str,
+    pub required_device_bytes: u64,
+    pub available_device_bytes: u64,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum H3PrivateFl2VaPrepareError {
     #[error("private H3 runtime has no reviewed runtime qualification")]
@@ -1264,6 +1297,11 @@ pub enum H3PrivateFl2VaPrepareError {
     /// own reclaimable cache and retry before refusing the request.
     #[error("{0}")]
     InsufficientHostHeadroom(H3PrivateHostHeadroomShortfall),
+    /// Device (or unified) memory alone was short. Carried typed so a caller
+    /// can park the job until the fleet is idle instead of holding it on a
+    /// sample that was only momentarily true.
+    #[error("{0}")]
+    InsufficientDeviceHeadroom(H3PrivateDeviceHeadroomShortfall),
     #[error("private H3 preparation evidence was rejected: {0}")]
     InvalidEvidence(String),
 }
@@ -1705,8 +1743,14 @@ pub fn prepare_h3_private_fl2va_admission(
         prepare_reviewed_h3_private_fl2va_admission(input, progress).map_err(|error| {
             // Preserve the one refusal a caller can act on. Everything else
             // keeps the existing opaque evidence wording.
-            match error.downcast::<H3PrivateHostHeadroomShortfall>() {
-                Ok(shortfall) => H3PrivateFl2VaPrepareError::InsufficientHostHeadroom(shortfall),
+            let error = match error.downcast::<H3PrivateHostHeadroomShortfall>() {
+                Ok(shortfall) => {
+                    return H3PrivateFl2VaPrepareError::InsufficientHostHeadroom(shortfall)
+                }
+                Err(error) => error,
+            };
+            match error.downcast::<H3PrivateDeviceHeadroomShortfall>() {
+                Ok(shortfall) => H3PrivateFl2VaPrepareError::InsufficientDeviceHeadroom(shortfall),
                 Err(error) => H3PrivateFl2VaPrepareError::InvalidEvidence(error.to_string()),
             }
         })
@@ -10619,6 +10663,120 @@ mod tests {
         assert!(device_error
             .downcast::<H3PrivateHostHeadroomShortfall>()
             .is_err());
+    }
+
+    /// #1272's rule, applied to the whole memory boundary: a budget refusal is
+    /// a TYPE, never prose. The host arm learned that in #1289; the device arm
+    /// did not, and an untyped device shortfall sampled while another render
+    /// transiently held the card became a PERMANENT hold on an idle GPU.
+    ///
+    /// Enumerates every refusal the two H3 memory gates can raise, on both
+    /// backends, and requires each to downcast.
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn every_h3_memory_gate_refusal_carries_its_shortfall_as_a_type() {
+        #[cfg(feature = "h3")]
+        let bounds = public_runtime_bounds_for_shape(MEASURED_CANVAS, MEASURED_FRAMES);
+        #[cfg(not(feature = "h3"))]
+        let bounds = capture_runtime_bounds();
+        let device_floor = private_h3_admission_device_floor_bytes(&bounds).unwrap();
+        let host_floor = private_h3_admission_host_floor_bytes(&bounds).unwrap();
+        let unified_floor = device_floor.max(host_floor);
+
+        let device = |error: anyhow::Error| {
+            error
+                .downcast::<H3PrivateDeviceHeadroomShortfall>()
+                .expect("a device-memory refusal must carry its own type")
+        };
+        let host = |error: anyhow::Error| {
+            error
+                .downcast::<H3PrivateHostHeadroomShortfall>()
+                .expect("a host-memory refusal must carry its own type")
+        };
+
+        let cuda_floor = device(
+            precheck_private_h3_admission_capacity(
+                &bounds,
+                Some((8, 9)),
+                device_floor.saturating_sub(1),
+                u64::MAX,
+            )
+            .unwrap_err(),
+        );
+        assert_eq!(cuda_floor.resource, "device");
+        assert_eq!(cuda_floor.required_device_bytes, device_floor);
+        assert_eq!(
+            cuda_floor.available_device_bytes,
+            device_floor.saturating_sub(1)
+        );
+
+        assert_eq!(
+            host(
+                precheck_private_h3_admission_capacity(
+                    &bounds,
+                    Some((8, 9)),
+                    u64::MAX,
+                    host_floor.saturating_sub(1),
+                )
+                .unwrap_err(),
+            )
+            .required_host_bytes,
+            host_floor
+        );
+
+        let metal_floor = device(
+            precheck_private_h3_admission_capacity(
+                &bounds,
+                None,
+                unified_floor.saturating_sub(1),
+                0,
+            )
+            .unwrap_err(),
+        );
+        assert_eq!(metal_floor.resource, "unified-memory");
+        assert_eq!(metal_floor.required_device_bytes, unified_floor);
+
+        let cuda_target = device(
+            check_private_h3_target_budget_fits(
+                9_000_000_001,
+                7_000_000_000,
+                Some((8, 9)),
+                9_000_000_000,
+                7_000_000_000,
+            )
+            .unwrap_err(),
+        );
+        assert_eq!(cuda_target.resource, "device");
+        assert_eq!(cuda_target.required_device_bytes, 9_000_000_001);
+        assert_eq!(cuda_target.available_device_bytes, 9_000_000_000);
+
+        assert_eq!(
+            host(
+                check_private_h3_target_budget_fits(
+                    9_000_000_000,
+                    7_000_000_001,
+                    Some((8, 9)),
+                    9_000_000_000,
+                    7_000_000_000,
+                )
+                .unwrap_err(),
+            )
+            .required_host_bytes,
+            7_000_000_001
+        );
+
+        let metal_target = device(
+            check_private_h3_target_budget_fits(
+                9_000_000_001,
+                7_000_000_000,
+                None,
+                9_000_000_000,
+                1,
+            )
+            .unwrap_err(),
+        );
+        assert_eq!(metal_target.resource, "unified-memory");
+        assert_eq!(metal_target.required_device_bytes, 9_000_000_001);
     }
 
     #[cfg(feature = "mp4")]
