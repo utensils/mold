@@ -61,15 +61,6 @@ export function generationRefusalReason(
   return policy.admission === "canonical_durable" ? null : policy.refusal;
 }
 
-export function requestIsEligibleForDurableGeneration(
-  request: GenerateRequest,
-  queue: DurableGenerationQueueCapabilities | null | undefined,
-  durableMedia: DurableMediaCapabilities | null | undefined,
-  modelFamily?: string | null,
-): boolean {
-  return generationRefusalReason(request, queue, durableMedia, modelFamily) === null;
-}
-
 export function durableChildSummary(
   request: GenerateRequest,
   index: number,

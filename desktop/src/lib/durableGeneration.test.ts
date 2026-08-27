@@ -7,7 +7,6 @@ import {
   parseEventAuthority,
   parseEventResync,
   generationRefusalReason,
-  requestIsEligibleForDurableGeneration,
   saveDurableGenerationRecovery,
 } from "./durableGeneration";
 import type { GenerateRequest } from "./api/types";
@@ -37,7 +36,6 @@ describe("desktop durable generation recovery", () => {
     expect(
       generationRefusalReason(request({ source_image: "bytes" }), queue, durableMedia),
     ).toBeNull();
-    expect(requestIsEligibleForDurableGeneration(request(), queue, undefined)).toBe(true);
   });
 
   it("names the refusal instead of routing the print to a second path", () => {
@@ -93,14 +91,6 @@ describe("desktop durable generation recovery", () => {
           candidate.family,
         ),
       ).toBe(candidate.reason);
-      expect(
-        requestIsEligibleForDurableGeneration(
-          candidate.request,
-          candidate.queue ?? queue,
-          candidate.media,
-          candidate.family,
-        ),
-      ).toBe(false);
     }
   });
 
