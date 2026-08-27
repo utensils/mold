@@ -330,6 +330,28 @@ function admissionCalls(): unknown[][] {
  * carrying a source image, an identity photo, or H3 references be queued at
  * all — without it every media-bearing print is refused by name.
  */
+/**
+ * An image checkpoint. A durable print takes its output format from the
+ * REQUEST — there is no SSE completion frame to carry one — so a test that
+ * asserts the still tile must develop on a still model rather than the
+ * shared video fixture.
+ */
+const stillModel: ModelEntry = {
+  ...model,
+  name: "flux-dev:q8",
+  family: "flux",
+  description: "Image model",
+};
+
+/** Serve one still checkpoint, leaving every other path on the default mock. */
+function serveStillModel(): void {
+  const base = apiJsonTo.getMockImplementation()!;
+  apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+    if (path === "/api/models") return Promise.resolve([stillModel]);
+    return base(callTarget, path, init);
+  });
+}
+
 const durableQueueCapabilities = {
   queue: { heterogeneous_batch_max_outputs: 64 },
   durable_media: {
@@ -5190,6 +5212,7 @@ describe("MobileApp generation queue", () => {
   });
 
   it("develops the active print over a live latent preview once one arrives", async () => {
+    serveStillModel();
     wrapper = mountMobileApp();
     await flushPromises();
     await submitPrompt("a latent preview print");
@@ -5470,6 +5493,7 @@ describe("MobileApp generation queue", () => {
   });
 
   it("keeps a completed result visible while a queued sibling settles independently", async () => {
+    serveStillModel();
     wrapper = mountMobileApp();
     await flushPromises();
 
@@ -5600,6 +5624,7 @@ describe("MobileApp generation queue", () => {
   });
 
   it("promotes the last of simultaneous completions before pruning older results", async () => {
+    serveStillModel();
     wrapper = mountMobileApp();
     await flushPromises();
 
@@ -5647,6 +5672,7 @@ describe("MobileApp generation queue", () => {
   });
 
   it("does not show an older result when the latest saved result has no filename", async () => {
+    serveStillModel();
     admitCompletedPrints();
     wrapper = mountMobileApp();
     await flushPromises();
@@ -5679,6 +5705,7 @@ describe("MobileApp generation queue", () => {
   });
 
   it("shows ticket failures and lets the user retry the preview", async () => {
+    serveStillModel();
     streamableMediaUrl
       .mockRejectedValueOnce(new Error("The host refused the media ticket."))
       .mockResolvedValueOnce("https://studio/media/retried-image");
@@ -5726,6 +5753,7 @@ describe("MobileApp generation queue", () => {
   });
 
   it("bounds automatic media recovery and exposes a manual retry", async () => {
+    serveStillModel();
     const unchangedUrl = "https://studio/media/missing?media_token=unchanged&expires=4102444800";
     streamableMediaUrl.mockResolvedValueOnce(unchangedUrl).mockResolvedValueOnce(unchangedUrl);
     admitCompletedPrints("missing.png");
@@ -5858,6 +5886,7 @@ describe("MobileApp generation queue", () => {
   });
 
   it("shows a completion that wins the cancellation race", async () => {
+    serveStillModel();
     admitCompletedPrints();
     wrapper = mountMobileApp();
     await flushPromises();
@@ -8754,7 +8783,24 @@ describe("MobileApp gallery", () => {
   });
 
   it("opens the latest generated image in the full-screen print viewer when tapped", async () => {
+    serveStillModel();
     admitCompletedPrints("expand-this-result.png");
+    // The viewer opens the host's own gallery entry for the print, so the
+    // listing has to hold the still this admission saved.
+    const base = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((callTarget: unknown, path: string, init?: RequestInit) => {
+      if (path === "/api/gallery") {
+        return Promise.resolve([
+          {
+            filename: "expand-this-result.png",
+            timestamp: Math.floor(Date.now() / 1000) + 5,
+            format: "png",
+            metadata: { prompt: "expand this result", model: stillModel.name },
+          },
+        ]);
+      }
+      return base(callTarget, path, init);
+    });
     wrapper = mountMobileApp();
     await flushPromises();
     await fieldControl("Prompt").setValue("expand this result");
@@ -8771,7 +8817,11 @@ describe("MobileApp gallery", () => {
     await flushPromises();
 
     expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
-    expect(wrapper.get("[data-test='gallery-viewer-image']").attributes("src")).toContain("blob:");
+    // A durable print carries no encoded payload, so the viewer resolves its
+    // media from the host through a ticketed URL rather than a session blob.
+    expect(wrapper.get("[data-test='gallery-viewer-image']").attributes("src")).toBe(
+      "https://studio/media/full-video",
+    );
   });
 
   it("shows New and Upscaled indicators on mobile Library tiles", async () => {
