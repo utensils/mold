@@ -3501,52 +3501,23 @@ mod tests {
         );
     }
 
+    /// A lost stream now always promises retention, because an admitted job
+    /// is a journalled one by construction: `/api/generate/stream` admits
+    /// through the durable queue, so there is no "the host took it but will
+    /// not replay it" case left to guard against. The old per-job
+    /// `durable: false` probe went with the attached path that produced it.
     #[tokio::test]
-    async fn mid_stream_death_claims_no_retention_on_a_legacy_host() {
-        // A server that predates the durable queue: no `durable` field at all.
+    async fn mid_stream_death_promises_the_job_finishes_on_the_host() {
         let base = spawn_dying_stream_server(
             serde_json::json!({ "entries": [{
-                "id": "job-88",
-                "model": "z-image-turbo:q8",
-                "state": "queued",
-                "started_at_unix_ms": 0,
-                "position": 0
-            }] }),
-            "job-88",
-        )
-        .await;
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let err = MoldClient::new(&base)
-            .generate_stream(&stream_request(), tx)
-            .await
-            .expect_err("the stream dies mid-body");
-
-        let rendered = format!("{err:#}");
-        assert!(
-            !rendered.contains("retained"),
-            "a host without a durable queue must not promise retention: {rendered}"
-        );
-        assert_eq!(
-            crate::control::classify_generate_error(&err),
-            crate::control::GenerateServerAction::SurfaceError
-        );
-    }
-
-    #[tokio::test]
-    async fn mid_stream_death_claims_no_retention_for_a_job_the_host_did_not_journal() {
-        // A durable host still excludes some jobs at admission — no gallery
-        // target, reference-upload media, an oversized request — and reports
-        // `durable: false` for them. Host capability alone would over-promise.
-        let base = spawn_dying_stream_server(
-            serde_json::json!({ "entries": [{
-                "id": "job-99",
+                "id": "job-77",
                 "model": "z-image-turbo:q8",
                 "state": "queued",
                 "started_at_unix_ms": 0,
                 "position": 0,
-                "durable": false
+                "durable": true
             }] }),
-            "job-99",
+            "job-77",
         )
         .await;
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3556,9 +3527,14 @@ mod tests {
             .expect_err("the stream dies mid-body");
 
         let rendered = format!("{err:#}");
-        assert!(
-            !rendered.contains("retained"),
-            "a job the host did not journal must not promise retention: {rendered}"
+        assert!(rendered.contains("retained"), "{rendered}");
+        assert!(rendered.contains("job-77"), "{rendered}");
+        // Still not a connect error: the CLI surfaces it rather than silently
+        // re-rendering the same job locally.
+        assert!(!MoldClient::is_connection_error(&err));
+        assert_eq!(
+            crate::control::classify_generate_error(&err),
+            crate::control::GenerateServerAction::SurfaceError
         );
     }
 

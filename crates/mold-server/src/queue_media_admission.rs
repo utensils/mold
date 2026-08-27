@@ -350,6 +350,16 @@ impl DurableMediaAdmission {
                 "requests must contain at least one child",
             ));
         }
+        // A host on its way down admits nothing new. The retention fence is up
+        // before the scheduler is cancelled, so this is the moment to stop
+        // taking work: accepting here would journal a print whose only
+        // delivery is a queue about to be drained, and the caller would get a
+        // `202` instead of the `Retry-After` that tells it to come back.
+        if state.queue_journal.is_retaining() {
+            return Err(crate::routes::ApiError::server_restarting(
+                "server is restarting; this generation was not accepted",
+            ));
+        }
         let typed_history = body
             .requests
             .iter()

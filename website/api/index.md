@@ -320,6 +320,21 @@ re-queues GPU work. A retry restores the job's dispatch budget but not its
 replay budget, which bounds a boot crash loop and is not an operator's to
 spend.
 
+### `GET /api/generation-batches/{id}/events`
+
+Server-sent events carrying the authoritative state of one durable batch.
+Every frame is a complete `GenerationBatchStatus` under the event name
+`generation_batch`, not a delta: the stream opens with one, emits another
+whenever a child commits a new authoritative state, and closes once every
+child is `complete`, `failed`, `cancelled` or `held`. A client that connects
+late, reconnects, or misses a frame is therefore correct from the first event
+it receives, and a lagged subscriber re-reads rather than resynchronising.
+
+This is the state channel, not a progress channel. Per-step progress and
+denoise previews ride the single observer a job's own admission registered —
+`POST /api/generate/stream` is that observer for a singleton, and
+`GET /api/queue/{id}/preview` is the snapshot every other surface polls.
+
 ### Child revisions
 
 Every child in a `GenerationBatchStatus` carries a monotonic `revision`,

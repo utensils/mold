@@ -4437,7 +4437,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_use_reference_handles_never_use_blocking_fallback() {
+    async fn one_use_reference_handles_never_reach_a_second_endpoint() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -4464,7 +4464,13 @@ mod tests {
         let error = generate_remote_for_test(&MoldClient::new(&server.uri()), &request)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("secure streaming generation"));
+        // There is no blocking endpoint left to fall back to: a host that does
+        // not serve the streaming route is an error naming it, and the one-use
+        // upload handles are never replayed anywhere.
+        assert!(
+            format!("{error:#}").contains("/api/generate/stream"),
+            "{error:#}"
+        );
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].url.path(), "/api/generate/stream");

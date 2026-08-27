@@ -263,6 +263,7 @@ use crate::queue::clean_error_message;
         generate_stream,
         admit_generation_batch,
         get_generation_batch,
+        generation_batch_events,
         get_generation_batch_by_client,
         reconcile_generation_batches,
         generate_placement_preview,
@@ -526,6 +527,10 @@ pub fn create_router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(GENERATION_BATCH_STATUS_BODY_BYTES)),
         )
         .route("/api/generation-batches/:id", get(get_generation_batch))
+        .route(
+            "/api/generation-batches/:id/events",
+            get(generation_batch_events),
+        )
         .route(
             "/api/generate/reference-upload-sessions",
             post(crate::reference_uploads::create_reference_upload_session)
@@ -2321,6 +2326,15 @@ pub(crate) async fn direct_durable_admission(
     let _ = plan_builtin_ltx2_control(state, request).await?;
     let _ = plan_builtin_ltx2_camera_controls(state, request).await?;
     crate::queue_media_admission::durable_media_preflight(request)?;
+    // Asked before readiness: a host on its way down is a more specific — and
+    // more actionable — answer than "this host cannot admit durably", and it
+    // carries the `Retry-After` that tells the caller to come back. The batch
+    // route asks the same question at the top of `admit_batch`.
+    if state.queue_journal.is_retaining() {
+        return Err(ApiError::server_restarting(
+            "server is restarting; this generation was not accepted",
+        ));
+    }
     ensure_generation_available(state)?;
     let config = state.config.read().await;
     // One resolved value, read once, by every consumer.
@@ -2522,6 +2536,127 @@ async fn get_generation_batch(
         )
     })?;
     Ok(Json(generation_batch_status(&state.instance_id, detail)))
+}
+
+/// Live authoritative state for one durable batch.
+///
+/// A batch's children are independent durable rows, so the thing a client
+/// needs streamed is the AUTHORITATIVE state each one commits — which is
+/// exactly what `ServerEvent::JobStateCommitted` announces, after the SQLite
+/// transaction. Each announcement re-reads the batch and emits the whole
+/// status, so a client that connects late, reconnects, or misses a frame is
+/// correct from the first event it sees rather than having to replay a delta
+/// log.
+///
+/// Deliberately NOT per-step progress or denoise previews: those ride the
+/// single-consumer observer a job's own admission registered, and one job has
+/// exactly one. `/api/generate/stream` is that consumer for a singleton, and
+/// `GET /api/queue/{id}/preview` is the snapshot every other surface reads.
+#[utoipa::path(
+    get,
+    path = "/api/generation-batches/{id}/events",
+    tag = "generation",
+    params(("id" = String, Path, description = "Generation batch id")),
+    responses(
+        (status = 200, description = "SSE stream of authoritative batch status"),
+        (status = 404, description = "Batch not found"),
+    )
+)]
+async fn generation_batch_events(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let status = read_generation_batch_status(&state, &id).await?;
+    let mut events = state.events.subscribe();
+    let children = status
+        .children
+        .iter()
+        .map(|child| child.job_id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let stream = async_stream::stream! {
+        let mut settled = generation_batch_is_settled(&status);
+        yield Ok::<_, Infallible>(generation_batch_event(&status));
+        while !settled {
+            let event = match events.recv().await {
+                Ok(event) => Some(event),
+                // A lagged subscriber missed announcements, but every frame is
+                // a whole status, so one fresh read restores it.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => None,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            };
+            if let Some(event) = event {
+                let concerns_batch = match &event {
+                    mold_core::ServerEvent::JobStateCommitted { id } => children.contains(id),
+                    // One transaction settled several rows at once; ask rather
+                    // than guess whether any of them was ours.
+                    mold_core::ServerEvent::GenerationStatesCommitted => true,
+                    _ => false,
+                };
+                if !concerns_batch {
+                    continue;
+                }
+            }
+            let Ok(status) = read_generation_batch_status(&state, &id).await else {
+                return;
+            };
+            settled = generation_batch_is_settled(&status);
+            yield Ok(generation_batch_event(&status));
+        }
+    };
+    Ok(Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("ping"),
+        )
+        .into_response())
+}
+
+fn generation_batch_event(status: &mold_core::GenerationBatchStatus) -> axum::response::sse::Event {
+    match serde_json::to_string(status) {
+        Ok(data) => axum::response::sse::Event::default()
+            .event("generation_batch")
+            .data(data),
+        Err(error) => axum::response::sse::Event::default().event("error").data(
+            serde_json::json!({ "message": format!("failed to serialize batch status: {error}") })
+                .to_string(),
+        ),
+    }
+}
+
+/// Every child has reached a state this server will not leave on its own. A
+/// `held` child counts: it is waiting for an explicit
+/// `POST /api/queue/{id}/retry`, not for this host.
+fn generation_batch_is_settled(status: &mold_core::GenerationBatchStatus) -> bool {
+    use mold_core::GenerationBatchChildState as ChildState;
+    status.children.iter().all(|child| {
+        matches!(
+            child.state,
+            ChildState::Complete | ChildState::Failed | ChildState::Cancelled | ChildState::Held
+        )
+    })
+}
+
+async fn read_generation_batch_status(
+    state: &AppState,
+    id: &str,
+) -> Result<mold_core::GenerationBatchStatus, ApiError> {
+    let journal = state.queue_journal.clone();
+    let batch_id = id.to_string();
+    let detail = spawn_queue_read(move || {
+        journal
+            .durable_generation_batch(&batch_id)
+            .map_err(anyhow::Error::msg)
+    })
+    .await?
+    .ok_or_else(|| {
+        ApiError::with_code(
+            "generation batch not found",
+            "GENERATION_BATCH_NOT_FOUND",
+            StatusCode::NOT_FOUND,
+        )
+    })?;
+    Ok(generation_batch_status(&state.instance_id, detail))
 }
 
 #[utoipa::path(
@@ -3742,6 +3877,13 @@ async fn generate_stream(
     let job_id = status.children[0].job_id.clone();
     let batch_id = status.id.clone();
     let client_batch_id = status.client_batch_id.clone();
+    // The first frame carries the position AND the server id, so a client can
+    // say "#N in line" before anything renders and reconcile against
+    // `/api/queue` afterwards. Read on the REGISTRY scale — the count of live
+    // jobs this admission now sits behind — because the durable row has not
+    // been claimed by the feeder yet, so there is no dispatch position to
+    // read. Seeding 0 unconditionally told every caller it was next up.
+    let queued_position = state.job_registry.len();
     let stream = async_stream::stream! {
         for warning in warnings.all() {
             yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Progress(
@@ -3749,7 +3891,7 @@ async fn generate_stream(
             )));
         }
         yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Progress(
-            SseProgressEvent::Queued { position: 0, id: job_id }
+            SseProgressEvent::Queued { position: queued_position, id: job_id }
         )));
         let Ok(attached) = observer.attached().await else {
             yield Ok::<_, Infallible>(sse_message_to_event(SseMessage::Error(
