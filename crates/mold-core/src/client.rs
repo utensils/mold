@@ -1414,22 +1414,41 @@ impl MoldClient {
     /// `page` and `live_only_entries` are dropped from the result: they
     /// describe one page's position in a walk that is now finished, and
     /// keeping either would invite a caller to page again from the middle.
+    ///
+    /// Rows are deduplicated by id across the whole walk. The server repeats
+    /// the bounded `live_only_entries` set on EVERY explicit page — it is the
+    /// registry's non-durable overlay, not a slice of the durable order — and
+    /// `fetch_queue_listing` folds it into `entries` per page, so appending
+    /// blindly would list each live-only job once per continuation.
     pub async fn list_queue_all(&self) -> Result<QueueListingWire> {
         let mut listing = self.list_queue().await?;
-        let mut entries = std::mem::take(&mut listing.entries);
         let plan = listing.plan.take();
+        let mut entries: Vec<crate::QueueJobEntryWire> = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
         let mut seen_cursors = std::collections::HashSet::new();
-        while let Some(cursor) = listing
-            .page
-            .as_ref()
-            .and_then(|page| page.next_cursor.clone())
-        {
+        loop {
+            entries.extend(
+                std::mem::take(&mut listing.entries)
+                    .into_iter()
+                    .filter(|entry| seen_ids.insert(entry.id.clone())),
+            );
+            let Some(cursor) = listing
+                .page
+                .as_ref()
+                .and_then(|page| page.next_cursor.clone())
+            else {
+                break;
+            };
             let limit = listing.page.as_ref().map_or(0, |page| page.limit);
             if !seen_cursors.insert(cursor.clone()) {
                 anyhow::bail!("host repeated a queue continuation cursor");
             }
             listing = self.list_queue_page(limit, Some(&cursor)).await?;
-            entries.append(&mut listing.entries);
+        }
+        // A walk of the durable order restates position per page, so the
+        // merged sequence is the authority for where each row sits.
+        for (position, entry) in entries.iter_mut().enumerate() {
+            entry.position = position;
         }
         Ok(QueueListingWire {
             entries,
@@ -3393,6 +3412,7 @@ mod tests {
             .and(query_param("cursor", "page-2"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "entries": [row("tail")],
+                "live_only_entries": [row("live")],
                 "page": { "limit": 1, "offset": 1, "returned": 1 }
             })))
             .mount(&server)
@@ -3401,6 +3421,8 @@ mod tests {
             .and(path("/api/queue"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "entries": [row("head")],
+                // Repeated on every explicit page, as the server does.
+                "live_only_entries": [row("live")],
                 "plan": { "plan_version": 1, "state_version": 1, "optimizer_state": "idle", "work_items": [] },
                 "page": { "limit": 1, "offset": 0, "returned": 1, "next_cursor": "page-2" }
             })))
@@ -3409,9 +3431,17 @@ mod tests {
 
         let client = MoldClient::new(&server.uri());
         // One page is what a poller wants and is deliberately not the whole
-        // queue: the tail row is invisible to it.
+        // queue: it carries the durable head plus the live-only overlay, and
+        // the tail row is invisible to it.
         let one_page = client.list_queue().await.unwrap();
-        assert_eq!(one_page.entries.len(), 1);
+        assert_eq!(
+            one_page
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["head", "live"]
+        );
 
         let all = client.list_queue_all().await.unwrap();
         assert_eq!(
@@ -3419,7 +3449,16 @@ mod tests {
                 .iter()
                 .map(|e| e.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["head", "tail"]
+            vec!["head", "live", "tail"],
+            "the repeated live-only overlay must be listed once"
+        );
+        assert_eq!(
+            all.entries
+                .iter()
+                .map(|entry| entry.position)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "the merged sequence is the authority for position"
         );
         assert!(all.plan.is_some(), "the first page's plan is retained");
         assert!(

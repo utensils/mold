@@ -154,7 +154,7 @@ no local fallback, because a queue belongs to one serving host.
 mold queue list [--held] [--json]        # job, state, model, batch, prompt, admitted
 mold queue show <JOB-ID> [--json]        # one job in full, with its batch progress
 mold queue cancel <JOB-ID>...            # DELETE /api/queue/{id}
-mold queue cancel --all [--yes]          # DELETE /api/queue — running work finishes
+mold queue cancel --all [--yes]          # DELETE /api/queue — queued rows only
 mold queue cancel --batch <BATCH-ID>     # DELETE /api/generation-batches/{id}
 mold queue retry <JOB-ID>... | --held    # POST /api/queue/{id}/retry
 mold queue move <JOB-ID> --to <N>        # PATCH /api/queue/{id} {position}

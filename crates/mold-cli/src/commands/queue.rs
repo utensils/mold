@@ -22,6 +22,11 @@ use crate::QueueAction;
 const STATE_HELD: &str = "held";
 /// Wire value of the running lifecycle.
 const STATE_RUNNING: &str = "running";
+/// Wire value of the plain queued lifecycle — the ONLY state `DELETE
+/// /api/queue` removes. Running work is left alone by design, and a held row
+/// is parked rather than queued, so neither belongs in the count the
+/// confirmation prompt names.
+const STATE_QUEUED: &str = "queued";
 
 pub async fn run(action: QueueAction) -> Result<()> {
     let client = MoldClient::from_env();
@@ -201,12 +206,9 @@ async fn queue_cancel(
     if all {
         if !yes {
             let rows = fetch_rows(client, false).await?;
-            let waiting = rows
-                .iter()
-                .filter(|row| row.entry.state != STATE_RUNNING)
-                .count();
+            let waiting = cancellable_by_cancel_all(&rows);
             if waiting == 0 {
-                println!("Nothing is waiting on {}.", client.host());
+                println!("Nothing is queued on {}.", client.host());
                 return Ok(());
             }
             if !confirm_cancel_all(waiting, client.host())? {
@@ -372,6 +374,17 @@ async fn queue_sweep(client: &MoldClient) -> Result<()> {
         batches.purged, batches.remaining
     );
     Ok(())
+}
+
+/// How many rows `DELETE /api/queue` would actually remove.
+///
+/// The endpoint cancels queued rows only. Counting held rows here promised to
+/// cancel work the call then left in place and reported `cancelled=0` for;
+/// counting running rows would promise something it deliberately never does.
+pub(crate) fn cancellable_by_cancel_all(rows: &[QueueRow]) -> usize {
+    rows.iter()
+        .filter(|row| row.entry.state == STATE_QUEUED)
+        .count()
 }
 
 fn confirm_cancel_all(count: usize, host: &str) -> Result<bool> {
@@ -738,6 +751,20 @@ mod tests {
             render_listing(&rows, true, 1_000).contains("no reason reported"),
             "an unexplained hold must still be legible"
         );
+    }
+
+    #[test]
+    fn cancel_all_counts_only_what_that_call_removes() {
+        let rows = vec![
+            row(entry("running", "running", 0), QueueWaitStatus::Next),
+            row(entry("queued", "queued", 1), QueueWaitStatus::Position(1)),
+            row(entry("held", "held", 2), QueueWaitStatus::Position(2)),
+        ];
+        assert_eq!(cancellable_by_cancel_all(&rows), 1);
+        // A queue of nothing but holds must not offer to cancel them: the
+        // call would report `cancelled=0` and leave every row in place.
+        let held_only = vec![row(entry("held", "held", 0), QueueWaitStatus::Position(0))];
+        assert_eq!(cancellable_by_cancel_all(&held_only), 0);
     }
 
     #[test]
