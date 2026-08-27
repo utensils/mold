@@ -184,4 +184,35 @@ describe("reduceChainJobFrame", () => {
     expect(last.live.activeStage).toBe(1);
     expect(estimatedChainFrames(last.live)).toBe(194);
   });
+
+  it("settles from the last finalize record when the job was already complete on attach", () => {
+    const live = emptyChainJobLive();
+    const frame = reduceChainJobFrame(live, {
+      type: "snapshot",
+      job: {
+        id: "job-1",
+        state: "completed",
+        error: null,
+        stage_count: 2,
+        stages: [],
+        finalizes: [
+          {
+            output: "final/output-1.mp4",
+            gallery_filename: "mold-chain-a-take-1.mp4",
+            take: 1,
+          },
+          {
+            output: "final/output-2.mp4",
+            gallery_filename: "mold-chain-a-take-2.gif",
+            take: 2,
+          },
+        ],
+      } as never,
+    });
+    expect(frame.finalized).toEqual({
+      output: "mold-chain-a-take-2.gif",
+      take: 2,
+    });
+    expect(frame.terminal).toEqual({ state: "completed", error: null });
+  });
 });

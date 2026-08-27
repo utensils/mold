@@ -22,7 +22,11 @@ import {
   emptyChainJobLive,
   type ChainJobLive,
 } from "./chainJobEvents";
-import type { ChainJobEvent, ChainJobState } from "./api/chainTypes";
+import type {
+  ChainJobEvent,
+  ChainJobState,
+  ChainJobDetail,
+} from "./api/chainTypes";
 
 /**
  * Structurally the `ChainProgressEvent` union both shells already own, so a
@@ -85,12 +89,7 @@ function isTerminal(state: ChainJobState): boolean {
  * frame. The live value is always returned so the caller keeps one authority
  * for the job rather than a second parallel reduction.
  */
-function snapshotFinalized(job: {
-  finalizes?: ReadonlyArray<{
-    gallery_filename?: string | null;
-    take?: number;
-  }> | null;
-}): ChainJobFinalized | null {
+function snapshotFinalized(job: ChainJobDetail): ChainJobFinalized | null {
   const last = job.finalizes?.at(-1);
   if (!last?.gallery_filename) return null;
   return { output: last.gallery_filename, take: last.take ?? null };
@@ -123,7 +122,7 @@ export function reduceChainJobFrame(
         // only place the gallery filename exists after the stream is gone.
         finalized: isTerminal(event.job.state)
           ? snapshotFinalized(event.job)
-          : live.finalized,
+          : null,
         terminal: isTerminal(event.job.state)
           ? { state: event.job.state, error: event.job.error ?? null }
           : null,

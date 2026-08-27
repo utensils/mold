@@ -1415,11 +1415,11 @@ function applyDurableTracker(tracker: GenerationBatchTracker): void {
     } else {
       settleDurableTerminal(job, lifecycle);
     }
-    const previewTarget = durableRoutes.get(tracker.hostId)?.target ?? null;
-    if (lifecycle.phase === "running" && previewTarget) {
+    const previewRoute = durableRoutes.get(tracker.hostId) ?? null;
+    if (lifecycle.phase === "running" && previewRoute) {
       ownPreviews.ensure(
         job.id,
-        previewTarget,
+        routeApiTarget(previewRoute),
         lifecycle.authority.jobId,
         (preview) => {
           if (job.state !== "running") return;
