@@ -40,6 +40,7 @@ import RecentGrid from "../components/create/RecentGrid.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import { defaultUpscaler } from "../components/create/advanced/upscalers";
 import { blobToBase64 } from "../lib/base64";
+import { HeldPullOffers } from "../lib/heldPullOffers";
 import Icon from "@ui/components/Icon.vue";
 import ErrorNotice from "@ui/components/ErrorNotice.vue";
 import { ASPECTS } from "@ui/lib/resolution";
@@ -3620,17 +3621,21 @@ async function offerMissingModelPull(
  * placement preview. Same offer, same policy; the resume retries the child
  * the machine is already holding rather than queueing a second print.
  */
-const offeredMissingModelHolds = new Set<string>();
+const offeredMissingModelHolds = new HeldPullOffers();
+// A print that is no longer held is forgotten, so the ledger cannot grow for
+// the life of the tab and a resumed print parked again for the same missing
+// model is offered the pull again.
+watch(
+  () =>
+    stream.jobs.value
+      .filter((job) => job.holdCode !== null)
+      .map((job) => job.id),
+  (heldIds) => offeredMissingModelHolds.retain(heldIds),
+);
 async function offerHeldMissingModelPull(job: Job): Promise<void> {
   const missing = classifyMissingModelHold(job.holdCode, job.request.model);
-  if (!missing) {
-    // The hold ended (or was never about the model): a later hold on the
-    // same print is a new offer.
-    offeredMissingModelHolds.delete(job.id);
-    return;
-  }
-  if (offeredMissingModelHolds.has(job.id)) return;
-  offeredMissingModelHolds.add(job.id);
+  if (!missing) return;
+  if (!offeredMissingModelHolds.claim(job.id)) return;
   const hostId = job.hostId ?? ORIGIN_HOST_ID;
   await armMissingModelPull({
     model: missing.model,

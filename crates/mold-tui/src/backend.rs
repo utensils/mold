@@ -230,6 +230,9 @@ pub async fn run_generation(
                     let _ = tx.send(BackgroundEvent::Error(error));
                     return;
                 }
+                // Fall through to the per-item loop below, which is the
+                // singleton path and owns the local fallback.
+                CanonicalBatchResult::FallbackLocal => {}
             }
         }
     }
@@ -435,7 +438,10 @@ pub async fn run_chain_generation(
                 Ok(outcome) if outcome.state == mold_core::chain_job::ChainJobState::Completed => {
                     let _ = tx.send(BackgroundEvent::ChainComplete {
                         stage_count,
-                        request_warnings: Vec::new(),
+                        // The host's advisories about the request it accepted
+                        // — a filing it could not apply — surface on the
+                        // sequence exactly as they do on a one-shot.
+                        request_warnings: created.request_warnings,
                     });
                 }
                 Ok(outcome) => {
@@ -633,6 +639,10 @@ enum ServerResult {
 enum CanonicalBatchResult {
     Done,
     Error(String),
+    /// The host could not be reached at all. The singleton path answers this
+    /// by rendering locally, and a batch must not be the one submission that
+    /// fails outright on an unreachable server.
+    FallbackLocal,
 }
 
 fn new_client_batch_id() -> String {
@@ -812,6 +822,9 @@ async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> Canonical
     .await
     {
         Ok(report) => report,
+        Err(error) if mold_core::MoldClient::is_connection_error(&error) => {
+            return CanonicalBatchResult::FallbackLocal
+        }
         Err(error) => return CanonicalBatchResult::Error(format!("{error:#}")),
     };
 
@@ -826,6 +839,144 @@ async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> Canonical
         input.tx,
     )
     .await
+}
+
+/// Retry every held child this client still holds authority for, then wait
+/// for their batches to settle again.
+///
+/// `POST /api/queue/{id}/retry` fences on the whole admission authority, so
+/// this is the only place a TUI retry can come from: the Machines queue lanes
+/// list rows with no batch identity at all.
+pub async fn retry_held_prints(
+    url: String,
+    api_key: Option<String>,
+    held: Vec<crate::app::HeldPrintRetry>,
+    submission: OwnedBatchSubmission,
+    tx: mpsc::UnboundedSender<BackgroundEvent>,
+) {
+    let client = crate::hosts::client_for(&url, api_key.as_deref());
+    let mut authorities: Vec<mold_core::GenerationBatchAuthority> = Vec::new();
+    let mut failures = Vec::new();
+    for entry in &held {
+        let _ = tx.send(BackgroundEvent::Progress(SseProgressEvent::Info {
+            message: format!("Retrying batch {}", entry.index),
+        }));
+        match mold_core::durable_generation::retry_canonical_child(
+            &client,
+            &entry.authority,
+            &entry.job_id,
+            0,
+        )
+        .await
+        {
+            Ok(_) => {
+                if !authorities
+                    .iter()
+                    .any(|known| known.batch_id == entry.authority.batch_id)
+                {
+                    authorities.push(entry.authority.clone());
+                }
+            }
+            Err(error) => failures.push(format!("Batch {}: {error:#}", entry.index)),
+        }
+    }
+    if authorities.is_empty() {
+        let _ = tx.send(BackgroundEvent::Error(if failures.is_empty() {
+            "No held prints to retry".to_string()
+        } else {
+            failures.join("; ")
+        }));
+        return;
+    }
+    let mut outcomes = Vec::new();
+    for authority in &authorities {
+        match mold_core::durable_generation::wait_for_settled_batch(&client, authority).await {
+            Ok(status) => {
+                for child in status.children {
+                    let Some(entry) = held.iter().find(|entry| entry.job_id == child.job_id) else {
+                        continue;
+                    };
+                    outcomes.push(child_outcome(entry.index, authority.clone(), child));
+                }
+            }
+            Err(error) => failures.push(format!("{error:#}")),
+        }
+    }
+    outcomes.sort_by_key(|outcome| outcome.index);
+    hydrate_last_completed(&client, &mut outcomes).await;
+    let _ = tx.send(BackgroundEvent::DurableGenerationBatchComplete {
+        outcomes,
+        prompt: submission.prompt,
+        negative_prompt: submission.negative_prompt,
+        model: submission.model,
+    });
+    if !failures.is_empty() {
+        let _ = tx.send(BackgroundEvent::Error(failures.join("; ")));
+    }
+}
+
+/// [`BatchSubmission`] with owned strings, for the retry task that outlives
+/// the form it was read from.
+pub struct OwnedBatchSubmission {
+    pub prompt: String,
+    pub negative_prompt: Option<String>,
+    pub model: String,
+}
+
+/// Project one settled child onto the pane's outcome row.
+fn child_outcome(
+    index: u32,
+    authority: mold_core::GenerationBatchAuthority,
+    child: mold_core::GenerationBatchChild,
+) -> DurableGenerationChildOutcome {
+    let result = child.result.unwrap_or_default();
+    let error =
+        match child.state {
+            GenerationBatchChildState::Complete
+                if result.filename.is_none() && result.original_filename.is_none() =>
+            {
+                Some("completed without a durable gallery filename".to_string())
+            }
+            GenerationBatchChildState::Complete => None,
+            _ => Some(child.error.unwrap_or_else(|| {
+                format!("generation {}", batch_child_state_label(&child.state))
+            })),
+        };
+    DurableGenerationChildOutcome {
+        index,
+        job_id: child.job_id,
+        authority,
+        filename: result.filename,
+        original_filename: result.original_filename,
+        error,
+        retryable: child.retryable.unwrap_or(false),
+        seed: result.seed,
+        generation_time_ms: result.generation_time_ms,
+        preview_bytes: None,
+    }
+}
+
+/// The pane shows one print, so only the last completed sibling's bytes are
+/// worth a round trip.
+async fn hydrate_last_completed(
+    client: &MoldClient,
+    outcomes: &mut [DurableGenerationChildOutcome],
+) {
+    let Some(last) = outcomes
+        .iter_mut()
+        .rev()
+        .find(|outcome| outcome.error.is_none())
+    else {
+        return;
+    };
+    let Some(filename) = last
+        .filename
+        .as_deref()
+        .or(last.original_filename.as_deref())
+    else {
+        return;
+    };
+    last.preview_bytes = client.get_gallery_image(filename).await.ok();
 }
 
 /// What the batch was submitted with. The Create form may have moved on
@@ -846,48 +997,12 @@ async fn finish_canonical_batch(
         .outcomes
         .into_iter()
         .map(|outcome| {
-            let child = outcome.child;
-            let result = child.result.unwrap_or_default();
-            let error = match child.state {
-                GenerationBatchChildState::Complete
-                    if result.filename.is_none() && result.original_filename.is_none() =>
-                {
-                    Some("completed without a durable gallery filename".to_string())
-                }
-                GenerationBatchChildState::Complete => None,
-                _ => Some(child.error.unwrap_or_else(|| {
-                    format!("generation {}", batch_child_state_label(&child.state))
-                })),
-            };
-            DurableGenerationChildOutcome {
-                index: outcome.request_offset + child.index,
-                job_id: child.job_id,
-                filename: result.filename,
-                original_filename: result.original_filename,
-                error,
-                retryable: child.retryable.unwrap_or(false),
-                seed: result.seed,
-                generation_time_ms: result.generation_time_ms,
-                preview_bytes: None,
-            }
+            let index = outcome.request_offset + outcome.child.index;
+            child_outcome(index, outcome.authority, outcome.child)
         })
         .collect::<Vec<_>>();
     outcomes.sort_by_key(|outcome| outcome.index);
-    // The pane shows one print, so only the last completed sibling's bytes
-    // are worth a round trip.
-    if let Some(last) = outcomes
-        .iter_mut()
-        .rev()
-        .find(|outcome| outcome.error.is_none())
-    {
-        if let Some(filename) = last
-            .filename
-            .as_deref()
-            .or(last.original_filename.as_deref())
-        {
-            last.preview_bytes = client.get_gallery_image(filename).await.ok();
-        }
-    }
+    hydrate_last_completed(client, &mut outcomes).await;
     let _ = tx.send(BackgroundEvent::DurableGenerationBatchComplete {
         outcomes,
         prompt: submission.prompt.to_string(),
@@ -1736,6 +1851,30 @@ mod tests {
             canonical_batch_capabilities(64).canonical_generation_batch_limit(&requests),
             Ok(64)
         );
+    }
+
+    /// The singleton path renders locally when the server cannot be reached.
+    /// A batch must not be the one submission that fails outright instead.
+    #[tokio::test]
+    async fn an_unreachable_host_hands_the_batch_to_the_local_path() {
+        let config = mold_core::Config::default();
+        let params = GenerateParams::from_config(&config);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // Port 1 is not listening: the capability read fails to connect.
+        let client = MoldClient::new("http://127.0.0.1:1");
+        let result = try_canonical_remote_batch(CanonicalBatchInput {
+            client: &client,
+            params: &params,
+            prompt: "two prints",
+            negative_prompt: &None,
+            prepared_prompts: &[],
+            prepared_transforms: &[],
+            batch: 2,
+            base_seed: Some(1),
+            tx: &tx,
+        })
+        .await;
+        assert_eq!(result, CanonicalBatchResult::FallbackLocal);
     }
 
     #[tokio::test]

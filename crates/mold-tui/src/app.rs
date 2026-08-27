@@ -49,6 +49,12 @@ pub struct LicenseDownloadRequirement {
 pub struct DurableGenerationChildOutcome {
     pub index: u32,
     pub job_id: String,
+    /// The admission authority this child belongs to. `POST
+    /// /api/queue/{id}/retry` fences on the whole of it, so only the client
+    /// that admitted the batch can retry a held child — which is why the
+    /// retry lives here and not in the Machines queue lanes, whose rows carry
+    /// no batch identity.
+    pub authority: mold_core::GenerationBatchAuthority,
     pub filename: Option<String>,
     pub original_filename: Option<String>,
     pub error: Option<String>,
@@ -1341,8 +1347,21 @@ pub struct GenerateState {
     /// strip's "done · saved to …" line. None when saving is disabled or
     /// the server kept the file.
     pub last_output_path: Option<std::path::PathBuf>,
+    /// Held children of the batch this client last submitted, with the
+    /// admission authority `POST /api/queue/{id}/retry` fences on. Cleared by
+    /// the next submission — a retry is offered for work this session still
+    /// owns, never for a row somebody else admitted.
+    pub held_retries: Vec<HeldPrintRetry>,
     /// Monotonic fence for async Expand/Remix results.
     pub prompt_transform_token: u64,
+}
+
+/// One held child this client can retry.
+#[derive(Debug, Clone)]
+pub struct HeldPrintRetry {
+    pub authority: mold_core::GenerationBatchAuthority,
+    pub job_id: String,
+    pub index: u32,
 }
 
 impl GenerateState {
@@ -2369,6 +2388,7 @@ impl App {
                 warning_message: None,
                 model_description,
                 last_output_path: None,
+                held_retries: Vec::new(),
                 prompt_transform_token: 0,
             },
             gallery: GalleryState::default(),
@@ -4763,6 +4783,9 @@ impl App {
             }
             Action::RemixPrompt if self.active_view == View::Create => {
                 self.start_prompt_transform(PromptTransformOperation::Remix);
+            }
+            Action::RetryHeldPrints if self.active_view == View::Create => {
+                self.retry_held_prints();
             }
             Action::ToggleMode => {
                 self.generate.params.inference_mode = self.generate.params.inference_mode.next();
@@ -7572,6 +7595,63 @@ impl App {
         });
     }
 
+    /// Retry every held child of the batch this client last submitted.
+    ///
+    /// The retry fence is the whole admission authority, which only the
+    /// submitting client holds — a Machines queue row carries no batch
+    /// identity — so this is where the action lives, and it is offered only
+    /// for the work this session still owns.
+    fn retry_held_prints(&mut self) {
+        if self.generate.generating {
+            return;
+        }
+        let held = self.generate.held_retries.clone();
+        if held.is_empty() {
+            self.generate.error_message =
+                Some("No held prints from this session to retry".to_string());
+            return;
+        }
+        use crate::hosts::GenTarget;
+        let (url, api_key) = match &self.target {
+            GenTarget::Host(id) => match self.machines.registry.get(id) {
+                Some(entry) => (entry.url.clone(), crate::hosts::api_key_for(id)),
+                None => {
+                    self.generate.error_message = Some(format!(
+                        "Machine '{id}' is no longer saved. Pick a target in Machines (4)."
+                    ));
+                    return;
+                }
+            },
+            _ => match self.server_url.clone() {
+                Some(url) => (
+                    url,
+                    std::env::var("MOLD_API_KEY")
+                        .ok()
+                        .filter(|key| !key.is_empty()),
+                ),
+                None => {
+                    self.generate.error_message =
+                        Some("No server to retry held prints on".to_string());
+                    return;
+                }
+            },
+        };
+        self.generate.generating = true;
+        self.generate.error_message = None;
+        self.generate.held_retries.clear();
+        self.generate.progress.mark_generation_start();
+        let submission = crate::backend::OwnedBatchSubmission {
+            prompt: self.generate.prompt.lines().join("\n").trim().to_string(),
+            negative_prompt: Some(self.generate.negative_prompt.lines().join("\n"))
+                .filter(|text| !text.is_empty()),
+            model: self.generate.params.model.clone(),
+        };
+        let tx = self.bg_tx.clone();
+        self.tokio_handle.spawn(async move {
+            crate::backend::retry_held_prints(url, api_key, held, submission, tx).await;
+        });
+    }
+
     fn set_prompt_text(&mut self, prompt: &str) {
         self.generate.prompt = TextArea::new(prompt.lines().map(String::from).collect());
         self.generate
@@ -8393,7 +8473,15 @@ impl App {
 
                     let mut failures = Vec::new();
                     let mut completed = 0_usize;
+                    self.generate.held_retries.clear();
                     for outcome in outcomes {
+                        if outcome.retryable {
+                            self.generate.held_retries.push(HeldPrintRetry {
+                                authority: outcome.authority.clone(),
+                                job_id: outcome.job_id.clone(),
+                                index: outcome.index,
+                            });
+                        }
                         if let Some(seed) = outcome.seed {
                             self.generate.last_seed = Some(seed);
                             // Advance exactly as a singleton does, so a batch
@@ -8434,7 +8522,7 @@ impl App {
                             });
                         } else if let Some(error) = outcome.error {
                             let retry = if outcome.retryable {
-                                format!(" (retryable queue job {})", outcome.job_id)
+                                format!(" (^T retries queue job {})", outcome.job_id)
                             } else {
                                 String::new()
                             };
@@ -10505,6 +10593,7 @@ mod tests {
                 warning_message: None,
                 model_description: String::new(),
                 last_output_path: None,
+                held_retries: Vec::new(),
                 prompt_transform_token: 0,
             },
             gallery: GalleryState::default(),
@@ -14837,6 +14926,7 @@ mod tests {
             warning_message: None,
             model_description: String::new(),
             last_output_path: None,
+            held_retries: Vec::new(),
             prompt_transform_token: 0,
         };
 
@@ -14903,6 +14993,7 @@ mod tests {
             warning_message: None,
             model_description: String::new(),
             last_output_path: None,
+            held_retries: Vec::new(),
             prompt_transform_token: 0,
         };
 
@@ -14950,6 +15041,7 @@ mod tests {
             warning_message: None,
             model_description: String::new(),
             last_output_path: None,
+            held_retries: Vec::new(),
             prompt_transform_token: 0,
         };
 

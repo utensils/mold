@@ -529,7 +529,10 @@ impl McpServer {
     async fn tool_generation_status(&self, arguments: Value) -> std::result::Result<Value, String> {
         let args: GenerationStatusArgs =
             serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
-        let include_result = args.include_result == Some(true);
+        // A caller asking about ONE job wants the print: the default is to
+        // hydrate it, and `include_result: false` is the explicit opt-out for
+        // a poll that only wants the state.
+        let include_result = args.include_result.unwrap_or(true);
 
         if let Some(job_id) = args.job_id {
             self.jobs.reconcile_pending_job(&self.client, &job_id).await;
@@ -2563,7 +2566,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "generation_status",
-            "description": "List async generation jobs or return status for one job. Completed image content is hydrated only when explicitly requested.",
+            "description": "List async generation jobs or return status for one job. A single job returns its completed image unless include_result is false.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2573,7 +2576,7 @@ fn tool_definitions() -> Value {
                     },
                     "include_result": {
                         "type": "boolean",
-                        "description": "Include completed image content when job_id is provided. Defaults to false; a failed or timed-out hydration can be retried by requesting it again."
+                        "description": "Include completed image content when job_id is provided. Defaults to true; pass false to poll state only. A failed or timed-out hydration can be retried by requesting it again."
                     }
                 },
                 "additionalProperties": false

@@ -50,9 +50,11 @@ vi.mock("../lib/galleryMedia", () => ({
   fetchGalleryThumbnailBlob,
 }));
 
+type QueueJobProgress =
+  import("@studio/api/generationSelection").QueueJobProgress;
 const previewWatches: Array<{
   jobId: string;
-  onPreview: (preview: { image: string; step: number; total: number }) => void;
+  onPreview: (progress: QueueJobProgress) => void;
   stop: ReturnType<typeof vi.fn>;
 }> = [];
 vi.mock("@studio/api/generationSelection", async (importOriginal) => ({
@@ -60,11 +62,7 @@ vi.mock("@studio/api/generationSelection", async (importOriginal) => ({
   watchSelectedQueuePreview: (
     _target: unknown,
     jobId: string,
-    onPreview: (preview: {
-      image: string;
-      step: number;
-      total: number;
-    }) => void,
+    onPreview: (progress: QueueJobProgress) => void,
   ) => {
     const stop = vi.fn();
     previewWatches.push({ jobId, onPreview, stop });

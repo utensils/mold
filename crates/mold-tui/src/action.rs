@@ -37,6 +37,9 @@ pub enum Action {
     ExpandPrompt,
     /// Create subject-preserving prompt alternatives for review.
     RemixPrompt,
+    /// Retry every held child of the batch this client last submitted,
+    /// through the batch authority it still holds.
+    RetryHeldPrints,
     /// Save the current preview image to a file.
     SaveImage,
     /// Toggle between local and remote inference mode.

@@ -685,6 +685,14 @@ pub struct ChainJobListing {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateChainJobResponse {
     pub job_id: String,
+    /// Advisories about the accepted request — today, a filing the host could
+    /// not apply. The same set rides `x-mold-request-warning`; a client that
+    /// polls the job rather than reading the creation response's headers
+    /// would otherwise never see them, exactly as
+    /// [`ChainResponse::request_warnings`](crate::chain::ChainResponse::request_warnings)
+    /// exists for the attached path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

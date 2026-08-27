@@ -186,7 +186,10 @@ pub async fn create_chain_job(
     Ok((
         StatusCode::ACCEPTED,
         crate::routes::request_warning_headers(&filing_warnings),
-        Json(CreateChainJobResponse { job_id }),
+        Json(CreateChainJobResponse {
+            job_id,
+            request_warnings: filing_warnings,
+        }),
     ))
 }
 

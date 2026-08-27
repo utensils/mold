@@ -12,6 +12,7 @@ clients, and custom integrations on one generation contract.
 | `POST`   | `/api/generate/stream`                        | Generate with SSE progress streaming                                                                              |
 | `POST`   | `/api/generation-batches`                     | Durably admit an idempotent ordered batch of singleton generations                                                |
 | `GET`    | `/api/generation-batches/:id`                 | Read one durable generation batch by server batch ID                                                              |
+| `DELETE` | `/api/generation-batches/:id`                 | Cancel every non-terminal child of one durable generation batch                                                   |
 | `GET`    | `/api/generation-batches/by-client/:id`       | Recover a durable generation batch by its client idempotency ID                                                   |
 | `POST`   | `/api/generation-batches/status`              | Reconcile a bounded set of durable generation batches                                                             |
 | `POST`   | `/api/generate/estimate`                      | Estimate request-sensitive peak memory for a generation request                                                   |
@@ -659,7 +660,12 @@ authority captured from the admitted batch status:
 `{ "instance_id": "...", "batch_id": "...", "client_batch_id": "...", "job_id": "..." }`.
 The path and body job IDs must match; the server transactionally fences the
 serving instance and batch/client/job identity before returning HTTP 202. Cancel queued work with
-`DELETE /api/queue/{job_id}`.
+`DELETE /api/queue/{job_id}`, or the whole print run with
+`DELETE /api/generation-batches/{id}` — that is the same per-child cancel
+applied to every non-terminal child under one durable transition, returning
+the authoritative `GenerationBatchStatus` as of the revocation. A child that
+had already settled keeps its outcome, and running inference stops at the next
+model safe point.
 
 Important fields:
 

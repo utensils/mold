@@ -263,6 +263,7 @@ use crate::queue::clean_error_message;
         generate_stream,
         admit_generation_batch,
         get_generation_batch,
+        cancel_generation_batch,
         generation_batch_events,
         get_generation_batch_by_client,
         reconcile_generation_batches,
@@ -527,7 +528,10 @@ pub fn create_router(state: AppState) -> Router {
             post(reconcile_generation_batches)
                 .layer(DefaultBodyLimit::max(GENERATION_BATCH_STATUS_BODY_BYTES)),
         )
-        .route("/api/generation-batches/:id", get(get_generation_batch))
+        .route(
+            "/api/generation-batches/:id",
+            get(get_generation_batch).delete(cancel_generation_batch),
+        )
         .route(
             "/api/generation-batches/:id/events",
             get(generation_batch_events),
@@ -2602,6 +2606,70 @@ async fn get_generation_batch(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<mold_core::GenerationBatchStatus>, ApiError> {
+    let journal = state.queue_journal.clone();
+    let detail = spawn_queue_read(move || {
+        journal
+            .durable_generation_batch(&id)
+            .map_err(anyhow::Error::msg)
+    })
+    .await?
+    .ok_or_else(|| {
+        ApiError::with_code(
+            "generation batch not found",
+            "GENERATION_BATCH_NOT_FOUND",
+            StatusCode::NOT_FOUND,
+        )
+    })?;
+    Ok(Json(generation_batch_status(&state.instance_id, detail)))
+}
+
+/// Cancel every non-terminal child of one durable batch.
+///
+/// A batch's children are independent durable rows, so this is exactly the
+/// per-child cancel applied to each of them under ONE durable transition —
+/// there is no second cancellation path. Running inference stops at the next
+/// model safe point, so the returned status is the authority as of the
+/// revocation rather than a promise that every child has already stopped; a
+/// child that settled first is left alone.
+#[utoipa::path(
+    delete,
+    path = "/api/generation-batches/{id}",
+    tag = "generation",
+    params(("id" = String, Path, description = "Generation batch id")),
+    responses(
+        (status = 200, description = "Cancellation accepted; authoritative child states", body = mold_core::GenerationBatchStatus),
+        (status = 404, description = "Batch not found"),
+    )
+)]
+async fn cancel_generation_batch(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<mold_core::GenerationBatchStatus>, ApiError> {
+    let _durable_transition = state.queue_journal.lock_durable_transition().await;
+    let journal = state.queue_journal.clone();
+    let probe_id = id.clone();
+    let detail = spawn_queue_read(move || {
+        journal
+            .durable_generation_batch(&probe_id)
+            .map_err(anyhow::Error::msg)
+    })
+    .await?
+    .ok_or_else(|| {
+        ApiError::with_code(
+            "generation batch not found",
+            "GENERATION_BATCH_NOT_FOUND",
+            StatusCode::NOT_FOUND,
+        )
+    })?;
+    let pending: Vec<String> = detail
+        .children
+        .iter()
+        .filter(|child| !matches!(child.state.as_str(), "complete" | "failed" | "cancelled"))
+        .map(|child| child.job_id.clone())
+        .collect();
+    for job_id in pending {
+        cancel_one_queue_job(&state, &job_id).await?;
+    }
     let journal = state.queue_journal.clone();
     let detail = spawn_queue_read(move || {
         journal
@@ -6450,13 +6518,41 @@ async fn cancel_queue_job(
     // in-memory lifecycle transition and explicitly dropped before the final
     // DB mutation.
     let _durable_transition = state.queue_journal.lock_durable_transition().await;
+    match cancel_one_queue_job(&state, &id).await? {
+        QueueJobCancelOutcome::Cancelled => Ok(StatusCode::NO_CONTENT),
+        QueueJobCancelOutcome::Completing => Err(ApiError::queue_job_not_found(format!(
+            "queue job {id} is already completing"
+        ))),
+        QueueJobCancelOutcome::NotFound => Err(ApiError::queue_job_not_found(format!(
+            "queue job {id} not found"
+        ))),
+    }
+}
+
+/// What one row's cancellation did, so the single-job route can answer 404
+/// while the batch route simply skips a child nobody can cancel any more.
+#[derive(Debug, PartialEq, Eq)]
+enum QueueJobCancelOutcome {
+    Cancelled,
+    Completing,
+    NotFound,
+}
+
+/// Cancel one queue row. The caller must already hold
+/// `lock_durable_transition`, which is what serializes this against feeder
+/// publication and PATCH — it is deliberately not taken here so a batch can
+/// cancel every child under one transition.
+async fn cancel_one_queue_job(
+    state: &AppState,
+    id: &str,
+) -> Result<QueueJobCancelOutcome, ApiError> {
     let journal = state.queue_journal.clone();
-    let probe_id = id.clone();
+    let probe_id = id.to_string();
     let durable_candidate =
         spawn_queue_read(move || journal.owns_cancellable_row(&probe_id)).await?;
     {
         let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
-        match state.job_registry.cancel_queued(&id) {
+        match state.job_registry.cancel_queued(id) {
             Ok(()) => {}
             Err(crate::job_registry::QueuedJobCancelError::AlreadyRunning) => {
                 // `cancel_queued` already signalled (or latched) the exact running
@@ -6464,9 +6560,7 @@ async fn cancel_queue_job(
                 // terminal publication.
             }
             Err(crate::job_registry::QueuedJobCancelError::CompletionClaimed) => {
-                return Err(ApiError::queue_job_not_found(format!(
-                    "queue job {id} is already completing"
-                )));
+                return Ok(QueueJobCancelOutcome::Completing);
             }
             // Some retained rows have no registry entry: a held job, and a queued
             // job on a boot with no dispatch owner. This endpoint is the
@@ -6475,9 +6569,7 @@ async fn cancel_queue_job(
             // cannot act on.
             Err(crate::job_registry::QueuedJobCancelError::NotFound) => {
                 if !durable_candidate {
-                    return Err(ApiError::queue_job_not_found(format!(
-                        "queue job {id} not found"
-                    )));
+                    return Ok(QueueJobCancelOutcome::NotFound);
                 }
             }
         }
@@ -6485,8 +6577,9 @@ async fn cancel_queue_job(
     // Unconditional, not fence-aware: a cancel that lands during the shutdown
     // drain must not come back after the restart.
     let journal = state.queue_journal.clone();
+    let id = id.to_string();
     spawn_queue_mutation(move || journal.cancel_id(&id)).await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(QueueJobCancelOutcome::Cancelled)
 }
 
 /// Resume a durable dependency-preparation failure after the dependency or
@@ -6614,11 +6707,12 @@ async fn resume_queue(State(state): State<AppState>) -> Result<Json<QueuePauseRe
     Ok(Json(QueuePauseResponse { paused: false }))
 }
 
-/// Cancel every still-queued generation job and close every active
-/// server-owned batch authority. Ordinary running jobs are left untouched;
-/// running batch children drain privately and cannot publish. The returned
-/// count remains the number of queued rows removed, preserving the established
-/// queue API contract.
+/// Cancel every still-queued generation job on this host, settling each
+/// queued row's batch child as `cancelled`. Running jobs are left untouched —
+/// use `DELETE /api/queue/{id}` for one running singleton, or `DELETE
+/// /api/generation-batches/{id}` for one batch's children. The returned count
+/// is the number of queued rows removed, preserving the established queue API
+/// contract.
 #[utoipa::path(
     delete,
     path = "/api/queue",

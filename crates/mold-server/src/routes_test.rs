@@ -8064,6 +8064,113 @@ mod tests {
         );
     }
 
+    /// One id cancels the whole print run. Cancelling N children one at a
+    /// time is the same work with N chances to be interrupted half way.
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelling_a_batch_cancels_every_child_that_had_not_settled() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (mut state, _rx) = durable_state(db.clone(), root.path());
+        install_authoritative_v2(&mut state);
+        let queue_owner = state.queue_journal.owner_uuid().unwrap().to_string();
+        let app = app_with_state(state);
+
+        let client_batch_id = uuid::Uuid::new_v4().to_string();
+        let requests = ["settled", "still queued", "also queued"]
+            .into_iter()
+            .map(|prompt| {
+                serde_json::from_str::<serde_json::Value>(&generate_body(prompt, 512, 512)).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let admitted = json_body(
+            app.clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/api/generation-batches",
+                    serde_json::json!({
+                        "client_batch_id": client_batch_id,
+                        "requests": requests,
+                    }),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let batch_id = admitted["id"].as_str().unwrap().to_string();
+        let settled_job = admitted["children"][0]["job_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // One child finishes before the cancellation lands; its terminal
+        // outcome must survive.
+        mold_db::generation_batches::finish_unclaimed_queued(
+            db.as_ref().as_ref().unwrap(),
+            &queue_owner,
+            &settled_job,
+            mold_db::generation_batches::GenerationBatchTerminal {
+                state: mold_db::generation_batches::GenerationBatchTerminalState::Complete,
+                error: None,
+                terminal_error_json: None,
+                result_json: Some(r#"{"filename":"done.png"}"#),
+                completed_at_ms: 100,
+            },
+        )
+        .unwrap();
+
+        let cancelled = app
+            .clone()
+            .oneshot(
+                Request::delete(format!("/api/generation-batches/{batch_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::OK);
+        let cancelled = json_body(cancelled).await;
+        assert_eq!(cancelled["children"][0]["state"], "complete");
+        assert_eq!(cancelled["children"][0]["result"]["filename"], "done.png");
+        assert_eq!(cancelled["children"][1]["state"], "cancelled");
+        assert_eq!(cancelled["children"][2]["state"], "cancelled");
+
+        // The authoritative read agrees, and a second cancel is a no-op
+        // rather than an error.
+        let again = app
+            .clone()
+            .oneshot(
+                Request::delete(format!("/api/generation-batches/{batch_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::OK);
+        let read = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get(format!("/api/generation-batches/{batch_id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(read["children"][0]["state"], "complete");
+        assert_eq!(read["children"][1]["state"], "cancelled");
+
+        let missing = app
+            .oneshot(
+                Request::delete("/api/generation-batches/does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn durable_batch_outcomes_recover_by_client_and_bulk_with_instance_fencing() {
         let root = tempfile::tempdir().unwrap();

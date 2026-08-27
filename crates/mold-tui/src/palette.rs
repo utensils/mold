@@ -25,6 +25,7 @@ pub enum CommandId {
     ConnectMachine,
     RandomizeSeed,
     ExpandPrompt,
+    RetryHeldPrints,
     SearchHistory,
     OpenHelp,
     Quit,
@@ -66,6 +67,12 @@ pub fn all_commands() -> Vec<PaletteCommand> {
         ),
         cmd(CommandId::RandomizeSeed, "✦", "Randomize seed".into(), "^R"),
         cmd(CommandId::ExpandPrompt, "✦", "Expand prompt".into(), "^E"),
+        cmd(
+            CommandId::RetryHeldPrints,
+            "↻",
+            "Retry held prints".into(),
+            "^T",
+        ),
         cmd(
             CommandId::SearchHistory,
             "▦",
@@ -119,6 +126,7 @@ pub fn command_action(id: CommandId) -> Action {
         CommandId::ConnectMachine => Action::MachinesConnect,
         CommandId::RandomizeSeed => Action::RandomizeSeed,
         CommandId::ExpandPrompt => Action::ExpandPrompt,
+        CommandId::RetryHeldPrints => Action::RetryHeldPrints,
         CommandId::SearchHistory => Action::SearchHistory,
         CommandId::OpenHelp => Action::ShowHelp,
         CommandId::Quit => Action::Quit,
@@ -135,7 +143,7 @@ mod tests {
         let all = all_commands();
         let filtered = filter_commands("");
         assert_eq!(all.len(), filtered.len());
-        assert_eq!(all.len(), 13 + ThemePreset::ALL.len());
+        assert_eq!(all.len(), 14 + ThemePreset::ALL.len());
         for (a, b) in all.iter().zip(filtered.iter()) {
             assert_eq!(a.id, b.id);
         }
