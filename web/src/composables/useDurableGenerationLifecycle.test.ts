@@ -593,6 +593,43 @@ describe("web durable generation lifecycle", () => {
     await vi.waitFor(() => expect(job.state).toBe("canceled"));
   });
 
+  it("announces a held child once, with the machine's own reason", async () => {
+    // A print is admitted BEFORE its model is resolved, so "nobody has this
+    // model" arrives as a held child rather than an infeasible preview. The
+    // pull offer hangs off this listener; without it the pull is lost.
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(batch(body.client_batch_id)),
+    );
+    const held: GenerationBatchStatus[] = [];
+    const stream = useGenerateStream(undefined, (job) =>
+      held.push(job as never),
+    );
+    const id = stream.submit(request("held print"), { kind: "single" }, route);
+    await vi.waitFor(() =>
+      expect(
+        stream.jobs.value.find((job) => job.id === id)?.serverId,
+      ).toBeTruthy(),
+    );
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    const clientBatchId = job.durableBatch!.clientBatchId;
+    const parked = batch(clientBatchId, ["held"]);
+    parked.children[0] = {
+      ...parked.children[0]!,
+      error: "UNKNOWN_MODEL: flux-dev:q8 is not installed",
+      retryable: true,
+    };
+    reconcileGenerationBatches.mockResolvedValue(statusResponse([parked]));
+
+    await __testing__.reconcileDurableHost(route.hostId);
+    // A second reconciliation of the same hold must not re-announce it.
+    await __testing__.reconcileDurableHost(route.hostId);
+
+    expect(held).toHaveLength(1);
+    expect(job.holdError).toBe("UNKNOWN_MODEL: flux-dev:q8 is not installed");
+    expect(job.retryable).toBe(true);
+  });
+
   it("retries held durable work only through the admitting instance fence", async () => {
     admitGenerationBatch.mockImplementation(
       (_target: unknown, body: { client_batch_id: string }) =>
@@ -1346,13 +1383,16 @@ describe("web durable generation lifecycle", () => {
       {
         ...request("lora + media"),
         source_image: "source",
-        loras: [{ path: "local" }],
+        loras: [{ path: "local", scale: 1 }],
       },
       { kind: "single" },
       durableMediaRoute,
     );
     stream.submit(
-      { ...request("hdr"), hdr_exr_dir: "/private/hdr" },
+      {
+        ...request("hdr"),
+        hdr_exr_dir: "/private/hdr",
+      } as unknown as GenerateRequestWire,
       { kind: "single" },
       durableMediaRoute,
     );
@@ -1360,7 +1400,7 @@ describe("web durable generation lifecycle", () => {
     expect(admitGenerationBatch).toHaveBeenCalledTimes(2);
     expect(admitGenerationBatch.mock.calls[0]![1].requests[0]).toMatchObject({
       source_image: "source",
-      loras: [{ path: "local" }],
+      loras: [{ path: "local", scale: 1 }],
     });
     expect(admitGenerationBatch.mock.calls[1]![1].requests[0]).toMatchObject({
       hdr_exr_dir: "/private/hdr",

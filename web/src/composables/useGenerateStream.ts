@@ -850,6 +850,20 @@ watch(
 
 type CompleteListener = (job: Job) => void;
 const completeListeners = new Set<CompleteListener>();
+/** Fired the first time a child is parked by its machine, with the machine's
+ * own reason. A print is admitted BEFORE its model is resolved, so this is
+ * where "nobody has this model" now arrives. */
+const heldListeners = new Set<CompleteListener>();
+
+function fireHeld(job: Job) {
+  for (const cb of heldListeners) {
+    try {
+      cb(job);
+    } catch (e) {
+      console.error("generate onHeld listener threw", e);
+    }
+  }
+}
 
 function fireComplete(job: Job) {
   for (const cb of completeListeners) {
@@ -1376,10 +1390,12 @@ function applyDurableTracker(tracker: GenerationBatchTracker): void {
       markWorkStarted(job);
       job.progress.stage = "Developing";
     } else if (lifecycle.phase === "held") {
+      const alreadyHeld = job.holdError !== null && job.holdError !== undefined;
       job.progress.stage = "Held by host · action required";
       job.holdError = lifecycle.error;
       job.retryable = lifecycle.retryable === true;
       job.workStarted = false;
+      if (!alreadyHeld) fireHeld(job);
     } else if (lifecycle.phase === "cancelling") {
       job.progress.stage = "Cancellation pending";
       job.cancelling = true;
@@ -2169,6 +2185,7 @@ function selectJob(id: string | null) {
 
 export function useGenerateStream(
   onComplete?: (job: Job) => void,
+  onHeld?: (job: Job) => void,
 ): UseGenerateStream {
   recoverDurableLifecycle();
   installDurableWakeListeners();
@@ -2181,6 +2198,12 @@ export function useGenerateStream(
     completeListeners.add(onComplete);
     onUnmounted(() => {
       completeListeners.delete(onComplete);
+    });
+  }
+  if (onHeld) {
+    heldListeners.add(onHeld);
+    onUnmounted(() => {
+      heldListeners.delete(onHeld);
     });
   }
 

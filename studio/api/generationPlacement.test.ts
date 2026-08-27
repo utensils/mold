@@ -1,6 +1,7 @@
-import { describe, expect, test, vi } from "vitest";
+import { describe, expect, it, test, vi } from "vitest";
 import {
   comparePlacementPreviews,
+  classifyMissingModelHold,
   classifyPlacementPreview,
   previewChainPlacement,
   previewGenerationPlacement,
@@ -508,5 +509,36 @@ describe("generation placement preview", () => {
 
     await expect(pending).rejects.toThrow("another Auto host is ready");
     expect(requestSignal?.aborted).toBe(true);
+  });
+});
+
+describe("classifyMissingModelHold", () => {
+  it("classifies the machine's own missing-model hold codes", () => {
+    for (const reason of [
+      "UNKNOWN_MODEL",
+      "unknown_model: flux-dev:q8",
+      "MODEL_NOT_FOUND while preparing",
+      "held: model_not_found",
+    ]) {
+      expect(classifyMissingModelHold(reason, "flux-dev:q8")).toEqual({
+        model: "flux-dev:q8",
+        missingComponents: [],
+      });
+    }
+  });
+
+  it("never guesses from an unrelated hold, an absent reason, or no model", () => {
+    for (const reason of [
+      null,
+      undefined,
+      "",
+      "insufficient VRAM on this device",
+      "QUEUE_PAUSED",
+      "the operator disabled every device",
+      "MODEL_NOT_FOUNDATION",
+    ]) {
+      expect(classifyMissingModelHold(reason, "flux-dev:q8")).toBeNull();
+    }
+    expect(classifyMissingModelHold("UNKNOWN_MODEL", "")).toBeNull();
   });
 });

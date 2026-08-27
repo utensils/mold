@@ -306,6 +306,31 @@ export function classifyMissingModel(
   return { model: requestedModel, missingComponents };
 }
 
+/**
+ * Codes a machine parks a queued child under when the MODEL ITSELF is absent.
+ * Matched as whole words so a reason merely quoting a model name cannot be
+ * read as a missing-model hold.
+ */
+const MISSING_MODEL_HOLD_CODES = /\b(UNKNOWN_MODEL|MODEL_NOT_FOUND)\b/;
+
+/**
+ * The durable queue's half of {@link classifyMissingModel}.
+ *
+ * A print is admitted before model resolution, so "nobody has this model" now
+ * arrives as a HELD child carrying the server's own reason rather than as an
+ * infeasible placement preview. Both answers must reach the same pull offer —
+ * a client that classified only the preview would silently lose the pull the
+ * moment generation stopped previewing.
+ */
+export function classifyMissingModelHold(
+  heldReason: string | null | undefined,
+  requestedModel: string,
+): MissingModelPlacement | null {
+  if (!heldReason || !requestedModel) return null;
+  if (!MISSING_MODEL_HOLD_CODES.test(heldReason.toUpperCase())) return null;
+  return { model: requestedModel, missingComponents: [] };
+}
+
 /** A prepared Batch N is submitted as N independent one-image requests.
  * Keep the reviewed request immutable, but preview the exact sibling shape
  * instead of multiplying its original batch_size by copies a second time. */

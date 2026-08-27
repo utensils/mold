@@ -276,6 +276,7 @@ import {
   type InstallTarget,
 } from "../composables/useModelInstallTargets";
 import { planModelInstall } from "@studio/lib/modelInstallTargets";
+import { classifyMissingModelHold } from "@studio/api/generationPlacement";
 import type {
   ExpandFormState,
   GalleryImage,
@@ -890,12 +891,18 @@ const selectedIndex = ref<number>(-1);
 // shortened list, so the job rail alone forgets the seed across reloads.
 // `completedSeedToLock` filters chain completions that fabricate seed_used=0.
 const lastSeedUsed = ref<number | null>(loadLastSeed());
-const stream = useGenerateStream((job) => {
-  const seed = completedSeedToLock(job);
-  if (seed === null) return;
-  lastSeedUsed.value = seed;
-  storeLastSeed(seed);
-});
+const stream = useGenerateStream(
+  (job) => {
+    const seed = completedSeedToLock(job);
+    if (seed === null) return;
+    lastSeedUsed.value = seed;
+    storeLastSeed(seed);
+  },
+  // A print is admitted before its model is resolved, so a machine that does
+  // not have the checkpoint parks the child instead of refusing the request.
+  // Same offer, same policy as the pre-submission dead end.
+  (job) => void offerHeldMissingModelPull(job),
+);
 // ── Durable sequence jobs (multi-host, mockup 1c: the chain Jobs list
 //    merges with the activity strip) ────────────────────────────────────
 const chainJobs = useChainJobs();
@@ -3499,20 +3506,25 @@ function frozenRequestIsFinal(
   return !carriesMedia && !carriesLists;
 }
 
-async function offerMissingModelPull(
-  result: Exclude<FeasibilityResult, { kind: "route" }>,
-  request: GenerateRequestWire,
-  decision: ReturnType<typeof decideGenerateRequestRouting>,
-  quick: unknown,
-  signal: AbortSignal,
-): Promise<boolean> {
-  const failures = missingModelFailures(result);
-  if (failures.length === 0) return false;
-  const model = failures[0]!.missingModel!.model;
+/**
+ * Offer the pull for one named model on the machines that reported it absent,
+ * and arm the resume. `resume` is what happens once the download lands: a
+ * fresh submission for a print that was never admitted, a retry of the held
+ * child for one the machine already parked. Returns false only when there is
+ * nothing to offer, so the caller keeps its own failure message.
+ */
+async function armMissingModelPull(options: {
+  model: string;
+  candidateIds: string[];
+  signal: AbortSignal;
+  /** Absent when the frozen request would still change before it renders. */
+  resume: (() => void) | null;
+  pendingMessage: (hostLabel: string) => string;
+}): Promise<boolean> {
+  const { model, candidateIds, signal } = options;
   // Only the machines that actually reported the model absent are pull
   // targets: one that refused for capacity or policy would refuse again after
   // the download, and repairing it there would be pure waste.
-  const candidateIds = failures.map((failure) => failure.hostId);
   if (installTargets.planFor(model, false, candidateIds).targets.length === 0) {
     return false;
   }
@@ -3547,24 +3559,11 @@ async function offerMissingModelPull(
     return true;
   }
   if (signal.aborted) return true;
-  if (!frozenRequestIsFinal(request, quick)) {
-    toast(
-      "info",
-      `Pulling ${model} on ${hostLabel} — press Generate again once it's ready.`,
-    );
+  const resume = options.resume;
+  if (!resume) {
+    toast("info", options.pendingMessage(hostLabel));
     return true;
   }
-  const frozenModelFamily = currentFamily.value.trim();
-  const resolvedResumeRoute = routing.multiHost.value
-    ? routeForHostId(hostId)
-    : null;
-  const resumeRoute = resolvedResumeRoute
-    ? {
-        ...resolvedResumeRoute,
-        target: { ...resolvedResumeRoute.target },
-        ...(frozenModelFamily ? { modelFamily: frozenModelFamily } : {}),
-      }
-    : null;
   const pendingPull = {
     model,
     // A catalog download reports its queue id on both routes; a plain
@@ -3574,7 +3573,7 @@ async function offerMissingModelPull(
     hostId,
     hostLabel,
     resume: () => {
-      if (!signal.aborted) submitRequestCopies(request, decision, resumeRoute);
+      if (!signal.aborted) resume();
     },
   };
   if (signal.aborted) return true;
@@ -3583,11 +3582,81 @@ async function offerMissingModelPull(
     pullResume.cancel(pendingPull);
     return true;
   }
-  toast(
-    "info",
-    `Pulling ${model} on ${hostLabel} — generation starts when it's ready`,
-  );
+  toast("info", options.pendingMessage(hostLabel));
   return true;
+}
+
+/**
+ * Auto / Most capable must never dead-end. When nothing can run this print
+ * because no machine has the model, offer the pull on a machine that could —
+ * the same `planModelInstall` policy the Models workspace uses — and resume
+ * the exact frozen request there once the download lands.
+ */
+async function offerMissingModelPull(
+  result: Exclude<FeasibilityResult, { kind: "route" }>,
+  request: GenerateRequestWire,
+  decision: ReturnType<typeof decideGenerateRequestRouting>,
+  quick: unknown,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const failures = missingModelFailures(result);
+  if (failures.length === 0) return false;
+  const model = failures[0]!.missingModel!.model;
+  const candidateIds = failures.map((failure) => failure.hostId);
+  const final = frozenRequestIsFinal(request, quick);
+  const frozenModelFamily = currentFamily.value.trim();
+  return armMissingModelPull({
+    model,
+    candidateIds,
+    signal,
+    resume: final
+      ? () => {
+          const resolved = routing.multiHost.value
+            ? routeForHostId(candidateIds[0] ?? ORIGIN_HOST_ID)
+            : null;
+          submitRequestCopies(
+            request,
+            decision,
+            resolved
+              ? {
+                  ...resolved,
+                  target: { ...resolved.target },
+                  ...(frozenModelFamily
+                    ? { modelFamily: frozenModelFamily }
+                    : {}),
+                }
+              : null,
+          );
+        }
+      : null,
+    pendingMessage: (hostLabel) =>
+      final
+        ? `Pulling ${model} on ${hostLabel} — generation starts when it's ready`
+        : `Pulling ${model} on ${hostLabel} — press Generate again once it's ready.`,
+  });
+}
+
+/**
+ * A print is admitted BEFORE the machine resolves its model, so "nobody has
+ * this model" now arrives as a held child rather than as an infeasible
+ * placement preview. Same offer, same policy; the resume retries the child
+ * the machine is already holding rather than queueing a second print.
+ */
+const offeredMissingModelHolds = new Set<string>();
+async function offerHeldMissingModelPull(job: Job): Promise<void> {
+  if (offeredMissingModelHolds.has(job.id)) return;
+  const missing = classifyMissingModelHold(job.holdError, job.request.model);
+  if (!missing) return;
+  offeredMissingModelHolds.add(job.id);
+  const hostId = job.hostId ?? ORIGIN_HOST_ID;
+  await armMissingModelPull({
+    model: missing.model,
+    candidateIds: [hostId],
+    signal: new AbortController().signal,
+    resume: () => void stream.retry(job.id),
+    pendingMessage: (hostLabel) =>
+      `Pulling ${missing.model} on ${hostLabel} — the held print resumes when it's ready`,
+  });
 }
 
 function terminalPunctuation(value: string): string {
