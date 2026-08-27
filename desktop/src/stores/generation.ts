@@ -40,6 +40,7 @@ import {
 import { type ReferenceUploadCapabilities } from "@studio/api/referenceUploads";
 import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
 import { emptyChainJobLive, reduceChainJobFrame } from "@studio/lib/chainJobProgress";
+import { OwnPrintPreviewWatchers, previewDataUrl } from "@studio/api/ownPrintPreview";
 import type { ChainJobEvent, CreateChainJobResponse } from "@studio/lib/api/chainTypes";
 import { blobToBase64 } from "@studio/lib/base64";
 import {
@@ -305,6 +306,8 @@ const durableBatchJobs = new Map<string, Map<number, Job>>();
 /** Effect-only recovered jobs participate in settlement but never load UI media. */
 const durableHiddenJobIds = new Set<number>();
 const durableSettlements = new Map<string, DurableSettlement>();
+/** Live preview + step progress for our own running prints (see web). */
+const ownPreviews = new OwnPrintPreviewWatchers();
 const durableHostStreams = new Map<string, DurableHostStream>();
 const durableReconciles = new Map<string, Promise<void>>();
 /** Missing = no follow-up; null = host-wide; Set = selected client batches. */
@@ -850,6 +853,26 @@ export const useGenerationStore = defineStore("generation", {
       for (const lifecycle of Object.values(record.tracker.jobs)) {
         const job = durableBatchJobs.get(record.tracker.clientBatchId)?.get(lifecycle.childIndex);
         if (!job) continue;
+        // The durable child carries no denoise preview or step count; poll
+        // the host's `/api/queue/{id}/preview` for our own running print
+        // exactly as an inspected queue row does, and stop when it leaves
+        // `running`.
+        const previewTarget = targets.get(job.clientId) ?? null;
+        if (lifecycle.phase === "running" && previewTarget && !jobHasSettled(job)) {
+          ownPreviews.ensure(
+            String(job.clientId),
+            previewTarget,
+            lifecycle.authority.jobId,
+            (preview) => {
+              if (jobHasSettled(job)) return;
+              job.previewUrl = previewDataUrl(preview);
+              job.step = preview.step;
+              job.total = preview.total;
+            },
+          );
+        } else {
+          ownPreviews.stop(String(job.clientId));
+        }
         job.id = lifecycle.authority.jobId;
         job.streamStarted = true;
         switch (lifecycle.phase) {
@@ -1739,6 +1762,7 @@ export const useGenerationStore = defineStore("generation", {
       aborts.clear();
       for (const stream of durableHostStreams.values()) stream.abort.abort();
       durableHostStreams.clear();
+      ownPreviews.stopAll();
       durableReconciles.clear();
       durableReconcilePending.clear();
       durablePostCommitInstances.clear();

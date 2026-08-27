@@ -30,6 +30,10 @@ import { blobToBase64 } from "../lib/base64";
 import { inferFormatFromName, type OutputFormat } from "../types";
 import { apiHeaders, type ApiTarget } from "@studio/api/client";
 import {
+  OwnPrintPreviewWatchers,
+  previewDataUrl,
+} from "@studio/api/ownPrintPreview";
+import {
   mutateQueueJobOnExpectedInstance,
   retryQueueJobRecoveringAmbiguity,
 } from "@studio/api/queuePlan";
@@ -1002,6 +1006,10 @@ function createJobRecord(
 const durableTrackers = new Map<string, GenerationBatchTracker>();
 const durableJobsByBatch = new Map<string, Job[]>();
 const durableRoutes = new Map<string, HostRoute>();
+/** Denoise preview + step progress for our own running prints: the durable
+ * child carries neither, so each running job polls its host's
+ * `GET /api/queue/{id}/preview` exactly as an inspected queue row does. */
+const ownPreviews = new OwnPrintPreviewWatchers();
 const durableEffectKeys = new Set<string>();
 const durableEventSessions = new Map<
   string,
@@ -1406,6 +1414,23 @@ function applyDurableTracker(tracker: GenerationBatchTracker): void {
       job.workStarted = false;
     } else {
       settleDurableTerminal(job, lifecycle);
+    }
+    const previewTarget = durableRoutes.get(tracker.hostId)?.target ?? null;
+    if (lifecycle.phase === "running" && previewTarget) {
+      ownPreviews.ensure(
+        job.id,
+        previewTarget,
+        lifecycle.authority.jobId,
+        (preview) => {
+          if (job.state !== "running") return;
+          job.previewUrl = previewDataUrl(preview);
+          job.progress.step = preview.step;
+          job.progress.totalSteps = preview.total;
+          job.lastProgressAt = Date.now();
+        },
+      );
+    } else {
+      ownPreviews.stop(job.id);
     }
     if (
       job.cancelRequested &&
@@ -2302,6 +2327,7 @@ export function useGenerateStream(
   // direct test invocations harmless.
   if (onComplete) {
     completeListeners.add(onComplete);
+    onUnmounted(() => ownPreviews.stopAll());
     onUnmounted(() => {
       completeListeners.delete(onComplete);
     });

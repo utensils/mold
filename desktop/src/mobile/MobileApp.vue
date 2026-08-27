@@ -425,6 +425,7 @@ import MobileSourceControls from "./MobileSourceControls.vue";
 import MobileStyleChips from "./MobileStyleChips.vue";
 import MobileTemplates from "./MobileTemplates.vue";
 import SwipeActionRow from "@studio/components/SwipeActionRow.vue";
+import { OwnPrintPreviewWatchers, previewDataUrl } from "@studio/api/ownPrintPreview";
 import type { SwipeRowAction } from "@studio/lib/swipeAction";
 import { mobileFileUnderAvailable, mobileFileUnderCollections } from "./fileUnder";
 import {
@@ -1983,6 +1984,9 @@ function durableLifecycleForJob(job: Job) {
   return lifecycle ? { ...durable, lifecycle } : null;
 }
 
+/** Live preview + step progress for our own running prints (see web). */
+const ownPreviews = new OwnPrintPreviewWatchers();
+
 function durableHeldError(job: Job): string | null {
   const durable = durableLifecycleForJob(job);
   if (!durable || truthfulGenerationPhase(durable.lifecycle) !== "held") return null;
@@ -2125,7 +2129,24 @@ function syncDurableGenerationJobs(): void {
         job.status = "loading";
         job.cancelling = recovery.cancelRequestedChildIndexes.includes(presentation.index);
         job.stage = "Rendering";
+        // The durable child carries no denoise preview or step count; poll
+        // the host for our own running print as a tapped queue row does.
+        const previewHost = resolveMobileDurableHost(recovery, connectedHosts.value);
+        if (previewHost) {
+          ownPreviews.ensure(
+            String(job.clientId),
+            mobileHostTarget(previewHost),
+            lifecycle.authority.jobId,
+            (preview) => {
+              if (job.status !== "loading") return;
+              job.previewUrl = previewDataUrl(preview);
+              job.step = preview.step;
+              job.total = preview.total;
+            },
+          );
+        }
       } else if (truthfulPhase !== "terminal") {
+        ownPreviews.stop(String(job.clientId));
         job.status = "queued";
         job.cancelling = recovery.cancelRequestedChildIndexes.includes(presentation.index);
         job.stage =
@@ -3002,6 +3023,7 @@ async function processDurableGenerationTerminalEffects(): Promise<void> {
             generationAnnouncement.value = "Generation cancelled.";
           });
         } else {
+          ownPreviews.stop(String(job.clientId));
           const detail = durableFailureMessage(lifecycle.error, job.hostLabel);
           // A batch's partial failure must say WHICH sibling failed and the
           // prompt it was reviewed with; a bare "Generation failed" leaves a
