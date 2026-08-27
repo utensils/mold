@@ -121,6 +121,19 @@ describe("runWithConcurrency", () => {
 
 describe("submitBatch connection cap", () => {
   const mockSse = vi.mocked(sseStream);
+  /** The clip seed each created chain job carries, keyed by its job id. */
+  const chainJobSeeds = new Map<string, number>();
+  let chainJobSequence = 0;
+  /** A sequence is CREATED on a machine before its stream opens, so every
+   *  chain submit names one; the old shim's POST was the stream itself and
+   *  never had to resolve a target at all. */
+  const chainRoute = {
+    hostId: "sequence-host",
+    label: "sequence-host",
+    kind: "remote" as const,
+    target: { baseUrl: "http://sequence-host:7680", apiKey: null },
+    instanceId: "instance-1",
+  };
   const streams: Array<{
     seed: number;
     target: string;
@@ -128,9 +141,13 @@ describe("submitBatch connection cap", () => {
     resolve: () => void;
   }> = [];
 
+  /** Release one held stream. A sequence settles on its OWN terminal frame,
+   *  so ending the socket without one would leave the row for the
+   *  machine-polling reconciler instead of finishing here. */
   function resolveStream(seed: number) {
-    const idx = streams.findIndex((c) => c.seed === seed);
-    streams[idx]!.resolve();
+    const stream = streams.find((candidate) => candidate.seed === seed)!;
+    stream.onEvent("chain_job", JSON.stringify({ type: "state_changed", state: "cancelled" }));
+    stream.resolve();
   }
 
   const req: GenerateRequest = {
@@ -153,21 +170,22 @@ describe("submitBatch connection cap", () => {
   };
   const chainReq: GenerateRequest = { ...req, model: "ltx-2-19b-distilled:fp8", frames: 241 };
 
+  /** Finish one sequence the way its machine does: a saved FILENAME on
+   *  `finalized`, never inline bytes. */
   function completeChainStream(seed: number) {
     const stream = streams.find((candidate) => candidate.seed === seed);
     stream!.onEvent(
-      "complete",
-      JSON.stringify({
-        video: btoa("clip"),
-        format: "mp4",
-        width: 1024,
-        height: 1024,
-        frames: 241,
-        fps: 24,
-        generation_time_ms: 100,
-        metadata: { seed, model: chainReq.model },
-      }),
+      "chain_job",
+      JSON.stringify({ type: "finalized", output: `sequence-${seed}.mp4` }),
     );
+  }
+
+  /** End one sequence without a result, so the row settles here rather than
+   *  falling through to the machine-polling reconciler. */
+  function endChainStream(seed: number) {
+    const stream = streams.find((candidate) => candidate.seed === seed);
+    stream!.onEvent("chain_job", JSON.stringify({ type: "state_changed", state: "cancelled" }));
+    stream!.resolve();
   }
 
   beforeEach(() => {
@@ -175,8 +193,26 @@ describe("submitBatch connection cap", () => {
     streams.length = 0;
     mockSse.mockReset();
     vi.mocked(apiJsonTo).mockReset();
+    // A routed sequence reconciles against its machine's queue when a stream
+    // ends; an empty listing lets that settle instead of retrying on a timer.
+    vi.mocked(apiJsonTo).mockResolvedValue({ entries: [] } as never);
     vi.mocked(apiFetchTo).mockReset();
-    vi.mocked(apiFetchTo).mockResolvedValue(new Response(null, { status: 204 }));
+    // A sequence is created through `POST /api/chain-jobs` before its event
+    // stream opens. Each create gets its own id so the clip's seed — which
+    // used to ride the stream's POST body — stays identifiable.
+    chainJobSeeds.clear();
+    chainJobSequence = 0;
+    vi.mocked(apiFetchTo).mockImplementation(
+      (_target: unknown, path: string, init?: RequestInit) => {
+        if (path !== "/api/chain-jobs") {
+          return Promise.resolve(new Response(null, { status: 204 }));
+        }
+        const body = JSON.parse(String(init?.body)) as { seed?: number };
+        const jobId = `chain-job-${++chainJobSequence}`;
+        chainJobSeeds.set(jobId, body.seed ?? 0);
+        return Promise.resolve(new Response(JSON.stringify({ job_id: jobId })));
+      },
+    );
     durableApi.admit.mockReset();
     durableApi.lookup.mockReset();
     durableApi.reconcile.mockReset();
@@ -190,10 +226,13 @@ describe("submitBatch connection cap", () => {
     // Each POST parks open until the test resolves it, so we can observe how
     // many held streams the batch opens at once.
     mockSse.mockImplementation((_url, opts) => {
+      const chainJobId = /chain-jobs\/([^/]+)\/events/.exec(String(_url))?.[1];
       return new Promise<void>((resolve) => {
         let settled = false;
         const stream = {
-          seed: (opts.body as { seed: number }).seed,
+          seed: chainJobId
+            ? (chainJobSeeds.get(chainJobId) ?? 0)
+            : (opts.body as { seed: number }).seed,
           target: opts.target?.baseUrl ?? "__primary__",
           onEvent: opts.onEvent,
           resolve: () => {},
@@ -292,7 +331,7 @@ describe("submitBatch connection cap", () => {
 
   it("holds at most four sequence clips streaming at once", async () => {
     const store = useGenerationStore();
-    const submitted = store.submitBatch(chainReq, 5, null, chainDecision);
+    const submitted = store.submitBatch(chainReq, 5, chainRoute, chainDecision);
     await flushPromises();
     expect(streams.map((s) => s.seed).sort()).toEqual([100, 101, 102, 103]);
 
@@ -303,7 +342,7 @@ describe("submitBatch connection cap", () => {
     // Drain before leaving: a batch still holding streams would settle inside
     // the next test and pollute its module-scoped state.
     while (streams.length > 0) {
-      streams[0]!.resolve();
+      endChainStream(streams[0]!.seed);
       await flushPromises();
     }
     await submitted.settled;
@@ -1822,11 +1861,11 @@ describe("submitBatch connection cap", () => {
 
   it("holds at most four sequence streams across separate Generate submissions", async () => {
     const store = useGenerationStore();
-    const first = store.submitBatch({ ...chainReq, seed: 200 }, 1, null, chainDecision);
-    const second = store.submitBatch({ ...chainReq, seed: 201 }, 1, null, chainDecision);
-    const third = store.submitBatch({ ...chainReq, seed: 202 }, 1, null, chainDecision);
-    const fourth = store.submitBatch({ ...chainReq, seed: 203 }, 1, null, chainDecision);
-    const fifth = store.submitBatch({ ...chainReq, seed: 204 }, 1, null, chainDecision);
+    const first = store.submitBatch({ ...chainReq, seed: 200 }, 1, chainRoute, chainDecision);
+    const second = store.submitBatch({ ...chainReq, seed: 201 }, 1, chainRoute, chainDecision);
+    const third = store.submitBatch({ ...chainReq, seed: 202 }, 1, chainRoute, chainDecision);
+    const fourth = store.submitBatch({ ...chainReq, seed: 203 }, 1, chainRoute, chainDecision);
+    const fifth = store.submitBatch({ ...chainReq, seed: 204 }, 1, chainRoute, chainDecision);
     await flushPromises();
 
     expect(streams.map((stream) => stream.seed).sort()).toEqual([200, 201, 202, 203]);
@@ -1849,8 +1888,8 @@ describe("submitBatch connection cap", () => {
   });
   it("shares the four-stream host cap across overlapping sequence batches", async () => {
     const store = useGenerationStore();
-    const first = store.submitBatch({ ...chainReq, seed: 400 }, 3, null, chainDecision);
-    const second = store.submitBatch({ ...chainReq, seed: 500 }, 3, null, chainDecision);
+    const first = store.submitBatch({ ...chainReq, seed: 400 }, 3, chainRoute, chainDecision);
+    const second = store.submitBatch({ ...chainReq, seed: 500 }, 3, chainRoute, chainDecision);
     await flushPromises();
 
     expect(streams).toHaveLength(4);
@@ -1863,7 +1902,7 @@ describe("submitBatch connection cap", () => {
     expect(streams).toHaveLength(4);
 
     while (streams.length > 0) {
-      streams[0]!.resolve();
+      endChainStream(streams[0]!.seed);
       await flushPromises();
     }
     await Promise.all([first.settled, second.settled]);
@@ -1925,11 +1964,11 @@ describe("submitBatch connection cap", () => {
   });
   it("releases a slot on a terminal sequence frame even when the peer does not close", async () => {
     const store = useGenerationStore();
-    const first = store.submitBatch({ ...chainReq, seed: 300 }, 1, null, chainDecision);
-    const second = store.submitBatch({ ...chainReq, seed: 301 }, 1, null, chainDecision);
-    const third = store.submitBatch({ ...chainReq, seed: 302 }, 1, null, chainDecision);
-    const fourth = store.submitBatch({ ...chainReq, seed: 303 }, 1, null, chainDecision);
-    const fifth = store.submitBatch({ ...chainReq, seed: 304 }, 1, null, chainDecision);
+    const first = store.submitBatch({ ...chainReq, seed: 300 }, 1, chainRoute, chainDecision);
+    const second = store.submitBatch({ ...chainReq, seed: 301 }, 1, chainRoute, chainDecision);
+    const third = store.submitBatch({ ...chainReq, seed: 302 }, 1, chainRoute, chainDecision);
+    const fourth = store.submitBatch({ ...chainReq, seed: 303 }, 1, chainRoute, chainDecision);
+    const fifth = store.submitBatch({ ...chainReq, seed: 304 }, 1, chainRoute, chainDecision);
     await flushPromises();
     expect(streams.map((stream) => stream.seed).sort()).toEqual([300, 301, 302, 303]);
 
@@ -1951,7 +1990,7 @@ describe("submitBatch connection cap", () => {
   });
   it("never opens a stream for a sequence sibling cancelled before its turn", async () => {
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch(chainReq, 5, null, chainDecision);
+    const { jobs, settled } = store.submitBatch(chainReq, 5, chainRoute, chainDecision);
     await flushPromises();
 
     // Cancel the last sibling while the first four hold the pool.
@@ -1968,7 +2007,13 @@ describe("submitBatch connection cap", () => {
     await flushPromises();
     await settled;
 
-    const openedSeeds = mockSse.mock.calls.map((c) => (c[1].body as { seed: number }).seed);
+    // A sequence's stream is a GET with no body, so the seed it belongs to is
+    // read off the chain job the create minted for it.
+    const openedSeeds = mockSse.mock.calls.flatMap((call) => {
+      const jobId = /chain-jobs\/([^/]+)\/events/.exec(String(call[0]))?.[1];
+      const seed = jobId ? chainJobSeeds.get(jobId) : undefined;
+      return seed === undefined ? [] : [seed];
+    });
     expect(openedSeeds).toContain(102);
     expect(openedSeeds).not.toContain(104);
   });

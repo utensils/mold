@@ -283,6 +283,11 @@ function durableApiFallback(
   if (path === "/api/generation-batches" && init?.method === "POST") {
     return Promise.resolve(durableBatchResponse(init));
   }
+  // An auto-chained sequence is created as a durable chain job before its own
+  // event stream opens.
+  if (path === "/api/chain-jobs" && init?.method === "POST") {
+    return Promise.resolve({ job_id: "chain-job-1" });
+  }
   if (path === "/api/generation-batches/status") {
     return Promise.resolve({
       instance_id: status.instance_id,
@@ -3979,19 +3984,22 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
 
-    expect(openStreams).toHaveLength(1);
-    expect(openStreams[0]?.path).toBe("/api/generate/chain/stream");
-    expect(openStreams[0]?.options.headers).toEqual({
-      "X-Mold-SSE-Payload": "metadata-only",
-    });
-    expect(openStreams[0]?.options.body).toMatchObject({
+    // A sequence is CREATED as a durable chain job and followed on its own
+    // event stream; the auto-expand body rides the create.
+    const create = apiFetchTo.mock.calls.find((call) => call[1] === "/api/chain-jobs");
+    expect(create).toBeTruthy();
+    const body = JSON.parse(String((create![2] as RequestInit).body)) as Record<string, unknown>;
+    expect(body).toMatchObject({
+      ephemeral: true,
       model: chainModel.name,
       prompt: "a continuous flight through clouds",
       total_frames: 177,
       clip_frames: 97,
       motion_tail_frames: 17,
     });
-    expect(openStreams[0]?.options.body).not.toHaveProperty("frames");
+    expect(body).not.toHaveProperty("frames");
+    expect(openStreams).toHaveLength(1);
+    expect(openStreams[0]?.path).toBe("/api/chain-jobs/chain-job-1/events");
 
     openStreams[0]?.resolve();
     await flushPromises();
@@ -6649,10 +6657,10 @@ describe("MobileApp wan source conditioning", () => {
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
 
-    // 81 frames on wan auto-chains, so this print rides the chain stream
-    // rather than durable batch admission.
-    expect(openStreams).toHaveLength(1);
-    const body = openStreams[0]!.options.body;
+    // 81 frames on wan auto-chains, so this print is created as a chain job
+    // rather than admitted through the durable batch.
+    const create = apiFetchTo.mock.calls.find((call) => call[1] === "/api/chain-jobs");
+    const body = JSON.parse(String((create![2] as RequestInit).body)) as Record<string, unknown>;
     expect(body.source_image).toBe(btoa("opening"));
     expect(body).not.toHaveProperty("keyframes");
   });

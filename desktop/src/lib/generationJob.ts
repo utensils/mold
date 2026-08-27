@@ -365,8 +365,3 @@ export function jobStatusCode(job: Job): string {
   }
   return "UNKNOWN";
 }
-
-export function base64ToBlobUrl(b64: string, mime: string): string {
-  const bytes = Uint8Array.from(atob(b64), (character) => character.charCodeAt(0));
-  return URL.createObjectURL(new Blob([bytes], { type: mime }));
-}

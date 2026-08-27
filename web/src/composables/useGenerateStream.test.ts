@@ -18,7 +18,7 @@ import type {
   GenerationBatchStatusResponse,
 } from "@studio/api/generationAdmission";
 import type { ChainRoutingDecision } from "../lib/chainRouting";
-import type { ChainStreamHandlers, StreamTarget } from "../api";
+import type { StreamTarget } from "../api";
 import { cancelQueueJob } from "../api";
 import type { HostRoute } from "../lib/hostRouting";
 
@@ -36,7 +36,7 @@ let lastChainRequest: ChainRequestWire | null = null;
  *  The MOST RECENT subscription is the one under test — the mock is shared
  *  across the file, so an earlier test's stream is still in `mock.calls`. */
 function emitChainJobEvent(event: unknown): void {
-  const call = [...fetchEventSource.mock.calls]
+  const call = [...(fetchEventSource.mock.calls as unknown[][])]
     .reverse()
     .find((entry) => String(entry[0]).includes("/api/chain-jobs/"));
   const options = call?.[1] as
@@ -593,7 +593,7 @@ describe("workStarted tracking", () => {
     // The create POST resolves before the subscription opens.
     await vi.waitFor(() =>
       expect(
-        fetchEventSource.mock.calls.some((entry) =>
+        (fetchEventSource.mock.calls as unknown[][]).some((entry) =>
           String(entry[0]).includes("/api/chain-jobs/"),
         ),
       ).toBe(true),
@@ -926,7 +926,7 @@ describe("auto-remove completed jobs", () => {
     expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("running");
 
     expect(
-      fetchEventSource.mock.calls.some((entry) =>
+      (fetchEventSource.mock.calls as unknown[][]).some((entry) =>
         String(entry[0]).includes("/api/chain-jobs/"),
       ),
     ).toBe(true);

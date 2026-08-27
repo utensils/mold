@@ -23,7 +23,6 @@ import type {
   CompleteEvent,
   GenerateRequest,
   PromptTransformProvenance,
-  SseChainCompleteEvent,
 } from "../lib/api/types";
 import {
   buildAutoChainRequest,
@@ -32,9 +31,6 @@ import {
 } from "../lib/chainRouting";
 import {
   applyChainProgress,
-  applyCompletionWarnings,
-  base64ToBlobUrl,
-  chainCompleteToComplete,
   isCancelledError,
   markJobSettled,
   metadataOnlyResult,
@@ -43,6 +39,8 @@ import {
 } from "../lib/generationJob";
 import { type ReferenceUploadCapabilities } from "@studio/api/referenceUploads";
 import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
+import { emptyChainJobLive, reduceChainJobFrame } from "@studio/lib/chainJobProgress";
+import type { ChainJobEvent, CreateChainJobResponse } from "@studio/lib/api/chainTypes";
 import { blobToBase64 } from "@studio/lib/base64";
 import {
   admitGenerationBatch,
@@ -79,9 +77,6 @@ import { retryQueueJobRecoveringAmbiguity } from "@studio/api/queuePlan";
 
 export {
   applyChainProgress,
-  applyCompletionWarnings,
-  base64ToBlobUrl,
-  chainCompleteToComplete,
   isCancelledError,
   jobPhase,
   jobProgress,
@@ -281,15 +276,6 @@ export async function runWithConcurrency<T>(
   return results;
 }
 
-const MIME: Record<string, string> = {
-  png: "image/png",
-  jpeg: "image/jpeg",
-  webp: "image/webp",
-  gif: "image/gif",
-  apng: "image/apng",
-  mp4: "video/mp4",
-};
-
 /**
  * Held generation SSE requests share the browser's per-origin HTTP pool with
  * gallery reads and queue cancellation. Four slots match the web surface and
@@ -430,6 +416,7 @@ function releaseSettledJob(job: Job): void {
   if (job.previewUrl) URL.revokeObjectURL(job.previewUrl);
   targets.delete(job.clientId);
   chainRoutes.delete(job.clientId);
+  chainJobIds.delete(job.clientId);
 }
 
 /** Move a job to a terminal status and stamp when it got there. Every
@@ -1546,15 +1533,18 @@ export const useGenerationStore = defineStore("generation", {
           throw error;
         }
       }
-      if (job.id) {
+      // A sequence is a chain job and is cancelled on its own route; the
+      // generation queue has no row for it. Its id comes from the create
+      // response, not from a progress frame.
+      const chainJobId = chainJobIds.get(job.clientId);
+      if (chainJobId || job.id) {
         try {
-          const chainRoute = chainRoutes.get(job.clientId);
           await apiFetchTo(
             targets.get(job.clientId) ?? currentTarget(),
-            chainRoute
-              ? `/api/chain-jobs/${encodeURIComponent(job.id)}/cancel`
-              : `/api/queue/${encodeURIComponent(job.id)}`,
-            { method: chainRoute ? "POST" : "DELETE" },
+            chainJobId
+              ? `/api/chain-jobs/${encodeURIComponent(chainJobId)}/cancel`
+              : `/api/queue/${encodeURIComponent(job.id!)}`,
+            { method: chainJobId ? "POST" : "DELETE" },
           );
         } catch (err) {
           // A terminal SSE frame may win while DELETE is in flight. Preserve
@@ -1760,6 +1750,7 @@ export const useGenerationStore = defineStore("generation", {
       durableRecoveryLoaded = false;
       targets.clear();
       chainRoutes.clear();
+      chainJobIds.clear();
       this.pendingConsumerBatchIds = [];
       this.selectedClientId = null;
       this.jobs = [];
@@ -1772,6 +1763,59 @@ export const useGenerationStore = defineStore("generation", {
       const job = createStoreJob(req, this.nextClientId++);
       this.jobs.push(job);
       return job;
+    },
+    /**
+     * A finished sequence is one saved print. `finalized { output }` carries
+     * the FILENAME the machine saved it under — never inline bytes — so the
+     * media is fetched from that machine's gallery exactly as a durable
+     * print's is, including the mirror to this Mac.
+     */
+    async completeChainJob(
+      job: Job,
+      request: GenerateRequest,
+      filename: string,
+      target?: ApiTarget,
+    ): Promise<void> {
+      if (jobHasSettled(job)) return;
+      const format = requestFormat(filename, request.output_format ?? "mp4");
+      job.result = {
+        image: "",
+        format,
+        width: request.width,
+        height: request.height,
+        seed_used: request.seed ?? 0,
+        generation_time_ms: 0,
+        model: request.model,
+        filename,
+        metadata: null,
+      };
+      job.visualSeed = String(request.seed ?? 0);
+      settleJob(job, "complete");
+      if (job.previewUrl) {
+        URL.revokeObjectURL(job.previewUrl);
+        job.previewUrl = null;
+      }
+      void this.refreshRemoteResultUrl(job.clientId).catch(() => {
+        // The reactive job carries the directed, user-visible error.
+      });
+      const originHostId = job.hostId ?? useHostsStore().primaryHost?.id ?? null;
+      if (originHostId) void useGalleryStore().refreshHost(originHostId);
+      if (
+        !job.remote ||
+        !job.mirrorRemoteOutput ||
+        !target ||
+        !(useAppPrefsStore().settings?.saveRemoteOutputs ?? true)
+      ) {
+        return;
+      }
+      try {
+        const bytes = await fetchGalleryMediaBytes(galleryMediaPath(filename, "host"), target);
+        const buffer = Uint8Array.from(bytes).buffer;
+        await ipc.saveOutputBytes(filename, await blobToBase64(new Blob([buffer])), null);
+        void useGalleryStore().refreshHost("local");
+      } catch (error) {
+        console.warn("local save of remote sequence output failed:", error);
+      }
     },
     async streamJob(
       job: Job,
@@ -1807,201 +1851,99 @@ export const useGenerationStore = defineStore("generation", {
         aborts.delete(job.clientId);
         return;
       }
-      const path = "/api/generate/chain/stream";
+      // A sequence is a durable chain job: created through
+      // `POST /api/chain-jobs` with additive `ephemeral: true` — the machine
+      // stitches it, records the print with stage seeds but no chain job id,
+      // and deletes the job's artifacts — then followed on its OWN event
+      // stream. `chainJobs.watch` is a singleton driving the sequence rail and
+      // must not be taken over by an auto-chained one-shot.
       job.streamStarted = true;
-      const body = buildAutoChainRequest(req, chainRoute);
-      // Freeze the exact host this stream opens against. Submit already
-      // snapshots the primary, but a job admitted while nothing was connected
-      // has no route recorded — and `sseStream` would then resolve the primary
-      // AGAIN, later, possibly a different machine. Recovery and cancel key off
-      // this map, and asking (or DELETEing on) a host that never ran the job is
-      // the one outcome the frozen-route invariant exists to prevent.
+      const body = { ...buildAutoChainRequest(req, chainRoute), ephemeral: true };
+      // Freeze the exact host this job is created on. Submit already snapshots
+      // the primary, but a job admitted while nothing was connected has no
+      // route recorded — and the stream would then resolve the primary AGAIN,
+      // later, possibly a different machine. Recovery and cancel key off this
+      // map, and asking (or DELETEing on) a host that never ran the job is the
+      // one outcome the frozen-route invariant exists to prevent.
       const streamTarget = target ?? connectedTarget();
       if (streamTarget && !targets.has(job.clientId)) {
         targets.set(job.clientId, streamTarget);
       }
-      await sseStream(path, {
-        method: "POST",
-        body,
+      let chainJobId: string;
+      try {
+        const created = await apiFetchTo(
+          streamTarget ?? currentTarget(),
+          "/api/chain-jobs",
+          chainJobInit(body, crypto.randomUUID()),
+        );
+        job.requestWarnings = requestWarningsFromHeaders(created.headers);
+        ({ job_id: chainJobId } = (await created.json()) as CreateChainJobResponse);
+      } catch (error) {
+        onAdmitted();
+        if (!abort.signal.aborted && !jobHasSettled(job)) {
+          settleJob(job, "error");
+          job.interrupted = false;
+          job.error = describeTransportError(error, job.hostLabel);
+        }
+        releaseStreamSlot();
+        aborts.delete(job.clientId);
+        return;
+      }
+      onAdmitted();
+      chainJobIds.set(job.clientId, chainJobId);
+      // For a sequence the chain job IS its server identity: recovery looks it
+      // up by this id, and the shim used to deliver the same value on its
+      // synthesized first frame.
+      job.id = chainJobId;
+      let live = emptyChainJobLive();
+      await sseStream(`/api/chain-jobs/${encodeURIComponent(chainJobId)}/events`, {
         signal: abort.signal,
-        retry: false,
-        ...(job.metadataOnlyCompletion
-          ? { headers: { "X-Mold-SSE-Payload": "metadata-only" } }
-          : {}),
+        retry: true,
         ...(streamTarget ? { target: streamTarget } : {}),
-        onOpen: (response) => {
-          onAdmitted();
-          job.requestWarnings = requestWarningsFromHeaders(response.headers);
-        },
-        onEvent: (event, data) => {
-          const current = job;
+        onEvent: (_event, data) => {
           // Abort/reset/cancel and terminal frames are final. Some SSE
           // implementations can still deliver already-buffered callbacks;
           // ignoring them prevents a cancelled job from being resurrected.
-          if (abort.signal.aborted || jobHasSettled(current)) return;
+          if (abort.signal.aborted || jobHasSettled(job)) return;
+          let event: ChainJobEvent;
           try {
-            if (event === "progress") {
-              applyChainProgress(current, JSON.parse(data) as ChainProgressEvent);
-            } else if (event === "complete") {
-              const complete = chainCompleteToComplete(
-                JSON.parse(data) as SseChainCompleteEvent,
-                req,
-              );
-              applyCompletionWarnings(current, complete);
-              const useSavedResult =
-                !complete.image ||
-                (current.metadataOnlyCompletion &&
-                  complete.format === "mp4" &&
-                  !!complete.filename);
-              if (complete.image && !useSavedResult) {
-                current.resultUrl = base64ToBlobUrl(
-                  complete.image,
-                  MIME[complete.format] ?? "application/octet-stream",
-                );
-                current.resultUrlIsObjectUrl = true;
-              }
-              current.result = current.retainEncodedResult
-                ? complete
-                : metadataOnlyResult(complete);
-              current.visualSeed = String(complete.seed_used);
-              settleJob(current, "complete");
-              if (useSavedResult) {
-                void this.refreshRemoteResultUrl(current.clientId).catch(() => {
-                  // The reactive job carries the directed, user-visible error.
-                });
-              }
-              if (current.previewUrl) {
-                URL.revokeObjectURL(current.previewUrl);
-                current.previewUrl = null;
-              }
-              // Remote prints also land in this Mac's gallery (pref-gated):
-              // the SSE payload is the encoded output file, so no extra
-              // download is needed. Newer servers also send the gallery
-              // filename and recorded metadata — keeping the origin's name
-              // makes the copy and the original one logical print in the
-              // merged gallery, and the metadata gives video copies (which
-              // embed nothing) their true dimensions and provenance.
-              if (
-                current.remote &&
-                current.mirrorRemoteOutput &&
-                complete.image &&
-                (useAppPrefsStore().settings?.saveRemoteOutputs ?? true)
-              ) {
-                const now = Date.now();
-                const meta = complete.metadata ?? null;
-                const originalMeta =
-                  meta && complete.original_width && complete.original_height
-                    ? {
-                        ...meta,
-                        width: complete.original_width,
-                        height: complete.original_height,
-                      }
-                    : meta;
-                const saves = complete.original_image
-                  ? [
-                      ipc.saveOutputBytes(
-                        complete.original_filename ??
-                          suggestOutputFilename(
-                            complete.model,
-                            complete.seed_used,
-                            complete.format,
-                            now,
-                            "original",
-                          ),
-                        complete.original_image,
-                        originalMeta,
-                      ),
-                      ipc.saveOutputBytes(
-                        complete.filename ??
-                          suggestOutputFilename(
-                            complete.model,
-                            complete.seed_used,
-                            complete.format,
-                            now,
-                            "upscaled",
-                          ),
-                        complete.image,
-                        meta,
-                      ),
-                    ]
-                  : [
-                      ipc.saveOutputBytes(
-                        complete.filename ??
-                          suggestOutputFilename(
-                            complete.model,
-                            complete.seed_used,
-                            complete.format,
-                            now,
-                          ),
-                        complete.image,
-                        meta,
-                      ),
-                    ];
-                Promise.allSettled(saves).then((results) => {
-                  for (const result of results) {
-                    if (result.status === "rejected") {
-                      console.warn("local save of remote output failed:", result.reason);
-                    }
-                  }
-                  if (results.some((result) => result.status === "fulfilled")) {
-                    void useGalleryStore().refreshHost("local");
-                  }
-                });
-              }
-              // Nudge the unified gallery's bucket for the host this print
-              // landed on. refreshHost only refetches already-loaded buckets
-              // — a background completion must not force-load a gallery
-              // bucket the user never opened.
-              const originHostId = current.hostId ?? useHostsStore().primaryHost?.id ?? null;
-              if (originHostId) void useGalleryStore().refreshHost(originHostId);
-              abort.abort();
-            } else if (event === "error") {
-              settleJob(current, "error");
-              try {
-                const parsed = JSON.parse(data) as {
-                  error?: string;
-                  message?: string;
-                  retained?: boolean;
-                };
-                const message = parsed.error ?? parsed.message ?? data;
-                current.error = isCancelledError(message) ? "Cancelled" : message;
-                // A durable-queue host ends a retained job's stream with an
-                // error frame carrying `retained` while keeping the work: it
-                // will run and land in that host's gallery. Treating it as an
-                // interruption suppresses the "failed" notification and hands
-                // the job to reconciliation, exactly like a dead socket —
-                // `retainedByHost` additionally tells reconciliation to wait
-                // out the restart instead of the much shorter suspension budget.
-                current.interrupted = parsed.retained === true;
-                current.retainedByHost = parsed.retained === true;
-              } catch {
-                current.error = isCancelledError(data) ? "Cancelled" : data;
-              }
-              abort.abort();
-            }
+            event = JSON.parse(data) as ChainJobEvent;
           } catch {
-            if (current.status !== "complete" && current.status !== "error") {
-              settleJob(current, "error");
-              current.error = "The host returned an invalid generation update.";
-              abort.abort();
-            }
+            // A malformed frame carries no authority; the terminal one settles.
+            return;
           }
+          const reduced = reduceChainJobFrame(live, event);
+          live = reduced.live;
+          for (const frame of reduced.progress) {
+            applyChainProgress(job, frame as ChainProgressEvent);
+          }
+          const output = reduced.finalized?.output;
+          if (output) {
+            void this.completeChainJob(job, req, output, streamTarget ?? undefined);
+            abort.abort();
+            return;
+          }
+          const terminal = reduced.terminal;
+          if (!terminal || terminal.state === "completed") return;
+          settleJob(job, "error");
+          job.error =
+            terminal.state === "cancelled"
+              ? "Cancelled"
+              : (terminal.error ?? "The sequence failed on the host.");
+          abort.abort();
         },
         onClose: (err) => {
           if (err && !abort.signal.aborted && !jobHasSettled(job)) {
             settleJob(job, "error");
             job.error = err.message;
             // fetch-event-source reports network/transport loss as TypeError.
-            // HTTP/auth failures are deterministic and must remain final —
-            // suppressing their notification and retrying on foreground would
-            // only hide the actual server response.
+            // HTTP/auth failures are deterministic and must remain final.
             job.interrupted = err instanceof TypeError;
           }
         },
       }).catch((error: unknown) => {
         streamError = error;
       });
-      onAdmitted();
       if (!abort.signal.aborted && !jobHasSettled(job)) {
         settleJob(job, "error");
         job.interrupted = streamError === null || streamError instanceof TypeError;
@@ -2034,3 +1976,15 @@ const targets = new Map<number, ApiTarget>();
 
 /** Automatic-chain routing snapshot for endpoint selection and cancellation. */
 const chainRoutes = new Map<number, AutoChainRoutingDecision>();
+/** The durable chain job an auto-chained sequence became. Cancel routes on
+ * this: a chain is cancelled through its own route, never the queue. */
+const chainJobIds = new Map<number, string>();
+
+const chainJobInit = (body: unknown, operationId: string): RequestInit => ({
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "x-mold-operation-id": operationId,
+  },
+  body: JSON.stringify(body),
+});
