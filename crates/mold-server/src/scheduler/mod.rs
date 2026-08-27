@@ -6423,23 +6423,15 @@ fn exact_leased_execution_plan(
         .cloned()
 }
 
-fn reject_generation(state: &AppState, mut job: GenerationJob, error: String) {
-    if let Some(progress) = job.progress_tx {
-        let _ = progress.send(SseMessage::Error(mold_core::SseErrorEvent::failed(
-            error.clone(),
-        )));
-    }
-    let id = job.id.clone();
-    // Deterministic planning and validation refusals remain visible but cannot
-    // be retried unchanged. Persist that fact before resolving observers.
-    crate::durable_generation_settlement::settle_blocking(
-        &mut job.journal,
+/// Deterministic planning and validation refusals remain visible but cannot
+/// be retried unchanged.
+fn reject_generation(state: &AppState, job: GenerationJob, error: String) {
+    settle_refusal(
+        state,
+        job,
         crate::durable_disposition::DurableDisposition::Hold { retryable: false },
-        &error,
+        error,
     );
-    let _ = job.result_tx.send(Err(error));
-    state.queue.decrement();
-    state.job_registry.remove(&id);
 }
 
 /// Deferred dependency failures happen after durable acknowledgement. Preserve
@@ -6447,41 +6439,39 @@ fn reject_generation(state: &AppState, mut job: GenerationJob, error: String) {
 /// transient download, probe, or preparation error into terminal data loss.
 /// Non-durable jobs retain their legacy terminal behavior.
 fn hold_preparation_failure(state: &AppState, job: GenerationJob, error: String) {
-    let mut job = job;
-    if let Some(progress) = job.progress_tx {
-        let _ = progress.send(SseMessage::Error(mold_core::SseErrorEvent::failed(
-            error.clone(),
-        )));
-    }
-    let id = job.id.clone();
-    crate::durable_generation_settlement::settle_blocking(
-        &mut job.journal,
+    settle_refusal(
+        state,
+        job,
         crate::durable_disposition::DurableDisposition::Hold { retryable: true },
-        &error,
+        error,
     );
-    let _ = job.result_tx.send(Err(error));
-    state.queue.decrement();
-    state.job_registry.remove(&id);
 }
 
 /// A process-level interruption is not a job failure. Release the durable
 /// claim so the next feeder pass or process boot replays it automatically.
-fn retain_generation(state: &AppState, mut job: GenerationJob, error: String) {
-    let settlement = crate::durable_generation_settlement::settle_blocking(
-        &mut job.journal,
+fn retain_generation(state: &AppState, job: GenerationJob, error: String) {
+    settle_refusal(
+        state,
+        job,
         crate::durable_disposition::DurableDisposition::Retain,
-        &error,
+        error,
     );
-    if let Some(progress) = &job.progress_tx {
-        let event = if settlement.is_retained() {
-            mold_core::SseErrorEvent::retained(error.clone())
-        } else {
-            mold_core::SseErrorEvent::failed(error.clone())
-        };
-        let _ = progress.send(SseMessage::Error(event));
-    }
+}
+
+/// The coordinator's three refusals differ only in what the row becomes.
+///
+/// Settling before reporting is the module contract every worker path already
+/// keeps (`durable_generation_settlement`); these three used to send the SSE
+/// frame first, which both contradicted it and hard-coded `failed` over a
+/// cancellation that had already won the row.
+fn settle_refusal(
+    state: &AppState,
+    job: GenerationJob,
+    disposition: crate::durable_disposition::DurableDisposition,
+    error: String,
+) {
     let id = job.id.clone();
-    let _ = job.result_tx.send(Err(error));
+    crate::durable_generation_settlement::fail_blocking(job, disposition, error);
     state.queue.decrement();
     state.job_registry.remove(&id);
 }

@@ -2083,6 +2083,28 @@ impl GpuPool {
     }
 }
 
+impl crate::durable_generation_settlement::IntoSettlementChannels for GpuJob {
+    fn into_settlement_channels(self) -> crate::durable_generation_settlement::SettlementChannels {
+        crate::durable_generation_settlement::SettlementChannels {
+            journal: self.journal,
+            progress_tx: self.progress_tx,
+            result_tx: Some(self.result_tx),
+        }
+    }
+}
+
+impl crate::durable_generation_settlement::IntoSettlementChannels for Box<GpuJob> {
+    fn into_settlement_channels(self) -> crate::durable_generation_settlement::SettlementChannels {
+        (*self).into_settlement_channels()
+    }
+}
+
+impl crate::durable_generation_settlement::IntoSettlementChannels for PostGenerationUpscaleJob {
+    fn into_settlement_channels(self) -> crate::durable_generation_settlement::SettlementChannels {
+        self.generation.into_settlement_channels()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

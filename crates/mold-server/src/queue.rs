@@ -1814,42 +1814,23 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     if let Some(claim) = dispatch_claim {
         match claim {
             crate::queue_journal::DispatchClaim::Exhausted { attempts, cap } => {
-                let err_msg = format!(
-                    "'{}' was started {attempts} times without finishing (limit {cap}); \
-                     it is held for review instead of being retried",
-                    job.request.model
-                );
                 drop(scheduler_mutation);
-                let settlement = durable_generation_settlement::settle_async(
-                    &mut job.journal,
-                    DurableDisposition::Hold { retryable: false },
-                    "dispatch attempts exhausted",
+                let model = job.request.model.clone();
+                durable_generation_settlement::refuse_exhausted_dispatch_async(
+                    job, &model, attempts, cap,
                 )
                 .await;
-                if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(
-                        durable_generation_settlement::terminal_error_event(
-                            settlement,
-                            err_msg.clone(),
-                        ),
-                    ));
-                }
-                let _ = job.result_tx.send(Err(err_msg));
                 return;
             }
             crate::queue_journal::DispatchClaim::Fenced => {
-                let err_msg = "durable generation claim is stale; refusing dispatch".to_string();
-                tracing::warn!(job = %job.id, "single-worker path refused a stale durable feeder claim");
-                if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent::failed(err_msg.clone())));
-                }
                 drop(scheduler_mutation);
-                let _ = job.result_tx.send(Err(err_msg));
+                let job_id = job.id.clone();
+                durable_generation_settlement::refuse_fenced_dispatch(job, &job_id);
                 return;
             }
             crate::queue_journal::DispatchClaim::Cancelled => {
                 drop(scheduler_mutation);
-                finish_single_worker_cancelled(job, true);
+                finish_single_worker_cancelled(job, true).await;
                 return;
             }
             crate::queue_journal::DispatchClaim::Granted
@@ -1874,7 +1855,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         // the durable row terminal; refuse to run or publish the stale payload.
         attempt_cancellation.cancel();
         drop(scheduler_mutation);
-        finish_single_worker_cancelled(job, true);
+        finish_single_worker_cancelled(job, true).await;
         return;
     }
 
@@ -1886,15 +1867,16 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
 
     if attempt_cancellation.is_cancelled() {
         let user_requested = state.job_registry.cancel_requested(&job.id);
-        finish_single_worker_cancelled(job, user_requested);
+        finish_single_worker_cancelled(job, user_requested).await;
         return;
     }
 
     // The single-worker loop is the execution-slot lease. Keep the durable
     // bundle opaque through all queueing and cancellation-before-start paths,
     // then hydrate off Tokio immediately before reference/model preparation.
+    let job_id = job.id.clone();
     let hydrated_media_lease = if let Some(deferred) = job.deferred_media.take() {
-        let expected_job_id = job.id.clone();
+        let expected_job_id = job_id.clone();
         let mut request = job.request.clone();
         match tokio::task::spawn_blocking(move || {
             let result = deferred.hydrate_into(&expected_job_id, &mut request);
@@ -1907,14 +1889,16 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 Some(lease)
             }
             Ok((_request, Err(error))) => {
-                finish_single_worker_hydration_failure(job, error);
+                durable_generation_settlement::fail_hydration_async(job, &job_id, error).await;
                 return;
             }
             Err(_) => {
-                finish_single_worker_hydration_failure(
+                durable_generation_settlement::fail_hydration_async(
                     job,
+                    &job_id,
                     crate::queue_media_runtime::DeferredQueueMediaError::worker_failure(),
-                );
+                )
+                .await;
                 return;
             }
         }
@@ -1930,7 +1914,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     {
         Ok(references) => references.flatten(),
         Err(error) => {
-            finish_single_worker_hydration_failure(job, error);
+            durable_generation_settlement::fail_hydration_async(job, &job_id, error).await;
             return;
         }
     };
@@ -1944,7 +1928,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     if attempt_cancellation.is_cancelled() {
         let user_requested = state.job_registry.cancel_requested(&job.id);
         drop(request);
-        finish_single_worker_cancelled(job, user_requested);
+        finish_single_worker_cancelled(job, user_requested).await;
         return;
     }
 
@@ -1987,26 +1971,18 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             if mold_inference::is_inference_cancelled(&error) {
                 let user_requested = state.job_registry.cancel_requested(&job.id);
                 drop(request);
-                finish_single_worker_cancelled(job, user_requested);
+                finish_single_worker_cancelled(job, user_requested).await;
                 return;
             }
             let err_msg = request
                 .redact_staging_paths(format!("generation reference binding error: {error:#}"));
-            let settlement = durable_generation_settlement::settle_async(
-                &mut job.journal,
+            drop(request);
+            durable_generation_settlement::fail_async(
+                job,
                 DurableDisposition::Hold { retryable: true },
-                &err_msg,
+                err_msg,
             )
             .await;
-            if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(
-                    durable_generation_settlement::terminal_error_event(
-                        settlement,
-                        err_msg.clone(),
-                    ),
-                ));
-            }
-            let _ = job.result_tx.send(Err(err_msg));
             return;
         }
     };
@@ -2031,25 +2007,20 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     .await
     {
         let err_msg = request.redact_staging_paths(api_err.error.clone());
-        let settlement = durable_generation_settlement::settle_async(
-            &mut job.journal,
+        drop(request);
+        durable_generation_settlement::fail_async(
+            job,
             DurableDisposition::Hold { retryable: true },
-            &err_msg,
+            err_msg,
         )
         .await;
-        if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(
-                durable_generation_settlement::terminal_error_event(settlement, err_msg.clone()),
-            ));
-        }
-        let _ = job.result_tx.send(Err(err_msg));
         return;
     }
 
     if attempt_cancellation.is_cancelled() {
         let user_requested = state.job_registry.cancel_requested(&job.id);
         drop(request);
-        finish_single_worker_cancelled(job, user_requested);
+        finish_single_worker_cancelled(job, user_requested).await;
         return;
     }
 
@@ -2073,19 +2044,13 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         cache.take(&request.model)
     };
     let Some(mut cached_engine) = taken else {
-        let err_msg = "no engine available after model readiness check".to_string();
-        let settlement = durable_generation_settlement::settle_async(
-            &mut job.journal,
+        drop(request);
+        durable_generation_settlement::fail_async(
+            job,
             DurableDisposition::Hold { retryable: true },
-            &err_msg,
+            "no engine available after model readiness check",
         )
         .await;
-        if let Some(ref tx) = job.progress_tx {
-            let _ = tx.send(SseMessage::Error(
-                durable_generation_settlement::terminal_error_event(settlement, err_msg.clone()),
-            ));
-        }
-        let _ = job.result_tx.send(Err(err_msg));
         return;
     };
 
@@ -2177,23 +2142,13 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             crate::metrics::record_generation(&request.model, inference_duration);
 
             if response.images.is_empty() && response.video.is_none() && response.audio.is_none() {
-                let err_msg =
-                    "generation error: engine returned no images, video, or audio".to_string();
-                let settlement = durable_generation_settlement::settle_async(
-                    &mut job.journal,
+                drop(request);
+                durable_generation_settlement::fail_async(
+                    job,
                     DurableDisposition::Hold { retryable: true },
-                    &err_msg,
+                    "generation error: engine returned no images, video, or audio",
                 )
                 .await;
-                if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(
-                        durable_generation_settlement::terminal_error_event(
-                            settlement,
-                            err_msg.clone(),
-                        ),
-                    ));
-                }
-                let _ = job.result_tx.send(Err(err_msg));
                 return;
             }
             // For video-only responses, synthesize an ImageData from the thumbnail
@@ -2254,12 +2209,12 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 crate::job_registry::CompletionClaim::Claimed => {}
                 crate::job_registry::CompletionClaim::UserCancelled => {
                     drop(request);
-                    finish_single_worker_cancelled(job, true);
+                    finish_single_worker_cancelled(job, true).await;
                     return;
                 }
                 crate::job_registry::CompletionClaim::AttemptCancelled => {
                     drop(request);
-                    finish_single_worker_cancelled(job, false);
+                    finish_single_worker_cancelled(job, false).await;
                     return;
                 }
             }
@@ -2365,70 +2320,44 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             // retention fence and replay into a duplicate print; and a failed
             // publication would delete the row, losing a replayed job outright
             // since the gallery file is its only delivery.
-            let settlement = if saved_names.output.is_some() {
-                let result_json = saved_names.terminal_json(&response);
-                durable_generation_settlement::settle_completion_async(
-                    &mut job.journal,
-                    &result_json,
-                )
-                .await
-            } else {
-                tracing::error!(
-                    job = %job.id,
-                    dir = ?job.output_dir,
-                    "generation finished but its output could not be saved; \
-                     holding the queue row for review"
+            drop(request);
+            let job_id = job.id.clone();
+            let output_dir = job.output_dir.clone();
+            let completion_payload = job.completion_payload;
+            let mut channels =
+                durable_generation_settlement::IntoSettlementChannels::into_settlement_channels(
+                    job,
                 );
-                durable_generation_settlement::settle_async(
-                    &mut job.journal,
-                    DurableDisposition::Hold { retryable: true },
-                    "the generated output could not be saved to the gallery",
-                )
-                .await
-            };
-            state.job_registry.finish_completion(&job.id);
-            if settlement.is_cancelled() {
-                let message = "Cancelled".to_string();
-                if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(
-                        durable_generation_settlement::terminal_error_event(
-                            settlement,
-                            message.clone(),
-                        ),
-                    ));
-                }
-                let _ = job.result_tx.send(Err(message));
+            if durable_generation_settlement::settle_publication_async(
+                &mut channels,
+                &job_id,
+                output_dir.as_deref(),
+                &state.job_registry,
+                &saved_names,
+                &response,
+            )
+            .await
+            .is_err()
+            {
                 return;
             }
-            if settlement.is_retained() {
-                let message =
-                    "generation output is retained for durable reconciliation after restart"
-                        .to_string();
-                if let Some(ref tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(SseErrorEvent::retained(message.clone())));
-                }
-                let _ = job.result_tx.send(Err(message));
-                return;
-            }
-
-            // Send SSE complete event
-            if let Some(ref tx) = job.progress_tx {
-                let message = build_sse_completion_message(
+            let completion = channels.progress_tx.is_some().then(|| {
+                build_sse_completion_message(
                     &response,
                     &img,
                     original_img.as_ref(),
                     Some(&metadata),
                     &saved_names,
-                    job.completion_payload,
-                );
-                let _ = tx.send(message);
-            }
-
-            // Send result through oneshot
-            let _ = job.result_tx.send(Ok(GenerationJobResult {
-                image: img,
-                response,
-            }));
+                    completion_payload,
+                )
+            });
+            channels.complete(
+                completion,
+                GenerationJobResult {
+                    image: img,
+                    response,
+                },
+            );
         }
         Ok(Ok(Err(e))) => {
             #[cfg(feature = "metrics")]
@@ -2438,27 +2367,19 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             if mold_inference::is_inference_cancelled(&e) {
                 let user_requested = state.job_registry.cancel_requested(&job.id);
                 drop(request);
-                finish_single_worker_cancelled(job, user_requested);
+                finish_single_worker_cancelled(job, user_requested).await;
                 return;
             }
             let err_msg = request
                 .redact_staging_paths(format!("generation error: {}", clean_error_message(&e)));
             tracing::error!(%err_msg, "generation failed");
-            let settlement = durable_generation_settlement::settle_async(
-                &mut job.journal,
+            drop(request);
+            durable_generation_settlement::fail_async(
+                job,
                 DurableDisposition::Hold { retryable: true },
-                &err_msg,
+                err_msg,
             )
             .await;
-            if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(
-                    durable_generation_settlement::terminal_error_event(
-                        settlement,
-                        err_msg.clone(),
-                    ),
-                ));
-            }
-            let _ = job.result_tx.send(Err(err_msg));
         }
         Ok(Err(panic_payload)) => {
             #[cfg(feature = "metrics")]
@@ -2472,28 +2393,18 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 .unwrap_or("unknown panic");
             let err_msg = request.redact_staging_paths(format!("inference panicked: {msg}"));
             tracing::error!(%err_msg, "inference panicked");
-            // A panic is never user-retryable. The GPU-owner path answers
-            // `Retain` because it quarantines the worker and the process
-            // restarts, which replays the row; this path cannot quarantine, so
-            // `Retain` would strand the row with nothing to restart it. A
-            // non-retryable hold is settled, visible, and fenced off from
-            // `POST /api/queue/:id/retry`, whose `retryable` bit means "safe to
-            // re-run in this process".
-            let settlement = durable_generation_settlement::settle_async(
-                &mut job.journal,
+            drop(request);
+            // A panic is never auto-replayed and never user-retryable
+            // unchanged — the same answer the GPU-owner path gives, where the
+            // quarantine fence then outranks the hold and retains the row for
+            // the restart. Here nothing restarts, so the hold stands: settled,
+            // visible, and fenced off from `POST /api/queue/:id/retry`.
+            durable_generation_settlement::fail_async(
+                job,
                 DurableDisposition::Hold { retryable: false },
-                &err_msg,
+                err_msg,
             )
             .await;
-            if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(
-                    durable_generation_settlement::terminal_error_event(
-                        settlement,
-                        err_msg.clone(),
-                    ),
-                ));
-            }
-            let _ = job.result_tx.send(Err(err_msg));
         }
         Err(join_err) => {
             #[cfg(feature = "metrics")]
@@ -2501,22 +2412,13 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
 
             *active_gen.write().unwrap_or_else(|e| e.into_inner()) = None;
             tracing::error!("inference task join error: {join_err:?}");
-            let err_msg = "inference task failed".to_string();
-            let settlement = durable_generation_settlement::settle_async(
-                &mut job.journal,
+            drop(request);
+            durable_generation_settlement::fail_async(
+                job,
                 DurableDisposition::Hold { retryable: true },
-                &err_msg,
+                "inference task failed",
             )
             .await;
-            if let Some(ref tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(
-                    durable_generation_settlement::terminal_error_event(
-                        settlement,
-                        err_msg.clone(),
-                    ),
-                ));
-            }
-            let _ = job.result_tx.send(Err(err_msg));
         }
     }
 }
@@ -2545,58 +2447,9 @@ impl Drop for SingleWorkerCancelGuard<'_> {
 /// Explicit user cancellation is terminal; shutdown/attempt cancellation is
 /// retained for feeder replay. Neither path can publish gallery bytes or mark
 /// a durable batch child complete.
-fn finish_single_worker_cancelled(mut job: GenerationJob, user_requested: bool) {
-    if let Some(ticket) = job.journal.take() {
-        if user_requested {
-            ticket.discard();
-        } else {
-            job.journal = Some(ticket);
-            durable_generation_settlement::settle_blocking(
-                &mut job.journal,
-                DurableDisposition::Retain,
-                "server shutdown interrupted generation",
-            );
-        }
-    }
-    let message = if user_requested {
-        "Cancelled".to_string()
-    } else {
-        crate::gpu_worker::shutdown_retention_user_message(&job.request.model)
-    };
-    if let Some(ref tx) = job.progress_tx {
-        let event = if user_requested {
-            SseErrorEvent::cancelled(message.clone())
-        } else {
-            SseErrorEvent::retained(message.clone())
-        };
-        let _ = tx.send(SseMessage::Error(event));
-    }
-    let _ = job.result_tx.send(Err(message));
-}
-
-fn finish_single_worker_hydration_failure(
-    mut job: GenerationJob,
-    error: crate::queue_media_runtime::DeferredQueueMediaError,
-) {
-    let disposition = error.disposition();
-    let settlement = durable_generation_settlement::settle_blocking(
-        &mut job.journal,
-        disposition,
-        match disposition {
-            DurableDisposition::Hold { .. } => "durable queue-media validation failed",
-            DurableDisposition::Retain => {
-                "durable queue-media hydration must be retried after restart"
-            }
-        },
-    );
-    tracing::error!(job = %job.id, %error, "durable queue-media hydration failed");
-    let message = error.public_message().to_string();
-    if let Some(ref tx) = job.progress_tx {
-        let event =
-            durable_generation_settlement::terminal_error_event(settlement, message.clone());
-        let _ = tx.send(SseMessage::Error(event));
-    }
-    let _ = job.result_tx.send(Err(message));
+async fn finish_single_worker_cancelled(job: GenerationJob, user_requested: bool) {
+    let model = job.request.model.clone();
+    durable_generation_settlement::finish_cancelled_async(job, &model, user_requested).await;
 }
 
 // ── Multi-GPU queue dispatcher ──────────────────────────────────────────────
@@ -3085,7 +2938,7 @@ async fn run_queue_dispatcher_with_tuning_inner(
         // PATCH/cancellation. Downloads and worker availability waits happen
         // after this guard is released; the final send revalidates both facts
         // before it can promote the registry row to Running.
-        let (mut job, selected_order, selected_target) = {
+        let (job, selected_order, selected_target) = {
             let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
             let snapshot = state.job_registry.scheduler_snapshot();
             let order = snapshot
@@ -3115,7 +2968,7 @@ async fn run_queue_dispatcher_with_tuning_inner(
             // transport; treating it like an old id-less test job can execute
             // work after DELETE already returned 204.
             let _durable_transition = state.queue_journal.lock_durable_transition().await;
-            reject_cancelled_generation_job(&state, job);
+            reject_cancelled_generation_job(&state, job).await;
             continue;
         }
 
@@ -3127,21 +2980,12 @@ async fn run_queue_dispatcher_with_tuning_inner(
             crate::gpu_pool::model_unschedulable_message(&model_name, Some(&shape_bucket))
         {
             tracing::warn!(model = %model_name, "{err_msg}");
-            let settlement = durable_generation_settlement::settle_async(
-                &mut job.journal,
+            durable_generation_settlement::fail_async(
+                job,
                 DurableDisposition::Hold { retryable: false },
-                &err_msg,
+                err_msg,
             )
             .await;
-            if let Some(tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(
-                    durable_generation_settlement::terminal_error_event(
-                        settlement,
-                        err_msg.clone(),
-                    ),
-                ));
-            }
-            let _ = job.result_tx.send(Err(err_msg));
             state.queue.decrement();
             state.job_registry.remove(&job_id);
             #[cfg(feature = "metrics")]
@@ -3157,21 +3001,12 @@ async fn run_queue_dispatcher_with_tuning_inner(
             Ok(ordinal) => ordinal,
             Err(err_msg) => {
                 tracing::warn!(model = %model_name, "{err_msg}");
-                let settlement = durable_generation_settlement::settle_async(
-                    &mut job.journal,
+                durable_generation_settlement::fail_async(
+                    job,
                     DurableDisposition::Hold { retryable: false },
-                    &err_msg,
+                    err_msg,
                 )
                 .await;
-                if let Some(tx) = job.progress_tx {
-                    let _ = tx.send(SseMessage::Error(
-                        durable_generation_settlement::terminal_error_event(
-                            settlement,
-                            err_msg.clone(),
-                        ),
-                    ));
-                }
-                let _ = job.result_tx.send(Err(err_msg));
                 state.queue.decrement();
                 state.job_registry.remove(&job_id);
                 #[cfg(feature = "metrics")]
@@ -3214,7 +3049,7 @@ async fn run_queue_dispatcher_with_tuning_inner(
                 if state.job_registry.scheduler_lifecycle(&job_id)
                     != Some(crate::job_registry::JobLifecycle::Queued)
                 {
-                    reject_cancelled_generation_job(&state, job);
+                    reject_cancelled_generation_job(&state, job).await;
                     continue 'dispatcher;
                 }
                 upscale_download = Box::pin(ensure_legacy_post_upscale_model_downloaded(
@@ -3232,7 +3067,7 @@ async fn run_queue_dispatcher_with_tuning_inner(
                 result = &mut upscale_download => break result,
                 _ = shutdown.cancelled() => {
                     drop(upscale_download);
-                    reject_generation_job(&state, job, legacy_dispatch_stop_message(&state));
+                    reject_generation_job(&state, job, legacy_dispatch_stop_message(&state)).await;
                     break 'dispatcher;
                 }
                 _ = &mut mutation => {}
@@ -3248,7 +3083,7 @@ async fn run_queue_dispatcher_with_tuning_inner(
             if state.job_registry.scheduler_lifecycle(&job_id)
                 != Some(crate::job_registry::JobLifecycle::Queued)
             {
-                reject_cancelled_generation_job(&state, job);
+                reject_cancelled_generation_job(&state, job).await;
                 continue 'dispatcher;
             }
         }
@@ -3258,21 +3093,12 @@ async fn run_queue_dispatcher_with_tuning_inner(
                 upscaler = ?job.request.upscale_model,
                 "{err_msg}"
             );
-            let settlement = durable_generation_settlement::settle_async(
-                &mut job.journal,
+            durable_generation_settlement::fail_async(
+                job,
                 DurableDisposition::Hold { retryable: true },
-                &err_msg,
+                err_msg,
             )
             .await;
-            if let Some(tx) = job.progress_tx {
-                let _ = tx.send(SseMessage::Error(
-                    durable_generation_settlement::terminal_error_event(
-                        settlement,
-                        err_msg.clone(),
-                    ),
-                ));
-            }
-            let _ = job.result_tx.send(Err(err_msg));
             state.queue.decrement();
             state.job_registry.remove(&job_id);
             #[cfg(feature = "metrics")]
@@ -3368,7 +3194,8 @@ async fn run_queue_dispatcher_with_tuning_inner(
                     reject_cancelled_generation_job(
                         &state,
                         generation_from_legacy_gpu_job(pending),
-                    );
+                    )
+                    .await;
                     continue 'dispatcher;
                 }
             }
@@ -3474,7 +3301,8 @@ async fn run_queue_dispatcher_with_tuning_inner(
                         &state,
                         generation_from_legacy_gpu_job(pending),
                         "Cancelled".to_string(),
-                    );
+                    )
+                    .await;
                 }
                 continue 'dispatcher;
             }
@@ -3497,7 +3325,8 @@ async fn run_queue_dispatcher_with_tuning_inner(
                                 .expect("invalid selected job remains pending"),
                         ),
                         error,
-                    );
+                    )
+                    .await;
                     continue 'dispatcher;
                 }
             };
@@ -3581,7 +3410,8 @@ async fn run_queue_dispatcher_with_tuning_inner(
                             &state,
                             generation_from_legacy_gpu_job(pending),
                             "Cancelled".to_string(),
-                        );
+                        )
+                        .await;
                     }
                     continue 'dispatcher;
                 }
@@ -3610,26 +3440,16 @@ async fn run_queue_dispatcher_with_tuning_inner(
                     if preferred_gpu.is_none() {
                         skip.push(worker.gpu.ordinal);
                     } else {
-                        let mut rejected =
-                            gpu_job.take().expect("gpu_job retained after disconnect");
-                        let err_msg = format!(
-                            "gpu:{} disconnected while dispatching model {model_name}",
-                            worker.gpu.ordinal
-                        );
-                        let settlement = durable_generation_settlement::settle_blocking(
-                            &mut rejected.journal,
+                        let rejected = gpu_job.take().expect("gpu_job retained after disconnect");
+                        durable_generation_settlement::fail_async(
+                            rejected,
                             DurableDisposition::Hold { retryable: true },
-                            &err_msg,
-                        );
-                        if let Some(tx) = rejected.progress_tx {
-                            let _ = tx.send(SseMessage::Error(
-                                durable_generation_settlement::terminal_error_event(
-                                    settlement,
-                                    err_msg.clone(),
-                                ),
-                            ));
-                        }
-                        let _ = rejected.result_tx.send(Err(err_msg));
+                            format!(
+                                "gpu:{} disconnected while dispatching model {model_name}",
+                                worker.gpu.ordinal
+                            ),
+                        )
+                        .await;
                         state.queue.decrement();
                         state.job_registry.remove(&job_id);
                         break;
@@ -3641,11 +3461,11 @@ async fn run_queue_dispatcher_with_tuning_inner(
         crate::metrics::record_queue_depth(state.queue.pending());
     }
     for buffered in buffer {
-        reject_generation_job(&state, buffered.job, legacy_dispatch_stop_message(&state));
+        reject_generation_job(&state, buffered.job, legacy_dispatch_stop_message(&state)).await;
     }
     job_rx.close();
     while let Some(job) = job_rx.recv().await {
-        reject_generation_job(&state, job, legacy_dispatch_stop_message(&state));
+        reject_generation_job(&state, job, legacy_dispatch_stop_message(&state)).await;
     }
     tracing::info!("multi-GPU queue dispatcher shutting down");
 }
@@ -3663,32 +3483,17 @@ pub(crate) fn legacy_generation_preferred_gpu(
         .or(placement_gpu))
 }
 
-fn reject_generation_job(state: &AppState, mut job: GenerationJob, message: String) {
-    let settlement = durable_generation_settlement::settle_blocking(
-        &mut job.journal,
-        DurableDisposition::Retain,
-        &message,
-    );
-    if let Some(progress) = &job.progress_tx {
-        let _ = progress.send(SseMessage::Error(
-            durable_generation_settlement::terminal_error_event(settlement, message.clone()),
-        ));
-    }
+async fn reject_generation_job(state: &AppState, job: GenerationJob, message: String) {
     let job_id = job.id.clone();
-    let _ = job.result_tx.send(Err(message));
+    durable_generation_settlement::fail_async(job, DurableDisposition::Retain, message).await;
     state.queue.decrement();
     state.job_registry.remove(&job_id);
 }
 
-fn reject_cancelled_generation_job(state: &AppState, mut job: GenerationJob) {
-    if let Some(ticket) = job.journal.take() {
-        ticket.discard();
-    }
-    if let Some(progress) = &job.progress_tx {
-        let _ = progress.send(SseMessage::Error(SseErrorEvent::cancelled("Cancelled")));
-    }
+async fn reject_cancelled_generation_job(state: &AppState, job: GenerationJob) {
     let job_id = job.id.clone();
-    let _ = job.result_tx.send(Err("Cancelled".to_string()));
+    let model = job.request.model.clone();
+    durable_generation_settlement::finish_cancelled_async(job, &model, true).await;
     state.queue.decrement();
     state.job_registry.remove(&job_id);
 }
@@ -4201,6 +4006,74 @@ mod tests {
         (journal, db, ticket)
     }
 
+    /// One panic policy for both worker paths.
+    ///
+    /// A panic is never auto-replayed and never user-retryable unchanged. The
+    /// GPU owner adds a quarantine fence on top, which `settle_one` honours
+    /// over the hold; nothing here restarts, so the hold is what the row
+    /// keeps. The two arms used to disagree in the source, with a comment
+    /// explaining why — this asserts they no longer do.
+    #[tokio::test]
+    async fn a_single_worker_inference_panic_holds_the_row_non_retryably() {
+        let (journal, db, ticket) = claimed_single_worker_ticket("panicked");
+        assert_eq!(
+            claim_single_worker_dispatch(Some(&ticket)),
+            Some(crate::queue_journal::DispatchClaim::Granted)
+        );
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        durable_generation_settlement::fail_async(
+            durable_generation_settlement::SettlementChannels {
+                journal: Some(ticket),
+                progress_tx: Some(progress_tx),
+                result_tx: Some(result_tx),
+            },
+            DurableDisposition::Hold { retryable: false },
+            "inference panicked: boom".to_string(),
+        )
+        .await;
+
+        let row = mold_db::generation_queue::get(db.as_ref().as_ref().unwrap(), "panicked")
+            .unwrap()
+            .expect("a panicked row is parked, never deleted");
+        assert_eq!(row.state, mold_db::generation_queue::QueueRowState::Held);
+        let child = mold_db::generation_batches::get_durable(
+            db.as_ref().as_ref().unwrap(),
+            journal.owner_uuid().unwrap(),
+            "batch",
+        )
+        .unwrap()
+        .unwrap()
+        .children
+        .remove(0);
+        assert!(
+            !child.retryable,
+            "`POST /api/queue/:id/retry` must not re-run a request that panicked"
+        );
+        match progress_rx.try_recv().expect("one terminal frame") {
+            SseMessage::Error(event) => {
+                assert!(!event.retained);
+                assert_eq!(event.code, None);
+            }
+            _ => panic!("expected a terminal error frame"),
+        }
+        assert!(result_rx.await.unwrap().is_err());
+
+        for (file, source) in [
+            ("queue.rs", include_str!("queue.rs")),
+            ("gpu_worker.rs", include_str!("gpu_worker.rs")),
+        ] {
+            let arm = source
+                .find("\"inference panicked")
+                .expect("both worker paths report an inference panic");
+            let tail = &source[arm..arm + 800];
+            assert!(
+                tail.contains("DurableDisposition::Hold { retryable: false }"),
+                "{file} must answer a panic with a non-retryable hold"
+            );
+        }
+    }
+
     #[test]
     fn single_worker_claim_transitions_running_then_terminal_complete() {
         let (journal, db, ticket) = claimed_single_worker_ticket("claimed");
@@ -4318,7 +4191,7 @@ mod tests {
             h3_private_ingress_grant: None,
         };
 
-        finish_single_worker_cancelled(job, true);
+        finish_single_worker_cancelled(job, true).await;
 
         let SseMessage::Error(error) = progress_rx.recv().await.unwrap() else {
             panic!("user cancellation must emit a terminal SSE error frame");

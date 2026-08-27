@@ -968,6 +968,16 @@ impl AppState {
     }
 }
 
+impl crate::durable_generation_settlement::IntoSettlementChannels for GenerationJob {
+    fn into_settlement_channels(self) -> crate::durable_generation_settlement::SettlementChannels {
+        crate::durable_generation_settlement::SettlementChannels {
+            journal: self.journal,
+            progress_tx: self.progress_tx,
+            result_tx: Some(self.result_tx),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
