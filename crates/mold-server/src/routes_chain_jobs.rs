@@ -127,11 +127,12 @@ pub async fn create_chain_job(
     // manifest keeps this request verbatim, so an unresolved id would still
     // be unresolved on a resume days later.
     let filing_warnings = crate::routes::resolve_collection_reference(db, &mut req.collection);
-    if req.output_format != mold_core::OutputFormat::Mp4 {
-        return Err(ApiError::validation(
-            "chain jobs require output_format = mp4; stitching and its audio mux \
-             are MP4-native, so request mp4 here and convert the finished print",
-        ));
+    if !req.output_format.is_video() {
+        return Err(ApiError::validation(format!(
+            "{:?} is not a video output format; a chain job stitches MP4 and publishes \
+             the requested mp4, gif, webp, or apng print",
+            req.output_format
+        )));
     }
     // An ephemeral job is one print's implementation detail rather than a
     // sequence the user authored: absent from the listing, swept after
@@ -591,10 +592,11 @@ pub async fn amend_chain_job(
         let candidate = candidate
             .normalise_with_family(Some(&family))
             .map_err(|error| ApiError::validation(error.to_string()))?;
-        if candidate.output_format != mold_core::OutputFormat::Mp4 {
-            return Err(ApiError::validation(
-                "durable chain jobs currently require output_format = mp4",
-            ));
+        if !candidate.output_format.is_video() {
+            return Err(ApiError::validation(format!(
+                "{:?} is not a video output format",
+                candidate.output_format
+            )));
         }
         crate::routes::materialize_chain_camera_controls(&state, &validation_config, &candidate)
             .await?;
