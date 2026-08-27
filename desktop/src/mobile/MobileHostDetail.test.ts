@@ -510,15 +510,21 @@ describe("MobileHostDetail remote host data", () => {
     vi.stubGlobal("fetch", fetchMock);
     const view = await mountDetail();
 
-    expect(view.find("[data-test='host-detail-queue-cancel-job-running']").exists()).toBe(false);
-    const cancel = view.get("[data-test='host-detail-queue-cancel-job-queued']");
-    expect(cancel.attributes("aria-label")).toBe("Cancel queued z-image:q8 job");
+    // A running row on a host without cooperative cancellation offers nothing.
+    expect(
+      view
+        .find("[data-test='host-detail-queue-row-job-running'] [data-test='swipe-action-cancel']")
+        .exists(),
+    ).toBe(false);
+    const row = view.get("[data-test='host-detail-queue-row-job-queued']");
+    const reveal = row.get("[data-test='swipe-row-actions']");
+    expect(reveal.attributes("aria-label")).toBe("Actions for z-image:q8 job");
 
-    await cancel.trigger("click");
+    // Revealing the tray is step one — nothing is cancelled by the gesture.
+    await reveal.trigger("click");
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(cancel.text()).toBe("Cancel?");
 
-    await cancel.trigger("click");
+    await row.get("[data-test='swipe-action-cancel']").trigger("click");
     await flushPromises();
 
     expect(fetchMock).toHaveBeenCalledOnce();
@@ -542,12 +548,11 @@ describe("MobileHostDetail remote host data", () => {
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
     const view = await mountDetail();
-    const cancel = view.get("[data-test='host-detail-queue-cancel-job-running']");
+    const row = view.get("[data-test='host-detail-queue-row-job-running']");
 
-    await cancel.trigger("click");
+    await row.get("[data-test='swipe-row-actions']").trigger("click");
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(cancel.text()).toBe("Cancel?");
-    await cancel.trigger("click");
+    await row.get("[data-test='swipe-action-cancel']").trigger("click");
     await flushPromises();
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -567,17 +572,133 @@ describe("MobileHostDetail remote host data", () => {
       ),
     );
     const view = await mountDetail();
-    const cancel = view.get("[data-test='host-detail-queue-cancel-job-queued']");
+    const row = view.get("[data-test='host-detail-queue-row-job-queued']");
 
-    await cancel.trigger("click");
-    await cancel.trigger("click");
+    await row.get("[data-test='swipe-row-actions']").trigger("click");
+    await row.get("[data-test='swipe-action-cancel']").trigger("click");
     await flushPromises();
 
     expect(view.text()).toContain("z-image:q8");
     expect(view.get("[role='alert']").text()).toContain(
       "queue job job-queued is already running; only queued jobs can be cancelled",
     );
-    expect(cancel.text()).toBe("Cancel");
+    // The row survives the refusal and is actionable again.
+    expect(row.find("[data-test='swipe-action-cancel']").exists()).toBe(true);
+  });
+
+  it("commits the cancel on a full swipe without a second tap", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const view = await mountDetail();
+    const row = view.get("[data-test='host-detail-queue-row-job-queued']");
+    vi.spyOn(row.element, "getBoundingClientRect").mockReturnValue({
+      width: 390,
+    } as DOMRect);
+    const surface = row.get("div:last-child");
+
+    await surface.trigger("pointerdown", {
+      pointerId: 1,
+      pointerType: "touch",
+      clientX: 380,
+      clientY: 0,
+    });
+    await surface.trigger("pointermove", {
+      pointerId: 1,
+      pointerType: "touch",
+      clientX: 60,
+      clientY: 0,
+    });
+    await surface.trigger("pointerup", {
+      pointerId: 1,
+      pointerType: "touch",
+      clientX: 60,
+      clientY: 0,
+    });
+    await flushPromises();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${studio.baseUrl}/api/queue/job-queued`,
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  it("offers Move to back only where the host advertises reordering", async () => {
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    const patched: RequestInit[] = [];
+    apiJsonTo.mockImplementation((requestTarget, path, init) => {
+      if (path === "/api/capabilities") {
+        return Promise.resolve({
+          events: { available: true },
+          devices: { available: true, lifecycle: true },
+          dispatch: { v2_authoritative: true },
+          queue: { can_reorder: true },
+        });
+      }
+      if (path === "/api/queue/job-queued") {
+        patched.push(init as RequestInit);
+        return Promise.resolve({
+          id: "job-queued",
+          model: "z-image:q8",
+          state: "queued",
+          started_at_unix_ms: 1,
+          position: 9,
+        });
+      }
+      return originalApi(requestTarget, path, init);
+    });
+    const view = await mountDetail();
+
+    // Reordering is queued-only; a running row never offers it.
+    expect(
+      view
+        .find("[data-test='host-detail-queue-row-job-running'] [data-test='swipe-action-back']")
+        .exists(),
+    ).toBe(false);
+    const row = view.get("[data-test='host-detail-queue-row-job-queued']");
+    await row.get("[data-test='swipe-row-actions']").trigger("click");
+    await row.get("[data-test='swipe-action-back']").trigger("click");
+    await flushPromises();
+
+    expect(patched).toHaveLength(1);
+    expect(patched[0]!.method).toBe("PATCH");
+    // The server clamps a large index to the tail, so no depth read is needed.
+    expect(JSON.parse(String(patched[0]!.body)).position).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  it("opens one queue row in a detail sheet with the shared vocabulary", async () => {
+    const view = await mountDetail();
+    expect(view.find("[data-test='queue-entry-detail']").exists()).toBe(false);
+
+    await view.get("[data-test='host-detail-queue-open-job-queued']").trigger("click");
+    await flushPromises();
+
+    const sheet = view.get("[data-test='queue-entry-detail']");
+    expect(sheet.get("[data-test='queue-detail-facts']").text()).toContain("#2 in line");
+    // The gap is the wire's, not an old host's.
+    expect(sheet.text()).not.toMatch(/upgrade/i);
+    expect(sheet.get("[data-test='queue-detail-settings-notice']").text()).toMatch(
+      /once this machine loads the job/i,
+    );
+  });
+
+  it("arms the sheet's cancel before it touches the host", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const view = await mountDetail();
+    await view.get("[data-test='host-detail-queue-open-job-queued']").trigger("click");
+    await flushPromises();
+
+    const cancel = view.get("[data-test='queue-detail-cancel']");
+    await cancel.trigger("click");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(cancel.text()).toBe("Cancel job?");
+
+    await cancel.trigger("click");
+    await flushPromises();
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${studio.baseUrl}/api/queue/job-queued`,
+      expect.objectContaining({ method: "DELETE" }),
+    );
   });
 
   it("ignores older same-host queue and device refetches after a newer event refresh", async () => {

@@ -493,6 +493,28 @@ export async function mutateQueueJobOnExpectedInstance(
   }
 }
 
+/**
+ * Send one queued job to the back of the line.
+ *
+ * `PATCH /api/queue/:id {position}` clamps a large index to the tail, so this
+ * needs no read of the current depth — which matters on a phone, where the
+ * listing it would read is a bounded page rather than the whole queue.
+ */
+export async function moveQueueJobToBack(
+  target: ApiTarget,
+  workId: string,
+): Promise<QueueEntry> {
+  return apiJsonTo<QueueEntry>(
+    target,
+    `/api/queue/${encodeURIComponent(workId)}`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ position: Number.MAX_SAFE_INTEGER }),
+    },
+  );
+}
+
 /** Set or clear a durable stable-device pin for queued work. */
 export async function setQueueDevicePin(
   target: ApiTarget,

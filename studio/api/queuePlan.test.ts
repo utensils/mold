@@ -12,6 +12,7 @@ import {
   reduceQueuePlanEvent,
   retryQueueJob,
   retryQueueJobRecoveringAmbiguity,
+  moveQueueJobToBack,
   setQueueDevicePin,
   type QueuePlan,
   type QueueListing,
@@ -358,6 +359,34 @@ describe("queue plan contract", () => {
     expect((init?.headers as Headers).get("x-api-key")).toBe("secret");
     expect(JSON.parse(String(init?.body))).toEqual({
       hard_pinned_device_id: null,
+    });
+  });
+
+  it("sends a queued job to the back without reading the queue depth", async () => {
+    let captured: [RequestInfo | URL, RequestInit | undefined] | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        captured = [input, init];
+        return Response.json({
+          id: "job/1",
+          model: "flux-dev:q8",
+          state: "queued",
+          started_at_unix_ms: 1,
+          position: 4,
+        });
+      }),
+    );
+    await moveQueueJobToBack(
+      { baseUrl: "https://gpu.example", apiKey: "secret" },
+      "job/1",
+    );
+    const [url, init] = captured!;
+    expect(url).toBe("https://gpu.example/api/queue/job%2F1");
+    expect(init?.method).toBe("PATCH");
+    // The server clamps a large index to the tail, so no depth read is needed.
+    expect(JSON.parse(String(init?.body))).toEqual({
+      position: Number.MAX_SAFE_INTEGER,
     });
   });
 

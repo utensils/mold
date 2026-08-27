@@ -19,6 +19,15 @@ const RUBBER_BAND_RESISTANCE = 0.35;
 
 export type SwipePhase = "idle" | "undecided" | "horizontal" | "vertical";
 
+/** One trailing action a swipe row reveals. */
+export interface SwipeRowAction {
+  id: string;
+  label: string;
+  tone?: "danger" | "neutral";
+  /** At most one action should claim the full swipe. */
+  commitOnFullSwipe?: boolean;
+}
+
 export interface SwipeGestureState {
   phase: SwipePhase;
   /** Row translation in px. 0 is closed; negative reveals the trailing tray. */

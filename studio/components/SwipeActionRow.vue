@@ -22,15 +22,8 @@ import {
   moveSwipe,
   swipeIsOpen,
   type SwipeGestureConfig,
+  type SwipeRowAction,
 } from "../lib/swipeAction";
-
-export interface SwipeRowAction {
-  id: string;
-  label: string;
-  tone?: "danger" | "neutral";
-  /** At most one action should claim the full swipe. */
-  commitOnFullSwipe?: boolean;
-}
 
 const props = withDefaults(
   defineProps<{
@@ -148,6 +141,7 @@ defineExpose({ close });
     >
       <slot />
       <button
+        v-if="actions.length > 0"
         type="button"
         class="swipe-row__more"
         :aria-label="`Actions for ${label}`"
