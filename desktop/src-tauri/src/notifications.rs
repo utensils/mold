@@ -41,7 +41,9 @@ pub async fn send_native_notification(
         // UNUserNotificationCenter aborts the process with an uncatchable
         // NSInternalInconsistencyException ("bundleProxyForCurrentProcess is
         // nil") when the binary runs outside an .app bundle — i.e. `tauri dev`.
-        if macos_bundle_identifier().is_none() {
+        // The check reads the executable PATH, never `NSBundle.bundleIdentifier`:
+        // see `runs_from_app_bundle`.
+        if !runs_from_app_bundle() {
             tracing::warn!(
                 "skipping native notification: not running from an app bundle (dev mode)"
             );
@@ -149,14 +151,31 @@ pub fn take_notification_action() -> Option<NotificationAction> {
     PENDING_ACTION.lock().ok()?.take()
 }
 
-/// Some(id) only when the process runs from a real .app bundle; None for bare
-/// binaries (dev builds, test harnesses), where UserNotifications cannot work.
+/// Whether `exe` sits inside a `.app` bundle (`…/Mold.app/Contents/MacOS/x`).
+/// Bare binaries (dev builds, test harnesses) never do.
 #[cfg(target_os = "macos")]
-fn macos_bundle_identifier() -> Option<String> {
-    use objc2_foundation::NSBundle;
-    NSBundle::mainBundle()
-        .bundleIdentifier()
-        .map(|id| id.to_string())
+fn exe_is_inside_app_bundle(exe: &std::path::Path) -> bool {
+    crate::relocate::bundle_path_from_exe(exe).is_some()
+}
+
+/// True only when the process runs from a real .app bundle, where
+/// UserNotifications can work.
+///
+/// This is deliberately a PATH question and not `NSBundle.mainBundle.bundleIdentifier`.
+/// When this command declines in dev mode, `notify.ts` falls back to
+/// `@tauri-apps/plugin-notification`, whose macOS path calls
+/// `notify_rust::set_application("com.apple.Terminal")`; `mac-notification-sys`
+/// implements that by swizzling `-[NSBundle bundleIdentifier]` process-wide
+/// (`objc/notify.h` `installNSBundleHook`). From then on the main bundle reports
+/// an identifier it does not have, an identifier-based guard passes, and the
+/// NEXT native notification aborts the dev app with
+/// "bundleProxyForCurrentProcess is nil". No dependency can swizzle
+/// `current_exe`.
+#[cfg(target_os = "macos")]
+fn runs_from_app_bundle() -> bool {
+    std::env::current_exe()
+        .ok()
+        .is_some_and(|exe| exe_is_inside_app_bundle(&exe))
 }
 
 /// What `delegate::install` may do given the process it finds itself in.
@@ -168,12 +187,12 @@ enum DelegateInstall {
     SkipOffMainThread,
 }
 
-/// Bundle identity is checked before the thread, because touching
+/// The bundle location is checked before the thread, because touching
 /// `UNUserNotificationCenter` at all from an unbundled process aborts it — and
 /// the abort happens on the main thread, where the delegate would be installed.
 #[cfg(target_os = "macos")]
-fn delegate_install_decision(has_bundle_identity: bool, on_main_thread: bool) -> DelegateInstall {
-    match (has_bundle_identity, on_main_thread) {
+fn delegate_install_decision(in_app_bundle: bool, on_main_thread: bool) -> DelegateInstall {
+    match (in_app_bundle, on_main_thread) {
         (false, _) => DelegateInstall::SkipUnbundled,
         (true, false) => DelegateInstall::SkipOffMainThread,
         (true, true) => DelegateInstall::Run,
@@ -295,8 +314,8 @@ fn action_from_identifier(identifier: &str) -> Option<NotificationAction> {
 #[cfg(target_os = "macos")]
 mod delegate {
     use super::{
-        action_from_identifier, delegate_install_decision, macos_bundle_identifier,
-        DelegateInstall, NotificationAction,
+        action_from_identifier, delegate_install_decision, runs_from_app_bundle, DelegateInstall,
+        NotificationAction,
     };
     use block2::DynBlock;
     use objc2::runtime::ProtocolObject;
@@ -347,7 +366,7 @@ mod delegate {
 
     pub fn install(app: &tauri::AppHandle) {
         let mtm = MainThreadMarker::new();
-        match delegate_install_decision(macos_bundle_identifier().is_some(), mtm.is_some()) {
+        match delegate_install_decision(runs_from_app_bundle(), mtm.is_some()) {
             DelegateInstall::SkipUnbundled => {
                 tracing::warn!(
                     "skipping notification delegate: not running from an app bundle (dev mode)"
@@ -379,8 +398,8 @@ pub fn install_notification_delegate(app: &tauri::AppHandle) {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::{
-        action_from_identifier, delegate_install_decision, macos_bundle_identifier,
-        wait_for_callback, DelegateInstall, NotificationAction,
+        action_from_identifier, delegate_install_decision, exe_is_inside_app_bundle,
+        runs_from_app_bundle, wait_for_callback, DelegateInstall, NotificationAction,
     };
     use base64::Engine;
 
@@ -389,7 +408,7 @@ mod tests {
     /// process outside an .app bundle. Being on the main thread is exactly the
     /// case `tauri dev` hits, so the bundle check must be decided first.
     #[test]
-    fn delegate_install_is_skipped_without_bundle_identity() {
+    fn delegate_install_is_skipped_outside_an_app_bundle() {
         assert_eq!(
             delegate_install_decision(false, true),
             DelegateInstall::SkipUnbundled
@@ -410,8 +429,37 @@ mod tests {
     #[test]
     fn bare_binary_never_installs_the_delegate() {
         assert_eq!(
-            delegate_install_decision(macos_bundle_identifier().is_some(), true),
+            delegate_install_decision(runs_from_app_bundle(), true),
             DelegateInstall::SkipUnbundled
+        );
+    }
+
+    /// The bundle question is answered from the executable path alone.
+    #[test]
+    fn exe_inside_app_bundle_is_a_path_question() {
+        use std::path::Path;
+        assert!(exe_is_inside_app_bundle(Path::new(
+            "/Applications/Mold.app/Contents/MacOS/mold-desktop"
+        )));
+        assert!(!exe_is_inside_app_bundle(Path::new(
+            "/Users/dev/mold/desktop/src-tauri/target/debug/mold-desktop"
+        )));
+    }
+
+    /// Regression for the second-notification abort in `tauri dev`: once the
+    /// plugin fallback has run, `mac-notification-sys` has swizzled
+    /// `-[NSBundle bundleIdentifier]` to answer "com.apple.Terminal" for the
+    /// main bundle, so an identifier-based guard passes on a bare binary and
+    /// UNUserNotificationCenter aborts the process. The guard must therefore
+    /// never read the identifier at all.
+    #[test]
+    fn bundle_check_never_reads_nsbundle_identifier() {
+        let source = include_str!("notifications.rs");
+        // Split so this literal is not itself a match.
+        let reads = source.matches(concat!(".bundle", "Identifier()")).count();
+        assert_eq!(
+            reads, 0,
+            "guard must derive bundle identity from the executable path"
         );
     }
 
@@ -426,8 +474,8 @@ mod tests {
     /// environment where UNUserNotificationCenter throws an uncatchable
     /// NSInternalInconsistencyException. The guard must detect it.
     #[test]
-    fn bare_binary_has_no_bundle_identity() {
-        assert!(macos_bundle_identifier().is_none());
+    fn bare_binary_is_not_an_app_bundle() {
+        assert!(!runs_from_app_bundle());
     }
 
     #[test]
