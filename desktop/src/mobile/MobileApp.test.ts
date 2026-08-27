@@ -1944,7 +1944,7 @@ describe("MobileApp Output field", () => {
       true,
     );
 
-    await row.get("[data-test='mobile-sequence-cancel']").trigger("click");
+    await row.get("[data-test='swipe-action-cancel']").trigger("click");
     await flushPromises();
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/chain-jobs/sequence-job-1/cancel", {
       method: "POST",
@@ -1995,22 +1995,22 @@ describe("MobileApp Output field", () => {
     await failure.trigger("click");
     expect(failure.attributes("aria-expanded")).toBe("true");
     expect(failure.classes()).toContain("mobile-sequence-row-error--expanded");
-    expect(row.find("[data-test='mobile-sequence-cancel']").exists()).toBe(false);
-    expect(row.find("[data-test='mobile-sequence-dismiss']").exists()).toBe(true);
+    expect(row.find("[data-test='swipe-action-cancel']").exists()).toBe(false);
+    expect(row.find("[data-test='swipe-action-dismiss']").exists()).toBe(true);
     // The row survives for its actions, but a settled job is not active work.
     expect(wrapper.get("[data-test='mobile-queue-count']").text()).toBe("0 active");
     // A settled job has nothing left to stream.
     expect(events.options.signal.aborted).toBe(true);
     expect(localStorage.getItem("mold.mobile.sequence-job.v1")).toBeNull();
 
-    await row.get("[data-test='mobile-sequence-resume']").trigger("click");
+    await row.get("[data-test='swipe-action-resume']").trigger("click");
     await flushPromises();
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/chain-jobs/sequence-job-1/resume", {
       method: "POST",
     });
     // Resuming re-attaches on the SAME frozen route and re-arms recovery.
     const resumed = wrapper.get("[data-test='mobile-sequence-job']");
-    expect(resumed.find("[data-test='mobile-sequence-cancel']").exists()).toBe(true);
+    expect(resumed.find("[data-test='swipe-action-cancel']").exists()).toBe(true);
     expect(JSON.parse(localStorage.getItem("mold.mobile.sequence-job.v1") ?? "null")).toEqual({
       hostId: "studio-id",
       baseUrl: target.baseUrl,
@@ -2044,7 +2044,7 @@ describe("MobileApp Output field", () => {
     await flushPromises();
 
     await wrapper
-      .get("[data-test='mobile-sequence-job'] [data-test='mobile-sequence-dismiss']")
+      .get("[data-test='mobile-sequence-job'] [data-test='swipe-action-dismiss']")
       .trigger("click");
     await flushPromises();
     expect(wrapper.find("[data-test='mobile-sequence-job']").exists()).toBe(false);
@@ -2605,7 +2605,7 @@ describe("MobileApp generation queue", () => {
     wrapper = mountMobileApp();
     await flushPromises();
     await submitPrompt("cancel before admission returns");
-    await wrapper.get("[data-test='mobile-generation-cancel']").trigger("click");
+    await wrapper.get("[data-test='swipe-action-cancel']").trigger("click");
     await flushPromises();
 
     expect(
@@ -2737,7 +2737,7 @@ describe("MobileApp generation queue", () => {
     expect(wrapper.get("[data-test='mobile-generation-held-error']").text()).toBe(
       "model access requires approval",
     );
-    expect(wrapper.find("[data-test='mobile-generation-retry']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='swipe-action-retry']").exists()).toBe(false);
   });
 
   it("retries only an explicitly retryable held child on its exact authenticated host", async () => {
@@ -2790,9 +2790,9 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
     await submitPrompt("retry held print");
 
-    const retry = wrapper.get("[data-test='mobile-generation-retry']");
+    const retry = wrapper.get("[data-test='swipe-action-retry']");
     expect(retry.text()).toBe("Retry");
-    expect(retry.classes()).toContain("mobile-touch-action");
+    expect(retry.classes()).toContain("swipe-row__action");
     expect(wrapper.get("[data-test='mobile-generation-held-error']").text()).toBe(
       "artifact digest mismatch",
     );
@@ -2804,12 +2804,13 @@ describe("MobileApp generation queue", () => {
     );
     const retryClick = retry.trigger("click");
     await flushPromises();
-    expect(wrapper.get("[data-test='mobile-generation-retry']").attributes("disabled")).toBe("");
+    // While the retry is in flight the row offers no second Retry action.
+    expect(wrapper.find("[data-test='swipe-action-retry']").exists()).toBe(false);
     openStreams
       .find((stream) => stream.path === "/api/events")!
       .options.onEvent("event", JSON.stringify({ type: "generation_states_committed" }));
     await flushPromises();
-    expect(wrapper.get("[data-test='mobile-generation-retry']").attributes("disabled")).toBe("");
+    expect(wrapper.find("[data-test='swipe-action-retry']").exists()).toBe(false);
     confirmation.resolve(new Response(null, { status: 202 }));
     await retryClick;
     await flushPromises();
@@ -4352,7 +4353,7 @@ describe("MobileApp generation queue", () => {
     const cancelRow = wrapper
       .findAll("[data-test='mobile-generation-job']")
       .find((row) => row.text().includes("cancelled dusk"))!;
-    await cancelRow.get("[data-test='mobile-generation-cancel']").trigger("click");
+    await cancelRow.get("[data-test='swipe-action-cancel']").trigger("click");
     await flushPromises();
 
     // The machine never confirmed the cancel, and it settles the batch anyway:
@@ -5297,7 +5298,9 @@ describe("MobileApp generation queue", () => {
 
     admissions.settleAt(0, { state: "running" });
     await flushPromises();
-    await wrapper.get("[data-test='mobile-generation-job']").trigger("click");
+    await wrapper
+      .get("[data-test='mobile-generation-job'] .mobile-generation-job")
+      .trigger("click");
     await flushPromises();
     await flushPromises();
 
@@ -5349,7 +5352,7 @@ describe("MobileApp generation queue", () => {
     // Each print is its own durable child, so cancelling one names that
     // child's own queue id and leaves the other alone.
     const second = rows.find((row) => row.text().includes("second prompt"));
-    await second?.get("[data-test='mobile-generation-cancel']").trigger("click");
+    await second?.get("[data-test='swipe-action-cancel']").trigger("click");
     await flushPromises();
 
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/durable-job-2", {
@@ -5497,7 +5500,7 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
     await submitPrompt("cancel before the remote queue id arrives");
 
-    await wrapper.get("[data-test='mobile-generation-cancel']").trigger("click");
+    await wrapper.get("[data-test='swipe-action-cancel']").trigger("click");
     await flushPromises();
     expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("Accepted");
 
@@ -5865,7 +5868,7 @@ describe("MobileApp generation queue", () => {
     await submitPrompt("almost finished prompt");
     apiFetchTo.mockImplementationOnce(async () => new Response(null, { status: 204 }));
 
-    await wrapper.get("[data-test='mobile-generation-cancel']").trigger("click");
+    await wrapper.get("[data-test='swipe-action-cancel']").trigger("click");
     admission.resolve(durableBatchResponse(body, { state: "complete" }));
     await flushPromises();
     await flushPromises();

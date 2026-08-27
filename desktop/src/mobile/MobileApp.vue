@@ -424,6 +424,8 @@ import MobileSharedParams from "./MobileSharedParams.vue";
 import MobileSourceControls from "./MobileSourceControls.vue";
 import MobileStyleChips from "./MobileStyleChips.vue";
 import MobileTemplates from "./MobileTemplates.vue";
+import SwipeActionRow from "@studio/components/SwipeActionRow.vue";
+import type { SwipeRowAction } from "@studio/lib/swipeAction";
 import { mobileFileUnderAvailable, mobileFileUnderCollections } from "./fileUnder";
 import {
   emptyFileUnderState,
@@ -9950,6 +9952,49 @@ onBeforeUnmount(() => {
   generation.resetJobs();
   for (const url of objectUrls) URL.revokeObjectURL(url);
 });
+type MobileActivityRow = (typeof activityRows.value)[number];
+
+/**
+ * Trailing swipe actions for one Create queue row. Cancel is the only
+ * destructive one and the only one a full swipe commits; the tray's reveal is
+ * step one, so the row keeps its two deliberate moves without inline buttons.
+ * Retry appears only for a durable hold the host itself fenced.
+ */
+function mobileQueueRowActions(row: MobileActivityRow): SwipeRowAction[] {
+  const actions: SwipeRowAction[] = [];
+  if (row.print) {
+    if (durableHeldIsRetryable(row.print) && !durableHeldIsRetrying(row.print)) {
+      actions.push({ id: "retry", label: "Retry" });
+    }
+    if (!row.print.cancelling) {
+      actions.push({ id: "cancel", label: "Cancel", tone: "danger", commitOnFullSwipe: true });
+    }
+    return actions;
+  }
+  if (!row.sequence) return actions;
+  if (row.sequence.actions.includes("resume")) {
+    actions.push({ id: "resume", label: "Resume" });
+  }
+  if (row.sequence.actions.includes("delete")) {
+    actions.push({ id: "dismiss", label: "Dismiss" });
+  }
+  if (row.sequence.actions.includes("cancel")) {
+    actions.push({ id: "cancel", label: "Cancel", tone: "danger", commitOnFullSwipe: true });
+  }
+  return actions;
+}
+
+function onMobileQueueRowAction(row: MobileActivityRow, action: string): void {
+  if (row.print) {
+    if (action === "retry") void retryHeldGeneration(row.print);
+    if (action === "cancel") void cancelGeneration(row.print);
+    return;
+  }
+  if (!row.sequence) return;
+  if (action === "cancel") void cancelMobileSequence();
+  if (action === "resume") void resumeMobileSequence();
+  if (action === "dismiss") void dismissMobileSequence();
+}
 </script>
 
 <template>
@@ -10764,121 +10809,86 @@ onBeforeUnmount(() => {
               <span data-test="mobile-queue-count">{{ activityCountLabel(activityCounts) }}</span>
             </div>
             <ol>
-              <li
-                v-for="row in activityRows"
-                :key="row.key"
-                class="mobile-generation-job"
-                :data-test="row.print ? 'mobile-generation-job' : 'mobile-sequence-job'"
-                role="button"
-                tabindex="0"
-                @click="row.print ? selectMobilePrint(row.print) : selectCurrentMobileSequence()"
-                @keydown.enter.prevent="
-                  row.print ? selectMobilePrint(row.print) : selectCurrentMobileSequence()
-                "
-              >
-                <template v-if="row.print">
-                  <div class="mobile-generation-job-copy">
-                    <p>{{ row.print.prompt }}</p>
-                    <span>{{ modelLabel(row.print.model) }} · {{ row.print.hostLabel }}</span>
-                    <p
-                      v-if="durableHeldError(row.print)"
-                      class="mobile-generation-held-error"
-                      data-test="mobile-generation-held-error"
-                    >
-                      {{ durableHeldError(row.print) }}
-                    </p>
+              <li v-for="row in activityRows" :key="row.key" class="mobile-generation-row">
+                <SwipeActionRow
+                  :actions="mobileQueueRowActions(row)"
+                  :label="row.print ? row.print.prompt : modelLabel(row.sequence?.model ?? '')"
+                  :disabled="row.print?.cancelling === true"
+                  :data-test="row.print ? 'mobile-generation-job' : 'mobile-sequence-job'"
+                  @act="onMobileQueueRowAction(row, $event)"
+                >
+                  <div
+                    class="mobile-generation-job"
+                    role="button"
+                    tabindex="0"
+                    @click="
+                      row.print ? selectMobilePrint(row.print) : selectCurrentMobileSequence()
+                    "
+                    @keydown.enter.prevent="
+                      row.print ? selectMobilePrint(row.print) : selectCurrentMobileSequence()
+                    "
+                  >
+                    <template v-if="row.print">
+                      <div class="mobile-generation-job-copy">
+                        <p>{{ row.print.prompt }}</p>
+                        <span>{{ modelLabel(row.print.model) }} · {{ row.print.hostLabel }}</span>
+                        <p
+                          v-if="durableHeldError(row.print)"
+                          class="mobile-generation-held-error"
+                          data-test="mobile-generation-held-error"
+                        >
+                          {{ durableHeldError(row.print) }}
+                        </p>
+                      </div>
+                      <div class="mobile-generation-job-action">
+                        <span data-test="mobile-generation-status">{{
+                          activityRowStatus(row)
+                        }}</span>
+                        <span v-if="row.print.cancelling" data-test="mobile-generation-cancelling">
+                          Cancelling…
+                        </span>
+                      </div>
+                    </template>
+                    <template v-else-if="row.sequence">
+                      <div class="mobile-generation-job-copy">
+                        <p>
+                          {{ modelLabel(row.sequence.model) || "Sequence" }} ·
+                          {{ row.sequence.stageCount }} clips
+                        </p>
+                        <span>
+                          {{ row.sequence.phase ?? row.sequence.state }} · clip
+                          {{ Math.min(row.sequence.currentStage + 1, row.sequence.stageCount) }}/{{
+                            row.sequence.stageCount
+                          }}
+                          <template v-if="sequenceRowProgress !== null">
+                            · {{ sequenceRowProgress }}%
+                          </template>
+                        </span>
+                        <button
+                          v-if="row.sequence.error"
+                          type="button"
+                          class="mobile-sequence-row-error"
+                          :class="{
+                            'mobile-sequence-row-error--expanded': expandedQueueFailures.has(
+                              row.key,
+                            ),
+                          }"
+                          data-test="mobile-sequence-error-disclosure"
+                          :aria-expanded="expandedQueueFailures.has(row.key)"
+                          @click.stop="toggleQueueFailure(row.key)"
+                        >
+                          <span>{{ row.sequence.error }}</span>
+                          <span aria-hidden="true">
+                            {{ expandedQueueFailures.has(row.key) ? "Less" : "Details" }}
+                          </span>
+                        </button>
+                      </div>
+                      <div class="mobile-generation-job-action">
+                        <span data-test="mobile-sequence-status">{{ row.sequence.hostLabel }}</span>
+                      </div>
+                    </template>
                   </div>
-                  <div class="mobile-generation-job-action">
-                    <span data-test="mobile-generation-status">{{ activityRowStatus(row) }}</span>
-                    <button
-                      v-if="durableHeldIsRetryable(row.print)"
-                      class="mobile-generation-retry mobile-touch-action"
-                      type="button"
-                      data-test="mobile-generation-retry"
-                      :disabled="durableHeldIsRetrying(row.print)"
-                      @click.stop="retryHeldGeneration(row.print)"
-                    >
-                      {{ durableHeldIsRetrying(row.print) ? "Retrying…" : "Retry" }}
-                    </button>
-                    <button
-                      class="mobile-generation-cancel"
-                      type="button"
-                      :aria-label="
-                        row.print.cancelling
-                          ? `Cancelling ${row.print.prompt}`
-                          : `Cancel ${row.print.prompt}`
-                      "
-                      data-test="mobile-generation-cancel"
-                      :disabled="row.print.cancelling"
-                      @click.stop="cancelGeneration(row.print)"
-                    >
-                      {{ row.print.cancelling ? "Cancelling…" : "Cancel" }}
-                    </button>
-                  </div>
-                </template>
-                <template v-else-if="row.sequence">
-                  <div class="mobile-generation-job-copy">
-                    <p>
-                      {{ modelLabel(row.sequence.model) || "Sequence" }} ·
-                      {{ row.sequence.stageCount }} clips
-                    </p>
-                    <span>
-                      {{ row.sequence.phase ?? row.sequence.state }} · clip
-                      {{ Math.min(row.sequence.currentStage + 1, row.sequence.stageCount) }}/{{
-                        row.sequence.stageCount
-                      }}
-                      <template v-if="sequenceRowProgress !== null">
-                        · {{ sequenceRowProgress }}%
-                      </template>
-                    </span>
-                    <button
-                      v-if="row.sequence.error"
-                      type="button"
-                      class="mobile-sequence-row-error"
-                      :class="{
-                        'mobile-sequence-row-error--expanded': expandedQueueFailures.has(row.key),
-                      }"
-                      data-test="mobile-sequence-error-disclosure"
-                      :aria-expanded="expandedQueueFailures.has(row.key)"
-                      @click.stop="toggleQueueFailure(row.key)"
-                    >
-                      <span>{{ row.sequence.error }}</span>
-                      <span aria-hidden="true">
-                        {{ expandedQueueFailures.has(row.key) ? "Less" : "Details" }}
-                      </span>
-                    </button>
-                  </div>
-                  <div class="mobile-generation-job-action">
-                    <span data-test="mobile-sequence-status">{{ row.sequence.hostLabel }}</span>
-                    <button
-                      v-if="row.sequence.actions.includes('cancel')"
-                      class="mobile-generation-cancel"
-                      type="button"
-                      data-test="mobile-sequence-cancel"
-                      @click.stop="cancelMobileSequence"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      v-else-if="row.sequence.actions.includes('resume')"
-                      class="mobile-generation-cancel mobile-sequence-resume"
-                      type="button"
-                      data-test="mobile-sequence-resume"
-                      @click.stop="resumeMobileSequence"
-                    >
-                      Resume
-                    </button>
-                    <button
-                      v-if="row.sequence.actions.includes('delete')"
-                      class="mobile-generation-cancel mobile-sequence-dismiss"
-                      type="button"
-                      data-test="mobile-sequence-dismiss"
-                      @click.stop="dismissMobileSequence"
-                    >
-                      Dismiss
-                    </button>
-                  </div>
-                </template>
+                </SwipeActionRow>
               </li>
             </ol>
             <LiveActivityList
