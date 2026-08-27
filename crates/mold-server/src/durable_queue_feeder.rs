@@ -368,6 +368,20 @@ fn claim_next(
                         claimed_as_attached: true,
                     }));
                 }
+                // An exact claim that fails means one of two things, and they
+                // need opposite answers. The row may be GONE — cancelled and
+                // deleted — in which case the hint and its observer are both
+                // dead and `discard_hint` resolves the caller. Or the row may
+                // simply be UNCLAIMABLE RIGHT NOW, most often because this
+                // same feeder just claimed it through the ordinary FIFO path,
+                // whose `take_claimed` will hand the observer over exactly
+                // once. Discarding the hint in that second case detaches a
+                // live observer and turns a print into a `202` the caller has
+                // to reconcile — which is what two concurrent `/api/generate`
+                // requests used to do to each other.
+                None if journal.owns_cancellable_row(&job_id).unwrap_or(false) => {
+                    ingress.defer_claimed_hint(&job_id);
+                }
                 None => ingress.discard_hint(&job_id),
             }
         }

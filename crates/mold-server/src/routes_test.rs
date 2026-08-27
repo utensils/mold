@@ -12461,59 +12461,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_requests_only_load_existing_engine_once() {
         let load_count = Arc::new(AtomicUsize::new(0));
-        let (tx, rx) = tokio::sync::mpsc::channel(16);
-        let queue = crate::state::QueueHandle::new(tx);
-        let engine = MockEngine::unloaded(load_count.clone(), Duration::from_millis(50));
-        let mut cache = crate::model_cache::ModelCache::new(3);
-        cache.insert(Box::new(engine), 0);
-        let state = AppState {
-            instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
-            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
-            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
-            discovery: Arc::new(crate::state::DiscoveryState::default()),
-            gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new().into(),
-            }),
-            generation_unavailable_reason: Arc::new(std::sync::RwLock::new(None)),
-            device_registry: crate::device_registry::DeviceRegistry::empty(),
-            queue_capacity: 200,
-            model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
-            active_generation: Arc::new(std::sync::RwLock::new(None)),
-            config: Arc::new(tokio::sync::RwLock::new(AppState::test_config())),
-            reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
-            output_disabled_override: true,
-            reload_config_from_disk: false,
-            start_time: std::time::Instant::now(),
-            model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
-            pull_lock: Arc::new(tokio::sync::Mutex::new(())),
-            queue,
-            scheduled_work: crate::scheduler::ScheduledWorkHandle::default(),
-            job_registry: crate::job_registry::JobRegistry::new(),
-            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
-            queue_pause: crate::queue::QueuePause::new(),
-            shared_pool: Arc::new(std::sync::Mutex::new(
-                mold_inference::shared_pool::SharedPool::new(),
-            )),
-            shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
-            metadata_db: Arc::new(None),
-            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
-            chain_jobs: None,
-            downloads: crate::downloads::DownloadQueue::new(),
-            resources: crate::resources::ResourceBroadcaster::new(),
-            events: crate::events::EventBroadcaster::new(),
-            catalog_live_cache: mold_catalog::live::LiveCache::new(
-                std::time::Duration::from_secs(300),
-                64,
-            ),
-            catalog_live_civitai_base: std::sync::Arc::new(
-                crate::state::CATALOG_LIVE_CIVITAI_BASE.to_string(),
-            ),
-            catalog_intents: std::sync::Arc::new(tokio::sync::RwLock::new(
-                std::collections::HashMap::new(),
-            )),
-            models_disk_cache: Arc::new(crate::state::ModelsDiskCache::default()),
-        };
+        let (state, rx, _gallery_root) = durable_test_state(MockEngine::unloaded(
+            load_count.clone(),
+            Duration::from_millis(50),
+        ));
+        spawn_durable_feeder(&state);
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
         let app = app_with_state(state);
@@ -12536,59 +12488,8 @@ mod tests {
     /// conversion) are delivered through the SSE stream to the client.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stream_delivers_load_progress_events() {
-        let (tx, rx) = tokio::sync::mpsc::channel(16);
-        let queue = crate::state::QueueHandle::new(tx);
-        let engine = MockEngine::unloaded_with_progress();
-        let mut cache = crate::model_cache::ModelCache::new(3);
-        cache.insert(Box::new(engine), 0);
-        let state = AppState {
-            instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
-            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
-            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
-            discovery: Arc::new(crate::state::DiscoveryState::default()),
-            gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new().into(),
-            }),
-            generation_unavailable_reason: Arc::new(std::sync::RwLock::new(None)),
-            device_registry: crate::device_registry::DeviceRegistry::empty(),
-            queue_capacity: 200,
-            model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
-            active_generation: Arc::new(std::sync::RwLock::new(None)),
-            config: Arc::new(tokio::sync::RwLock::new(AppState::test_config())),
-            reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
-            output_disabled_override: true,
-            reload_config_from_disk: false,
-            start_time: std::time::Instant::now(),
-            model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
-            pull_lock: Arc::new(tokio::sync::Mutex::new(())),
-            queue,
-            scheduled_work: crate::scheduler::ScheduledWorkHandle::default(),
-            job_registry: crate::job_registry::JobRegistry::new(),
-            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
-            queue_pause: crate::queue::QueuePause::new(),
-            shared_pool: Arc::new(std::sync::Mutex::new(
-                mold_inference::shared_pool::SharedPool::new(),
-            )),
-            shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
-            metadata_db: Arc::new(None),
-            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
-            chain_jobs: None,
-            downloads: crate::downloads::DownloadQueue::new(),
-            resources: crate::resources::ResourceBroadcaster::new(),
-            events: crate::events::EventBroadcaster::new(),
-            catalog_live_cache: mold_catalog::live::LiveCache::new(
-                std::time::Duration::from_secs(300),
-                64,
-            ),
-            catalog_live_civitai_base: std::sync::Arc::new(
-                crate::state::CATALOG_LIVE_CIVITAI_BASE.to_string(),
-            ),
-            catalog_intents: std::sync::Arc::new(tokio::sync::RwLock::new(
-                std::collections::HashMap::new(),
-            )),
-            models_disk_cache: Arc::new(crate::state::ModelsDiskCache::default()),
-        };
+        let (state, rx, _gallery_root) = durable_test_state(MockEngine::unloaded_with_progress());
+        spawn_durable_feeder(&state);
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
         let app = app_with_state(state);
@@ -12797,6 +12698,57 @@ mod tests {
             .unwrap();
     }
 
+    /// Two concurrent prints must both come back as prints.
+    ///
+    /// The feeder prefers claiming rows that have an attached observer, and an
+    /// exact claim that fails used to discard the hint AND the observer. Under
+    /// concurrency the ordinary FIFO claim routinely wins a row first, so the
+    /// second request's observer was destroyed and its caller received a `202`
+    /// reconciliation body for a print that rendered perfectly well. Only a
+    /// row that is genuinely gone may discard its observer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_prints_keep_their_own_observers() {
+        let (app, _gallery_root) = app_with(MockEngine::ready());
+        let responses = (0..4)
+            .map(|index| {
+                let app = app.clone();
+                tokio::spawn(async move {
+                    app.oneshot(
+                        Request::post("/api/generate")
+                            .header("content-type", "application/json")
+                            .body(Body::from(generate_body(
+                                &format!("concurrent print {index}"),
+                                512,
+                                512,
+                            )))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        for (index, response) in responses.into_iter().enumerate() {
+            let response = tokio::time::timeout(Duration::from_secs(20), response)
+                .await
+                .expect("every concurrent print must settle")
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "print {index} lost its observer"
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get("content-type")
+                    .and_then(|value| value.to_str().ok()),
+                Some("image/png"),
+                "print {index} returned no media"
+            );
+        }
+    }
+
     /// Verify that both streaming and non-streaming requests are properly
     /// serialized through the queue.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -12840,59 +12792,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn snapshot_consistent_after_queue_load() {
         let load_count = Arc::new(AtomicUsize::new(0));
-        let (tx, rx) = tokio::sync::mpsc::channel(16);
-        let queue = crate::state::QueueHandle::new(tx);
-        let engine = MockEngine::unloaded(load_count, Duration::from_millis(10));
-        let mut cache = crate::model_cache::ModelCache::new(3);
-        cache.insert(Box::new(engine), 0);
-        let state = AppState {
-            instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
-            queue_journal: Arc::new(crate::queue_journal::QueueJournal::disabled()),
-            generation_cancel: Arc::new(crate::generation_cancel::CancelRegistry::new()),
-            discovery: Arc::new(crate::state::DiscoveryState::default()),
-            gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new().into(),
-            }),
-            generation_unavailable_reason: Arc::new(std::sync::RwLock::new(None)),
-            device_registry: crate::device_registry::DeviceRegistry::empty(),
-            queue_capacity: 200,
-            model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
-            active_generation: Arc::new(std::sync::RwLock::new(None)),
-            config: Arc::new(tokio::sync::RwLock::new(AppState::test_config())),
-            reference_uploads: crate::reference_uploads::ReferenceUploadStore::from_mold_home(),
-            output_disabled_override: true,
-            reload_config_from_disk: false,
-            start_time: std::time::Instant::now(),
-            model_load_lock: Arc::new(tokio::sync::Mutex::new(())),
-            pull_lock: Arc::new(tokio::sync::Mutex::new(())),
-            queue,
-            scheduled_work: crate::scheduler::ScheduledWorkHandle::default(),
-            job_registry: crate::job_registry::JobRegistry::new(),
-            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
-            queue_pause: crate::queue::QueuePause::new(),
-            shared_pool: Arc::new(std::sync::Mutex::new(
-                mold_inference::shared_pool::SharedPool::new(),
-            )),
-            shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
-            metadata_db: Arc::new(None),
-            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
-            chain_jobs: None,
-            downloads: crate::downloads::DownloadQueue::new(),
-            resources: crate::resources::ResourceBroadcaster::new(),
-            events: crate::events::EventBroadcaster::new(),
-            catalog_live_cache: mold_catalog::live::LiveCache::new(
-                std::time::Duration::from_secs(300),
-                64,
-            ),
-            catalog_live_civitai_base: std::sync::Arc::new(
-                crate::state::CATALOG_LIVE_CIVITAI_BASE.to_string(),
-            ),
-            catalog_intents: std::sync::Arc::new(tokio::sync::RwLock::new(
-                std::collections::HashMap::new(),
-            )),
-            models_disk_cache: Arc::new(crate::state::ModelsDiskCache::default()),
-        };
+        let (state, rx, _gallery_root) =
+            durable_test_state(MockEngine::unloaded(load_count, Duration::from_millis(10)));
+        spawn_durable_feeder(&state);
         let worker_state = state.clone();
         tokio::spawn(crate::queue::run_queue_worker(rx, worker_state));
         let app = app_with_state(state.clone());
