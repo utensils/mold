@@ -323,6 +323,44 @@ async fn hold_claimed(
     }
 }
 
+/// Park one claimed row by its disposition and resolve any attached observer.
+///
+/// `Retain` returns the exact claim to the backlog for the next pass; both
+/// holds go through [`hold_claimed`] with their own retryability. This is the
+/// only place a [`DurableDisposition`] becomes a feeder action — the three
+/// ladders that used to decode it by hand each read one producer's private
+/// enum and could disagree about what "hold" meant.
+async fn park_claimed(
+    ticket: crate::queue_journal::QueueTicket,
+    ingress: Option<&crate::queue_media_ingress::QueueMediaIngress>,
+    job_id: &str,
+    reason: String,
+    code: Option<String>,
+    disposition: crate::durable_disposition::DurableDisposition,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> HoldClaimOutcome {
+    match disposition {
+        crate::durable_disposition::DurableDisposition::Retain => {
+            tracing::warn!(job = %job_id, reason = %reason, "durable generation is temporarily unpreparable; retaining its claim for replay");
+            retain_for_retry(ticket, shutdown).await;
+            HoldClaimOutcome::Retained
+        }
+        crate::durable_disposition::DurableDisposition::Hold { retryable } => {
+            let logged = reason.clone();
+            let parked =
+                hold_claimed(ticket, ingress, job_id, reason, code, retryable, shutdown).await;
+            if parked != HoldClaimOutcome::Retained {
+                if retryable {
+                    tracing::warn!(job = %job_id, reason = %logged, "held durable generation until its dependency becomes available");
+                } else {
+                    tracing::error!(job = %job_id, reason = %logged, "held durable generation for operator review");
+                }
+            }
+            parked
+        }
+    }
+}
+
 /// Make one best-effort release after the runtime queue transport has closed.
 /// There is no live feeder to resume, so a failed release deliberately drops
 /// the inert retry ticket and leaves the exact token for startup recovery.
@@ -431,16 +469,17 @@ fn restore_admission_authority(
     crate::durable_admission_authority::RuntimeAuthority,
     crate::durable_admission_authority::Failure,
 > {
-    use crate::durable_admission_authority::{Failure, PreparationDisposition};
+    use crate::durable_admission_authority::Failure;
+    use crate::durable_disposition::DurableDisposition;
     let envelope = match row.admission_authority.as_deref() {
         Some(encoded) => {
             let authority = crate::queue_media_store::QueueMediaAdmissionAuthority::parse(encoded)
                 .map_err(|error| Failure {
-                    disposition: PreparationDisposition::Hold,
+                    disposition: DurableDisposition::Hold { retryable: false },
                     message: error.to_string(),
                 })?;
             let lifecycle = lifecycle.ok_or_else(|| Failure {
-                disposition: PreparationDisposition::Retain,
+                disposition: DurableDisposition::Retain,
                 message: "durable admission authority storage is unavailable".into(),
             })?;
             Some(
@@ -448,9 +487,9 @@ fn restore_admission_authority(
                     .open_admission_authority(&row.id, &authority)
                     .map_err(|error| Failure {
                         disposition: if projection_failure_holds(&error) {
-                            PreparationDisposition::Hold
+                            DurableDisposition::Hold { retryable: false }
                         } else {
-                            PreparationDisposition::Retain
+                            DurableDisposition::Retain
                         },
                         message: error.to_string(),
                     })?,
@@ -460,20 +499,12 @@ fn restore_admission_authority(
     };
     let mut request = crate::queue_media_runtime::ZeroizingGenerateRequest::from_owned(request);
     let hydration = match (envelope.as_ref(), deferred_media) {
-        (Some(_), Some(media)) => {
-            Some(media.hydrate_into(&row.id, &mut request).map_err(|error| {
-                match error.disposition() {
-                    crate::queue_media_runtime::DeferredHydrationDisposition::Hold => Failure {
-                        disposition: PreparationDisposition::Hold,
-                        message: error.to_string(),
-                    },
-                    crate::queue_media_runtime::DeferredHydrationDisposition::Retain => Failure {
-                        disposition: PreparationDisposition::Retain,
-                        message: error.to_string(),
-                    },
-                }
-            })?)
-        }
+        (Some(_), Some(media)) => Some(media.hydrate_into(&row.id, &mut request).map_err(
+            |error| Failure {
+                disposition: error.disposition(),
+                message: error.to_string(),
+            },
+        )?),
         _ => None,
     };
     let restored = crate::durable_admission_authority::restore(
@@ -1040,63 +1071,26 @@ async fn feed_available(
             })) {
                 Ok(Ok(authority)) => authority,
                 Ok(Err(crate::durable_admission_authority::Failure {
-                    disposition: crate::durable_admission_authority::PreparationDisposition::Hold,
+                    disposition,
                     message: reason,
                 })) => {
-                    let logged_reason = reason.clone();
-                    let held = hold_claimed(
+                    let parked = park_claimed(
                         ticket,
                         ingress.as_deref(),
                         &row.id,
                         reason,
                         None,
-                        false,
+                        disposition,
                         shutdown,
                     )
                     .await;
                     drop(reservation);
-                    if held == HoldClaimOutcome::Retained {
+                    if parked == HoldClaimOutcome::Retained {
                         report.stop = FeederStop::RecoverableFailure;
                         return report;
                     }
-                    tracing::error!(job = %row.id, reason = %logged_reason, "held durable generation with invalid admission authority");
-                    report.held += usize::from(held == HoldClaimOutcome::Held);
+                    report.held += usize::from(parked == HoldClaimOutcome::Held);
                     continue;
-                }
-                Ok(Err(crate::durable_admission_authority::Failure {
-                    disposition:
-                        crate::durable_admission_authority::PreparationDisposition::HoldRetryable,
-                    message: reason,
-                })) => {
-                    let logged_reason = reason.clone();
-                    let held = hold_claimed(
-                        ticket,
-                        ingress.as_deref(),
-                        &row.id,
-                        reason,
-                        None,
-                        true,
-                        shutdown,
-                    )
-                    .await;
-                    drop(reservation);
-                    if held == HoldClaimOutcome::Retained {
-                        report.stop = FeederStop::RecoverableFailure;
-                        return report;
-                    }
-                    tracing::warn!(job = %row.id, reason = %logged_reason, "held durable generation until its admission runtime is available");
-                    report.held += usize::from(held == HoldClaimOutcome::Held);
-                    continue;
-                }
-                Ok(Err(crate::durable_admission_authority::Failure {
-                    disposition: crate::durable_admission_authority::PreparationDisposition::Retain,
-                    message: reason,
-                })) => {
-                    drop(reservation);
-                    retain_for_retry(ticket, shutdown).await;
-                    tracing::warn!(job = %row.id, reason = %reason, "durable admission authority is temporarily unavailable; retaining for replay");
-                    report.stop = FeederStop::RecoverableFailure;
-                    return report;
                 }
                 Err(error) => {
                     drop(reservation);
@@ -1125,34 +1119,23 @@ async fn feed_available(
                     Some(lease)
                 }
                 Ok((_request, Err(error))) => {
-                    let reason = error.to_string();
-                    match error.disposition() {
-                        crate::queue_media_runtime::DeferredHydrationDisposition::Hold => {
-                            let held = hold_claimed(
-                                ticket,
-                                ingress.as_deref(),
-                                &row.id,
-                                reason,
-                                None,
-                                false,
-                                shutdown,
-                            )
-                            .await;
-                            drop(reservation);
-                            if held == HoldClaimOutcome::Retained {
-                                report.stop = FeederStop::RecoverableFailure;
-                                return report;
-                            }
-                            report.held += usize::from(held == HoldClaimOutcome::Held);
-                            continue;
-                        }
-                        crate::queue_media_runtime::DeferredHydrationDisposition::Retain => {
-                            drop(reservation);
-                            retain_for_retry(ticket, shutdown).await;
-                            report.stop = FeederStop::RecoverableFailure;
-                            return report;
-                        }
+                    let parked = park_claimed(
+                        ticket,
+                        ingress.as_deref(),
+                        &row.id,
+                        error.to_string(),
+                        None,
+                        error.disposition(),
+                        shutdown,
+                    )
+                    .await;
+                    drop(reservation);
+                    if parked == HoldClaimOutcome::Retained {
+                        report.stop = FeederStop::RecoverableFailure;
+                        return report;
                     }
+                    report.held += usize::from(parked == HoldClaimOutcome::Held);
+                    continue;
                 }
                 Err(error) => {
                     drop(reservation);
@@ -1181,27 +1164,13 @@ async fn feed_available(
             Ok(route) => route,
             Err(error) => {
                 let reason = format!("deferred generation preparation failed: {}", error.error);
-                let retryable = match crate::durable_admission_authority::preparation_disposition(
-                    &error,
-                ) {
-                    crate::durable_admission_authority::PreparationDisposition::Hold => false,
-                    crate::durable_admission_authority::PreparationDisposition::HoldRetryable => {
-                        true
-                    }
-                    crate::durable_admission_authority::PreparationDisposition::Retain => {
-                        drop(reservation);
-                        retain_for_retry(ticket, shutdown).await;
-                        report.stop = FeederStop::RecoverableFailure;
-                        return report;
-                    }
-                };
-                let held = hold_claimed(
+                let held = park_claimed(
                     ticket,
                     ingress.as_deref(),
                     &row.id,
                     reason,
                     Some(error.code.clone()),
-                    retryable,
+                    crate::durable_admission_authority::preparation_disposition(&error),
                     shutdown,
                 )
                 .await;
@@ -3639,6 +3608,106 @@ mod tests {
             state.queue.pending(),
             0,
             "no runtime reservation survives the failed pass"
+        );
+    }
+    #[tokio::test]
+    async fn park_claimed_records_each_disposition_on_the_row() {
+        let (state, _rx) = state(3);
+        let ids = admit(&state, 3);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+
+        for (index, disposition) in [
+            crate::durable_disposition::DurableDisposition::Hold { retryable: true },
+            crate::durable_disposition::DurableDisposition::Hold { retryable: false },
+            crate::durable_disposition::DurableDisposition::Retain,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let claim = state
+                .queue_journal
+                .claim_next_feeder()
+                .unwrap()
+                .expect("one queued row per pass");
+            assert_eq!(claim.row.id, ids[index]);
+            let ticket = state
+                .queue_journal
+                .attach_claimed(&claim.row.id, claim.claim_token);
+            let parked = park_claimed(
+                ticket,
+                None,
+                &ids[index],
+                format!("parked {index}"),
+                None,
+                disposition,
+                &shutdown,
+            )
+            .await;
+            assert_eq!(
+                parked,
+                match disposition {
+                    crate::durable_disposition::DurableDisposition::Retain =>
+                        HoldClaimOutcome::Retained,
+                    crate::durable_disposition::DurableDisposition::Hold { .. } =>
+                        HoldClaimOutcome::Held,
+                },
+                "disposition {disposition:?} must park the row without a hand-mapped ladder"
+            );
+        }
+
+        let rows = state.queue_journal.list_all();
+        let row = |id: &str| {
+            rows.iter()
+                .find(|row| row.id == id)
+                .expect("every admitted row survives")
+                .clone()
+        };
+        assert_eq!(
+            row(&ids[0]).state,
+            mold_db::generation_queue::QueueRowState::Held
+        );
+        assert_eq!(row(&ids[0]).held_reason.as_deref(), Some("parked 0"));
+        assert_eq!(
+            row(&ids[1]).state,
+            mold_db::generation_queue::QueueRowState::Held
+        );
+        assert_eq!(row(&ids[1]).held_reason.as_deref(), Some("parked 1"));
+        assert_eq!(
+            row(&ids[2]).state,
+            mold_db::generation_queue::QueueRowState::Queued,
+            "a retained claim returns to the backlog unchanged"
+        );
+        assert!(row(&ids[2]).held_reason.is_none());
+
+        let children = mold_db::generation_batches::get_durable(
+            state.metadata_db.as_ref().as_ref().unwrap(),
+            state.queue_journal.owner_uuid().unwrap(),
+            "batch",
+        )
+        .unwrap()
+        .unwrap()
+        .children;
+        let child = |id: &str| {
+            children
+                .iter()
+                .find(|child| child.job_id == id)
+                .expect("every admitted child survives")
+                .clone()
+        };
+        assert!(
+            child(&ids[0]).retryable,
+            "a retryable hold stays user-retryable unchanged"
+        );
+        assert!(!child(&ids[1]).retryable);
+
+        let requeued = state
+            .queue_journal
+            .claim_next_feeder()
+            .unwrap()
+            .expect("the retained row is claimable again");
+        assert_eq!(
+            requeued.row.id, ids[2],
+            "retain clears the exact claim token instead of holding the row"
         );
     }
 }

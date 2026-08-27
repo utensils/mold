@@ -4,15 +4,9 @@
 //! disposition the observer is about to report. Both the Tokio single-worker
 //! path and dedicated GPU owner threads pass through this module.
 
+use crate::durable_disposition::DurableDisposition;
 use crate::queue_journal::{QueueTicket, RetainOutcome};
 use mold_core::SseErrorEvent;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DurableDisposition {
-    RetryableHold,
-    NonRetryableHold,
-    Retain,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SettlementOutcome {
@@ -59,10 +53,10 @@ fn settle_one(
     disposition: DurableDisposition,
     message: &str,
 ) -> RetainOutcome {
-    if ticket.retention_requested() || disposition == DurableDisposition::Retain {
-        ticket.retain()
-    } else {
-        ticket.hold_exact(message, disposition == DurableDisposition::RetryableHold)
+    match disposition {
+        DurableDisposition::Retain => ticket.retain(),
+        _ if ticket.retention_requested() => ticket.retain(),
+        DurableDisposition::Hold { retryable } => ticket.hold_exact(message, retryable),
     }
 }
 
@@ -79,15 +73,11 @@ pub(crate) fn settle_blocking(
     };
     for attempt in 1..=MAX_EXACT_ATTEMPTS {
         let job_id = owned.id().to_string();
-        let effective = if owned.retention_requested() || disposition == DurableDisposition::Retain
-        {
-            DurableDisposition::Retain
-        } else {
-            disposition
-        };
+        let effective_retain =
+            disposition == DurableDisposition::Retain || owned.retention_requested();
         match settle_one(owned, disposition, message) {
             RetainOutcome::Released | RetainOutcome::Stale => {
-                return if effective == DurableDisposition::Retain {
+                return if effective_retain {
                     SettlementOutcome::Retained
                 } else {
                     SettlementOutcome::Settled

@@ -1,4 +1,5 @@
-use crate::durable_generation_settlement::{self, DurableDisposition};
+use crate::durable_disposition::DurableDisposition;
+use crate::durable_generation_settlement;
 use crate::gpu_pool::{
     ActiveGeneration, AdminModelUnloadJob, GpuJob, GpuWorker, GpuWorkerCommand, LeaseGrant,
     OwnerWork, PostGenerationUpscaleJob, PromptExpansionJob, StandaloneUpscaleJob,
@@ -3618,7 +3619,7 @@ fn validate_h3_publication_contract(
 fn reject_claimed_h3_generation_message(mut job: GpuJob, error: String) -> bool {
     let settlement = durable_generation_settlement::settle_blocking(
         &mut job.journal,
-        DurableDisposition::RetryableHold,
+        DurableDisposition::Hold { retryable: true },
         &error,
     );
     if let Some(progress_tx) = &job.progress_tx {
@@ -3761,7 +3762,7 @@ fn process_job_with_sink(
             if unavailable.retainable {
                 DurableDisposition::Retain
             } else {
-                DurableDisposition::RetryableHold
+                DurableDisposition::Hold { retryable: true }
             },
             &err_msg,
         );
@@ -3793,7 +3794,7 @@ fn process_job_with_sink(
                 tracing::error!(gpu = ordinal, model = %model_name, attempts, cap, "held an exhausted durable queue row");
                 let settlement = durable_generation_settlement::settle_blocking(
                     &mut job.journal,
-                    DurableDisposition::NonRetryableHold,
+                    DurableDisposition::Hold { retryable: false },
                     "dispatch attempts exhausted",
                 );
                 if let Some(ref tx) = job.progress_tx {
@@ -3912,7 +3913,7 @@ fn process_job_with_sink(
             let err_msg = request.redact_staging_paths(err_msg);
             let settlement = durable_generation_settlement::settle_blocking(
                 &mut job.journal,
-                DurableDisposition::RetryableHold,
+                DurableDisposition::Hold { retryable: true },
                 &err_msg,
             );
             if let Some(ref tx) = job.progress_tx {
@@ -4061,9 +4062,9 @@ fn process_job_with_sink(
                         let settlement = durable_generation_settlement::settle_blocking(
                             &mut job.journal,
                             if error.user_input {
-                                DurableDisposition::NonRetryableHold
+                                DurableDisposition::Hold { retryable: false }
                             } else {
-                                DurableDisposition::RetryableHold
+                                DurableDisposition::Hold { retryable: true }
                             },
                             &err_msg,
                         );
@@ -4164,7 +4165,7 @@ fn process_job_with_sink(
             if is_fatal_cuda {
                 DurableDisposition::Retain
             } else {
-                DurableDisposition::RetryableHold
+                DurableDisposition::Hold { retryable: true }
             },
             &err_msg,
         );
@@ -4255,7 +4256,7 @@ fn process_job_with_sink(
         let err_msg = "engine not found in cache after load".to_string();
         let settlement = durable_generation_settlement::settle_blocking(
             &mut job.journal,
-            DurableDisposition::RetryableHold,
+            DurableDisposition::Hold { retryable: true },
             &err_msg,
         );
         if let Some(ref tx) = job.progress_tx {
@@ -4395,7 +4396,7 @@ fn process_job_with_sink(
                 let error = error.to_string();
                 let settlement = durable_generation_settlement::settle_blocking(
                     &mut job.journal,
-                    DurableDisposition::RetryableHold,
+                    DurableDisposition::Hold { retryable: true },
                     &error,
                 );
                 if let Some(ref tx) = job.progress_tx {
@@ -4448,7 +4449,7 @@ fn process_job_with_sink(
                     "generation error: engine returned no images, video, or audio".to_string();
                 let settlement = durable_generation_settlement::settle_blocking(
                     &mut job.journal,
-                    DurableDisposition::RetryableHold,
+                    DurableDisposition::Hold { retryable: true },
                     &err_msg,
                 );
                 if let Some(ref tx) = job.progress_tx {
@@ -4654,7 +4655,7 @@ fn process_job_with_sink(
                 if should_retain || fatal_cuda {
                     DurableDisposition::Retain
                 } else {
-                    DurableDisposition::RetryableHold
+                    DurableDisposition::Hold { retryable: true }
                 },
                 &err_msg,
             );
@@ -4817,7 +4818,7 @@ fn finish_generation_success(
         );
         durable_generation_settlement::settle_blocking(
             &mut job.journal,
-            DurableDisposition::RetryableHold,
+            DurableDisposition::Hold { retryable: true },
             "the generated output could not be saved to the gallery",
         )
     };
@@ -4891,21 +4892,17 @@ fn finish_generation_hydration_failure(
     mut job: GpuJob,
     error: crate::queue_media_runtime::DeferredQueueMediaError,
 ) {
-    use crate::queue_media_runtime::DeferredHydrationDisposition;
-
     let disposition = error.disposition();
-    let settlement = match disposition {
-        DeferredHydrationDisposition::Hold => durable_generation_settlement::settle_blocking(
-            &mut job.journal,
-            DurableDisposition::NonRetryableHold,
-            "durable queue-media validation failed",
-        ),
-        DeferredHydrationDisposition::Retain => durable_generation_settlement::settle_blocking(
-            &mut job.journal,
-            DurableDisposition::Retain,
-            "durable queue-media hydration must be retried after restart",
-        ),
-    };
+    let settlement = durable_generation_settlement::settle_blocking(
+        &mut job.journal,
+        disposition,
+        match disposition {
+            DurableDisposition::Hold { .. } => "durable queue-media validation failed",
+            DurableDisposition::Retain => {
+                "durable queue-media hydration must be retried after restart"
+            }
+        },
+    );
     tracing::error!(job = %job.id, %error, "durable queue-media hydration failed");
     let message = error.public_message().to_string();
     if let Some(ref tx) = job.progress_tx {

@@ -3,31 +3,26 @@
 //! Generic queue code persists and restores only opaque envelopes plus a
 //! typed disposition. Family policy remains behind this module.
 
-/// Durable outcome for failures discovered only after acknowledgement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PreparationDisposition {
-    Hold,
-    HoldRetryable,
-    Retain,
-}
+use crate::durable_disposition::DurableDisposition;
 
-pub(crate) fn preparation_disposition(error: &crate::routes::ApiError) -> PreparationDisposition {
+/// Durable outcome for failures discovered only after acknowledgement.
+pub(crate) fn preparation_disposition(error: &crate::routes::ApiError) -> DurableDisposition {
     match error.code.as_str() {
-        "SERVER_RESTARTING" => PreparationDisposition::Retain,
+        "SERVER_RESTARTING" => DurableDisposition::Retain,
         // These name dependencies the operator/user can install or make
         // reachable without changing the accepted request.
-        "UNKNOWN_MODEL" | "MODEL_NOT_FOUND" => PreparationDisposition::HoldRetryable,
+        "UNKNOWN_MODEL" | "MODEL_NOT_FOUND" => DurableDisposition::Hold { retryable: true },
         _ if error.status() == axum::http::StatusCode::TOO_MANY_REQUESTS
             || error.status().is_server_error() =>
         {
-            PreparationDisposition::HoldRetryable
+            DurableDisposition::Hold { retryable: true }
         }
-        _ => PreparationDisposition::Hold,
+        _ => DurableDisposition::Hold { retryable: false },
     }
 }
 
 pub(crate) struct Failure {
-    pub disposition: PreparationDisposition,
+    pub disposition: DurableDisposition,
     pub message: String,
 }
 
@@ -151,7 +146,7 @@ pub(crate) fn restore(
         let Some(envelope) = envelope else {
             return if requires_h3 {
                 Err(Failure {
-                    disposition: PreparationDisposition::Hold,
+                    disposition: DurableDisposition::Hold { retryable: false },
                     message: "durable MiniMax H3 admission authority is missing".into(),
                 })
             } else {
@@ -160,13 +155,13 @@ pub(crate) fn restore(
         };
         let envelope: AuthorityEnvelope =
             serde_json::from_slice(envelope).map_err(|_| Failure {
-                disposition: PreparationDisposition::Hold,
+                disposition: DurableDisposition::Hold { retryable: false },
                 message: "durable admission authority envelope is invalid".into(),
             })?;
         if envelope.version != ENVELOPE_VERSION || envelope.kind != H3_PRIVATE_KIND || !requires_h3
         {
             return Err(Failure {
-                disposition: PreparationDisposition::Hold,
+                disposition: DurableDisposition::Hold { retryable: false },
                 message: "durable admission authority is attached to an unsupported request".into(),
             });
         }
@@ -185,10 +180,8 @@ pub(crate) fn restore(
             })
         })
         .map_err(|error| Failure {
-            disposition: if error.code == crate::h3_private_bridge::H3_PRIVATE_RUNTIME_UNAVAILABLE {
-                PreparationDisposition::HoldRetryable
-            } else {
-                PreparationDisposition::Hold
+            disposition: DurableDisposition::Hold {
+                retryable: error.code == crate::h3_private_bridge::H3_PRIVATE_RUNTIME_UNAVAILABLE,
             },
             message: error.error,
         })
@@ -198,7 +191,7 @@ pub(crate) fn restore(
         let _ = (request, instance_id);
         if envelope.is_some() {
             Err(Failure {
-                disposition: PreparationDisposition::Hold,
+                disposition: DurableDisposition::Hold { retryable: false },
                 message: "durable admission authority is unsupported by this build".into(),
             })
         } else {
@@ -292,19 +285,19 @@ mod tests {
     fn deferred_preparation_disposition_is_typed_by_recoverability() {
         assert_eq!(
             preparation_disposition(&crate::routes::ApiError::unknown_model("missing")),
-            PreparationDisposition::HoldRetryable
+            DurableDisposition::Hold { retryable: true }
         );
         assert_eq!(
             preparation_disposition(&crate::routes::ApiError::not_found("missing")),
-            PreparationDisposition::HoldRetryable
+            DurableDisposition::Hold { retryable: true }
         );
         assert_eq!(
             preparation_disposition(&crate::routes::ApiError::server_restarting("restart")),
-            PreparationDisposition::Retain
+            DurableDisposition::Retain
         );
         assert_eq!(
             preparation_disposition(&crate::routes::ApiError::validation("invalid")),
-            PreparationDisposition::Hold
+            DurableDisposition::Hold { retryable: false }
         );
     }
 }

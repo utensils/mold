@@ -15,7 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio::sync::Notify;
 
-use crate::durable_generation_settlement::{self, DurableDisposition};
+use crate::durable_disposition::DurableDisposition;
+use crate::durable_generation_settlement;
 use crate::gpu_pool::GpuJob;
 use crate::model_manager;
 use crate::state::{
@@ -1821,7 +1822,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 drop(scheduler_mutation);
                 let settlement = durable_generation_settlement::settle_async(
                     &mut job.journal,
-                    DurableDisposition::NonRetryableHold,
+                    DurableDisposition::Hold { retryable: false },
                     "dispatch attempts exhausted",
                 )
                 .await;
@@ -1993,7 +1994,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 .redact_staging_paths(format!("generation reference binding error: {error:#}"));
             let settlement = durable_generation_settlement::settle_async(
                 &mut job.journal,
-                DurableDisposition::RetryableHold,
+                DurableDisposition::Hold { retryable: true },
                 &err_msg,
             )
             .await;
@@ -2032,7 +2033,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         let err_msg = request.redact_staging_paths(api_err.error.clone());
         let settlement = durable_generation_settlement::settle_async(
             &mut job.journal,
-            DurableDisposition::RetryableHold,
+            DurableDisposition::Hold { retryable: true },
             &err_msg,
         )
         .await;
@@ -2075,7 +2076,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
         let err_msg = "no engine available after model readiness check".to_string();
         let settlement = durable_generation_settlement::settle_async(
             &mut job.journal,
-            DurableDisposition::RetryableHold,
+            DurableDisposition::Hold { retryable: true },
             &err_msg,
         )
         .await;
@@ -2180,7 +2181,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                     "generation error: engine returned no images, video, or audio".to_string();
                 let settlement = durable_generation_settlement::settle_async(
                     &mut job.journal,
-                    DurableDisposition::RetryableHold,
+                    DurableDisposition::Hold { retryable: true },
                     &err_msg,
                 )
                 .await;
@@ -2380,7 +2381,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
                 );
                 durable_generation_settlement::settle_async(
                     &mut job.journal,
-                    DurableDisposition::RetryableHold,
+                    DurableDisposition::Hold { retryable: true },
                     "the generated output could not be saved to the gallery",
                 )
                 .await
@@ -2445,7 +2446,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             tracing::error!(%err_msg, "generation failed");
             let settlement = durable_generation_settlement::settle_async(
                 &mut job.journal,
-                DurableDisposition::RetryableHold,
+                DurableDisposition::Hold { retryable: true },
                 &err_msg,
             )
             .await;
@@ -2480,7 +2481,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             // re-run in this process".
             let settlement = durable_generation_settlement::settle_async(
                 &mut job.journal,
-                DurableDisposition::NonRetryableHold,
+                DurableDisposition::Hold { retryable: false },
                 &err_msg,
             )
             .await;
@@ -2503,7 +2504,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             let err_msg = "inference task failed".to_string();
             let settlement = durable_generation_settlement::settle_async(
                 &mut job.journal,
-                DurableDisposition::RetryableHold,
+                DurableDisposition::Hold { retryable: true },
                 &err_msg,
             )
             .await;
@@ -2577,21 +2578,17 @@ fn finish_single_worker_hydration_failure(
     mut job: GenerationJob,
     error: crate::queue_media_runtime::DeferredQueueMediaError,
 ) {
-    use crate::queue_media_runtime::DeferredHydrationDisposition;
-
     let disposition = error.disposition();
-    let settlement = match disposition {
-        DeferredHydrationDisposition::Hold => durable_generation_settlement::settle_blocking(
-            &mut job.journal,
-            DurableDisposition::NonRetryableHold,
-            "durable queue-media validation failed",
-        ),
-        DeferredHydrationDisposition::Retain => durable_generation_settlement::settle_blocking(
-            &mut job.journal,
-            DurableDisposition::Retain,
-            "durable queue-media hydration must be retried after restart",
-        ),
-    };
+    let settlement = durable_generation_settlement::settle_blocking(
+        &mut job.journal,
+        disposition,
+        match disposition {
+            DurableDisposition::Hold { .. } => "durable queue-media validation failed",
+            DurableDisposition::Retain => {
+                "durable queue-media hydration must be retried after restart"
+            }
+        },
+    );
     tracing::error!(job = %job.id, %error, "durable queue-media hydration failed");
     let message = error.public_message().to_string();
     if let Some(ref tx) = job.progress_tx {
@@ -3132,7 +3129,7 @@ async fn run_queue_dispatcher_with_tuning_inner(
             tracing::warn!(model = %model_name, "{err_msg}");
             let settlement = durable_generation_settlement::settle_async(
                 &mut job.journal,
-                DurableDisposition::NonRetryableHold,
+                DurableDisposition::Hold { retryable: false },
                 &err_msg,
             )
             .await;
@@ -3162,7 +3159,7 @@ async fn run_queue_dispatcher_with_tuning_inner(
                 tracing::warn!(model = %model_name, "{err_msg}");
                 let settlement = durable_generation_settlement::settle_async(
                     &mut job.journal,
-                    DurableDisposition::NonRetryableHold,
+                    DurableDisposition::Hold { retryable: false },
                     &err_msg,
                 )
                 .await;
@@ -3263,7 +3260,7 @@ async fn run_queue_dispatcher_with_tuning_inner(
             );
             let settlement = durable_generation_settlement::settle_async(
                 &mut job.journal,
-                DurableDisposition::RetryableHold,
+                DurableDisposition::Hold { retryable: true },
                 &err_msg,
             )
             .await;
@@ -3621,7 +3618,7 @@ async fn run_queue_dispatcher_with_tuning_inner(
                         );
                         let settlement = durable_generation_settlement::settle_blocking(
                             &mut rejected.journal,
-                            DurableDisposition::RetryableHold,
+                            DurableDisposition::Hold { retryable: true },
                             &err_msg,
                         );
                         if let Some(tx) = rejected.progress_tx {

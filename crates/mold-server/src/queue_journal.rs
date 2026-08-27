@@ -3041,7 +3041,7 @@ mod tests {
         let mut ticket = Some(ticket);
         let outcome = crate::durable_generation_settlement::settle_blocking(
             &mut ticket,
-            crate::durable_generation_settlement::DurableDisposition::RetryableHold,
+            crate::durable_disposition::DurableDisposition::Hold { retryable: true },
             "inference failed",
         );
 

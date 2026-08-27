@@ -6434,7 +6434,7 @@ fn reject_generation(state: &AppState, mut job: GenerationJob, error: String) {
     // be retried unchanged. Persist that fact before resolving observers.
     crate::durable_generation_settlement::settle_blocking(
         &mut job.journal,
-        crate::durable_generation_settlement::DurableDisposition::NonRetryableHold,
+        crate::durable_disposition::DurableDisposition::Hold { retryable: false },
         &error,
     );
     let _ = job.result_tx.send(Err(error));
@@ -6456,7 +6456,7 @@ fn hold_preparation_failure(state: &AppState, job: GenerationJob, error: String)
     let id = job.id.clone();
     crate::durable_generation_settlement::settle_blocking(
         &mut job.journal,
-        crate::durable_generation_settlement::DurableDisposition::RetryableHold,
+        crate::durable_disposition::DurableDisposition::Hold { retryable: true },
         &error,
     );
     let _ = job.result_tx.send(Err(error));
@@ -6469,7 +6469,7 @@ fn hold_preparation_failure(state: &AppState, job: GenerationJob, error: String)
 fn retain_generation(state: &AppState, mut job: GenerationJob, error: String) {
     let settlement = crate::durable_generation_settlement::settle_blocking(
         &mut job.journal,
-        crate::durable_generation_settlement::DurableDisposition::Retain,
+        crate::durable_disposition::DurableDisposition::Retain,
         &error,
     );
     if let Some(progress) = &job.progress_tx {
@@ -8486,7 +8486,7 @@ mod tests {
         let mut ticket = Some(ticket);
         let outcome = crate::durable_generation_settlement::settle_blocking(
             &mut ticket,
-            crate::durable_generation_settlement::DurableDisposition::Retain,
+            crate::durable_disposition::DurableDisposition::Retain,
             "settlement-retry",
         );
         assert!(outcome.is_retained());

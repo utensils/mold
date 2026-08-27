@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use zeroize::Zeroize;
 
+use crate::durable_disposition::DurableDisposition;
 use crate::queue_media_store::{
     DecryptedQueueMediaSet, MediaSetRef, QueueMediaProjection, QueueMediaStore,
 };
@@ -385,33 +386,24 @@ fn scrub_metadata_path(path: &mut Option<String>) {
     *path = None;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeferredHydrationDisposition {
-    /// Authenticated state is permanently invalid or violates its authority
-    /// contract. Preserve it for operator review instead of replaying it.
-    Hold,
-    /// The store could not be accessed safely now. Retain it for replay.
-    Retain,
-}
-
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
 pub struct DeferredQueueMediaError {
-    disposition: DeferredHydrationDisposition,
+    disposition: DurableDisposition,
     message: String,
 }
 
 impl DeferredQueueMediaError {
     fn hold(message: impl Into<String>) -> Self {
         Self {
-            disposition: DeferredHydrationDisposition::Hold,
+            disposition: DurableDisposition::Hold { retryable: false },
             message: message.into(),
         }
     }
 
     fn retain(message: impl Into<String>) -> Self {
         Self {
-            disposition: DeferredHydrationDisposition::Retain,
+            disposition: DurableDisposition::Retain,
             message: message.into(),
         }
     }
@@ -439,16 +431,16 @@ impl DeferredQueueMediaError {
         ))
     }
 
-    pub fn disposition(&self) -> DeferredHydrationDisposition {
+    pub(crate) fn disposition(&self) -> DurableDisposition {
         self.disposition
     }
 
     pub fn public_message(&self) -> &'static str {
         match self.disposition {
-            DeferredHydrationDisposition::Hold => {
+            DurableDisposition::Hold { .. } => {
                 "durable queue media could not be authenticated; the job is held for review"
             }
-            DeferredHydrationDisposition::Retain => {
+            DurableDisposition::Retain => {
                 "durable queue media is temporarily unavailable; the job was retained for replay"
             }
         }
@@ -891,7 +883,7 @@ mod tests {
         plain.references = None;
         assert!(matches!(
             lease.references(&plain),
-            Err(error) if error.disposition() == DeferredHydrationDisposition::Hold
+            Err(error) if error.disposition() == DurableDisposition::Hold { retryable: false }
         ));
 
         // The staging is released by the last holder, whichever it is.
@@ -920,21 +912,21 @@ mod tests {
                 crate::queue_media_store::QueueMediaError::Authentication,
             )
             .disposition(),
-            DeferredHydrationDisposition::Hold,
+            DurableDisposition::Hold { retryable: false },
         );
         assert_eq!(
             DeferredQueueMediaError::from_store(crate::queue_media_store::QueueMediaError::Io(
                 std::io::Error::new(std::io::ErrorKind::Interrupted, "temporary"),
             ))
             .disposition(),
-            DeferredHydrationDisposition::Retain,
+            DurableDisposition::Retain,
         );
         assert_eq!(
             DeferredQueueMediaError::from_store(
                 crate::queue_media_store::QueueMediaError::SecurityUnavailable("temporary".into()),
             )
             .disposition(),
-            DeferredHydrationDisposition::Retain,
+            DurableDisposition::Retain,
         );
     }
 }
