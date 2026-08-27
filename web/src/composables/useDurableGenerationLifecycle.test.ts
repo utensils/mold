@@ -83,10 +83,7 @@ const route: HostRoute = {
   target: { baseUrl: "http://render-box:7680", apiKey: "secret" },
   instanceId: "instance-1",
   durableGeneration: {
-    heterogeneous_batch: true,
     heterogeneous_batch_max_outputs: 64,
-    durable_batch_outcomes: true,
-    admission_protocol_version: 2,
   },
   eventsAvailable: true,
 };
@@ -258,23 +255,28 @@ describe("web durable generation lifecycle", () => {
     expect(persisted).not.toContain("PRIVATE-DURABLE-SOURCE");
   });
 
-  it("keeps an opaque H3 family on the legacy stream", () => {
+  it("refuses an opaque H3 family the machine has no private contract for", () => {
     const stream = useGenerateStream();
     const submitted = request("opaque H3");
     submitted.model = "hf:opaque-h3-checkpoint";
     submitted.source_image = "PRIVATE-H3-SOURCE";
 
-    stream.submit(
-      submitted,
-      { kind: "single" },
-      {
-        ...durableMediaRoute,
-        modelFamily: "minimax-h3",
-      },
-    );
-
+    expect(() =>
+      stream.submit(
+        submitted,
+        { kind: "single" },
+        {
+          ...durableMediaRoute,
+          durableMedia: {
+            ...durableMediaRoute.durableMedia!,
+            private_h3: false,
+          },
+          modelFamily: "minimax-h3",
+        },
+      ),
+    ).toThrow("cannot store MiniMax H3 request media durably");
     expect(admitGenerationBatch).not.toHaveBeenCalled();
-    expect(generateStream).toHaveBeenCalledTimes(1);
+    expect(generateStream).not.toHaveBeenCalled();
   });
 
   it("admits canonical v2 H3 through the durable batch transport", () => {
@@ -1264,31 +1266,60 @@ describe("web durable generation lifecycle", () => {
   });
 
   it.each([
-    ["older host", { ...route, durableGeneration: null }, request()],
-    ["identity", route, request("identity")],
-    ["references", route, request("references")],
     [
-      "MiniMax H3",
+      "a machine with no durable queue",
+      { ...route, durableGeneration: null },
+      request(),
+      "does not advertise the durable generation queue",
+    ],
+    [
+      "an identity photo the machine cannot store",
+      route,
+      { ...request("identity"), id_image: "private-face" },
+      "cannot store request media durably",
+    ],
+    [
+      "references the machine cannot store",
+      route,
+      { ...request("references"), references: [] },
+      "cannot store request media durably",
+    ],
+    [
+      "MiniMax H3 on a machine with no durable media at all",
       route,
       { ...request(), model: "minimax-h3-fl2va:official-bf16" },
+      "cannot store request media durably",
+    ],
+    [
+      "MiniMax H3 without the private contract",
+      {
+        ...durableMediaRoute,
+        durableMedia: { ...durableMediaRoute.durableMedia!, private_h3: false },
+      },
+      { ...request(), model: "minimax-h3-fl2va:official-bf16" },
+      "cannot store MiniMax H3 request media durably",
     ],
   ])(
-    "keeps %s on the explicit legacy stream",
-    async (_name, candidateRoute, candidate) => {
-      if (_name === "identity") candidate.id_image = "private-face";
-      if (_name === "references") candidate.references = [];
+    "refuses %s by name and queues nothing",
+    (_name, candidateRoute, candidate, reason) => {
       const stream = useGenerateStream();
-      stream.submit(candidate, { kind: "single" }, candidateRoute);
-      await Promise.resolve();
 
-      expect(generateStream).toHaveBeenCalledTimes(1);
+      expect(() =>
+        stream.submit(
+          candidate as GenerateRequestWire,
+          { kind: "single" },
+          candidateRoute,
+        ),
+      ).toThrow(reason);
       expect(admitGenerationBatch).not.toHaveBeenCalled();
+      expect(generateStream).not.toHaveBeenCalled();
+      expect(stream.jobs.value).toHaveLength(0);
     },
   );
 
   it.each(GENERATION_REQUEST_MEDIA_FIELDS)(
-    "keeps media-bearing %s requests on the legacy stream",
-    async (field) => {
+    "refuses a media-bearing %s request the machine cannot store",
+    (field) => {
       const valueByField: Record<string, unknown> = {
         source_image: "source",
         edit_images: ["edit"],
@@ -1308,47 +1339,33 @@ describe("web durable generation lifecycle", () => {
       };
       const stream = useGenerateStream();
 
-      stream.submit(
-        { ...request(), [field]: valueByField[field] },
-        { kind: "single" },
-        route,
+      expect(() =>
+        stream.submit(
+          { ...request(), [field]: valueByField[field] },
+          { kind: "single" },
+          route,
+        ),
+      ).toThrow(
+        field === "hdr_exr_dir"
+          ? "an HDR EXR output directory cannot be queued"
+          : "cannot store request media durably",
       );
-      await Promise.resolve();
-
-      expect(generateStream).toHaveBeenCalledTimes(1);
       expect(admitGenerationBatch).not.toHaveBeenCalled();
+      expect(generateStream).not.toHaveBeenCalled();
     },
   );
 
-  it("keeps every waiting media job visible while draining four streams per target", async () => {
-    const opened: Array<{
-      prompt: string;
-      target: string;
-    }> = [];
-    generateStream.mockImplementation(
-      (
-        candidate: GenerateRequestWire,
-        _handlers: unknown,
-        signal: AbortSignal,
-        target: { baseUrl?: string } | undefined,
-      ) =>
-        new Promise<void>((resolve) => {
-          opened.push({
-            prompt: candidate.prompt,
-            target: target?.baseUrl ?? "origin",
-          });
-          signal.addEventListener("abort", () => resolve(), { once: true });
-        }),
-    );
+  it("admits every media print immediately — there is no browser stream budget left to drain", () => {
+    admitGenerationBatch.mockImplementation(() => new Promise(() => {}));
     const otherRoute: HostRoute = {
-      ...route,
+      ...durableMediaRoute,
       hostId: "render-box-b",
       label: "Render box B",
       target: { baseUrl: "http://render-box-b:7680", apiKey: "secret-b" },
       instanceId: "instance-2",
     };
     const stream = useGenerateStream();
-    const ids = [route, otherRoute].flatMap((candidateRoute) =>
+    const ids = [durableMediaRoute, otherRoute].flatMap((candidateRoute) =>
       Array.from({ length: 5 }, (_, index) =>
         stream.submit(
           {
@@ -1361,53 +1378,10 @@ describe("web durable generation lifecycle", () => {
       ),
     );
 
-    try {
-      expect(
-        stream.jobs.value.filter((job) => ids.includes(job.id)),
-      ).toHaveLength(10);
-      expect(
-        opened.filter((entry) => entry.target === route.target.baseUrl),
-      ).toHaveLength(4);
-      expect(
-        opened.filter((entry) => entry.target === otherRoute.target.baseUrl),
-      ).toHaveLength(4);
-
-      const waitingA = stream.jobs.value.find(
-        (job) => job.request.prompt === "render-box-4",
-      )!;
-      const waitingB = stream.jobs.value.find(
-        (job) => job.request.prompt === "render-box-b-4",
-      )!;
-      expect(waitingA.streamStarted).toBe(false);
-      expect(waitingB.streamStarted).toBe(false);
-
-      await stream.cancel(waitingA.id);
-      expect(waitingA.state).toBe("canceled");
-      stream.jobs.value
-        .find((job) => job.request.prompt === "render-box-0")!
-        .controller.abort();
-      await Promise.resolve();
-      expect(
-        opened.filter((entry) => entry.target === route.target.baseUrl),
-      ).toHaveLength(4);
-
-      const activeB = stream.jobs.value.find(
-        (job) => job.request.prompt === "render-box-b-0",
-      )!;
-      activeB.controller.abort();
-      await vi.waitFor(() =>
-        expect(
-          opened.filter((entry) => entry.target === otherRoute.target.baseUrl),
-        ).toHaveLength(5),
-      );
-      expect(waitingB.streamStarted).toBe(true);
-    } finally {
-      for (const job of stream.jobs.value.filter((candidate) =>
-        ids.includes(candidate.id),
-      )) {
-        job.controller.abort();
-        stream.remove(job.id);
-      }
-    }
+    expect(
+      stream.jobs.value.filter((job) => ids.includes(job.id)),
+    ).toHaveLength(10);
+    expect(admitGenerationBatch).toHaveBeenCalledTimes(10);
+    expect(generateStream).not.toHaveBeenCalled();
   });
 });

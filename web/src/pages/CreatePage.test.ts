@@ -4691,10 +4691,7 @@ describe("CreatePage host routing", () => {
     hostModelsMock.mockResolvedValue([]);
     hostCapabilitiesMock.mockResolvedValue({
       gallery: { can_delete: true },
-      queue: {
-        heterogeneous_batch: true,
-        durable_batch_outcomes: true,
-      },
+      queue: {},
       durable_media: {
         protocol_version: 1,
         encrypted_at_rest: true,
