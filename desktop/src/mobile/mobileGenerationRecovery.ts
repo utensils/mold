@@ -5,7 +5,10 @@ import type {
   GenerationBatchStatusResponse,
 } from "@studio/api/generationAdmission";
 import { generationHostSubmissionPolicy } from "@studio/lib/generationSubmissionPolicy";
-import { generationTrackerSettled } from "@studio/lib/generationPresentation";
+import {
+  generationTrackerSettled,
+  reconciliationPresentation,
+} from "@studio/lib/generationPresentation";
 import {
   buildGenerationBatchStatusRequest,
   createGenerationBatchTracker,
@@ -342,6 +345,12 @@ export function mobileDurableTerminalEffectsClaimed(
   recovery: MobileDurableGenerationRecovery,
 ): boolean {
   if (!mobileDurableRecoveryIsTerminal(recovery)) return false;
+  // A batch whose authority was lost is retired by the app, which owes the
+  // user its "Outcome unknown" rows first; it never reads as fully claimed,
+  // least of all when no child ever arrived and the job list is empty.
+  if (reconciliationPresentation(recovery.tracker.reconciliation, null).kind === "unknown") {
+    return false;
+  }
   if (recovery.tracker.admission.phase === "rejected") {
     return recovery.claimedEffects[mobileDurableAdmissionEffectKey(recovery)]?.viewer === true;
   }

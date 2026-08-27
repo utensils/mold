@@ -281,6 +281,15 @@ describe("mobile durable generation recovery", () => {
       ),
     ).toBe(true);
 
+    // A batch whose authority was lost before any child arrived owes the
+    // app its "Outcome unknown" row and retirement notice; an empty job list
+    // must never read as "every effect claimed".
+    const orphaned = reduceMobileDurableGenerationRecovery(recovery("orphaned"), {
+      type: "event_gap",
+      instanceId: "replacement",
+    });
+    expect(mobileDurableTerminalEffectsClaimed(orphaned)).toBe(false);
+
     let rejected = reduceMobileDurableGenerationRecovery(recovery("rejected"), {
       type: "admission_rejected",
       error: "invalid request",
