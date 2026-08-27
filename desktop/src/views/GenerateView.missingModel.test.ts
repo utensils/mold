@@ -385,3 +385,108 @@ describe("GenerateView missing-model pull before submit", () => {
     expect(wrapper.findComponent(MissingModelDialog).props("hostLabel")).toBe("This device");
   });
 });
+
+describe("GenerateView missing-model pull after a durable hold", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    apiJson
+      .mockReset()
+      .mockImplementation((path: string) => Promise.resolve(path === "/api/models" ? [model] : []));
+    apiJsonTo
+      .mockReset()
+      .mockImplementation((_target: unknown, path: string) =>
+        Promise.resolve(path === "/api/models" ? [model] : []),
+      );
+    vi.mocked(startCatalogDownload).mockReset().mockResolvedValue("pull-job-1");
+    const connection = useConnectionStore();
+    connection.info = {
+      mode: "local",
+      baseUrl: localRoute.target.baseUrl!,
+      apiKey: localRoute.target.apiKey ?? null,
+    };
+    connection.status = "ready";
+    useHostsStore().initialized = true;
+    useModelStore().all = [model];
+    const form = useGenerateFormStore().form;
+    form.prompt = "a lighthouse at dusk";
+    form.model = model.name;
+    form.family = model.family;
+    form.batchSize = 1;
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  /** A print is admitted before the machine resolves its model, so a missing
+   *  model parks the child instead of refusing the request. */
+  function holdJob(generation: ReturnType<typeof useGenerationStore>, reason: string) {
+    const job = generation.startJob({
+      prompt: "a lighthouse at dusk",
+      model: model.name,
+      width: 1024,
+      height: 1024,
+      steps: 8,
+    });
+    job.hostId = "local";
+    job.status = "queued";
+    job.holdError = reason;
+    job.retryable = true;
+    return job;
+  }
+
+  it("offers the pull once for a child held because the model is missing", async () => {
+    const generation = useGenerationStore();
+    const wrapper = mountView();
+    await flushPromises();
+
+    const job = holdJob(generation, "UNKNOWN_MODEL: z-image-turbo:q6 is not installed");
+    await flushPromises();
+
+    const dialog = wrapper.findComponent(MissingModelDialog);
+    expect(dialog.exists()).toBe(true);
+    expect(dialog.props("model")).toBe(model.name);
+
+    // Re-reporting the same hold must not raise a second offer.
+    job.holdError = "UNKNOWN_MODEL: z-image-turbo:q6 is not installed (again)";
+    await flushPromises();
+    expect(wrapper.findAllComponents(MissingModelDialog)).toHaveLength(1);
+  });
+
+  it("offers nothing for a hold that is not about the model", async () => {
+    const generation = useGenerationStore();
+    const wrapper = mountView();
+    await flushPromises();
+
+    holdJob(generation, "insufficient VRAM on this device");
+    await flushPromises();
+
+    expect(wrapper.findComponent(MissingModelDialog).exists()).toBe(false);
+  });
+
+  it("retries the held child rather than queueing a second print", async () => {
+    const generation = useGenerationStore();
+    const retryHeld = vi.spyOn(generation, "retryHeld").mockResolvedValue(undefined);
+    const submit = vi
+      .spyOn(generation, "submitBatch")
+      .mockReturnValue({ jobs: [], settled: Promise.resolve([]) });
+    const downloads = useDownloadsStore();
+    vi.spyOn(downloads, "subscribe").mockResolvedValue(undefined);
+    const pullResume = usePullResumeStore();
+    const wrapper = mountView();
+    await flushPromises();
+    const job = holdJob(generation, "MODEL_NOT_FOUND");
+    await flushPromises();
+
+    wrapper.findComponent(MissingModelDialog).vm.$emit("confirm");
+    await flushPromises();
+
+    expect(pullResume.pending?.retryClientId).toBe(job.clientId);
+    downloads.history = [{ id: "pull-job-1", model: model.name, status: "completed" }] as never;
+    pullResume.check();
+    await flushPromises();
+
+    expect(retryHeld).toHaveBeenCalledWith(job.clientId);
+    expect(submit).not.toHaveBeenCalled();
+  });
+});

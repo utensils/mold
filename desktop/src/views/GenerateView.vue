@@ -23,7 +23,10 @@ import MissingModelDialog from "../components/generate/MissingModelDialog.vue";
 import DownloadTargetDialog from "../components/models/DownloadTargetDialog.vue";
 import { useLicenseAcceptance } from "@studio/composables/useLicenseAcceptance";
 import { licenseRequirements } from "@studio/lib/licenseAcceptance";
-import type { GenerationPlacementPreview } from "@studio/api/generationPlacement";
+import {
+  classifyMissingModelHold,
+  type GenerationPlacementPreview,
+} from "@studio/api/generationPlacement";
 import {
   watchSelectedQueuePreview,
   type QueueJobPreview,
@@ -316,6 +319,9 @@ const missingModel = ref<{
   /** False when the frozen request still has to be finalized against the
    *  chosen machine — download only, never a resume promise. */
   resumeAfterPull?: boolean;
+  /** Set when the machine is already HOLDING this work: resume retries that
+   *  exact child instead of queueing a second print. */
+  retryClientId?: number | null;
 } | null>(null);
 
 const missingModelHostLabel = computed(
@@ -350,6 +356,9 @@ interface MissingModelSubmission {
    * generate is not, because resuming would use different conditioning.
    */
   resumeAfterPull?: boolean;
+  /** Set when the machine is already HOLDING this work: resume retries that
+   *  exact child instead of queueing a second print. */
+  retryClientId?: number | null;
 }
 
 function freezeModelFamily(route: HostRoute | null, modelFamily: string): HostRoute | null {
@@ -460,6 +469,57 @@ function presentMissingModelPull(
 }
 
 /**
+ * A print is admitted BEFORE the machine resolves its model, so "nobody has
+ * this model" now arrives as a HELD child carrying the machine's own reason
+ * rather than as an infeasible placement preview. Same offer, same policy —
+ * only the machine that parked the work is a pull target, and the resume
+ * retries that exact child instead of queueing a second print.
+ */
+const offeredMissingModelHolds = new Set<number>();
+function offerHeldMissingModelPull(job: Job): void {
+  if (offeredMissingModelHolds.has(job.clientId)) return;
+  const request = job.request;
+  if (!request) return;
+  const missing = classifyMissingModelHold(job.holdError, job.model);
+  if (!missing) return;
+  offeredMissingModelHolds.add(job.clientId);
+  const hostId = job.hostId ?? hosts.primaryHost?.id ?? null;
+  const host = hostId ? hosts.all.find((entry) => entry.id === hostId) : null;
+  const targets = planModelInstall(host ? [host] : [], hostModels.hostsFor(missing.model), {
+    // The machine's own hold IS the positive knowledge that it lacks the
+    // model — stronger evidence than an inventory poll that may be stale.
+    inventoryKnown: () => true,
+  }).targets;
+  presentMissingModelPull(
+    targets,
+    {
+      model: missing.model,
+      modelFamily: form.family,
+      // Nothing is resubmitted on this path; the child is already queued.
+      request,
+      batch: 1,
+      chainRouting: null,
+      requestOptions: {},
+      retryClientId: job.clientId,
+    },
+    (candidateId) => hosts.resolveRoute(candidateId),
+  );
+}
+
+watch(
+  () =>
+    generation.jobs
+      .filter((job) => job.holdError)
+      .map((job) => `${job.clientId}:${job.holdError}`)
+      .join("|"),
+  () => {
+    for (const job of generation.jobs) {
+      if (job.holdError) offerHeldMissingModelPull(job);
+    }
+  },
+);
+
+/**
  * The Create picker's "Not installed" row. There is no placement evidence
  * here, so the machines come from the shared install-target policy: every
  * reachable machine whose inventory has been read and does not have it.
@@ -531,6 +591,7 @@ async function pullMissingModel() {
     route,
     chainRouting: info.chainRouting,
     requestOptions: info.requestOptions,
+    retryClientId: info.retryClientId ?? null,
   };
   // The resume watcher is fed by this stream — a dead stream means the
   // promise "generation starts when it's ready" could never be kept, so

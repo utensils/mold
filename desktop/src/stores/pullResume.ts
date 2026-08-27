@@ -37,6 +37,13 @@ export interface PendingResume {
   chainRouting?: ChainRoutingDecision | null;
   /** Preserve ordered prepared prompts and their shared source provenance. */
   requestOptions?: BatchRequestOptions;
+  /**
+   * Set when the machine is ALREADY holding this work: a print is admitted
+   * before its model is resolved, so a missing model parks the child instead
+   * of refusing the request. Resuming then retries that exact child — queueing
+   * a second print would leave the held one behind forever.
+   */
+  retryClientId?: number | null;
 }
 
 const isTerminal = (job: DownloadJob) => isTerminalPullJob(job);
@@ -84,10 +91,26 @@ export const usePullResumeStore = defineStore("pullResume", {
       if (outcome.kind === "waiting") return;
       if (outcome.kind === "ready") {
         this.pending = null;
+        const generation = useGenerationStore();
+        if (pending.retryClientId != null) {
+          // The child is still parked on the machine that reported the model
+          // missing. Retry it in place; there is nothing to submit.
+          useToastStore().push(
+            `${pending.model} is ready on ${pending.hostLabel} — retrying the held print`,
+          );
+          void generation.retryHeld(pending.retryClientId).catch((error: unknown) => {
+            useToastStore().push(
+              `Retrying the held ${pending.model} print failed — ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+              "error",
+            );
+          });
+          return;
+        }
         useToastStore().push(`${pending.model} is ready on ${pending.hostLabel} — generating`);
         // The resumed submit must not fail silently — the last thing the
         // user saw was a promise that it would generate.
-        const generation = useGenerationStore();
         let submission: ReturnType<typeof generation.submitBatch>;
         try {
           submission = pending.requestOptions

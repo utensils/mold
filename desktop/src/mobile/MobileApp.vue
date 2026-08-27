@@ -322,6 +322,7 @@ import {
   resolveMobileIdentityRestore,
   showMobileIdentityWell,
 } from "./identity";
+import { planHeldMissingModelPull } from "./missingModelHold";
 import {
   isCancelledError,
   jobPhase,
@@ -934,6 +935,11 @@ const missingGenerationModel = ref<{
   model: string;
   host: MobileHost;
   route: HostRoute;
+  /** Set when the machine is already HOLDING this work: a print is admitted
+   *  before its model is resolved, so a missing model parks the child. The
+   *  completed pull then retries that exact child — pressing Develop would
+   *  queue a second print and leave the held one parked forever. */
+  heldJobId?: string | null;
 } | null>(null);
 const missingGenerationModelBusy = ref(false);
 const missingGenerationModelError = ref("");
@@ -4205,12 +4211,50 @@ async function routeAutomaticGeneration(options: {
   });
 }
 
-function promptForMissingGenerationModel(model: string, host: MobileHost, route: HostRoute): void {
+function promptForMissingGenerationModel(
+  model: string,
+  host: MobileHost,
+  route: HostRoute,
+  heldJobId: string | null = null,
+): void {
   missingGenerationPullRequestId += 1;
   missingGenerationPullAttempt.value = null;
   missingGenerationModelError.value = "";
-  missingGenerationModel.value = { model, host: { ...host }, route };
+  missingGenerationModel.value = { model, host: { ...host }, route, heldJobId };
 }
+
+/**
+ * A print is admitted BEFORE the machine resolves its model, so "nobody has
+ * this model" now arrives as a HELD child carrying the machine's own reason
+ * rather than as an infeasible placement preview. Same offer, same frozen
+ * machine; the completed pull retries the child that machine is holding.
+ */
+const offeredMissingModelHolds = new Set<string>();
+function offerHeldMissingModelPull(job: Job): void {
+  const planned = planHeldMissingModelPull({
+    jobId: job.id,
+    model: job.model,
+    heldReason: durableHeldError(job),
+    alreadyOffered: offeredMissingModelHolds,
+  });
+  if (!planned) return;
+  const durable = durableLifecycleForJob(job);
+  if (!durable) return;
+  const host = resolveMobileDurableHost(durable.recovery, connectedHosts.value);
+  if (!host) return;
+  offeredMissingModelHolds.add(planned.jobId);
+  promptForMissingGenerationModel(planned.model, host, routeForMobileHost(host), planned.jobId);
+}
+
+watch(
+  () =>
+    allGenerationJobs.value
+      .map((job) => `${job.id ?? job.clientId}:${durableHeldError(job) ?? ""}`)
+      .join("|"),
+  () => {
+    for (const job of allGenerationJobs.value) offerHeldMissingModelPull(job);
+  },
+);
 
 function closeMissingGenerationModel(): void {
   if (
@@ -4250,8 +4294,19 @@ async function pullMissingGenerationModel(): Promise<void> {
         pending.model,
       );
       catalogModelsChanged(pending.route.hostId);
-      setGenerationStatus(`${pending.model} is ready on ${pending.route.label}.`);
-      generationAnnouncement.value = `${pending.model} is ready. Press Develop to continue.`;
+      const heldJob = pending.heldJobId
+        ? allGenerationJobs.value.find((candidate) => candidate.id === pending.heldJobId)
+        : null;
+      if (heldJob) {
+        setGenerationStatus(
+          `${pending.model} is ready on ${pending.route.label} — retrying the held print.`,
+        );
+        generationAnnouncement.value = `${pending.model} is ready. Retrying the held print.`;
+        void retryHeldGeneration(heldJob);
+      } else {
+        setGenerationStatus(`${pending.model} is ready on ${pending.route.label}.`);
+        generationAnnouncement.value = `${pending.model} is ready. Press Develop to continue.`;
+      }
     } else {
       attempt.terminalJob = job;
       const message =
