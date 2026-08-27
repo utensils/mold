@@ -757,7 +757,7 @@ describe("web durable generation lifecycle", () => {
     ).toBeGreaterThan(0);
   });
 
-  it("reconciles again from the post-commit hint when earlier terminal hints race", async () => {
+  it("reconciles on the commit hint alone, never on job_ended", async () => {
     admitGenerationBatch.mockImplementation(
       (_target: unknown, body: { client_batch_id: string }) =>
         Promise.resolve(batch(body.client_batch_id)),
@@ -772,22 +772,19 @@ describe("web durable generation lifecycle", () => {
     );
     const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
     const clientBatchId = job.durableBatch!.clientBatchId;
-    reconcileGenerationBatches
-      .mockResolvedValueOnce(
-        statusResponse([batch(clientBatchId, ["running"])]),
-      )
-      .mockResolvedValueOnce(
-        statusResponse([batch(clientBatchId, ["complete"])]),
-      );
+    reconcileGenerationBatches.mockResolvedValue(
+      statusResponse([batch(clientBatchId, ["complete"])]),
+    );
 
+    // `job_ended` precedes the row write; reading on it would race the
+    // commit hint the server publishes after every settlement.
     __testing__.handleDurableEvent(
       route.hostId,
       "event",
       JSON.stringify({ type: "job_ended", id: job.serverId }),
     );
-    await vi.waitFor(() =>
-      expect(reconcileGenerationBatches).toHaveBeenCalledTimes(1),
-    );
+    await Promise.resolve();
+    expect(reconcileGenerationBatches).not.toHaveBeenCalled();
     expect(job.state).toBe("running");
 
     __testing__.handleDurableEvent(
@@ -801,6 +798,7 @@ describe("web durable generation lifecycle", () => {
 
     await vi.waitFor(() => expect(job.state).toBe("done"));
     await vi.waitFor(() => expect(completed).toHaveBeenCalledTimes(1));
+    expect(reconcileGenerationBatches).toHaveBeenCalledTimes(1);
   });
 
   it("scopes child commits and reserves host-wide reads for bulk commits", async () => {
@@ -1156,7 +1154,7 @@ describe("web durable generation lifecycle", () => {
     expect(listGalleryFrom).toHaveBeenCalledTimes(1);
   });
 
-  it("uses an exact gallery event row without launching a gallery listing", async () => {
+  it("caches the gallery event row and reads it on the commit hint without a listing", async () => {
     admitGenerationBatch.mockImplementation(
       (_target: unknown, body: { client_batch_id: string }) =>
         Promise.resolve(batch(body.client_batch_id)),
@@ -1184,6 +1182,13 @@ describe("web durable generation lifecycle", () => {
         filename: image.filename,
         image,
       }),
+    );
+    await Promise.resolve();
+    expect(reconcileGenerationBatches).not.toHaveBeenCalled();
+    __testing__.handleDurableEvent(
+      route.hostId,
+      "event",
+      JSON.stringify({ type: "job_state_committed", id: job.serverId }),
     );
 
     await vi.waitFor(() =>

@@ -3163,7 +3163,7 @@ describe("MobileApp generation queue", () => {
     phase = "complete";
     hostEvents[0]!.options.onEvent(
       "event",
-      JSON.stringify({ type: "job_ended", id: "durable-job-1" }),
+      JSON.stringify({ type: "job_state_committed", id: "durable-job-1" }),
     );
     await vi.waitFor(() =>
       expect(wrapper!.find("[data-test='mobile-generation-queue']").exists()).toBe(false),

@@ -343,8 +343,6 @@ const durableHostStreams = new Map<string, DurableHostStream>();
 const durableReconciles = new Map<string, Promise<void>>();
 /** Missing = no follow-up; null = host-wide; Set = selected client batches. */
 const durableReconcilePending = new Map<string, Set<string> | null>();
-/** Host instance ids that proved they emit ordered post-commit hints. */
-const durablePostCommitInstances = new Map<string, string>();
 const durableCancelAttempts = new Map<string, Promise<boolean>>();
 const sharedDurableEventHosts = new Set<string>();
 let durableRecoveryLoaded = false;
@@ -714,25 +712,15 @@ export const useGenerationStore = defineStore("generation", {
           Object.values(record.tracker.jobs).some((job) => job.authority.jobId === frame.id),
         );
         if (frame.type === "job_state_committed") {
-          durablePostCommitInstances.set(hostId, records[0]!.tracker.expectedInstanceId);
           void this.reconcileDurableHost(
             hostId,
             owner ? new Set([owner.tracker.clientBatchId]) : undefined,
           );
         } else if (frame.type === "generation_states_committed") {
-          durablePostCommitInstances.set(hostId, records[0]!.tracker.expectedInstanceId);
           void this.reconcileDurableHost(hostId);
-        } else if (
-          frame.type === "gallery_added" &&
-          durablePostCommitInstances.get(hostId) !== records[0]!.tracker.expectedInstanceId
-        ) {
-          void this.reconcileDurableHost(hostId);
-        } else if (
-          owner &&
-          (frame.type === "job_queued" ||
-            frame.type === "job_started" ||
-            frame.type === "job_ended")
-        ) {
+        } else if (owner && (frame.type === "job_queued" || frame.type === "job_started")) {
+          // The running transition emits no commit hint; `job_ended` and
+          // `gallery_added` precede the one that follows every settlement.
           void this.reconcileDurableHost(hostId, new Set([owner.tracker.clientBatchId]));
         }
       } catch {
@@ -1760,7 +1748,6 @@ export const useGenerationStore = defineStore("generation", {
       ownPreviews.stopAll();
       durableReconciles.clear();
       durableReconcilePending.clear();
-      durablePostCommitInstances.clear();
       durableCancelAttempts.clear();
       durableJobIds.clear();
       durableBatchJobs.clear();

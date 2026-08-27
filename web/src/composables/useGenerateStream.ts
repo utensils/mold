@@ -1025,8 +1025,6 @@ const durableEventSessions = new Map<
 >();
 const durableReconciliations = new Map<string, Promise<void>>();
 const durableReconciliationPending = new Map<string, Set<string> | null>();
-/** Server instance signatures that proved they emit post-commit lifecycle hints. */
-const durablePostCommitSignatures = new Map<string, string>();
 const durableHydrations = new Map<string, Promise<void>>();
 const durableCancellations = new Map<string, Promise<void>>();
 const durableGallerySnapshots = new Map<string, Promise<GalleryImage[]>>();
@@ -1704,16 +1702,33 @@ function handleDurableEvent(
     // Normal settlements reconcile only their owning batch. Admission and
     // execution are concurrent, so an event whose id is not mapped yet must
     // still fall back to the coalesced host-wide authority read.
-    durablePostCommitSignatures.set(hostId, routeSignature(route));
     void reconcileDurableHost(hostId, exactJob?.durableBatch?.clientBatchId);
     return;
   }
   if (data.type === "generation_states_committed") {
     // Bulk cancellation deliberately emits one host-wide post-commit hint.
-    durablePostCommitSignatures.set(hostId, routeSignature(route));
     void reconcileDurableHost(hostId);
     return;
   }
+  if (data.type === "gallery_added" && typeof data.filename === "string") {
+    // The row is cached for the read the commit hint drives; the hint
+    // always follows the gallery publish, so reading here would duplicate
+    // every completion read.
+    const row = galleryRowFromUnknown(data.image, data.filename);
+    const owner =
+      row?.metadata.job_id &&
+      jobs.value.find(
+        (candidate) =>
+          candidate.hostId === hostId &&
+          candidate.serverId === row.metadata.job_id,
+      );
+    if (row && owner) {
+      durableGalleryRows.set(durableGalleryRowKey(hostId, data.filename), row);
+    }
+    return;
+  }
+  // The running transition emits no commit hint, so queue/start hints read
+  // their owning batch; `job_ended` precedes the row write and never does.
   if (data.type === "job_started" && typeof data.id === "string") {
     if (exactJob?.state === "running") {
       markWorkStarted(exactJob);
@@ -1722,31 +1737,8 @@ function handleDurableEvent(
     }
   } else if (data.type === "job_queued" && typeof data.id === "string") {
     if (exactJob?.state === "running") exactJob.progress.stage = "Queued";
-  } else if (
-    data.type === "gallery_added" &&
-    typeof data.filename === "string"
-  ) {
-    const row = galleryRowFromUnknown(data.image, data.filename);
-    if (row) {
-      const jobId = row.metadata.job_id;
-      if (jobId) {
-        exactJob = jobs.value.find(
-          (candidate) =>
-            candidate.hostId === hostId && candidate.serverId === jobId,
-        );
-      }
-      if (exactJob) {
-        durableGalleryRows.set(
-          durableGalleryRowKey(hostId, data.filename),
-          row,
-        );
-      }
-    }
-    // Older servers need gallery invalidation as their last completion hint.
-    // Once this exact server instance proves it emits the ordered commit hint,
-    // reconciling here would duplicate every completion read.
-    if (durablePostCommitSignatures.get(hostId) === routeSignature(route))
-      return;
+  } else {
+    return;
   }
   if (exactJob?.durableBatch) {
     void reconcileDurableHost(hostId, exactJob.durableBatch.clientBatchId);
@@ -1877,7 +1869,6 @@ function resetDurableLifecycleForTests(): void {
   durableEffectKeys.clear();
   durableReconciliations.clear();
   durableReconciliationPending.clear();
-  durablePostCommitSignatures.clear();
   durableHydrations.clear();
   durableCancellations.clear();
   durableGallerySnapshots.clear();

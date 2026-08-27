@@ -38,14 +38,17 @@ describe("mobile durable generation host watch", () => {
     await h.flush();
     expect(h.reasons).toEqual(["open"]);
 
+    // Neither `gallery_added` nor `job_ended` is a lifecycle authority: the
+    // commit hint that follows every settlement is the only read trigger.
+    h.callbacks().onEvent("event", JSON.stringify({ type: "gallery_added" }));
+    h.callbacks().onEvent("event", JSON.stringify({ type: "job_ended", id: "a" }));
+    await h.flush();
+    expect(h.reasons).toEqual(["open"]);
+
     h.callbacks().onEvent("event", JSON.stringify({ type: "job_state_committed", id: "a" }));
     await h.flush();
     expect(h.reasons).toEqual(["open", "event"]);
     expect(h.scopes).toEqual([undefined, ["a"]]);
-
-    h.callbacks().onEvent("event", JSON.stringify({ type: "gallery_added" }));
-    await h.flush();
-    expect(h.reasons).toEqual(["open", "event"]);
 
     h.callbacks().onEvent("event", JSON.stringify({ type: "job_state_committed", id: "b" }));
     h.callbacks().onEvent("event", JSON.stringify({ type: "job_state_committed", id: "c" }));

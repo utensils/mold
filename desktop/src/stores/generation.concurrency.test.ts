@@ -843,10 +843,13 @@ describe("submitBatch connection cap", () => {
     store.onDurableEvent("hal9000", "authority", '{"instance_id":"instance-1"}');
     await flushPromises();
     expect(submitted.jobs[0]!.status).toBe("loading");
+    expect(durableApi.reconcile).toHaveBeenCalledTimes(1);
 
+    // `job_ended` precedes the row write; only the commit hint reads.
     store.onDurableEvent("hal9000", "event", '{"type":"job_ended","id":"job-1"}');
     await flushPromises();
     expect(submitted.jobs[0]!.status).toBe("loading");
+    expect(durableApi.reconcile).toHaveBeenCalledTimes(1);
 
     phase = "complete";
     store.onDurableEvent(
@@ -863,6 +866,7 @@ describe("submitBatch connection cap", () => {
     await flushPromises();
     store.onDurableEvent("hal9000", "event", '{"type":"job_ended","id":"job-1"}');
     await flushPromises();
+    expect(durableApi.reconcile).toHaveBeenCalledTimes(2);
     expect(effectMocks.notifyGenerated).toHaveBeenCalledTimes(1);
     expect(effectMocks.fetchGalleryMediaBytes).toHaveBeenCalledTimes(1);
     expect(effectMocks.fetchGalleryMediaBytes).toHaveBeenCalledWith(
@@ -966,7 +970,7 @@ describe("submitBatch connection cap", () => {
     store.onDurableEvent(
       "hal9000",
       "event",
-      JSON.stringify({ type: "job_ended", id: "job-scope-1" }),
+      JSON.stringify({ type: "job_state_committed", id: "job-scope-1" }),
     );
     await flushPromises();
 
