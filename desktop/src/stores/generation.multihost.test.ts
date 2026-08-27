@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
+import { flushPromises } from "@vue/test-utils";
 import type { GenerateRequest } from "../lib/api/types";
 
 const sseStream = vi.fn();
@@ -7,10 +8,16 @@ vi.mock("../lib/api/sse", () => ({
   sseStream: (...a: unknown[]) => sseStream(...a),
 }));
 
-const prepareReferenceUploads = vi.fn();
-vi.mock("@studio/api/referenceUploads", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@studio/api/referenceUploads")>()),
-  prepareReferenceUploads: (...args: unknown[]) => prepareReferenceUploads(...args),
+const durableApi = vi.hoisted(() => ({
+  admit: vi.fn(),
+  lookup: vi.fn(),
+  reconcile: vi.fn(),
+}));
+vi.mock("@studio/api/generationAdmission", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/generationAdmission")>()),
+  admitGenerationBatch: (...args: unknown[]) => durableApi.admit(...args),
+  lookupGenerationBatchByClientId: (...args: unknown[]) => durableApi.lookup(...args),
+  reconcileGenerationBatches: (...args: unknown[]) => durableApi.reconcile(...args),
 }));
 
 const streamableMediaUrl = vi.fn().mockResolvedValue("https://hal9000/media/generated-video");
@@ -63,11 +70,8 @@ vi.mock("../lib/ipc", () => ({
   },
 }));
 
-import { notifyGenerationFailed } from "../lib/notify";
 import { useGenerationStore, suggestOutputFilename, needsHostRoute } from "./generation";
-import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
-import { useGalleryStore } from "./gallery";
 import { useHostsStore } from "./hosts";
 
 function request(): GenerateRequest {
@@ -79,7 +83,21 @@ const halRoute = {
   label: "hal9000",
   kind: "remote" as const,
   target: { baseUrl: "http://hal9000:7680", apiKey: "hk" },
+  // A print is admitted through the durable queue, so a frozen route must
+  // carry the machine's instance identity and its advertised chunk limit.
+  instanceId: "hal-instance",
+  heterogeneousBatchMaxOutputs: 64,
 };
+
+/** The target `admitGenerationBatch` was called against. */
+function admittedTarget(call = 0): { baseUrl: string; apiKey: string | null } {
+  return durableApi.admit.mock.calls[call]![0] as { baseUrl: string; apiKey: string | null };
+}
+
+/** The requests one durable admission carried. */
+function admittedRequests(call = 0): GenerateRequest[] {
+  return (durableApi.admit.mock.calls[call]![1] as { requests: GenerateRequest[] }).requests;
+}
 
 const chainDecision = {
   kind: "chain" as const,
@@ -88,132 +106,80 @@ const chainDecision = {
   stageCount: 3,
 };
 
-function completeFrame() {
-  return JSON.stringify({
-    image: "aGVsbG8=",
-    original_image: "b3JpZ2luYWw=",
-    format: "png",
-    width: 512,
-    height: 512,
-    original_width: 128,
-    original_height: 128,
-    seed_used: 7,
-    generation_time_ms: 100,
-    model: "flux2-klein",
-  });
-}
-
 beforeEach(() => {
   setActivePinia(createPinia());
   primary.target = { baseUrl: "http://primary:7680", apiKey: "pk" };
   vi.clearAllMocks();
   apiFetchTo.mockResolvedValue(new Response(null, { status: 200 }));
+  durableApi.admit.mockReset();
+  durableApi.lookup.mockReset();
+  durableApi.reconcile.mockReset();
+  // Every print admits durably and stays queued unless a test says otherwise.
+  durableApi.admit.mockImplementation(
+    async (_target: unknown, body: { client_batch_id: string; requests: unknown[] }) => ({
+      id: "server-batch",
+      client_batch_id: body.client_batch_id,
+      instance_id: "hal-instance",
+      durable: true,
+      children: body.requests.map((_request, index) => ({
+        index: index + 1,
+        job_id: `srv-${index + 1}`,
+        state: "queued",
+        created_at_ms: 1,
+        updated_at_ms: 1,
+      })),
+    }),
+  );
   streamableMediaUrl.mockResolvedValue("https://hal9000/media/generated-video");
   // Client ids restart with each fresh Pinia, so clear the module-scoped
   // per-job target map (a real session never reuses ids).
   useGenerationStore().resetJobs();
 });
 
-describe("generation store multi-host routing", () => {
-  it("creates a fresh exact-host reference lease for every submission attempt", async () => {
-    let attempt = 0;
-    const cancel = vi.fn().mockResolvedValue(undefined);
-    prepareReferenceUploads.mockImplementation(
-      async ({ request: original }: { request: GenerateRequest }) => {
-        attempt += 1;
-        return {
-          request: {
-            ...original,
-            references: original.references?.map((reference) => ({
-              ...reference,
-              media: { authority: "upload", handle: `lease-${attempt}` },
-            })),
-          },
-          expiresAtMs: Date.now() + 60_000,
-          requestScopeSha256: "a".repeat(64),
-          cancel,
-        };
-      },
-    );
-    sseStream.mockResolvedValue(undefined);
-    const original: GenerateRequest = {
-      ...request(),
-      model: "minimax-h3-ref2va",
-      frames: 124,
-      fps: 24,
-      references: [
-        {
-          kind: "image",
-          media: { authority: "inline", data: "PRIVATE-IMAGE-BYTES" },
-          provenance: { name: "identity.png", sha256: "b".repeat(64) },
-          mime_type: "image/png",
-          width: 32,
-          height: 24,
-        },
-      ],
-    };
-    const route = {
-      ...halRoute,
-      instanceId: "instance-1",
-      referenceUploads: {
-        available: true,
-        protocol_version: 2,
-        requires_api_key: true,
-        session_path: "/api/generate/reference-upload-sessions",
-        upload_path: "/api/generate/reference-upload",
-        session_handle_header: "x-mold-reference-session",
-        upload_handle_header: "x-mold-reference-upload",
-        max_file_bytes: 1_000_000,
-        max_session_bytes: 2_000_000,
-        session_ttl_ms: 60_000,
-      },
-    };
+/** This device, ready and advertising the durable queue. */
+function readyPrimary(): void {
+  const conn = useConnectionStore();
+  conn.info = { mode: "local", baseUrl: "http://primary:7680", apiKey: "pk" };
+  conn.status = "ready";
+  const hosts = useHostsStore();
+  hosts.telemetry.local = { instanceId: "local-instance" } as never;
+  hosts.capabilities.local = {
+    queue: { heterogeneous_batch_max_outputs: 64 },
+  } as never;
+}
 
-    const first = useGenerationStore().submitBatch(original, 1, route);
-    await first.settled;
-    const second = useGenerationStore().submitBatch(original, 1, route);
-    await second.settled;
-
-    expect(prepareReferenceUploads).toHaveBeenCalledTimes(2);
-    expect(prepareReferenceUploads.mock.calls[0]?.[0]).toMatchObject({
-      target: halRoute.target,
-      expectedInstanceId: "instance-1",
-      capabilities: route.referenceUploads,
-    });
-    expect(sseStream.mock.calls[0]?.[1].body.references[0].media).toEqual({
-      authority: "upload",
-      handle: "lease-1",
-    });
-    expect(sseStream.mock.calls[1]?.[1].body.references[0].media).toEqual({
-      authority: "upload",
-      handle: "lease-2",
-    });
-    expect(first.jobs[0]!.request!.references?.[0]?.media).toEqual({
-      authority: "inline",
-      data: "PRIVATE-IMAGE-BYTES",
-    });
-    expect(second.jobs[0]!.request!.references?.[0]?.media).toEqual({
-      authority: "inline",
-      data: "PRIVATE-IMAGE-BYTES",
-    });
-    expect(cancel).toHaveBeenCalledTimes(2);
+/** One reachable remote machine, ready and advertising the durable queue. */
+function readyRemote(): void {
+  const hosts = useHostsStore();
+  hosts.extras.push({
+    id: "hal9000-7680",
+    label: "hal9000",
+    url: "http://hal9000:7680",
+    apiKey: "hk",
+    status: "ready",
+    error: null,
+    instanceId: "hal-instance",
   });
+  hosts.telemetry["hal9000-7680"] = { instanceId: "hal-instance" } as never;
+  hosts.capabilities["hal9000-7680"] = {
+    queue: { heterogeneous_batch_max_outputs: 64 },
+  } as never;
+}
 
-  it("tags jobs with their host and streams against its target", async () => {
-    sseStream.mockResolvedValue(undefined);
+describe("generation store multi-host routing", () => {
+  it("tags jobs with their host and admits against its target", async () => {
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch(request(), 1, halRoute);
-    await settled;
+    const { jobs } = store.submitBatch(request(), 1, halRoute);
+    await flushPromises();
     expect(jobs[0]).toMatchObject({ hostId: "hal9000-7680", hostLabel: "hal9000" });
-    const options = sseStream.mock.calls[0]?.[1] as { target?: { baseUrl: string } };
-    expect(options.target?.baseUrl).toBe("http://hal9000:7680");
+    expect(admittedTarget()).toEqual(halRoute.target);
+    expect(sseStream).not.toHaveBeenCalled();
   });
 
   it("fails closed instead of falling back after a job target is released", async () => {
-    sseStream.mockResolvedValue(undefined);
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch(request(), 1, halRoute);
-    await settled;
+    const { jobs } = store.submitBatch(request(), 1, halRoute);
+    await flushPromises();
 
     expect(store.targetForJob(jobs[0]!.clientId)).toEqual(halRoute.target);
     store.resetJobs();
@@ -221,25 +187,22 @@ describe("generation store multi-host routing", () => {
   });
 
   it("submits every per-item prompt through the one supplied route", async () => {
-    sseStream.mockResolvedValue(undefined);
     const store = useGenerationStore();
     const prompts = ["first variation", "second variation", "third variation"];
-    const { jobs, settled } = store.submitBatch(request(), 3, halRoute, null, {
+    const { jobs } = store.submitBatch(request(), 3, halRoute, null, {
       prompts,
       originalPrompt: "source prompt",
     });
-    await settled;
+    await flushPromises();
 
     expect(jobs.map((job) => job.prompt)).toEqual(prompts);
-    expect(sseStream).toHaveBeenCalledTimes(3);
-    for (const [, options] of sseStream.mock.calls) {
-      expect(options).toMatchObject({ target: halRoute.target });
-    }
-    expect(
-      sseStream.mock.calls.map(
-        ([, options]) => (options as { body: GenerateRequest }).body.original_prompt,
-      ),
-    ).toEqual(["source prompt", "source prompt", "source prompt"]);
+    expect(durableApi.admit).toHaveBeenCalledTimes(1);
+    expect(admittedTarget()).toEqual(halRoute.target);
+    expect(admittedRequests().map((candidate) => candidate.original_prompt)).toEqual([
+      "source prompt",
+      "source prompt",
+      "source prompt",
+    ]);
   });
 
   it("rejects an inconsistent per-item prompt list before creating or streaming jobs", () => {
@@ -255,473 +218,55 @@ describe("generation store multi-host routing", () => {
     expect(sseStream).not.toHaveBeenCalled();
   });
 
-  it("snapshots the primary target at submit when no route is given", async () => {
-    sseStream.mockResolvedValue(undefined);
+  it("admits an unrouted print against This device's own route", async () => {
+    // An unrouted submit is This device: the app's embedded server is a
+    // machine like any other, so its instance identity and advertised limit
+    // are what the durable admission is frozen against.
+    readyPrimary();
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch(request(), 1);
-    await settled;
-    expect(jobs[0]?.hostId).toBeNull();
-    // The target is pinned at submit time — a mid-batch primary switch must
-    // not reroute queued siblings or cancels to the new engine.
-    const options = sseStream.mock.calls[0]?.[1] as { target?: { baseUrl: string } };
-    expect(options.target?.baseUrl).toBe("http://primary:7680");
+    const { jobs } = store.submitBatch(request(), 1);
+    await flushPromises();
+    expect(jobs[0]?.hostId).toBe("local");
+    expect(admittedTarget()).toEqual({ baseUrl: "http://primary:7680", apiKey: "pk" });
   });
 
-  it("auto-saves remote results to this Mac when the pref is on", async () => {
-    sseStream.mockImplementation(
-      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
-        opts.onEvent("complete", completeFrame());
-        return Promise.resolve();
-      },
-    );
+  it("refuses an unrouted print when no machine can be resolved at all", async () => {
     const store = useGenerationStore();
-    const { settled } = store.submitBatch(request(), 1, halRoute);
-    await settled;
-    expect(saveOutputBytes).toHaveBeenCalledTimes(2);
-    const [originalName, originalB64] = saveOutputBytes.mock.calls[0] as [string, string];
-    const [upscaledName, upscaledB64] = saveOutputBytes.mock.calls[1] as [string, string];
-    expect(originalName).toMatch(/^mold-flux2-klein-7-\d+-original\.png$/);
-    expect(originalB64).toBe("b3JpZ2luYWw=");
-    expect(upscaledName).toMatch(/^mold-flux2-klein-7-\d+-upscaled\.png$/);
-    expect(upscaledB64).toBe("aGVsbG8=");
-  });
-
-  it("keeps the server's gallery filenames and metadata on auto-saved copies", async () => {
-    const metadata = {
-      prompt: "a cheetah at dusk",
-      model: "flux2-klein",
-      seed: 7,
-      steps: 28,
-      guidance: 3.5,
-      width: 512,
-      height: 512,
-    };
-    sseStream.mockImplementation(
-      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
-        opts.onEvent(
-          "complete",
-          JSON.stringify({
-            ...JSON.parse(completeFrame()),
-            filename: "flux2-klein-999-upscaled.png",
-            original_filename: "flux2-klein-999-original.png",
-            metadata,
-          }),
-        );
-        return Promise.resolve();
-      },
-    );
-    const store = useGenerationStore();
-    const { settled } = store.submitBatch(request(), 1, halRoute);
-    await settled;
-
-    expect(saveOutputBytes).toHaveBeenCalledTimes(2);
-    const [originalName, , originalMeta] = saveOutputBytes.mock.calls[0] as [
-      string,
-      string,
-      Record<string, unknown>,
-    ];
-    const [upscaledName, , upscaledMeta] = saveOutputBytes.mock.calls[1] as [
-      string,
-      string,
-      Record<string, unknown>,
-    ];
-    // The origin's names are kept verbatim — the copy and the original stay
-    // one logical print in the merged gallery.
-    expect(originalName).toBe("flux2-klein-999-original.png");
-    expect(upscaledName).toBe("flux2-klein-999-upscaled.png");
-    // The recorded metadata rides along; the original gets its true dims.
-    expect(upscaledMeta).toMatchObject({ seed: 7, width: 512, height: 512 });
-    expect(originalMeta).toMatchObject({ seed: 7, width: 128, height: 128 });
-  });
-
-  it("refreshes the local gallery when only one paired remote save succeeds", async () => {
-    saveOutputBytes
-      .mockRejectedValueOnce(new Error("original save failed"))
-      .mockResolvedValueOnce("upscaled.png");
-    sseStream.mockImplementation(
-      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
-        opts.onEvent("complete", completeFrame());
-        return Promise.resolve();
-      },
-    );
-    useGalleryStore().buckets["local"] = { items: [], loading: false, error: null, loaded: true };
-
-    await useGenerationStore().submitBatch(request(), 1, halRoute).settled;
-
-    await vi.waitFor(() => expect(localGalleryList).toHaveBeenCalled());
-  });
-
-  it("skips the local save for local jobs and when the pref is off", async () => {
-    sseStream.mockImplementation(
-      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
-        opts.onEvent("complete", completeFrame());
-        return Promise.resolve();
-      },
-    );
-    const store = useGenerationStore();
-    // Local (unrouted) job: never saved — it's already in the local gallery.
-    await store.submitBatch(request(), 1).settled;
-    expect(saveOutputBytes).not.toHaveBeenCalled();
-    // Remote job with the pref off: not saved either.
-    useAppPrefsStore().settings = { saveRemoteOutputs: false } as never;
-    await store.submitBatch(request(), 1, halRoute).settled;
-    expect(saveOutputBytes).not.toHaveBeenCalled();
-  });
-
-  it("keeps an iPhone remote job remote without mirroring into a desktop gallery", async () => {
-    sseStream.mockImplementation(
-      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
-        opts.onEvent(
-          "complete",
-          JSON.stringify({
-            ...JSON.parse(completeFrame()),
-            video_thumbnail: "large-thumbnail-base64",
-            video_gif_preview: "large-gif-base64",
-          }),
-        );
-        return Promise.resolve();
-      },
-    );
-    const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch(request(), 1, {
-      ...halRoute,
-      mirrorRemoteOutput: false,
-      retainEncodedResult: false,
-    });
-    await settled;
-
-    expect(jobs[0]).toMatchObject({
-      remote: true,
-      mirrorRemoteOutput: false,
-      retainEncodedResult: false,
-      result: {
-        image: "",
-        original_image: null,
-        video_thumbnail: null,
-        video_gif_preview: null,
-        seed_used: 7,
-      },
-    });
-    expect(saveOutputBytes).not.toHaveBeenCalled();
-  });
-
-  it("loads an iPhone video from its saved host file without decoding SSE media", async () => {
-    const createObjectUrl = vi.spyOn(URL, "createObjectURL");
-    sseStream.mockImplementation(
-      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
-        opts.onEvent(
-          "complete",
-          JSON.stringify({
-            ...JSON.parse(completeFrame()),
-            image: "",
-            format: "mp4",
-            filename: "generated clip.mp4",
-            original_image: null,
-            video_frames: 121,
-            video_fps: 30,
-          }),
-        );
-        return Promise.resolve();
-      },
-    );
-    const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch(request(), 1, {
-      ...halRoute,
-      mirrorRemoteOutput: false,
-      retainEncodedResult: false,
-      metadataOnlyCompletion: true,
-    });
-    await settled;
-    await vi.waitFor(() =>
-      expect(jobs[0]!.resultUrl).toBe("https://hal9000/media/generated-video"),
-    );
-
-    expect(streamableMediaUrl).toHaveBeenCalledWith("/api/gallery/image/generated%20clip.mp4", {
-      target: halRoute.target,
-      cacheKey: halRoute.hostId,
-      allowLegacyBlob: false,
-    });
-    expect(sseStream.mock.calls[0]?.[1]).toMatchObject({
-      headers: { "X-Mold-SSE-Payload": "metadata-only" },
-    });
-    expect(createObjectUrl).not.toHaveBeenCalled();
-    expect(jobs[0]!.result?.image).toBe("");
-  });
-
-  it("does not mirror a metadata-only completion without encoded media", async () => {
-    sseStream.mockImplementation(
-      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
-        opts.onEvent(
-          "complete",
-          JSON.stringify({
-            ...JSON.parse(completeFrame()),
-            image: "",
-            original_image: null,
-            filename: "generated image.png",
-          }),
-        );
-        return Promise.resolve();
-      },
-    );
-
-    await useGenerationStore().submitBatch(request(), 1, {
-      ...halRoute,
-      metadataOnlyCompletion: true,
-    }).settled;
-
-    expect(saveOutputBytes).not.toHaveBeenCalled();
-  });
-
-  it("loads a metadata-only iPhone image from its saved host file", async () => {
-    const createObjectUrl = vi.spyOn(URL, "createObjectURL");
-    streamableMediaUrl.mockResolvedValueOnce("https://hal9000/media/generated-image");
-    sseStream.mockImplementation(
-      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
-        opts.onEvent(
-          "complete",
-          JSON.stringify({
-            ...JSON.parse(completeFrame()),
-            image: "",
-            original_image: null,
-            filename: "generated image.png",
-          }),
-        );
-        return Promise.resolve();
-      },
-    );
-
-    const { jobs, settled } = useGenerationStore().submitBatch(request(), 1, {
-      ...halRoute,
-      mirrorRemoteOutput: false,
-      retainEncodedResult: false,
-      metadataOnlyCompletion: true,
-    });
-    await settled;
-    await vi.waitFor(() =>
-      expect(jobs[0]!.resultUrl).toBe("https://hal9000/media/generated-image"),
-    );
-
-    expect(streamableMediaUrl).toHaveBeenCalledWith("/api/gallery/image/generated%20image.png", {
-      target: halRoute.target,
-      cacheKey: halRoute.hostId,
-      allowLegacyBlob: true,
-    });
-    expect(createObjectUrl).not.toHaveBeenCalled();
-  });
-
-  it("surfaces a metadata-only completion that has no saved filename", async () => {
-    sseStream.mockImplementation(
-      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
-        opts.onEvent(
-          "complete",
-          JSON.stringify({ ...JSON.parse(completeFrame()), image: "", original_image: null }),
-        );
-        return Promise.resolve();
-      },
-    );
-
-    const { jobs, settled } = useGenerationStore().submitBatch(request(), 1, {
-      ...halRoute,
-      mirrorRemoteOutput: false,
-      retainEncodedResult: false,
-      metadataOnlyCompletion: true,
-    });
-    await settled;
-    await vi.waitFor(() => expect(jobs[0]!.resultError).toContain("saved result URL"));
-
-    expect(jobs[0]).toMatchObject({ status: "complete", resultUrl: null });
-    expect(streamableMediaUrl).not.toHaveBeenCalled();
-  });
-
-  it("renews a ticketed result URL when it is close to expiring", async () => {
-    const now = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
-    streamableMediaUrl
-      .mockResolvedValueOnce(
-        "https://hal9000/media/generated-video?media_token=old&expires=1800000300",
-      )
-      .mockResolvedValueOnce(
-        "https://hal9000/media/generated-video?media_token=new&expires=1800001200",
-      );
-    sseStream.mockImplementation(
-      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
-        opts.onEvent(
-          "complete",
-          JSON.stringify({
-            ...JSON.parse(completeFrame()),
-            image: "",
-            format: "mp4",
-            filename: "generated clip.mp4",
-            original_image: null,
-          }),
-        );
-        return Promise.resolve();
-      },
-    );
-    const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch(request(), 1, {
-      ...halRoute,
-      mirrorRemoteOutput: false,
-      retainEncodedResult: false,
-      metadataOnlyCompletion: true,
-    });
-    await settled;
-    await vi.waitFor(() => expect(jobs[0]!.resultUrl).toContain("media_token=old"));
-
-    await store.refreshRemoteResultUrl(jobs[0]!.clientId);
-    expect(streamableMediaUrl).toHaveBeenCalledTimes(1);
-    now.mockReturnValue(1_800_000_250_000);
-    await store.refreshRemoteResultUrl(jobs[0]!.clientId);
-
-    expect(streamableMediaUrl).toHaveBeenCalledTimes(2);
-    expect(jobs[0]!.resultUrl).toContain("media_token=new");
-    now.mockRestore();
-  });
-
-  it("evicts a legacy generated-image Blob before a forced retry", async () => {
-    const revokeObjectUrl = vi.spyOn(URL, "revokeObjectURL");
-    streamableMediaUrl
-      .mockResolvedValueOnce("blob:legacy-generated-image")
-      .mockResolvedValueOnce("blob:refetched-generated-image");
-    sseStream.mockImplementation(
-      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
-        opts.onEvent(
-          "complete",
-          JSON.stringify({
-            ...JSON.parse(completeFrame()),
-            image: "",
-            filename: "generated image.png",
-            original_image: null,
-          }),
-        );
-        return Promise.resolve();
-      },
-    );
-    const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch(request(), 1, {
-      ...halRoute,
-      mirrorRemoteOutput: false,
-      retainEncodedResult: false,
-      metadataOnlyCompletion: true,
-    });
-    await settled;
-    await vi.waitFor(() => expect(jobs[0]!.resultUrl).toBe("blob:legacy-generated-image"));
-
-    await store.refreshRemoteResultUrl(jobs[0]!.clientId, true);
-
-    expect(evictMedia).toHaveBeenCalledWith(
-      "/api/gallery/image/generated%20image.png",
-      halRoute.hostId,
-    );
-    expect(evictMedia.mock.invocationCallOrder[0]).toBeLessThan(
-      streamableMediaUrl.mock.invocationCallOrder[1]!,
-    );
-    expect(jobs[0]!.resultUrl).toBe("blob:refetched-generated-image");
-    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:legacy-generated-image");
-  });
-
-  it("refreshes the origin host's loaded gallery bucket when a routed job completes", async () => {
-    sseStream.mockImplementation(
-      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
-        opts.onEvent("complete", completeFrame());
-        return Promise.resolve();
-      },
-    );
-    useHostsStore().extras.push({
-      id: "hal9000-7680",
-      label: "hal9000",
-      url: "http://hal9000:7680",
-      apiKey: "hk",
-      status: "ready",
-      error: null,
-      instanceId: null,
-    });
-    const gallery = useGalleryStore();
-    gallery.buckets["hal9000-7680"] = { items: [], loading: false, error: null, loaded: true };
-    // The auto local save also refreshes this Mac's loaded bucket.
-    gallery.buckets["local"] = { items: [], loading: false, error: null, loaded: true };
-
-    const store = useGenerationStore();
-    await store.submitBatch(request(), 1, halRoute).settled;
-
-    await vi.waitFor(() => {
-      expect(apiJsonTo).toHaveBeenCalledWith(
-        { baseUrl: "http://hal9000:7680", apiKey: "hk" },
-        "/api/gallery",
-      );
-      expect(localGalleryList).toHaveBeenCalled();
-    });
-  });
-
-  it("never force-loads gallery buckets from a background completion", async () => {
-    sseStream.mockImplementation(
-      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
-        opts.onEvent("complete", completeFrame());
-        return Promise.resolve();
-      },
-    );
-    const store = useGenerationStore();
-    await store.submitBatch(request(), 1, halRoute).settled;
-    await Promise.resolve();
-    expect(apiJsonTo).not.toHaveBeenCalled();
-    expect(useGalleryStore().buckets["hal9000-7680"]).toBeUndefined();
+    expect(() => store.submitBatch(request(), 1)).toThrow("No machine is selected for this print.");
+    expect(store.jobs).toHaveLength(0);
+    expect(durableApi.admit).not.toHaveBeenCalled();
   });
 
   it("falls back to a ready host when the primary connection is down", async () => {
     // Local engine failed to start (conn.info never set) but a remote host is
-    // ready: an unrouted batch must snapshot that host, not the dead primary.
-    sseStream.mockResolvedValue(undefined);
-    useHostsStore().extras.push({
-      id: "hal9000-7680",
-      label: "hal9000",
-      url: "http://hal9000:7680",
-      apiKey: "hk",
-      status: "ready",
-      error: null,
-      instanceId: null,
-    });
+    // ready: an unrouted batch must be admitted against that host.
+    readyRemote();
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch(request(), 1);
-    await settled;
+    const { jobs } = store.submitBatch(request(), 1);
+    await flushPromises();
     expect(jobs[0]).toMatchObject({ hostId: "hal9000-7680", hostLabel: "hal9000", remote: true });
-    const options = sseStream.mock.calls[0]?.[1] as { target?: { baseUrl: string } };
-    expect(options.target?.baseUrl).toBe("http://hal9000:7680");
+    expect(admittedTarget()).toEqual({ baseUrl: "http://hal9000:7680", apiKey: "hk" });
   });
 
-  it("keeps the primary snapshot for unrouted jobs while the primary is ready", async () => {
-    sseStream.mockResolvedValue(undefined);
-    const conn = useConnectionStore();
-    conn.info = { mode: "local", baseUrl: "http://primary:7680", apiKey: "pk" };
-    conn.status = "ready";
-    useHostsStore().extras.push({
-      id: "hal9000-7680",
-      label: "hal9000",
-      url: "http://hal9000:7680",
-      apiKey: "hk",
-      status: "ready",
-      error: null,
-      instanceId: null,
-    });
+  it("keeps This device for unrouted jobs while the primary is ready", async () => {
+    readyPrimary();
+    readyRemote();
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch(request(), 1);
-    await settled;
-    expect(jobs[0]?.hostId).toBeNull();
-    const options = sseStream.mock.calls[0]?.[1] as { target?: { baseUrl: string } };
-    expect(options.target?.baseUrl).toBe("http://primary:7680");
+    const { jobs } = store.submitBatch(request(), 1);
+    await flushPromises();
+    expect(jobs[0]?.hostId).toBe("local");
+    expect(admittedTarget()).toEqual({ baseUrl: "http://primary:7680", apiKey: "pk" });
   });
 
   it("cancels a routed job against its own host", async () => {
-    // Stream that stays open until aborted, reporting the server id.
-    sseStream.mockImplementation(
-      (_path: string, opts: { signal: AbortSignal; onEvent: (e: string, d: string) => void }) => {
-        opts.onEvent("progress", JSON.stringify({ type: "queued", position: 1, id: "srv-1" }));
-        return new Promise<void>((resolve) => {
-          opts.signal.addEventListener("abort", () => resolve());
-        });
-      },
-    );
+    // Durable admission is what reports the queue id, and the cancel must
+    // reach the machine that actually holds the job — matched by id AND by
+    // the exact instance the job was admitted against.
+    readyRemote();
     const store = useGenerationStore();
     const { jobs } = store.submitBatch(request(), 1, halRoute);
-    await Promise.resolve(); // let the stream open and deliver "queued"
+    await flushPromises();
+    expect(jobs[0]!.id).toBe("srv-1");
     await store.cancel(jobs[0]!.clientId);
     const [target, path, init] = apiFetchTo.mock.calls[0] as [
       { baseUrl: string },
@@ -733,145 +278,18 @@ describe("generation store multi-host routing", () => {
     expect(init.method).toBe("DELETE");
   });
 
-  it("reconciles against the host that ACCEPTED the job, not the current primary", async () => {
-    // Nothing is frozen at submit when no engine is connected yet, so recovery
-    // used to ask whatever the primary had BECOME. Against a different machine
-    // that is destructive: it can claim a print that is not ours, or DELETE a
-    // queued row on a host that never ran our work. The frozen-route invariant
-    // (CLAUDE.md) exists for exactly this.
-    primary.target = null; // submit finds no connection
-    const asked: string[] = [];
-    apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string) => {
-      asked.push(`${target?.baseUrl ?? "?"}${path}`);
-      if (path === "/api/queue") return Promise.resolve({ entries: [] });
-      return Promise.resolve([]);
-    });
-    sseStream.mockImplementation(
-      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
-        opts.onEvent("progress", JSON.stringify({ type: "queued", position: 1, id: "srv-1" }));
-        // The user switches machines while this job is in flight.
-        primary.target = { baseUrl: "http://other:7680", apiKey: "ok" };
-        return Promise.resolve();
-      },
-    );
-    const store = useGenerationStore();
-    const { settled } = store.submitBatch(request(), 1);
-    // The engine comes up between submit and the stream opening.
-    primary.target = { baseUrl: "http://accepted:7680", apiKey: "ak" };
-    await settled;
-
-    expect(asked.length).toBeGreaterThan(0);
-    expect(asked.every((call) => call.startsWith("http://accepted:7680"))).toBe(true);
-    expect(asked.some((call) => call.startsWith("http://other:7680"))).toBe(false);
-  });
-
-  it("reconciles nothing at all when no host can be named for the job", async () => {
-    // Never connected: the request reached no machine, so there is no host to
-    // ask and every question would be about someone else's queue.
+  it("asks no host anything when no machine can be named for the print", async () => {
+    // Never connected: the print reaches no machine, so it is refused by name
+    // before a row exists — there is nothing to reconcile and no queue to ask
+    // about, and every question would be about someone else's.
     primary.target = null;
     apiJsonTo.mockImplementation(() => Promise.resolve([]));
-    sseStream.mockRejectedValue(new Error("No engine connected."));
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch(request(), 1);
-    await settled;
 
+    expect(() => store.submitBatch(request(), 1)).toThrow("No machine is selected for this print.");
     expect(apiJsonTo).not.toHaveBeenCalled();
-    expect(jobs[0]?.status).toBe("error");
-  });
-
-  it("reconciles a retained job to the print the host finished, never a failure", async () => {
-    // Desktop Create renders `status: "error"` as a Failed row AND hides the
-    // matching live fleet row by id, so settling a retained job as an error
-    // tells the user it failed and hides the work that would correct them.
-    let queuePolls = 0;
-    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
-      if (path === "/api/queue") {
-        queuePolls += 1;
-        return Promise.resolve({
-          entries:
-            queuePolls === 1
-              ? [
-                  {
-                    id: "srv-9",
-                    model: "flux2-klein",
-                    state: "queued",
-                    position: 0,
-                    durable: true,
-                  },
-                ]
-              : [],
-        });
-      }
-      if (path === "/api/gallery") {
-        return Promise.resolve([
-          {
-            filename: "resumed.png",
-            // Newer than the submission under test: gallery recovery is age-bounded.
-            get timestamp() {
-              return Math.floor(Date.now() / 1000) + 5;
-            },
-            format: "png",
-            metadata: {
-              prompt: "a cat",
-              model: "flux2-klein",
-              seed: 7,
-              steps: 4,
-              guidance: 3.5,
-              width: 512,
-              height: 512,
-            },
-          },
-        ]);
-      }
-      return Promise.resolve([]);
-    });
-    sseStream.mockImplementation(
-      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
-        opts.onEvent("progress", JSON.stringify({ type: "queued", position: 1, id: "srv-9" }));
-        opts.onEvent(
-          "progress",
-          JSON.stringify({ type: "denoise_step", step: 1, total: 4, elapsed_ms: 10 }),
-        );
-        opts.onEvent(
-          "error",
-          JSON.stringify({
-            message: "mold is restarting; this generation was kept in the queue",
-            retained: true,
-            code: "server_restarting",
-          }),
-        );
-        return Promise.resolve();
-      },
-    );
-    const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch({ ...request(), seed: 7 }, 1, halRoute);
-    await settled;
-    await vi.waitFor(() => expect(jobs[0]?.status).not.toBe("loading"));
-
-    // The host kept it, so the row is reclaimed as live work and then settled
-    // by the print that actually landed — never announced as a failure.
-    expect(queuePolls).toBeGreaterThan(0);
-    expect(jobs[0]?.status).toBe("complete");
-    expect(jobs[0]?.result?.filename).toBe("resumed.png");
-    expect(notifyGenerationFailed).not.toHaveBeenCalled();
-    // Retention extends recovery only while the outcome is unresolved. A
-    // definitive completion clears it so the settled row can be removed.
-    expect(jobs[0]?.retainedByHost).toBe(false);
-  });
-
-  it("keeps an ordinary server error a final failure", async () => {
-    sseStream.mockImplementation(
-      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
-        opts.onEvent("error", JSON.stringify({ message: "host ran out of memory" }));
-        return Promise.resolve();
-      },
-    );
-    const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch(request(), 1, halRoute);
-    await settled;
-
-    expect(jobs[0]?.interrupted).toBe(false);
-    expect(notifyGenerationFailed).toHaveBeenCalled();
+    expect(durableApi.admit).not.toHaveBeenCalled();
+    expect(store.jobs).toHaveLength(0);
   });
 
   it("posts only the supported auto-expand body and maps chain progress/completion", async () => {

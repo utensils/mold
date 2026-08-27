@@ -9,6 +9,7 @@ import { mount, flushPromises } from "@vue/test-utils";
 import GenerateView from "./GenerateView.vue";
 import { useGenerateFormStore } from "../stores/generateForm";
 import { useGenerationStore } from "../stores/generation";
+import { useHostModelsStore } from "../stores/hostModels";
 import { useModelStore } from "../stores/models";
 import { useConnectionStore } from "../stores/connection";
 import { useHostsStore } from "../stores/hosts";
@@ -106,6 +107,13 @@ describe("GenerateView style-at-submit", () => {
     conn.status = "ready";
     useHostsStore().initialized = true;
     useModelStore().all = [fluxModel, sdxlModel];
+    // A print is routed from inventory, not from a placement preview, so This
+    // device must have listed its own models before one can be queued.
+    useHostModelsStore().byHost.local = {
+      entries: [fluxModel, sdxlModel],
+      fetchedAt: Date.now(),
+      error: null,
+    };
   });
   afterEach(() => (document.body.innerHTML = ""));
 

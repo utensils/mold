@@ -133,22 +133,6 @@ describe("submitBatch connection cap", () => {
     streams[idx]!.resolve();
   }
 
-  function completeStream(seed: number) {
-    const stream = streams.find((candidate) => candidate.seed === seed);
-    stream!.onEvent(
-      "complete",
-      JSON.stringify({
-        image: btoa("generated"),
-        format: "png",
-        width: 1024,
-        height: 1024,
-        seed_used: seed,
-        generation_time_ms: 100,
-        model: req.model,
-      }),
-    );
-  }
-
   const req: GenerateRequest = {
     prompt: "a lighthouse",
     model: "flux-schnell:q8",
@@ -157,6 +141,34 @@ describe("submitBatch connection cap", () => {
     steps: 4,
     seed: 100,
   };
+
+  // The held-stream pool serves SEQUENCES alone now: a print is admitted
+  // through the durable queue and never opens a stream, so every cap below is
+  // exercised with auto-chained clips.
+  const chainDecision = {
+    kind: "chain" as const,
+    clipFrames: 97,
+    motionTail: 17,
+    stageCount: 3,
+  };
+  const chainReq: GenerateRequest = { ...req, model: "ltx-2-19b-distilled:fp8", frames: 241 };
+
+  function completeChainStream(seed: number) {
+    const stream = streams.find((candidate) => candidate.seed === seed);
+    stream!.onEvent(
+      "complete",
+      JSON.stringify({
+        video: btoa("clip"),
+        format: "mp4",
+        width: 1024,
+        height: 1024,
+        frames: 241,
+        fps: 24,
+        generation_time_ms: 100,
+        metadata: { seed, model: chainReq.model },
+      }),
+    );
+  }
 
   beforeEach(() => {
     setActivePinia(createPinia());
@@ -207,69 +219,6 @@ describe("submitBatch connection cap", () => {
     vi.unstubAllGlobals();
   });
 
-  it("holds at most four sibling streams open at once", async () => {
-    const store = useGenerationStore();
-    store.submitBatch(req, 5);
-    await flushPromises();
-    expect(streams.map((s) => s.seed).sort()).toEqual([100, 101, 102, 103]);
-
-    resolveStream(100);
-    await flushPromises();
-    expect(streams.map((s) => s.seed).sort()).toEqual([101, 102, 103, 104]);
-  });
-
-  it("retries one committed heterogeneous admission with the same UUID and maps all 30 ids", async () => {
-    const calls: Array<{ path: string; body: string | undefined }> = [];
-    let admissions = 0;
-    vi.mocked(apiJsonTo).mockImplementation(async (_target, path, init) => {
-      calls.push({ path, body: typeof init?.body === "string" ? init.body : undefined });
-      if (path === "/api/generation-batches") {
-        admissions += 1;
-        if (admissions === 1) throw new TypeError("Load failed");
-        return {
-          batch_id: "server-batch",
-          client_batch_id: "client-batch",
-          state: "queued",
-          created_at_ms: 1,
-          updated_at_ms: 1,
-          children: Array.from({ length: 30 }, (_, index) => ({
-            index: index + 1,
-            job_id: `job-${index + 1}`,
-            state: "queued",
-            error: null,
-          })),
-        } as never;
-      }
-      return new Promise<never>(() => {});
-    });
-    const store = useGenerationStore();
-    const { jobs } = store.submitBatch(
-      req,
-      30,
-      {
-        hostId: "hal9000",
-        label: "hal9000",
-        kind: "remote",
-        target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
-        heterogeneousBatch: true,
-        heterogeneousBatchMaxOutputs: 64,
-      },
-      null,
-      { batchId: "client-batch" },
-    );
-    await flushPromises();
-    await flushPromises();
-
-    const admissionCalls = calls.filter((call) => call.path === "/api/generation-batches");
-    expect(admissionCalls).toHaveLength(2);
-    expect(admissionCalls[1]!.body).toBe(admissionCalls[0]!.body);
-    expect(JSON.parse(admissionCalls[0]!.body!).client_batch_id).toBe("client-batch");
-    expect(jobs.map((job) => job.id)).toEqual(
-      Array.from({ length: 30 }, (_, index) => `job-${index + 1}`),
-    );
-    expect(mockSse).not.toHaveBeenCalled();
-  });
-
   it.each(["QuotaExceededError", "SecurityError"])(
     "admits once through the durable endpoint when recovery storage raises %s",
     async (name) => {
@@ -283,6 +232,9 @@ describe("submitBatch connection cap", () => {
           storage.set(key, value);
         },
       });
+      // The unavailable-storage warning is deliberately once per module
+      // session, so this case runs first in the file — a later test that has
+      // already tripped it would leave nothing to observe.
       const store = useGenerationStore();
       durableApi.admit.mockImplementation(async (_target, body) => {
         const clientBatchId = (body as { client_batch_id: string }).client_batch_id;
@@ -309,10 +261,7 @@ describe("submitBatch connection cap", () => {
         kind: "remote",
         target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
         instanceId: "instance-1",
-        heterogeneousBatch: true,
         heterogeneousBatchMaxOutputs: 64,
-        durableBatchOutcomes: true,
-        admissionProtocolVersion: 2,
         mirrorRemoteOutput: false,
       });
       await flushPromises();
@@ -333,6 +282,24 @@ describe("submitBatch connection cap", () => {
     },
   );
 
+  it("holds at most four sequence clips streaming at once", async () => {
+    const store = useGenerationStore();
+    const submitted = store.submitBatch(chainReq, 5, null, chainDecision);
+    await flushPromises();
+    expect(streams.map((s) => s.seed).sort()).toEqual([100, 101, 102, 103]);
+
+    resolveStream(100);
+    await flushPromises();
+    expect(streams.map((s) => s.seed).sort()).toEqual([101, 102, 103, 104]);
+
+    // Drain before leaving: a batch still holding streams would settle inside
+    // the next test and pollute its module-scoped state.
+    while (streams.length > 0) {
+      streams[0]!.resolve();
+      await flushPromises();
+    }
+    await submitted.settled;
+  });
   it("refuses held Retry after the owning server instance is replaced", async () => {
     const store = useGenerationStore();
     const hosts = useHostsStore();
@@ -371,10 +338,7 @@ describe("submitBatch connection cap", () => {
       kind: "remote",
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
-      heterogeneousBatch: true,
       heterogeneousBatchMaxOutputs: 64,
-      durableBatchOutcomes: true,
-      admissionProtocolVersion: 2,
     });
     await flushPromises();
     expect(submitted.jobs[0]).toMatchObject({ retryable: true, id: "held-job" });
@@ -428,10 +392,7 @@ describe("submitBatch connection cap", () => {
       kind: "remote",
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
-      heterogeneousBatch: true,
       heterogeneousBatchMaxOutputs: 64,
-      durableBatchOutcomes: true,
-      admissionProtocolVersion: 2,
     });
     await flushPromises();
 
@@ -499,10 +460,7 @@ describe("submitBatch connection cap", () => {
       kind: "remote" as const,
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
-      heterogeneousBatch: true,
       heterogeneousBatchMaxOutputs: 2,
-      durableBatchOutcomes: true,
-      admissionProtocolVersion: 2,
       mirrorRemoteOutput: false,
     };
 
@@ -574,10 +532,7 @@ describe("submitBatch connection cap", () => {
         kind: "remote",
         target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
         instanceId: "instance-1",
-        heterogeneousBatch: true,
         heterogeneousBatchMaxOutputs: 64,
-        durableBatchOutcomes: true,
-        admissionProtocolVersion: 2,
         mirrorRemoteOutput: false,
       });
       await flushPromises();
@@ -645,10 +600,7 @@ describe("submitBatch connection cap", () => {
       kind: "remote",
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
-      heterogeneousBatch: true,
       heterogeneousBatchMaxOutputs: 64,
-      durableBatchOutcomes: true,
-      admissionProtocolVersion: 2,
       mirrorRemoteOutput: true,
     });
     await flushPromises();
@@ -753,10 +705,7 @@ describe("submitBatch connection cap", () => {
       kind: "remote" as const,
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
-      heterogeneousBatch: true,
       heterogeneousBatchMaxOutputs: 64,
-      durableBatchOutcomes: true,
-      admissionProtocolVersion: 2,
       mirrorRemoteOutput: false,
     };
     store.submitBatch(req, 1, route);
@@ -830,10 +779,7 @@ describe("submitBatch connection cap", () => {
       kind: "remote",
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
-      heterogeneousBatch: true,
       heterogeneousBatchMaxOutputs: 64,
-      durableBatchOutcomes: true,
-      admissionProtocolVersion: 2,
       mirrorRemoteOutput: false,
     });
     await flushPromises();
@@ -908,10 +854,7 @@ describe("submitBatch connection cap", () => {
       kind: "remote",
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
-      heterogeneousBatch: true,
       heterogeneousBatchMaxOutputs: 64,
-      durableBatchOutcomes: true,
-      admissionProtocolVersion: 2,
       mirrorRemoteOutput: false,
     });
     await flushPromises();
@@ -989,10 +932,7 @@ describe("submitBatch connection cap", () => {
       kind: "remote",
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
-      heterogeneousBatch: true,
       heterogeneousBatchMaxOutputs: 64,
-      durableBatchOutcomes: true,
-      admissionProtocolVersion: 2,
       mirrorRemoteOutput: false,
     });
     await submitted.admitted;
@@ -1044,10 +984,7 @@ describe("submitBatch connection cap", () => {
       kind: "remote",
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
-      heterogeneousBatch: true,
       heterogeneousBatchMaxOutputs: 64,
-      durableBatchOutcomes: true,
-      admissionProtocolVersion: 2,
       mirrorRemoteOutput: false,
     });
     await submitted.settled;
@@ -1120,10 +1057,7 @@ describe("submitBatch connection cap", () => {
       kind: "remote",
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
-      heterogeneousBatch: true,
       heterogeneousBatchMaxOutputs: 64,
-      durableBatchOutcomes: true,
-      admissionProtocolVersion: 2,
       mirrorRemoteOutput: false,
     });
     await submitted.admitted;
@@ -1198,10 +1132,7 @@ describe("submitBatch connection cap", () => {
       kind: "remote",
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
-      heterogeneousBatch: true,
       heterogeneousBatchMaxOutputs: 64,
-      durableBatchOutcomes: true,
-      admissionProtocolVersion: 2,
       mirrorRemoteOutput: false,
     });
     await submitted.admitted;
@@ -1552,10 +1483,7 @@ describe("submitBatch connection cap", () => {
       kind: "remote",
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
-      heterogeneousBatch: true,
       heterogeneousBatchMaxOutputs: 64,
-      durableBatchOutcomes: true,
-      admissionProtocolVersion: 2,
       mirrorRemoteOutput: false,
     });
     await flushPromises();
@@ -1613,10 +1541,7 @@ describe("submitBatch connection cap", () => {
       kind: "remote" as const,
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
-      heterogeneousBatch: true,
       heterogeneousBatchMaxOutputs: 64,
-      durableBatchOutcomes: true,
-      admissionProtocolVersion: 2,
       mirrorRemoteOutput: false,
     };
 
@@ -1674,10 +1599,7 @@ describe("submitBatch connection cap", () => {
       kind: "remote",
       target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
       instanceId: "instance-1",
-      heterogeneousBatch: true,
       heterogeneousBatchMaxOutputs: 64,
-      durableBatchOutcomes: true,
-      admissionProtocolVersion: 2,
       durableMedia: {
         protocol_version: 2,
         encrypted_at_rest: true,
@@ -1700,40 +1622,41 @@ describe("submitBatch connection cap", () => {
     );
   });
 
-  it("keeps an opaque H3 family on the legacy stream", async () => {
+  it("refuses an opaque H3 family the machine has no private contract for", async () => {
     const store = useGenerationStore();
-    store.submitBatch(
-      {
-        ...req,
-        model: "hf:opaque-h3-checkpoint",
-        source_image: "PRIVATE-H3-SOURCE",
-      },
-      1,
-      {
-        hostId: "hal9000",
-        label: "hal9000",
-        kind: "remote",
-        target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
-        instanceId: "instance-1",
-        heterogeneousBatch: true,
-        durableBatchOutcomes: true,
-        durableMedia: {
-          protocol_version: 1,
-          encrypted_at_rest: true,
-          generate_request_media: true,
-          identity: true,
-          h3_references: false,
-          private_h3: false,
+    expect(() =>
+      store.submitBatch(
+        {
+          ...req,
+          model: "hf:opaque-h3-checkpoint",
+          source_image: "PRIVATE-H3-SOURCE",
         },
-        modelFamily: "minimax-h3",
-      },
-    );
+        1,
+        {
+          hostId: "hal9000",
+          label: "hal9000",
+          kind: "remote",
+          target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+          instanceId: "instance-1",
+          heterogeneousBatchMaxOutputs: 64,
+          durableMedia: {
+            protocol_version: 2,
+            encrypted_at_rest: true,
+            generate_request_media: true,
+            identity: true,
+            h3_references: false,
+            private_h3: false,
+          },
+          modelFamily: "minimax-h3",
+        },
+      ),
+    ).toThrow("cannot store MiniMax H3 request media durably");
     await flushPromises();
 
     expect(durableApi.admit).not.toHaveBeenCalled();
-    expect(mockSse).toHaveBeenCalledTimes(1);
+    expect(mockSse).not.toHaveBeenCalled();
+    expect(store.jobs).toHaveLength(0);
   });
-
   it("admits canonical v2 H3 through the durable batch transport", async () => {
     durableApi.admit.mockImplementation(() => new Promise(() => {}));
     const store = useGenerationStore();
@@ -1750,10 +1673,7 @@ describe("submitBatch connection cap", () => {
         kind: "remote",
         target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
         instanceId: "instance-1",
-        heterogeneousBatch: true,
         heterogeneousBatchMaxOutputs: 64,
-        durableBatchOutcomes: true,
-        admissionProtocolVersion: 2,
         durableMedia: {
           protocol_version: 3,
           encrypted_at_rest: true,
@@ -1775,13 +1695,13 @@ describe("submitBatch connection cap", () => {
     expect(mockSse).not.toHaveBeenCalled();
   });
 
-  it("holds at most four streams across separate Generate submissions", async () => {
+  it("holds at most four sequence streams across separate Generate submissions", async () => {
     const store = useGenerationStore();
-    const first = store.submitBatch({ ...req, seed: 200 }, 1);
-    const second = store.submitBatch({ ...req, seed: 201 }, 1);
-    const third = store.submitBatch({ ...req, seed: 202 }, 1);
-    const fourth = store.submitBatch({ ...req, seed: 203 }, 1);
-    const fifth = store.submitBatch({ ...req, seed: 204 }, 1);
+    const first = store.submitBatch({ ...chainReq, seed: 200 }, 1, null, chainDecision);
+    const second = store.submitBatch({ ...chainReq, seed: 201 }, 1, null, chainDecision);
+    const third = store.submitBatch({ ...chainReq, seed: 202 }, 1, null, chainDecision);
+    const fourth = store.submitBatch({ ...chainReq, seed: 203 }, 1, null, chainDecision);
+    const fifth = store.submitBatch({ ...chainReq, seed: 204 }, 1, null, chainDecision);
     await flushPromises();
 
     expect(streams.map((stream) => stream.seed).sort()).toEqual([200, 201, 202, 203]);
@@ -1802,11 +1722,10 @@ describe("submitBatch connection cap", () => {
       fifth.settled,
     ]);
   });
-
-  it("shares the four-stream host cap across overlapping batches", async () => {
+  it("shares the four-stream host cap across overlapping sequence batches", async () => {
     const store = useGenerationStore();
-    const first = store.submitBatch({ ...req, seed: 400 }, 3);
-    const second = store.submitBatch({ ...req, seed: 500 }, 3);
+    const first = store.submitBatch({ ...chainReq, seed: 400 }, 3, null, chainDecision);
+    const second = store.submitBatch({ ...chainReq, seed: 500 }, 3, null, chainDecision);
     await flushPromises();
 
     expect(streams).toHaveLength(4);
@@ -1824,8 +1743,7 @@ describe("submitBatch connection cap", () => {
     }
     await Promise.all([first.settled, second.settled]);
   });
-
-  it("drains the mobile media backlog per target and keeps waiting jobs visible and cancellable", async () => {
+  it("drains the sequence backlog per target and keeps waiting clips visible and cancellable", async () => {
     const store = useGenerationStore();
     const mobileRoute = (hostId: string, baseUrl: string) => ({
       hostId,
@@ -1833,21 +1751,22 @@ describe("submitBatch connection cap", () => {
       kind: "remote" as const,
       target: { baseUrl, apiKey: `${hostId}-secret` },
       instanceId: `${hostId}-instance`,
-      heterogeneousBatch: true,
-      durableBatchOutcomes: true,
+      heterogeneousBatchMaxOutputs: 64,
       mirrorRemoteOutput: false,
       retainEncodedResult: false,
       metadataOnlyCompletion: true,
     });
     const first = store.submitBatch(
-      { ...req, seed: 600, source_image: "session-only-a" },
+      { ...chainReq, seed: 600 },
       5,
       mobileRoute("phone-a", "http://phone-a:7680"),
+      chainDecision,
     );
     const second = store.submitBatch(
-      { ...req, seed: 700, source_image: "session-only-b" },
+      { ...chainReq, seed: 700 },
       5,
       mobileRoute("phone-b", "http://phone-b:7680"),
+      chainDecision,
     );
 
     await flushPromises();
@@ -1857,45 +1776,31 @@ describe("submitBatch connection cap", () => {
     expect(streams.filter((stream) => stream.target === "http://phone-b:7680")).toHaveLength(4);
 
     expect(await store.cancel(first.jobs[4]!.clientId)).toBe(true);
-    completeStream(600);
+    completeChainStream(600);
     await flushPromises();
     expect(streams.some((stream) => stream.seed === 604)).toBe(false);
 
-    completeStream(700);
+    completeChainStream(700);
     await flushPromises();
     expect(streams.some((stream) => stream.seed === 704)).toBe(true);
 
     while (streams.length > 0) {
-      completeStream(streams[0]!.seed);
+      completeChainStream(streams[0]!.seed);
       await flushPromises();
     }
     await Promise.all([first.settled, second.settled]);
   });
-
-  it("releases a slot on a terminal frame even when the peer does not close", async () => {
+  it("releases a slot on a terminal sequence frame even when the peer does not close", async () => {
     const store = useGenerationStore();
-    const first = store.submitBatch({ ...req, seed: 300 }, 1);
-    const second = store.submitBatch({ ...req, seed: 301 }, 1);
-    const third = store.submitBatch({ ...req, seed: 302 }, 1);
-    const fourth = store.submitBatch({ ...req, seed: 303 }, 1);
-    const fifth = store.submitBatch({ ...req, seed: 304 }, 1);
+    const first = store.submitBatch({ ...chainReq, seed: 300 }, 1, null, chainDecision);
+    const second = store.submitBatch({ ...chainReq, seed: 301 }, 1, null, chainDecision);
+    const third = store.submitBatch({ ...chainReq, seed: 302 }, 1, null, chainDecision);
+    const fourth = store.submitBatch({ ...chainReq, seed: 303 }, 1, null, chainDecision);
+    const fifth = store.submitBatch({ ...chainReq, seed: 304 }, 1, null, chainDecision);
     await flushPromises();
     expect(streams.map((stream) => stream.seed).sort()).toEqual([300, 301, 302, 303]);
 
-    streams
-      .find((stream) => stream.seed === 300)!
-      .onEvent(
-        "complete",
-        JSON.stringify({
-          image: btoa("generated"),
-          format: "png",
-          width: 1024,
-          height: 1024,
-          seed_used: 300,
-          generation_time_ms: 100,
-          model: req.model,
-        }),
-      );
+    completeChainStream(300);
     await flushPromises();
 
     expect(streams.map((stream) => stream.seed).sort()).toEqual([301, 302, 303, 304]);
@@ -1911,10 +1816,9 @@ describe("submitBatch connection cap", () => {
       fifth.settled,
     ]);
   });
-
-  it("never opens a stream for a sibling cancelled before its turn", async () => {
+  it("never opens a stream for a sequence sibling cancelled before its turn", async () => {
     const store = useGenerationStore();
-    const { jobs, settled } = store.submitBatch(req, 5);
+    const { jobs, settled } = store.submitBatch(chainReq, 5, null, chainDecision);
     await flushPromises();
 
     // Cancel the last sibling while the first four hold the pool.

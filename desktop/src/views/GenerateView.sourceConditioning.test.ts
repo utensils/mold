@@ -10,6 +10,7 @@ import { mount, flushPromises } from "@vue/test-utils";
 import GenerateView from "./GenerateView.vue";
 import { useGenerateFormStore } from "../stores/generateForm";
 import { useGenerationStore } from "../stores/generation";
+import { useHostModelsStore } from "../stores/hostModels";
 import { useModelStore } from "../stores/models";
 import { useConnectionStore } from "../stores/connection";
 import { useComposerStore } from "../stores/composer";
@@ -105,6 +106,12 @@ describe("GenerateView source-conditioning gating (#772, #779)", () => {
   it("parks a source image while submitting an advertised text-to-video checkpoint", async () => {
     const model = wanModel("wan22-t2v-a14b", "unsupported");
     useModelStore().all = [model];
+    // A print routes from inventory now, not from a placement preview.
+    useHostModelsStore().byHost.local = {
+      entries: [model],
+      fetchedAt: Date.now(),
+      error: null,
+    };
     const submitBatch = vi
       .spyOn(useGenerationStore(), "submitBatch")
       .mockReturnValue({ jobs: [], settled: Promise.resolve([]) });
@@ -141,6 +148,12 @@ describe("GenerateView source-conditioning gating (#772, #779)", () => {
   it("blocks Generate until a required source image is attached", async () => {
     const model = wanModel("wan22-i2v-a14b", "required");
     useModelStore().all = [model];
+    // A print routes from inventory now, not from a placement preview.
+    useHostModelsStore().byHost.local = {
+      entries: [model],
+      fetchedAt: Date.now(),
+      error: null,
+    };
     const submitBatch = vi
       .spyOn(useGenerationStore(), "submitBatch")
       .mockReturnValue({ jobs: [], settled: Promise.resolve([]) });
@@ -172,6 +185,12 @@ describe("GenerateView source-conditioning gating (#772, #779)", () => {
       default_fps: 24,
     } as ModelEntry;
     useModelStore().all = [model];
+    // A print routes from inventory now, not from a placement preview.
+    useHostModelsStore().byHost.local = {
+      entries: [model],
+      fetchedAt: Date.now(),
+      error: null,
+    };
     const wrapper = mount(GenerateView, {
       shallow: true,
       attachTo: document.body,
@@ -192,6 +211,12 @@ describe("GenerateView source-conditioning gating (#772, #779)", () => {
   it("blocks an end-frame-only draft until a first frame joins it", async () => {
     const model = wanModel("wan22-flf2v-a14b", "optional");
     useModelStore().all = [model];
+    // A print routes from inventory now, not from a placement preview.
+    useHostModelsStore().byHost.local = {
+      entries: [model],
+      fetchedAt: Date.now(),
+      error: null,
+    };
     const submitBatch = vi
       .spyOn(useGenerationStore(), "submitBatch")
       .mockReturnValue({ jobs: [], settled: Promise.resolve([]) });
@@ -224,6 +249,12 @@ describe("GenerateView source-conditioning gating (#772, #779)", () => {
   it("says the end frame cannot be restored when reusing a first/last-frame print", async () => {
     const model = wanModel("wan22-flf2v-a14b", "optional");
     useModelStore().all = [model];
+    // A print routes from inventory now, not from a placement preview.
+    useHostModelsStore().byHost.local = {
+      entries: [model],
+      fetchedAt: Date.now(),
+      error: null,
+    };
     sourceStashGet.mockResolvedValue("RESTORED");
     useComposerStore().set({
       metadata: {
@@ -255,6 +286,12 @@ describe("GenerateView source-conditioning gating (#772, #779)", () => {
   it("stays silent about an end frame for an ordinary single-source print", async () => {
     const model = wanModel("wan22-flf2v-a14b", "optional");
     useModelStore().all = [model];
+    // A print routes from inventory now, not from a placement preview.
+    useHostModelsStore().byHost.local = {
+      entries: [model],
+      fetchedAt: Date.now(),
+      error: null,
+    };
     sourceStashGet.mockResolvedValue("RESTORED");
     useComposerStore().set({
       metadata: {

@@ -160,6 +160,13 @@ describe("GenerateView prepared expansion batches", () => {
     connection.status = "ready";
     useHostsStore().initialized = true;
     useModelStore().all = [model];
+    // A print routes from inventory now, not from a placement preview, so
+    // This device must have listed its own models before one can be queued.
+    useHostModelsStore().byHost.local = {
+      entries: [model],
+      fetchedAt: Date.now(),
+      error: null,
+    };
     const form = useGenerateFormStore().form;
     form.prompt = "a lighthouse at dusk";
     form.model = model.name;
@@ -367,60 +374,6 @@ describe("GenerateView prepared expansion batches", () => {
         .props("batch")
         .prompts.map((prompt: { text: string }) => prompt.text),
     ).toEqual(prompts);
-  });
-
-  it("exposes responsive cancellation while placement planning is pending", async () => {
-    useGenerateFormStore().form.batchSize = 1;
-    const preview = deferred<unknown>();
-    placementPreview.mockReset().mockImplementation(() => preview.promise);
-    const submit = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
-      jobs: [],
-      settled: Promise.resolve([]),
-    });
-    const wrapper = mountView();
-    await flushPromises();
-
-    await wrapper.get('[data-test="generate-button"]').trigger("click");
-    await nextTick();
-
-    const planningButton = wrapper.get('[data-test="generate-button"]');
-    expect(planningButton.text()).toContain("Cancel");
-    expect(wrapper.get('[data-test="preprocessing-status"]').text()).toContain(
-      "Checking machine fit",
-    );
-    expect(planningButton.attributes("disabled")).toBeUndefined();
-    await planningButton.trigger("click");
-    await nextTick();
-    expect(placementPreview).toHaveBeenCalledTimes(1);
-    expect(submit).not.toHaveBeenCalled();
-
-    const previewOptions = placementPreview.mock.calls[0]?.[3];
-    expect(previewOptions?.signal?.aborted).toBe(true);
-    expect(wrapper.get('[data-test="generate-button"]').text()).toContain("Generate");
-
-    preview.resolve({
-      version: 1,
-      authoritative: true,
-      state_version: 1,
-      plan_version: 1,
-      outcome: "planned",
-      candidate: {
-        device_id: "cuda:0",
-        execution_fingerprint: "test",
-        predicted_start_after_ms: 0,
-        predicted_completion_after_ms: 100,
-        setup_ms: 0,
-        setup_kind: "warm",
-        estimate_confidence: "high",
-      },
-    });
-    await flushPromises();
-
-    expect(submit).not.toHaveBeenCalled();
-    const readyButton = wrapper.get('[data-test="generate-button"]');
-    expect(readyButton.text()).toContain("Generate");
-    expect(readyButton.text()).not.toContain("Planning");
-    expect(readyButton.attributes("disabled")).toBeUndefined();
   });
 
   it("runs exactly one finalized placement preview before submitting edited prepared prompts", async () => {
@@ -723,7 +676,6 @@ describe("GenerateView prepared expansion batches", () => {
       target: { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
       instanceId: null,
       referenceUploads: null,
-      heterogeneousBatch: false,
       heterogeneousBatchMaxOutputs: null,
     };
     const remoteRoute = {
@@ -870,6 +822,11 @@ describe("GenerateView prepared expansion batches", () => {
     apiJson.mockResolvedValue([model, catalogModel]);
     apiJsonTo.mockResolvedValue([model, catalogModel]);
     useModelStore().all = [model, catalogModel];
+    useHostModelsStore().byHost.local = {
+      entries: [model, catalogModel],
+      fetchedAt: Date.now(),
+      error: null,
+    };
     vi.mocked(expandPrompt).mockResolvedValue({
       original: "a lighthouse at dusk",
       expanded: ["storm light"],
@@ -896,6 +853,11 @@ describe("GenerateView prepared expansion batches", () => {
     apiJson.mockResolvedValue([model, catalogModel]);
     apiJsonTo.mockResolvedValue([model, catalogModel]);
     useModelStore().all = [model, catalogModel];
+    useHostModelsStore().byHost.local = {
+      entries: [model, catalogModel],
+      fetchedAt: Date.now(),
+      error: null,
+    };
     vi.mocked(expandPrompt).mockResolvedValue({
       original: "a lighthouse at dusk",
       expanded: ["storm light"],
@@ -932,6 +894,11 @@ describe("GenerateView prepared expansion batches", () => {
     apiJson.mockResolvedValue([model, catalogModel]);
     apiJsonTo.mockResolvedValue([model, catalogModel]);
     useModelStore().all = [model, catalogModel];
+    useHostModelsStore().byHost.local = {
+      entries: [model, catalogModel],
+      fetchedAt: Date.now(),
+      error: null,
+    };
     vi.mocked(expandPrompt)
       .mockResolvedValueOnce({
         original: "a lighthouse at dusk",
