@@ -629,6 +629,51 @@ extrapolation for a clip longer than 124 frames, which is why the derived
 device floor grows steeply there (about 24.3 GB at 345 frames against 9.7 GB at
 the default) and refuses a small card with numbers.
 
+### The host charge is a peak, not a sum (2026-08-26)
+
+The compact stack places its Qwen3-VL conditioner on the CPU for a CUDA route,
+so its 15.687 GB of packed parameters are real anonymous host bytes and are the
+floor under every host figure here. What is charged BESIDE them changed, and
+none of it is a lowered constant:
+
+- **The load staging is one largest tensor, not two.** The NVFP4 loader reads a
+  tensor into an anonymous `Vec` and copies it again, so the largest tensor is
+  live twice — but only `params[0..k)` are resident while tensor k is staged,
+  and that sum is at most `total - size(k)`. The load peak is therefore bounded
+  by `total + size(k)` <= `total + max`. Charging `2 x max` on top of a total
+  that already contains the tensor once over-counted 742 MiB.
+- **Loading and forwarding are sequential.** The staging buffers are freed
+  before the first forward allocates an activation, so
+  `qwen_conditioner_phase_host_peak` takes `parameters + max(load staging,
+  activation + output state)` where the old derivation summed both transients
+  into one phase.
+- **FL2VA pays for its own conditioner sequence.** The reviewed grant was
+  charged verbatim for every admitted canvas, so a 768x768 render was charged
+  for the vision pads a 1344x768 boundary endpoint packs. It now scales the one
+  observed per-row cost by the request's own text + vision rows under the same
+  x1.15 + 64 MiB-grid policy Ref2VA already used, clamped by the grant. At the
+  reviewed shape the envelope's cap (2,048 + 4,032 = 6,080 rows) sits 0.25%
+  above the sequence the observation was taken over (6,065), so the clamp keeps
+  that shape byte-identical.
+
+At the reviewed 1344x768 x 124 shape the exact-target host charge therefore
+moves from 22,893,760,967 B to 21,337,936,327 B — exactly the doubly-charged
+staging — and smaller canvases fall further through the sequence scaling.
+
+**What this does NOT resolve.** Two figures in this document cannot both
+describe the same quantity. `FL2VA_OBSERVED_QWEN_ACTIVATION_WORKSPACE_BYTES` is
+4,168,069,120 B, captured by `routed_qwen_workspace` as the process `VmHWM`
+GROWTH across the `QwenEncode` phase on the CPU route; the 768x768 rows below
+report a whole-process peak host RSS of 16.36 GB, of which 15.687 GB is the
+conditioner's parameters and 0.66 GB the fixed runtime. There is no room in the
+second figure for the first. A `VmHWM` growth is also not additive with a
+separately charged resident-parameter figure: whatever part of that growth WAS
+the parameter load is counted twice. Resolving it needs a capture that
+separates anonymous from file-backed pages across the conditioner phase — the
+artifact pass's ~37 GB of file-backed reads sit inside the same high-water mark
+— and until that exists the activation term stays charged as measured. Do not
+lower it to make a render fit.
+
 Model-valid is not Mold-measured. The checkpoint accepts any 32-aligned canvas
 between 1:4 and 4:1 (ComfyUI's `nodes_minimax_h3.py:99-100` declares
 `min=32, max=MAX_RESOLUTION, step=32`, and 1344x768 is a *default* there), and

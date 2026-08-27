@@ -11,3 +11,14 @@
   than on which worker happened to be busy at the instant admission sampled,
   and a park that outlives an idle scheduler is answered with its own
   shortfall numbers rather than waiting indefinitely on an idle GPU.
+- **MiniMax H3 no longer charges one host peak for memory it uses at two
+  different moments.** The conditioner's load staging and its forward
+  activation cannot coexist — the staging buffers are freed before the first
+  forward allocates — so the phase peak now takes the larger rather than their
+  sum, and the staging term charges one largest tensor instead of two on top of
+  a parameter total that already contains it. FL2VA also pays for its own
+  conditioner sequence instead of the largest canvas the family admits, using
+  the same measured per-row cost and margin policy Ref2VA already used and
+  clamped so the reviewed shape is unchanged. At the reviewed 1344x768 shape
+  the host charge falls from 22.89 GB to 21.34 GB; smaller canvases fall
+  further.

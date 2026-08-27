@@ -1606,25 +1606,56 @@ pub(crate) const FL2VA_OBSERVED_QWEN_SEQUENCE_ROWS: u64 = 2_033 + 4_032;
 /// rather than an undercharged admit. Admission and the frozen-plan reopen
 /// both derive through here, so the freeze-time projection comparison
 /// cannot drift.
+/// Host peak of the conditioner phase.
+///
+/// The conditioner is LOADED and then RUN. Its staging buffers are freed
+/// before the first forward allocates an activation, so the two transients
+/// cannot coexist and the phase peak takes the larger — never their sum. The
+/// parameters are the one term live across both halves and are charged once.
+///
+/// Summing them charged one host peak for two disjoint moments, which on the
+/// released compact stack is 742 MiB of a budget that has refused real renders
+/// on a 62 GB host.
+fn qwen_conditioner_phase_host_peak(
+    resident_bytes: u64,
+    load_transient_bytes: u64,
+    forward_transient_bytes: u64,
+) -> Result<u64> {
+    checked_sum([
+        resident_bytes,
+        load_transient_bytes.max(forward_transient_bytes),
+    ])
+}
+
 pub(crate) fn qwen_activation_workspace_demand_bytes(
     request: &H3FactoryPreparedRequestInput,
     granted_qwen_activation_workspace_bytes: u64,
 ) -> Result<u64> {
+    let rows = checked_sum([
+        request.rows.qwen_output_text_rows,
+        request.rows.qwen_vision_rows,
+    ])?;
+    let scaled = FL2VA_OBSERVED_QWEN_ACTIVATION_WORKSPACE_BYTES
+        .checked_mul(rows)
+        .map(|bytes| bytes / FL2VA_OBSERVED_QWEN_SEQUENCE_ROWS)
+        .ok_or_else(|| anyhow!("private H3 Qwen activation demand overflow"))?;
+    let demand = scaled
+        .checked_mul(115)
+        .map(|bytes| (bytes / 100).next_multiple_of(64 * 1024 * 1024))
+        .ok_or_else(|| anyhow!("private H3 Qwen activation demand overflow"))?;
     match request.task {
-        Task::Fl2va => Ok(granted_qwen_activation_workspace_bytes),
+        // FL2VA's envelope CAPS the sequence at the rows the observation was
+        // taken over, so the grant is an upper bound the request can only sit
+        // under. Clamping rather than refusing keeps a full-length prompt at
+        // the reviewed shape byte-identical to the old flat charge (the cap is
+        // 6,080 rows against the observation's 6,065 — 0.25%, far inside the
+        // x1.15 margin), while a smaller canvas finally pays for the sequence
+        // it actually encodes instead of the largest one the family admits.
+        Task::Fl2va => Ok(demand.min(granted_qwen_activation_workspace_bytes)),
+        // Ref2VA's grant is a provisional ceiling and its sequence varies by an
+        // order of magnitude with the ordered reference set, so a demand past
+        // the grant is a named refusal rather than a silent clamp.
         Task::Ref2va => {
-            let rows = checked_sum([
-                request.rows.qwen_output_text_rows,
-                request.rows.qwen_vision_rows,
-            ])?;
-            let scaled = FL2VA_OBSERVED_QWEN_ACTIVATION_WORKSPACE_BYTES
-                .checked_mul(rows)
-                .map(|bytes| bytes / FL2VA_OBSERVED_QWEN_SEQUENCE_ROWS)
-                .ok_or_else(|| anyhow!("private H3 Qwen activation demand overflow"))?;
-            let demand = scaled
-                .checked_mul(115)
-                .map(|bytes| (bytes / 100).next_multiple_of(64 * 1024 * 1024))
-                .ok_or_else(|| anyhow!("private H3 Qwen activation demand overflow"))?;
             if demand > granted_qwen_activation_workspace_bytes {
                 bail!(
                     "private H3 Ref2VA Qwen sequence of {rows} rows needs {demand} bytes of \
@@ -1746,12 +1777,16 @@ fn build_canonical_private_fl2va_target_budget(
     // The NVFP4 loader reads one tensor at a time into an anonymous `Vec`
     // (`qwen_nvfp4.rs:820-856`) and `Tensor::from_raw_buffer` copies it again
     // (`qwen_nvfp4_runtime.rs:806-821`), so the largest tensor is live twice
-    // while the parameters already read are resident. This transient was
-    // measured but never budgeted before.
-    let qwen_host_load_staging_bytes = qwen_memory
-        .maximum_tensor_staging_bytes
-        .checked_mul(2)
-        .ok_or_else(|| anyhow!("private H3 Qwen host load staging overflow"))?;
+    // while the parameters already read are resident.
+    //
+    // ONE tensor above the resident set, not two, and the arithmetic is the
+    // argument: while tensor k is staged twice, only params[0..k) are resident,
+    // and that sum is at most `total - size(k)`. So the load peak is bounded by
+    // `total - size(k) + 2*size(k)` = `total + size(k)` <= `total + max`. The
+    // old `2 x max` charged the staged tensor twice ON TOP of a total that
+    // already contains it once — 742 MiB of a host budget that has refused
+    // real renders.
+    let qwen_host_load_staging_bytes = qwen_memory.maximum_tensor_staging_bytes;
     // Metadata each opened authority retains beside the payload it streams:
     // the Qwen's parsed raw header, the transformer's parsed safetensors
     // header, and the VAE authorities' two decoded config buffers.
@@ -2074,13 +2109,16 @@ fn build_canonical_private_fl2va_target_budget(
         transformer_alive_metadata_host_bytes,
         vae_memory.peak_host_io_buffer_bytes,
     ])?;
-    let qwen_encode_phase_host_bytes = checked_sum([
-        attempt_host_bytes,
-        qwen_alive_metadata_host_bytes,
-        qwen_host_workspace_bytes,
+    let qwen_encode_phase_host_bytes = qwen_conditioner_phase_host_peak(
+        checked_sum([
+            attempt_host_bytes,
+            qwen_alive_metadata_host_bytes,
+            qwen_host_parameter_bytes,
+            text_modality_tags_host_bytes,
+        ])?,
         qwen_host_load_staging_bytes,
-        text_modality_tags_host_bytes,
-    ])?;
+        checked_sum([qwen_host_activation_bytes, qwen_host_output_state_bytes])?,
+    )?;
     let qwen_transfer_phase_host_bytes = checked_sum([
         attempt_host_bytes,
         qwen_alive_metadata_host_bytes,
@@ -2554,25 +2592,97 @@ mod tests {
         (prepared, frozen)
     }
 
+    /// Two disjoint moments are not one peak, and a staged tensor is not
+    /// charged on top of a total that already contains it.
+    ///
+    /// The released compact conditioner's own numbers: 15.687 GB of parameters,
+    /// a 742 MiB largest tensor, and a 4.83 GB activation grant. The old
+    /// derivation asked for parameters + 2 x staging + activation; every term
+    /// past the first is a transient, and the two transients belong to the
+    /// load and the forward respectively.
+    #[test]
+    fn the_conditioner_phase_charges_one_transient_and_one_staging_tensor() {
+        let facts =
+            crate::minimax_h3::private_qwen::released_h3_private_qwen_loader_memory_authority(
+                crate::minimax_h3::private_qwen::H3PrivateQwenLoaderMemoryRoute::Cpu,
+            )
+            .unwrap();
+        let parameters = facts.host_resident_parameter_bytes;
+        let staging = facts.maximum_tensor_staging_bytes;
+        let activation = 4_831_838_208_u64;
+
+        // While tensor k is staged twice, only params[0..k) are resident, and
+        // that sum is at most `total - size(k)`. So the load peak is bounded by
+        // `total + size(k)` <= `total + max`, never `total + 2 * max`.
+        let load = qwen_conditioner_phase_host_peak(parameters, staging, 0).unwrap();
+        assert_eq!(load, parameters + staging);
+
+        // The forward's activation and the load's staging never coexist.
+        let forward = qwen_conditioner_phase_host_peak(parameters, staging, activation).unwrap();
+        assert_eq!(forward, parameters + activation);
+        assert!(
+            forward < parameters + 2 * staging + activation,
+            "the phase peak must not sum two disjoint transients"
+        );
+        assert_eq!(
+            parameters + 2 * staging + activation - forward,
+            2 * staging,
+            "the correction is exactly the double-charged staging"
+        );
+    }
+
     /// The exact budget charges the Qwen activation workspace from the
-    /// REQUEST's own Qwen sequence, never a flat profile constant: FL2VA
-    /// keeps its reviewed grant verbatim (its envelope caps the sequence at
-    /// the rows the grant was measured over), the scripted one-reference
-    /// campaign shape stays admitted at its own derived demand, and a
-    /// three-reference maximum-canvas request — 2.20x FL2VA's measured
-    /// sequence, above the capture profile's 2x provisional grant — is a
-    /// named refusal instead of an undercharged admit.
+    /// REQUEST's own Qwen sequence, never a flat profile constant.
+    ///
+    /// FL2VA used to take the reviewed grant verbatim for EVERY admitted
+    /// canvas, which charged a 768x768 render for the conditioner sequence a
+    /// 1344x768 one encodes — the family's largest — and is one of the terms
+    /// that refused real renders on a 62 GB host. It now pays its own
+    /// sequence, clamped by the grant so the reviewed shape stays byte-exact,
+    /// while Ref2VA's provisional ceiling remains a named refusal rather than
+    /// a silent clamp.
     #[test]
     fn qwen_activation_charge_follows_the_request_sequence() {
         const FL2VA_PUBLIC_CEILING: u64 = 4_831_838_208;
         const CAPTURE_GRANT: u64 = 2 * FL2VA_PUBLIC_CEILING;
         let (_, fl2va_frozen) = prepared_runtime_pair();
 
-        // FL2VA: the reviewed grant, byte-identical to the old flat charge.
+        let fl2va_shape = |text_rows: u64, vision_rows: u64| {
+            let mut request = fl2va_frozen.clone();
+            request.rows.qwen_output_text_rows = text_rows;
+            request.rows.qwen_vision_rows = vision_rows;
+            request
+        };
+
+        // At the exact sequence the observation was taken over, the derivation
+        // reproduces the reviewed grant byte for byte — the check that the
+        // per-row model and the old flat charge are one statement.
+        let measured = fl2va_shape(2_033, FL2VA_OBSERVED_QWEN_SEQUENCE_ROWS - 2_033);
         assert_eq!(
-            qwen_activation_workspace_demand_bytes(&fl2va_frozen, FL2VA_PUBLIC_CEILING).unwrap(),
+            qwen_activation_workspace_demand_bytes(&measured, FL2VA_PUBLIC_CEILING).unwrap(),
             FL2VA_PUBLIC_CEILING
         );
+
+        // The envelope's own cap sits 15 rows above that sequence, so the
+        // clamp — not a refusal — is what keeps a full-length prompt at the
+        // reviewed canvas charging exactly what it charged before.
+        let at_the_cap = fl2va_shape(2_048, 4_032);
+        assert_eq!(
+            qwen_activation_workspace_demand_bytes(&at_the_cap, FL2VA_PUBLIC_CEILING).unwrap(),
+            FL2VA_PUBLIC_CEILING
+        );
+
+        // A materially shorter sequence pays materially less. This is the
+        // whole point: a smaller canvas packs fewer vision pads.
+        let shorter = fl2va_shape(2_048, 2_304);
+        let shorter_demand =
+            qwen_activation_workspace_demand_bytes(&shorter, FL2VA_PUBLIC_CEILING).unwrap();
+        assert!(
+            shorter_demand < FL2VA_PUBLIC_CEILING,
+            "a shorter conditioner sequence must not be charged the largest canvas's grant: \
+             {shorter_demand}"
+        );
+        assert_eq!(shorter_demand % (64 * 1024 * 1024), 0, "{shorter_demand}");
 
         let ref2va_shape = |vision_rows: u64| {
             let mut request = fl2va_frozen.clone();
