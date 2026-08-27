@@ -6963,7 +6963,8 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        // A sibling with no canvas is a validation refusal of the batch.
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let error = json_body(refused).await;
         assert!(
             error["error"].as_str().unwrap().contains("requests[2]"),
@@ -6997,6 +6998,79 @@ mod tests {
     /// request through the batch route. The one-use handle is consumed inside
     /// admission and never journaled; the session, its staging, and its quota
     /// are all gone by the time the 202 is answered.
+    /// The durable row carries the reference DESCRIPTOR; the feeder's deferred
+    /// preparation must validate that form rather than the admission form —
+    /// hal9000 held the first live Ref2VA print with
+    /// `MINIMAX_H3_REFERENCE_DESCRIPTOR_ONLY` (2026-08-27).
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deferred_preparation_validates_references_in_their_resolved_form() {
+        let root = tempfile::tempdir().unwrap();
+        let db_path = root.path().join("mold.db");
+        let db = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
+        let (mut state, _rx) = durable_state_with_engine(
+            db.clone(),
+            root.path(),
+            MockEngine::ready_for_model(mold_core::minimax_h3::REF2VA_COMFY),
+        );
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let image = minimal_png();
+
+        let accepted = authless_app(state.clone())
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [inline_ref2va_body("resolved-form validation", &image)],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 1, "the reference print is one durable row");
+        let row = &rows[0];
+        let mut request: mold_core::GenerateRequest =
+            serde_json::from_str(&row.request_json).unwrap();
+        assert!(
+            request
+                .references
+                .as_ref()
+                .is_some_and(|refs| refs.iter().all(|r| matches!(
+                    r.media(),
+                    mold_core::GenerationReferenceAuthority::Descriptor
+                ))),
+            "the row carries descriptors: {}",
+            row.request_json
+        );
+
+        // The exact validation the feeder's preparation runs on that row.
+        let outcome = crate::routes::validate_generate_request(
+            &request,
+            Some(mold_core::minimax_h3::FAMILY),
+            mold_core::ReferenceForm::Resolved,
+        );
+        assert!(
+            !outcome
+                .as_ref()
+                .err()
+                .is_some_and(|e| e.contains("descriptor authority")),
+            "deferred preparation must accept the descriptor form: {outcome:?}"
+        );
+        // And the admission form still refuses it, so a client can never
+        // hand the server a payload-free reference.
+        request.title = None;
+        let admitted = crate::routes::validate_generate_request(
+            &request,
+            Some(mold_core::minimax_h3::FAMILY),
+            mold_core::ReferenceForm::Admitted,
+        )
+        .unwrap_err();
+        assert!(admitted.contains("descriptor authority"), "{admitted}");
+    }
+
     #[cfg(feature = "h3")]
     #[tokio::test(flavor = "current_thread")]
     async fn upload_session_references_admit_durably_and_release_staging() {
@@ -19652,9 +19726,19 @@ mod tests {
         )
         .unwrap();
         req.title = Some("bad\u{0007}title".into());
-        assert!(crate::routes::validate_generate_request(&req, None).is_err());
+        assert!(crate::routes::validate_generate_request(
+            &req,
+            None,
+            mold_core::ReferenceForm::Admitted
+        )
+        .is_err());
         req.title = Some("Smurf village".into());
-        assert!(crate::routes::validate_generate_request(&req, None).is_ok());
+        assert!(crate::routes::validate_generate_request(
+            &req,
+            None,
+            mold_core::ReferenceForm::Admitted
+        )
+        .is_ok());
     }
 
     /// The desktop auto-save mirror (`PUT /api/gallery/import/:filename`)

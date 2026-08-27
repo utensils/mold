@@ -146,9 +146,9 @@ describe("QueueEntryDetail", () => {
     expect(wrapper.get('[data-test="queue-detail-preview"]').text()).toContain(
       "Step 7 of 28",
     );
-    expect(wrapper.get('[data-test="queue-detail-preview"] img').attributes("src")).toBe(
-      "data:image/png;base64,AAA",
-    );
+    expect(
+      wrapper.get('[data-test="queue-detail-preview"] img').attributes("src"),
+    ).toBe("data:image/png;base64,AAA");
   });
 
   it("keeps the step counter on a host that renders without previews", () => {
@@ -162,9 +162,9 @@ describe("QueueEntryDetail", () => {
     expect(wrapper.get('[data-test="queue-detail-preview"]').text()).toContain(
       "Step 7 of 28",
     );
-    expect(wrapper.find('[data-test="queue-detail-preview"] img').exists()).toBe(
-      false,
-    );
+    expect(
+      wrapper.find('[data-test="queue-detail-preview"] img').exists(),
+    ).toBe(false);
   });
 
   it("shows an action failure inline instead of leaving it to a toast", () => {

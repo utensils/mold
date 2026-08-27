@@ -117,7 +117,8 @@ pub use validation::{
     validate_generate_request_fields, validate_generate_request_with_family,
     validate_generation_dimensions, validate_generation_dimensions_composed,
     validate_generation_dimensions_for_model, validate_request_organization,
-    validate_upscale_request, wan_dimension_alignment, Ltx2OutputRung, Ltx2SpatialComposition,
+    validate_resolved_generate_request_with_family, validate_upscale_request,
+    wan_dimension_alignment, Ltx2OutputRung, Ltx2SpatialComposition, ReferenceForm,
     RequestOrganization, LORA_CAPABLE_FAMILIES, LTX2_OUTPUT_RUNGS,
 };
 

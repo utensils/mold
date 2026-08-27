@@ -1889,6 +1889,35 @@ pub fn validate_generate_request_with_family(
     validate_generate_request_after_activation(req, family_hint)
 }
 
+/// Which form a request's ordered references are in when it is validated.
+///
+/// A client submits references as inline bytes, upload handles, or
+/// server-local paths, and a payload-free `Descriptor` from a client is a
+/// refusal at admission. Durable admission then resolves every reference —
+/// the bytes are sealed into the encrypted media set and only the descriptor
+/// (kind, probed shape, content `sha256`) stays on the queued request — so
+/// everything that re-validates the request AFTER that point (deferred
+/// preparation, a replay after restart) must accept exactly the descriptor
+/// form it refused at the door. Passing the admission rule there held every
+/// durable Ref2VA print with `MINIMAX_H3_REFERENCE_DESCRIPTOR_ONLY`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceForm {
+    /// Client-supplied media authorities; descriptors are refused.
+    Admitted,
+    /// Post-resolution descriptors with content digests; media is refused.
+    Resolved,
+}
+
+/// [`validate_generate_request_with_family`] for a request whose references
+/// have already been resolved to descriptors by durable admission.
+pub fn validate_resolved_generate_request_with_family(
+    req: &GenerateRequest,
+    family_hint: Option<&str>,
+) -> Result<(), String> {
+    crate::require_model_activation(&req.model, family_hint).map_err(|error| error.to_string())?;
+    validate_generate_request_after_activation_with(req, family_hint, ReferenceForm::Resolved)
+}
+
 /// Validate request-owned fields after authentication but before model-family
 /// resolution. Durable queue admission uses this bounded pass so unknown or
 /// temporarily unavailable model identities can be persisted and diagnosed
@@ -1930,6 +1959,14 @@ pub fn validate_h3_private_uat_request(req: &GenerateRequest) -> Result<(), Stri
 fn validate_generate_request_after_activation(
     req: &GenerateRequest,
     family_hint: Option<&str>,
+) -> Result<(), String> {
+    validate_generate_request_after_activation_with(req, family_hint, ReferenceForm::Admitted)
+}
+
+fn validate_generate_request_after_activation_with(
+    req: &GenerateRequest,
+    family_hint: Option<&str>,
+    reference_form: ReferenceForm,
 ) -> Result<(), String> {
     let family = resolved_family(&req.model, family_hint);
 
@@ -2089,9 +2126,14 @@ fn validate_generate_request_after_activation(
                     .to_string(),
             );
         }
-        crate::minimax_h3::validate_request_contract(req, task)
-            .map(|_| ())
-            .map_err(|error| error.to_string())?;
+        match reference_form {
+            ReferenceForm::Admitted => crate::minimax_h3::validate_request_contract(req, task),
+            ReferenceForm::Resolved => {
+                crate::minimax_h3::validate_resolved_request_contract(req, task)
+            }
+        }
+        .map(|_| ())
+        .map_err(|error| error.to_string())?;
         return Ok(());
     }
     let flux2_dev = is_flux2_dev_model(&req.model);
@@ -3778,6 +3820,60 @@ mod tests {
         assert!(
             validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY),)
                 .is_ok()
+        );
+    }
+
+    /// The durable row keeps only the reference DESCRIPTOR (bytes are sealed
+    /// in the media set), so post-admission validation must accept exactly
+    /// the form admission refuses — otherwise every durable Ref2VA print is
+    /// held by the feeder with `MINIMAX_H3_REFERENCE_DESCRIPTOR_ONLY`, which
+    /// is what hal9000 did on 2026-08-27 with the first inline reference.
+    #[test]
+    fn h3_resolved_validation_accepts_the_descriptor_form_admission_refuses() {
+        let mut req = valid_h3_request(crate::minimax_h3::REF2VA_COMFY);
+        req.references = Some(vec![crate::GenerationReference::Image {
+            media: crate::GenerationReferenceAuthority::Descriptor,
+            provenance: crate::GenerationReferenceProvenance {
+                name: Some("reference.png".to_string()),
+                sha256: Some("a".repeat(64)),
+                crop: None,
+            },
+            mime_type: "image/png".to_string(),
+            width: 1920,
+            height: 1080,
+        }]);
+
+        let admitted =
+            validate_generate_request_after_activation(&req, Some(crate::minimax_h3::FAMILY))
+                .unwrap_err();
+        assert!(
+            admitted.contains("descriptor authority is valid only for placement preview"),
+            "admission must still refuse a client-supplied descriptor: {admitted}"
+        );
+        validate_generate_request_after_activation_with(
+            &req,
+            Some(crate::minimax_h3::FAMILY),
+            ReferenceForm::Resolved,
+        )
+        .expect("the resolved form is what the durable row carries");
+
+        // And the resolved form refuses media: bytes never belong on a row.
+        let mut inline = req.clone();
+        if let Some(crate::GenerationReference::Image { media, .. }) =
+            inline.references.as_mut().and_then(|refs| refs.first_mut())
+        {
+            *media = crate::GenerationReferenceAuthority::Inline { data: png_bytes() };
+        }
+        let resolved = validate_generate_request_after_activation_with(
+            &inline,
+            Some(crate::minimax_h3::FAMILY),
+            ReferenceForm::Resolved,
+        )
+        .unwrap_err();
+        assert!(
+            resolved.contains("MINIMAX_H3_REFERENCE_PREVIEW_MEDIA")
+                || resolved.contains("placement preview"),
+            "{resolved}"
         );
     }
 

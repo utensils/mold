@@ -1290,8 +1290,12 @@ async fn prepare_generation_inner(
     // then fail before control planning, LipDub probing, reference resolution,
     // or server-local media access.
     if !private_h3_ingress && resolved_profile.is_none() {
-        validate_generate_request(request, resolved_family.as_deref())
-            .map_err(ApiError::validation)?;
+        validate_generate_request(
+            request,
+            resolved_family.as_deref(),
+            mold_core::ReferenceForm::Resolved,
+        )
+        .map_err(ApiError::validation)?;
         let _ = model_manager::check_model_available(state, &request.model).await?;
         return Err(ApiError::validation(format!(
             "model '{}' has no generation recipe deliverable by this server build",
@@ -1318,14 +1322,26 @@ async fn prepare_generation_inner(
     } else {
         &*request
     };
+    // This runs AFTER durable admission resolved every reference to its
+    // descriptor (bytes sealed in the media set), so the request is
+    // validated in its resolved form; the admission rule would hold every
+    // durable Ref2VA print here.
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     let validation = if private_h3_ingress {
         mold_core::validation::validate_h3_private_uat_request(validation_request)
     } else {
-        validate_generate_request(validation_request, resolved_family.as_deref())
+        validate_generate_request(
+            validation_request,
+            resolved_family.as_deref(),
+            mold_core::ReferenceForm::Resolved,
+        )
     };
     #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
-    let validation = validate_generate_request(validation_request, resolved_family.as_deref());
+    let validation = validate_generate_request(
+        validation_request,
+        resolved_family.as_deref(),
+        mold_core::ReferenceForm::Resolved,
+    );
     if let Err(e) = validation {
         return Err(ApiError::validation(e));
     }
@@ -3252,6 +3268,7 @@ pub(crate) fn apply_media_headers(
 pub(crate) fn validate_generate_request(
     req: &mold_core::GenerateRequest,
     family_hint: Option<&str>,
+    reference_form: mold_core::ReferenceForm,
 ) -> Result<(), String> {
     // The print title is embedded into provenance and folded into the output
     // filename, so refuse control characters / over-long titles before any
@@ -3259,7 +3276,14 @@ pub(crate) fn validate_generate_request(
     if let Some(title) = req.title.as_deref() {
         mold_core::validate_print_title(title)?;
     }
-    mold_core::validate_generate_request_with_family(req, family_hint)
+    match reference_form {
+        mold_core::ReferenceForm::Admitted => {
+            mold_core::validate_generate_request_with_family(req, family_hint)
+        }
+        mold_core::ReferenceForm::Resolved => {
+            mold_core::validate_resolved_generate_request_with_family(req, family_hint)
+        }
+    }
 }
 
 /// Enforce the per-model source-image contract at admission (#772), with the
