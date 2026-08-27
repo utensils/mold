@@ -1124,6 +1124,7 @@ pub async fn run_server(
     let shutdown_chain_jobs = state.chain_jobs.clone();
     let shutdown_journal = state.queue_journal.clone();
     let shutdown_generation_cancel = state.generation_cancel.clone();
+    let shutdown_event_streams = state.events.clone();
     let shutdown_fatal_cuda = fatal_cuda_error.clone();
     tokio::spawn(async move {
         let _ = shutdown_request_rx.await;
@@ -1136,6 +1137,7 @@ pub async fn run_server(
             &shutdown_scheduler,
             &shutdown_journal,
             &shutdown_generation_cancel,
+            &shutdown_event_streams,
         );
         let _ = http_shutdown_tx.send(());
     });
@@ -1581,6 +1583,7 @@ fn begin_runtime_shutdown(
     scheduler_shutdown: &tokio_util::sync::CancellationToken,
     queue_journal: &queue_journal::QueueJournal,
     generation_cancel: &generation_cancel::CancelRegistry,
+    event_streams: &events::EventBroadcaster,
 ) {
     queue_journal.retain_all();
     let aborted = generation_cancel.request_all();
@@ -1594,6 +1597,7 @@ fn begin_runtime_shutdown(
         let active_chains = chain_jobs.request_shutdown();
         tracing::info!(active_chains, "cancelled chain work before HTTP drain");
     }
+    event_streams.shutdown();
     scheduler_shutdown.cancel();
 }
 
@@ -1710,12 +1714,20 @@ mod tests {
         let journal = Arc::new(crate::queue_journal::QueueJournal::disabled());
 
         let singletons = Arc::new(crate::generation_cancel::CancelRegistry::new());
-        begin_runtime_shutdown(Some(&chains), &scheduler, &journal, &singletons);
+        let event_streams = crate::events::EventBroadcaster::new();
+        begin_runtime_shutdown(
+            Some(&chains),
+            &scheduler,
+            &journal,
+            &singletons,
+            &event_streams,
+        );
 
         assert!(chains.is_cancelling("chain-in-flight"));
         chains.register_cancel_for_tests("chain-claimed-during-shutdown");
         assert!(chains.is_cancelling("chain-claimed-during-shutdown"));
         assert!(scheduler.is_cancelled());
+        assert!(event_streams.shutdown_token().is_cancelled());
     }
 
     /// The whole correctness argument for retention: the fence has to be up
@@ -1743,6 +1755,7 @@ mod tests {
             &scheduler,
             &journal,
             &crate::generation_cancel::CancelRegistry::new(),
+            &crate::events::EventBroadcaster::new(),
         );
         watcher.await.unwrap();
 
@@ -1854,7 +1867,13 @@ mod tests {
         let running = singletons.token("job-1");
         assert!(!running.is_cancelled());
 
-        begin_runtime_shutdown(None, &scheduler, &journal, &singletons);
+        begin_runtime_shutdown(
+            None,
+            &scheduler,
+            &journal,
+            &singletons,
+            &crate::events::EventBroadcaster::new(),
+        );
 
         assert!(running.is_cancelled());
     }

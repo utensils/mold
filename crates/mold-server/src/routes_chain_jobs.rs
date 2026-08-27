@@ -346,10 +346,19 @@ pub async fn chain_job_events(
     detail.summary.cancelling =
         detail.summary.state == ChainJobState::Running && handle.is_cancelling(&id);
     let snapshot = ChainJobEvent::Snapshot { job: detail };
+    let shutdown = state.events.shutdown_token();
     let stream = async_stream::stream! {
+        if shutdown.is_cancelled() {
+            return;
+        }
         yield Ok(sse_event(snapshot));
         loop {
-            match live.recv().await {
+            let delivery = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                delivery = live.recv() => delivery,
+            };
+            match delivery {
                 Ok(event) => yield Ok(sse_event(event)),
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,

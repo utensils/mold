@@ -1,0 +1,1 @@
+- **Fast idle server restarts.** Close connected SSE subscriptions during graceful shutdown so an idle `mold serve` no longer waits for the abort deadline ([#1415](https://github.com/utensils/mold/issues/1415)).
