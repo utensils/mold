@@ -53,6 +53,14 @@ pub struct DurableGenerationChildOutcome {
     pub original_filename: Option<String>,
     pub error: Option<String>,
     pub retryable: bool,
+    /// Terminal facts the child settled with. Absent for a child that did
+    /// not complete, and for one settled by a server that predates them.
+    pub seed: Option<u64>,
+    pub generation_time_ms: Option<u64>,
+    /// Bytes of the print this pane shows. Only the last completed child
+    /// carries them — the pane displays one image, so hydrating every
+    /// sibling would download a batch to throw it away.
+    pub preview_bytes: Option<Vec<u8>>,
 }
 
 /// Events sent from background tasks to the main TUI loop.
@@ -74,6 +82,12 @@ pub enum BackgroundEvent {
     /// Results are gallery identities, not fabricated response bytes.
     DurableGenerationBatchComplete {
         outcomes: Vec<DurableGenerationChildOutcome>,
+        /// The prompt, negative and model this batch was submitted with —
+        /// the form may have moved on while it rendered, and prompt history
+        /// records what was actually developed.
+        prompt: String,
+        negative_prompt: Option<String>,
+        model: String,
     },
     /// Generation or background task failed.
     Error(String),
@@ -8365,7 +8379,12 @@ impl App {
                         });
                     }
                 }
-                BackgroundEvent::DurableGenerationBatchComplete { outcomes } => {
+                BackgroundEvent::DurableGenerationBatchComplete {
+                    outcomes,
+                    prompt,
+                    negative_prompt,
+                    model,
+                } => {
                     self.generate.generating = false;
                     self.generate.batch_remaining = 0;
                     self.generate.clear_live_preview();
@@ -8373,18 +8392,41 @@ impl App {
                     self.generate.progress.stage_started_at = None;
 
                     let mut failures = Vec::new();
-                    let mut last_filename = None;
+                    let mut completed = 0_usize;
                     for outcome in outcomes {
+                        if let Some(seed) = outcome.seed {
+                            self.generate.last_seed = Some(seed);
+                            // Advance exactly as a singleton does, so a batch
+                            // does not leave the form pinned to the seed the
+                            // first sibling already rendered.
+                            self.generate.params.seed =
+                                self.generate.params.seed_mode.advance(seed);
+                        }
+                        if let Some(elapsed_ms) = outcome.generation_time_ms {
+                            self.generate.last_generation_time_ms = Some(elapsed_ms);
+                        }
+                        if let Some(bytes) = outcome.preview_bytes.as_deref() {
+                            if let Ok(img) = image::load_from_memory(bytes) {
+                                let protocol = self.picker.new_resize_protocol(img.clone());
+                                self.generate.preview_image = Some(img);
+                                self.generate.image_state = Some(protocol);
+                                self.generate.animation = None;
+                            }
+                        }
                         let mut filenames = [outcome.filename, outcome.original_filename]
                             .into_iter()
                             .flatten()
                             .collect::<Vec<_>>();
                         filenames.dedup();
                         if !filenames.is_empty() {
-                            last_filename = filenames.first().cloned();
+                            completed += 1;
+                            let elapsed = outcome
+                                .generation_time_ms
+                                .map(|ms| format!(" ({:.1}s)", ms as f64 / 1000.0))
+                                .unwrap_or_default();
                             self.generate.progress.push_log(ProgressLogEntry {
                                 message: format!(
-                                    "Batch {} saved {}",
+                                    "Batch {} saved {}{elapsed}",
                                     outcome.index,
                                     filenames.join(" + ")
                                 ),
@@ -8408,9 +8450,28 @@ impl App {
                             failures.push(message);
                         }
                     }
-                    self.generate.last_output_path = last_filename.map(std::path::PathBuf::from);
+                    // A durable batch always renders on a remote host, which
+                    // wrote the file into its own gallery: there is no local
+                    // path for the activity strip to name, exactly as a
+                    // remote singleton has none. The per-child log lines above
+                    // carry the filenames.
+                    self.generate.last_output_path = None;
                     self.generate.error_message =
                         (!failures.is_empty()).then(|| failures.join("; "));
+                    if completed > 0 {
+                        self.save_session();
+                        mold_db::settings::record_last_model(&model);
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        self.history.push(crate::history::HistoryEntry {
+                            prompt,
+                            negative: negative_prompt.filter(|text| !text.is_empty()),
+                            model,
+                            timestamp: ts,
+                        });
+                    }
                     if self.should_poll_remote() {
                         self.gallery.scanning = true;
                         self.spawn_gallery_scan();

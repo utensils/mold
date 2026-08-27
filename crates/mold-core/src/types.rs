@@ -7631,6 +7631,9 @@ mod tests {
                 result: Some(super::GenerationBatchResult {
                     filename: Some("finished.png".into()),
                     original_filename: Some("original.png".into()),
+                    seed: Some(4242),
+                    generation_time_ms: Some(7_500),
+                    gpu: Some(1),
                 }),
             }],
         };
@@ -7638,10 +7641,20 @@ mod tests {
         assert_eq!(json["instance_id"], "instance-1");
         assert_eq!(json["durable"], true);
         assert_eq!(json["children"][0]["result"]["filename"], "finished.png");
+        assert_eq!(json["children"][0]["result"]["seed"], 4242);
+        assert_eq!(json["children"][0]["result"]["generation_time_ms"], 7_500);
+        assert_eq!(json["children"][0]["result"]["gpu"], 1);
         assert_eq!(
             serde_json::from_value::<super::GenerationBatchStatus>(json).unwrap(),
             enriched
         );
+        // A child settled before the terminal facts existed still reads back,
+        // reporting absence rather than a fabricated zero.
+        let legacy: super::GenerationBatchResult =
+            serde_json::from_str(r#"{"filename":"finished.png"}"#).unwrap();
+        assert_eq!(legacy.seed, None);
+        assert_eq!(legacy.generation_time_ms, None);
+        assert_eq!(legacy.gpu, None);
     }
 
     #[test]
@@ -8376,12 +8389,29 @@ pub struct GenerationBatchChild {
     pub result: Option<GenerationBatchResult>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+/// What a completed child produced, recorded once at settlement.
+///
+/// The terminal facts beside the filenames are the ones a caller cannot
+/// recover from the gallery alone at the moment it needs them — the seed it
+/// must advance from, how long the render took, and which accelerator ran it.
+/// They are additive: a child settled before they existed, and the
+/// committed-archive replay path (which knows only the filenames), leave them
+/// absent rather than reporting a fabricated zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema, Default)]
 pub struct GenerationBatchResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_filename: Option<String>,
+    /// The seed the render actually used, including a server-chosen one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_time_ms: Option<u64>,
+    /// Index of the accelerator that ran it, the same ordinal
+    /// [`GenerateResponse::gpu`] and the SSE complete event report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]

@@ -94,10 +94,10 @@ async fn generate_canonically(
         }],
         video: None,
         audio: None,
-        generation_time_ms: 0,
+        generation_time_ms: artifact.result.generation_time_ms.unwrap_or_default(),
         model: artifact.metadata.model,
         seed_used: artifact.metadata.seed,
-        gpu: None,
+        gpu: artifact.result.gpu,
         request_warnings: Vec::new(),
     })
 }
@@ -106,6 +106,7 @@ async fn hydrate_canonical_outcome(
     client: &MoldClient,
     child: &GenerationBatchChild,
 ) -> std::result::Result<GenerateResponse, String> {
+    let terminal = child.result.clone().unwrap_or_default();
     let artifact = hydrate_canonical_artifact(client, child)
         .await
         .map_err(|error| format!("{error:#}"))?;
@@ -132,10 +133,10 @@ async fn hydrate_canonical_outcome(
         }],
         video: None,
         audio: None,
-        generation_time_ms: 0,
+        generation_time_ms: terminal.generation_time_ms.unwrap_or_default(),
         model: artifact.metadata.model,
         seed_used: artifact.metadata.seed,
-        gpu: None,
+        gpu: terminal.gpu,
         request_warnings: Vec::new(),
     })
 }
@@ -1411,7 +1412,7 @@ impl AsyncJobRegistry {
         let observed_revision = attempt.observed_revision;
 
         enum ReadOutcome {
-            Found(GenerationBatchChild),
+            Found(Box<GenerationBatchChild>),
             Retry(String),
             Stop(String),
         }
@@ -1433,7 +1434,7 @@ impl AsyncJobRegistry {
                     .find(|child| child.job_id == durable_job_id)
                     .cloned()
                 {
-                    Some(child) => ReadOutcome::Found(child),
+                    Some(child) => ReadOutcome::Found(Box::new(child)),
                     None => ReadOutcome::Stop(format!(
                         "generation batch lost durable job {durable_job_id} during retry reconciliation"
                     )),
@@ -1457,6 +1458,7 @@ impl AsyncJobRegistry {
         let mut confirmation_finished = false;
         let keep_polling = match outcome {
             ReadOutcome::Found(child) => {
+                let child = *child;
                 // A revision past the pre-POST one proves the retry landed,
                 // whatever state the child is in now — a re-held child at a
                 // higher revision was retried and held again for a fresh
@@ -2877,7 +2879,12 @@ mod tests {
             "index": 1,
             "job_id": "durable-job-1",
             "state": "complete",
-            "result": { "filename": "result.png" }
+            "result": {
+                "filename": "result.png",
+                "seed": 4242,
+                "generation_time_ms": 7500,
+                "gpu": 1
+            }
         }))
         .unwrap();
         finish_canonical_child(
@@ -3783,6 +3790,13 @@ mod tests {
             .unwrap();
         assert_eq!(hydrated["structuredContent"]["status"], "succeeded");
         assert_eq!(hydrated["structuredContent"]["result"]["image"]["width"], 1);
+        // The child settled with these; reporting 0 and null told the caller
+        // the render was instantaneous and ran nowhere.
+        assert_eq!(
+            hydrated["structuredContent"]["result"]["generation_time_ms"],
+            7500
+        );
+        assert_eq!(hydrated["structuredContent"]["result"]["gpu"], 1);
         assert_eq!(hydrated["structuredContent"]["result_error"], Value::Null);
         assert_eq!(gallery_requests.load(Ordering::SeqCst), 4);
         assert_eq!(hydrated["content"][1]["type"], "image");

@@ -1850,12 +1850,24 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         }
     };
     std::fs::write(&output_path, &artifact.bytes)?;
-    println!(
-        "{} saved {} (durable output {})",
-        theme::icon_done(),
-        output_path.display(),
-        artifact.filename
-    );
+    match (
+        artifact.result.generation_time_ms,
+        artifact.result.seed.or(Some(artifact.metadata.seed)),
+    ) {
+        (Some(elapsed_ms), Some(seed)) => println!(
+            "{} saved {} ({:.1}s on seed {seed}, durable output {})",
+            theme::icon_done(),
+            output_path.display(),
+            elapsed_ms as f64 / 1000.0,
+            artifact.filename
+        ),
+        _ => println!(
+            "{} saved {} (durable output {})",
+            theme::icon_done(),
+            output_path.display(),
+            artifact.filename
+        ),
+    }
 
     // Update state + history.
     let mut state = load_state();

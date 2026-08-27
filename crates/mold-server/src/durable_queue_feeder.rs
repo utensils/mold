@@ -842,11 +842,14 @@ async fn feed_available(
                 continue;
             }
         } else if let Some(output) = completed_output {
-            let result_json = serde_json::json!({
-                "filename": output.filename,
-                "original_filename": output.original_filename,
+            // The committed archive records the filenames only, so the
+            // terminal facts stay absent rather than reported as zero.
+            let result_json = serde_json::to_string(&mold_core::GenerationBatchResult {
+                filename: Some(output.filename),
+                original_filename: output.original_filename,
+                ..Default::default()
             })
-            .to_string();
+            .unwrap_or_default();
             let _ = tokio::task::spawn_blocking(move || {
                 ticket.complete_before_dispatch_with_result(Some(&result_json));
             })
@@ -2548,10 +2551,9 @@ mod tests {
                 detail.children[0].result_json.as_deref().unwrap()
             )
             .unwrap(),
-            serde_json::json!({
-                "filename": "mold-mock-model-1~portrait.png",
-                "original_filename": null,
-            })
+            // No pre-upscale original was saved, and no terminal facts
+            // survive an archive replay: absence is reported as absence.
+            serde_json::json!({ "filename": "mold-mock-model-1~portrait.png" })
         );
         shutdown.cancel();
         handle.await.unwrap();
@@ -2638,10 +2640,7 @@ mod tests {
                 detail.children[0].result_json.as_deref().unwrap()
             )
             .unwrap(),
-            serde_json::json!({
-                "filename": "mold-mock-model-1-original~portrait.png",
-                "original_filename": null,
-            })
+            serde_json::json!({ "filename": "mold-mock-model-1-original~portrait.png" })
         );
 
         let later = tokio::time::timeout(Duration::from_secs(2), rx.recv())

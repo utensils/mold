@@ -13,6 +13,9 @@ pub(crate) struct CanonicalGenerationArtifact {
     pub filename: String,
     pub request: GenerateRequest,
     pub metadata: mold_core::OutputMetadata,
+    /// The child's own terminal facts — seed, elapsed time, accelerator —
+    /// which the gallery row alone does not answer at this moment.
+    pub result: mold_core::GenerationBatchResult,
 }
 
 #[derive(Debug)]
@@ -132,12 +135,14 @@ pub(crate) async fn canonical_singleton_artifact_observed(
     if outcome.authority.client_batch_id != outcome.client_batch_id {
         anyhow::bail!("canonical singleton outcome lost its admission authority");
     }
+    let result = outcome.child.result.clone().unwrap_or_default();
     let artifact = hydrate_canonical_artifact(client, &outcome.child).await?;
     Ok(CanonicalGenerationArtifact {
         bytes: artifact.bytes,
         filename: artifact.filename,
         request: outcome.request,
         metadata: artifact.metadata,
+        result,
     })
 }
 

@@ -8134,7 +8134,7 @@ mod tests {
                 error: None,
                 terminal_error_json: None,
                 result_json: Some(
-                    r#"{"filename":"finished.png","original_filename":"original.png"}"#,
+                    r#"{"filename":"finished.png","original_filename":"original.png","seed":77,"generation_time_ms":4321,"gpu":1}"#,
                 ),
                 completed_at_ms: 200,
             },
@@ -8179,6 +8179,12 @@ mod tests {
             first["children"][0]["result"]["original_filename"],
             "original.png"
         );
+        // The terminal facts a caller cannot recover from the gallery at the
+        // moment it needs them: the seed to advance from, the elapsed time,
+        // and the accelerator that ran it.
+        assert_eq!(first["children"][0]["result"]["seed"], 77);
+        assert_eq!(first["children"][0]["result"]["generation_time_ms"], 4321);
+        assert_eq!(first["children"][0]["result"]["gpu"], 1);
         assert_eq!(first["children"][1]["state"], "failed");
         assert_eq!(first["children"][1]["error"], "render failed");
         assert_eq!(

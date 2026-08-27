@@ -347,12 +347,19 @@ pub(crate) struct SavedOutputNames {
 }
 
 impl SavedOutputNames {
-    pub(crate) fn terminal_json(&self) -> String {
-        serde_json::json!({
-            "filename": self.output,
-            "original_filename": self.original,
+    /// The one projection of a completed child's terminal result.
+    ///
+    /// The facts come from the same response the SSE complete event carries,
+    /// so an attached observer and a durable child describe one render.
+    pub(crate) fn terminal_json(&self, response: &mold_core::GenerateResponse) -> String {
+        serde_json::to_string(&mold_core::GenerationBatchResult {
+            filename: self.output.clone(),
+            original_filename: self.original.clone(),
+            seed: Some(response.seed_used),
+            generation_time_ms: Some(response.generation_time_ms),
+            gpu: response.gpu,
         })
-        .to_string()
+        .unwrap_or_default()
     }
 }
 
@@ -2354,7 +2361,7 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
             // publication would delete the row, losing a replayed job outright
             // since the gallery file is its only delivery.
             let settlement = if saved_names.output.is_some() {
-                let result_json = saved_names.terminal_json();
+                let result_json = saved_names.terminal_json(&response);
                 durable_generation_settlement::settle_completion_async(
                     &mut job.journal,
                     &result_json,
@@ -4121,15 +4128,41 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn durable_terminal_result_carries_saved_gallery_names() {
+    fn durable_terminal_result_carries_saved_gallery_names_and_terminal_facts() {
+        let response = mold_core::GenerateResponse {
+            images: Vec::new(),
+            video: None,
+            audio: None,
+            generation_time_ms: 12_345,
+            model: "flux-dev:q8".to_string(),
+            seed_used: 99,
+            gpu: Some(1),
+            request_warnings: Vec::new(),
+        };
         let result = SavedOutputNames {
             output: Some("print.png".to_string()),
             original: Some("print_original.png".to_string()),
         }
-        .terminal_json();
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["filename"], "print.png");
-        assert_eq!(parsed["original_filename"], "print_original.png");
+        .terminal_json(&response);
+        let parsed: mold_core::GenerationBatchResult = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed.filename.as_deref(), Some("print.png"));
+        assert_eq!(
+            parsed.original_filename.as_deref(),
+            Some("print_original.png")
+        );
+        assert_eq!(parsed.seed, Some(99));
+        assert_eq!(parsed.generation_time_ms, Some(12_345));
+        assert_eq!(parsed.gpu, Some(1));
+    }
+
+    #[test]
+    fn a_result_settled_without_terminal_facts_still_reads_back() {
+        let parsed: mold_core::GenerationBatchResult =
+            serde_json::from_str(r#"{"filename":"done.png"}"#).unwrap();
+        assert_eq!(parsed.filename.as_deref(), Some("done.png"));
+        assert_eq!(parsed.seed, None);
+        assert_eq!(parsed.generation_time_ms, None);
+        assert_eq!(parsed.gpu, None);
     }
 
     fn claimed_single_worker_ticket(

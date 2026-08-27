@@ -815,11 +815,31 @@ async fn try_canonical_remote_batch(input: CanonicalBatchInput<'_>) -> Canonical
         Err(error) => return CanonicalBatchResult::Error(format!("{error:#}")),
     };
 
-    finish_canonical_batch(report, input.tx)
+    finish_canonical_batch(
+        report,
+        input.client,
+        BatchSubmission {
+            prompt: input.prompt,
+            negative_prompt: input.negative_prompt.as_deref(),
+            model: &input.params.model,
+        },
+        input.tx,
+    )
+    .await
 }
 
-fn finish_canonical_batch(
+/// What the batch was submitted with. The Create form may have moved on
+/// while it rendered, and prompt history records what was developed.
+struct BatchSubmission<'a> {
+    prompt: &'a str,
+    negative_prompt: Option<&'a str>,
+    model: &'a str,
+}
+
+async fn finish_canonical_batch(
     report: mold_core::durable_generation::CanonicalGenerationReport,
+    client: &MoldClient,
+    submission: BatchSubmission<'_>,
     tx: &mpsc::UnboundedSender<BackgroundEvent>,
 ) -> CanonicalBatchResult {
     let mut outcomes = report
@@ -827,10 +847,7 @@ fn finish_canonical_batch(
         .into_iter()
         .map(|outcome| {
             let child = outcome.child;
-            let result = child.result.unwrap_or(mold_core::GenerationBatchResult {
-                filename: None,
-                original_filename: None,
-            });
+            let result = child.result.unwrap_or_default();
             let error = match child.state {
                 GenerationBatchChildState::Complete
                     if result.filename.is_none() && result.original_filename.is_none() =>
@@ -849,11 +866,34 @@ fn finish_canonical_batch(
                 original_filename: result.original_filename,
                 error,
                 retryable: child.retryable.unwrap_or(false),
+                seed: result.seed,
+                generation_time_ms: result.generation_time_ms,
+                preview_bytes: None,
             }
         })
         .collect::<Vec<_>>();
     outcomes.sort_by_key(|outcome| outcome.index);
-    let _ = tx.send(BackgroundEvent::DurableGenerationBatchComplete { outcomes });
+    // The pane shows one print, so only the last completed sibling's bytes
+    // are worth a round trip.
+    if let Some(last) = outcomes
+        .iter_mut()
+        .rev()
+        .find(|outcome| outcome.error.is_none())
+    {
+        if let Some(filename) = last
+            .filename
+            .as_deref()
+            .or(last.original_filename.as_deref())
+        {
+            last.preview_bytes = client.get_gallery_image(filename).await.ok();
+        }
+    }
+    let _ = tx.send(BackgroundEvent::DurableGenerationBatchComplete {
+        outcomes,
+        prompt: submission.prompt.to_string(),
+        negative_prompt: submission.negative_prompt.map(str::to_string),
+        model: submission.model.to_string(),
+    });
 
     if report.orchestration_failures.is_empty() {
         CanonicalBatchResult::Done
@@ -1698,8 +1738,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn held_child_emits_one_structured_completion_without_global_error() {
+    #[tokio::test]
+    async fn held_child_emits_one_structured_completion_without_global_error() {
         let authority = mold_core::GenerationBatchAuthority {
             instance_id: "instance-1".into(),
             batch_id: "batch-1".into(),
@@ -1734,18 +1774,114 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
 
         assert_eq!(
-            finish_canonical_batch(report, &tx),
+            finish_canonical_batch(
+                report,
+                &MoldClient::new("http://127.0.0.1:1"),
+                BatchSubmission {
+                    prompt: "a held print",
+                    negative_prompt: None,
+                    model: "flux-dev:q8",
+                },
+                &tx,
+            )
+            .await,
             CanonicalBatchResult::Done
         );
         match rx.try_recv().unwrap() {
-            BackgroundEvent::DurableGenerationBatchComplete { outcomes } => {
+            BackgroundEvent::DurableGenerationBatchComplete {
+                outcomes,
+                prompt,
+                model,
+                ..
+            } => {
                 assert_eq!(outcomes.len(), 1);
                 assert_eq!(outcomes[0].error.as_deref(), Some("dependency unavailable"));
                 assert!(outcomes[0].retryable);
+                // A held child produced nothing, so there is nothing to
+                // hydrate and no terminal facts to report.
+                assert_eq!(outcomes[0].seed, None);
+                assert_eq!(outcomes[0].generation_time_ms, None);
+                assert!(outcomes[0].preview_bytes.is_none());
+                assert_eq!(prompt, "a held print");
+                assert_eq!(model, "flux-dev:q8");
             }
             _ => panic!("unexpected non-completion event"),
         }
         assert!(rx.try_recv().is_err());
+    }
+
+    /// A completed child carries the seed and elapsed time its settlement
+    /// recorded, which is what the pane restores.
+    #[tokio::test]
+    async fn a_completed_child_reports_the_terminal_facts_it_settled_with() {
+        let authority = mold_core::GenerationBatchAuthority {
+            instance_id: "instance-1".into(),
+            batch_id: "batch-1".into(),
+            client_batch_id: "client-1".into(),
+        };
+        let report = mold_core::durable_generation::CanonicalGenerationReport {
+            authorities: vec![authority.clone()],
+            admitted_client_ids: vec!["client-1".into()],
+            outcomes: vec![mold_core::durable_generation::CanonicalGenerationOutcome {
+                authority,
+                client_batch_id: "client-1".into(),
+                request_offset: 0,
+                request: ordinary_request(),
+                child: mold_core::GenerationBatchChild {
+                    index: 1,
+                    job_id: "job-1".into(),
+                    state: GenerationBatchChildState::Complete,
+                    error: None,
+                    error_code: None,
+                    retryable: None,
+                    created_at_ms: 0,
+                    updated_at_ms: 0,
+                    revision: 2,
+                    completed_at_ms: Some(9),
+                    terminal_error: None,
+                    result: Some(mold_core::GenerationBatchResult {
+                        filename: Some("print.png".into()),
+                        original_filename: None,
+                        seed: Some(4242),
+                        generation_time_ms: Some(7_500),
+                        gpu: Some(0),
+                    }),
+                },
+            }],
+            orchestration_failures: Vec::new(),
+            failures: Vec::new(),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        assert_eq!(
+            finish_canonical_batch(
+                report,
+                // Unreachable on purpose: hydration is best effort and must
+                // never turn a completed print into a failure.
+                &MoldClient::new("http://127.0.0.1:1"),
+                BatchSubmission {
+                    prompt: "a finished print",
+                    negative_prompt: Some("blurry"),
+                    model: "flux-dev:q8",
+                },
+                &tx,
+            )
+            .await,
+            CanonicalBatchResult::Done
+        );
+        match rx.try_recv().unwrap() {
+            BackgroundEvent::DurableGenerationBatchComplete {
+                outcomes,
+                negative_prompt,
+                ..
+            } => {
+                assert_eq!(outcomes[0].seed, Some(4242));
+                assert_eq!(outcomes[0].generation_time_ms, Some(7_500));
+                assert_eq!(outcomes[0].error, None);
+                assert_eq!(negative_prompt.as_deref(), Some("blurry"));
+            }
+            _ => panic!("unexpected non-completion event"),
+        }
     }
 
     /// The client gates on the MACHINE alone: a host that advertises the

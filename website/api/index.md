@@ -370,6 +370,28 @@ particular `preview_image` is absent for the whole render on a host started
 with `MOLD_STEP_PREVIEW=0`, while `step`, `total` and `stage` still advance —
 so read the counter from those fields rather than from the image.
 
+### Child results
+
+A completed child carries a `result`:
+
+```json
+{
+  "filename": "mold-flux-dev-1756200000000.png",
+  "original_filename": "mold-flux-dev-1756200000000-original.png",
+  "seed": 4242,
+  "generation_time_ms": 7500,
+  "gpu": 1
+}
+```
+
+`filename` and `original_filename` name the gallery rows the render published;
+the second is present only when a pre-upscale original was saved separately.
+`seed`, `generation_time_ms` and `gpu` are the terminal facts the settlement
+recorded, and are the same values the SSE complete event carries — the seed
+matters when the server chose it. All five fields are additive: a child
+settled before they existed, or replayed from the committed archive, omits
+what it does not know rather than reporting a zero.
+
 ### Child revisions
 
 Every child in a `GenerationBatchStatus` carries a monotonic `revision`,

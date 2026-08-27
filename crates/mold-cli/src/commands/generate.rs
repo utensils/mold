@@ -481,12 +481,26 @@ fn save_durable_batch_download(
     destination: &str,
     format: OutputFormat,
     preview: bool,
+    persist: Option<PersistArgs<'_>>,
 ) -> Result<()> {
     if std::path::Path::new(destination).exists() {
         status!("{} Overwriting: {}", theme::icon_alert(), destination);
     }
     std::fs::write(destination, bytes)?;
     status!("{} Saved: {}", theme::icon_done(), destination.bold());
+    // The local copy is a print like any other: record it so `mold` and the
+    // TUI Library see a `--batch N` sibling exactly as they see a singleton.
+    if let Some(persist) = persist {
+        crate::metadata_db::record_local_save(
+            std::path::Path::new(destination),
+            persist.request,
+            persist.seed_used,
+            persist.generation_time_ms,
+            format,
+            None,
+            None,
+        );
+    }
     if preview && !format.is_video() && !format.is_audio() {
         preview_image(bytes);
     }
@@ -630,6 +644,13 @@ async fn run_canonical_remote_batch(
                 continue;
             }
             let global_index = request.batch_index.unwrap_or(child.index).saturating_sub(1);
+            // The seed the host actually rendered with, which for a
+            // server-chosen seed is the only place it exists.
+            let persist = result.seed.or(request.seed).map(|seed_used| PersistArgs {
+                request,
+                seed_used,
+                generation_time_ms: result.generation_time_ms.unwrap_or_default(),
+            });
             let stdout_output = (piped && output.is_none()) || output.as_deref() == Some("-");
             if stdout_output {
                 // A byte stream can carry one artifact only. Match the attached
@@ -668,6 +689,9 @@ async fn run_canonical_remote_batch(
                             &destination,
                             request.resolved_output_format(),
                             preview && filename.is_none(),
+                            // The pre-upscale original is only the print's
+                            // own row when no upscaled sibling replaces it.
+                            filename.is_none().then_some(persist).flatten(),
                         ) {
                             failures.push(format!(
                                 "could not save {original_filename} for accepted client id {}: {error}",
@@ -698,6 +722,7 @@ async fn run_canonical_remote_batch(
                             &destination,
                             request.resolved_output_format(),
                             preview,
+                            persist,
                         ) {
                             failures.push(format!(
                                 "could not save {filename} for accepted client id {}: {error}",

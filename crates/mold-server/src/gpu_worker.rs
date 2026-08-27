@@ -4818,7 +4818,7 @@ fn finish_generation_success(
     // racing the last microseconds of delivery cannot retain a completed job
     // and replay it into a duplicate print.
     let settlement = if saved_names.output.is_some() {
-        let result_json = saved_names.terminal_json();
+        let result_json = saved_names.terminal_json(&response);
         durable_generation_settlement::settle_completion_blocking(&mut job.journal, &result_json)
     } else {
         tracing::error!(
