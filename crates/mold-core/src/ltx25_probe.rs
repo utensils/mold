@@ -88,7 +88,7 @@ fn gguf_metadata_json(value: &GgufMetadataValue) -> Value {
     }
 }
 
-fn gguf_metadata_path<'a>(header: &'a GgufHeader, path: &[&str]) -> Option<Value> {
+fn gguf_metadata_path(header: &GgufHeader, path: &[&str]) -> Option<Value> {
     let dotted = path.join(".");
     if let Some(value) = header.metadata.get(&dotted) {
         return Some(gguf_metadata_json(value));
