@@ -616,7 +616,9 @@ describe("web durable generation lifecycle", () => {
     const parked = batch(clientBatchId, ["held"]);
     parked.children[0] = {
       ...parked.children[0]!,
-      error: "UNKNOWN_MODEL: flux-dev:q8 is not installed",
+      error:
+        "deferred generation preparation failed: model 'flux-dev:q8' is not downloaded",
+      error_code: "UNKNOWN_MODEL",
       retryable: true,
     };
     reconcileGenerationBatches.mockResolvedValue(statusResponse([parked]));
@@ -626,7 +628,10 @@ describe("web durable generation lifecycle", () => {
     await __testing__.reconcileDurableHost(route.hostId);
 
     expect(held).toHaveLength(1);
-    expect(job.holdError).toBe("UNKNOWN_MODEL: flux-dev:q8 is not installed");
+    expect(job.holdError).toBe(
+      "deferred generation preparation failed: model 'flux-dev:q8' is not downloaded",
+    );
+    expect(job.holdCode).toBe("UNKNOWN_MODEL");
     expect(job.retryable).toBe(true);
   });
 

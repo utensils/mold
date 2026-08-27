@@ -859,6 +859,7 @@ export const useGenerationStore = defineStore("generation", {
               job.status = "queued";
               job.stage = null;
               job.holdError = null;
+              job.holdCode = null;
               job.retryable = false;
               job.retrying = false;
             }
@@ -868,6 +869,7 @@ export const useGenerationStore = defineStore("generation", {
               job.status = "queued";
               job.stage = "Held by host — action required";
               job.holdError = lifecycle.error;
+              job.holdCode = lifecycle.errorCode;
               job.retryable = lifecycle.retryable === true;
             }
             break;
@@ -947,6 +949,7 @@ export const useGenerationStore = defineStore("generation", {
           throw new Error(outcome.error);
         }
         job.holdError = null;
+        job.holdCode = null;
         job.stage = null;
         void this.reconcileDurableHost(
           record.tracker.hostId,

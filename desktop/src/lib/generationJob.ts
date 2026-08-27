@@ -47,6 +47,8 @@ export interface Job {
   error: string | null;
   /** Nonterminal durable hold details and host-owned retry fence. */
   holdError: string | null;
+  /** Typed cause of the hold (`MODEL_NOT_FOUND`, …); what the pull offer reads. */
+  holdCode: string | null;
   retryable: boolean;
   retrying: boolean;
   /** Advisories from an accepted request; each header value stays whole. */
@@ -127,6 +129,7 @@ export function newJob(req: GenerateRequest): Job {
     chainStageCount: null,
     error: null,
     holdError: null,
+    holdCode: null,
     retryable: false,
     retrying: false,
     requestWarnings: [],

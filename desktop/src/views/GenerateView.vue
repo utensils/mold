@@ -480,7 +480,7 @@ function offerHeldMissingModelPull(job: Job): void {
   if (offeredMissingModelHolds.has(job.clientId)) return;
   const request = job.request;
   if (!request) return;
-  const missing = classifyMissingModelHold(job.holdError, job.model);
+  const missing = classifyMissingModelHold(job.holdCode, job.model);
   if (!missing) return;
   offeredMissingModelHolds.add(job.clientId);
   const hostId = job.hostId ?? hosts.primaryHost?.id ?? null;
@@ -510,7 +510,7 @@ watch(
   () =>
     generation.jobs
       .filter((job) => job.holdError)
-      .map((job) => `${job.clientId}:${job.holdError}`)
+      .map((job) => `${job.clientId}:${job.holdCode ?? ""}:${job.holdError}`)
       .join("|"),
   () => {
     for (const job of generation.jobs) {

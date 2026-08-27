@@ -23,6 +23,12 @@ export interface GenerationBatchChild {
   retryable?: boolean | null;
   /** Human-readable failure the lifecycle presents beside `terminal_error`. */
   error?: string | null;
+  /**
+   * Typed cause of a `held` child — the machine's own refusal code
+   * (`MODEL_NOT_FOUND`, `UNKNOWN_MODEL`, …) beside its sentence. This, never
+   * the prose, is what the missing-model pull offer classifies on.
+   */
+  error_code?: string | null;
   created_at_ms: number;
   updated_at_ms: number;
   /**

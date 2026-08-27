@@ -420,7 +420,11 @@ describe("GenerateView missing-model pull after a durable hold", () => {
 
   /** A print is admitted before the machine resolves its model, so a missing
    *  model parks the child instead of refusing the request. */
-  function holdJob(generation: ReturnType<typeof useGenerationStore>, reason: string) {
+  function holdJob(
+    generation: ReturnType<typeof useGenerationStore>,
+    code: string | null,
+    reason = "deferred generation preparation failed: model is not downloaded",
+  ) {
     const job = generation.startJob({
       prompt: "a lighthouse at dusk",
       model: model.name,
@@ -431,6 +435,7 @@ describe("GenerateView missing-model pull after a durable hold", () => {
     job.hostId = "local";
     job.status = "queued";
     job.holdError = reason;
+    job.holdCode = code;
     job.retryable = true;
     return job;
   }
@@ -440,7 +445,7 @@ describe("GenerateView missing-model pull after a durable hold", () => {
     const wrapper = mountView();
     await flushPromises();
 
-    const job = holdJob(generation, "UNKNOWN_MODEL: z-image-turbo:q6 is not installed");
+    const job = holdJob(generation, "UNKNOWN_MODEL");
     await flushPromises();
 
     const dialog = wrapper.findComponent(MissingModelDialog);
@@ -448,7 +453,7 @@ describe("GenerateView missing-model pull after a durable hold", () => {
     expect(dialog.props("model")).toBe(model.name);
 
     // Re-reporting the same hold must not raise a second offer.
-    job.holdError = "UNKNOWN_MODEL: z-image-turbo:q6 is not installed (again)";
+    job.holdError = "deferred generation preparation failed: model is not downloaded (again)";
     await flushPromises();
     expect(wrapper.findAllComponents(MissingModelDialog)).toHaveLength(1);
   });

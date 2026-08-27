@@ -5,9 +5,9 @@ import { classifyMissingModelHold } from "@studio/api/generationPlacement";
  *
  * A print is admitted through `POST /api/generation-batches` BEFORE the
  * machine resolves its model, so "nobody has this model" arrives as a HELD
- * child carrying the machine's own reason rather than as an infeasible
+ * child carrying the machine's own typed code rather than as an infeasible
  * placement preview. `classifyMissingModelHold` stays the single authority for
- * WHICH reasons mean that; this owns only the phone-shaped question of whether
+ * WHICH codes mean that; this owns only the phone-shaped question of whether
  * a given job should raise the prompt right now, so `MobileApp.vue` stays an
  * orchestrator.
  *
@@ -19,11 +19,12 @@ import { classifyMissingModelHold } from "@studio/api/generationPlacement";
 export function planHeldMissingModelPull(input: {
   jobId: string | null | undefined;
   model: string;
-  heldReason: string | null;
+  /** The held child's typed `error_code`, never its sentence. */
+  heldCode: string | null;
   alreadyOffered: ReadonlySet<string>;
 }): { model: string; jobId: string } | null {
   const jobId = input.jobId;
   if (!jobId || input.alreadyOffered.has(jobId)) return null;
-  const missing = classifyMissingModelHold(input.heldReason, input.model);
+  const missing = classifyMissingModelHold(input.heldCode, input.model);
   return missing ? { model: missing.model, jobId } : null;
 }

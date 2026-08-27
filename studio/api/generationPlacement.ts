@@ -308,26 +308,31 @@ export function classifyMissingModel(
 
 /**
  * Codes a machine parks a queued child under when the MODEL ITSELF is absent.
- * Matched as whole words so a reason merely quoting a model name cannot be
- * read as a missing-model hold.
+ * These are the child's typed `error_code`, never its sentence: the sentence
+ * is "deferred generation preparation failed: model 'x' is not downloaded…",
+ * which names no code, so matching prose finds nothing on a real host.
  */
-const MISSING_MODEL_HOLD_CODES = /\b(UNKNOWN_MODEL|MODEL_NOT_FOUND)\b/;
+const MISSING_MODEL_HOLD_CODES: ReadonlySet<string> = new Set([
+  "UNKNOWN_MODEL",
+  "MODEL_NOT_FOUND",
+]);
 
 /**
  * The durable queue's half of {@link classifyMissingModel}.
  *
  * A print is admitted before model resolution, so "nobody has this model" now
- * arrives as a HELD child carrying the server's own reason rather than as an
- * infeasible placement preview. Both answers must reach the same pull offer —
- * a client that classified only the preview would silently lose the pull the
- * moment generation stopped previewing.
+ * arrives as a HELD child carrying the server's own typed code rather than as
+ * an infeasible placement preview. Both answers must reach the same pull
+ * offer — a client that classified only the preview would silently lose the
+ * pull the moment generation stopped previewing. A hold with no code is not
+ * a missing-model hold.
  */
 export function classifyMissingModelHold(
-  heldReason: string | null | undefined,
+  heldCode: string | null | undefined,
   requestedModel: string,
 ): MissingModelPlacement | null {
-  if (!heldReason || !requestedModel) return null;
-  if (!MISSING_MODEL_HOLD_CODES.test(heldReason.toUpperCase())) return null;
+  if (!heldCode || !requestedModel) return null;
+  if (!MISSING_MODEL_HOLD_CODES.has(heldCode.trim().toUpperCase())) return null;
   return { model: requestedModel, missingComponents: [] };
 }
 

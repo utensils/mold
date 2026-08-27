@@ -53,6 +53,8 @@ export interface GenerationLifecycleJob {
   completedAtMs: number | null;
   version: GenerationLifecycleVersion;
   error: string | null;
+  /** Typed cause of a held child; `null` when the machine gave none. */
+  errorCode: string | null;
   terminalError: unknown;
   result: { filename?: string; originalFilename?: string } | null;
 }
@@ -224,6 +226,7 @@ function lifecycleJob(
       revision: revision ?? childRevision(child),
     },
     error: child.error ?? null,
+    errorCode: child.error_code ?? null,
     terminalError: child.terminal_error ?? null,
     result: child.result
       ? {

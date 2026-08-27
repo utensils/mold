@@ -3645,7 +3645,7 @@ async function offerMissingModelPull(
 const offeredMissingModelHolds = new Set<string>();
 async function offerHeldMissingModelPull(job: Job): Promise<void> {
   if (offeredMissingModelHolds.has(job.id)) return;
-  const missing = classifyMissingModelHold(job.holdError, job.request.model);
+  const missing = classifyMissingModelHold(job.holdCode, job.request.model);
   if (!missing) return;
   offeredMissingModelHolds.add(job.id);
   const hostId = job.hostId ?? ORIGIN_HOST_ID;

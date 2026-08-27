@@ -94,6 +94,8 @@ export interface Job {
   /** Durable hold details remain visible without turning the live job into a
    * terminal canvas error. Retry is offered only when the host owns it. */
   holdError?: string | null;
+  /** Typed cause of the hold (`MODEL_NOT_FOUND`, …); what the pull offer reads. */
+  holdCode?: string | null;
   retryable?: boolean;
   retrying?: boolean;
   /** Wall clock when the job stopped moving; `null` while it is running.
@@ -971,6 +973,7 @@ function createJobRecord(
     cancelling: false,
     cancelRequested: false,
     holdError: null,
+    holdCode: null,
     retryable: false,
     retrying: false,
     settledAt: null,
@@ -1386,6 +1389,7 @@ function applyDurableTracker(tracker: GenerationBatchTracker): void {
       const alreadyHeld = job.holdError !== null && job.holdError !== undefined;
       job.progress.stage = "Held by host · action required";
       job.holdError = lifecycle.error;
+      job.holdCode = lifecycle.errorCode;
       job.retryable = lifecycle.retryable === true;
       job.workStarted = false;
       if (!alreadyHeld) fireHeld(job);
@@ -1396,6 +1400,7 @@ function applyDurableTracker(tracker: GenerationBatchTracker): void {
     } else if (lifecycle.phase === "accepted" || lifecycle.phase === "queued") {
       job.progress.stage = "Queued";
       job.holdError = null;
+      job.holdCode = null;
       job.retryable = false;
       job.retrying = false;
       job.workStarted = false;
@@ -2248,6 +2253,7 @@ async function retryJob(id: string): Promise<void> {
       throw new Error(outcome.error);
     }
     job.holdError = null;
+    job.holdCode = null;
     job.progress.stage = "Queued";
     void reconcileDurableHost(job.hostId ?? route?.hostId ?? "");
   } catch (error) {

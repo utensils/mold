@@ -513,31 +513,32 @@ describe("generation placement preview", () => {
 });
 
 describe("classifyMissingModelHold", () => {
-  it("classifies the machine's own missing-model hold codes", () => {
-    for (const reason of [
+  it("classifies the machine's own typed missing-model hold codes", () => {
+    for (const code of [
       "UNKNOWN_MODEL",
-      "unknown_model: flux-dev:q8",
-      "MODEL_NOT_FOUND while preparing",
-      "held: model_not_found",
+      "model_not_found",
+      " MODEL_NOT_FOUND ",
     ]) {
-      expect(classifyMissingModelHold(reason, "flux-dev:q8")).toEqual({
+      expect(classifyMissingModelHold(code, "flux-dev:q8")).toEqual({
         model: "flux-dev:q8",
         missingComponents: [],
       });
     }
   });
 
-  it("never guesses from an unrelated hold, an absent reason, or no model", () => {
-    for (const reason of [
+  it("never guesses from prose, an unrelated code, an absent code, or no model", () => {
+    for (const code of [
       null,
       undefined,
       "",
+      // The sentence a real host writes carries no code; only `error_code` does.
+      "deferred generation preparation failed: model 'flux-dev:q8' is not downloaded. Run: mold pull flux-dev:q8",
+      "UNKNOWN_MODEL: flux-dev:q8",
       "insufficient VRAM on this device",
       "QUEUE_PAUSED",
-      "the operator disabled every device",
       "MODEL_NOT_FOUNDATION",
     ]) {
-      expect(classifyMissingModelHold(reason, "flux-dev:q8")).toBeNull();
+      expect(classifyMissingModelHold(code, "flux-dev:q8")).toBeNull();
     }
     expect(classifyMissingModelHold("UNKNOWN_MODEL", "")).toBeNull();
   });

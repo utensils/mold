@@ -1989,6 +1989,13 @@ function durableHeldError(job: Job): string | null {
   return durable.lifecycle.error ?? null;
 }
 
+/** The held child's typed `error_code`; what the missing-model offer reads. */
+function durableHeldCode(job: Job): string | null {
+  const durable = durableLifecycleForJob(job);
+  if (!durable || truthfulGenerationPhase(durable.lifecycle) !== "held") return null;
+  return durable.lifecycle.errorCode ?? null;
+}
+
 function durableHeldIsRetryable(job: Job): boolean {
   const durable = durableLifecycleForJob(job);
   return (
@@ -4264,7 +4271,7 @@ function offerHeldMissingModelPull(job: Job): void {
   const planned = planHeldMissingModelPull({
     jobId: job.id,
     model: job.model,
-    heldReason: durableHeldError(job),
+    heldCode: durableHeldCode(job),
     alreadyOffered: offeredMissingModelHolds,
   });
   if (!planned) return;
@@ -4279,7 +4286,10 @@ function offerHeldMissingModelPull(job: Job): void {
 watch(
   () =>
     allGenerationJobs.value
-      .map((job) => `${job.id ?? job.clientId}:${durableHeldError(job) ?? ""}`)
+      .map(
+        (job) =>
+          `${job.id ?? job.clientId}:${durableHeldCode(job) ?? ""}:${durableHeldError(job) ?? ""}`,
+      )
       .join("|"),
   () => {
     for (const job of allGenerationJobs.value) offerHeldMissingModelPull(job);

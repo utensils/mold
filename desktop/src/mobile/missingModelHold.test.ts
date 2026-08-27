@@ -9,12 +9,8 @@ const base = {
 
 describe("planHeldMissingModelPull", () => {
   it("offers the pull for a child the machine parked because the model is missing", () => {
-    for (const heldReason of [
-      "UNKNOWN_MODEL",
-      "UNKNOWN_MODEL: z-image-turbo:q6 is not installed",
-      "MODEL_NOT_FOUND while preparing",
-    ]) {
-      expect(planHeldMissingModelPull({ ...base, heldReason })).toEqual({
+    for (const heldCode of ["UNKNOWN_MODEL", "MODEL_NOT_FOUND"]) {
+      expect(planHeldMissingModelPull({ ...base, heldCode })).toEqual({
         model: "z-image-turbo:q6",
         jobId: "job-1",
       });
@@ -22,14 +18,15 @@ describe("planHeldMissingModelPull", () => {
   });
 
   it("offers nothing for a hold that is not about the model", () => {
-    for (const heldReason of [
+    for (const heldCode of [
       null,
       "",
-      "insufficient VRAM on this device",
+      // A sentence is never a code, even one that mentions the model.
+      "deferred generation preparation failed: model 'z-image-turbo:q6' is not downloaded",
       "QUEUE_PAUSED",
-      "the operator disabled every device",
+      "DEVICES_DISABLED",
     ]) {
-      expect(planHeldMissingModelPull({ ...base, heldReason })).toBeNull();
+      expect(planHeldMissingModelPull({ ...base, heldCode })).toBeNull();
     }
   });
 
@@ -38,7 +35,7 @@ describe("planHeldMissingModelPull", () => {
     const alreadyOffered = new Set<string>();
     const first = planHeldMissingModelPull({
       ...base,
-      heldReason: "UNKNOWN_MODEL",
+      heldCode: "UNKNOWN_MODEL",
       alreadyOffered,
     });
     expect(first).not.toBeNull();
@@ -46,7 +43,7 @@ describe("planHeldMissingModelPull", () => {
     expect(
       planHeldMissingModelPull({
         ...base,
-        heldReason: "UNKNOWN_MODEL: reported again",
+        heldCode: "UNKNOWN_MODEL",
         alreadyOffered,
       }),
     ).toBeNull();
@@ -54,7 +51,7 @@ describe("planHeldMissingModelPull", () => {
 
   it("offers nothing for a job with no durable identity to retry", () => {
     for (const jobId of [null, undefined, ""]) {
-      expect(planHeldMissingModelPull({ ...base, jobId, heldReason: "UNKNOWN_MODEL" })).toBeNull();
+      expect(planHeldMissingModelPull({ ...base, jobId, heldCode: "UNKNOWN_MODEL" })).toBeNull();
     }
   });
 });
