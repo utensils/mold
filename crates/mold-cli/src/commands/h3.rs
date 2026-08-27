@@ -478,6 +478,7 @@ fn prepare_references(
         let provenance = GenerationReferenceProvenance {
             name: display_name(&input.path),
             sha256: Some(sha256),
+            crop: None,
         };
         let descriptor = match input.kind {
             ReferenceKind::Image => probe_image(file.try_clone()?, provenance)

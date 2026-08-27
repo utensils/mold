@@ -1400,6 +1400,7 @@ mod tests {
         let provenance = |name: &str, digest: char| GenerationReferenceProvenance {
             name: Some(name.to_string()),
             sha256: Some(sha(digest)),
+            crop: None,
         };
         let mut request = request();
         request.model = contract::REF2VA_COMFY.into();
@@ -1451,6 +1452,7 @@ mod tests {
             provenance: GenerationReferenceProvenance {
                 name: Some("portrait.png".to_string()),
                 sha256: Some(sha('2')),
+                crop: None,
             },
             mime_type: "image/png".into(),
             width: 48,
@@ -2859,6 +2861,7 @@ mod tests {
                 provenance: mold_core::GenerationReferenceProvenance {
                     name: Some("portrait.png".into()),
                     sha256: Some(format!("{:x}", Sha256::digest(&image_bytes))),
+                    crop: None,
                 },
                 mime_type: "image/png".into(),
                 width: 48,
@@ -2873,6 +2876,7 @@ mod tests {
                 provenance: mold_core::GenerationReferenceProvenance {
                     name: Some("voice.wav".into()),
                     sha256: Some(format!("{:x}", Sha256::digest(&audio_bytes))),
+                    crop: None,
                 },
                 mime_type: "audio/wav".into(),
                 duration_ms: 2_000,

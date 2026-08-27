@@ -290,6 +290,7 @@ fn canonical_reference(
     let provenance = GenerationReferenceProvenance {
         name: complete.metadata.name.clone(),
         sha256: Some(complete.metadata.sha256.to_ascii_lowercase()),
+        crop: provisional.provenance().crop.clone(),
     };
     let descriptor = match provisional {
         GenerationReference::Image { mime_type, .. } => {
@@ -702,6 +703,7 @@ mod tests {
             provenance: GenerationReferenceProvenance {
                 name: Some("voice.wav".into()),
                 sha256: Some("a".repeat(64)),
+                crop: None,
             },
             mime_type: "audio/x-wav".into(),
             duration_ms: 1_000,
@@ -736,6 +738,7 @@ mod tests {
                 channels: Some(2),
                 sample_count: Some(47_904),
                 prepared_shape: None,
+                crop: None,
             },
             request_scope_sha256: "b".repeat(64),
             session_complete: true,

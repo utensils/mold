@@ -3020,6 +3020,7 @@ mod structural_tests {
         let provenance = |name: &str, byte: u8| GenerationReferenceProvenance {
             name: Some(name.to_string()),
             sha256: Some(format!("{byte:02x}").repeat(32)),
+            crop: None,
         };
         let image = GenerationReference::Image {
             media: GenerationReferenceAuthority::Descriptor,

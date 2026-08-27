@@ -6761,6 +6761,7 @@ mod tests {
         let provenance = |name: &str, byte: u8| GenerationReferenceProvenance {
             name: Some(name.to_string()),
             sha256: Some(format!("{byte:02x}").repeat(32)),
+            crop: None,
         };
         request.model = mold_core::minimax_h3::REF2VA_COMFY.to_string();
         request.references = Some(vec![

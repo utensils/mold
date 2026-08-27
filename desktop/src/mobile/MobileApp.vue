@@ -301,7 +301,7 @@ import {
 import { sequenceParams } from "../lib/sequenceParams";
 import { isGenerationModel } from "../stores/models";
 import type { HostRoute } from "../stores/hosts";
-import { domCanvasOps } from "../lib/sourceFitCanvas";
+import { domCanvasOps } from "@studio/lib/sourceFitCanvas";
 import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
 import { coerceSourceFitForMaskless, parseSourceFitPolicy } from "@studio/lib/sourceFit";
 import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";

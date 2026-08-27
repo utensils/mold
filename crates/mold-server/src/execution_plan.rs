@@ -4737,6 +4737,7 @@ mod tests {
             provenance: GenerationReferenceProvenance {
                 name: Some(name.to_string()),
                 sha256: None,
+                crop: None,
             },
             mime_type: "image/png".to_string(),
             width: 640,
@@ -4760,6 +4761,7 @@ mod tests {
             provenance: GenerationReferenceProvenance {
                 name: Some("first.png".to_string()),
                 sha256: Some(digest),
+                crop: None,
             },
             mime_type: "image/png".to_string(),
             width: 640,

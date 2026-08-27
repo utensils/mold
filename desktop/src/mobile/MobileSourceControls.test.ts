@@ -6,6 +6,8 @@ import { MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES } from "../lib/generateValida
 import { newGenerateForm, type GenerateForm } from "../lib/generateForm";
 import MaskEditorModal from "../components/generate/MaskEditorModal.vue";
 import MobileImagePickerSheet from "./MobileImagePickerSheet.vue";
+import MobileReferenceCropSheet from "./MobileReferenceCropSheet.vue";
+import ReferenceCropEditor from "@studio/components/ReferenceCropEditor.vue";
 
 const { fetchCatalogInstalled } = vi.hoisted(() => ({
   fetchCatalogInstalled: vi.fn(),
@@ -591,6 +593,46 @@ describe("MobileSourceControls — MiniMax H3 FL2VA boundaries", () => {
     const picker = wrapper.getComponent(MobileImagePickerSheet);
     expect(picker.props("open")).toBe(true);
     expect(picker.props("multiple")).toBe(true);
+  });
+
+  it("opens the crop sheet for a Ref2VA image and stores the applied crop on the draft", async () => {
+    const form = formFor("minimax-h3");
+    form.model = "minimax-h3-ref2va:comfy-pruned-int8";
+    form.h3Authoring = {
+      firstFrame: null,
+      lastFrame: null,
+      references: [
+        {
+          reference: {
+            kind: "image",
+            media: { authority: "inline", data: "SU1BR0U=" },
+            provenance: { name: "subject.png", sha256: "a".repeat(64) },
+            mime_type: "image/png",
+            width: 1024,
+            height: 768,
+          },
+        },
+      ],
+    };
+    const wrapper = mount(MobileSourceControls, {
+      props: { form, model: model(form.model, form.family) },
+    });
+    const sheet = wrapper.getComponent(MobileReferenceCropSheet);
+    expect(sheet.props("open")).toBe(false);
+
+    await wrapper.get("[data-test='h3-reference-crop-0']").trigger("click");
+    expect(sheet.props("open")).toBe(true);
+    const editor = wrapper.getComponent(ReferenceCropEditor);
+    expect(editor.props("large")).toBe(true);
+    editor.vm.$emit("apply", { x: 256, y: 0, width: 512, height: 768 });
+    await flushPromises();
+    expect(form.h3Authoring?.references[0]?.crop).toEqual({
+      x: 256,
+      y: 0,
+      width: 512,
+      height: 768,
+    });
+    expect(sheet.props("open")).toBe(false);
   });
 
   it("renders the shared wells and applies a gallery pick to the first frame", async () => {

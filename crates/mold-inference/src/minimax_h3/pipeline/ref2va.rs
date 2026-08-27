@@ -1393,6 +1393,7 @@ mod tests {
         mold_core::GenerationReferenceProvenance {
             name: Some(name.into()),
             sha256: None,
+            crop: None,
         }
     }
 

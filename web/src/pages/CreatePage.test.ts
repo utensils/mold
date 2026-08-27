@@ -1752,6 +1752,106 @@ describe("CreatePage layout and behavior", () => {
     }
   });
 
+  it("applies a pending Ref2VA reference crop at the original resolution before submitting", async () => {
+    hostModelsMock.mockResolvedValue([
+      {
+        ...installedModelRow(
+          "minimax-h3-ref2va:comfy-pruned-int8",
+          "minimax-h3",
+        ),
+        default_width: 1344,
+        default_height: 768,
+      },
+    ]);
+    class LoadedImage {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      naturalWidth = 1024;
+      naturalHeight = 768;
+      set src(_value: string) {
+        queueMicrotask(() => this.onload?.());
+      }
+    }
+    vi.stubGlobal("Image", LoadedImage);
+    const drawImage = vi.fn();
+    const getContext = vi
+      .spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockReturnValue({
+        fillStyle: "",
+        fillRect: vi.fn(),
+        drawImage,
+      } as unknown as CanvasRenderingContext2D);
+    const toDataUrl = vi
+      .spyOn(HTMLCanvasElement.prototype, "toDataURL")
+      .mockReturnValue("data:image/png;base64,Q1JPUFBFRA==");
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "minimax-h3-ref2va:comfy-pruned-int8";
+    form.state.value.modelFamily = "minimax-h3";
+    form.state.value.prompt = "a subject in a new shot";
+    form.state.value.h3Authoring = {
+      firstFrame: null,
+      lastFrame: null,
+      references: [
+        {
+          reference: {
+            kind: "image",
+            media: { authority: "inline", data: "SU1BR0U=" },
+            provenance: { name: "subject.png", sha256: "a".repeat(64) },
+            mime_type: "image/png",
+            width: 1024,
+            height: 768,
+          },
+          crop: { x: 256, y: 0, width: 512, height: 768 },
+        },
+      ],
+    };
+    await nextTick();
+
+    try {
+      await wrapper.get("[data-test='composer-submit']").trigger("click");
+      await vi.waitFor(() => expect(submitMock).toHaveBeenCalledTimes(1), {
+        timeout: 5_000,
+      });
+      const req = submitMock.mock.calls[0][0];
+      expect(drawImage).toHaveBeenCalledWith(
+        expect.anything(),
+        -256,
+        0,
+        1024,
+        768,
+      );
+      expect(req.references?.[0]).toMatchObject({
+        kind: "image",
+        media: { authority: "inline", data: "Q1JPUFBFRA==" },
+        width: 512,
+        height: 768,
+        provenance: {
+          name: "subject.png",
+          crop: {
+            x: 256,
+            y: 0,
+            width: 512,
+            height: 768,
+            source_width: 1024,
+            source_height: 768,
+            source_sha256: "a".repeat(64),
+          },
+        },
+      });
+      // The live form keeps the uncropped original and its pending crop.
+      expect(form.state.value.h3Authoring.references[0]).toMatchObject({
+        reference: { width: 1024, media: { data: "SU1BR0U=" } },
+        crop: { x: 256, y: 0, width: 512, height: 768 },
+      });
+    } finally {
+      getContext.mockRestore();
+      toDataUrl.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("keeps a long advanced video request single-shot and preserves its settings", async () => {
     const guidedModel = {
       ...installedSequenceModel(),

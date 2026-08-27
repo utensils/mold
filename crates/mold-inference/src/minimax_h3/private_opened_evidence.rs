@@ -2830,6 +2830,7 @@ mod tests {
             provenance: GenerationReferenceProvenance {
                 name: Some("portrait.png".to_string()),
                 sha256: Some(sha256(b"reference-bytes")),
+                crop: None,
             },
             mime_type: "image/png".into(),
             width: 640,

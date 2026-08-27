@@ -28,6 +28,8 @@ import MobileImagePickerSheet, {
   type MobileGallerySource,
   type MobilePickedImage,
 } from "./MobileImagePickerSheet.vue";
+import MobileReferenceCropSheet from "./MobileReferenceCropSheet.vue";
+import type { ReferenceCrop } from "@studio/lib/referenceCrop";
 import { effectiveGenerationRecipe } from "@studio/lib/generationProfile";
 import SourceMediaWells, { type SourceMediaSlot } from "@studio/components/SourceMediaWells.vue";
 import MinimaxH3AuthoringPanel from "@studio/components/MinimaxH3AuthoringPanel.vue";
@@ -35,8 +37,10 @@ import { sourceMediaPlan } from "@studio/lib/sourceMediaPlan";
 import {
   appendMinimaxH3PickedImageReferences,
   emptyMinimaxH3AuthoringState,
+  minimaxH3ReferenceCropTarget,
   setMinimaxH3BoundaryFile,
   setMinimaxH3PickedImageBoundary,
+  setMinimaxH3ReferenceCrop,
   type MinimaxH3BoundaryEndpoint,
   type MinimaxH3GalleryImageResult,
 } from "@studio/lib/minimaxH3Authoring";
@@ -98,6 +102,20 @@ function setH3Authoring(value: typeof h3Authoring.value): void {
 }
 const h3PickerTarget = ref<MinimaxH3BoundaryEndpoint | null>(null);
 const h3ReferencePickerOpen = ref(false);
+/** Which ordered reference the crop sheet is editing; null when closed. */
+const h3CropIndex = ref<number | null>(null);
+const h3CropTarget = computed(() =>
+  minimaxH3ReferenceCropTarget(props.form.h3Authoring, h3CropIndex.value),
+);
+function applyH3ReferenceCrop(crop: ReferenceCrop | null): void {
+  if (h3CropIndex.value === null) return;
+  props.form.h3Authoring = setMinimaxH3ReferenceCrop(
+    props.form.h3Authoring ?? emptyMinimaxH3AuthoringState(),
+    h3CropIndex.value,
+    crop,
+  );
+  h3CropIndex.value = null;
+}
 const h3Error = ref<string | null>(null);
 const h3PickerMaxBytes = computed(() =>
   Math.max(
@@ -481,8 +499,17 @@ function applyMask(mask: string): void {
         image-picker-available
         @update:model-value="setH3Authoring"
         @open-image-picker="h3ReferencePickerOpen = true"
+        @crop-reference="h3CropIndex = $event"
       />
     </fieldset>
+    <MobileReferenceCropSheet
+      :open="h3CropTarget !== null"
+      :title="`Crop reference ${(h3CropIndex ?? 0) + 1}`"
+      :image="h3CropTarget?.image ?? null"
+      :crop="h3CropTarget?.crop ?? null"
+      @apply="applyH3ReferenceCrop"
+      @close="h3CropIndex = null"
+    />
     <MobileImagePickerSheet
       :open="h3ReferencePickerOpen"
       :target="target"

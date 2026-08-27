@@ -370,6 +370,42 @@ describe("SourceMediaPanel — MiniMax H3 FL2VA boundaries", () => {
   });
 });
 
+describe("SourceMediaPanel — H3 reference crop", () => {
+  it("relays the shared panel's Crop action to the page-level editor host", async () => {
+    const ref2va = {
+      name: "minimax-h3-ref2va:comfy-pruned-int8",
+      family: "minimax-h3",
+      downloaded: true,
+    } as ModelInfoExtended;
+    const wrapper = factory(
+      "minimax-h3",
+      {
+        model: ref2va.name,
+        modelFamily: ref2va.family,
+        h3Authoring: {
+          firstFrame: null,
+          lastFrame: null,
+          references: [
+            {
+              reference: {
+                kind: "image",
+                media: { authority: "inline", data: "SU1BR0U=" },
+                provenance: { name: "subject.png", sha256: "a".repeat(64) },
+                mime_type: "image/png",
+                width: 1024,
+                height: 768,
+              },
+            },
+          ],
+        },
+      },
+      { models: [ref2va] },
+    );
+    await wrapper.get("[data-test='h3-reference-crop-0']").trigger("click");
+    expect(wrapper.emitted("crop-h3-reference")).toEqual([[0]]);
+  });
+});
+
 describe("SourceMediaPanel — direct file uploads", () => {
   const PNG_7x4 =
     "iVBORw0KGgoAAAANSUhEUgAAAAcAAAAECAIAAAAmkwkpAAAAAElFTkSuQmCC";

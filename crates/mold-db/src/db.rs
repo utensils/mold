@@ -1272,6 +1272,7 @@ mod tests {
                     visual_rows: 27_216,
                     audio_rows: 320,
                 }),
+                crop: None,
             },
             mold_core::GenerationReferenceMetadata {
                 kind: mold_core::GenerationReferenceKind::Audio,
@@ -1303,6 +1304,7 @@ mod tests {
                     visual_rows: 0,
                     audio_rows: 240,
                 }),
+                crop: None,
             },
         ]);
 

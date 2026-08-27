@@ -31,6 +31,8 @@ import SequenceComposer from "../components/SequenceComposer.vue";
 import ExpandModal from "../components/ExpandModal.vue";
 import RemixModal from "../components/RemixModal.vue";
 import ImagePickerModal from "../components/ImagePickerModal.vue";
+import ReferenceCropModal from "../components/ReferenceCropModal.vue";
+import { domCanvasOps } from "@studio/lib/sourceFitCanvas";
 import MaskEditorModal from "../components/MaskEditorModal.vue";
 import GenerationTemplatesPanel from "../components/GenerationTemplatesPanel.vue";
 import ColdStartGuide from "../components/create/ColdStartGuide.vue";
@@ -241,12 +243,18 @@ import {
   MINIMAX_H3_PROMPT_PLACEHOLDER,
   emptyMinimaxH3AuthoringState,
   isMinimaxH3Identity,
+  applyMinimaxH3ReferenceCrops,
   minimaxH3AuthoringError,
+  minimaxH3ReferenceCropTarget,
+  minimaxH3ReferenceProjection,
   minimaxH3TaskForModel,
   setMinimaxH3GalleryImageFirstFrame,
   setMinimaxH3PickedImageBoundary,
+  setMinimaxH3ReferenceCrop,
+  type MinimaxH3AuthoringState,
   type MinimaxH3BoundaryEndpoint,
 } from "@studio/lib/minimaxH3Authoring";
+import type { ReferenceCrop } from "@studio/lib/referenceCrop";
 import {
   firstLastFrameRestoreNotice,
   sourceImageValidationError,
@@ -330,6 +338,20 @@ function openTargetPicker() {
 // One picker serves both FL2VA boundaries; the target names the slot.
 const h3BoundaryPickerTarget = ref<MinimaxH3BoundaryEndpoint | null>(null);
 const h3ReferencePickerOpen = ref(false);
+/** Which ordered H3 reference the crop dialog is editing; null when closed. */
+const h3CropIndex = ref<number | null>(null);
+const h3CropTarget = computed(() =>
+  minimaxH3ReferenceCropTarget(form.state.value.h3Authoring, h3CropIndex.value),
+);
+function applyH3ReferenceCrop(crop: ReferenceCrop | null): void {
+  if (h3CropIndex.value === null) return;
+  form.state.value.h3Authoring = setMinimaxH3ReferenceCrop(
+    form.state.value.h3Authoring ?? emptyMinimaxH3AuthoringState(),
+    h3CropIndex.value,
+    crop,
+  );
+  h3CropIndex.value = null;
+}
 /** Wan's closing still gets its own picker (#779) so attaching one can never
  * overwrite the opening frame the source well holds. */
 const showEndFramePicker = ref(false);
@@ -765,32 +787,19 @@ function syncPhone() {
   isPhone.value = phoneQuery?.matches ?? false;
 }
 
-function mediaUrl(image: SourceImageState): string {
-  return `data:${image.mime || "image/png"};base64,${image.base64}`;
-}
-
-function loadHtmlImage(image: SourceImageState): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error(`failed to decode ${image.filename}`));
-    img.src = mediaUrl(image);
-  });
-}
-
-function canvasToSourceImage(
-  canvas: HTMLCanvasElement,
+/** A fitted/cropped PNG as a `SourceImageState` beside its original. */
+function fittedSourceImage(
+  base64: string,
+  size: { width: number; height: number },
   original: SourceImageState,
   suffix: string,
 ): SourceImageState {
-  const dataUrl = canvas.toDataURL("image/png");
-  const comma = dataUrl.indexOf(",");
   return {
     ...original,
     filename: original.filename.replace(/(\.[^.]+)?$/, `${suffix}.png`),
-    base64: comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl,
-    width: canvas.width,
-    height: canvas.height,
+    base64,
+    width: size.width,
+    height: size.height,
     mime: "image/png",
   };
 }
@@ -3127,61 +3136,31 @@ async function prepareStillSourceToRequest(
     policy,
     target,
     async () => {
-      const sourceImg = await loadHtmlImage(source!);
-      if (
-        sourceImg.naturalWidth === target.width &&
-        sourceImg.naturalHeight === target.height
-      ) {
+      const natural = await domCanvasOps.imageSize(source!.base64);
+      if (natural.width === target.width && natural.height === target.height) {
         return { source, mask };
       }
-      const transform = resolveSourceFitTransform(
-        { width: sourceImg.naturalWidth, height: sourceImg.naturalHeight },
-        target,
-        policy,
+      const transform = resolveSourceFitTransform(natural, target, policy);
+      const output = {
+        width: transform.outputWidth,
+        height: transform.outputHeight,
+      };
+      const fittedSource = fittedSourceImage(
+        await domCanvasOps.fitImage(source!.base64, transform),
+        output,
+        source!,
+        "-fit",
       );
-      const canvas = document.createElement("canvas");
-      canvas.width = transform.outputWidth;
-      canvas.height = transform.outputHeight;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return { source, mask };
-      ctx.fillStyle = "black";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(
-        sourceImg,
-        transform.offsetX,
-        transform.offsetY,
-        transform.drawWidth,
-        transform.drawHeight,
-      );
-      const fittedSource = canvasToSourceImage(canvas, source!, "-fit");
 
       if (policy.mode !== "pad-repaint" && !mask)
         return { source: fittedSource, mask };
-      const maskCanvas = document.createElement("canvas");
-      maskCanvas.width = transform.outputWidth;
-      maskCanvas.height = transform.outputHeight;
-      const maskCtx = maskCanvas.getContext("2d");
-      if (!maskCtx) return { source: fittedSource, mask };
-      maskCtx.fillStyle = "black";
-      maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
-      if (mask) {
-        const maskImg = await loadHtmlImage(mask);
-        maskCtx.drawImage(
-          maskImg,
-          transform.offsetX,
-          transform.offsetY,
-          transform.drawWidth,
-          transform.drawHeight,
-        );
-      }
-      if (policy.mode === "pad-repaint") {
-        maskCtx.fillStyle = "white";
-        for (const rect of maskPaddingRectangles(transform)) {
-          maskCtx.fillRect(rect.x, rect.y, rect.width, rect.height);
-        }
-      }
-      const fittedMask = canvasToSourceImage(
-        maskCanvas,
+      const fittedMask = fittedSourceImage(
+        await domCanvasOps.buildMask(
+          mask?.base64 ?? null,
+          transform,
+          policy.mode === "pad-repaint" ? maskPaddingRectangles(transform) : [],
+        ),
+        output,
         mask ?? { kind: source!.kind, filename: "pad-mask.png", base64: "" },
         "-fit-mask",
       );
@@ -3886,7 +3865,33 @@ async function onSubmitInner(
     toast("error", decision.reason);
     return;
   }
+  // Ref2VA: pending image crops are applied at the original resolution BEFORE
+  // the first planning request exists, so placement preview, upload
+  // conversion, and the route all see the cropped reference; only the
+  // requests receive the cropped bytes — the composer keeps the original.
+  let h3Cropped: MinimaxH3AuthoringState | null = null;
+  if (
+    isMinimaxH3Identity(currentFamily.value, form.state.value.model) &&
+    form.state.value.h3Authoring &&
+    minimaxH3TaskForModel(form.state.value.model) === "ref2va"
+  ) {
+    try {
+      h3Cropped = await applyMinimaxH3ReferenceCrops(
+        form.state.value.h3Authoring,
+        domCanvasOps,
+      );
+    } catch (error) {
+      if (!isCurrent()) return;
+      const message = error instanceof Error ? error.message : String(error);
+      composerError.value = `Reference preprocessing failed: ${message}`;
+      return;
+    }
+    if (!isCurrent()) return;
+  }
   const currentRequest = form.toRequest(currentModel.value);
+  if (h3Cropped) {
+    currentRequest.references = minimaxH3ReferenceProjection(h3Cropped);
+  }
   const originalSource = form.state.value.imageAttachments[0]
     ? {
         ...form.state.value.imageAttachments[0],
@@ -3984,6 +3989,7 @@ async function onSubmitInner(
   // same client-side fit, coerced maskless.
   if (isMinimaxH3Identity(currentFamily.value, form.state.value.model)) {
     const h3 = form.state.value.h3Authoring;
+    if (h3Cropped) req.references = minimaxH3ReferenceProjection(h3Cropped);
     const boundaryRoute: HostRoute | null = route || null;
     const fitBoundary = async (
       base64: string,
@@ -5549,6 +5555,7 @@ onBeforeUnmount(() => {
                     h3BoundaryPickerTarget = 'lastFrame'
                   "
                   @open-h3-reference-picker="h3ReferencePickerOpen = true"
+                  @crop-h3-reference="h3CropIndex = $event"
                 />
                 <IdentityPanel
                   v-if="!sequenceMode"
@@ -5802,6 +5809,7 @@ onBeforeUnmount(() => {
           @open-h3-first-frame-picker="h3BoundaryPickerTarget = 'firstFrame'"
           @open-h3-last-frame-picker="h3BoundaryPickerTarget = 'lastFrame'"
           @open-h3-reference-picker="h3ReferencePickerOpen = true"
+          @crop-h3-reference="h3CropIndex = $event"
         />
         <!-- The identity photo is media the user attaches, not a setting, so
              it sits with the source wells; only its two knobs are Advanced. -->
@@ -5949,6 +5957,14 @@ onBeforeUnmount(() => {
       :multiple="true"
       @pick="onPickH3References"
       @close="h3ReferencePickerOpen = false"
+    />
+    <ReferenceCropModal
+      :open="h3CropTarget !== null"
+      :title="`Crop reference ${(h3CropIndex ?? 0) + 1}`"
+      :image="h3CropTarget?.image ?? null"
+      :crop="h3CropTarget?.crop ?? null"
+      @apply="applyH3ReferenceCrop"
+      @close="h3CropIndex = null"
     />
     <ImagePickerModal
       :open="showEndFramePicker"

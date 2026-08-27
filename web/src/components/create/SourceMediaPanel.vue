@@ -64,6 +64,8 @@ const emit = defineEmits<{
   "open-h3-first-frame-picker": [];
   "open-h3-last-frame-picker": [];
   "open-h3-reference-picker": [];
+  /** Open the page-level crop editor for ordered reference `index`. */
+  "crop-h3-reference": [index: number];
 }>();
 
 function patch(next: Partial<GenerateFormState>) {
@@ -297,6 +299,7 @@ function clearControl() {
       image-picker-available
       @update:model-value="setH3Authoring"
       @open-image-picker="emit('open-h3-reference-picker')"
+      @crop-reference="emit('crop-h3-reference', $event)"
     />
 
     <!-- Ordered picture strip (Qwen edit / FLUX.2 references). -->

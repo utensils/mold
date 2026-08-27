@@ -7618,6 +7618,7 @@ mod tests {
         let provenance = |name: &str, seed: &[u8]| GenerationReferenceProvenance {
             name: Some(name.to_string()),
             sha256: Some(format!("{:x}", Sha256::digest(seed))),
+            crop: None,
         };
         vec![
             // A plain 16:9 photograph. Its short edge is normalized to 2048,
@@ -9436,6 +9437,7 @@ mod tests {
             provenance: GenerationReferenceProvenance {
                 name: Some("portrait.png".to_string()),
                 sha256: Some(sha('9')),
+                crop: None,
             },
             mime_type: "image/png".into(),
             width: 48,

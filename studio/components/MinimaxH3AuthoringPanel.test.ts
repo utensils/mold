@@ -229,3 +229,95 @@ describe("MinimaxH3AuthoringPanel", () => {
     });
   });
 });
+
+describe("MinimaxH3AuthoringPanel — reference crop", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "createImageBitmap",
+      vi.fn(async () => ({ width: 1_024, height: 768, close: vi.fn() })),
+    );
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
+      drawImage: vi.fn(),
+    } as unknown as CanvasRenderingContext2D);
+    vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue(
+      "data:image/jpeg;base64,BOUNDED",
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("offers Crop on attached image rows only and asks the host to open the editor", async () => {
+    const wrapper = mount(MinimaxH3AuthoringPanel, {
+      props: { modelValue: state() },
+    });
+    const crop = wrapper.get('[data-test="h3-reference-crop-0"]');
+    expect(crop.attributes("aria-label")).toBe("Crop reference 1");
+    expect(wrapper.find('[data-test="h3-reference-crop-1"]').exists()).toBe(
+      false,
+    );
+    expect(wrapper.find('[data-test="h3-reference-crop-2"]').exists()).toBe(
+      false,
+    );
+    await crop.trigger("click");
+    expect(wrapper.emitted("crop-reference")).toEqual([[0]]);
+  });
+
+  it("disables Crop until a redacted image's bytes are reattached", () => {
+    const value = state();
+    value.references[0]!.reference.media = { authority: "descriptor" };
+    const wrapper = mount(MinimaxH3AuthoringPanel, {
+      props: { modelValue: value },
+    });
+    expect(
+      wrapper.get('[data-test="h3-reference-crop-0"]').attributes("disabled"),
+    ).toBeDefined();
+  });
+
+  it("draws the pending crop's outline over the thumbnail and names its size", () => {
+    const value = state();
+    value.references[0]!.crop = { x: 256, y: 0, width: 512, height: 768 };
+    const wrapper = mount(MinimaxH3AuthoringPanel, {
+      props: { modelValue: value },
+    });
+    const outline = wrapper.get('[data-test="h3-reference-crop-outline-0"]');
+    expect(outline.attributes("style")).toContain("left: 25%");
+    expect(outline.attributes("style")).toContain("width: 50%");
+    expect(wrapper.text()).toContain("cropped to 512×768");
+    expect(
+      wrapper.find('[data-test="h3-reference-crop-outline-1"]').exists(),
+    ).toBe(false);
+  });
+
+  it("clears a saved crop with an inline disclosure when a different original is reattached", async () => {
+    const value = state();
+    value.references[0]!.reference.media = { authority: "descriptor" };
+    value.references[0]!.crop = { x: 256, y: 0, width: 512, height: 768 };
+    const wrapper = mount(MinimaxH3AuthoringPanel, {
+      props: { modelValue: value },
+    });
+    const input = wrapper.get('[data-test="h3-reference-reattach-0"]');
+    Object.defineProperty(input.element, "files", {
+      configurable: true,
+      value: [
+        new File([new Uint8Array([1, 2, 3])], "other.png", {
+          type: "image/png",
+        }),
+      ],
+    });
+    await input.trigger("change");
+    await vi.waitFor(() => {
+      expect(wrapper.emitted("update:modelValue")).toHaveLength(1);
+    });
+    const emitted = wrapper.emitted(
+      "update:modelValue",
+    )?.[0]?.[0] as MinimaxH3AuthoringState;
+    expect(emitted.references[0]).not.toHaveProperty("crop");
+    expect(emitted.references[0]?.reference.provenance?.name).toBe("other.png");
+    expect(wrapper.get('[data-test="h3-reference-notice"]').text()).toContain(
+      "saved crop was cleared",
+    );
+  });
+});

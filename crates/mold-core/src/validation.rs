@@ -3768,6 +3768,7 @@ mod tests {
             provenance: crate::GenerationReferenceProvenance {
                 name: Some("reference.png".to_string()),
                 sha256: None,
+                crop: None,
             },
             mime_type: "image/png".to_string(),
             width: 1920,

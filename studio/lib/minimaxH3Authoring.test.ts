@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { GenerationReference } from "./generationReferences";
+import { sha256PaddedBase64 } from "./base64Digest";
 import {
   MINIMAX_H3_FIXED_FPS,
   MINIMAX_H3_FL2VA_COMFY,
@@ -23,6 +24,10 @@ import {
   minimaxH3ReferenceDraftsFromMetadata,
   minimaxH3TaskForModel,
   moveMinimaxH3Reference,
+  applyMinimaxH3ReferenceCrops,
+  reattachMinimaxH3Reference,
+  setMinimaxH3ReferenceCrop,
+  stripMinimaxH3AuthoringMedia,
   serializeMinimaxH3Authoring,
   setMinimaxH3BoundaryFile,
   setMinimaxH3GalleryImageBoundary,
@@ -726,5 +731,205 @@ describe("model-switch boundary bridge", () => {
       ),
     ).toBeNull();
     expect(stagedImageFromMinimaxH3Boundary(null)).toBeNull();
+  });
+});
+
+describe("reference crop", () => {
+  const CROP = { x: 256, y: 0, width: 768, height: 768 };
+  const cropped = (name: string) => ({ reference: image(name), crop: CROP });
+  const fitImage = vi.fn(async () => "Q1JPUFBFRA==");
+
+  it("re-encodes a cropped image at the crop's own size with a fresh digest and crop provenance", async () => {
+    fitImage.mockClear();
+    const state = emptyMinimaxH3AuthoringState();
+    state.references = [
+      cropped("subject.png"),
+      { reference: video("motion.mp4") },
+      { reference: image("plain.png") },
+    ];
+    const next = await applyMinimaxH3ReferenceCrops(state, { fitImage });
+
+    expect(fitImage).toHaveBeenCalledTimes(1);
+    expect(fitImage).toHaveBeenCalledWith("SUBJECT.PNG", {
+      outputWidth: 768,
+      outputHeight: 768,
+      drawWidth: 1024,
+      drawHeight: 768,
+      offsetX: -256,
+      offsetY: 0,
+      maskPaddedPixels: false,
+    });
+    const first = next.references[0]!;
+    expect(first.crop).toBeUndefined();
+    expect(first.reference).toEqual({
+      kind: "image",
+      media: { authority: "inline", data: "Q1JPUFBFRA==" },
+      mime_type: "image/png",
+      width: 768,
+      height: 768,
+      provenance: {
+        name: "subject.png",
+        sha256: await sha256PaddedBase64("Q1JPUFBFRA=="),
+        crop: {
+          ...CROP,
+          source_width: 1024,
+          source_height: 768,
+          source_sha256: "subject.png".repeat(64).slice(0, 64),
+        },
+      },
+    });
+    // Untouched neighbours are the same objects, in the same order.
+    expect(next.references[1]!.reference).toBe(state.references[1]!.reference);
+    expect(next.references[2]!.reference).toBe(state.references[2]!.reference);
+    // The live state was never mutated.
+    expect(state.references[0]!.reference).toMatchObject({ width: 1024 });
+  });
+
+  it("leaves an identity crop's bytes untouched and records no crop provenance", async () => {
+    fitImage.mockClear();
+    const state = emptyMinimaxH3AuthoringState();
+    state.references = [
+      {
+        reference: image("whole.png"),
+        crop: { x: 0, y: 0, width: 1024, height: 768 },
+      },
+    ];
+    const next = await applyMinimaxH3ReferenceCrops(state, { fitImage });
+    expect(fitImage).not.toHaveBeenCalled();
+    expect(next.references[0]!.reference).toBe(state.references[0]!.reference);
+    expect(next.references[0]!.crop).toBeUndefined();
+  });
+
+  it("refuses to crop a reference whose bytes are not attached, naming its position", async () => {
+    const state = emptyMinimaxH3AuthoringState();
+    state.references = [
+      { reference: video("one.mp4") },
+      {
+        reference: {
+          ...image("gone.png"),
+          media: { authority: "descriptor" },
+        },
+        crop: CROP,
+      },
+    ];
+    await expect(
+      applyMinimaxH3ReferenceCrops(state, { fitImage }),
+    ).rejects.toThrow(/Reference 2/);
+  });
+
+  it("serializes a pending crop into the projection so conditioning fingerprints stale on it", () => {
+    const state = emptyMinimaxH3AuthoringState();
+    state.references = [cropped("subject.png")];
+    const request = serializeMinimaxH3Authoring(
+      { frames: 124 },
+      "minimax-h3",
+      "minimax-h3-ref2va:comfy-pruned-int8",
+      state,
+    ) as unknown as { references: GenerationReference[] };
+    expect(request.references[0]!.provenance?.crop).toEqual({
+      ...CROP,
+      source_width: 1024,
+      source_height: 768,
+      source_sha256: "subject.png".repeat(64).slice(0, 64),
+    });
+    // The projection's bytes are still the source's: only the applied crop
+    // rewrites them, and the server refuses a size mismatch by name.
+    expect(request.references[0]!.media).toEqual({
+      authority: "inline",
+      data: "SUBJECT.PNG",
+    });
+  });
+
+  it("restores a saved crop as a pending draft crop over the uncropped source facts", () => {
+    const [draft] = minimaxH3ReferenceDraftsFromMetadata([
+      {
+        kind: "image",
+        index: 1,
+        name: "subject.png",
+        sha256: "c".repeat(64),
+        mime_type: "image/png",
+        width: 768,
+        height: 768,
+        crop: {
+          ...CROP,
+          source_width: 1024,
+          source_height: 768,
+          source_sha256: "d".repeat(64),
+        },
+      },
+    ]);
+    expect(draft!.crop).toEqual(CROP);
+    expect(draft!.reference).toMatchObject({
+      kind: "image",
+      media: { authority: "descriptor" },
+      width: 1024,
+      height: 768,
+      provenance: { name: "subject.png", sha256: "d".repeat(64) },
+    });
+    expect(draft!.reference.provenance).not.toHaveProperty("crop");
+  });
+
+  it("re-applies the crop only when the reattached original is byte-identical", () => {
+    const state = emptyMinimaxH3AuthoringState();
+    state.references = [
+      {
+        reference: {
+          ...image("subject.png"),
+          media: { authority: "descriptor" },
+        },
+        crop: CROP,
+      },
+    ];
+    const same = reattachMinimaxH3Reference(state, 0, {
+      reference: image("subject.png"),
+    });
+    expect(same.notice).toBeNull();
+    expect(same.state.references[0]).toEqual({
+      reference: image("subject.png"),
+      crop: CROP,
+    });
+
+    const other = reattachMinimaxH3Reference(state, 0, {
+      reference: image("other.png"),
+    });
+    expect(other.state.references[0]).toEqual({
+      reference: image("other.png"),
+    });
+    expect(other.notice).toContain("crop");
+
+    expect(() =>
+      reattachMinimaxH3Reference(state, 0, { reference: video("clip.mp4") }),
+    ).toThrow(/as image/);
+  });
+
+  it("sets and clears a draft crop, and the byte-free projection keeps it", () => {
+    const state = emptyMinimaxH3AuthoringState();
+    state.references = [{ reference: image("subject.png") }];
+    const set = setMinimaxH3ReferenceCrop(state, 0, {
+      x: 0.4,
+      y: 0,
+      width: 900.2,
+      height: 768,
+    });
+    expect(set.references[0]!.crop).toEqual({
+      x: 0,
+      y: 0,
+      width: 900,
+      height: 768,
+    });
+    expect(stripMinimaxH3AuthoringMedia(set).references[0]).toMatchObject({
+      crop: { x: 0, y: 0, width: 900, height: 768 },
+      reference: { media: { authority: "descriptor" } },
+    });
+    const identity = setMinimaxH3ReferenceCrop(set, 0, {
+      x: 0,
+      y: 0,
+      width: 1024,
+      height: 768,
+    });
+    expect(identity.references[0]).not.toHaveProperty("crop");
+    expect(
+      setMinimaxH3ReferenceCrop(set, 0, null).references[0],
+    ).not.toHaveProperty("crop");
   });
 });

@@ -4170,6 +4170,7 @@ mod tests {
             provenance: mold_core::GenerationReferenceProvenance {
                 name: Some(name.to_string()),
                 sha256: Some(sha256.to_string()),
+                crop: None,
             },
             mime_type: "image/png".to_string(),
             width: 32,
@@ -4531,6 +4532,7 @@ mod tests {
             provenance: mold_core::GenerationReferenceProvenance {
                 name: Some("reference.png".into()),
                 sha256: Some("a".repeat(64)),
+                crop: None,
             },
             mime_type: "image/png".into(),
             width: 32,
@@ -4571,6 +4573,7 @@ mod tests {
             provenance: mold_core::GenerationReferenceProvenance {
                 name: Some("reference.png".into()),
                 sha256: Some("a".repeat(64)),
+                crop: None,
             },
             mime_type: "image/png".into(),
             width: 32,

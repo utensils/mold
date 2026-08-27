@@ -2137,6 +2137,79 @@ button.mobile-generate-disclosure {
   }
 }
 
+/* Reference crop sheet — the same fixed-overlay recipe as the seam sheet. */
+.mobile-crop-sheet {
+  display: none;
+  position: fixed;
+  inset: 0 0 auto;
+  height: var(--mobile-visual-viewport-height, 100dvh);
+  z-index: 46;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.mobile-crop-sheet.is-open {
+  display: flex;
+}
+
+.mobile-crop-sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: color-mix(in srgb, var(--print) 62%, transparent);
+}
+
+.mobile-crop-sheet-panel {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  max-height: min(92dvh, var(--mobile-visual-viewport-height, 100dvh));
+  flex-direction: column;
+  border-top: 1px solid var(--edge);
+  border-radius: 18px 18px 0 0;
+  background: var(--bath);
+  color: var(--rebate);
+  animation: mobile-sheet-in 0.2s ease;
+}
+
+.mobile-crop-sheet-grabber {
+  display: block;
+  width: 38px;
+  height: 4px;
+  flex: 0 0 auto;
+  margin: 8px auto 2px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--rebate) 22%, transparent);
+}
+
+.mobile-crop-sheet-body {
+  display: grid;
+  flex: 1;
+  min-height: 0;
+  gap: 10px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: none;
+  touch-action: manipulation;
+  padding: 10px max(18px, env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom))
+    max(18px, env(safe-area-inset-left));
+}
+
+.mobile-crop-sheet-head {
+  margin: 0;
+  color: var(--ink-3);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mobile-crop-sheet-panel {
+    animation: none;
+  }
+}
+
 .mobile-generate-file-field {
   margin-top: 14px;
 }

@@ -73,6 +73,14 @@ const applySourceFitPreprocess = vi.fn();
 vi.mock("../lib/sourceFitPreprocess", () => ({
   applySourceFitPreprocess: (...args: unknown[]) => applySourceFitPreprocess(...args),
 }));
+const fitImage = vi.fn();
+vi.mock("@studio/lib/sourceFitCanvas", () => ({
+  domCanvasOps: {
+    imageSize: vi.fn(),
+    fitImage: (...args: unknown[]) => fitImage(...args),
+    buildMask: vi.fn(),
+  },
+}));
 
 const model: ModelEntry = {
   name: "sd15:fp16",
@@ -381,6 +389,71 @@ describe("GenerateView source-fit submit path", () => {
     expect(submitBatch).toHaveBeenCalledTimes(1);
     expect(submitBatch.mock.calls[0]![0].edit_images).toEqual(["FITTED_TARGET", "REFERENCE"]);
     expect(form.imageAttachments).toEqual(["TARGET", "REFERENCE"]);
+  });
+
+  it("applies pending Ref2VA reference crops on the frozen draft before placement", async () => {
+    const ref2va = {
+      ...model,
+      name: "minimax-h3-ref2va:comfy-pruned-int8",
+      family: "minimax-h3",
+      default_width: 1344,
+      default_height: 768,
+    } as ModelEntry;
+    apiJsonTo.mockResolvedValue([ref2va]);
+    useModelStore().all = [ref2va];
+    setupMultiHost();
+    const submitBatch = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    fitImage.mockReset();
+    fitImage.mockResolvedValue("Q1JPUFBFRA==");
+
+    mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+    const form = useGenerateFormStore().form;
+    form.prompt = "a subject in a new shot";
+    form.model = ref2va.name;
+    form.family = ref2va.family;
+    form.h3Authoring = {
+      firstFrame: null,
+      lastFrame: null,
+      references: [
+        {
+          reference: {
+            kind: "image",
+            media: { authority: "inline", data: "SU1BR0U=" },
+            provenance: { name: "subject.png", sha256: "a".repeat(64) },
+            mime_type: "image/png",
+            width: 1024,
+            height: 768,
+          },
+          crop: { x: 256, y: 0, width: 512, height: 768 },
+        },
+      ],
+    };
+    useUiStore().generateTick++;
+    await flushPromises();
+
+    // The cropped PNG is digested through WebCrypto, which settles off the
+    // microtask queue.
+    await vi.waitFor(() => expect(submitBatch).toHaveBeenCalledTimes(1));
+    expect(fitImage).toHaveBeenCalledWith(
+      "SU1BR0U=",
+      expect.objectContaining({ outputWidth: 512, outputHeight: 768, offsetX: -256 }),
+    );
+    expect(submitBatch.mock.calls[0]![0].references?.[0]).toMatchObject({
+      media: { authority: "inline", data: "Q1JPUFBFRA==" },
+      width: 512,
+      height: 768,
+      provenance: { crop: { x: 256, source_width: 1024, source_sha256: "a".repeat(64) } },
+    });
+    // The composer keeps the uncropped original and its pending crop.
+    expect(form.h3Authoring.references[0]).toMatchObject({
+      reference: { width: 1024, media: { data: "SU1BR0U=" } },
+      crop: { x: 256, y: 0, width: 512, height: 768 },
+    });
+    expect(applySourceFitPreprocess).not.toHaveBeenCalled();
   });
 
   it("reuses one per-composer cache across repeat submits", async () => {

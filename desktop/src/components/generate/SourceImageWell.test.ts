@@ -5,6 +5,7 @@ import { reactive } from "vue";
 import SourceImageWell from "./SourceImageWell.vue";
 import ImagePickerModal from "./ImagePickerModal.vue";
 import MaskEditorModal from "./MaskEditorModal.vue";
+import ReferenceCropEditor from "@studio/components/ReferenceCropEditor.vue";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 
 vi.mock("../../lib/api/client", () => ({
@@ -394,6 +395,48 @@ describe("SourceImageWell — per-model source conditioning (#772, #779)", () =>
     const picker = wrapper.getComponent(ImagePickerModal);
     expect(picker.props("open")).toBe(true);
     expect(picker.props("multiple")).toBe(true);
+  });
+
+  it("hosts the shared crop editor for a Ref2VA image and records the applied crop", async () => {
+    const form = reactive({
+      ...newGenerateForm(),
+      family: "minimax-h3",
+      model: "minimax-h3-ref2va:comfy-pruned-int8",
+    });
+    form.h3Authoring = {
+      firstFrame: null,
+      lastFrame: null,
+      references: [
+        {
+          reference: {
+            kind: "image",
+            media: { authority: "inline", data: "SU1BR0U=" },
+            provenance: { name: "subject.png", sha256: "a".repeat(64) },
+            mime_type: "image/png",
+            width: 1024,
+            height: 768,
+          },
+        },
+      ],
+    };
+    const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+    expect(wrapper.findComponent(ReferenceCropEditor).exists()).toBe(false);
+
+    await wrapper.get("[data-test='h3-reference-crop-0']").trigger("click");
+    const editor = wrapper.findComponent(ReferenceCropEditor);
+    expect(editor.exists()).toBe(true);
+    expect(editor.props("image")).toMatchObject({ width: 1024, height: 768 });
+
+    editor.vm.$emit("apply", { x: 256, y: 0, width: 512, height: 768 });
+    await flushPromises();
+    expect(form.h3Authoring.references[0]?.crop).toEqual({
+      x: 256,
+      y: 0,
+      width: 512,
+      height: 768,
+    });
+    expect(wrapper.findComponent(ReferenceCropEditor).exists()).toBe(false);
+    wrapper.unmount();
   });
 
   it("keeps today's well and offers no end frame when the server advertises nothing", () => {

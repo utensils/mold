@@ -652,6 +652,74 @@ pub struct GenerationReferenceProvenance {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// The user crop a client applied to an IMAGE reference before digesting
+    /// and uploading it. The server already received the cropped bytes, so
+    /// this is provenance: it is validated as a non-degenerate rectangle
+    /// inside its source whose size is the reference's own, then retained
+    /// verbatim so Reuse settings can restore the crop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<GenerationReferenceCrop>,
+}
+
+/// A client-side crop rectangle in SOURCE pixels of the original photograph.
+///
+/// `width`/`height` are the cropped reference's own dimensions; `source_*`
+/// describe the uncropped photograph and `source_sha256` its digest, which is
+/// what lets a reattached original re-apply the same crop exactly. This is
+/// never a fit-to-canvas policy: the server normalizes every image reference
+/// onto its own 2048-short-edge canvas regardless.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationReferenceCrop {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub source_sha256: String,
+}
+
+impl GenerationReferenceCrop {
+    /// Check the rectangle against the reference that carries it: a
+    /// non-degenerate rect, inside the source, whose size equals the
+    /// reference's own `width`/`height` (a size mismatch is a pre-crop
+    /// projection whose bytes were never cropped), with a well-formed source
+    /// digest.
+    pub fn validate_for_image(
+        &self,
+        reference_width: u32,
+        reference_height: u32,
+    ) -> Result<(), &'static str> {
+        if self.width == 0 || self.height == 0 {
+            return Err("crop must be at least one pixel on each axis");
+        }
+        if self.source_width == 0 || self.source_height == 0 {
+            return Err("crop source dimensions must be positive");
+        }
+        let inside = self
+            .x
+            .checked_add(self.width)
+            .is_some_and(|right| right <= self.source_width)
+            && self
+                .y
+                .checked_add(self.height)
+                .is_some_and(|bottom| bottom <= self.source_height);
+        if !inside {
+            return Err("crop must lie inside its source image");
+        }
+        if self.width != reference_width || self.height != reference_height {
+            return Err("crop size must equal the cropped reference's own dimensions");
+        }
+        if self.source_sha256.len() != 64
+            || !self
+                .source_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("crop source_sha256 must contain exactly 64 hexadecimal characters");
+        }
+        Ok(())
+    }
 }
 
 /// Ordered heterogeneous reference input for MiniMax H3 Ref2VA.
@@ -763,6 +831,10 @@ pub struct GenerationReferenceMetadata {
     /// admission. Older metadata remains compatible when this is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prepared_shape: Option<crate::minimax_h3::GenerationReferencePreparedShape>,
+    /// The client-side crop an image reference carried (see
+    /// [`GenerationReferenceCrop`]); absent for every other reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<GenerationReferenceCrop>,
 }
 
 pub fn generation_reference_fingerprint(references: &[GenerationReferenceMetadata]) -> String {
@@ -911,6 +983,7 @@ impl GenerationReference {
                 channels: None,
                 sample_count: None,
                 prepared_shape,
+                crop: self.provenance().crop.clone(),
             },
             Self::Video {
                 mime_type,
@@ -945,6 +1018,7 @@ impl GenerationReference {
                 channels: None,
                 sample_count: None,
                 prepared_shape,
+                crop: None,
             },
             Self::Audio {
                 mime_type,
@@ -973,6 +1047,7 @@ impl GenerationReference {
                 channels: Some(*channels),
                 sample_count: *sample_count,
                 prepared_shape,
+                crop: None,
             },
         })
     }
@@ -1032,6 +1107,7 @@ impl GenerationReference {
                 channels: None,
                 sample_count: None,
                 prepared_shape,
+                crop: self.provenance().crop.clone(),
             },
             Self::Video {
                 mime_type,
@@ -1066,6 +1142,7 @@ impl GenerationReference {
                 channels: None,
                 sample_count: None,
                 prepared_shape,
+                crop: None,
             },
             Self::Audio {
                 mime_type,
@@ -1094,6 +1171,7 @@ impl GenerationReference {
                 channels: Some(*channels),
                 sample_count: *sample_count,
                 prepared_shape,
+                crop: None,
             },
         }
     }
@@ -6043,6 +6121,7 @@ mod tests {
             provenance: GenerationReferenceProvenance {
                 name: Some("long.wav".to_string()),
                 sha256: Some("11".repeat(32)),
+                crop: None,
             },
             mime_type: "audio/wav".to_string(),
             duration_ms: 15_000,
@@ -11119,5 +11198,157 @@ mod queue_plan_wire_tests {
                 .contains_key("job_id"),
             "an unstamped print must not gain a null job id"
         );
+    }
+}
+
+#[cfg(test)]
+mod reference_crop_tests {
+    use super::*;
+
+    fn crop() -> GenerationReferenceCrop {
+        GenerationReferenceCrop {
+            x: 420,
+            y: 0,
+            width: 1080,
+            height: 1080,
+            source_width: 1920,
+            source_height: 1080,
+            source_sha256: "ab".repeat(32),
+        }
+    }
+
+    fn image(
+        width: u32,
+        height: u32,
+        crop: Option<GenerationReferenceCrop>,
+    ) -> GenerationReference {
+        GenerationReference::Image {
+            media: GenerationReferenceAuthority::Inline {
+                data: b"cropped-bytes".to_vec(),
+            },
+            provenance: GenerationReferenceProvenance {
+                name: Some("subject.png".to_string()),
+                sha256: None,
+                crop,
+            },
+            mime_type: "image/png".to_string(),
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn crop_validates_only_a_non_degenerate_rect_inside_its_source_that_matches_the_bytes() {
+        crop().validate_for_image(1080, 1080).unwrap();
+
+        let degenerate = GenerationReferenceCrop { width: 0, ..crop() };
+        assert!(degenerate.validate_for_image(0, 1080).is_err());
+
+        let outside = GenerationReferenceCrop { x: 900, ..crop() };
+        assert!(outside.validate_for_image(1080, 1080).is_err());
+
+        let overflow = GenerationReferenceCrop {
+            x: u32::MAX,
+            width: 2,
+            ..crop()
+        };
+        assert!(overflow.validate_for_image(2, 1080).is_err());
+
+        // The crop describes the bytes the server received: a rect whose size
+        // differs from the reference's own dimensions is a pre-crop
+        // projection that was never applied.
+        assert!(crop().validate_for_image(1920, 1080).is_err());
+
+        let bad_digest = GenerationReferenceCrop {
+            source_sha256: "nope".to_string(),
+            ..crop()
+        };
+        assert!(bad_digest.validate_for_image(1080, 1080).is_err());
+    }
+
+    #[test]
+    fn crop_provenance_is_additive_and_absent_when_unset() {
+        let plain = serde_json::to_value(image(1920, 1080, None)).unwrap();
+        assert!(plain["provenance"].get("crop").is_none());
+
+        let cropped = image(1080, 1080, Some(crop()));
+        let json = serde_json::to_value(&cropped).unwrap();
+        assert_eq!(json["provenance"]["crop"]["source_width"], 1920);
+        let back: GenerationReference = serde_json::from_value(json).unwrap();
+        assert_eq!(back.provenance().crop.as_ref(), Some(&crop()));
+    }
+
+    #[test]
+    fn redacted_metadata_carries_the_crop_and_reference_validation_enforces_it() {
+        let cropped = image(1080, 1080, Some(crop()));
+        let metadata = cropped.redacted_metadata(0).unwrap();
+        assert_eq!(metadata.crop.as_ref(), Some(&crop()));
+        let metadata_json = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(metadata_json["crop"]["x"], 420);
+        let plain_json =
+            serde_json::to_value(image(1920, 1080, None).redacted_metadata(0).unwrap()).unwrap();
+        assert!(plain_json.get("crop").is_none());
+
+        crate::minimax_h3::validate_references(&[cropped]).unwrap();
+        let unapplied = image(1920, 1080, Some(crop()));
+        let error = crate::minimax_h3::validate_references(&[unapplied]).unwrap_err();
+        assert_eq!(error.code, "MINIMAX_H3_REFERENCE_CROP");
+
+        let video = GenerationReference::Video {
+            media: GenerationReferenceAuthority::Inline {
+                data: b"video".to_vec(),
+            },
+            provenance: GenerationReferenceProvenance {
+                name: Some("clip.mp4".to_string()),
+                sha256: None,
+                crop: Some(crop()),
+            },
+            mime_type: "video/mp4".to_string(),
+            width: 1080,
+            height: 1080,
+            frame_count: Some(96),
+            duration_ms: 4_000,
+            fps: 24.0,
+            has_audio: false,
+            audio_duration_ms: None,
+            audio_sample_count: None,
+            audio_sample_rate: None,
+            audio_channels: None,
+        };
+        assert_eq!(
+            crate::minimax_h3::validate_references(&[video])
+                .unwrap_err()
+                .code,
+            "MINIMAX_H3_REFERENCE_CROP"
+        );
+    }
+
+    /// The browser's `referencePadEstimate` (studio/lib/referenceCrop.ts)
+    /// mirrors `reference_image_dimensions` + `rows_per_video_latent`; these
+    /// fixtures are the values its test pins, so the two can only drift
+    /// together.
+    #[test]
+    fn image_reference_pad_fixtures_match_the_browser_estimate() {
+        let fixtures: [(u32, u32, u32, u32, u64); 6] = [
+            (1920, 1080, 3648, 2048, 7296),
+            (1080, 1080, 2048, 2048, 4096),
+            (1024, 768, 2720, 2048, 5440),
+            (1080, 1920, 2048, 3648, 7296),
+            (1344, 768, 3584, 2048, 7168),
+            (1120, 1080, 2112, 2048, 4224),
+        ];
+        for (width, height, normalized_width, normalized_height, rows) in fixtures {
+            let shape =
+                crate::minimax_h3::reference_prepared_shape(&image(width, height, None)).unwrap();
+            assert_eq!(
+                (
+                    shape.normalized_width,
+                    shape.normalized_height,
+                    shape.visual_rows
+                ),
+                (Some(normalized_width), Some(normalized_height), rows),
+                "{width}x{height}"
+            );
+        }
     }
 }

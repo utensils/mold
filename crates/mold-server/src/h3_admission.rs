@@ -2286,6 +2286,7 @@ mod tests {
             provenance: GenerationReferenceProvenance {
                 name: Some("condition.mp4".to_string()),
                 sha256: Some(sha(231)),
+                crop: None,
             },
             mime_type: "video/mp4".to_string(),
             width: 1280,
@@ -2590,6 +2591,7 @@ mod tests {
                 provenance: GenerationReferenceProvenance {
                     name: Some("image.png".to_string()),
                     sha256: Some(sha(1)),
+                    crop: None,
                 },
                 mime_type: "image/png".to_string(),
                 width: 1024,
@@ -2602,6 +2604,7 @@ mod tests {
                 provenance: GenerationReferenceProvenance {
                     name: Some("video.mp4".to_string()),
                     sha256: Some(sha(2)),
+                    crop: None,
                 },
                 mime_type: "video/mp4".to_string(),
                 width: 1280,
@@ -2622,6 +2625,7 @@ mod tests {
                 provenance: GenerationReferenceProvenance {
                     name: Some("audio.wav".to_string()),
                     sha256: Some(sha(3)),
+                    crop: None,
                 },
                 mime_type: "audio/wav".to_string(),
                 duration_ms: 4_000,
@@ -2657,6 +2661,7 @@ mod tests {
             provenance: GenerationReferenceProvenance {
                 name: Some("long-reference.mp4".to_string()),
                 sha256: Some(sha(19)),
+                crop: None,
             },
             mime_type: "video/mp4".to_string(),
             width: 1280,
@@ -3594,6 +3599,7 @@ mod tests {
             provenance: GenerationReferenceProvenance {
                 name: Some("reference.png".to_string()),
                 sha256: Some(sha(17)),
+                crop: None,
             },
             mime_type: "image/png".to_string(),
             width: 1024,

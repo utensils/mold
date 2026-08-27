@@ -66,6 +66,7 @@ import {
 import { OPTIONAL_PROMPT_GUIDANCE, promptRequired } from "@studio/lib/promptRequirement";
 import { applyAuthoredPrompt } from "@studio/lib/promptProvenance";
 import {
+  applyMinimaxH3ReferenceCrops,
   emptyMinimaxH3AuthoringState,
   minimaxH3AuthoringError,
   setMinimaxH3PickedImageBoundary,
@@ -157,7 +158,7 @@ import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { applyH3BoundaryFit, applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
 import { coerceSourceFitForMaskless, parseSourceFitPolicy } from "@studio/lib/sourceFit";
 import { expansionTaskForRequest } from "@studio/lib/expandTask";
-import { domCanvasOps } from "../lib/sourceFitCanvas";
+import { domCanvasOps } from "@studio/lib/sourceFitCanvas";
 import { upscaleImage } from "../lib/api/upscale";
 import { expandPrompt } from "../lib/api/expand";
 import { remixPrompt } from "../lib/api/remix";
@@ -3143,6 +3144,19 @@ async function preprocessSourceFit(
       return false;
     } finally {
       preprocessingStatus.value = null;
+    }
+  }
+  // Ref2VA: pending image crops are applied at the original resolution on the
+  // frozen draft, before the placement preview and any upload conversion.
+  if (draftCaps.sourceImageMode === "ordered-references" && draft.h3Authoring) {
+    try {
+      draft.h3Authoring = await applyMinimaxH3ReferenceCrops(draft.h3Authoring, domCanvasOps);
+      return true;
+    } catch (error) {
+      if (signal?.aborted) return false;
+      const message = error instanceof Error ? error.message : String(error);
+      toasts.push(`Reference preprocessing failed: ${message}`, "error");
+      return false;
     }
   }
   if (draftCaps.sourceImageMode === "qwen-edit" && draft.imageAttachments[0]) {

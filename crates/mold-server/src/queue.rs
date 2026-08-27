@@ -6086,6 +6086,7 @@ mod tests {
         let provenance = |name: &str, byte: u8| GenerationReferenceProvenance {
             name: Some(name.to_string()),
             sha256: Some(format!("{byte:02x}").repeat(32)),
+            crop: None,
         };
         let mut request = fake_request(mold_core::minimax_h3::REF2VA_COMFY);
         request.width = 1344;

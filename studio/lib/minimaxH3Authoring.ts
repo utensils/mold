@@ -3,6 +3,15 @@ import type {
   GenerationReferenceMetadata,
 } from "./generationReferences";
 import {
+  applyReferenceCropTransform,
+  normalizeReferenceCrop,
+  referenceCropFromProvenance,
+  referenceCropIsIdentity,
+  referenceCropProvenance,
+  type ReferenceCrop,
+} from "./referenceCrop";
+import type { SourceFitCanvasOps } from "./sourceFitCanvas";
+import {
   isModelAccessRestricted,
   type ModelAccessCapabilityRecord,
 } from "./modelAccess";
@@ -93,6 +102,10 @@ export interface MinimaxH3BoundaryImage {
 export interface MinimaxH3ReferenceDraft {
   reference: GenerationReference;
   draftId?: string;
+  /** Pending user crop of an IMAGE reference, in the reference's own source
+   * pixels. Applied by {@link applyMinimaxH3ReferenceCrops} at submit; until
+   * then `reference` still describes the uncropped photograph. */
+  crop?: ReferenceCrop;
 }
 
 export interface MinimaxH3AuthoringState {
@@ -620,6 +633,157 @@ export function moveMinimaxH3Reference(
   return next;
 }
 
+/** Record (or clear) the pending crop of one reference; an identity crop is
+ * stored as no crop at all. */
+export function setMinimaxH3ReferenceCrop(
+  state: MinimaxH3AuthoringState,
+  index: number,
+  crop: ReferenceCrop | null,
+): MinimaxH3AuthoringState {
+  const next = cloneMinimaxH3AuthoringState(state);
+  const draft = next.references[index];
+  if (!draft || draft.reference.kind !== "image") return next;
+  const normalized = crop
+    ? normalizeReferenceCrop(crop, draft.reference)
+    : null;
+  if (!normalized || referenceCropIsIdentity(normalized, draft.reference)) {
+    delete draft.crop;
+  } else {
+    draft.crop = normalized;
+  }
+  return next;
+}
+
+/** What a surface's crop editor host needs for reference `index`: the
+ * attached image and its pending crop, or `null` when the row cannot be
+ * cropped (not an image, or its bytes are not attached). */
+export function minimaxH3ReferenceCropTarget(
+  state: MinimaxH3AuthoringState | null | undefined,
+  index: number | null,
+): {
+  image: { data: string; mimeType: string; width: number; height: number };
+  crop: ReferenceCrop | null;
+} | null {
+  if (index === null) return null;
+  const draft = state?.references[index];
+  if (
+    !draft ||
+    draft.reference.kind !== "image" ||
+    draft.reference.media.authority !== "inline" ||
+    !draft.reference.media.data
+  ) {
+    return null;
+  }
+  return {
+    image: {
+      data: draft.reference.media.data,
+      mimeType: draft.reference.mime_type,
+      width: draft.reference.width,
+      height: draft.reference.height,
+    },
+    crop: draft.crop ?? null,
+  };
+}
+
+export interface MinimaxH3ReattachResult {
+  state: MinimaxH3AuthoringState;
+  /** Inline disclosure when a pending crop could not follow the new bytes. */
+  notice: string | null;
+}
+
+/**
+ * Replace reference `index` with freshly read media of the same kind. A
+ * pending crop follows the replacement only when its uncropped digest is the
+ * one the crop was made against; any other photograph drops it, disclosed.
+ */
+export function reattachMinimaxH3Reference(
+  state: MinimaxH3AuthoringState,
+  index: number,
+  replacement: MinimaxH3ReferenceDraft,
+): MinimaxH3ReattachResult {
+  const current = state.references[index];
+  if (!current || replacement.reference.kind !== current.reference.kind) {
+    throw new Error(
+      `Reference ${index + 1} must be reattached as ${current?.reference.kind ?? "the same media kind"}.`,
+    );
+  }
+  const next = cloneMinimaxH3AuthoringState(state);
+  const { crop: _stale, ...fresh } = replacement;
+  let notice: string | null = null;
+  if (current.crop) {
+    const sameBytes =
+      !!current.reference.provenance?.sha256 &&
+      current.reference.provenance.sha256 ===
+        replacement.reference.provenance?.sha256;
+    if (sameBytes) {
+      next.references[index] = { ...fresh, crop: current.crop };
+      return { state: next, notice };
+    }
+    notice = `Reference ${index + 1}: the reattached file is not the original, so its saved crop was cleared.`;
+  }
+  next.references[index] = fresh;
+  return { state: next, notice };
+}
+
+/**
+ * Apply every pending image crop at the ORIGINAL resolution: re-encode the
+ * crop as PNG through the shared canvas ops, then recompute `width`/`height`
+ * and the content digest so upload conversion, placement preview, and
+ * conditioning fingerprints all see the cropped reference. Runs in the
+ * surface's async preprocessing hook, before any upload or preview. The
+ * result carries `provenance.crop` and no pending `crop`; the live state is
+ * left untouched.
+ */
+export async function applyMinimaxH3ReferenceCrops(
+  state: MinimaxH3AuthoringState,
+  ops: Pick<SourceFitCanvasOps, "fitImage">,
+): Promise<MinimaxH3AuthoringState> {
+  const references: MinimaxH3ReferenceDraft[] = [];
+  for (const [index, draft] of state.references.entries()) {
+    const { crop, ...rest } = draft;
+    if (!crop || draft.reference.kind !== "image") {
+      references.push(rest);
+      continue;
+    }
+    const source = draft.reference;
+    if (referenceCropIsIdentity(crop, source)) {
+      references.push(rest);
+      continue;
+    }
+    if (source.media.authority !== "inline" || !source.media.data) {
+      throw new Error(
+        `Reference ${index + 1}: reattach the original image before its crop can be applied.`,
+      );
+    }
+    // The crop's provenance names the uncropped digest so a reattached
+    // original can re-apply it; digest the source now if nothing recorded it.
+    const sourceSha256 =
+      source.provenance?.sha256 ??
+      (await sha256PaddedBase64(source.media.data));
+    const data = await ops.fitImage(
+      source.media.data,
+      applyReferenceCropTransform(crop, source),
+    );
+    const sha256 = await sha256PaddedBase64(data);
+    references.push({
+      ...rest,
+      reference: {
+        kind: "image",
+        media: { authority: "inline", data },
+        mime_type: "image/png",
+        width: crop.width,
+        height: crop.height,
+        provenance: {
+          name: source.provenance?.name ?? null,
+          sha256,
+          crop: referenceCropProvenance(crop, source, sourceSha256),
+        },
+      },
+    });
+  }
+  return { ...state, references };
+}
+
 export function minimaxH3ReferenceNeedsMedia(
   draft: MinimaxH3ReferenceDraft,
 ): boolean {
@@ -753,9 +917,7 @@ export function serializeMinimaxH3Authoring<T extends H3Request>(
     delete next.source_image;
     delete next.source_image_name;
     delete next.keyframes;
-    next.references = state.references.map(({ reference }) =>
-      JSON.parse(JSON.stringify(reference)),
-    );
+    next.references = minimaxH3ReferenceProjection(state);
   } else {
     delete next.references;
     if (state.firstFrame) {
@@ -779,6 +941,36 @@ export function serializeMinimaxH3Authoring<T extends H3Request>(
   return next as T;
 }
 
+/** The ordered `references` wire projection of the authoring state. A
+ * pending crop rides the projection's provenance so reviewed prompt work
+ * stales on it; the bytes stay the source's until
+ * {@link applyMinimaxH3ReferenceCrops} rewrites them, and a projection that
+ * reached the server unapplied is refused by name (size mismatch). */
+export function minimaxH3ReferenceProjection(
+  state: MinimaxH3AuthoringState,
+): GenerationReference[] {
+  return state.references.map(({ reference, crop }) => {
+    const projection = JSON.parse(
+      JSON.stringify(reference),
+    ) as GenerationReference;
+    if (
+      crop &&
+      projection.kind === "image" &&
+      !referenceCropIsIdentity(crop, projection)
+    ) {
+      projection.provenance = {
+        ...projection.provenance,
+        crop: referenceCropProvenance(
+          crop,
+          projection,
+          projection.provenance?.sha256 ?? "",
+        ),
+      };
+    }
+    return projection;
+  });
+}
+
 /** Rebuild redacted reference rows from durable gallery provenance. The
  * descriptor authority makes missing media explicit: Recreate can display the
  * exact order but cannot queue until the original bytes are reattached. */
@@ -786,10 +978,28 @@ export function minimaxH3ReferenceDraftsFromMetadata(
   metadata: readonly GenerationReferenceMetadata[] | null | undefined,
 ): MinimaxH3ReferenceDraft[] {
   return (metadata ?? []).map(
-    ({ index: _index, prepared_shape: _shape, ...row }) => {
+    ({ index: _index, prepared_shape: _shape, crop, ...row }) => {
       const media = { authority: "descriptor" as const };
       const provenance = { name: row.name ?? null, sha256: row.sha256 };
       if (row.kind === "image") {
+        // A saved crop comes back as a PENDING draft crop over the uncropped
+        // photograph's own facts, so a reattached original re-applies it.
+        if (crop) {
+          return {
+            reference: {
+              kind: "image",
+              media,
+              provenance: {
+                name: row.name ?? null,
+                sha256: crop.source_sha256,
+              },
+              mime_type: row.mime_type,
+              width: crop.source_width,
+              height: crop.source_height,
+            },
+            crop: referenceCropFromProvenance(crop),
+          };
+        }
         return {
           reference: {
             kind: "image",

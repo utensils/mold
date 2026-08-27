@@ -1465,6 +1465,7 @@ fn reference_from_metadata(metadata: &GenerationReferenceMetadata) -> Generation
     let provenance = GenerationReferenceProvenance {
         name: metadata.name.clone(),
         sha256: Some(metadata.sha256.clone()),
+        crop: metadata.crop.clone(),
     };
     match metadata.kind {
         mold_core::GenerationReferenceKind::Image => GenerationReference::Image {
@@ -1632,6 +1633,7 @@ fn probe_reference(
     let provenance = GenerationReferenceProvenance {
         name: expected.provenance().name.clone(),
         sha256: Some(digest.to_string()),
+        crop: expected.provenance().crop.clone(),
     };
     let canonical = match expected {
         GenerationReference::Image {
@@ -2423,6 +2425,7 @@ mod tests {
             provenance: GenerationReferenceProvenance {
                 name: Some("anchor.png".to_string()),
                 sha256,
+                crop: None,
             },
             mime_type: "image/png".to_string(),
             width: 2,
@@ -2470,6 +2473,7 @@ mod tests {
             provenance: GenerationReferenceProvenance {
                 name: Some("timing.wav".to_string()),
                 sha256: Some(sha256),
+                crop: None,
             },
             mime_type: "audio/wav".to_string(),
             duration_ms,
@@ -2604,6 +2608,7 @@ mod tests {
             provenance: GenerationReferenceProvenance {
                 name: Some("motion.mp4".to_string()),
                 sha256: Some(sha256),
+                crop: None,
             },
             mime_type: "video/mp4".to_string(),
             width: 32,
