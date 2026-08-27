@@ -460,6 +460,21 @@ function routeQueueCapabilities(route: JobRoute | null): DurableGenerationQueueC
   return { heterogeneous_batch_max_outputs: route?.heterogeneousBatchMaxOutputs ?? null };
 }
 
+/**
+ * The machine this batch runs on. An unrouted submit is **This device**: the
+ * app's own embedded server is a machine like any other, and durable
+ * admission needs its instance identity and advertised limit, so the primary's
+ * full route is resolved here rather than left as a bare target.
+ */
+function effectiveJobRoute(route: JobRoute | null, model: string | null): JobRoute | null {
+  if (route) return route;
+  const hosts = useHostsStore();
+  const primaryId = hosts.primaryHost?.id ?? null;
+  return (
+    (primaryId ? hosts.resolveRoute(primaryId, model) : null) ?? hosts.resolveRoute(null, model)
+  );
+}
+
 /** The named reason this batch cannot be queued on its frozen machine, or
  * `null` when it can. */
 function generationRouteRefusal(
@@ -1263,6 +1278,9 @@ export const useGenerationStore = defineStore("generation", {
       const size = Math.max(1, Math.floor(batchSize));
       const baseSeed = resolveBaseSeed(req.seed);
       const plans = planBatchRequests(req, size, baseSeed, requestOptions);
+      // An unrouted submit means This device; resolve its own route so the
+      // durable contract is read from the machine that will run the print.
+      route = effectiveJobRoute(route, req.model || null);
       if (chainRouting?.kind !== "chain") {
         // Every print is admitted through the durable queue. A machine that
         // cannot carry this request is refused BY NAME with nothing queued —
