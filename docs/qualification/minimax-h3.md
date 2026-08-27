@@ -644,9 +644,14 @@ none of it is a lowered constant:
   that already contains the tensor once over-counted 742 MiB.
 - **Loading and forwarding are sequential.** The staging buffers are freed
   before the first forward allocates an activation, so
-  `qwen_conditioner_phase_host_peak` takes `parameters + max(load staging,
-  activation + output state)` where the old derivation summed both transients
-  into one phase.
+  `h3_factory::qwen_encode_phase_host_bytes` takes `parameters + max(load
+  staging, activation + output state)` where the old derivation summed both
+  transients into one phase. It lives in `h3_factory` because the evidence
+  builder, `validate_target_budget`'s re-derivation, and the freeze-time
+  projection's staging term must all read one policy: while they did not,
+  every H3 render was held with `MiniMax H3 target budget is internally
+  inconsistent: qwen_encode_phase_host_bytes is ..., expected ...` — the same
+  777,912,320 B this section corrects, refused rather than saved.
 - **FL2VA pays for its own conditioner sequence.** The reviewed grant was
   charged verbatim for every admitted canvas, so a 768x768 render was charged
   for the vision pads a 1344x768 boundary endpoint packs. It now scales the one
