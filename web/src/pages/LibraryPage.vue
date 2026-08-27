@@ -1809,7 +1809,7 @@ async function setAsSource(item: GalleryImage): Promise<boolean> {
       };
       const result =
         h3Task === "ref2va"
-          ? appendMinimaxH3GalleryImageReference(state.h3Authoring, image)
+          ? await appendMinimaxH3GalleryImageReference(state.h3Authoring, image)
           : setMinimaxH3GalleryImageFirstFrame(state.h3Authoring, image);
       if (!result.ok) throw new Error(result.error);
       state.h3Authoring = result.state;

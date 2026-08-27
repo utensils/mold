@@ -7739,6 +7739,61 @@ describe("MobileApp gallery", () => {
     expect(liveForm.sourceImage).toBeNull();
   });
 
+  it("keeps a superseding gallery selection while a Ref2VA source hash finishes", async () => {
+    const ref2vaModel: ModelEntry = {
+      ...model,
+      name: "minimax-h3-ref2va:comfy-pruned-int8",
+      family: "minimax-h3",
+      default_steps: 50,
+      default_guidance: 0,
+      default_width: 1344,
+      default_height: 768,
+      default_frames: 124,
+      default_fps: 24,
+      supports_audio: true,
+    };
+    const first = { ...print, filename: "first subject.png", format: "png" as const };
+    const second = { ...print, filename: "second subject.png", format: "png" as const };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([ref2vaModel]);
+      if (path === "/api/gallery") return Promise.resolve([first, second]);
+      if (path === "/api/activity") {
+        return Promise.resolve({ instance_id: "mobile-host", observed_at_unix_ms: 1, items: [] });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    apiFetchTo.mockResolvedValue({
+      headers: new Headers({ "content-type": "image/png" }),
+      blob: () => Promise.resolve(new Blob(["subject bytes"], { type: "image/png" })),
+    } as Response);
+    const lateDigest = deferred<ArrayBuffer>();
+    const digest = vi
+      .spyOn(globalThis.crypto.subtle, "digest")
+      .mockReturnValueOnce(lateDigest.promise);
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(2));
+    await wrapper.findAll("[data-test='gallery-item']")[0]!.trigger("click");
+    await wrapper.get("[data-test='gallery-viewer-use-source']").trigger("click");
+    await vi.waitFor(() => expect(digest).toHaveBeenCalledTimes(1));
+
+    await wrapper.get("[data-test='gallery-viewer-close']").trigger("click");
+    await wrapper.findAll("[data-test='gallery-item']")[1]!.trigger("click");
+    expect(wrapper.get("[data-test='gallery-viewer']").text()).toContain("second subject.png");
+
+    lateDigest.resolve(new Uint8Array(32).buffer);
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
+    expect(wrapper.get("[data-test='gallery-viewer']").text()).toContain("second subject.png");
+    expect(liveForm.h3Authoring?.references).toEqual([]);
+    expect(wrapper.text()).not.toContain("Added gallery print as reference");
+  });
+
   it("keeps retained verified models authoritative while the host reconnects", async () => {
     wrapper = mountMobileApp();
     await flushPromises();

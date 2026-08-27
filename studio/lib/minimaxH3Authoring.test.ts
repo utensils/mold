@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { GenerationReference } from "./generationReferences";
 import {
   MINIMAX_H3_FIXED_FPS,
@@ -70,8 +70,8 @@ const audio = (name: string, duration_ms = 3_000): GenerationReference => ({
 });
 
 describe("MiniMax H3 Studio authority", () => {
-  it("appends picker images in one preserved semantic order", () => {
-    const result = appendMinimaxH3PickedImageReferences(
+  it("appends hashed picker images in one preserved semantic order", async () => {
+    const result = await appendMinimaxH3PickedImageReferences(
       emptyMinimaxH3AuthoringState(),
       [
         { filename: "second.jpg", base64: "U0VDT05E", width: 8, height: 6 },
@@ -84,11 +84,48 @@ describe("MiniMax H3 Studio authority", () => {
       result.state.references.map((draft) => ({
         name: draft.reference.provenance?.name,
         mime: draft.reference.mime_type,
+        sha256: draft.reference.provenance?.sha256,
       })),
     ).toEqual([
-      { name: "second.jpg", mime: "image/jpeg" },
-      { name: "first.png", mime: "image/png" },
+      {
+        name: "second.jpg",
+        mime: "image/jpeg",
+        sha256:
+          "84747dcd831c7131207a1042d74b60ac54fdcc10e7aef9e1f7940dda2c95dcae",
+      },
+      {
+        name: "first.png",
+        mime: "image/png",
+        sha256:
+          "267d3b81a9dcd937f3b46a17a57fc0ca2133373389336861142673a73fc17bc6",
+      },
     ]);
+  });
+
+  it("hashes picker references sequentially to bound transient media memory", async () => {
+    let resolveFirst!: (value: ArrayBuffer) => void;
+    const firstDigest = new Promise<ArrayBuffer>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const digest = vi
+      .spyOn(globalThis.crypto.subtle, "digest")
+      .mockImplementationOnce(() => firstDigest)
+      .mockResolvedValue(new ArrayBuffer(32));
+    try {
+      const pending = appendMinimaxH3PickedImageReferences(null, [
+        { filename: "one.png", base64: "T05F", width: 1, height: 1 },
+        { filename: "two.png", base64: "VFdP", width: 1, height: 1 },
+      ]);
+      await Promise.resolve();
+      expect(digest).toHaveBeenCalledTimes(1);
+
+      resolveFirst(new ArrayBuffer(32));
+      const result = await pending;
+      expect(result.ok).toBe(true);
+      expect(digest).toHaveBeenCalledTimes(2);
+    } finally {
+      digest.mockRestore();
+    }
   });
 
   it("resolves only the released explicit task partitions", () => {
@@ -281,17 +318,17 @@ describe("MiniMax H3 Studio authority", () => {
     );
   });
 
-  it("appends a gallery image as the final ordered inline Ref2VA reference", () => {
+  it("appends a gallery image as the final ordered inline Ref2VA reference", async () => {
     const state = emptyMinimaxH3AuthoringState();
     const original = { reference: video("motion.mp4") };
     state.references = [original];
 
-    const result = appendMinimaxH3GalleryImageReference(state, {
+    const result = await appendMinimaxH3GalleryImageReference(state, {
       filename: " subject.png ",
       mimeType: "image/png; charset=binary",
       width: 1280,
       height: 720,
-      data: "SUBJECT",
+      data: "U1VCSkVDVA==",
     });
 
     expect(result.ok).toBe(true);
@@ -300,19 +337,23 @@ describe("MiniMax H3 Studio authority", () => {
     expect(result.state.references[0]).toBe(original);
     expect(result.state.references[1]?.reference).toEqual({
       kind: "image",
-      media: { authority: "inline", data: "SUBJECT" },
-      provenance: { name: "subject.png" },
+      media: { authority: "inline", data: "U1VCSkVDVA==" },
+      provenance: {
+        name: "subject.png",
+        sha256:
+          "5995c8078362c12933e619215e1bd732118ae7e7ae32ddbf89db02057cbdb4c5",
+      },
       mime_type: "image/png",
       width: 1280,
       height: 720,
     });
   });
 
-  it("enforces gallery reference limits and maps FL2VA source to its first frame", () => {
+  it("enforces gallery reference limits and maps FL2VA source to its first frame", async () => {
     const images = Array.from({ length: 9 }, (_, index) => ({
       reference: image(`${index}.png`),
     }));
-    const rejected = appendMinimaxH3GalleryImageReference(
+    const rejected = await appendMinimaxH3GalleryImageReference(
       { ...emptyMinimaxH3AuthoringState(), references: images },
       {
         filename: "overflow.png",

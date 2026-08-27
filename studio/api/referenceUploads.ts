@@ -1,5 +1,10 @@
 import type { GenerationReference } from "../lib/generationReferences";
 import { minimaxH3TaskForModel } from "../lib/minimaxH3Authoring";
+import {
+  Base64DigestError,
+  decodePaddedBase64,
+  sha256PaddedBase64,
+} from "../lib/base64Digest";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "./client";
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
@@ -22,6 +27,9 @@ const RESERVED_SECRET_HEADERS = new Set([
 
 export interface ReferenceUploadCapabilities {
   available: boolean;
+  /** Positive current-host evidence that API-key auth is disabled. Absent on
+   * legacy/unknown snapshots, which authenticated routes treat fail-closed. */
+  authless_inline?: boolean;
   protocol_version: number;
   requires_api_key: boolean;
   session_path: string;
@@ -182,6 +190,7 @@ function validateCapabilities(
   }
   return {
     available: true,
+    authless_inline: false,
     protocol_version: 2,
     requires_api_key: true,
     session_path: sessionPath,
@@ -255,34 +264,31 @@ function decodeBase64(
   value: string,
   reference: number,
 ): Uint8Array<ArrayBuffer> {
-  let binary: string;
   try {
-    binary = globalThis.atob(value);
-  } catch {
+    return decodePaddedBase64(value);
+  } catch (error) {
+    if (!(error instanceof Base64DigestError)) throw error;
     protocolError(
       "REFERENCE_UPLOAD_MEDIA_INVALID",
       `Reference ${reference} does not contain valid base64 media.`,
     );
   }
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
 }
 
 async function sha256(value: string, reference: number): Promise<string> {
-  if (!globalThis.crypto?.subtle) {
+  try {
+    return await sha256PaddedBase64(value);
+  } catch (error) {
+    if (!(error instanceof Base64DigestError)) throw error;
     protocolError(
-      "REFERENCE_UPLOAD_HASH_UNAVAILABLE",
-      "Secure reference hashing is unavailable on this device.",
+      error.code === "hash-unavailable"
+        ? "REFERENCE_UPLOAD_HASH_UNAVAILABLE"
+        : "REFERENCE_UPLOAD_MEDIA_INVALID",
+      error.code === "hash-unavailable"
+        ? "Secure reference hashing is unavailable on this device."
+        : `Reference ${reference} does not contain valid base64 media.`,
     );
   }
-  const bytes = decodeBase64(value, reference);
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
 }
 
 function cloneWireRecord(
@@ -913,5 +919,22 @@ export function requestNeedsReferenceUpload(
     request.references.some(
       (reference) => reference.media.authority === "inline",
     )
+  );
+}
+
+/** Prefer request-bound uploads for every API-key route unless a current host
+ * snapshot positively identifies authless inline support. Missing/legacy
+ * capabilities stay fail-closed by entering upload preparation, whose strict
+ * validation refuses the unknown protocol instead of disclosing media inline. */
+export function requestShouldUseReferenceUploads(
+  request: ReferenceUploadRequest,
+  target: { apiKey?: ApiTarget["apiKey"] } | null | undefined,
+  capabilities:
+    Pick<ReferenceUploadCapabilities, "authless_inline"> | null | undefined,
+): boolean {
+  return (
+    requestNeedsReferenceUpload(request) &&
+    Boolean(target?.apiKey?.trim()) &&
+    capabilities?.authless_inline !== true
   );
 }

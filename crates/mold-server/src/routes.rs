@@ -1192,21 +1192,24 @@ async fn prepare_generation_inner(
         // resolution, still before the request can enter the queue.
         mold_core::minimax_h3::validate_references(references).map_err(ApiError::reference)?;
     }
-    let reference_identity = if request.references.is_some() {
-        Some(
-            authenticated
-                .ok_or_else(|| {
-                    ApiError::with_code(
-                        "API key authentication is required for reference media",
-                        "UNAUTHORIZED",
-                        StatusCode::UNAUTHORIZED,
-                    )
-                })?
-                .identity
-                .clone(),
-        )
-    } else {
-        None
+    // Ordered references never reach preparation on the durable path today:
+    // `durable_media_preflight` refuses them by name before admission, and
+    // post-ack preparation has no request context (no `AuthState`) to decide
+    // an auth-disabled inline set the way the retired attached route did.
+    // Carrying references durably is the tracked follow-up; until then this
+    // arm is the honest fail-closed answer.
+    let reference_identity = match request.references.as_deref() {
+        None => None,
+        Some(_) if authenticated.is_some() => {
+            Some(authenticated.expect("checked above").identity.clone())
+        }
+        Some(_) => {
+            return Err(ApiError::with_code(
+                "API key authentication is required for reference media",
+                "UNAUTHORIZED",
+                StatusCode::UNAUTHORIZED,
+            ));
+        }
     };
     let reference_scope_sha256 = request
         .references
@@ -6867,7 +6870,11 @@ async fn server_capabilities(
         },
         durable_media: readiness.advertised_media(),
         reference_uploads: mold_core::ReferenceUploadCapabilities {
-            available: true,
+            // The request-bound upload protocol derives its authority from an
+            // authenticated API-key identity. When server auth is disabled,
+            // clients must retain validated inline references instead.
+            available: api_key_auth_enabled,
+            authless_inline: !api_key_auth_enabled,
             // V2 rebinds the request scope to content-probed canonical
             // descriptors as each upload completes. V1 trusted provisional
             // browser AAC packet arithmetic and is intentionally not offered.

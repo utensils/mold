@@ -4624,8 +4624,8 @@ function onPickH3Boundary(images: SourceImageState[]): void {
   composerError.value = null;
 }
 
-function onPickH3References(images: SourceImageState[]): void {
-  const result = appendMinimaxH3PickedImageReferences(
+async function onPickH3References(images: SourceImageState[]): Promise<void> {
+  const result = await appendMinimaxH3PickedImageReferences(
     form.state.value.h3Authoring,
     images.map((image) => ({
       filename: image.filename,
@@ -5025,7 +5025,10 @@ async function attachLightboxSource(item: GalleryImage): Promise<boolean> {
         };
         const result =
           h3Task === "ref2va"
-            ? appendMinimaxH3GalleryImageReference(state.h3Authoring, image)
+            ? await appendMinimaxH3GalleryImageReference(
+                state.h3Authoring,
+                image,
+              )
             : setMinimaxH3GalleryImageFirstFrame(state.h3Authoring, image);
         if (!result.ok) throw new Error(result.error);
         state.h3Authoring = result.state;

@@ -3,6 +3,7 @@ import type { GenerationReference } from "../lib/generationReferences";
 import {
   prepareReferenceUploads,
   requestNeedsReferenceUpload,
+  requestShouldUseReferenceUploads,
   type ReferenceUploadCapabilities,
   type ReferenceUploadRequest,
 } from "./referenceUploads";
@@ -16,6 +17,7 @@ const SCOPE_DIGEST = "a".repeat(64);
 const REBOUND_SCOPE_DIGEST = "b".repeat(64);
 const CAPABILITIES: ReferenceUploadCapabilities = {
   available: true,
+  authless_inline: false,
   protocol_version: 2,
   requires_api_key: true,
   session_path: "/api/generate/reference-upload-sessions",
@@ -636,6 +638,25 @@ describe("MiniMax H3 reference upload leases", () => {
   it("identifies only fresh inline Ref2VA snapshots as upload work", async () => {
     const request = await requestFixture();
     expect(requestNeedsReferenceUpload(request)).toBe(true);
+    expect(
+      requestShouldUseReferenceUploads(request, TARGET, CAPABILITIES),
+    ).toBe(true);
+    expect(
+      requestShouldUseReferenceUploads(request, { apiKey: null }, CAPABILITIES),
+    ).toBe(false);
+    expect(
+      requestShouldUseReferenceUploads(
+        request,
+        { apiKey: "   " },
+        CAPABILITIES,
+      ),
+    ).toBe(false);
+    expect(requestShouldUseReferenceUploads(request, TARGET, null)).toBe(true);
+    expect(
+      requestShouldUseReferenceUploads(request, TARGET, {
+        authless_inline: true,
+      }),
+    ).toBe(false);
     expect(
       requestNeedsReferenceUpload({
         ...request,

@@ -7638,8 +7638,9 @@ async function useSelectedPrintAsSource(): Promise<void> {
       };
       const result =
         h3Task === "ref2va"
-          ? appendMinimaxH3GalleryImageReference(form.h3Authoring, image)
+          ? await appendMinimaxH3GalleryImageReference(form.h3Authoring, image)
           : setMinimaxH3GalleryImageFirstFrame(form.h3Authoring, image);
+      if (!isCurrent()) return;
       if (!result.ok) throw new Error(result.error);
       form.h3Authoring = result.state;
       setGenerationStatus(

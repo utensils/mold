@@ -4323,6 +4323,7 @@ mod tests {
         let capabilities = mold_core::ServerCapabilities {
             reference_uploads: mold_core::ReferenceUploadCapabilities {
                 available: true,
+                authless_inline: false,
                 protocol_version: 2,
                 requires_api_key: true,
                 session_path: mold_core::reference_upload::SESSION_PATH.into(),

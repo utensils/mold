@@ -172,6 +172,7 @@ export interface ServerCapabilities {
    * separately and may still keep H3 legally unavailable. */
   reference_uploads?: {
     available: boolean;
+    authless_inline?: boolean;
     protocol_version: number;
     requires_api_key: boolean;
     session_path: string;

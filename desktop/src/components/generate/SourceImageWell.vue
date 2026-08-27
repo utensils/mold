@@ -101,8 +101,8 @@ function onMaskApplied(mask: string) {
   props.form.maskImage = mask;
 }
 
-function onH3ReferenceImagesPicked(picked: PickedImage[]) {
-  const result = appendMinimaxH3PickedImageReferences(props.form.h3Authoring, picked);
+async function onH3ReferenceImagesPicked(picked: PickedImage[]) {
+  const result = await appendMinimaxH3PickedImageReferences(props.form.h3Authoring, picked);
   applyH3(result);
 }
 
