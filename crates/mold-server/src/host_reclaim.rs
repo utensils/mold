@@ -60,10 +60,14 @@ pub(crate) struct ReclaimTarget {
 /// What one reclaim attempt actually gave back.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct HostReclaimOutcome {
-    /// Observed increase in host headroom across the whole attempt.
+    /// Observed increase in headroom across the whole attempt.
     pub released_bytes: u64,
     /// Models evicted, in the order they were released.
     pub evicted: Vec<String>,
+    /// The sampler could not read the memory it was asked about, so this
+    /// outcome carries no evidence: nothing was evicted on a missing reading
+    /// and no refusal may be built on one.
+    pub sample_failed: bool,
 }
 
 impl HostReclaimOutcome {
@@ -232,9 +236,28 @@ pub(crate) fn busy_worker_device_ids(state: &AppState) -> BTreeSet<String> {
 }
 
 /// Collect every engine this server could release right now.
-async fn reclaim_candidates(state: &AppState, requested_model: &str) -> Vec<ReclaimTarget> {
+/// Which memory a reclaim is for. A device reclaim releases only what sits
+/// on that device — the shared cache, whose engine lives wherever the legacy
+/// path put it, and that device's own worker cache — because evicting a
+/// model from another GPU cannot change the reading the reclaim is chasing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReclaimScope {
+    Host,
+    Device(usize),
+}
+
+async fn reclaim_candidates(
+    state: &AppState,
+    requested_model: &str,
+    scope: ReclaimScope,
+) -> Vec<ReclaimTarget> {
     let mut candidates = targets_from(state.model_cache.lock().await.reclaimable(), None);
     for worker in state.gpu_pool.workers.snapshot() {
+        if let ReclaimScope::Device(ordinal) = scope {
+            if worker.gpu.ordinal != ordinal {
+                continue;
+            }
+        }
         if !accepts_releasing_work(worker_release_state(&worker)) {
             continue;
         }
@@ -256,7 +279,9 @@ async fn reclaim_candidates(state: &AppState, requested_model: &str) -> Vec<Recl
 /// no byte estimate: only the completed teardown and a fresh OS sample can say
 /// how many host pages an engine actually returned.
 pub(crate) async fn has_reclaimable_cached_model(state: &AppState, requested_model: &str) -> bool {
-    !reclaim_candidates(state, requested_model).await.is_empty()
+    !reclaim_candidates(state, requested_model, ReclaimScope::Host)
+        .await
+        .is_empty()
 }
 
 /// Why one eviction did not happen.
@@ -337,12 +362,58 @@ pub(crate) async fn reclaim_host_headroom(
     needed_headroom_bytes: u64,
     headroom: &(dyn Fn() -> u64 + Sync),
 ) -> HostReclaimOutcome {
+    reclaim_headroom(
+        state,
+        requested_model,
+        needed_headroom_bytes,
+        ReclaimScope::Host,
+        &|| Some(headroom()),
+    )
+    .await
+}
+
+/// [`reclaim_host_headroom`] for one device's memory: only that device's
+/// engines are released, and a sampler that cannot read the device ends the
+/// attempt with `sample_failed` rather than reading as zero — an unreadable
+/// device must never flush every cached model and then be refused on it.
+pub(crate) async fn reclaim_device_headroom(
+    state: &AppState,
+    requested_model: &str,
+    needed_headroom_bytes: u64,
+    ordinal: usize,
+    free: &(dyn Fn() -> Option<u64> + Sync),
+) -> HostReclaimOutcome {
+    reclaim_headroom(
+        state,
+        requested_model,
+        needed_headroom_bytes,
+        ReclaimScope::Device(ordinal),
+        free,
+    )
+    .await
+}
+
+async fn reclaim_headroom(
+    state: &AppState,
+    requested_model: &str,
+    needed_headroom_bytes: u64,
+    scope: ReclaimScope,
+    headroom: &(dyn Fn() -> Option<u64> + Sync),
+) -> HostReclaimOutcome {
     let mut outcome = HostReclaimOutcome::default();
-    let before = headroom();
+    let Some(before) = headroom() else {
+        tracing::warn!(
+            model = %requested_model,
+            ?scope,
+            "memory could not be sampled; releasing nothing on a missing reading"
+        );
+        outcome.sample_failed = true;
+        return outcome;
+    };
     if before >= needed_headroom_bytes {
         return outcome;
     }
-    let targets = reclaim_candidates(state, requested_model).await;
+    let targets = reclaim_candidates(state, requested_model, scope).await;
     if targets.is_empty() {
         tracing::info!(
             model = %requested_model,
@@ -388,7 +459,15 @@ pub(crate) async fn reclaim_host_headroom(
         // sample tell the truth.
         crate::routes::release_host_memory_after_unload(state);
         outcome.evicted.push(target.model.clone());
-        let now = headroom();
+        let Some(now) = headroom() else {
+            tracing::warn!(
+                model = %target.model,
+                ?scope,
+                "memory could not be re-sampled after an eviction; stopping the reclaim"
+            );
+            outcome.sample_failed = true;
+            break;
+        };
         outcome.released_bytes = now.saturating_sub(before);
         tracing::info!(
             model = %target.model,
@@ -461,6 +540,7 @@ mod tests {
     #[test]
     fn a_shortfall_refusal_names_the_bytes_released_and_the_models_unloaded() {
         let outcome = HostReclaimOutcome {
+            sample_failed: false,
             released_bytes: 9_800_000_000,
             evicted: vec!["flux-schnell".into(), "sdxl-base".into()],
         };
@@ -472,6 +552,7 @@ mod tests {
         );
 
         let single = HostReclaimOutcome {
+            sample_failed: false,
             released_bytes: 1_000_000_000,
             evicted: vec!["flux-schnell".into()],
         };

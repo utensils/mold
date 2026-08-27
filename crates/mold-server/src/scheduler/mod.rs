@@ -709,14 +709,18 @@ struct ReclaimRequest {
 /// Free device memory as the driver reports it right now, for the reclaim's
 /// re-sample between evictions — the same reading the worker's own post-drop
 /// gate trusts, not the registry's last one-second sample.
-fn device_headroom_from_driver(ordinal: usize, backend: mold_core::GpuBackend) -> u64 {
+fn device_headroom_from_driver(ordinal: usize, backend: mold_core::GpuBackend) -> Option<u64> {
     match backend {
         mold_core::GpuBackend::Cuda => {
-            mold_inference::device::usable_free_vram_bytes_result(ordinal).unwrap_or(0)
+            match mold_inference::device::usable_free_vram_bytes_result(ordinal) {
+                Ok(free) => Some(free),
+                Err(error) => {
+                    tracing::warn!(ordinal, %error, "device memory sample failed during reclaim");
+                    None
+                }
+            }
         }
-        mold_core::GpuBackend::Metal => {
-            mold_inference::device::available_system_memory_bytes().unwrap_or(0)
-        }
+        mold_core::GpuBackend::Metal => mold_inference::device::available_system_memory_bytes(),
     }
 }
 
@@ -3835,9 +3839,17 @@ impl Coordinator {
             .pending
             .iter_mut()
             .filter(|(_, pending)| {
+                // A reclaim whose sampler failed proved nothing and evicted
+                // on nothing; it is asked again rather than counted.
                 matches!(
                     pending.memory_block.as_ref().map(|block| &block.reclaim),
                     Some(ReclaimAttempt::NotStarted)
+                        | Some(ReclaimAttempt::Done(
+                            crate::host_reclaim::HostReclaimOutcome {
+                                sample_failed: true,
+                                ..
+                            }
+                        ))
                 )
             })
             .min_by_key(|(_, pending)| pending.queue_rank)?;
@@ -6472,22 +6484,30 @@ pub async fn run_scheduler_coordinator(
                 host_reclaim = Some((
                     job_id,
                     tokio::spawn(async move {
-                        let sampler: Box<dyn Fn() -> u64 + Send + Sync> = match &request.kind {
-                            MemoryBlockKind::Host => Box::new(host_headroom_from_system),
+                        let outcome = match &request.kind {
+                            MemoryBlockKind::Host => {
+                                crate::host_reclaim::reclaim_host_headroom(
+                                    &state,
+                                    &request.model,
+                                    request.required_bytes,
+                                    &host_headroom_from_system,
+                                )
+                                .await
+                            }
                             MemoryBlockKind::Device {
                                 ordinal, backend, ..
                             } => {
                                 let (ordinal, backend) = (*ordinal, *backend);
-                                Box::new(move || device_headroom_from_driver(ordinal, backend))
+                                crate::host_reclaim::reclaim_device_headroom(
+                                    &state,
+                                    &request.model,
+                                    request.required_bytes,
+                                    ordinal,
+                                    &move || device_headroom_from_driver(ordinal, backend),
+                                )
+                                .await
                             }
                         };
-                        let outcome = crate::host_reclaim::reclaim_host_headroom(
-                            &state,
-                            &request.model,
-                            request.required_bytes,
-                            sampler.as_ref(),
-                        )
-                        .await;
                         (request.job_id, outcome)
                     }),
                 ));
@@ -6712,6 +6732,9 @@ fn memory_shortfall_reason(pending: &PendingGeneration) -> Option<String> {
     let ReclaimAttempt::Done(outcome) = &block.reclaim else {
         return None;
     };
+    if outcome.sample_failed {
+        return None;
+    }
     Some(crate::host_reclaim::host_shortfall_message(
         outcome,
         block.required_bytes,
@@ -9988,18 +10011,22 @@ mod tests {
         // own driver reading: the idle engine goes and the shortfall clears.
         let samples = std::sync::atomic::AtomicUsize::new(0);
         let free = || {
-            [1u64 << 30, 24 << 30][samples
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                .min(1)]
+            Some(
+                [1u64 << 30, 24 << 30][samples
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    .min(1)],
+            )
         };
-        let outcome = crate::host_reclaim::reclaim_host_headroom(
+        let outcome = crate::host_reclaim::reclaim_device_headroom(
             &coordinator.state,
             &request.model,
             request.required_bytes,
+            0,
             &free,
         )
         .await;
         assert_eq!(outcome.evicted, vec!["other-model".to_string()]);
+        assert!(!outcome.sample_failed);
 
         publish_free_vram(&coordinator.state, 24 << 30);
         let mut immediate = false;
@@ -10009,6 +10036,51 @@ mod tests {
         let _ = coordinator.dispatch_ready().await;
         assert!(granted(&worker_rx), "the released VRAM admits the print");
         assert!(!coordinator.pending.contains_key("print"));
+        assert!(result_rx.try_recv().is_err());
+    }
+
+    /// A device the driver cannot read is not evidence of anything: the
+    /// reclaim evicts nothing, the block is asked again on the next idle turn,
+    /// and the wait is never bounded on the missing reading.
+    #[tokio::test]
+    async fn an_unreadable_device_reclaims_nothing_and_is_never_held_on_it() {
+        let (mut coordinator, _worker, worker_rx, mut result_rx, _root) =
+            hal9000_vram_blocked_coordinator().await;
+        let _ = coordinator.dispatch_ready().await;
+        assert!(!coordinator.settle_unschedulable_generations());
+        let request = coordinator.next_memory_reclaim().expect("blocked and idle");
+        let outcome = crate::host_reclaim::reclaim_device_headroom(
+            &coordinator.state,
+            &request.model,
+            request.required_bytes,
+            0,
+            &|| None,
+        )
+        .await;
+        assert!(outcome.sample_failed);
+        assert!(
+            outcome.evicted.is_empty(),
+            "nothing is released on a missing reading"
+        );
+        assert!(coordinator
+            .state
+            .model_cache
+            .lock()
+            .await
+            .contains("other-model"));
+        let mut immediate = false;
+        coordinator.finish_memory_reclaim(&request.job_id, outcome, &mut immediate);
+        coordinator.unschedulable_idle_grace_ms = 0;
+        assert!(
+            !coordinator.settle_unschedulable_generations(),
+            "a failed sample never bounds the wait"
+        );
+        assert!(coordinator.pending.contains_key("print"));
+        assert!(
+            coordinator.next_memory_reclaim().is_some(),
+            "the reclaim is asked again once the sampler can answer"
+        );
+        assert!(!granted(&worker_rx));
         assert!(result_rx.try_recv().is_err());
     }
 
