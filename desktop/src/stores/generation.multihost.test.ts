@@ -36,6 +36,23 @@ const primary = vi.hoisted(() => ({
   } | null,
 }));
 const apiFetchTo = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+
+/** The opening snapshot a chain job's own event stream sends. */
+function chainSnapshot(): Record<string, unknown> {
+  return {
+    id: "chain-job-1",
+    state: "running",
+    model: "ltx-2.3-22b-distilled:fp8",
+    stage_count: 3,
+    current_stage: 0,
+    created_at_unix_ms: 1,
+    updated_at_unix_ms: 2,
+    error: null,
+    ephemeral: true,
+    stages: [0, 1, 2].map((idx) => ({ idx, state: "pending" })),
+    script: { chain: {}, stages: [{ frames: 97 }, { frames: 97 }, { frames: 47 }] },
+  };
+}
 const apiJsonTo = vi.fn().mockResolvedValue([]);
 vi.mock("../lib/api/client", () => ({
   ApiError: class ApiError extends Error {
@@ -118,7 +135,15 @@ beforeEach(() => {
   setActivePinia(createPinia());
   primary.target = { baseUrl: "http://primary:7680", apiKey: "pk" };
   vi.clearAllMocks();
-  apiFetchTo.mockResolvedValue(new Response(null, { status: 200 }));
+  // A sequence is CREATED through `POST /api/chain-jobs` before its event
+  // stream opens; every other call keeps the plain 200.
+  apiFetchTo.mockImplementation((_target: unknown, path: string) =>
+    Promise.resolve(
+      path === "/api/chain-jobs"
+        ? new Response(JSON.stringify({ job_id: "chain-job-1" }))
+        : new Response(null, { status: 200 }),
+    ),
+  );
   durableApi.admit.mockReset();
   durableApi.lookup.mockReset();
   durableApi.reconcile.mockReset();
@@ -339,53 +364,12 @@ describe("generation store multi-host routing", () => {
     };
     sseStream.mockImplementation(
       (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent("chain_job", JSON.stringify({ type: "snapshot", job: chainSnapshot() }));
         opts.onEvent(
-          "progress",
-          JSON.stringify({
-            type: "chain_start",
-            stage_count: 3,
-            estimated_total_frames: 241,
-            job_id: "chain-1",
-          }),
+          "chain_job",
+          JSON.stringify({ type: "denoise_step", stage_idx: 1, step: 2, total: 4 }),
         );
-        opts.onEvent(
-          "progress",
-          JSON.stringify({
-            type: "denoise_step",
-            stage_idx: 1,
-            step: 2,
-            total: 4,
-            job_id: "chain-1",
-          }),
-        );
-        opts.onEvent(
-          "complete",
-          JSON.stringify({
-            video: "aGVsbG8=",
-            format: "mp4",
-            width: 1536,
-            height: 640,
-            frames: 241,
-            fps: 24,
-            thumbnail: "thumb-b64",
-            gif_preview: "gif-b64",
-            has_audio: true,
-            duration_ms: 10_042,
-            stage_count: 3,
-            generation_time_ms: 12_345,
-            filename: "chain-42.mp4",
-            metadata: {
-              prompt: chainRequest.prompt,
-              model: chainRequest.model,
-              seed: 42,
-              steps: 4,
-              guidance: 3.5,
-              width: 1536,
-              height: 640,
-            },
-            script: {},
-          }),
-        );
+        opts.onEvent("chain_job", JSON.stringify({ type: "finalized", output: "chain-42.mp4" }));
         return Promise.resolve();
       },
     );
@@ -398,12 +382,13 @@ describe("generation store multi-host routing", () => {
     );
     await settled;
 
-    const [path, options] = sseStream.mock.calls[0] as [
-      string,
-      { body: Record<string, unknown>; headers?: Record<string, string> },
-    ];
-    expect(path).toBe("/api/generate/chain/stream");
-    expect(options.body).toEqual({
+    const [path] = sseStream.mock.calls[0] as [string];
+    expect(path).toBe("/api/chain-jobs/chain-job-1/events");
+    // The auto-expand body rides the CREATE, not the stream.
+    const create = apiFetchTo.mock.calls.find((call) => call[1] === "/api/chain-jobs")!;
+    const body = JSON.parse(String((create[2] as RequestInit).body)) as Record<string, unknown>;
+    expect(body).toEqual({
+      ephemeral: true,
       output_mode: "one-shot",
       model: chainRequest.model,
       prompt: chainRequest.prompt,
@@ -421,25 +406,20 @@ describe("generation store multi-host routing", () => {
       source_image: "source-b64",
       enable_audio: true,
     });
-    expect(options.body).not.toHaveProperty("negative_prompt");
-    expect(options.body).not.toHaveProperty("loras");
-    expect(options.body).not.toHaveProperty("pipeline");
-    expect(options.headers).toBeUndefined();
-    expect(jobs[0]).toMatchObject({
-      id: "chain-1",
-      status: "complete",
-      chainStageCount: 3,
-      resultUrlIsObjectUrl: true,
-      result: {
-        image: "aGVsbG8=",
-        filename: "chain-42.mp4",
-        seed_used: 42,
-        video_frames: 241,
-        video_fps: 24,
-        video_has_audio: true,
-      },
+    expect(body).not.toHaveProperty("negative_prompt");
+    expect(body).not.toHaveProperty("loras");
+    expect(body).not.toHaveProperty("pipeline");
+    // The idempotency key the chain API owns.
+    expect((create[2] as RequestInit).headers).toMatchObject({
+      "x-mold-operation-id": expect.any(String),
     });
-    expect(createObjectUrl).toHaveBeenCalledTimes(1);
+    // Completion is a saved FILENAME, so no bytes are decoded into a Blob.
+    expect(jobs[0]).toMatchObject({
+      id: "chain-job-1",
+      status: "complete",
+      result: { image: "", filename: "chain-42.mp4", seed_used: 42 },
+    });
+    expect(createObjectUrl).not.toHaveBeenCalled();
   });
 
   it("keeps a metadata-only chain filename without creating a media Blob", async () => {
@@ -447,38 +427,10 @@ describe("generation store multi-host routing", () => {
     streamableMediaUrl.mockResolvedValueOnce("https://hal9000/media/chain-video");
     sseStream.mockImplementation(
       (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent("chain_job", JSON.stringify({ type: "snapshot", job: chainSnapshot() }));
         opts.onEvent(
-          "progress",
-          JSON.stringify({
-            type: "chain_start",
-            stage_count: 3,
-            estimated_total_frames: 241,
-            job_id: "chain-metadata",
-          }),
-        );
-        opts.onEvent(
-          "complete",
-          JSON.stringify({
-            video: "",
-            format: "mp4",
-            width: 1536,
-            height: 640,
-            frames: 241,
-            fps: 24,
-            stage_count: 3,
-            generation_time_ms: 12_345,
-            filename: "metadata chain.mp4",
-            metadata: {
-              prompt: "a lighthouse",
-              model: "ltx-2.3-22b-distilled:fp8",
-              seed: 77,
-              steps: 4,
-              guidance: 3.5,
-              width: 1536,
-              height: 640,
-            },
-            script: {},
-          }),
+          "chain_job",
+          JSON.stringify({ type: "finalized", output: "metadata chain.mp4" }),
         );
         return Promise.resolve();
       },
@@ -508,10 +460,9 @@ describe("generation store multi-host routing", () => {
     await settled;
     await vi.waitFor(() => expect(jobs[0]!.resultUrl).toBe("https://hal9000/media/chain-video"));
 
-    expect(sseStream.mock.calls[0]?.[0]).toBe("/api/generate/chain/stream");
-    expect(sseStream.mock.calls[0]?.[1]).toMatchObject({
-      headers: { "X-Mold-SSE-Payload": "metadata-only" },
-    });
+    // Every sequence is metadata-only now: its completion carries a saved
+    // filename and the media is resolved from the machine's gallery.
+    expect(sseStream.mock.calls[0]?.[0]).toBe("/api/chain-jobs/chain-job-1/events");
     expect(streamableMediaUrl).toHaveBeenCalledWith("/api/gallery/image/metadata%20chain.mp4", {
       target: halRoute.target,
       cacheKey: halRoute.hostId,
@@ -521,79 +472,13 @@ describe("generation store multi-host routing", () => {
     expect(jobs[0]!.result).toMatchObject({
       image: "",
       filename: "metadata chain.mp4",
-      seed_used: 77,
-      video_frames: 241,
-    });
-  });
-
-  it("falls back to the encoded chain video when an older host ignores metadata-only", async () => {
-    const createObjectUrl = vi.spyOn(URL, "createObjectURL");
-    sseStream.mockImplementation(
-      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
-        opts.onEvent(
-          "complete",
-          JSON.stringify({
-            video: "aGVsbG8=",
-            format: "mp4",
-            width: 1536,
-            height: 640,
-            frames: 241,
-            fps: 24,
-            stage_count: 3,
-            generation_time_ms: 12_345,
-            script: {},
-          }),
-        );
-        return Promise.resolve();
-      },
-    );
-    const chainRequest: GenerateRequest = {
-      ...request(),
-      model: "ltx-2.3-22b-distilled:fp8",
-      width: 1536,
-      height: 640,
-      frames: 241,
-      fps: 24,
-      output_format: "mp4",
-    };
-
-    const { jobs, settled } = useGenerationStore().submitBatch(
-      chainRequest,
-      1,
-      {
-        ...halRoute,
-        mirrorRemoteOutput: false,
-        retainEncodedResult: false,
-        metadataOnlyCompletion: true,
-      },
-      chainDecision,
-    );
-    await settled;
-
-    expect(sseStream.mock.calls[0]?.[1]).toMatchObject({
-      headers: { "X-Mold-SSE-Payload": "metadata-only" },
-    });
-    expect(streamableMediaUrl).not.toHaveBeenCalled();
-    expect(createObjectUrl).toHaveBeenCalledTimes(1);
-    expect(jobs[0]).toMatchObject({
-      status: "complete",
-      resultUrlIsObjectUrl: true,
-      result: { image: "", format: "mp4", video_frames: 241 },
     });
   });
 
   it("cancels an automatic chain through the durable chain-job endpoint", async () => {
     sseStream.mockImplementation(
       (_path: string, opts: { signal: AbortSignal; onEvent: (e: string, d: string) => void }) => {
-        opts.onEvent(
-          "progress",
-          JSON.stringify({
-            type: "chain_start",
-            stage_count: 3,
-            estimated_total_frames: 241,
-            job_id: "chain/job-1",
-          }),
-        );
+        opts.onEvent("chain_job", JSON.stringify({ type: "snapshot", job: chainSnapshot() }));
         return new Promise<void>((resolve) => {
           opts.signal.addEventListener("abort", () => resolve());
         });
@@ -606,14 +491,13 @@ describe("generation store multi-host routing", () => {
       halRoute,
       chainDecision,
     );
-    await Promise.resolve();
+    // The chain job id comes from the create response, so wait for it.
+    await flushPromises();
     await store.cancel(jobs[0]!.clientId);
 
-    expect(apiFetchTo).toHaveBeenCalledWith(
-      halRoute.target,
-      "/api/chain-jobs/chain%2Fjob-1/cancel",
-      { method: "POST" },
-    );
+    expect(apiFetchTo).toHaveBeenCalledWith(halRoute.target, "/api/chain-jobs/chain-job-1/cancel", {
+      method: "POST",
+    });
     expect(jobs[0]).toMatchObject({ status: "error", error: "Cancelled" });
   });
 

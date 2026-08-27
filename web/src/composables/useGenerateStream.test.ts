@@ -18,7 +18,7 @@ import type {
   GenerationBatchStatusResponse,
 } from "@studio/api/generationAdmission";
 import type { ChainRoutingDecision } from "../lib/chainRouting";
-import type { ChainStreamHandlers, StreamTarget } from "../api";
+import type { StreamTarget } from "../api";
 import { cancelQueueJob } from "../api";
 import type { HostRoute } from "../lib/hostRouting";
 
@@ -26,15 +26,24 @@ function persistedPayload(jobs: unknown[]): string {
   return JSON.stringify({ version: 1, jobs });
 }
 
-// A SEQUENCE is the only submission that still opens an attached SSE stream,
-// so `generateChainStream`'s handlers are captured to drive that lifecycle.
-// Every PRINT is admitted through `POST /api/generation-batches` and settles
-// through the durable authority — `admitGenerationBatch` plus
-// `reconcileGenerationBatches` are its equivalent seam.
-let lastChainHandlers: ChainStreamHandlers | null = null;
-// The dispatch target the singleton threaded through — `undefined` means the
-// submission was never routed and lands on the serving origin.
+// A SEQUENCE is a durable chain job: it is created through
+// `POST /api/chain-jobs` and followed on its OWN `/api/chain-jobs/:id/events`
+// subscription. Every PRINT is admitted through `POST /api/generation-batches`
+// and settles through the durable authority.
 let lastChainTarget: StreamTarget | undefined;
+let lastChainRequest: ChainRequestWire | null = null;
+/** Drive the per-job chain event stream the way the SSE handlers used to be.
+ *  The MOST RECENT subscription is the one under test — the mock is shared
+ *  across the file, so an earlier test's stream is still in `mock.calls`. */
+function emitChainJobEvent(event: unknown): void {
+  const call = [...(fetchEventSource.mock.calls as unknown[][])]
+    .reverse()
+    .find((entry) => String(entry[0]).includes("/api/chain-jobs/"));
+  const options = call?.[1] as
+    | { onmessage?: (message: { event: string; data: string }) => void }
+    | undefined;
+  options?.onmessage?.({ event: "chain_job", data: JSON.stringify(event) });
+}
 
 const admitGenerationBatch = vi.hoisted(() => vi.fn());
 const lookupGenerationBatchByClientId = vi.hoisted(() => vi.fn());
@@ -70,19 +79,33 @@ vi.mock("../api", () => ({
   cancelQueueJob: vi.fn().mockResolvedValue(undefined),
   fetchQueue: vi.fn().mockResolvedValue({ entries: [] }),
   listGalleryFrom,
-  generateChainStream: vi.fn(
-    (
-      _req: ChainRequestWire,
-      handlers: ChainStreamHandlers,
-      _signal?: AbortSignal,
-      target?: StreamTarget,
-    ) => {
-      lastChainHandlers = handlers;
-      lastChainTarget = target;
-      return Promise.resolve();
-    },
-  ),
+  cancelChainJob: vi.fn().mockResolvedValue(undefined),
+  chainJobEventsUrl: (id: string) => `/api/chain-jobs/${id}/events`,
+  createChainJob: vi.fn((req: ChainRequestWire, target?: StreamTarget) => {
+    lastChainRequest = req;
+    lastChainTarget = target;
+    return Promise.resolve({ job_id: "chain-job-1" });
+  }),
 }));
+
+function chainJobDetail(): Record<string, unknown> {
+  return {
+    id: "chain-job-1",
+    state: "running",
+    model: "ltx-2-19b-distilled:fp8",
+    stage_count: 3,
+    current_stage: 0,
+    created_at_unix_ms: 1,
+    updated_at_unix_ms: 2,
+    error: null,
+    ephemeral: true,
+    stages: [0, 1, 2].map((idx) => ({ idx, state: "pending" })),
+    script: {
+      chain: { model: "ltx-2-19b-distilled:fp8" },
+      stages: [{ frames: 97 }, { frames: 97 }, { frames: 97 }],
+    },
+  };
+}
 
 function chainDecision(
   overrides: Partial<Extract<ChainRoutingDecision, { kind: "chain" }>> = {},
@@ -543,7 +566,6 @@ describe("resolveChainRequest", () => {
 // display text.
 describe("workStarted tracking", () => {
   beforeEach(() => {
-    lastChainHandlers = null;
     __testing__.resetDurableLifecycleForTests();
     admitGenerationBatch.mockReset();
     reconcileGenerationBatches.mockReset();
@@ -565,41 +587,37 @@ describe("workStarted tracking", () => {
     stream.clearDone();
   });
 
-  it("keeps a chain queued until a stage starts and between durable stages", () => {
+  it("keeps a chain queued until a stage starts and between durable stages", async () => {
     const stream = useGenerateStream();
     const id = stream.submit(singleGen({ frames: 241 }), chainDecision());
+    // The create POST resolves before the subscription opens.
+    await vi.waitFor(() =>
+      expect(
+        (fetchEventSource.mock.calls as unknown[][]).some((entry) =>
+          String(entry[0]).includes("/api/chain-jobs/"),
+        ),
+      ).toBe(true),
+    );
     const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
-    expect(lastChainHandlers).not.toBeNull();
+    expect(lastChainRequest?.ephemeral).toBe(true);
 
-    lastChainHandlers!.onProgress({
-      type: "chain_start",
-      stage_count: 3,
-      estimated_total_frames: 241,
-    });
+    emitChainJobEvent({ type: "snapshot", job: chainJobDetail() });
     expect(job.workStarted).toBe(false);
-    expect(job.progress.stage).toBe("Queued · 3 clips · ~241 frames");
+    expect(job.progress.stage).toBe("Queued · 3 clips · ~291 frames");
 
-    lastChainHandlers!.onProgress({ type: "stage_start", stage_idx: 0 });
+    emitChainJobEvent({ type: "stage_start", stage_idx: 0 });
     expect(job.workStarted).toBe(true);
     expect(job.progress.stage).toBe("Preparing clip 1/3");
 
-    lastChainHandlers!.onProgress({
-      type: "stage_done",
-      stage_idx: 0,
-      frames_emitted: 97,
-    });
+    emitChainJobEvent({ type: "stage_done", stage_idx: 0 });
     expect(job.workStarted).toBe(false);
     expect(job.progress.stage).toBe("Clip 1/3 done · next clip queued");
 
-    lastChainHandlers!.onProgress({
-      type: "stage_done",
-      stage_idx: 2,
-      frames_emitted: 97,
-    });
+    emitChainJobEvent({ type: "stage_done", stage_idx: 2 });
     expect(job.workStarted).toBe(true);
     expect(job.progress.stage).toBe("Clip 3/3 done · preparing final output");
 
-    lastChainHandlers!.onProgress({ type: "stitching", total_frames: 241 });
+    emitChainJobEvent({ type: "finalizing", total_frames: 241 });
     expect(job.workStarted).toBe(true);
     expect(job.progress.stage).toBe("Stitching 241 frames…");
   });
@@ -732,7 +750,6 @@ describe("insecure-context compatibility", () => {
 describe("auto-remove completed jobs", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    lastChainHandlers = null;
     __testing__.resetDurableLifecycleForTests();
     admitGenerationBatch.mockReset();
     reconcileGenerationBatches.mockReset();
@@ -893,33 +910,34 @@ describe("auto-remove completed jobs", () => {
     expect(stream.jobs.value.find((j) => j.id === id)).toBeUndefined();
   });
 
-  it("auto-removes a chain job ~1500ms after chain complete", () => {
+  it("auto-removes a chain job ~1500ms after its stitched print lands", async () => {
+    // A sequence finishes with `finalized { output }` — a saved FILENAME — so
+    // the stitched print is hydrated from the machine's gallery exactly as a
+    // durable print is, with no inline bytes on the wire.
+    // The per-host gallery snapshot is cached for the process; drop a
+    // previous test's so this print's own filename is looked up freshly.
+    __testing__.resetDurableLifecycleForTests();
+    listGalleryFrom.mockResolvedValue([galleryRow("stitched.mp4")]);
+    fetchGalleryBlob.mockResolvedValue(new Blob(["media"]));
+    fetchGalleryThumbnailBlob.mockResolvedValue(new Blob(["thumbnail"]));
     const stream = useGenerateStream();
     const id = stream.submit(singleGen({ frames: 241 }), chainDecision());
+    await flushDurable();
     expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("running");
-    expect(lastChainHandlers).not.toBeNull();
 
-    // Chain complete events carry a `video` field instead of `image`.
-    lastChainHandlers!.onComplete({
-      video: "AAAA",
-      format: "mp4",
-      width: 1216,
-      height: 704,
-      frames: 241,
-      fps: 24,
-      generation_time_ms: 9876,
-      // The fields below are optional on the wire but the singleton
-      // shape-shifts them into a SseCompleteEvent with sensible defaults.
-      thumbnail: null,
-      gif_preview: null,
-      has_audio: false,
-      duration_ms: null,
-      audio_sample_rate: null,
-      audio_channels: null,
-      gpu: 0,
-    } as Parameters<ChainStreamHandlers["onComplete"]>[0]);
+    expect(
+      (fetchEventSource.mock.calls as unknown[][]).some((entry) =>
+        String(entry[0]).includes("/api/chain-jobs/"),
+      ),
+    ).toBe(true);
+    emitChainJobEvent({ type: "snapshot", job: chainJobDetail() });
+    emitChainJobEvent({ type: "finalized", output: "stitched.mp4" });
+    await flushDurable();
+    await flushDurable();
 
-    expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("done");
+    const settled = stream.jobs.value.find((j) => j.id === id);
+    expect(settled?.error ?? null).toBeNull();
+    expect(settled?.state).toBe("done");
     vi.advanceTimersByTime(__testing__.AUTO_REMOVE_DONE_MS + 1);
     expect(stream.jobs.value.find((j) => j.id === id)).toBeUndefined();
   });

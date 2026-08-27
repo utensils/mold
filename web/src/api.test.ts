@@ -11,7 +11,6 @@ import {
   deleteModel,
   fetchQueue,
   gcChainJobs,
-  generateChainStream,
   fetchChainLimits,
   getChainJob,
   listChainJobs,
@@ -20,15 +19,9 @@ import {
   upscaleStream,
   updateQueueJobTargetGpu,
   validateChain,
-  type ChainStreamHandlers,
   type UpscaleStreamHandlers,
 } from "./api";
-import type {
-  ChainProgressEvent,
-  ChainRequestWire,
-  SseChainCompleteEvent,
-  UpscaleRequestWire,
-} from "./types";
+import type { ChainRequestWire, UpscaleRequestWire } from "./types";
 import type { SseEvent, StreamSseOptions } from "./lib/sse";
 
 // streamSse is the I/O surface; mocking it lets us drive the SSE lifecycle
@@ -40,16 +33,6 @@ vi.mock("./lib/sse", () => ({
 }));
 
 import { streamSse } from "./lib/sse";
-
-function chainHandlers() {
-  return {
-    onProgress: vi.fn<ChainStreamHandlers["onProgress"]>(),
-    onComplete: vi.fn<ChainStreamHandlers["onComplete"]>(),
-    onError: vi.fn<ChainStreamHandlers["onError"]>(),
-    onRequestWarnings:
-      vi.fn<NonNullable<ChainStreamHandlers["onRequestWarnings"]>>(),
-  };
-}
 
 function upscaleHandlers() {
   return {
@@ -301,49 +284,6 @@ describe("chain validation api", () => {
       "motion_tail_frames must be less than clip 2 frames",
     );
     expect((error as Error).message).not.toContain("VALIDATION_ERROR");
-  });
-});
-
-describe("generateChainStream", () => {
-  it("flips a chain job to network error on silent close", async () => {
-    installDriver((onEvent) => {
-      onEvent({
-        event: null,
-        data: JSON.stringify({
-          type: "denoise_step",
-          stage_idx: 0,
-          step: 1,
-          total: 8,
-        } as ChainProgressEvent),
-      });
-    });
-
-    const h = chainHandlers();
-    await generateChainStream(chainRequest(), h);
-
-    expect(h.onError).toHaveBeenCalledOnce();
-    expect(h.onError.mock.calls[0][0].kind).toBe("network");
-  });
-
-  it("does not synthesize a network error after a chain complete", async () => {
-    const evt: SseChainCompleteEvent = {
-      video: "AAAA",
-      format: "mp4",
-      width: 1216,
-      height: 704,
-      frames: 97,
-      fps: 24,
-      generation_time_ms: 8000,
-    } as SseChainCompleteEvent;
-
-    installDriver((onEvent) => {
-      onEvent({ event: "complete", data: JSON.stringify(evt) });
-    });
-
-    const h = chainHandlers();
-    await generateChainStream(chainRequest(), h);
-    expect(h.onComplete).toHaveBeenCalledOnce();
-    expect(h.onError).not.toHaveBeenCalled();
   });
 });
 

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  applyCompletionWarnings,
   jobProgress,
   jobStatusCode,
   newJob,
@@ -9,6 +8,9 @@ import {
   type Job,
   type JobStatus,
 } from "./generation";
+// `applyCompletionWarnings` is a lib helper: the store no longer re-exports it
+// now that no completion arrives on a stream.
+import { applyCompletionWarnings } from "../lib/generationJob";
 
 const req = {
   prompt: "a lighthouse at dusk",

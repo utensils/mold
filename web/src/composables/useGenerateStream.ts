@@ -1,8 +1,10 @@
 import { computed, onUnmounted, reactive, ref, watch, type Ref } from "vue";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import {
+  cancelChainJob,
   cancelQueueJob,
-  generateChainStream,
+  chainJobEventsUrl,
+  createChainJob,
   listGalleryFrom,
   type StreamTarget,
 } from "../api";
@@ -11,7 +13,6 @@ import type {
   ChainRequestWire,
   GalleryImage,
   GenerateRequestWire,
-  SseChainCompleteEvent,
   SseCompleteEvent,
 } from "../types";
 import type { ChainRoutingDecision } from "../lib/chainRouting";
@@ -51,6 +52,11 @@ import {
   type GenerationLifecycleJob,
 } from "@studio/lib/generationLifecycle";
 import { generationHostSubmissionPolicy } from "@studio/lib/generationSubmissionPolicy";
+import {
+  emptyChainJobLive,
+  reduceChainJobFrame,
+} from "@studio/lib/chainJobProgress";
+import type { ChainJobEvent } from "@studio/lib/api/chainTypes";
 
 function surfaceRequestWarnings(warnings: string[]): void {
   for (const warning of warnings) toast("warning", warning);
@@ -214,6 +220,10 @@ export interface ChainJobMeta {
   stageCount: number;
   currentStage: number;
   estimatedTotalFrames: number | null;
+  /** The durable chain job this sequence is, once created. Cancel routes on
+   * this rather than on `serverId`: a chain is cancelled through
+   * `DELETE /api/chain-jobs/:id`, never the generation queue. */
+  jobId?: string | null;
 }
 
 function emptyProgress(): JobProgress {
@@ -330,30 +340,6 @@ function chainStageLabel(
  * unchanged. `seed_used` falls back to the request seed (or 0) — the
  * gallery match will miss but the refresh-on-complete still surfaces the
  * new item. */
-function chainCompleteToSingle(
-  req: GenerateRequestWire | ChainRequestWire,
-  evt: SseChainCompleteEvent,
-): SseCompleteEvent {
-  return {
-    image: evt.video,
-    format: evt.format,
-    width: evt.width,
-    height: evt.height,
-    seed_used: req.seed ?? 0,
-    generation_time_ms: evt.generation_time_ms ?? 0,
-    model: req.model,
-    video_frames: evt.frames,
-    video_fps: evt.fps,
-    video_thumbnail: evt.thumbnail ?? null,
-    video_gif_preview: evt.gif_preview ?? null,
-    video_has_audio: evt.has_audio ?? false,
-    video_duration_ms: evt.duration_ms ?? null,
-    video_audio_sample_rate: evt.audio_sample_rate ?? null,
-    video_audio_channels: evt.audio_channels ?? null,
-    gpu: evt.gpu ?? null,
-  };
-}
-
 /** Translate a single-clip `GenerateRequestWire` + chain routing decision
  * into the auto-expand `ChainRequestWire` the server expects. */
 function buildChainRequest(
@@ -1190,9 +1176,14 @@ async function wavFacts(blob: Blob): Promise<WavFacts | null> {
 
 async function durableCompletionResult(
   job: Job,
-  lifecycle: GenerationLifecycleJob,
+  saved: {
+    filename?: string | null;
+    originalFilename?: string | null;
+    /** How long the machine actually spent, when the caller knows. */
+    generationTimeMs?: number;
+  },
 ): Promise<SseCompleteEvent> {
-  const filename = lifecycle.result?.filename;
+  const filename = saved.filename;
   if (!filename) {
     throw new Error("the host completed this print without an output filename");
   }
@@ -1219,9 +1210,9 @@ async function durableCompletionResult(
       .catch(() => null);
   }
   let originalImage: string | null = null;
-  if (lifecycle.result?.originalFilename) {
+  if (saved.originalFilename) {
     originalImage = await blobToBase64(
-      await fetchGalleryBlob(host, lifecycle.result.originalFilename),
+      await fetchGalleryBlob(host, saved.originalFilename),
     );
   }
   const request = job.request as GenerateRequestWire;
@@ -1235,11 +1226,7 @@ async function durableCompletionResult(
     width: metadata.width,
     height: metadata.height,
     seed_used: metadata.seed,
-    generation_time_ms: Math.max(
-      0,
-      (lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs) -
-        lifecycle.createdAtMs,
-    ),
+    generation_time_ms: Math.max(0, saved.generationTimeMs ?? 0),
     model: metadata.model,
     ...(originalImage ? { original_image: originalImage } : {}),
     ...(kind === "video"
@@ -1308,7 +1295,13 @@ function settleDurableTerminal(
     .then(async (release) => {
       if (!release) return;
       try {
-        const result = await durableCompletionResult(job, lifecycle);
+        const result = await durableCompletionResult(job, {
+          filename: lifecycle.result?.filename ?? null,
+          originalFilename: lifecycle.result?.originalFilename ?? null,
+          generationTimeMs:
+            (lifecycle.completedAtMs ?? lifecycle.version.updatedAtMs) -
+            lifecycle.createdAtMs,
+        });
         if (job.state !== "done") return;
         job.result = result;
         job.mediaHydrationError = null;
@@ -1910,6 +1903,113 @@ function submitJobs(
  * to fall back to, so a request this machine cannot carry durably is refused
  * by `submitDurableJobs` rather than re-routed here.
  */
+/**
+ * Create an auto-chained sequence as a durable chain job and follow its own
+ * event stream.
+ *
+ * `ephemeral: true` is what keeps it out of Library ▸ History ▸ Sequences and
+ * out of the print's saved provenance — the user asked for one shot, not a
+ * sequence. The subscription is deliberately PER JOB: `useChainJobs.watch` is
+ * a singleton driving the sequence rail, and an auto-chain row must not take
+ * it over.
+ */
+async function followAutoChainJob(
+  job: Job,
+  request: ChainRequestWire,
+  route: HostRoute | null,
+  controller: AbortController,
+  onError: (err: { kind: "http" | "network"; message?: string }) => void,
+): Promise<void> {
+  let jobId: string;
+  try {
+    ({ job_id: jobId } = await createChainJob(
+      request,
+      route?.target,
+      createUuid(),
+      surfaceRequestWarnings,
+    ));
+  } catch (error) {
+    onError({ kind: "network", message: errorText(error) });
+    return;
+  }
+  if (job.chain) job.chain.jobId = jobId;
+  let live = emptyChainJobLive();
+  let settled = false;
+  const settle = (run: () => void) => {
+    if (settled) return;
+    settled = true;
+    run();
+    controller.abort();
+  };
+  await fetchEventSource(chainJobEventsUrl(jobId, route?.target), {
+    signal: controller.signal,
+    openWhenHidden: true,
+    headers: route?.target?.apiKey ? { "x-api-key": route.target.apiKey } : {},
+    onmessage: (message) => {
+      if (message.event !== "chain_job") return;
+      let event: ChainJobEvent;
+      try {
+        event = JSON.parse(message.data) as ChainJobEvent;
+      } catch {
+        // A malformed frame carries no authority; the terminal frame settles.
+        return;
+      }
+      const reduced = reduceChainJobFrame(live, event);
+      live = reduced.live;
+      for (const frame of reduced.progress) applyChainProgress(job, frame);
+      const output = reduced.finalized?.output;
+      if (output) {
+        settle(() => void completeAutoChainJob(job, output));
+        return;
+      }
+      const terminal = reduced.terminal;
+      if (!terminal || terminal.state === "completed") return;
+      settle(() => {
+        if (terminal.state === "cancelled") {
+          markCancellationConfirmed(job);
+          return;
+        }
+        job.error = terminal.error ?? "The sequence failed.";
+        recordFailedSettlement(job);
+      });
+    },
+    onclose: () => {
+      if (!controller.signal.aborted && !settled) {
+        throw new Error("Sequence event stream closed.");
+      }
+    },
+    onerror: (error) => {
+      if (controller.signal.aborted || settled) return;
+      throw error;
+    },
+  }).catch((error) => {
+    if (settled || controller.signal.aborted || job.state !== "running") return;
+    onError({ kind: "network", message: errorText(error) });
+  });
+}
+
+/** A finished sequence is one saved print: hydrate it from the machine's
+ * gallery exactly as a durable print's completion does. */
+async function completeAutoChainJob(job: Job, filename: string): Promise<void> {
+  try {
+    const result = await durableCompletionResult(job, {
+      filename,
+      generationTimeMs: Date.now() - job.startedAt,
+    });
+    if (job.state !== "running") return;
+    job.result = result;
+    job.state = "done";
+    recordSuccessfulSettlement(job);
+    job.previewUrl = null;
+    fireComplete(job);
+    scheduleAutoRemoveOnDone(job.id);
+  } catch (error) {
+    if (job.state !== "running") return;
+    job.error = errorText(error);
+    recordFailedSettlement(job);
+  }
+}
+
 function submitJob(
   req: GenerateRequestWire | ChainRequestWire,
   decision: ChainRoutingDecision = { kind: "single" },
@@ -1952,27 +2052,13 @@ function submitJob(
 
   const startStream = async () => {
     if (decision.kind === "chain") {
-      const chainReq = resolveChainRequest(req, decision);
       job.streamStarted = true;
-      await generateChainStream(
-        chainReq,
-        {
-          onProgress: (evt) => applyChainProgress(job, evt),
-          onComplete: (evt) => {
-            job.result = chainCompleteToSingle(req, evt);
-            job.state = "done";
-            recordSuccessfulSettlement(job);
-            job.previewUrl = null;
-            if (evt.gpu !== null && evt.gpu !== undefined)
-              job.progress.gpu = evt.gpu;
-            fireComplete(job);
-            scheduleAutoRemoveOnDone(id);
-          },
-          onError: onErrorCommon,
-          onRequestWarnings: surfaceRequestWarnings,
-        },
-        controller.signal,
-        route?.target,
+      await followAutoChainJob(
+        job,
+        { ...resolveChainRequest(req, decision), ephemeral: true },
+        route,
+        controller,
+        onErrorCommon,
       );
     } else if (isPrebuiltChainRequest(req)) {
       // Caller bug: a stages-based ChainRequestWire was submitted with a
@@ -2089,6 +2175,20 @@ async function cancelJob(id: string): Promise<void> {
   }
   if (job.cancelling) return;
   job.cancelling = true;
+  // A sequence IS a chain job: it is cancelled on its own route, never on the
+  // generation queue, which has no row for it.
+  const chainJobId = job.chain?.jobId;
+  if (chainJobId) {
+    try {
+      await cancelChainJob(chainJobId, routeForDetachedJob(job));
+    } catch (error) {
+      if (job.state !== "running") return;
+      job.cancelling = false;
+      throw error;
+    }
+    markCancellationConfirmed(job);
+    return;
+  }
   if (job.serverId) {
     try {
       await cancelQueueJob(job.serverId, routeForDetachedJob(job));
