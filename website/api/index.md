@@ -588,7 +588,10 @@ If the admission response is lost, recover it with
 unique UUID identities across `client_batch_ids` and `batch_ids`; clients must
 chunk larger recovery sets. Children expose `accepted`, `held`, `running`,
 `cancelling`, `complete`, `failed`, or `cancelled`; completed
-children name their gallery `result.filename`. Held retryable work remains in
+children name their gallery `result.filename`. A `held` child carries the
+machine's sentence in `error` and, when the hold has a typed cause, its code in
+additive `error_code` (`MODEL_NOT_FOUND`, `UNKNOWN_MODEL`, …) — the field a
+client's missing-model pull offer classifies on. Held retryable work remains in
 the durable queue with its error and can be resumed with
 `POST /api/queue/{job_id}/retry`. Its JSON body must repeat the complete
 authority captured from the admitted batch status:
