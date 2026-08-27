@@ -1215,7 +1215,6 @@ async fn feed_available(
             }
         };
         let preparation_warnings = prepared_route.warnings;
-        let resolved_references = prepared_route.resolved_references;
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         let h3_private_ingress_grant = prepared_route.h3_private_ingress_grant;
         // Check SQLite before taking the scheduler publication fence. A later
@@ -1382,7 +1381,6 @@ async fn feed_available(
             durable_queue_rank: Some(queue_rank),
             request,
             deferred_media,
-            resolved_references,
             completion_payload: crate::queue_journal::completion_payload_from_str(
                 &row.completion_payload,
             ),
@@ -1498,7 +1496,6 @@ mod tests {
                 target_device_id: None,
                 completion_payload: SseCompletionPayload::MetadataOnly,
                 batch_child: false,
-                carries_reference_authority: false,
             })
             .collect::<Vec<_>>();
         state
@@ -2754,7 +2751,6 @@ mod tests {
                 target_device_id: None,
                 completion_payload: SseCompletionPayload::MetadataOnly,
                 batch_child: false,
-                carries_reference_authority: false,
             })
             .unwrap();
         assert!(state.queue_journal.claim_next_feeder().unwrap().is_none());
@@ -2840,7 +2836,6 @@ mod tests {
                 target_device_id: None,
                 completion_payload: SseCompletionPayload::MetadataOnly,
                 batch_child: false,
-                carries_reference_authority: false,
             })
             .unwrap();
         state.queue_journal.retain_all();
@@ -2862,7 +2857,6 @@ mod tests {
                 target_device_id: None,
                 completion_payload: SseCompletionPayload::MetadataOnly,
                 batch_child: false,
-                carries_reference_authority: false,
             })
             .unwrap();
 
@@ -2917,7 +2911,6 @@ mod tests {
                     target_device_id: None,
                     completion_payload: SseCompletionPayload::MetadataOnly,
                     batch_child: false,
-                    carries_reference_authority: false,
                 }],
             })
             .unwrap();
@@ -3079,7 +3072,6 @@ mod tests {
                     target_device_id: None,
                     completion_payload: SseCompletionPayload::MetadataOnly,
                     batch_child: false,
-                    carries_reference_authority: false,
                 }],
             })
             .unwrap();

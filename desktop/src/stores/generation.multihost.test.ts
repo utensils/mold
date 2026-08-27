@@ -109,7 +109,6 @@ const halRoute = {
     encrypted_at_rest: true,
     generate_request_media: true,
     identity: true,
-    h3_references: true,
     private_h3: true,
   },
 };
@@ -183,7 +182,6 @@ function readyPrimary(): void {
       encrypted_at_rest: true,
       generate_request_media: true,
       identity: true,
-      h3_references: true,
       private_h3: true,
     },
   } as never;
@@ -209,7 +207,6 @@ function readyRemote(): void {
       encrypted_at_rest: true,
       generate_request_media: true,
       identity: true,
-      h3_references: true,
       private_h3: true,
     },
   } as never;

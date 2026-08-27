@@ -1920,6 +1920,19 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     } else {
         None
     };
+    // The ordered references are bound from THIS hydration, under this lease;
+    // no job field carries a reference set across admission or dispatch.
+    let references = match hydrated_media_lease
+        .as_ref()
+        .map(|lease| lease.references(&job.request))
+        .transpose()
+    {
+        Ok(references) => references.flatten(),
+        Err(error) => {
+            finish_single_worker_hydration_failure(job, error);
+            return;
+        }
+    };
     let request = match hydrated_media_lease {
         Some(lease) => {
             crate::queue_media_runtime::AttemptQueueMediaRequest::hydrated(&mut job.request, lease)
@@ -1945,34 +1958,28 @@ async fn process_job(state: &AppState, mut job: GenerationJob) {
     }
 
     // Reference binding verifies up to one GiB of staged media. Keep that I/O
-    // off Tokio's async worker and return the staging owner alongside the
-    // opened handles so it remains alive for the whole generation attempt.
-    let reference_binding_result =
-        if request.references.is_none() && job.resolved_references.is_none() {
-            Ok(Vec::new())
-        } else {
-            let request = request.zeroizing_clone();
-            let resolved = job.resolved_references.take();
-            let cancellation = attempt_cancellation.clone();
-            match tokio::task::spawn_blocking(move || {
-                let result = crate::reference_uploads::inference_bindings_for_request(
-                    &request,
-                    resolved.as_ref(),
-                    Some(&cancellation),
-                );
-                (resolved, result)
-            })
-            .await
-            {
-                Ok((resolved, result)) => {
-                    job.resolved_references = resolved;
-                    result
-                }
-                Err(_) => Err(anyhow::anyhow!(
-                    "reference binding worker did not complete safely"
-                )),
-            }
-        };
+    // off Tokio's async worker. The opened handles outlive the set; the
+    // staging itself stays alive through the hydrated request guard.
+    let reference_binding_result = if request.references.is_none() && references.is_none() {
+        Ok(Vec::new())
+    } else {
+        let request = request.zeroizing_clone();
+        let cancellation = attempt_cancellation.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::reference_uploads::inference_bindings_for_request(
+                &request,
+                references.as_ref(),
+                Some(&cancellation),
+            )
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!(
+                "reference binding worker did not complete safely"
+            )),
+        }
+    };
     let reference_bindings = match reference_binding_result {
         Ok(bindings) => bindings,
         Err(error) => {
@@ -3283,7 +3290,6 @@ async fn run_queue_dispatcher_with_tuning_inner(
             model: model_name.clone(),
             request: job.request,
             deferred_media: job.deferred_media,
-            resolved_references: job.resolved_references,
             completion_payload: job.completion_payload,
             progress_tx: job.progress_tx,
             result_tx: job.result_tx,
@@ -3703,7 +3709,6 @@ fn generation_from_legacy_gpu_job(job: GpuJob) -> GenerationJob {
         durable_queue_rank: job.durable_queue_rank,
         request: job.request,
         deferred_media: job.deferred_media,
-        resolved_references: job.resolved_references,
         completion_payload: job.completion_payload,
         progress_tx: job.progress_tx,
         result_tx: job.result_tx,
@@ -4190,7 +4195,6 @@ mod tests {
                     target_device_id: None,
                     completion_payload: SseCompletionPayload::MetadataOnly,
                     batch_child: false,
-                    carries_reference_authority: false,
                 }],
             })
             .unwrap();
@@ -4308,7 +4312,6 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request("mock-model"),
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: Some(progress_tx),
             result_tx,
@@ -4331,6 +4334,101 @@ mod tests {
             result_rx.await.unwrap(),
             Err(ref message) if message == "Cancelled"
         ));
+    }
+
+    /// The single worker hydrates its durable media under its own lease and
+    /// binds the ordered references from THAT hydration: a sealed file whose
+    /// bytes no longer match its descriptor's digest is refused before any
+    /// model is prepared, and the refusal names the binding, not a lost set.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn single_worker_binds_references_from_its_own_hydration() {
+        use sha2::{Digest as _, Sha256};
+
+        let home = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let verified = staging.path().join("verified.media");
+        let tampered = staging.path().join("tampered.media");
+        std::fs::write(&verified, b"verified-reference-bytes").unwrap();
+        std::fs::write(&tampered, b"bytes that were swapped after probing").unwrap();
+        let descriptor = |name: &str, digest_of: &[u8]| {
+            serde_json::json!({
+                "kind": "image",
+                "media": { "authority": "descriptor" },
+                "provenance": { "name": name, "sha256": format!("{:x}", Sha256::digest(digest_of)) },
+                "mime_type": "image/png",
+                "width": 1024,
+                "height": 768
+            })
+        };
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "single worker references",
+            "model": mold_core::minimax_h3::REF2VA_COMFY,
+            "width": mold_core::minimax_h3::DEFAULT_WIDTH,
+            "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
+            "steps": 4,
+            "guidance": 0.0,
+            "seed": 7,
+            "batch_size": 1,
+            "output_format": "mp4",
+            "references": [
+                descriptor("verified.png", b"verified-reference-bytes"),
+                descriptor("tampered.png", b"the bytes the descriptor was probed from"),
+            ]
+        }))
+        .unwrap();
+        let staged = crate::reference_uploads::StagedReferences::from_files_for_test(
+            &request,
+            vec![verified, tampered],
+        );
+        let (deferred, request_json) = crate::queue_media_runtime::seal_request_for_test(
+            home.path(),
+            "single-worker-references",
+            request,
+            Some(&staged),
+        );
+        drop(staged);
+
+        let state = crate::state::AppState::for_tests();
+        state.job_registry.register(
+            "single-worker-references",
+            mold_core::minimax_h3::REF2VA_COMFY,
+        );
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let job = GenerationJob {
+            id: "single-worker-references".to_string(),
+            durable_queue_rank: None,
+            request: serde_json::from_str(&request_json).unwrap(),
+            deferred_media: Some(deferred),
+            completion_payload: SseCompletionPayload::Full,
+            progress_tx: Some(progress_tx),
+            result_tx,
+            output_dir: None,
+            journal: None,
+            #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+            h3_private_ingress_grant: None,
+        };
+
+        process_job(&state, job).await;
+
+        let error = match result_rx.await.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("a tampered reference must not render"),
+        };
+        assert!(
+            error.contains("generation reference binding error"),
+            "{error}"
+        );
+        assert!(error.contains("resolved reference 2"), "{error}");
+        assert!(!error.contains(home.path().to_string_lossy().as_ref()));
+        let mut saw_terminal_error = false;
+        while let Ok(message) = progress_rx.try_recv() {
+            if matches!(message, SseMessage::Error(_)) {
+                saw_terminal_error = true;
+            }
+        }
+        assert!(saw_terminal_error);
     }
 
     #[test]
@@ -5077,7 +5175,6 @@ mod tests {
             model: request.model.clone(),
             request,
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -7102,7 +7199,6 @@ mod tests {
             model: "busy-model".to_string(),
             request: fake_request("busy-model"),
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: filler_result_tx,
@@ -7136,7 +7232,6 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -7189,7 +7284,6 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -7273,7 +7367,6 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request(model),
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: tx,
@@ -7291,7 +7384,6 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request(model),
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: tx,
@@ -7552,7 +7644,6 @@ mod tests {
                 durable_queue_rank: None,
                 request: fake_request(model),
                 deferred_media: None,
-                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -7628,7 +7719,6 @@ mod tests {
                 durable_queue_rank: None,
                 request: fake_request(&format!("model-{id}")),
                 deferred_media: None,
-                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -7689,7 +7779,6 @@ mod tests {
                 durable_queue_rank: None,
                 request: fake_request(&format!("model-{i}")),
                 deferred_media: None,
-                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -7797,7 +7886,6 @@ mod tests {
                 durable_queue_rank: None,
                 request: fake_request(&format!("model-{i}")),
                 deferred_media: None,
-                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
@@ -7931,7 +8019,6 @@ mod tests {
             durable_queue_rank: None,
             request,
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -7975,7 +8062,6 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -8047,7 +8133,6 @@ mod tests {
                 target_device_id: None,
                 completion_payload: SseCompletionPayload::Full,
                 batch_child: false,
-                carries_reference_authority: false,
             })
             .expect("durable test job");
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
@@ -8058,7 +8143,6 @@ mod tests {
                     durable_queue_rank: None,
                     request,
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -8227,7 +8311,6 @@ mod tests {
                         durable_queue_rank: None,
                         request: fake_request("flux-dev:q4"),
                         deferred_media: None,
-                        resolved_references: None,
                         completion_payload: SseCompletionPayload::Full,
                         progress_tx: None,
                         result_tx,
@@ -8336,7 +8419,6 @@ mod tests {
                 target_device_id: None,
                 completion_payload: SseCompletionPayload::Full,
                 batch_child: false,
-                carries_reference_authority: false,
             })
             .expect("durable test job");
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -8347,7 +8429,6 @@ mod tests {
                     durable_queue_rank: None,
                     request,
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -8445,7 +8526,6 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -8507,7 +8587,6 @@ mod tests {
                         durable_queue_rank: None,
                         request: fake_request("flux-dev:q4"),
                         deferred_media: None,
-                        resolved_references: None,
                         completion_payload: SseCompletionPayload::Full,
                         progress_tx: None,
                         result_tx,
@@ -8572,7 +8651,6 @@ mod tests {
             durable_queue_rank: None,
             request: fake_request("flux-dev:q4"),
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,

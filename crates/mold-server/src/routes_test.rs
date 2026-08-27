@@ -4885,7 +4885,10 @@ mod tests {
         assert_eq!(body["devices"]["planned_lanes"], true);
         assert_eq!(body["devices"]["learned_eta"], true);
         assert_eq!(body["reference_uploads"]["available"], false);
-        assert_eq!(body["reference_uploads"]["authless_inline"], true);
+        assert!(
+            body["reference_uploads"].get("authless_inline").is_none(),
+            "authless inline is the negation of `available`, not a second bit"
+        );
         assert_eq!(body["reference_uploads"]["protocol_version"], 2);
         assert_eq!(body["reference_uploads"]["requires_api_key"], true);
         assert_eq!(
@@ -4914,8 +4917,11 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
         assert_eq!(body["reference_uploads"]["available"], true);
-        assert_eq!(body["reference_uploads"]["authless_inline"], false);
         assert_eq!(body["reference_uploads"]["requires_api_key"], true);
+        assert_eq!(
+            body["reference_uploads"]["max_active_sessions"],
+            crate::reference_uploads::MAX_REFERENCE_UPLOAD_SESSIONS_PER_IDENTITY
+        );
     }
 
     #[tokio::test]
@@ -4993,7 +4999,6 @@ mod tests {
                     "encrypted_at_rest": true,
                     "generate_request_media": true,
                     "identity": true,
-                    "h3_references": false,
                     "private_h3": cfg!(any(feature = "h3", feature = "h3-private-uat")),
                 }),
                 "lane count must not darken an otherwise complete runtime"
@@ -5312,7 +5317,6 @@ mod tests {
                     target_device_id: None,
                     completion_payload: crate::state::SseCompletionPayload::MetadataOnly,
                     batch_child: false,
-                    carries_reference_authority: false,
                 }],
             })
             .unwrap();
@@ -6721,26 +6725,303 @@ mod tests {
         );
     }
 
-    /// Ordered references still refuse, and the reason is their one-use upload
-    /// authority rather than a protocol version. Nothing reaches SQLite: the
-    /// point of the refusal is that those handles are never written down.
+    #[cfg(feature = "h3")]
+    fn inline_ref2va_body(prompt: &str, image: &[u8]) -> serde_json::Value {
+        serde_json::json!({
+            "prompt": prompt,
+            "model": mold_core::minimax_h3::REF2VA_COMFY,
+            "width": mold_core::minimax_h3::DEFAULT_WIDTH,
+            "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
+            "steps": mold_core::minimax_h3::DEFAULT_STEPS,
+            "guidance": 0.0,
+            "strength": 1.0,
+            "batch_size": 1,
+            "frames": mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
+            "fps": mold_core::minimax_h3::FIXED_FPS,
+            "output_format": "mp4",
+            "references": [{
+                "kind": "image",
+                "media": {
+                    "authority": "inline",
+                    "data": base64::engine::general_purpose::STANDARD.encode(image)
+                },
+                "provenance": {
+                    "name": "anchor.png",
+                    "sha256": format!("{:x}", Sha256::digest(image))
+                },
+                "mime_type": "image/png",
+                "width": 1,
+                "height": 1
+            }]
+        })
+    }
+
+    /// A router with API-key auth explicitly disabled: the auth layers are
+    /// installed with no key set, which is what `ReferenceIdentity` reads as
+    /// "inline references are admissible without a key".
+    #[cfg(feature = "h3")]
+    fn authless_app(state: AppState) -> axum::Router {
+        app_with_state(state)
+            .layer(axum::middleware::from_fn(crate::auth::require_api_key))
+            .layer(axum::middleware::from_fn_with_state(
+                None,
+                crate::auth::inject_auth_state,
+            ))
+    }
+
+    #[cfg(feature = "h3")]
+    fn keyed_app(state: AppState) -> axum::Router {
+        let keys = std::collections::HashSet::from(["test-key".to_string()]);
+        app_with_state(state)
+            .layer(axum::middleware::from_fn(crate::auth::require_api_key))
+            .layer(axum::middleware::from_fn_with_state(
+                Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys))),
+                crate::auth::inject_auth_state,
+            ))
+    }
+
+    #[cfg(feature = "h3")]
+    fn keyed_json_request(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("x-api-key", "test-key")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[cfg(feature = "h3")]
+    fn sqlite_bytes(db_path: &std::path::Path) -> Vec<u8> {
+        let mut sqlite = std::fs::read(db_path).unwrap();
+        if let Ok(wal) = std::fs::read(format!("{}-wal", db_path.display())) {
+            sqlite.extend(wal);
+        }
+        sqlite
+    }
+
+    /// Ordered references are admitted durably: the descriptor is a request
+    /// setting that stays in the row, the bytes are sealed into the encrypted
+    /// media set, and nothing that could re-open the media — the inline
+    /// payload, a handle, a staging path — is written into SQLite.
+    #[cfg(feature = "h3")]
     #[tokio::test(flavor = "current_thread")]
-    async fn ordered_references_refuse_without_persisting_their_handles() {
+    async fn inline_ref2va_references_admit_durably_and_seal_only_their_bytes() {
         let root = tempfile::tempdir().unwrap();
-        let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
-        let (mut state, _rx) = durable_state(db, root.path());
+        let db_path = root.path().join("mold.db");
+        let db = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
+        let (mut state, _rx) = durable_state_with_engine(
+            db.clone(),
+            root.path(),
+            MockEngine::ready_for_model(mold_core::minimax_h3::REF2VA_COMFY),
+        );
         install_authoritative_v2(&mut state);
         let journal = state.queue_journal.clone();
-        let mut request: GenerateRequest =
-            serde_json::from_str(&generate_body("ordered references", 64, 64)).unwrap();
-        request.references = Some(Vec::new());
+        let image = minimal_png();
+        let inline_payload = base64::engine::general_purpose::STANDARD.encode(&image);
 
-        let Err(error) = crate::routes::direct_durable_admission(&state, &mut request).await else {
-            panic!("one-use reference authority cannot be persisted");
-        };
-        assert_eq!(error.code, "DURABLE_MEDIA_REFERENCES_UNSUPPORTED");
-        assert!(error.error.contains("one-use"), "{}", error.error);
-        assert!(journal.list_all().is_empty());
+        let accepted = authless_app(state.clone())
+            .oneshot(json_request(
+                "POST",
+                "/api/generation-batches",
+                serde_json::json!({
+                    "client_batch_id": uuid::Uuid::new_v4().to_string(),
+                    "requests": [inline_ref2va_body("durable ordered references", &image)],
+                }),
+            ))
+            .await
+            .unwrap();
+        if accepted.status() != StatusCode::ACCEPTED {
+            let status = accepted.status();
+            let error = json_body(accepted).await;
+            panic!("inline Ref2VA was not admitted durably: {status}: {error}");
+        }
+
+        let rows = journal.list_all();
+        assert_eq!(
+            rows.len(),
+            1,
+            "a reference-carrying print is admitted durably"
+        );
+        let row = &rows[0];
+        assert!(row.media_set_id.is_some(), "the reference bytes are sealed");
+        assert!(
+            row.admission_authority.is_some(),
+            "the H3 grant is captured"
+        );
+        let stored: GenerateRequest = serde_json::from_str(&row.request_json).unwrap();
+        let references = stored
+            .references
+            .as_deref()
+            .expect("descriptors stay on the row");
+        assert_eq!(references.len(), 1);
+        assert!(matches!(
+            references[0].media(),
+            mold_core::GenerationReferenceAuthority::Descriptor
+        ));
+        assert_eq!(
+            references[0].provenance().sha256.as_deref(),
+            Some(format!("{:x}", Sha256::digest(&image)).as_str())
+        );
+        assert!(!row.request_json.contains("inline"));
+        assert!(!row.request_json.contains("resolved-"));
+        let owner = journal.owner_uuid().unwrap();
+        assert_eq!(
+            mold_db::generation_queue_media::list_obligations(
+                db.as_ref().as_ref().unwrap(),
+                owner,
+                mold_db::generation_queue_media::QueueMediaObligationState::Active,
+            )
+            .unwrap()
+            .len(),
+            1
+        );
+        let sqlite = sqlite_bytes(&db_path);
+        assert!(
+            !sqlite
+                .windows(inline_payload.len())
+                .any(|window| window == inline_payload.as_bytes()),
+            "reference bytes must never be written into mold.db"
+        );
+        // The admission staging released its quota and files at the seal; the
+        // encrypted set is the only copy.
+        assert_eq!(state.reference_uploads.resolved_bytes_for_test(), 0);
+        assert_eq!(state.reference_uploads.staged_set_count_for_test(), 0);
+    }
+
+    /// Stream one PNG through a request-bound upload session, then admit the
+    /// request through the batch route. The one-use handle is consumed inside
+    /// admission and never journaled; the session, its staging, and its quota
+    /// are all gone by the time the 202 is answered.
+    #[cfg(feature = "h3")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn upload_session_references_admit_durably_and_release_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let db_path = root.path().join("mold.db");
+        let db = Arc::new(Some(mold_db::MetadataDb::open(&db_path).unwrap()));
+        let (mut state, _rx) = durable_state_with_engine(
+            db,
+            root.path(),
+            MockEngine::ready_for_model(mold_core::minimax_h3::REF2VA_COMFY),
+        );
+        install_authoritative_v2(&mut state);
+        let journal = state.queue_journal.clone();
+        let app = keyed_app(state.clone());
+        let image = minimal_png();
+        let mut descriptor_request = inline_ref2va_body("uploaded ordered references", &image);
+        descriptor_request["references"][0]["media"] =
+            serde_json::json!({ "authority": "descriptor" });
+
+        let session = app
+            .clone()
+            .oneshot(keyed_json_request(
+                "POST",
+                "/api/generate/reference-upload-sessions",
+                serde_json::json!({
+                    "request": descriptor_request.clone(),
+                    "upload_references": [1],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(session.status(), StatusCode::OK, "session");
+        let session = json_body(session).await;
+        let handle = session["uploads"][0]["handle"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let uploaded = app
+            .clone()
+            .oneshot(
+                Request::put("/api/generate/reference-upload")
+                    .header("x-api-key", "test-key")
+                    .header(crate::reference_uploads::UPLOAD_HANDLE_HEADER, &handle)
+                    .header("content-type", "image/png")
+                    .header("content-length", image.len().to_string())
+                    .body(Body::from(image.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(uploaded.status(), StatusCode::OK, "upload");
+        let uploaded = json_body(uploaded).await;
+        assert_eq!(uploaded["session_complete"], true);
+        assert!(state.reference_uploads.staging_exists());
+
+        let mut upload_request = descriptor_request.clone();
+        upload_request["references"][0]["media"] =
+            serde_json::json!({ "authority": "upload", "handle": handle });
+        upload_request["references"][0]["provenance"]["sha256"] =
+            uploaded["metadata"]["sha256"].clone();
+        let client_batch_id = uuid::Uuid::new_v4().to_string();
+        let batch = serde_json::json!({
+            "client_batch_id": client_batch_id,
+            "requests": [upload_request],
+        });
+        let accepted = app
+            .clone()
+            .oneshot(keyed_json_request(
+                "POST",
+                "/api/generation-batches",
+                batch.clone(),
+            ))
+            .await
+            .unwrap();
+        if accepted.status() != StatusCode::ACCEPTED {
+            let status = accepted.status();
+            let error = json_body(accepted).await;
+            panic!("uploaded Ref2VA was not admitted durably: {status}: {error}");
+        }
+        let admitted = json_body(accepted).await;
+        let rows = journal.list_all();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].media_set_id.is_some());
+        assert!(!rows[0].request_json.contains(&handle));
+        let stored: GenerateRequest = serde_json::from_str(&rows[0].request_json).unwrap();
+        assert!(matches!(
+            stored.references.as_deref().unwrap()[0].media(),
+            mold_core::GenerationReferenceAuthority::Descriptor
+        ));
+        assert_eq!(state.reference_uploads.resolved_bytes_for_test(), 0);
+        assert_eq!(state.reference_uploads.staged_set_count_for_test(), 0);
+        assert!(
+            !sqlite_bytes(&db_path)
+                .windows(handle.len())
+                .any(|window| window == handle.as_bytes()),
+            "a one-use upload handle must never be written into mold.db"
+        );
+
+        // A retry of the same operation is answered from the journal before
+        // anything is resolved: the handle it carries was already spent, and
+        // the client gets its batch back rather than an unknown-upload error.
+        let retried = app
+            .clone()
+            .oneshot(keyed_json_request("POST", "/api/generation-batches", batch))
+            .await
+            .unwrap();
+        assert_eq!(retried.status(), StatusCode::OK);
+        assert_eq!(json_body(retried).await["id"], admitted["id"]);
+        assert_eq!(journal.list_all().len(), 1);
+
+        // The same spent handle under a NEW operation is a refusal, and it
+        // queues nothing.
+        let mut reused = serde_json::from_value::<serde_json::Value>(
+            serde_json::json!({ "client_batch_id": uuid::Uuid::new_v4().to_string() }),
+        )
+        .unwrap();
+        reused["requests"] = serde_json::json!([descriptor_request]);
+        reused["requests"][0]["references"][0]["media"] =
+            serde_json::json!({ "authority": "upload", "handle": handle });
+        let refused = app
+            .oneshot(keyed_json_request(
+                "POST",
+                "/api/generation-batches",
+                reused,
+            ))
+            .await
+            .unwrap();
+        assert!(refused.status().is_client_error(), "{}", refused.status());
+        assert_eq!(journal.list_all().len(), 1);
     }
 
     /// A LoRA beside conditioning media is an ordinary durable request.
@@ -7348,9 +7629,9 @@ mod tests {
             assert!(journal.cancel_id(&row.id).unwrap());
         }
 
-        // One-over-N atomicity is asked with a trait that still refuses:
-        // ordered references. A LoRA beside media used to serve here and no
-        // longer refuses at all — it is an ordinary durable request.
+        // One-over-N atomicity is asked with a trait that refuses by
+        // validation: ordered references on a model that is not MiniMax H3
+        // Ref2VA. Nothing about them is a durability question any more.
         let mut refused = media;
         refused["references"] = serde_json::json!([]);
         let rejected = app
@@ -7370,10 +7651,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(
-            json_body(rejected).await["code"],
-            "DURABLE_MEDIA_REFERENCES_UNSUPPORTED"
-        );
+        assert_eq!(json_body(rejected).await["code"], "VALIDATION_ERROR");
         assert!(journal.list_all().is_empty());
         let owner = journal.owner_uuid().unwrap();
         assert!(mold_db::generation_queue_media::list_obligations(
@@ -7424,12 +7702,12 @@ mod tests {
         hdr["hdr_exr_dir"] = serde_json::json!(hdr_sentinel);
 
         for path in ["/api/generate", "/api/generate/stream"] {
-            // `hdr_exr_dir` keeps its own older refusal — an HTTP client may
-            // not name an output directory on the inference machine — so the
-            // code differs from the reference one while the guarantee this
-            // test exists for, that neither reaches SQLite, is unchanged.
+            // Both refuse by validation: references belong to MiniMax H3
+            // Ref2VA alone, and `hdr_exr_dir` names an output directory on
+            // the inference machine an HTTP client may not choose. The
+            // guarantee this test exists for is that neither reaches SQLite.
             for (request, expected_code) in [
-                (&references, "DURABLE_MEDIA_REFERENCES_UNSUPPORTED"),
+                (&references, "VALIDATION_ERROR"),
                 (&hdr, "VALIDATION_ERROR"),
             ] {
                 let response = app
@@ -12310,73 +12588,59 @@ mod tests {
         }
     }
 
+    /// A host with API-key auth disabled admits an inline Ref2VA set on the
+    /// durable path and refuses an upload handle it has no identity to bind;
+    /// a keyed host refuses the keyless submission outright.
     #[cfg(feature = "h3")]
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn auth_disabled_host_accepts_inline_ref2va_but_auth_enabled_host_requires_a_key() {
-        let models_dir = tempfile::tempdir().unwrap();
-        let _models_root = EnvVarGuard::set("MOLD_MODELS_DIR", models_dir.path().as_os_str());
-        populate_manifest_files(models_dir.path(), mold_core::minimax_h3::REF2VA_COMFY);
-        let image = minimal_png();
-        let image_sha256 = format!("{:x}", Sha256::digest(&image));
-        let body = serde_json::json!({
-            "prompt": "authless inline reference",
-            "model": mold_core::minimax_h3::REF2VA_COMFY,
-            "width": mold_core::minimax_h3::DEFAULT_WIDTH,
-            "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
-            "steps": mold_core::minimax_h3::DEFAULT_STEPS,
-            "guidance": 0.0,
-            "strength": 1.0,
-            "batch_size": 1,
-            "frames": mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
-            "fps": mold_core::minimax_h3::FIXED_FPS,
-            "output_format": "mp4",
-            "references": [{
-                "kind": "image",
-                "media": {
-                    "authority": "inline",
-                    "data": base64::engine::general_purpose::STANDARD.encode(&image)
-                },
-                "provenance": { "name": "anchor.png", "sha256": image_sha256 },
-                "mime_type": "image/png",
-                "width": 1,
-                "height": 1
-            }]
-        })
-        .to_string();
-
-        let (state, mut queue_rx) = AppState::with_engine_and_queue(MockEngine::ready_for_model(
+        let (state, _rx, _root) = durable_test_state(MockEngine::ready_for_model(
             mold_core::minimax_h3::REF2VA_COMFY,
         ));
-        let authless_app = app_with_state(state.clone())
-            .layer(axum::middleware::from_fn(crate::auth::require_api_key))
-            .layer(axum::middleware::from_fn_with_state(
-                None,
-                crate::auth::inject_auth_state,
-            ));
-        let accepted = authless_app
-            .clone()
-            .oneshot(
-                Request::post("/api/generate/stream")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.clone()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        if accepted.status() != StatusCode::OK {
-            let status = accepted.status();
-            let error = json_body(accepted).await;
-            panic!("auth-disabled inline Ref2VA returned {status}: {error}");
-        }
-        assert_eq!(state.job_registry.len(), 1);
-        assert!(queue_rx.try_recv().is_ok(), "inline Ref2VA was not queued");
+        let journal = state.queue_journal.clone();
+        let image = minimal_png();
+        let body = inline_ref2va_body("authless inline reference", &image).to_string();
+        let authless = authless_app(state.clone());
+
+        // The streaming route answers once the feeder claims the row; this
+        // test owns admission, so it waits for the journal instead.
+        let stream = tokio::spawn({
+            let authless = authless.clone();
+            let body = body.clone();
+            async move {
+                authless
+                    .oneshot(
+                        Request::post("/api/generate/stream")
+                            .header("content-type", "application/json")
+                            .body(Body::from(body))
+                            .unwrap(),
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while journal.list_all().len() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("auth-disabled inline Ref2VA must be admitted durably");
+        let rows = journal.list_all();
+        assert!(rows[0].media_set_id.is_some());
+        let stored: GenerateRequest = serde_json::from_str(&rows[0].request_json).unwrap();
+        assert!(matches!(
+            stored.references.as_deref().unwrap()[0].media(),
+            mold_core::GenerationReferenceAuthority::Descriptor
+        ));
+        stream.abort();
+        let _ = stream.await;
 
         let mut upload_body: serde_json::Value = serde_json::from_str(&body).unwrap();
         upload_body["references"][0]["media"] = serde_json::json!({
             "authority": "upload",
             "handle": "authless-upload-must-not-resolve"
         });
-        let upload_rejected = authless_app
+        let upload_rejected = authless
             .oneshot(
                 Request::post("/api/generate/stream")
                     .header("content-type", "application/json")
@@ -12386,10 +12650,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(upload_rejected.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(journal.list_all().len(), 1);
 
-        let keys = std::collections::HashSet::from(["test-key".to_string()]);
-        let auth = Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys)));
-        let rejected = app_with_auth(auth)
+        let rejected = keyed_app(state)
             .oneshot(
                 Request::post("/api/generate/stream")
                     .header("content-type", "application/json")
@@ -12399,6 +12662,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(journal.list_all().len(), 1);
     }
 
     #[tokio::test]

@@ -1010,7 +1010,7 @@ pub async fn run(
         .is_some_and(mold_core::minimax_h3::is_family);
     if is_h3 && !reference_uploads.is_empty() && batch != 1 {
         anyhow::bail!(
-            "MiniMax H3 ordered references require batch 1 because upload handles are one-use and request-bound"
+            "MiniMax H3 uploaded references require batch 1: an upload session binds one request, so Batch N needs one session per sibling"
         );
     }
     if is_h3
@@ -4376,7 +4376,6 @@ mod tests {
         let capabilities = mold_core::ServerCapabilities {
             reference_uploads: mold_core::ReferenceUploadCapabilities {
                 available: true,
-                authless_inline: false,
                 protocol_version: 2,
                 requires_api_key: true,
                 session_path: mold_core::reference_upload::SESSION_PATH.into(),
@@ -4385,6 +4384,7 @@ mod tests {
                 upload_handle_header: mold_core::reference_upload::UPLOAD_HANDLE_HEADER.into(),
                 max_file_bytes: 256 * 1024 * 1024,
                 max_session_bytes: 1024 * 1024 * 1024,
+                max_active_sessions: 4,
                 session_ttl_ms: 120_000,
             },
             ..Default::default()

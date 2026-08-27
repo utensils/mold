@@ -26,10 +26,9 @@ const RESERVED_SECRET_HEADERS = new Set([
 ]);
 
 export interface ReferenceUploadCapabilities {
+  /** The request-bound upload protocol is offered exactly when the host has
+   * API-key auth enabled; otherwise validated inline references are sent. */
   available: boolean;
-  /** Positive current-host evidence that API-key auth is disabled. Absent on
-   * legacy/unknown snapshots, which authenticated routes treat fail-closed. */
-  authless_inline?: boolean;
   protocol_version: number;
   requires_api_key: boolean;
   session_path: string;
@@ -38,6 +37,9 @@ export interface ReferenceUploadCapabilities {
   upload_handle_header: string;
   max_file_bytes: number;
   max_session_bytes: number;
+  /** Open sessions one identity may hold at once; a durable batch takes one
+   * lease per reference-bearing sibling before it POSTs. */
+  max_active_sessions: number;
   session_ttl_ms: number;
 }
 
@@ -182,6 +184,10 @@ function validateCapabilities(
     value.session_ttl_ms,
     "session lifetime",
   );
+  const maxActiveSessions = requirePositiveSafeInteger(
+    value.max_active_sessions,
+    "active-session limit",
+  );
   if (maxFileBytes > maxSessionBytes) {
     protocolError(
       "REFERENCE_UPLOAD_CAPABILITY_INVALID",
@@ -190,7 +196,6 @@ function validateCapabilities(
   }
   return {
     available: true,
-    authless_inline: false,
     protocol_version: 2,
     requires_api_key: true,
     session_path: sessionPath,
@@ -199,6 +204,7 @@ function validateCapabilities(
     upload_handle_header: uploadHeader,
     max_file_bytes: maxFileBytes,
     max_session_bytes: maxSessionBytes,
+    max_active_sessions: maxActiveSessions,
     session_ttl_ms: sessionTtlMs,
   };
 }
@@ -922,19 +928,101 @@ export function requestNeedsReferenceUpload(
   );
 }
 
-/** Prefer request-bound uploads for every API-key route unless a current host
- * snapshot positively identifies authless inline support. Missing/legacy
- * capabilities stay fail-closed by entering upload preparation, whose strict
- * validation refuses the unknown protocol instead of disclosing media inline. */
+/** How many siblings one durable batch POST may carry when any of them takes
+ * the upload protocol. A lease stays open until the POST consumes it and the
+ * host caps open sessions per identity, so a chunk can hold no more leases
+ * than that; a batch with no upload work keeps the host's batch limit. */
+export function referenceUploadBatchLimit(
+  requests: readonly ReferenceUploadRequest[],
+  target: { apiKey?: ApiTarget["apiKey"] } | null | undefined,
+  capabilities: ReferenceUploadCapabilities | null | undefined,
+  batchLimit: number,
+): number {
+  if (
+    !requests.some((request) =>
+      requestShouldUseReferenceUploads(request, target, capabilities),
+    )
+  ) {
+    return batchLimit;
+  }
+  const sessions = capabilities?.max_active_sessions;
+  return Number.isSafeInteger(sessions) && (sessions as number) > 0
+    ? Math.min(batchLimit, sessions as number)
+    : batchLimit;
+}
+
+/** One durable chunk's siblings in transport form plus the authority to
+ * release every lease it took. A lease is consumed only by an admitted POST:
+ * a chunk the host DEFINITELY refused (validation, activation, a spent
+ * handle) leaves its sessions open until they expire unless the caller
+ * releases them, and four such refusals would lock the identity out. */
+export interface ReferenceUploadBatch<T extends ReferenceUploadRequest> {
+  readonly requests: T[];
+  /** Cancel every lease this chunk took. Idempotent and best-effort. */
+  release(): Promise<void>;
+}
+
+/** Stage one lease per sibling that takes the upload protocol, one at a time
+ * (the host caps open sessions per identity), and return the transport form
+ * of every sibling in order. Every lease taken is released again when a later
+ * sibling cannot take one: nothing has been POSTed yet, and the host's open
+ * slots must not stay occupied by a chunk that will never be admitted. */
+export async function prepareReferenceUploadBatch<
+  T extends ReferenceUploadRequest,
+>(options: {
+  target: ApiTarget;
+  expectedInstanceId: string;
+  capabilities: ReferenceUploadCapabilities | null | undefined;
+  requests: readonly T[];
+  signal?: AbortSignal;
+  now?: () => number;
+}): Promise<ReferenceUploadBatch<T>> {
+  const leases: ReferenceUploadLease<T>[] = [];
+  const release = async (): Promise<void> => {
+    await Promise.allSettled(leases.map((lease) => lease.cancel()));
+  };
+  const staged: T[] = [];
+  try {
+    for (const request of options.requests) {
+      if (
+        !requestShouldUseReferenceUploads(
+          request,
+          options.target,
+          options.capabilities,
+        )
+      ) {
+        staged.push(request);
+        continue;
+      }
+      const lease = await prepareReferenceUploads({
+        target: options.target,
+        expectedInstanceId: options.expectedInstanceId,
+        capabilities: options.capabilities,
+        request,
+        signal: options.signal,
+        now: options.now,
+      });
+      leases.push(lease);
+      staged.push(lease.request);
+    }
+  } catch (error) {
+    await release();
+    throw error;
+  }
+  return { requests: staged, release };
+}
+
+/** Use request-bound uploads exactly when the host offers them and this
+ * client holds the key they bind to; otherwise the validated inline
+ * references (32 MiB aggregate cap) go on the request itself. */
 export function requestShouldUseReferenceUploads(
   request: ReferenceUploadRequest,
   target: { apiKey?: ApiTarget["apiKey"] } | null | undefined,
-  capabilities:
-    Pick<ReferenceUploadCapabilities, "authless_inline"> | null | undefined,
+  capabilities: Pick<ReferenceUploadCapabilities, "available"> | null | undefined,
 ): boolean {
   return (
     requestNeedsReferenceUpload(request) &&
-    Boolean(target?.apiKey?.trim()) &&
-    capabilities?.authless_inline !== true
+    capabilities?.available === true &&
+    Boolean(target?.apiKey?.trim())
   );
 }

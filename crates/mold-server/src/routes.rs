@@ -1103,7 +1103,6 @@ pub(crate) async fn require_server_generation_request_activation(
 
 pub(crate) struct PreparedGenerationRoute {
     pub(crate) warnings: RequestWarnings,
-    pub(crate) resolved_references: Option<crate::reference_uploads::ResolvedReferenceSet>,
     #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
     pub(crate) h3_private_ingress_grant: Option<crate::h3_private_bridge::H3PrivateIngressGrant>,
 }
@@ -1135,7 +1134,7 @@ async fn prepare_generation_inner(
     restored_authority: Option<crate::durable_admission_authority::RuntimeAuthority>,
 ) -> Result<PreparedGenerationRoute, ApiError> {
     #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
-    let _ = &restored_authority;
+    let _ = (&restored_authority, authenticated);
     // This seam deliberately does not load an inference engine, prepare model
     // weights, or reserve execution memory. Scheduler V2 owns those bounded
     // operations after durable acknowledgement. Local prompt expansion and
@@ -1188,43 +1187,14 @@ async fn prepare_generation_inner(
     if !private_h3_ingress {
         require_server_generation_request_activation(state, request, family.as_deref()).await?;
     }
-    if request.references.is_some() && request.batch_size > 1 {
-        return Err(ApiError::with_code(
-            "MiniMax H3 reference requests do not support durable server batches yet",
-            "MINIMAX_H3_REFERENCE_BATCH_UNSUPPORTED",
-            StatusCode::UNPROCESSABLE_ENTITY,
-        ));
-    }
     if let Some(references) = request.references.as_deref() {
-        // Validate the complete ordered contract before catalog/model install
-        // or any other admission mutation. Content probing follows authority
-        // resolution, still before the request can enter the queue.
-        mold_core::minimax_h3::validate_references(references).map_err(ApiError::reference)?;
+        // Admission resolved every public authority before the row was
+        // acknowledged; what reaches preparation is the descriptor list whose
+        // media the consumer hydrates under its own lease. Anything else here
+        // is a row that was written wrong, held rather than guessed at.
+        mold_core::minimax_h3::validate_reference_descriptors(references)
+            .map_err(ApiError::reference)?;
     }
-    // Ordered references never reach preparation on the durable path today:
-    // `durable_media_preflight` refuses them by name before admission, and
-    // post-ack preparation has no request context (no `AuthState`) to decide
-    // an auth-disabled inline set the way the retired attached route did.
-    // Carrying references durably is the tracked follow-up; until then this
-    // arm is the honest fail-closed answer.
-    let reference_identity = match request.references.as_deref() {
-        None => None,
-        Some(_) if authenticated.is_some() => {
-            Some(authenticated.expect("checked above").identity.clone())
-        }
-        Some(_) => {
-            return Err(ApiError::with_code(
-                "API key authentication is required for reference media",
-                "UNAUTHORIZED",
-                StatusCode::UNAUTHORIZED,
-            ));
-        }
-    };
-    let reference_scope_sha256 = request
-        .references
-        .as_ref()
-        .map(|_| state.reference_uploads.scope_sha256(request))
-        .transpose()?;
     if request.expand == Some(true) && !request.prompt.trim().is_empty() {
         let settings = state
             .config
@@ -1377,24 +1347,6 @@ async fn prepare_generation_inner(
         .other
         .extend(resolve_request_filing(state, request).await);
 
-    let resolved_references = if request.references.is_some() {
-        let identity = reference_identity
-            .as_deref()
-            .expect("reference authentication was checked before admission mutation");
-        let media_roots = state.config.read().await.resolved_media_roots();
-        state
-            .reference_uploads
-            .resolve_request(
-                identity,
-                request,
-                &media_roots,
-                reference_scope_sha256.as_deref(),
-            )
-            .await?
-    } else {
-        None
-    };
-
     resolve_server_local_media_paths(state, request).await?;
     if let Some((adapter, path)) = planned_control {
         // The ordinary attached route may wait for this first-party adapter
@@ -1475,7 +1427,6 @@ async fn prepare_generation_inner(
     };
     Ok(PreparedGenerationRoute {
         warnings,
-        resolved_references,
         #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
         h3_private_ingress_grant,
     })
@@ -2375,6 +2326,21 @@ fn validate_direct_generation_request(
 /// generate, so every gate here is a refusal rather than a fallback: silently
 /// running a non-durable render on a host whose queue cannot replay it is
 /// exactly the ambiguity this route exists to remove.
+/// The identity reference media is resolved under: the API-key identity when
+/// one authenticated the request, the explicit auth-disabled host otherwise,
+/// and nothing at all when neither holds (a router without the auth layers).
+fn reference_identity(
+    state: &AppState,
+    authenticated: Option<&Extension<crate::auth::ApiKeyAuthenticated>>,
+    auth_state: Option<&Extension<crate::auth::AuthState>>,
+) -> Option<crate::reference_uploads::ReferenceIdentity> {
+    crate::reference_uploads::ReferenceIdentity::resolve(
+        authenticated.map(|Extension(auth)| auth),
+        auth_state.map(|Extension(auth_state)| auth_state),
+        state.instance_id.as_str(),
+    )
+}
+
 pub(crate) async fn direct_durable_admission(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
@@ -2524,6 +2490,7 @@ pub(crate) fn generation_batch_status(
 async fn admit_generation_batch(
     State(state): State<AppState>,
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
+    auth_state: Option<Extension<crate::auth::AuthState>>,
     Json(mut body): Json<mold_core::GenerationBatchAdmissionRequest>,
 ) -> Result<(StatusCode, Json<mold_core::GenerationBatchStatus>), ApiError> {
     // Every conjunct at one evaluation point. This used to be two statements
@@ -2584,6 +2551,7 @@ async fn admit_generation_batch(
         .admit_batch(
             &state,
             authenticated.as_ref().map(|Extension(auth)| auth),
+            reference_identity(&state, authenticated.as_ref(), auth_state.as_ref()),
             body,
             None,
             SseCompletionPayload::MetadataOnly,
@@ -2924,6 +2892,7 @@ fn canonical_generation_batch_status_ids(
 async fn generate(
     State(state): State<AppState>,
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
+    auth_state: Option<Extension<crate::auth::AuthState>>,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Response, ApiError> {
     mold_core::minimax_h3::canonicalize_request_model(&mut req);
@@ -2933,6 +2902,7 @@ async fn generate(
         .admit_batch(
             &state,
             authenticated.as_ref().map(|Extension(auth)| auth),
+            reference_identity(&state, authenticated.as_ref(), auth_state.as_ref()),
             mold_core::GenerationBatchAdmissionRequest {
                 client_batch_id: uuid::Uuid::new_v4().to_string(),
                 requests: vec![req],
@@ -3978,6 +3948,7 @@ pub(crate) fn requested_sse_completion_payload(
 async fn generate_stream(
     State(state): State<AppState>,
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
+    auth_state: Option<Extension<crate::auth::AuthState>>,
     headers: HeaderMap,
     Json(mut req): Json<mold_core::GenerateRequest>,
 ) -> Result<Response, ApiError> {
@@ -3989,6 +3960,7 @@ async fn generate_stream(
         .admit_batch(
             &state,
             authenticated.as_ref().map(|Extension(auth)| auth),
+            reference_identity(&state, authenticated.as_ref(), auth_state.as_ref()),
             mold_core::GenerationBatchAdmissionRequest {
                 client_batch_id: uuid::Uuid::new_v4().to_string(),
                 requests: vec![req],
@@ -6971,9 +6943,8 @@ async fn server_capabilities(
         reference_uploads: mold_core::ReferenceUploadCapabilities {
             // The request-bound upload protocol derives its authority from an
             // authenticated API-key identity. When server auth is disabled,
-            // clients must retain validated inline references instead.
+            // clients retain validated inline references instead.
             available: api_key_auth_enabled,
-            authless_inline: !api_key_auth_enabled,
             // V2 rebinds the request scope to content-probed canonical
             // descriptors as each upload completes. V1 trusted provisional
             // browser AAC packet arithmetic and is intentionally not offered.
@@ -6985,6 +6956,8 @@ async fn server_capabilities(
             upload_handle_header: crate::reference_uploads::UPLOAD_HANDLE_HEADER.to_string(),
             max_file_bytes: crate::reference_uploads::MAX_REFERENCE_UPLOAD_FILE_BYTES,
             max_session_bytes: crate::reference_uploads::MAX_REFERENCE_UPLOAD_SESSION_BYTES,
+            max_active_sessions:
+                crate::reference_uploads::MAX_REFERENCE_UPLOAD_SESSIONS_PER_IDENTITY as u32,
             session_ttl_ms: crate::reference_uploads::REFERENCE_UPLOAD_SESSION_TTL.as_millis()
                 as u64,
         },

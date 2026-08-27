@@ -1769,7 +1769,6 @@ describe("useHostRouting", () => {
       encrypted_at_rest: true,
       generate_request_media: true,
       identity: true,
-      h3_references: false,
       private_h3: false,
     };
     statuses.set(ORIGIN_HOST_ID, status());

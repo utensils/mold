@@ -68,10 +68,6 @@ pub struct GenerationJob {
     /// Authenticated durable media remains opaque until this job owns its
     /// execution slot or concrete device lease.
     pub deferred_media: Option<crate::queue_media_runtime::DeferredQueueMedia>,
-    /// Private, payload-bearing reference authority. The public request is
-    /// descriptor-only by the time this exists; this owner keeps safe-open
-    /// staging alive without exposing paths to queue metadata or recovery.
-    pub resolved_references: Option<crate::reference_uploads::ResolvedReferenceSet>,
     pub completion_payload: SseCompletionPayload,
     /// Channel to send SSE progress/complete/error events (None for non-streaming).
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
@@ -991,7 +987,6 @@ mod tests {
             durable_queue_rank: None,
             request,
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,

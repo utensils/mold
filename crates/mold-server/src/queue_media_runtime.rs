@@ -71,25 +71,62 @@ impl DeferredQueueMedia {
         let media =
             crate::queue_media::decrypted_media_into_opaque(expected_job_id, &mut decrypted)
                 .map_err(DeferredQueueMediaError::from_media)?;
-        crate::queue_media::rehydrate_request_media_into(expected_job_id, request, media)
-            .map_err(DeferredQueueMediaError::from_media)?;
-        Ok(HydratedQueueMediaLease { decrypted })
+        let reference_paths =
+            crate::queue_media::rehydrate_request_media_into(expected_job_id, request, media)
+                .map_err(DeferredQueueMediaError::from_media)?;
+        Ok(HydratedQueueMediaLease {
+            decrypted: Arc::new(decrypted),
+            reference_paths,
+        })
     }
 }
 
 /// Owns every private staged path until the generation attempt finishes.
-/// Dropping it removes the private staging tree; memory-only bytes remain on
-/// the request and are never materialized to a filesystem path.
+/// Dropping the last holder removes the private staging tree; memory-only
+/// bytes remain on the request and are never materialized to a filesystem
+/// path. Staged reference files are not overlaid onto the request — they are
+/// handed out through [`Self::references`] under this same hold.
 pub struct HydratedQueueMediaLease {
-    #[allow(dead_code)]
-    decrypted: DecryptedQueueMediaSet,
+    decrypted: Arc<DecryptedQueueMediaSet>,
+    /// One private path per `request.references` descriptor, in order.
+    reference_paths: Vec<std::path::PathBuf>,
 }
 
 impl fmt::Debug for HydratedQueueMediaLease {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("HydratedQueueMediaLease")
+            .field("reference_paths", &self.reference_paths.len())
             .finish_non_exhaustive()
+    }
+}
+
+impl HydratedQueueMediaLease {
+    /// The request's ordered references bound to their private staged files.
+    ///
+    /// `None` for a request with no references. The set shares this lease's
+    /// hold, so it — and any admission view minted from it — keeps the
+    /// staging alive past the lease itself; every consumer builds its own set
+    /// from its own hydration rather than receiving one on the job.
+    pub fn references(
+        &self,
+        request: &mold_core::GenerateRequest,
+    ) -> Result<Option<crate::reference_uploads::ResolvedReferenceSet>, DeferredQueueMediaError>
+    {
+        if request.references.is_none() && self.reference_paths.is_empty() {
+            return Ok(None);
+        }
+        crate::reference_uploads::ResolvedReferenceSet::from_hydrated(
+            request,
+            self.reference_paths.clone(),
+            Arc::clone(&self.decrypted),
+        )
+        .map(Some)
+        .map_err(|error| {
+            DeferredQueueMediaError::hold(format!(
+                "durable queue media does not match its request authority: {error}"
+            ))
+        })
     }
 }
 
@@ -327,7 +364,6 @@ fn request_media_is_cleared(request: &mold_core::GenerateRequest) -> bool {
         && request.id_images.is_none()
         && request.id_image_names.is_none()
         && request.edit_images.is_none()
-        && request.references.is_none()
         && request.mask_image.is_none()
         && request.control_image.is_none()
         && request.audio_file.is_none()
@@ -417,6 +453,48 @@ impl DeferredQueueMediaError {
             }
         }
     }
+}
+
+/// Seal one request exactly as admission does — extraction, projection, safe
+/// open, encryption — into a fresh store under `home`, and hand back the
+/// opaque deferred authority a job would carry plus the durable request JSON.
+/// Test consumers hydrate it under their own lease exactly like production.
+#[cfg(all(test, unix))]
+pub(crate) fn seal_request_for_test(
+    home: &std::path::Path,
+    job_id: &str,
+    request: mold_core::GenerateRequest,
+    staged: Option<&crate::reference_uploads::StagedReferences>,
+) -> (DeferredQueueMedia, String) {
+    use crate::queue_media::{
+        extract_request_media, into_seal_media, project_request_media, ProcessPrivateAuthorities,
+        ProcessPrivateAuthority,
+    };
+    use crate::queue_media_store::QueueMediaOperationFingerprint;
+
+    std::fs::create_dir_all(home).unwrap();
+    let store = Arc::new(QueueMediaStore::open(home).unwrap().store);
+    let durable_replacement = mold_core::minimax_h3::capability_contract_for_model(&request.model)
+        .map(|_| ProcessPrivateAuthority::H3PrivateIngressGrant);
+    let authorities =
+        ProcessPrivateAuthorities::none().with_durable_replacement(durable_replacement);
+    let extracted = extract_request_media(job_id, request, &authorities, staged).unwrap();
+    let projection = project_request_media(extracted.media()).unwrap();
+    let (request_json, media) = extracted.into_parts();
+    let sealed = into_seal_media(media).unwrap();
+    let reference = store
+        .seal_v2_with_operation_fingerprint(
+            "owner-test",
+            job_id,
+            &QueueMediaOperationFingerprint::sha256_v1(job_id.as_bytes()),
+            &projection,
+            sealed,
+        )
+        .unwrap();
+    (
+        DeferredQueueMedia::new(store, reference, projection),
+        request_json,
+    )
 }
 
 #[cfg(all(test, unix))]
@@ -528,9 +606,13 @@ mod tests {
         .unwrap();
         let expected_lora = admitted.lora.clone();
         let expected_loras = admitted.loras.clone();
-        let extracted =
-            extract_request_media("job-lora", admitted, &ProcessPrivateAuthorities::none())
-                .unwrap();
+        let extracted = extract_request_media(
+            "job-lora",
+            admitted,
+            &ProcessPrivateAuthorities::none(),
+            None,
+        )
+        .unwrap();
         let projection = project_request_media(extracted.media()).unwrap();
         let (request_json, opaque_media) = extracted.into_parts();
         let mut sanitized: mold_core::GenerateRequest =
@@ -573,6 +655,7 @@ mod tests {
             "job-runtime",
             request(&source_path),
             &ProcessPrivateAuthorities::none(),
+            None,
         )
         .unwrap();
         let projection = project_request_media(extracted.media()).unwrap();
@@ -620,6 +703,7 @@ mod tests {
             "job-runtime",
             sanitized.clone(),
             &ProcessPrivateAuthorities::none(),
+            None,
         )
         .unwrap();
         assert_eq!(project_request_media(hydrated.media()).unwrap(), projection);
@@ -639,6 +723,7 @@ mod tests {
             "job-guard",
             request(&source_path),
             &ProcessPrivateAuthorities::none(),
+            None,
         )
         .unwrap();
         let projection = project_request_media(extracted.media()).unwrap();
@@ -708,6 +793,113 @@ mod tests {
         assert!(!panic_path.exists());
         drop(deferred);
         assert!(!runtime_root.exists());
+    }
+
+    fn ref2va_request_for(files: &[&[u8]]) -> mold_core::GenerateRequest {
+        use sha2::{Digest as _, Sha256};
+
+        let references = files
+            .iter()
+            .enumerate()
+            .map(|(index, bytes)| {
+                serde_json::json!({
+                    "kind": "image",
+                    "media": { "authority": "descriptor" },
+                    "provenance": {
+                        "name": format!("reference-{}.png", index + 1),
+                        "sha256": format!("{:x}", Sha256::digest(bytes))
+                    },
+                    "mime_type": "image/png",
+                    "width": 1024,
+                    "height": 768
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::from_value(serde_json::json!({
+            "prompt": "ordered references",
+            "model": mold_core::minimax_h3::REF2VA_COMFY,
+            "width": mold_core::minimax_h3::DEFAULT_WIDTH,
+            "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
+            "steps": 4,
+            "guidance": 0.0,
+            "seed": 7,
+            "batch_size": 1,
+            "output_format": "mp4",
+            "references": references
+        }))
+        .unwrap()
+    }
+
+    /// The whole point of sealing reference bytes: a set sealed by one
+    /// process is hydrated by the next one over the same `MOLD_HOME`, and the
+    /// bindings it mints verify the descriptors' digests against the bytes
+    /// that came back — nothing from the admitting process survives but the
+    /// store.
+    #[test]
+    fn sealed_references_survive_a_store_reopen_and_bind_by_digest() {
+        let home = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let files: [&[u8]; 2] = [b"first-reference-bytes", b"second-reference-bytes"];
+        let paths = files
+            .iter()
+            .enumerate()
+            .map(|(index, bytes)| {
+                let path = staging.path().join(format!("reference-{index}.media"));
+                std::fs::write(&path, bytes).unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let request = ref2va_request_for(&files);
+        let staged =
+            crate::reference_uploads::StagedReferences::from_files_for_test(&request, paths);
+        let (admitted, request_json) =
+            seal_request_for_test(home.path(), "job-restart", request.clone(), Some(&staged));
+        drop(staged);
+        drop(staging);
+
+        // "Restart": a new store over the same home, the same media-set ref
+        // and projection as the journal row carries.
+        let reopened = Arc::new(QueueMediaStore::open(home.path()).unwrap().store);
+        let deferred = DeferredQueueMedia::new(
+            reopened,
+            admitted.media_set_ref().clone(),
+            admitted.projection().clone(),
+        );
+        drop(admitted);
+        let mut restored: mold_core::GenerateRequest = serde_json::from_str(&request_json).unwrap();
+        assert_eq!(
+            serde_json::to_value(&restored).unwrap(),
+            serde_json::to_value(&request).unwrap(),
+            "descriptors are settings and ride the row unchanged"
+        );
+
+        let lease = deferred.hydrate_into("job-restart", &mut restored).unwrap();
+        let references = lease
+            .references(&restored)
+            .unwrap()
+            .expect("a reference-bearing request hydrates a set");
+        assert_eq!(references.entries().len(), 2);
+        let bindings = references.inference_bindings(&restored, None).unwrap();
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings[0].metadata().index, 1);
+        assert_eq!(bindings[1].metadata().index, 2);
+        let private_path = references.entries()[0].path.clone();
+        assert!(private_path.is_file());
+
+        // A request with no references hydrates no set at all.
+        let mut plain: mold_core::GenerateRequest = serde_json::from_str(&request_json).unwrap();
+        plain.references = None;
+        assert!(matches!(
+            lease.references(&plain),
+            Err(error) if error.disposition() == DeferredHydrationDisposition::Hold
+        ));
+
+        // The staging is released by the last holder, whichever it is.
+        drop(lease);
+        assert!(private_path.is_file());
+        drop(bindings);
+        drop(references);
+        assert!(!private_path.exists());
     }
 
     #[test]

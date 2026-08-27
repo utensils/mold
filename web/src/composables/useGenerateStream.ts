@@ -30,6 +30,11 @@ import { blobToBase64 } from "../lib/base64";
 import { inferFormatFromName, type OutputFormat } from "../types";
 import { apiHeaders, type ApiTarget } from "@studio/api/client";
 import {
+  prepareReferenceUploadBatch,
+  referenceUploadBatchLimit,
+  requestShouldUseReferenceUploads,
+} from "@studio/api/referenceUploads";
+import {
   OwnPrintPreviewWatchers,
   previewDataUrl,
 } from "@studio/api/ownPrintPreview";
@@ -1513,15 +1518,44 @@ async function admitDurableBatch(
   clientBatchId: string,
   requests: readonly GenerateRequestWire[],
 ): Promise<void> {
+  let transport = requests;
+  // A lease is consumed only by an admitted POST; a definite refusal of the
+  // chunk hands its sessions back so a retry is not locked out.
+  let releaseLeases = async (): Promise<void> => {};
+  // MiniMax H3 references are staged on the frozen host right before the
+  // POST — one lease per sibling, on a keyed host; an authless host keeps the
+  // validated inline references. Nothing has been POSTed yet, so a failure
+  // here is a definite refusal of the chunk. A chunk with no upload work
+  // POSTs synchronously, exactly as before.
+  if (
+    requests.some((request) =>
+      requestShouldUseReferenceUploads(request, route.target, route.referenceUploads),
+    )
+  ) {
+    try {
+      const staged = await prepareReferenceUploadBatch({
+        target: routeApiTarget(route),
+        expectedInstanceId: route.instanceId ?? "",
+        capabilities: route.referenceUploads,
+        requests,
+      });
+      transport = staged.requests;
+      releaseLeases = staged.release;
+    } catch (error) {
+      rejectDurableAdmission(clientBatchId, errorText(error));
+      return;
+    }
+  }
   try {
     const batch = await admitGenerationBatch(routeApiTarget(route), {
       client_batch_id: clientBatchId,
-      requests: requests.map((request) => ({ ...request, batch_size: 1 })),
+      requests: transport.map((request) => ({ ...request, batch_size: 1 })),
     });
     applyDurableBatchStatus(clientBatchId, batch);
   } catch (error) {
     const tracker = durableTrackers.get(clientBatchId);
     if (isDefiniteGenerationAdmissionRejection(error)) {
+      await releaseLeases();
       rejectDurableAdmission(clientBatchId, errorText(error));
       return;
     }
@@ -1550,7 +1584,22 @@ function submitDurableJobs(
   const refusal = generationRefusal(route);
   if (refusal !== null) throw new Error(refusal);
   const host = route!;
-  const limit = canonicalGenerationBatchLimit(host.durableGeneration)!;
+  // A reference-bearing batch is chunked no wider than the host lets one
+  // identity hold upload sessions, because every sibling's lease is open
+  // until the chunk's POST consumes it.
+  const limit = referenceUploadBatchLimit(
+    requests,
+    host.target,
+    host.referenceUploads,
+    canonicalGenerationBatchLimit(host.durableGeneration)!,
+  );
+  // Every sibling's lease stays open until its chunk's POST consumes it, so
+  // reference-bearing chunks are admitted one after another; ordinary chunks
+  // keep leaving in parallel.
+  const uploadWork = requests.some((request) =>
+    requestShouldUseReferenceUploads(request, host.target, host.referenceUploads),
+  );
+  let previousChunk: Promise<void> = Promise.resolve();
   selectedJobId.value = null;
   canvasErrorJobId.value = null;
   const admitted: Job[] = [];
@@ -1575,7 +1624,13 @@ function submitDurableJobs(
     durableTrackers.set(clientBatchId, tracker);
     // Journal each independently idempotent chunk before its POST leaves.
     applyDurableTracker(tracker);
-    void admitDurableBatch(host, clientBatchId, requestChunk);
+    if (uploadWork) {
+      previousChunk = previousChunk.then(() =>
+        admitDurableBatch(host, clientBatchId, requestChunk),
+      );
+    } else {
+      void admitDurableBatch(host, clientBatchId, requestChunk);
+    }
   }
   jobs.value = [...admitted, ...jobs.value];
   durableRoutes.set(host.hostId, { ...host, target: { ...host.target } });

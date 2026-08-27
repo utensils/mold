@@ -9,12 +9,22 @@
 //! cross-job content deduplication. Until that layer exists, this is a mapping
 //! primitive rather than a claim that queue media survives a restart.
 //!
-//! Process-private grants are a different class of authority. Resolved H3
-//! reference staging owns descriptor/quota lifetimes, and the H3 ingress grant
-//! binds authentication, instance, policy, and the exact request. Neither can
-//! be reconstructed from media records, so extraction rejects them explicitly.
+//! An ordered MiniMax H3 reference is a DESCRIPTOR plus MEDIA. The descriptor
+//! (`{authority: "descriptor"}` plus its content digest and probed shape) is an
+//! ordinary request setting — it is exactly what gallery metadata already
+//! records — so it stays in the durable JSON. The media is the staged file the
+//! admission boundary resolved every public authority into; it seals into the
+//! private-staging sink and hydrates back to one ordered private path per
+//! descriptor. Upload handles, inline bytes, and server paths are consumed
+//! before extraction and refused here by index if any survives.
+//!
+//! The H3 ingress grant is a different class of authority: it binds
+//! authentication, instance, policy, and the exact request, and cannot be
+//! reconstructed from media records, so extraction demands its sealed
+//! replacement explicitly.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 
 #[cfg(test)]
 use std::sync::{
@@ -22,7 +32,7 @@ use std::sync::{
     Arc,
 };
 
-use mold_core::{GenerationReference, KeyframeCondition, LoraWeight};
+use mold_core::{GenerationReference, GenerationReferenceAuthority, KeyframeCondition, LoraWeight};
 use zeroize::Zeroize;
 
 /// Top-level `GenerateRequest` fields whose values must never enter the
@@ -35,7 +45,6 @@ pub const REQUEST_AUTHORITY_JSON_FIELDS: &[&str] = &[
     "id_images",
     "id_image_names",
     "edit_images",
-    "references",
     "mask_image",
     "control_image",
     "audio_file",
@@ -51,8 +60,8 @@ pub const REQUEST_AUTHORITY_JSON_FIELDS: &[&str] = &[
 ];
 
 /// The authoritative predicate for request fields transported by the
-/// encrypted durable-media store. Process-private references and local-only
-/// HDR/LoRA authorities are intentionally classified separately.
+/// encrypted durable-media store. Local-only HDR/LoRA authorities are
+/// intentionally classified separately.
 pub(crate) fn request_has_extractable_media(request: &mold_core::GenerateRequest) -> bool {
     request.has_durable_media_inputs()
 }
@@ -60,33 +69,23 @@ pub(crate) fn request_has_extractable_media(request: &mold_core::GenerateRequest
 /// A process-private authority that media extraction cannot make durable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessPrivateAuthority {
-    /// Private staged paths plus their quota/lifetime owner.
-    ResolvedReferenceStaging,
     /// Authenticated, instance- and policy-bound MiniMax H3 ingress proof.
     H3PrivateIngressGrant,
 }
 
 /// Explicit inventory supplied by the admission boundary.
 ///
-/// This is intentionally not inferred from `GenerateRequest`: a descriptor-only
-/// H3 request does not reveal whether a live `ResolvedReferenceSet` accompanies
-/// it, and the private ingress grant never enters the request at all.
+/// This is intentionally not inferred from `GenerateRequest`: the private
+/// ingress grant never enters the request at all, so only the boundary that
+/// sealed its replay subject can vouch that it exists.
 #[derive(Debug, Default)]
 pub struct ProcessPrivateAuthorities {
-    authorities: Vec<ProcessPrivateAuthority>,
     durable_replacements: Vec<ProcessPrivateAuthority>,
 }
 
 impl ProcessPrivateAuthorities {
     pub fn none() -> Self {
         Self::default()
-    }
-
-    pub fn from_authority(authority: ProcessPrivateAuthority) -> Self {
-        Self {
-            authorities: vec![authority],
-            durable_replacements: Vec::new(),
-        }
     }
 
     /// Declare that admission replaced the live H3 grant with its validated,
@@ -100,20 +99,6 @@ impl ProcessPrivateAuthorities {
             self.durable_replacements.push(authority);
         }
         self
-    }
-
-    pub fn from_present(resolved_reference_staging: bool, h3_private_ingress_grant: bool) -> Self {
-        let mut authorities = Vec::new();
-        if resolved_reference_staging {
-            authorities.push(ProcessPrivateAuthority::ResolvedReferenceStaging);
-        }
-        if h3_private_ingress_grant {
-            authorities.push(ProcessPrivateAuthority::H3PrivateIngressGrant);
-        }
-        Self {
-            authorities,
-            durable_replacements: Vec::new(),
-        }
     }
 }
 
@@ -129,6 +114,10 @@ pub enum QueueMediaError {
     Deserialize(#[source] serde_json::Error),
     #[error("durable request JSON retained prohibited authority field {0}")]
     RequestJsonContainsAuthority(&'static str),
+    #[error("durable request JSON references[{0}] must be a digest-bearing descriptor")]
+    RequestJsonReferenceAuthority(usize),
+    #[error("{descriptors} reference descriptors do not match {staged} staged reference files")]
+    ReferenceCountMismatch { descriptors: usize, staged: usize },
     #[error("queue media records belong to a different job")]
     JobScopeMismatch,
     #[error("queue media records require a non-empty job scope")]
@@ -269,9 +258,26 @@ pub(crate) enum QueueMediaPayload {
     Presence,
     Bytes(Vec<u8>),
     Text(String),
-    Reference(GenerationReference),
+    /// A resolved reference's staged media file. Pre-seal it names the
+    /// admission staging the resolver wrote; post-hydration it names the
+    /// owner-only private staging the store decrypted into. Either way the
+    /// path is process-private and never enters the request.
+    StagedPath(PathBuf),
     Keyframe(KeyframeCondition),
     Lora(LoraWeight),
+}
+
+fn scrub_path(path: &mut PathBuf) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+        let mut bytes = std::mem::take(path).into_os_string().into_vec();
+        bytes.zeroize();
+    }
+    #[cfg(not(unix))]
+    {
+        *path = PathBuf::new();
+    }
 }
 
 /// One non-serializable record. Payload access remains crate-private so an
@@ -373,50 +379,7 @@ fn payload_is_scrubbed(payload: &QueueMediaPayload) -> bool {
                     .as_ref()
                     .is_none_or(|name| bytes_are_scrubbed(name.as_bytes()))
         }
-        QueueMediaPayload::Reference(reference) => {
-            let (media, provenance, mime_type) = match reference {
-                GenerationReference::Image {
-                    media,
-                    provenance,
-                    mime_type,
-                    ..
-                }
-                | GenerationReference::Video {
-                    media,
-                    provenance,
-                    mime_type,
-                    ..
-                }
-                | GenerationReference::Audio {
-                    media,
-                    provenance,
-                    mime_type,
-                    ..
-                } => (media, provenance, mime_type),
-            };
-            let media_scrubbed = match media {
-                mold_core::GenerationReferenceAuthority::Inline { data } => {
-                    bytes_are_scrubbed(data)
-                }
-                mold_core::GenerationReferenceAuthority::Upload { handle } => {
-                    bytes_are_scrubbed(handle.as_bytes())
-                }
-                mold_core::GenerationReferenceAuthority::ServerPath { path } => {
-                    bytes_are_scrubbed(path.as_bytes())
-                }
-                mold_core::GenerationReferenceAuthority::Descriptor => true,
-            };
-            media_scrubbed
-                && provenance
-                    .name
-                    .as_ref()
-                    .is_none_or(|name| bytes_are_scrubbed(name.as_bytes()))
-                && provenance
-                    .sha256
-                    .as_ref()
-                    .is_none_or(|digest| bytes_are_scrubbed(digest.as_bytes()))
-                && bytes_are_scrubbed(mime_type.as_bytes())
-        }
+        QueueMediaPayload::StagedPath(path) => path.as_os_str().is_empty(),
         QueueMediaPayload::Lora(lora) => bytes_are_scrubbed(lora.path.as_bytes()),
     }
 }
@@ -425,52 +388,16 @@ fn scrub_payload(payload: &mut QueueMediaPayload) {
     match payload {
         QueueMediaPayload::Bytes(bytes) => bytes.zeroize(),
         QueueMediaPayload::Text(text) => text.zeroize(),
+        QueueMediaPayload::StagedPath(path) => scrub_path(path),
         QueueMediaPayload::Keyframe(keyframe) => {
             keyframe.image.zeroize();
             if let Some(name) = &mut keyframe.name {
                 name.zeroize();
             }
         }
-        QueueMediaPayload::Reference(reference) => scrub_reference(reference),
         QueueMediaPayload::Lora(lora) => lora.path.zeroize(),
         QueueMediaPayload::Presence => {}
     }
-}
-
-fn scrub_reference(reference: &mut GenerationReference) {
-    let (media, provenance, mime_type) = match reference {
-        GenerationReference::Image {
-            media,
-            provenance,
-            mime_type,
-            ..
-        }
-        | GenerationReference::Video {
-            media,
-            provenance,
-            mime_type,
-            ..
-        }
-        | GenerationReference::Audio {
-            media,
-            provenance,
-            mime_type,
-            ..
-        } => (media, provenance, mime_type),
-    };
-    match media {
-        mold_core::GenerationReferenceAuthority::Inline { data } => data.zeroize(),
-        mold_core::GenerationReferenceAuthority::Upload { handle } => handle.zeroize(),
-        mold_core::GenerationReferenceAuthority::ServerPath { path } => path.zeroize(),
-        mold_core::GenerationReferenceAuthority::Descriptor => {}
-    }
-    if let Some(name) = &mut provenance.name {
-        name.zeroize();
-    }
-    if let Some(digest) = &mut provenance.sha256 {
-        digest.zeroize();
-    }
-    mime_type.zeroize();
 }
 
 fn scrub_opaque_records(records: &mut [OpaqueQueueMediaRecord]) {
@@ -484,7 +411,10 @@ fn scrub_opaque_records(records: &mut [OpaqueQueueMediaRecord]) {
 /// This is intentionally the same exhaustive authority set as
 /// `extract_request_fields`. Attempt-scoped runtime guards call it before
 /// releasing private staging, and zeroizing request clones call it on every
-/// success/error exit from downstream worker ownership.
+/// success/error exit from downstream worker ownership. Reference DESCRIPTORS
+/// are deliberately left alone: they are settings, not media — byte-identical
+/// to what `OutputMetadata.references` persists — and no public authority can
+/// be present on them past admission.
 pub(crate) fn scrub_request_media(request: &mut mold_core::GenerateRequest) {
     fn scrub_bytes(value: &mut Option<Vec<u8>>) {
         if let Some(bytes) = value {
@@ -527,13 +457,6 @@ pub(crate) fn scrub_request_media(request: &mut mold_core::GenerateRequest) {
     scrub_byte_collection(&mut request.id_images);
     scrub_text_collection(&mut request.id_image_names);
     scrub_byte_collection(&mut request.edit_images);
-    if let Some(references) = &mut request.references {
-        for reference in references.iter_mut() {
-            scrub_reference(reference);
-        }
-        references.clear();
-    }
-    request.references = None;
     scrub_bytes(&mut request.mask_image);
     scrub_bytes(&mut request.control_image);
     scrub_bytes(&mut request.audio_file);
@@ -584,10 +507,11 @@ impl ExtractedQueueRequest {
         (self.request_json, self.media)
     }
 
+    /// Reconstruct the request plus the ordered staged reference paths.
     pub fn rehydrate(
         self,
         expected_job_id: &str,
-    ) -> Result<mold_core::GenerateRequest, QueueMediaError> {
+    ) -> Result<(mold_core::GenerateRequest, Vec<PathBuf>), QueueMediaError> {
         rehydrate_request_media(expected_job_id, &self.request_json, self.media)
     }
 }
@@ -634,19 +558,18 @@ fn collection<T>(
 /// The input is consumed so no second plaintext request copy is retained by
 /// this API. Callers must inventory process-private authorities separately;
 /// any such authority makes the operation unsupported rather than guessed.
+/// `staged` is the resolver's staged media for `request.references`, one file
+/// per descriptor in request order; it is required exactly when the request
+/// carries a non-empty reference list.
 pub fn extract_request_media(
     job_id: impl Into<String>,
     request: mold_core::GenerateRequest,
     process_private: &ProcessPrivateAuthorities,
+    staged: Option<&crate::reference_uploads::StagedReferences>,
 ) -> Result<ExtractedQueueRequest, QueueMediaError> {
     let job_id = job_id.into();
     if job_id.trim().is_empty() {
         return Err(QueueMediaError::InvalidJobScope);
-    }
-    if let Some(authority) = process_private.authorities.first().copied() {
-        return Err(QueueMediaError::UnsupportedProcessPrivateAuthority(
-            authority,
-        ));
     }
     // The private grant is not carried on GenerateRequest, but its necessity
     // is. Deriving this here prevents a new call site from making an H3 request
@@ -658,16 +581,6 @@ pub fn extract_request_media(
     {
         return Err(QueueMediaError::UnsupportedProcessPrivateAuthority(
             ProcessPrivateAuthority::H3PrivateIngressGrant,
-        ));
-    }
-    // At the current server boundary references have already been rewritten
-    // to descriptors paired with a live ResolvedReferenceSet. Raw upload and
-    // server-path forms are temporary authority too. Until a durable staging
-    // owner exists, every form is unsupported rather than replayed as dead
-    // authority.
-    if request.references.is_some() {
-        return Err(QueueMediaError::UnsupportedProcessPrivateAuthority(
-            ProcessPrivateAuthority::ResolvedReferenceStaging,
         ));
     }
     // A LoRA is a server-local adapter path plus a scale. It seals as JSON
@@ -684,16 +597,49 @@ pub fn extract_request_media(
         ));
     }
 
-    extract_request_fields(job_id, request)
+    extract_request_fields(job_id, request, staged)
+}
+
+/// Refuse any reference that is not a digest-bearing descriptor. This is the
+/// pin that keeps one-use upload handles, inline bytes, and server paths out
+/// of `mold.db`: extraction asks it before the durable JSON is minted, and
+/// hydration asks it again before trusting what came back.
+pub(crate) fn ensure_references_are_descriptors(
+    references: Option<&[GenerationReference]>,
+) -> Result<(), QueueMediaError> {
+    for (index, reference) in references.unwrap_or_default().iter().enumerate() {
+        let descriptor = matches!(reference.media(), GenerationReferenceAuthority::Descriptor);
+        if !descriptor || reference.provenance().sha256.is_none() {
+            return Err(QueueMediaError::RequestJsonReferenceAuthority(index));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_reference_count(
+    references: Option<&[GenerationReference]>,
+    staged: usize,
+) -> Result<(), QueueMediaError> {
+    let descriptors = references.map_or(0, <[GenerationReference]>::len);
+    if descriptors != staged {
+        return Err(QueueMediaError::ReferenceCountMismatch {
+            descriptors,
+            staged,
+        });
+    }
+    Ok(())
 }
 
 /// The field mapper stays separate from the authority preflight so its
-/// exhaustive lossless property can be tested for currently unsupported H3
-/// reference shapes without making those shapes admissible.
+/// exhaustive lossless property can be tested on its own.
 fn extract_request_fields(
     job_id: String,
     request: mold_core::GenerateRequest,
+    staged: Option<&crate::reference_uploads::StagedReferences>,
 ) -> Result<ExtractedQueueRequest, QueueMediaError> {
+    ensure_references_are_descriptors(request.references.as_deref())?;
+    let staged_paths = staged.map(|staged| staged.paths()).unwrap_or_default();
+    ensure_reference_count(request.references.as_deref(), staged_paths.len())?;
     // Intentionally exhaustive: adding any GenerateRequest field fails this
     // build until it is classified as retained JSON or extracted authority.
     let mold_core::GenerateRequest {
@@ -805,11 +751,12 @@ fn extract_request_fields(
         edit_images,
         QueueMediaPayload::Bytes,
     )?;
+    // The descriptors stay on the request; only the staged files are records.
     collection(
         &mut records,
         QueueMediaRole::References,
-        references,
-        QueueMediaPayload::Reference,
+        references.as_ref().map(|_| staged_paths),
+        QueueMediaPayload::StagedPath,
     )?;
     scalar(
         &mut records,
@@ -900,7 +847,7 @@ fn extract_request_fields(
         true_cfg,
         cfg_start_step,
         edit_images: None,
-        references: None,
+        references,
         strength,
         mask_image: None,
         control_image: None,
@@ -1100,15 +1047,6 @@ pub fn into_seal_media(
     // its Drop guard can scrub the full set on error. Serialized keyframes stay
     // zeroizing until their bytes move into the successful result.
     validate_record_topology(&media.records)?;
-    if media
-        .records
-        .iter()
-        .any(|record| matches!(record.payload, QueueMediaPayload::Reference(_)))
-    {
-        return Err(QueueMediaError::UnsupportedPreDispatchAuthority(
-            QueueMediaRole::References,
-        ));
-    }
     // Keyframes and LoRA weights are structured records; both seal as their
     // JSON encoding and stay zeroizing until the bytes move into the result.
     let mut serialized_json = media
@@ -1137,6 +1075,9 @@ pub fn into_seal_media(
                     .map(Some)
                     .map_err(QueueMediaError::SealSource)
             }
+            QueueMediaPayload::StagedPath(path) => SealMedia::preopen_path(path)
+                .map(Some)
+                .map_err(QueueMediaError::SealSource),
             _ => Ok(None),
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1144,7 +1085,9 @@ pub fn into_seal_media(
     #[cfg(not(unix))]
     let opened_paths = {
         if media.records.iter().any(|record| {
-            record.role.is_path_shaped() && matches!(record.payload, QueueMediaPayload::Text(_))
+            matches!(record.payload, QueueMediaPayload::StagedPath(_))
+                || (record.role.is_path_shaped()
+                    && matches!(record.payload, QueueMediaPayload::Text(_)))
         }) {
             return Err(QueueMediaError::SealSource(
                 crate::queue_media_store::QueueMediaError::SecurityUnavailable(
@@ -1187,6 +1130,23 @@ pub fn into_seal_media(
                 }
             }
             QueueMediaPayload::Text(value) => SealMedia::bytes(role, position, value.into_bytes()),
+            QueueMediaPayload::StagedPath(path) => {
+                let mut path = path;
+                scrub_path(&mut path);
+                #[cfg(unix)]
+                {
+                    SealMedia::from_preopened_path(
+                        role,
+                        position,
+                        opened_path
+                            .expect("staged reference was pre-opened before plaintext moved"),
+                    )
+                }
+                #[cfg(not(unix))]
+                {
+                    unreachable!("non-Unix staged references were rejected before plaintext moved")
+                }
+            }
             QueueMediaPayload::Keyframe(_) | QueueMediaPayload::Lora(_) => SealMedia::bytes(
                 role,
                 position,
@@ -1197,9 +1157,6 @@ pub fn into_seal_media(
                         .as_mut(),
                 ),
             ),
-            QueueMediaPayload::Reference(_) => {
-                unreachable!("unsupported payloads were rejected before moving plaintext")
-            }
         };
         sealed.push(item);
     }
@@ -1226,6 +1183,12 @@ pub(crate) fn decrypted_media_into_opaque(
                         .into_string()
                         .map_err(|_| QueueMediaError::InvalidStoredPath)?,
                 )
+            }
+            DecryptedQueueMediaPayload::PrivatePath(path)
+                if role == QueueMediaRole::References
+                    && matches!(position, QueueMediaPosition::Item(_)) =>
+            {
+                QueueMediaPayload::StagedPath(path)
             }
             DecryptedQueueMediaPayload::PrivatePath(_) => {
                 return Err(QueueMediaError::MalformedRecords(role))
@@ -1296,21 +1259,7 @@ impl OpaqueRecordsGuard {
 
 impl Drop for OpaqueRecordsGuard {
     fn drop(&mut self) {
-        for record in &mut self.0 {
-            match &mut record.payload {
-                QueueMediaPayload::Bytes(bytes) => bytes.zeroize(),
-                QueueMediaPayload::Text(text) => text.zeroize(),
-                QueueMediaPayload::Keyframe(keyframe) => {
-                    keyframe.image.zeroize();
-                    if let Some(name) = &mut keyframe.name {
-                        name.zeroize();
-                    }
-                }
-                QueueMediaPayload::Presence
-                | QueueMediaPayload::Reference(_)
-                | QueueMediaPayload::Lora(_) => {}
-            }
-        }
+        scrub_opaque_records(&mut self.0);
     }
 }
 
@@ -1341,7 +1290,7 @@ fn collection_role(role: QueueMediaRole) -> bool {
 }
 
 fn record_payload_matches(record: &OpaqueQueueMediaRecord) -> bool {
-    use QueueMediaPayload::{Bytes, Keyframe, Lora, Presence, Reference, Text};
+    use QueueMediaPayload::{Bytes, Keyframe, Lora, Presence, StagedPath, Text};
 
     if collection_role(record.role) && record.position == QueueMediaPosition::Collection {
         return matches!(record.payload, Presence);
@@ -1378,7 +1327,7 @@ fn record_payload_matches(record: &OpaqueQueueMediaRecord) -> bool {
         ) | (
             QueueMediaRole::References,
             QueueMediaPosition::Item(_),
-            Reference(_)
+            StagedPath(_)
         ) | (
             QueueMediaRole::Keyframes,
             QueueMediaPosition::Item(_),
@@ -1430,30 +1379,35 @@ fn validate_record_topology(records: &[OpaqueQueueMediaRecord]) -> Result<(), Qu
 }
 
 /// Reconstruct the exact request semantics from its JSON-safe settings and
-/// the records belonging to the same queue job.
+/// the records belonging to the same queue job. The second value is the
+/// ordered staged reference path per `request.references` descriptor.
 pub fn rehydrate_request_media(
     expected_job_id: &str,
     request_json: &str,
     media: OpaqueQueueMedia,
-) -> Result<mold_core::GenerateRequest, QueueMediaError> {
+) -> Result<(mold_core::GenerateRequest, Vec<PathBuf>), QueueMediaError> {
     ensure_json_is_authority_free(request_json)?;
     let mut request: mold_core::GenerateRequest =
         serde_json::from_str(request_json).map_err(QueueMediaError::Deserialize)?;
-    rehydrate_request_media_into(expected_job_id, &mut request, media)?;
-    Ok(request)
+    let paths = rehydrate_request_media_into(expected_job_id, &mut request, media)?;
+    Ok((request, paths))
 }
 
 /// Overlay deferred media onto the scheduler-mutated request. Only extracted
 /// media fields are touched; prompt/seed and every frozen plan/private
-/// authority field retain their current values.
+/// authority field retain their current values. Reference descriptors are
+/// settings the request already carries, so their staged files are not
+/// overlaid — they are returned in descriptor order for the consumer to bind
+/// under its own lease.
 pub fn rehydrate_request_media_into(
     expected_job_id: &str,
     request: &mut mold_core::GenerateRequest,
     mut media: OpaqueQueueMedia,
-) -> Result<(), QueueMediaError> {
+) -> Result<Vec<PathBuf>, QueueMediaError> {
     if media.job_id != expected_job_id {
         return Err(QueueMediaError::JobScopeMismatch);
     }
+    ensure_references_are_descriptors(request.references.as_deref())?;
     for (present, field) in [
         (request.source_image.is_some(), "source_image"),
         (request.source_image_name.is_some(), "source_image_name"),
@@ -1462,7 +1416,6 @@ pub fn rehydrate_request_media_into(
         (request.id_images.is_some(), "id_images"),
         (request.id_image_names.is_some(), "id_image_names"),
         (request.edit_images.is_some(), "edit_images"),
-        (request.references.is_some(), "references"),
         (request.mask_image.is_some(), "mask_image"),
         (request.control_image.is_some(), "control_image"),
         (request.audio_file.is_some(), "audio_file"),
@@ -1484,6 +1437,15 @@ pub fn rehydrate_request_media_into(
     // plaintext value into the caller's request. All fallible exits above and
     // here leave `media` armed, whose Drop scrubs every byte payload.
     validate_record_topology(&media.records)?;
+    let staged = media
+        .records
+        .iter()
+        .filter(|record| {
+            record.role == QueueMediaRole::References
+                && matches!(record.position, QueueMediaPosition::Item(_))
+        })
+        .count();
+    ensure_reference_count(request.references.as_deref(), staged)?;
 
     let mut grouped: HashMap<_, Vec<_>> = HashMap::new();
     for record in std::mem::take(&mut media.records) {
@@ -1525,7 +1487,17 @@ pub fn rehydrate_request_media_into(
     restore_collection!(QueueMediaRole::IdentityImages, id_images, Bytes);
     restore_collection!(QueueMediaRole::IdentityImageNames, id_image_names, Text);
     restore_collection!(QueueMediaRole::EditImages, edit_images, Bytes);
-    restore_collection!(QueueMediaRole::References, references, Reference);
+    let mut reference_paths = BTreeMap::new();
+    for record in grouped
+        .remove(&QueueMediaRole::References)
+        .unwrap_or_default()
+    {
+        if let (QueueMediaPosition::Item(index), QueueMediaPayload::StagedPath(path)) =
+            (record.position, record.payload)
+        {
+            reference_paths.insert(index, path);
+        }
+    }
     restore_scalar!(QueueMediaRole::MaskImage, mask_image, Bytes);
     restore_scalar!(QueueMediaRole::ControlImage, control_image, Bytes);
     restore_scalar!(QueueMediaRole::AudioFile, audio_file, Bytes);
@@ -1540,7 +1512,7 @@ pub fn rehydrate_request_media_into(
     restore_collection!(QueueMediaRole::Loras, loras, Lora);
 
     debug_assert!(grouped.is_empty(), "every validated role is restored");
-    Ok(())
+    Ok(reference_paths.into_values().collect())
 }
 
 #[cfg(test)]
@@ -1577,37 +1549,8 @@ mod tests {
             "references": [
                 {
                     "kind": "image",
-                    "media": { "authority": "inline", "data": "cmVmLWJ5dGVz" },
-                    "provenance": { "name": "reference-secret.png", "sha256": "11".repeat(32) },
-                    "mime_type": "image/png",
-                    "width": 320,
-                    "height": 240
-                },
-                {
-                    "kind": "audio",
-                    "media": { "authority": "upload", "handle": "upload-bearer-secret" },
-                    "provenance": { "name": "voice-secret.wav", "sha256": "22".repeat(32) },
-                    "mime_type": "audio/wav",
-                    "duration_ms": 1000,
-                    "sample_rate": 48000,
-                    "channels": 2,
-                    "sample_count": 48000
-                },
-                {
-                    "kind": "video",
-                    "media": { "authority": "server_path", "path": "/private/reference.mp4" },
-                    "provenance": { "name": "video-secret.mp4", "sha256": "33".repeat(32) },
-                    "mime_type": "video/mp4",
-                    "width": 640,
-                    "height": 360,
-                    "frame_count": 25,
-                    "duration_ms": 1000,
-                    "fps": 24.0
-                },
-                {
-                    "kind": "image",
                     "media": { "authority": "descriptor" },
-                    "provenance": { "name": "resolved-secret.png", "sha256": "44".repeat(32) },
+                    "provenance": { "name": "resolved.png", "sha256": "44".repeat(32) },
                     "mime_type": "image/png",
                     "width": 128,
                     "height": 128
@@ -1633,8 +1576,16 @@ mod tests {
         }))
         .unwrap();
         let expected = serde_json::to_value(&request).unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let resolved = staging.path().join("reference-1.media");
+        std::fs::write(&resolved, b"resolved-reference-bytes").unwrap();
+        let staged = crate::reference_uploads::StagedReferences::from_files_for_test(
+            &request,
+            vec![resolved],
+        );
 
-        let extracted = extract_request_fields("job-a".to_string(), request).unwrap();
+        let extracted =
+            extract_request_fields("job-a".to_string(), request, Some(&staged)).unwrap();
 
         let durable: serde_json::Value = serde_json::from_str(extracted.request_json()).unwrap();
         let durable = durable.as_object().unwrap();
@@ -1649,12 +1600,6 @@ mod tests {
             "source-private.png",
             "biometric-singular.png",
             "biometric-one.png",
-            "reference-secret.png",
-            "resolved-secret.png",
-            "upload-bearer-secret",
-            "/private/reference.mp4",
-            "11".repeat(32).as_str(),
-            "44".repeat(32).as_str(),
             "/private/audio.wav",
             "/private/exr-output",
             "/private/singular-lora.safetensors",
@@ -1665,8 +1610,293 @@ mod tests {
             );
         }
 
-        let restored = extracted.rehydrate("job-a").unwrap();
+        let (restored, paths) = extracted.rehydrate("job-a").unwrap();
         assert_eq!(serde_json::to_value(restored).unwrap(), expected);
+        assert_eq!(paths, staged.paths());
+    }
+
+    fn ref2va_descriptor_request() -> mold_core::GenerateRequest {
+        serde_json::from_value(serde_json::json!({
+            "prompt": "ordered references",
+            "model": mold_core::minimax_h3::REF2VA_COMFY,
+            "width": 64,
+            "height": 64,
+            "steps": 4,
+            "seed": 7,
+            "references": [
+                {
+                    "kind": "image",
+                    "media": { "authority": "descriptor" },
+                    "provenance": { "name": "subject.png", "sha256": "11".repeat(32) },
+                    "mime_type": "image/png",
+                    "width": 320,
+                    "height": 240
+                },
+                {
+                    "kind": "audio",
+                    "media": { "authority": "descriptor" },
+                    "provenance": { "name": "voice.wav", "sha256": "22".repeat(32) },
+                    "mime_type": "audio/wav",
+                    "duration_ms": 1000,
+                    "sample_rate": 48000,
+                    "channels": 2,
+                    "sample_count": 48000
+                }
+            ]
+        }))
+        .unwrap()
+    }
+
+    fn h3_durable_authorities() -> ProcessPrivateAuthorities {
+        ProcessPrivateAuthorities::none()
+            .with_durable_replacement(Some(ProcessPrivateAuthority::H3PrivateIngressGrant))
+    }
+
+    /// A reference is a DESCRIPTOR plus MEDIA. The descriptor is a request
+    /// setting and stays in the durable JSON; the media is a staged file that
+    /// seals into the private-staging sink and hydrates back to an ordered
+    /// private path per descriptor.
+    #[cfg(unix)]
+    #[test]
+    fn references_seal_as_staged_files_and_hydrate_to_private_paths() {
+        use crate::queue_media_store::{
+            DecryptedQueueMediaPayload, QueueMediaOperationFingerprint, QueueMediaSink,
+            QueueMediaStore, SealMediaSource,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let staging = temp.path().join("resolved-test");
+        std::fs::create_dir_all(&staging).unwrap();
+        let first = staging.join("reference-1.media");
+        let second = staging.join("reference-2.media");
+        std::fs::write(&first, b"first-reference-bytes").unwrap();
+        std::fs::write(&second, b"second-reference-bytes").unwrap();
+        let request = ref2va_descriptor_request();
+        let expected = serde_json::to_value(&request).unwrap();
+        let staged = crate::reference_uploads::StagedReferences::from_files_for_test(
+            &request,
+            vec![first, second],
+        );
+
+        let extracted = extract_request_media(
+            "job-references",
+            request,
+            &h3_durable_authorities(),
+            Some(&staged),
+        )
+        .unwrap();
+        let durable: serde_json::Value = serde_json::from_str(extracted.request_json()).unwrap();
+        let descriptors = durable["references"].as_array().unwrap();
+        assert_eq!(descriptors.len(), 2);
+        for descriptor in descriptors {
+            assert_eq!(descriptor["media"]["authority"], "descriptor");
+            assert_eq!(
+                descriptor["provenance"]["sha256"].as_str().unwrap().len(),
+                64
+            );
+        }
+        assert!(
+            !extracted.request_json().contains("resolved-test"),
+            "staging paths never enter durable JSON"
+        );
+        assert_eq!(
+            extracted
+                .media()
+                .records()
+                .iter()
+                .map(|record| (record.role(), record.position()))
+                .collect::<Vec<_>>(),
+            [
+                (QueueMediaRole::References, QueueMediaPosition::Collection),
+                (QueueMediaRole::References, QueueMediaPosition::Item(0)),
+                (QueueMediaRole::References, QueueMediaPosition::Item(1)),
+            ]
+        );
+        let projection = project_request_media(extracted.media()).unwrap();
+
+        let (request_json, media) = extracted.into_parts();
+        let sealed = into_seal_media(media).unwrap();
+        let mut staged_items = sealed
+            .iter()
+            .filter(|item| item.name.starts_with("item:"))
+            .collect::<Vec<_>>();
+        staged_items.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(staged_items.len(), 2);
+        for item in &staged_items {
+            assert_eq!(item.role, "references");
+            assert_eq!(item.sink, QueueMediaSink::PrivateStaging);
+            assert!(matches!(item.source, SealMediaSource::OpenFile(_)));
+        }
+
+        std::fs::create_dir_all(temp.path().join("home")).unwrap();
+        let store = QueueMediaStore::open(temp.path().join("home"))
+            .unwrap()
+            .store;
+        let reference = store
+            .seal_v2_with_operation_fingerprint(
+                "owner-references",
+                "job-references",
+                &QueueMediaOperationFingerprint::sha256_v1(b"references operation"),
+                &projection,
+                sealed,
+            )
+            .unwrap();
+        drop(staged);
+
+        let mut decrypted = store.decrypt_mixed(&reference).unwrap();
+        assert!(decrypted.media.iter().all(|item| {
+            item.role != "references"
+                || item.name == "collection"
+                || matches!(item.payload, DecryptedQueueMediaPayload::PrivatePath(_))
+        }));
+        let opaque = decrypted_media_into_opaque("job-references", &mut decrypted).unwrap();
+        let mut restored: mold_core::GenerateRequest = serde_json::from_str(&request_json).unwrap();
+        let paths = rehydrate_request_media_into("job-references", &mut restored, opaque).unwrap();
+        assert_eq!(serde_json::to_value(&restored).unwrap(), expected);
+        assert_eq!(paths.len(), 2);
+        assert_eq!(
+            std::fs::read(&paths[0]).unwrap(),
+            b"first-reference-bytes".to_vec()
+        );
+        assert_eq!(
+            std::fs::read(&paths[1]).unwrap(),
+            b"second-reference-bytes".to_vec()
+        );
+    }
+
+    /// Only descriptors may sit in the durable JSON: an inline payload, a
+    /// one-use upload handle, a server path, or a descriptor missing its digest
+    /// is refused by index rather than written down.
+    #[test]
+    fn durable_json_references_must_be_digest_bearing_descriptors() {
+        let mut inline = ref2va_descriptor_request();
+        inline.references.as_mut().unwrap()[1] = mold_core::GenerationReference::Audio {
+            media: mold_core::GenerationReferenceAuthority::Inline {
+                data: vec![1, 2, 3],
+            },
+            provenance: mold_core::GenerationReferenceProvenance {
+                name: None,
+                sha256: Some("22".repeat(32)),
+                crop: None,
+            },
+            mime_type: "audio/wav".to_string(),
+            duration_ms: 1000,
+            sample_rate: 48_000,
+            channels: 2,
+            sample_count: Some(48_000),
+        };
+        assert!(matches!(
+            ensure_references_are_descriptors(inline.references.as_deref()),
+            Err(QueueMediaError::RequestJsonReferenceAuthority(1))
+        ));
+
+        let mut upload = ref2va_descriptor_request();
+        if let Some(mold_core::GenerationReference::Image { media, .. }) =
+            upload.references.as_mut().unwrap().first_mut()
+        {
+            *media = mold_core::GenerationReferenceAuthority::Upload {
+                handle: "one-use-secret".to_string(),
+            };
+        }
+        assert!(matches!(
+            ensure_references_are_descriptors(upload.references.as_deref()),
+            Err(QueueMediaError::RequestJsonReferenceAuthority(0))
+        ));
+
+        let mut server_path = ref2va_descriptor_request();
+        if let Some(mold_core::GenerationReference::Image { media, .. }) =
+            server_path.references.as_mut().unwrap().first_mut()
+        {
+            *media = mold_core::GenerationReferenceAuthority::ServerPath {
+                path: "/private/subject.png".to_string(),
+            };
+        }
+        assert!(matches!(
+            ensure_references_are_descriptors(server_path.references.as_deref()),
+            Err(QueueMediaError::RequestJsonReferenceAuthority(0))
+        ));
+
+        let mut undigested = ref2va_descriptor_request();
+        if let Some(mold_core::GenerationReference::Image { provenance, .. }) =
+            undigested.references.as_mut().unwrap().first_mut()
+        {
+            provenance.sha256 = None;
+        }
+        assert!(matches!(
+            ensure_references_are_descriptors(undigested.references.as_deref()),
+            Err(QueueMediaError::RequestJsonReferenceAuthority(0))
+        ));
+
+        assert!(ensure_references_are_descriptors(None).is_ok());
+        assert!(ensure_references_are_descriptors(
+            ref2va_descriptor_request().references.as_deref()
+        )
+        .is_ok());
+
+        // Extraction is where the durable JSON is minted, so it asks the same
+        // question before a byte is serialized.
+        assert!(matches!(
+            extract_request_media("job-inline", inline, &h3_durable_authorities(), None),
+            Err(QueueMediaError::RequestJsonReferenceAuthority(1))
+        ));
+    }
+
+    /// Every descriptor owns exactly one staged file. A staged set that does
+    /// not line up with the descriptors is a mismatch at extraction and again
+    /// at hydration, never a silent truncation.
+    #[cfg(unix)]
+    #[test]
+    fn reference_descriptor_and_staged_counts_must_agree() {
+        let temp = tempfile::tempdir().unwrap();
+        let only = temp.path().join("reference-1.media");
+        std::fs::write(&only, b"only").unwrap();
+        let request = ref2va_descriptor_request();
+        let short =
+            crate::reference_uploads::StagedReferences::from_files_for_test(&request, vec![only]);
+        assert!(matches!(
+            extract_request_media(
+                "job-short",
+                request.clone(),
+                &h3_durable_authorities(),
+                Some(&short)
+            ),
+            Err(QueueMediaError::ReferenceCountMismatch {
+                descriptors: 2,
+                staged: 1
+            })
+        ));
+        assert!(matches!(
+            extract_request_media("job-none", request.clone(), &h3_durable_authorities(), None),
+            Err(QueueMediaError::ReferenceCountMismatch {
+                descriptors: 2,
+                staged: 0
+            })
+        ));
+
+        let mut restored = request;
+        let media = OpaqueQueueMedia {
+            job_id: "job-hydrate".into(),
+            records: vec![
+                OpaqueQueueMediaRecord {
+                    role: QueueMediaRole::References,
+                    position: QueueMediaPosition::Collection,
+                    payload: QueueMediaPayload::Presence,
+                },
+                OpaqueQueueMediaRecord {
+                    role: QueueMediaRole::References,
+                    position: QueueMediaPosition::Item(0),
+                    payload: QueueMediaPayload::StagedPath(temp.path().join("00000000.media")),
+                },
+            ],
+            scrub_probe: None,
+        };
+        assert!(matches!(
+            rehydrate_request_media_into("job-hydrate", &mut restored, media),
+            Err(QueueMediaError::ReferenceCountMismatch {
+                descriptors: 2,
+                staged: 1
+            })
+        ));
     }
 
     #[test]
@@ -1695,7 +1925,7 @@ mod tests {
             "keyframes": [{"frame": 0, "image": "a2V5"}]
         }))
         .unwrap();
-        let extracted = extract_request_fields("job-projection".into(), request).unwrap();
+        let extracted = extract_request_fields("job-projection".into(), request, None).unwrap();
         let projection = project_request_media(extracted.media()).unwrap();
 
         assert!(projection.source_image);
@@ -1736,7 +1966,7 @@ mod tests {
         .unwrap();
         mold_core::validation::validate_generate_request(&request).unwrap();
         let expected = serde_json::to_value(&request).unwrap();
-        let extracted = extract_request_fields("job-qwen-five".into(), request).unwrap();
+        let extracted = extract_request_fields("job-qwen-five".into(), request, None).unwrap();
         let projection = project_request_media(extracted.media()).unwrap();
 
         assert_eq!(projection.edit_image_count, 5);
@@ -1745,7 +1975,7 @@ mod tests {
             crate::queue_media_store::PROJECTED_EDIT_DIMENSION_SLOTS
         );
         assert_eq!(
-            serde_json::to_value(extracted.rehydrate("job-qwen-five").unwrap()).unwrap(),
+            serde_json::to_value(extracted.rehydrate("job-qwen-five").unwrap().0).unwrap(),
             expected
         );
     }
@@ -1903,7 +2133,7 @@ mod tests {
             "id_image": "ZmFjZQ=="
         }))
         .unwrap();
-        let extracted = extract_request_fields("job-overlay".into(), request).unwrap();
+        let extracted = extract_request_fields("job-overlay".into(), request, None).unwrap();
         let (json, media) = extracted.into_parts();
         let mut current: mold_core::GenerateRequest = serde_json::from_str(&json).unwrap();
         current.prompt = "expanded by scheduler".into();
@@ -2065,8 +2295,9 @@ mod tests {
         .unwrap();
         let expected = serde_json::to_value(&request).unwrap();
 
-        let extracted = extract_request_fields("job-empty".to_string(), request).unwrap();
-        let restored = extracted.rehydrate("job-empty").unwrap();
+        let extracted = extract_request_fields("job-empty".to_string(), request, None).unwrap();
+        let (restored, paths) = extracted.rehydrate("job-empty").unwrap();
+        assert!(paths.is_empty());
 
         assert_eq!(serde_json::to_value(restored).unwrap(), expected);
     }
@@ -2083,39 +2314,13 @@ mod tests {
         }))
         .unwrap();
         let extracted =
-            extract_request_media("job-one", request, &ProcessPrivateAuthorities::none()).unwrap();
+            extract_request_media("job-one", request, &ProcessPrivateAuthorities::none(), None)
+                .unwrap();
 
         assert!(matches!(
             extracted.rehydrate("job-two"),
             Err(QueueMediaError::JobScopeMismatch)
         ));
-    }
-
-    #[test]
-    fn process_private_authorities_are_explicitly_unsupported() {
-        let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
-            "prompt": "private authority",
-            "model": "minimax-h3-ref2va:comfy-pruned-int8",
-            "width": 64,
-            "height": 64,
-            "steps": 1
-        }))
-        .unwrap();
-
-        for authority in [
-            ProcessPrivateAuthority::ResolvedReferenceStaging,
-            ProcessPrivateAuthority::H3PrivateIngressGrant,
-        ] {
-            let result = extract_request_media(
-                "job-private",
-                request.clone(),
-                &ProcessPrivateAuthorities::from_authority(authority),
-            );
-            assert!(matches!(
-                result,
-                Err(QueueMediaError::UnsupportedProcessPrivateAuthority(actual)) if actual == authority
-            ));
-        }
     }
 
     #[test]
@@ -2129,12 +2334,15 @@ mod tests {
         });
         let h3: mold_core::GenerateRequest = serde_json::from_value(base.clone()).unwrap();
         assert!(matches!(
-            extract_request_media("job-h3", h3, &ProcessPrivateAuthorities::none()),
+            extract_request_media("job-h3", h3, &ProcessPrivateAuthorities::none(), None),
             Err(QueueMediaError::UnsupportedProcessPrivateAuthority(
                 ProcessPrivateAuthority::H3PrivateIngressGrant
             ))
         ));
 
+        // A reference that still carries public authority never reaches the
+        // durable JSON: the resolver consumed every handle before extraction,
+        // so one surviving here is refused by index rather than written down.
         let mut reference = base;
         reference["model"] = serde_json::json!("mock");
         reference["references"] = serde_json::json!([{
@@ -2150,11 +2358,10 @@ mod tests {
             extract_request_media(
                 "job-reference",
                 reference,
-                &ProcessPrivateAuthorities::none()
+                &ProcessPrivateAuthorities::none(),
+                None
             ),
-            Err(QueueMediaError::UnsupportedProcessPrivateAuthority(
-                ProcessPrivateAuthority::ResolvedReferenceStaging
-            ))
+            Err(QueueMediaError::RequestJsonReferenceAuthority(0))
         ));
     }
 
@@ -2170,7 +2377,7 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(
-            extract_request_media("job-hdr", request, &ProcessPrivateAuthorities::none()),
+            extract_request_media("job-hdr", request, &ProcessPrivateAuthorities::none(), None),
             Err(QueueMediaError::UnsupportedPreDispatchAuthority(
                 QueueMediaRole::HdrExrDir
             ))
@@ -2198,8 +2405,13 @@ mod tests {
         }))
         .unwrap();
         let expected = request.clone();
-        let extracted =
-            extract_request_media("job-lora", request, &ProcessPrivateAuthorities::none()).unwrap();
+        let extracted = extract_request_media(
+            "job-lora",
+            request,
+            &ProcessPrivateAuthorities::none(),
+            None,
+        )
+        .unwrap();
 
         let json: serde_json::Value = serde_json::from_str(extracted.request_json()).unwrap();
         assert!(
@@ -2235,10 +2447,16 @@ mod tests {
                 ]
             }))
             .unwrap();
-            extract_request_media("job-lora", request, &ProcessPrivateAuthorities::none())
-                .unwrap()
-                .rehydrate("job-lora")
-                .unwrap()
+            extract_request_media(
+                "job-lora",
+                request,
+                &ProcessPrivateAuthorities::none(),
+                None,
+            )
+            .unwrap()
+            .rehydrate("job-lora")
+            .unwrap()
+            .0
         };
         assert_eq!(
             serde_json::to_value(&restored).unwrap(),
@@ -2259,7 +2477,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            extract_request_media("  ", request, &ProcessPrivateAuthorities::none()),
+            extract_request_media("  ", request, &ProcessPrivateAuthorities::none(), None),
             Err(QueueMediaError::InvalidJobScope)
         ));
     }
@@ -2276,13 +2494,18 @@ mod tests {
         }))
         .unwrap();
         let expected = serde_json::to_value(&request).unwrap();
-        let extracted =
-            extract_request_media("job-store", request, &ProcessPrivateAuthorities::none())
-                .unwrap();
+        let extracted = extract_request_media(
+            "job-store",
+            request,
+            &ProcessPrivateAuthorities::none(),
+            None,
+        )
+        .unwrap();
         let (request_json, media) = extracted.into_parts();
         assert_eq!(media.job_id(), "job-store");
 
-        let restored = rehydrate_request_media("job-store", &request_json, media).unwrap();
+        let (restored, _paths) =
+            rehydrate_request_media("job-store", &request_json, media).unwrap();
         assert_eq!(serde_json::to_value(restored).unwrap(), expected);
     }
 
@@ -2323,9 +2546,13 @@ mod tests {
             "source_image_name": "secret-name.png"
         }))
         .unwrap();
-        let extracted =
-            extract_request_media("job-debug", request, &ProcessPrivateAuthorities::none())
-                .unwrap();
+        let extracted = extract_request_media(
+            "job-debug",
+            request,
+            &ProcessPrivateAuthorities::none(),
+            None,
+        )
+        .unwrap();
 
         let debug = format!("{:?}", extracted.media());
         assert!(!debug.contains("secret-bytes"));

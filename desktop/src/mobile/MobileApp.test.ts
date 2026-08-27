@@ -456,7 +456,6 @@ const durableQueueCapabilities = {
     encrypted_at_rest: true,
     generate_request_media: true,
     identity: true,
-    h3_references: true,
     private_h3: true,
   },
 };
@@ -2443,7 +2442,6 @@ describe("MobileApp generation queue", () => {
             encrypted_at_rest: true,
             generate_request_media: true,
             identity: true,
-            h3_references: false,
             private_h3: false,
           },
         });

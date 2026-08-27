@@ -40,6 +40,11 @@ const durableApi = vi.hoisted(() => ({
   lookup: vi.fn(),
   reconcile: vi.fn(),
 }));
+const referenceUploadApi = vi.hoisted(() => ({ prepareBatch: vi.fn() }));
+vi.mock("@studio/api/referenceUploads", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/referenceUploads")>()),
+  prepareReferenceUploadBatch: (...args: unknown[]) => referenceUploadApi.prepareBatch(...args),
+}));
 vi.mock("@studio/api/generationAdmission", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@studio/api/generationAdmission")>()),
   admitGenerationBatch: (...args: unknown[]) => durableApi.admit(...args),
@@ -313,7 +318,6 @@ describe("submitBatch connection cap", () => {
           encrypted_at_rest: true,
           generate_request_media: true,
           identity: true,
-          h3_references: true,
           private_h3: true,
         },
         mirrorRemoteOutput: false,
@@ -335,6 +339,248 @@ describe("submitBatch connection cap", () => {
       ).toBe(true);
     },
   );
+
+  const referenceUploads = {
+    available: true,
+    protocol_version: 2,
+    requires_api_key: true,
+    session_path: "/api/generate/reference-upload-sessions",
+    upload_path: "/api/generate/reference-upload",
+    session_handle_header: "x-mold-reference-upload-session",
+    upload_handle_header: "x-mold-reference-upload",
+    max_file_bytes: 1024,
+    max_session_bytes: 4096,
+    max_active_sessions: 4,
+    session_ttl_ms: 30_000,
+  };
+  const ref2vaReq: GenerateRequest = {
+    ...req,
+    model: "minimax-h3-ref2va:comfy-pruned-int8",
+    frames: 124,
+    references: [
+      {
+        kind: "image",
+        media: { authority: "inline", data: "aW5saW5l" },
+        provenance: { name: "anchor.png", sha256: "11".repeat(32) },
+        mime_type: "image/png",
+        width: 1,
+        height: 1,
+      },
+    ],
+  } as GenerateRequest;
+  const durableMedia = {
+    protocol_version: 2,
+    encrypted_at_rest: true,
+    generate_request_media: true,
+    identity: true,
+    private_h3: true,
+  };
+
+  /** Stage every sibling as the real helper would: one upload handle each. */
+  function stageReferenceUploads(release = vi.fn(async () => {})) {
+    referenceUploadApi.prepareBatch.mockImplementation(
+      async ({ requests }: { requests: GenerateRequest[] }) => ({
+        requests: requests.map((request) => ({
+          ...request,
+          references: [
+            {
+              ...request.references![0]!,
+              media: { authority: "upload", handle: `handle-${request.seed}` },
+            },
+          ],
+        })),
+        release,
+      }),
+    );
+    return release;
+  }
+
+  it("stages the chunk's reference-upload leases on the keyed host before the batch POST", async () => {
+    const store = useGenerationStore();
+    referenceUploadApi.prepareBatch.mockReset();
+    const release = stageReferenceUploads();
+    durableApi.admit.mockImplementation(async (_target, body) => ({
+      id: "reference-batch",
+      client_batch_id: (body as { client_batch_id: string }).client_batch_id,
+      instance_id: "instance-1",
+      durable: true,
+      children: (body as { requests: unknown[] }).requests.map((_, index) => ({
+        index: index + 1,
+        job_id: `reference-job-${index + 1}`,
+        state: "queued",
+        created_at_ms: 1,
+        updated_at_ms: 1,
+      })),
+    }));
+
+    const submitted = store.submitBatch(ref2vaReq, 2, {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      instanceId: "instance-1",
+      referenceUploads,
+      heterogeneousBatchMaxOutputs: 64,
+      durableMedia,
+    });
+    await flushPromises();
+
+    expect(referenceUploadApi.prepareBatch).toHaveBeenCalledTimes(1);
+    expect(referenceUploadApi.prepareBatch.mock.calls[0]![0]).toMatchObject({
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      expectedInstanceId: "instance-1",
+      capabilities: referenceUploads,
+    });
+    expect(
+      (referenceUploadApi.prepareBatch.mock.calls[0]![0] as { requests: unknown[] }).requests,
+    ).toHaveLength(2);
+    expect(release).not.toHaveBeenCalled();
+    expect(durableApi.admit).toHaveBeenCalledTimes(1);
+    const body = durableApi.admit.mock.calls[0]![1] as {
+      requests: Array<{ references: Array<{ media: Record<string, unknown> }> }>;
+    };
+    expect(body.requests.map((request) => request.references[0]!.media)).toEqual([
+      { authority: "upload", handle: "handle-100" },
+      { authority: "upload", handle: "handle-101" },
+    ]);
+    expect(referenceUploadApi.prepareBatch.mock.invocationCallOrder[0]).toBeLessThan(
+      durableApi.admit.mock.invocationCallOrder[0]!,
+    );
+    expect(submitted.jobs.map((job) => job.id)).toEqual(["reference-job-1", "reference-job-2"]);
+  });
+
+  it("chunks a reference-bearing batch at the host's session cap and admits the chunks in turn", async () => {
+    const store = useGenerationStore();
+    referenceUploadApi.prepareBatch.mockReset();
+    stageReferenceUploads();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    durableApi.admit.mockImplementation(async (_target, body) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await Promise.resolve();
+      inFlight -= 1;
+      const requests = (body as { requests: unknown[] }).requests;
+      return {
+        id: `chunk-${(body as { client_batch_id: string }).client_batch_id}`,
+        client_batch_id: (body as { client_batch_id: string }).client_batch_id,
+        instance_id: "instance-1",
+        durable: true,
+        children: requests.map((_, index) => ({
+          index: index + 1,
+          job_id: `chunk-job-${(body as { client_batch_id: string }).client_batch_id}-${index + 1}`,
+          state: "queued",
+          created_at_ms: 1,
+          updated_at_ms: 1,
+        })),
+      };
+    });
+
+    store.submitBatch(ref2vaReq, 5, {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      instanceId: "instance-1",
+      referenceUploads: { ...referenceUploads, max_active_sessions: 2 },
+      heterogeneousBatchMaxOutputs: 64,
+      durableMedia,
+    });
+    await flushPromises();
+
+    expect(durableApi.admit).toHaveBeenCalledTimes(3);
+    expect(
+      durableApi.admit.mock.calls.map(
+        (call) => (call[1] as { requests: unknown[] }).requests.length,
+      ),
+    ).toEqual([2, 2, 1]);
+    expect(maxInFlight).toBe(1);
+  });
+
+  it("releases the chunk's leases when the host definitely refuses the POST", async () => {
+    const store = useGenerationStore();
+    referenceUploadApi.prepareBatch.mockReset();
+    const release = stageReferenceUploads();
+    durableApi.admit.mockRejectedValue(
+      new ApiError("requests[1]: strength must be 1.0", 422, "VALIDATION_ERROR"),
+    );
+
+    const submitted = store.submitBatch(ref2vaReq, 1, {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      instanceId: "instance-1",
+      referenceUploads,
+      heterogeneousBatchMaxOutputs: 64,
+      durableMedia,
+    });
+    await flushPromises();
+
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(submitted.jobs[0]).toMatchObject({ status: "error" });
+  });
+
+  it("sends validated inline references on a host without the upload protocol", async () => {
+    const store = useGenerationStore();
+    referenceUploadApi.prepareBatch.mockReset();
+    durableApi.admit.mockImplementation(async (_target, body) => ({
+      id: "inline-batch",
+      client_batch_id: (body as { client_batch_id: string }).client_batch_id,
+      instance_id: "instance-1",
+      durable: true,
+      children: [
+        { index: 1, job_id: "inline-job", state: "queued", created_at_ms: 1, updated_at_ms: 1 },
+      ],
+    }));
+
+    store.submitBatch(ref2vaReq, 1, {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote",
+      target: { baseUrl: "http://hal9000:7680", apiKey: null },
+      instanceId: "instance-1",
+      referenceUploads: { ...referenceUploads, available: false },
+      heterogeneousBatchMaxOutputs: 64,
+      durableMedia,
+    });
+    await flushPromises();
+
+    expect(referenceUploadApi.prepareBatch).not.toHaveBeenCalled();
+    const body = durableApi.admit.mock.calls[0]![1] as {
+      requests: Array<{ references: Array<{ media: Record<string, unknown> }> }>;
+    };
+    expect(body.requests[0]!.references[0]!.media).toEqual({
+      authority: "inline",
+      data: "aW5saW5l",
+    });
+  });
+
+  it("settles the batch as refused when a reference lease cannot be taken", async () => {
+    const store = useGenerationStore();
+    referenceUploadApi.prepareBatch.mockReset();
+    referenceUploadApi.prepareBatch.mockRejectedValue(
+      new Error("reference upload session refused: REFERENCE_UPLOAD_QUOTA"),
+    );
+
+    const submitted = store.submitBatch(ref2vaReq, 1, {
+      hostId: "hal9000",
+      label: "hal9000",
+      kind: "remote",
+      target: { baseUrl: "http://hal9000:7680", apiKey: "fresh-key" },
+      instanceId: "instance-1",
+      referenceUploads,
+      heterogeneousBatchMaxOutputs: 64,
+      durableMedia,
+    });
+    await flushPromises();
+
+    expect(durableApi.admit).not.toHaveBeenCalled();
+    expect(submitted.jobs[0]).toMatchObject({
+      status: "error",
+      error: expect.stringContaining("REFERENCE_UPLOAD_QUOTA"),
+    });
+  });
 
   it("holds at most four sequence clips streaming at once", async () => {
     const store = useGenerationStore();
@@ -398,7 +644,6 @@ describe("submitBatch connection cap", () => {
         encrypted_at_rest: true,
         generate_request_media: true,
         identity: true,
-        h3_references: true,
         private_h3: true,
       },
     });
@@ -522,7 +767,6 @@ describe("submitBatch connection cap", () => {
         encrypted_at_rest: true,
         generate_request_media: true,
         identity: true,
-        h3_references: true,
         private_h3: true,
       },
     });
@@ -598,7 +842,6 @@ describe("submitBatch connection cap", () => {
         encrypted_at_rest: true,
         generate_request_media: true,
         identity: true,
-        h3_references: true,
         private_h3: true,
       },
       mirrorRemoteOutput: false,
@@ -678,7 +921,6 @@ describe("submitBatch connection cap", () => {
           encrypted_at_rest: true,
           generate_request_media: true,
           identity: true,
-          h3_references: true,
           private_h3: true,
         },
         mirrorRemoteOutput: false,
@@ -893,7 +1135,6 @@ describe("submitBatch connection cap", () => {
         encrypted_at_rest: true,
         generate_request_media: true,
         identity: true,
-        h3_references: true,
         private_h3: true,
       },
       mirrorRemoteOutput: true,
@@ -1016,7 +1257,6 @@ describe("submitBatch connection cap", () => {
         encrypted_at_rest: true,
         generate_request_media: true,
         identity: true,
-        h3_references: true,
         private_h3: true,
       },
       mirrorRemoteOutput: false,
@@ -1098,7 +1338,6 @@ describe("submitBatch connection cap", () => {
         encrypted_at_rest: true,
         generate_request_media: true,
         identity: true,
-        h3_references: true,
         private_h3: true,
       },
       mirrorRemoteOutput: false,
@@ -1181,7 +1420,6 @@ describe("submitBatch connection cap", () => {
         encrypted_at_rest: true,
         generate_request_media: true,
         identity: true,
-        h3_references: true,
         private_h3: true,
       },
       mirrorRemoteOutput: false,
@@ -1267,7 +1505,6 @@ describe("submitBatch connection cap", () => {
         encrypted_at_rest: true,
         generate_request_media: true,
         identity: true,
-        h3_references: true,
         private_h3: true,
       },
       mirrorRemoteOutput: false,
@@ -1327,7 +1564,6 @@ describe("submitBatch connection cap", () => {
         encrypted_at_rest: true,
         generate_request_media: true,
         identity: true,
-        h3_references: true,
         private_h3: true,
       },
       mirrorRemoteOutput: false,
@@ -1408,7 +1644,6 @@ describe("submitBatch connection cap", () => {
         encrypted_at_rest: true,
         generate_request_media: true,
         identity: true,
-        h3_references: true,
         private_h3: true,
       },
       mirrorRemoteOutput: false,
@@ -1491,7 +1726,6 @@ describe("submitBatch connection cap", () => {
         encrypted_at_rest: true,
         generate_request_media: true,
         identity: true,
-        h3_references: true,
         private_h3: true,
       },
       mirrorRemoteOutput: false,
@@ -1850,7 +2084,6 @@ describe("submitBatch connection cap", () => {
         encrypted_at_rest: true,
         generate_request_media: true,
         identity: true,
-        h3_references: true,
         private_h3: true,
       },
       mirrorRemoteOutput: false,
@@ -1916,7 +2149,6 @@ describe("submitBatch connection cap", () => {
         encrypted_at_rest: true,
         generate_request_media: true,
         identity: true,
-        h3_references: true,
         private_h3: true,
       },
       mirrorRemoteOutput: false,
@@ -1982,7 +2214,6 @@ describe("submitBatch connection cap", () => {
         encrypted_at_rest: true,
         generate_request_media: true,
         identity: true,
-        h3_references: false,
         private_h3: true,
       },
       mirrorRemoteOutput: false,
@@ -2023,7 +2254,6 @@ describe("submitBatch connection cap", () => {
           encrypted_at_rest: true,
           generate_request_media: true,
           identity: true,
-          h3_references: false,
           private_h3: false,
         },
         modelFamily: "minimax-h3",
@@ -2061,7 +2291,6 @@ describe("submitBatch connection cap", () => {
           encrypted_at_rest: true,
           generate_request_media: true,
           identity: true,
-          h3_references: true,
           private_h3: true,
         },
         modelFamily: "minimax-h3",
@@ -2139,7 +2368,6 @@ describe("submitBatch connection cap", () => {
         encrypted_at_rest: true,
         generate_request_media: true,
         identity: true,
-        h3_references: true,
         private_h3: true,
       },
       mirrorRemoteOutput: false,

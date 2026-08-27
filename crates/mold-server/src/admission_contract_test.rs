@@ -41,7 +41,6 @@ fn record_batch(journal: &Arc<QueueJournal>, output: &Path, job_id: &str, batch_
                 target_device_id: None,
                 completion_payload: SseCompletionPayload::MetadataOnly,
                 batch_child: false,
-                carries_reference_authority: false,
             }],
         })
         .unwrap();
@@ -211,6 +210,7 @@ fn source_media_survives_store_reopen_and_rehydrates_exactly_once() {
         "source-restart-job",
         original,
         &ProcessPrivateAuthorities::none(),
+        None,
     )
     .unwrap();
     let projection = project_request_media(extracted.media()).unwrap();
@@ -265,7 +265,12 @@ fn h3_with_source_media_is_refused_explicitly_instead_of_losing_conditioning() {
     .unwrap();
 
     assert!(matches!(
-        extract_request_media("h3-source-job", request, &ProcessPrivateAuthorities::none()),
+        extract_request_media(
+            "h3-source-job",
+            request,
+            &ProcessPrivateAuthorities::none(),
+            None
+        ),
         Err(QueueMediaError::UnsupportedProcessPrivateAuthority(
             ProcessPrivateAuthority::H3PrivateIngressGrant
         ))

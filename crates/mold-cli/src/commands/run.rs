@@ -995,7 +995,7 @@ pub async fn run(
     })?;
     if is_h3 && !references.is_empty() && batch > 1 {
         anyhow::bail!(
-            "MiniMax H3 ordered references currently require --batch 1 because upload handles are one-use and request-bound"
+            "MiniMax H3 uploaded references require --batch 1: an upload session binds one request, so Batch N needs one session per sibling"
         );
     }
     if is_h3 && steps.is_some_and(|value| value < 2) {

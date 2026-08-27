@@ -21,6 +21,7 @@ import type { ChainRoutingDecision } from "../lib/chainRouting";
 import type { StreamTarget } from "../api";
 import { cancelQueueJob } from "../api";
 import type { HostRoute } from "../lib/hostRouting";
+import { ApiError } from "@studio/api/client";
 
 function persistedPayload(jobs: unknown[]): string {
   return JSON.stringify({ version: 1, jobs });
@@ -53,6 +54,12 @@ const mutateQueueJobOnExpectedInstance = vi.hoisted(() =>
   vi.fn().mockResolvedValue(undefined),
 );
 const listGalleryFrom = vi.hoisted(() => vi.fn().mockResolvedValue([]));
+const prepareReferenceUploadBatch = vi.hoisted(() => vi.fn());
+
+vi.mock("@studio/api/referenceUploads", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/referenceUploads")>()),
+  prepareReferenceUploadBatch,
+}));
 const fetchGalleryBlob = vi.hoisted(() => vi.fn());
 const fetchGalleryThumbnailBlob = vi.hoisted(() => vi.fn());
 
@@ -154,7 +161,6 @@ const durableRoute: HostRoute = {
     encrypted_at_rest: true,
     generate_request_media: true,
     identity: true,
-    h3_references: true,
     private_h3: true,
   },
   eventsAvailable: true,
@@ -1235,7 +1241,6 @@ describe("useGenerateStream host routing", () => {
       encrypted_at_rest: true,
       generate_request_media: true,
       identity: true,
-      h3_references: true,
       private_h3: true,
     },
     eventsAvailable: true,
@@ -1248,6 +1253,196 @@ describe("useGenerateStream host routing", () => {
       baseUrl: "http://studio:7680",
       apiKey: "sk-studio",
     });
+  });
+
+  const REFERENCE_UPLOADS = {
+    available: true,
+    protocol_version: 2,
+    requires_api_key: true,
+    session_path: "/api/generate/reference-upload-sessions",
+    upload_path: "/api/generate/reference-upload",
+    session_handle_header: "x-mold-reference-upload-session",
+    upload_handle_header: "x-mold-reference-upload",
+    max_file_bytes: 1024,
+    max_session_bytes: 4096,
+    max_active_sessions: 4,
+    session_ttl_ms: 30_000,
+  };
+
+  function ref2vaInline(seed: number): GenerateRequestWire {
+    return {
+      ...singleGen({ frames: 124, seed }),
+      model: "minimax-h3-ref2va:comfy-pruned-int8",
+      references: [
+        {
+          kind: "image",
+          media: { authority: "inline", data: "aW5saW5l" },
+          provenance: { name: "anchor.png", sha256: "11".repeat(32) },
+          mime_type: "image/png",
+          width: 1,
+          height: 1,
+        },
+      ],
+    } as GenerateRequestWire;
+  }
+
+  /** Stage every sibling as the real helper would: one upload handle each. */
+  function stageReferenceUploads(release = vi.fn(async () => {})) {
+    prepareReferenceUploadBatch.mockImplementation(
+      async ({ requests }: { requests: GenerateRequestWire[] }) => ({
+        requests: requests.map((request) => ({
+          ...request,
+          references: [
+            {
+              ...request.references![0]!,
+              media: { authority: "upload", handle: `handle-${request.seed}` },
+            },
+          ],
+        })),
+        release,
+      }),
+    );
+    return release;
+  }
+
+  it("stages the chunk's reference-upload leases on the keyed host before the batch POST", async () => {
+    prepareReferenceUploadBatch.mockReset();
+    const release = stageReferenceUploads();
+    serveDurableArtifacts();
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(durableBatch(body.client_batch_id, ["queued", "queued"])),
+    );
+    const stream = useGenerateStream();
+    const route: HostRoute = {
+      ...studioDurableRoute,
+      referenceUploads: REFERENCE_UPLOADS,
+    };
+    stream.submitBatch([ref2vaInline(1), ref2vaInline(2)], { kind: "single" }, route);
+    await flushDurable();
+
+    expect(prepareReferenceUploadBatch).toHaveBeenCalledTimes(1);
+    expect(prepareReferenceUploadBatch.mock.calls[0]![0]).toMatchObject({
+      target: { baseUrl: "http://studio:7680", apiKey: "sk-studio" },
+      expectedInstanceId: "instance-1",
+      capabilities: REFERENCE_UPLOADS,
+    });
+    expect(
+      (prepareReferenceUploadBatch.mock.calls[0]![0] as { requests: unknown[] })
+        .requests,
+    ).toHaveLength(2);
+    expect(admitGenerationBatch).toHaveBeenCalledTimes(1);
+    const body = admitGenerationBatch.mock.calls[0]![1] as {
+      requests: Array<{ references: Array<{ media: Record<string, unknown> }> }>;
+    };
+    expect(body.requests.map((request) => request.references[0]!.media)).toEqual([
+      { authority: "upload", handle: "handle-1" },
+      { authority: "upload", handle: "handle-2" },
+    ]);
+    expect(prepareReferenceUploadBatch.mock.invocationCallOrder[0]).toBeLessThan(
+      admitGenerationBatch.mock.invocationCallOrder[0]!,
+    );
+    // An admitted POST consumed the leases; nothing is released.
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it("chunks a reference-bearing batch at the host's session cap and admits the chunks in turn", async () => {
+    prepareReferenceUploadBatch.mockReset();
+    stageReferenceUploads();
+    serveDurableArtifacts();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    admitGenerationBatch.mockImplementation(
+      async (_target: unknown, body: { client_batch_id: string; requests: unknown[] }) => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await Promise.resolve();
+        inFlight -= 1;
+        return durableBatch(
+          body.client_batch_id,
+          body.requests.map(() => "queued" as const),
+        );
+      },
+    );
+    const stream = useGenerateStream();
+    stream.submitBatch(
+      [1, 2, 3, 4, 5].map((seed) => ref2vaInline(seed)),
+      { kind: "single" },
+      { ...studioDurableRoute, referenceUploads: { ...REFERENCE_UPLOADS, max_active_sessions: 2 } },
+    );
+    await flushDurable();
+
+    expect(admitGenerationBatch).toHaveBeenCalledTimes(3);
+    expect(
+      admitGenerationBatch.mock.calls.map(
+        (call) => (call[1] as { requests: unknown[] }).requests.length,
+      ),
+    ).toEqual([2, 2, 1]);
+    expect(maxInFlight).toBe(1);
+  });
+
+  it("releases the chunk's leases when the host definitely refuses the POST", async () => {
+    prepareReferenceUploadBatch.mockReset();
+    const release = stageReferenceUploads();
+    admitGenerationBatch.mockRejectedValue(
+      new ApiError("requests[1]: strength must be 1.0", 422, {
+        code: "VALIDATION_ERROR",
+      }),
+    );
+    const stream = useGenerateStream();
+    const id = stream.submit(ref2vaInline(6), { kind: "single" }, {
+      ...studioDurableRoute,
+      referenceUploads: REFERENCE_UPLOADS,
+    });
+    await flushDurable();
+
+    expect(release).toHaveBeenCalledTimes(1);
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    expect(job.state).toBe("error");
+  });
+
+  it("sends validated inline references on a host without the upload protocol", async () => {
+    prepareReferenceUploadBatch.mockReset();
+    serveDurableArtifacts();
+    admitGenerationBatch.mockImplementation(
+      (_target: unknown, body: { client_batch_id: string }) =>
+        Promise.resolve(durableBatch(body.client_batch_id)),
+    );
+    const stream = useGenerateStream();
+    const authless: HostRoute = {
+      ...studioDurableRoute,
+      target: { baseUrl: "http://studio:7680" },
+      referenceUploads: { ...REFERENCE_UPLOADS, available: false },
+    };
+    stream.submit(ref2vaInline(3), { kind: "single" }, authless);
+    await flushDurable();
+
+    expect(prepareReferenceUploadBatch).not.toHaveBeenCalled();
+    const body = admitGenerationBatch.mock.calls[0]![1] as {
+      requests: Array<{ references: Array<{ media: Record<string, unknown> }> }>;
+    };
+    expect(body.requests[0]!.references[0]!.media).toEqual({
+      authority: "inline",
+      data: "aW5saW5l",
+    });
+  });
+
+  it("refuses the chunk by name when a reference lease cannot be taken", async () => {
+    prepareReferenceUploadBatch.mockReset();
+    prepareReferenceUploadBatch.mockRejectedValue(
+      new Error("reference upload session refused: REFERENCE_UPLOAD_QUOTA"),
+    );
+    const stream = useGenerateStream();
+    const id = stream.submit(ref2vaInline(4), { kind: "single" }, {
+      ...studioDurableRoute,
+      referenceUploads: REFERENCE_UPLOADS,
+    });
+    await flushDurable();
+
+    expect(admitGenerationBatch).not.toHaveBeenCalled();
+    const job = stream.jobs.value.find((candidate) => candidate.id === id)!;
+    expect(job.state).toBe("error");
+    expect(job.error).toContain("REFERENCE_UPLOAD_QUOTA");
   });
 
   it("dispatches an auto-promoted chain submission to the routed host", () => {
@@ -1282,7 +1477,6 @@ describe("useGenerateStream host routing", () => {
             encrypted_at_rest: true,
             generate_request_media: true,
             identity: true,
-            h3_references: true,
             private_h3: true,
           },
         },

@@ -3127,12 +3127,7 @@ fn run_claimed_h3_generation(
     if let Err(error) = validate_h3_prepared_attempt_facts(scope_facts, &prepared_facts) {
         return reject_claimed_h3_generation_message(job, error.to_string());
     }
-    if let Err(error) = prepared_facts.media.validate_for_request(
-        &job.request,
-        job.resolved_references
-            .as_ref()
-            .map(crate::reference_uploads::ResolvedReferenceSet::fingerprint),
-    ) {
+    if let Err(error) = prepared_facts.media.validate_for_request(&job.request) {
         return reject_claimed_h3_generation_message(job, error);
     }
     let lease = match job.lease.clone() {
@@ -3475,15 +3470,10 @@ fn validate_h3_publication_contract(
     output: &crate::h3_private_bridge::H3ClaimedRunOutput,
 ) -> anyhow::Result<()> {
     let contract = &prepared.media;
-    let expected_contract = crate::h3_private_bridge::H3PreparedMediaContract::from_request(
-        &job.request,
-        job.resolved_references
-            .as_ref()
-            .map(crate::reference_uploads::ResolvedReferenceSet::fingerprint),
-    )
-    .map_err(|_| {
-        anyhow::anyhow!("private H3 terminal media provenance mismatch: request-contract")
-    })?;
+    let expected_contract =
+        crate::h3_private_bridge::H3PreparedMediaContract::from_request(&job.request).map_err(
+            |_| anyhow::anyhow!("private H3 terminal media provenance mismatch: request-contract"),
+        )?;
     let expected_seed = job.request.seed.ok_or_else(|| {
         anyhow::anyhow!("private H3 terminal media provenance mismatch: request-seed")
     })?;
@@ -3884,6 +3874,19 @@ fn process_job_with_sink(
     } else {
         None
     };
+    // The ordered references are bound from THIS hydration, under this lease;
+    // no job field carries a reference set across admission or dispatch.
+    let references = match hydrated_media_lease
+        .as_ref()
+        .map(|lease| lease.references(&job.request))
+        .transpose()
+    {
+        Ok(references) => references.flatten(),
+        Err(error) => {
+            finish_generation_hydration_failure(job, error);
+            return false;
+        }
+    };
     let request = match hydrated_media_lease {
         Some(lease) => {
             crate::queue_media_runtime::AttemptQueueMediaRequest::hydrated(&mut job.request, lease)
@@ -3900,7 +3903,7 @@ fn process_job_with_sink(
 
     let reference_bindings = match crate::reference_uploads::inference_bindings_for_request(
         &request,
-        job.resolved_references.as_ref(),
+        references.as_ref(),
         inference_cancellation,
     ) {
         Ok(bindings) => bindings,
@@ -6496,7 +6499,6 @@ mod tests {
                         durable_queue_rank: None,
                         request: request.clone(),
                         deferred_media: None,
-                        resolved_references: None,
                         completion_payload: SseCompletionPayload::Full,
                         progress_tx: None,
                         result_tx: placeholder_tx,
@@ -6520,7 +6522,6 @@ mod tests {
             model: request.model.clone(),
             request,
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: Some(progress_tx),
             result_tx,
@@ -7082,20 +7083,14 @@ mod tests {
         job.output_dir = Some(output.path().to_path_buf());
         job.request = fake_ref2va_request(job.request);
         job.model = job.request.model.clone();
-        let resolved =
-            crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&job.request);
         let mut facts = fake_h3_facts(id);
-        facts.media = crate::h3_private_bridge::H3PreparedMediaContract::from_request(
-            &job.request,
-            Some(resolved.fingerprint()),
-        )
-        .expect("synthetic resolved Ref2VA authority");
+        facts.media = crate::h3_private_bridge::H3PreparedMediaContract::from_request(&job.request)
+            .expect("synthetic resolved Ref2VA authority");
         let reference_fingerprint = facts
             .media
             .reference_fingerprint_sha256
             .clone()
             .expect("Ref2VA fingerprint");
-        job.resolved_references = Some(resolved);
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         job.metadata_db = Arc::clone(&db);
         let (runs, drops) =
@@ -7165,26 +7160,20 @@ mod tests {
         job.output_dir = Some(output.path().to_path_buf());
         job.request = fake_ref2va_request(job.request);
         job.model = job.request.model.clone();
-        let admitted =
-            crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&job.request);
         let mut facts = fake_h3_facts(id);
-        facts.media = crate::h3_private_bridge::H3PreparedMediaContract::from_request(
-            &job.request,
-            Some(admitted.fingerprint()),
-        )
-        .expect("synthetic admitted Ref2VA authority");
-        job.resolved_references = Some(admitted);
+        facts.media = crate::h3_private_bridge::H3PreparedMediaContract::from_request(&job.request)
+            .expect("synthetic admitted Ref2VA authority");
         let (runs, drops) =
             install_fake_h3_attempt_with_facts(&mut job, FakeH3Outcome::Success, facts);
 
+        // The descriptors on the request drift from the order the attempt was
+        // prepared with; the owner re-derives the contract from the request in
+        // hand and refuses before the runtime runs or anything publishes.
         job.request
             .references
             .as_mut()
             .expect("ordered references")
             .reverse();
-        job.resolved_references = Some(
-            crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&job.request),
-        );
         let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
         let scheduler = fake_scheduler_v2(FakeSchedulerV2Mode::Live);
         let owner_worker = Arc::clone(&worker);
@@ -7199,7 +7188,7 @@ mod tests {
             Ok(_) => panic!("reordered Ref2VA authority unexpectedly published"),
         };
 
-        assert!(error.contains("ordered request authority"));
+        assert!(error.contains("ordered request authority"), "{error}");
         assert_eq!(runs.load(Ordering::SeqCst), 0);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert_eq!(settlements.load(Ordering::SeqCst), 1);
@@ -7218,15 +7207,9 @@ mod tests {
         job.output_dir = Some(output.path().to_path_buf());
         job.request = fake_ref2va_request(job.request);
         job.model = job.request.model.clone();
-        let resolved =
-            crate::reference_uploads::ResolvedReferenceSet::authority_only_for_test(&job.request);
         let mut facts = fake_h3_facts(id);
-        facts.media = crate::h3_private_bridge::H3PreparedMediaContract::from_request(
-            &job.request,
-            Some(resolved.fingerprint()),
-        )
-        .expect("synthetic cancellation authority");
-        job.resolved_references = Some(resolved);
+        facts.media = crate::h3_private_bridge::H3PreparedMediaContract::from_request(&job.request)
+            .expect("synthetic cancellation authority");
         let (runs, drops) =
             install_fake_h3_attempt_with_facts(&mut job, FakeH3Outcome::Cancelled, facts);
         let worker = single_worker_pool_with_parked("cache-sentinel", Duration::ZERO);
@@ -8610,7 +8593,6 @@ mod tests {
             model: request.model.clone(),
             request,
             deferred_media: None,
-            resolved_references: None,
             completion_payload: crate::state::SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -8933,7 +8915,6 @@ mod tests {
                 model: request.model.clone(),
                 request,
                 deferred_media: None,
-                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx,
@@ -9799,7 +9780,6 @@ mod tests {
                 model: request.model.clone(),
                 request,
                 deferred_media: None,
-                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx,
@@ -9933,7 +9913,6 @@ mod tests {
                     model: request.model.clone(),
                     request,
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -10570,7 +10549,6 @@ mod tests {
                     model: "test:q4".to_string(),
                     request,
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -11116,7 +11094,6 @@ mod tests {
                     durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
@@ -11139,7 +11116,6 @@ mod tests {
                 model: "lifecycle".to_string(),
                 request,
                 deferred_media: None,
-                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx,
@@ -11415,7 +11391,6 @@ mod tests {
                     durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
@@ -11442,7 +11417,6 @@ mod tests {
                 model: request.model.clone(),
                 request,
                 deferred_media: None,
-                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: Some(progress_tx),
                 result_tx,
@@ -11578,7 +11552,6 @@ mod tests {
                 target_device_id: None,
                 completion_payload: SseCompletionPayload::Full,
                 batch_child: false,
-                carries_reference_authority: false,
             })
             .expect("a gallery-bound generation is durable");
         assert_eq!(
@@ -11594,7 +11567,6 @@ mod tests {
             model: "mock-model".to_string(),
             request,
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -11647,7 +11619,6 @@ mod tests {
                 target_device_id: None,
                 completion_payload: SseCompletionPayload::Full,
                 batch_child: false,
-                carries_reference_authority: false,
             })
             .unwrap();
         assert_eq!(
@@ -11663,7 +11634,6 @@ mod tests {
             model: "mock-model".to_string(),
             request,
             deferred_media: None,
-            resolved_references: None,
             completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
@@ -11718,7 +11688,6 @@ mod tests {
                     model: "cancel-model".to_string(),
                     request,
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -11788,7 +11757,6 @@ mod tests {
                     durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
@@ -11815,7 +11783,6 @@ mod tests {
                     model: "panic-model".to_string(),
                     request: panic_request,
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -11863,7 +11830,6 @@ mod tests {
                     durable_queue_rank: None,
                     request: request.clone(),
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: placeholder_tx,
@@ -11888,7 +11854,6 @@ mod tests {
                     model: "panic-model".to_string(),
                     request,
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx,
@@ -12311,7 +12276,6 @@ mod tests {
                     durable_queue_rank: None,
                     request: job.request.clone(),
                     deferred_media: None,
-                    resolved_references: None,
                     completion_payload: SseCompletionPayload::Full,
                     progress_tx: None,
                     result_tx: dummy_tx,

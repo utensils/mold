@@ -435,7 +435,6 @@ pub struct GpuJob {
     /// Opaque durable-media authority transferred without hydration by the
     /// scheduler. Only the leased worker may consume it.
     pub deferred_media: Option<crate::queue_media_runtime::DeferredQueueMedia>,
-    pub resolved_references: Option<crate::reference_uploads::ResolvedReferenceSet>,
     pub completion_payload: crate::state::SseCompletionPayload,
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::state::SseMessage>>,
     pub result_tx: tokio::sync::oneshot::Sender<Result<crate::state::GenerationJobResult, String>>,

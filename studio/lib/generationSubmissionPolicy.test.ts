@@ -18,7 +18,6 @@ function canonicalHost(
       encrypted_at_rest: true,
       generate_request_media: true,
       identity: true,
-      h3_references: true,
       private_h3: true,
     },
     ...overrides,

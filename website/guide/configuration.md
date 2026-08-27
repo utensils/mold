@@ -264,8 +264,8 @@ before it is queued and replayed automatically at the next start, under its
 original job id. `GET /api/capabilities` reports `queue.durable_queue` — false on a host with
 server gallery output disabled, which cannot promise durability for anything —
 and each row in `GET /api/queue` reports whether that particular job is durable —
-a job with no gallery target, one carrying reference-upload media, or one
-whose request exceeds the payload ceiling runs normally but is not replayed.
+a job with no gallery target or one whose request exceeds the payload ceiling
+runs normally but is not replayed.
 
 | Variable                           | Default             | Description                                                                                                                                                                                                                                                                                                                                                                   |
 | ---------------------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

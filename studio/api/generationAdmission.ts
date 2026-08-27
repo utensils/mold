@@ -138,7 +138,6 @@ export interface DurableMediaCapabilities {
   encrypted_at_rest: boolean;
   generate_request_media: boolean;
   identity: boolean;
-  h3_references: boolean;
   private_h3: boolean;
 }
 

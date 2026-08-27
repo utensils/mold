@@ -43,6 +43,8 @@ struct PreparedChild {
     output_dir: std::path::PathBuf,
     preferred_gpu: Option<usize>,
     authority: Option<crate::durable_admission_authority::CapturedAuthority>,
+    /// The resolver's staged reference media, alive only until it is sealed.
+    staged_references: Option<crate::reference_uploads::StagedReferences>,
 }
 
 struct FingerprintWriter(Sha256);
@@ -231,6 +233,7 @@ struct SealInput {
     completion_payload: SseCompletionPayload,
     admission_authority: Option<Vec<u8>>,
     durable_replacement: Option<crate::queue_media::ProcessPrivateAuthority>,
+    staged_references: Option<crate::reference_uploads::StagedReferences>,
 }
 
 struct SealedChild {
@@ -340,6 +343,7 @@ impl DurableMediaAdmission {
         self: &Arc<Self>,
         state: &AppState,
         authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
+        reference_identity: Option<crate::reference_uploads::ReferenceIdentity>,
         mut body: mold_core::GenerationBatchAdmissionRequest,
         observer_mode: Option<ObserverMode>,
         completion_payload: SseCompletionPayload,
@@ -392,14 +396,56 @@ impl DurableMediaAdmission {
         let mut fingerprint = FingerprintWriter::new();
         serde_json::to_writer(&mut fingerprint, &body.requests)
             .map_err(|error| ApiError::internal(format!("batch serialization failed: {error}")))?;
-        let output_dir = {
+        // H3 idempotency is identity-bound: the same client key and request
+        // submitted under a different authenticated identity must conflict,
+        // not inherit the first caller's durable authority.
+        for (offset, request) in body.requests.iter().enumerate() {
+            if let Some(subject) = crate::durable_admission_authority::idempotency_subject_sha256(
+                request,
+                authenticated,
+                state.instance_id.as_str(),
+            )
+            .map_err(|mut error| {
+                error.error = format!("requests[{}]: {}", offset + 1, error.error);
+                error
+            })? {
+                fingerprint.write_all(subject.as_bytes()).map_err(|error| {
+                    ApiError::internal(format!("batch fingerprint failed: {error}"))
+                })?;
+            }
+        }
+        let fingerprint = fingerprint.finish();
+
+        // A duplicate POST is answered BEFORE any child is resolved: a
+        // reference upload session is consumed exactly once, so the retry of
+        // a lost response must find its batch here rather than burn the
+        // session the first attempt already spent.
+        if let Some(existing) = existing_by_client(state, &body.client_batch_id).await? {
+            self.verify_existing_async(state, &body.client_batch_id, &fingerprint, &existing)
+                .await?;
+            if observer_mode.is_some() {
+                return Err(ApiError::with_code(
+                    "this operation is already durable; reconcile it through the queue status endpoint",
+                    "DIRECT_OPERATION_ALREADY_ADMITTED",
+                    StatusCode::CONFLICT,
+                ));
+            }
+            return Ok(DurableAdmissionOutcome {
+                status_code: StatusCode::OK,
+                status: crate::routes::generation_batch_status(&state.instance_id, existing),
+                observers: Vec::new(),
+                warnings: None,
+            });
+        }
+
+        let (output_dir, media_roots) = {
             let config = state.config.read().await;
             if state.is_output_disabled(&config) {
                 return Err(ApiError::validation(
                     "durable admission requires server gallery output",
                 ));
             }
-            config.effective_output_dir()
+            (config.effective_output_dir(), config.resolved_media_roots())
         };
         let mut prepared = Vec::with_capacity(body.requests.len());
         for (offset, mut request) in body.requests.into_iter().enumerate() {
@@ -407,20 +453,20 @@ impl DurableMediaAdmission {
             if mold_core::minimax_h3::task_for_model(&request.model).is_some() {
                 request.normalise_output_format(Some(mold_core::minimax_h3::FAMILY));
             }
+            // An upload session is bound to the request scope the client
+            // created it for, so the scope is frozen here, before this host
+            // stamps its own defaults onto the request.
+            let reference_scope_sha256 = request
+                .references
+                .as_ref()
+                .map(|_| state.reference_uploads.scope_sha256(&request))
+                .transpose()?;
             crate::routes::apply_default_metadata_setting(state, &mut request).await;
             crate::routes::normalize_generation_placement(state, &mut request).await;
             let preferred_gpu =
                 crate::routes::validate_multi_gpu_placement(state, request.placement.as_ref())?;
-            // Authority binds the exact deterministic request persisted below.
-            let authority = crate::durable_admission_authority::capture(
-                &request,
-                authenticated,
-                state.instance_id.as_str(),
-            )
-            .map_err(|mut error| {
-                error.error = format!("requests[{}]: {}", offset + 1, error.error);
-                error
-            })?;
+            let private_ingress =
+                crate::durable_admission_authority::claims_private_ingress(&request);
             // Model activation is asked BEFORE the row is durably accepted,
             // because its answers are HTTP contracts a client acts on rather
             // than transient conditions worth replaying: `451` for a
@@ -441,7 +487,7 @@ impl DurableMediaAdmission {
                 error.error = format!("requests[{}]: {}", offset + 1, error.error);
                 error
             })?;
-            if authority.is_none() {
+            if !private_ingress {
                 let family = crate::routes::require_server_model_activation(state, &request.model)
                     .await
                     .map_err(|mut error| {
@@ -459,7 +505,7 @@ impl DurableMediaAdmission {
                     error
                 })?;
             }
-            let validation = if authority.is_some() {
+            let validation = if private_ingress {
                 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 {
                     mold_core::validation::validate_h3_private_uat_request(&request)
@@ -474,43 +520,43 @@ impl DurableMediaAdmission {
             validation.map_err(|error| {
                 ApiError::validation(format!("requests[{}]: {error}", offset + 1))
             })?;
+            // Every public reference authority — one-use upload handles,
+            // inline bytes, server paths — is consumed here and rewritten to
+            // a descriptor. This is the LAST fallible step before capture, so
+            // a refused request never spends a session, and the FIRST thing
+            // the request is serialized after, so a handle never reaches
+            // durable JSON.
+            let staged_references = state
+                .reference_uploads
+                .resolve_request(
+                    reference_identity.as_ref(),
+                    &mut request,
+                    &media_roots,
+                    reference_scope_sha256.as_deref(),
+                )
+                .await
+                .map_err(|mut error| {
+                    error.error = format!("requests[{}]: {}", offset + 1, error.error);
+                    error
+                })?;
+            // Authority binds the exact deterministic request persisted below
+            // — the descriptor form, which is what every later consumer
+            // re-hashes against it.
+            let authority = crate::durable_admission_authority::capture(
+                &request,
+                authenticated,
+                state.instance_id.as_str(),
+            )
+            .map_err(|mut error| {
+                error.error = format!("requests[{}]: {}", offset + 1, error.error);
+                error
+            })?;
             prepared.push(PreparedChild {
                 request,
                 output_dir: output_dir.clone(),
                 preferred_gpu,
                 authority,
-            });
-        }
-
-        // H3 idempotency is identity-bound: the same client key and request
-        // submitted under a different authenticated identity must conflict,
-        // not inherit the first caller's durable authority.
-        for child in &prepared {
-            if let Some(authority) = &child.authority {
-                fingerprint
-                    .write_all(authority.idempotency_subject_sha256.as_bytes())
-                    .map_err(|error| {
-                        ApiError::internal(format!("batch fingerprint failed: {error}"))
-                    })?;
-            }
-        }
-        let fingerprint = fingerprint.finish();
-
-        if let Some(existing) = existing_by_client(state, &body.client_batch_id).await? {
-            self.verify_existing_async(state, &body.client_batch_id, &fingerprint, &existing)
-                .await?;
-            if observer_mode.is_some() {
-                return Err(ApiError::with_code(
-                    "this operation is already durable; reconcile it through the queue status endpoint",
-                    "DIRECT_OPERATION_ALREADY_ADMITTED",
-                    StatusCode::CONFLICT,
-                ));
-            }
-            return Ok(DurableAdmissionOutcome {
-                status_code: StatusCode::OK,
-                status: crate::routes::generation_batch_status(&state.instance_id, existing),
-                observers: Vec::new(),
-                warnings: None,
+                staged_references,
             });
         }
 
@@ -526,6 +572,7 @@ impl DurableMediaAdmission {
                 output_dir,
                 preferred_gpu,
                 authority,
+                staged_references,
             } = prepared;
             let (admission_authority, durable_replacement) = authority
                 .map(|authority| (Some(authority.envelope), Some(authority.replaces)))
@@ -543,6 +590,7 @@ impl DurableMediaAdmission {
                 completion_payload,
                 admission_authority,
                 durable_replacement,
+                staged_references,
             });
         }
 
@@ -891,21 +939,10 @@ pub(crate) fn durable_media_preflight(
     //   machine and an HTTP client may not choose one. That refusal lives in
     //   `routes::reject_client_supplied_hdr_output` and keeps its actionable
     //   "re-run with --local" wording.
-    // Ordered references are the one that still refuses, and it is a
-    // DIFFERENT kind of limit from the two above. Their upload handles are
-    // one-use bearer secrets that `mold.db` must never hold, and the live
-    // admission path (`record_batch_with_media`) writes a journal row for
-    // every child it accepts — there is no producer for a row-less one, so
-    // "admit it as `durable: false`" needs a second dispatch route into
-    // `state.queue`, not a flag. Refusing by name is the honest interim: a
-    // client is told exactly what this host cannot persist instead of having
-    // its one-use handles written to disk.
-    if request.references.is_some() {
-        return Err(typed_refusal(
-            "DURABLE_MEDIA_REFERENCES_UNSUPPORTED",
-            "ordered references carry one-use upload authority the durable queue cannot persist",
-        ));
-    }
+    // * Ordered references are a descriptor plus media. The resolver consumes
+    //   every one-use handle before the request is serialized and the bytes
+    //   seal into the encrypted media set like any other source media, so
+    //   the platform check above is the only durability question they raise.
     Ok(())
 }
 
@@ -945,6 +982,7 @@ fn seal_batch_blocking(
             completion_payload,
             admission_authority,
             durable_replacement,
+            staged_references,
         } = input;
         let model = request.model.clone();
         let seed_pinned = request.seed.is_some();
@@ -966,8 +1004,13 @@ fn seal_batch_blocking(
         let (request_json, media_set) = if request_has_durable_media(&request) {
             let authorities = crate::queue_media::ProcessPrivateAuthorities::none()
                 .with_durable_replacement(durable_replacement);
-            let extracted = crate::queue_media::extract_request_media(&id, request, &authorities)
-                .map_err(|error| extraction_error(offset, error))?;
+            let extracted = crate::queue_media::extract_request_media(
+                &id,
+                request,
+                &authorities,
+                staged_references.as_ref(),
+            )
+            .map_err(|error| extraction_error(offset, error))?;
             let projection = crate::queue_media::project_request_media(extracted.media())
                 .map_err(|error| extraction_error(offset, error))?;
             let (request_json, media) = extracted.into_parts();
@@ -982,6 +1025,9 @@ fn seal_batch_blocking(
                         offset + 1
                     ))
                 })?;
+            // The encrypted set is now the only copy: releasing the staged
+            // set returns its quota and unlinks the admission staging.
+            drop(staged_references);
             batch.media_sets.push(reference.clone());
             (request_json, Some(reference))
         } else {
@@ -1257,12 +1303,14 @@ mod tests {
         assert_eq!(sealing.await.unwrap().unwrap(), 17);
     }
 
-    /// References keep a refusal — their one-use upload authority cannot be
-    /// written down — while H3, `hdr_exr_dir` and a LoRA beside media do not.
-    /// `hdr_exr_dir` is refused elsewhere, by the older rule that an HTTP
-    /// client may not name an output directory on the inference machine.
+    /// Nothing refuses here any more but the platform check: H3 uses sealed
+    /// replay authority, ordered references seal like any other media,
+    /// `hdr_exr_dir` is refused elsewhere by the older rule that an HTTP
+    /// client may not name an output directory on the inference machine, and
+    /// a LoRA beside media is an ordinary durable request.
+    #[cfg(unix)]
     #[test]
-    fn only_one_use_reference_authority_refuses_here() {
+    fn durable_preflight_refuses_nothing_the_encrypted_store_can_carry() {
         let mut h3 = request();
         h3.model = mold_core::minimax_h3::FL2VA_COMFY.to_string();
         durable_media_preflight(&h3).expect("H3 uses sealed durable replay authority");
@@ -1275,10 +1323,9 @@ mod tests {
             width: 1,
             height: 1,
         }]);
-        assert_eq!(
-            durable_media_preflight(&references).unwrap_err().code,
-            "DURABLE_MEDIA_REFERENCES_UNSUPPORTED"
-        );
+        assert!(request_has_durable_media(&references));
+        durable_media_preflight(&references)
+            .expect("ordered references are descriptors plus sealed media");
 
         let mut hdr = request();
         hdr.hdr_exr_dir = Some("private-output".to_string());

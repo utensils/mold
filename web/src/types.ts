@@ -244,7 +244,6 @@ export interface ServerCapabilities {
    * separate model_access decision. */
   reference_uploads?: {
     available: boolean;
-    authless_inline?: boolean;
     protocol_version: number;
     requires_api_key: boolean;
     session_path: string;
@@ -253,6 +252,7 @@ export interface ServerCapabilities {
     upload_handle_header: string;
     max_file_bytes: number;
     max_session_bytes: number;
+    max_active_sessions: number;
     session_ttl_ms: number;
   };
   devices?: {

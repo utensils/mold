@@ -39,7 +39,12 @@ import {
   newJob,
   type Job,
 } from "../lib/generationJob";
-import { type ReferenceUploadCapabilities } from "@studio/api/referenceUploads";
+import {
+  prepareReferenceUploadBatch,
+  referenceUploadBatchLimit,
+  requestShouldUseReferenceUploads,
+  type ReferenceUploadCapabilities,
+} from "@studio/api/referenceUploads";
 import { requestWarningsFromHeaders } from "@studio/lib/requestWarnings";
 import { emptyChainJobLive, reduceChainJobFrame } from "@studio/lib/chainJobProgress";
 import { OwnPrintPreviewWatchers, previewDataUrl } from "@studio/api/ownPrintPreview";
@@ -1174,8 +1179,10 @@ export const useGenerationStore = defineStore("generation", {
     async admitDurableRecord(
       record: DurableGenerationRecoveryRecord,
       requests: GenerateRequest[],
+      route: Pick<JobRoute, "referenceUploads"> | null = null,
     ): Promise<void> {
-      const host = useHostsStore().all.find(
+      const hosts = useHostsStore();
+      const host = hosts.all.find(
         (candidate) =>
           candidate.id === record.tracker.hostId &&
           candidate.instanceId === record.tracker.expectedInstanceId,
@@ -1188,7 +1195,38 @@ export const useGenerationStore = defineStore("generation", {
             return firstClientId === undefined ? null : (targets.get(firstClientId) ?? null);
           })();
       if (!target) return;
-      const body = { client_batch_id: record.tracker.clientBatchId, requests };
+      // MiniMax H3 references are staged on the exact host right before the
+      // POST. An upload session binds ONE request, so each sibling takes its
+      // own lease, one at a time; a host without the upload protocol keeps
+      // the validated inline references on the request. Nothing has been
+      // POSTed yet, so a failure here is a definite refusal. A lease is
+      // consumed only by an admitted POST: a definite refusal hands the
+      // sessions back so a retry is not locked out.
+      const referenceUploads =
+        route?.referenceUploads ??
+        (host ? (hosts.capabilities[host.id]?.reference_uploads ?? null) : null);
+      let transport = requests;
+      let releaseLeases = async (): Promise<void> => {};
+      if (
+        requests.some((request) =>
+          requestShouldUseReferenceUploads(request, target, referenceUploads),
+        )
+      ) {
+        try {
+          const staged = await prepareReferenceUploadBatch({
+            target,
+            expectedInstanceId: record.tracker.expectedInstanceId,
+            capabilities: referenceUploads,
+            requests,
+          });
+          transport = staged.requests;
+          releaseLeases = staged.release;
+        } catch (error) {
+          this.rejectDurableRecord(record, error);
+          return;
+        }
+      }
+      const body = { client_batch_id: record.tracker.clientBatchId, requests: transport };
       const attach = (batch: GenerationBatchStatus) => {
         record.tracker = reduceGenerationLifecycle(record.tracker, {
           type: "batch_snapshot",
@@ -1203,6 +1241,7 @@ export const useGenerationStore = defineStore("generation", {
         return;
       } catch (error) {
         if (isDefiniteGenerationAdmissionRejection(error)) {
+          await releaseLeases();
           this.rejectDurableRecord(record, error);
           return;
         }
@@ -1227,6 +1266,7 @@ export const useGenerationStore = defineStore("generation", {
         if (isDefiniteGenerationAdmissionRejection(retryError)) {
           // The second, identical POST was refused by name: nothing is queued
           // and the host's own sentence is the answer, not a silent wait.
+          await releaseLeases();
           this.rejectDurableRecord(record, retryError);
           return;
         }
@@ -1319,7 +1359,15 @@ export const useGenerationStore = defineStore("generation", {
         // `generationRouteRefusal` above already proved the machine and its
         // durable contract for every plan in this batch.
         const host = route!;
-        const limit = canonicalGenerationBatchLimit(routeQueueCapabilities(host))!;
+        // A reference-bearing batch is chunked no wider than the host lets
+        // one identity hold upload sessions: every sibling's lease is open
+        // until the chunk's POST consumes it.
+        const limit = referenceUploadBatchLimit(
+          plans,
+          host.target,
+          host.referenceUploads,
+          canonicalGenerationBatchLimit(routeQueueCapabilities(host))!,
+        );
         const chunks = chunkGenerationBatchRequests(plans, limit).map(
           (requestChunk, chunkIndex) => {
             const offset = chunkIndex * limit;
@@ -1361,9 +1409,24 @@ export const useGenerationStore = defineStore("generation", {
         // a client-side quota/privacy failure cannot veto valid host work or
         // redirect it into a second submission.
         persistDurableRecords();
-        const admitted = Promise.all(
-          chunks.map(({ record, requestChunk }) => this.admitDurableRecord(record, requestChunk)),
-        ).then(() => jobs);
+        // Every sibling's lease stays open until its chunk's POST consumes
+        // it, so reference-bearing chunks are admitted one after another;
+        // ordinary chunks keep leaving in parallel.
+        const uploadWork = plans.some((plan) =>
+          requestShouldUseReferenceUploads(plan, host.target, host.referenceUploads),
+        );
+        const admitChunks = uploadWork
+          ? chunks.reduce(
+              (previous, { record, requestChunk }) =>
+                previous.then(() => this.admitDurableRecord(record, requestChunk, host)),
+              Promise.resolve(),
+            )
+          : Promise.all(
+              chunks.map(({ record, requestChunk }) =>
+                this.admitDurableRecord(record, requestChunk, host),
+              ),
+            ).then(() => undefined);
+        const admitted = admitChunks.then(() => jobs);
         const settled = Promise.all(chunks.map(({ settlement }) => settlement.promise)).then(() => {
           this.pendingConsumerBatchIds = this.pendingConsumerBatchIds.filter(
             (pendingBatchId) => pendingBatchId !== batchId,

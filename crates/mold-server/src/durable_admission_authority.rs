@@ -33,7 +33,6 @@ pub(crate) struct Failure {
 
 pub(crate) struct CapturedAuthority {
     pub envelope: Vec<u8>,
-    pub idempotency_subject_sha256: String,
     pub replaces: crate::queue_media::ProcessPrivateAuthority,
 }
 
@@ -69,6 +68,43 @@ impl RuntimeAuthority {
     }
 }
 
+/// Whether this request is admitted through a private ingress grant rather
+/// than public model activation. Pure and cheap: it is the ONE predicate
+/// admission branches on before the grant exists, and the one `restore`
+/// demands an envelope for, so the two can never disagree about which rows
+/// carry authority.
+pub(crate) fn claims_private_ingress(request: &mold_core::GenerateRequest) -> bool {
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    {
+        crate::h3_private_bridge::claims_private_ingress(request)
+    }
+    #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
+    {
+        let _ = request;
+        false
+    }
+}
+
+/// The identity-only subject a private ingress binds client-operation
+/// idempotency to. It is what `capture` will record on the grant, asked
+/// BEFORE any child is resolved so a duplicate operation can be recognised
+/// without spending anything.
+pub(crate) fn idempotency_subject_sha256(
+    request: &mold_core::GenerateRequest,
+    authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
+    instance_id: &str,
+) -> Result<Option<String>, crate::routes::ApiError> {
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    {
+        crate::h3_private_bridge::idempotency_subject_sha256(request, authenticated, instance_id)
+    }
+    #[cfg(not(any(feature = "h3", feature = "h3-private-uat")))]
+    {
+        let _ = (request, authenticated, instance_id);
+        Ok(None)
+    }
+}
+
 pub(crate) fn capture(
     request: &mold_core::GenerateRequest,
     authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
@@ -90,7 +126,6 @@ pub(crate) fn capture(
                 payload,
             })
             .map_err(|error| crate::routes::ApiError::internal(error.to_string()))?,
-            idempotency_subject_sha256: grant.idempotency_subject_sha256().to_string(),
             replaces: crate::queue_media::ProcessPrivateAuthority::H3PrivateIngressGrant,
         }));
     }
@@ -112,8 +147,7 @@ pub(crate) fn restore(
         // envelope capture never wrote, so a download-only H3 row parked as a
         // permanent hold where its own `/api/models` entry promised
         // `MINIMAX_H3_RUNTIME_UNAVAILABLE` / 501.
-        let requires_h3 = !mold_core::is_pinned_unrunnable_minimax_h3_identity(&request.model)
-            && mold_core::minimax_h3::capability_contract_for_model(&request.model).is_some();
+        let requires_h3 = claims_private_ingress(request);
         let Some(envelope) = envelope else {
             return if requires_h3 {
                 Err(Failure {
@@ -176,6 +210,83 @@ pub(crate) fn restore(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The grant is captured on the DESCRIPTOR request — the form every
+    /// consumer re-hashes after hydration — so restore accepts exactly that
+    /// request and refuses one whose descriptors were reordered.
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    #[test]
+    fn h3_authority_is_captured_on_the_descriptor_request_and_restores_against_it() {
+        let descriptor = |name: &str, byte: u8| {
+            serde_json::json!({
+                "kind": "image",
+                "media": { "authority": "descriptor" },
+                "provenance": { "name": name, "sha256": format!("{byte:02x}").repeat(32) },
+                "mime_type": "image/png",
+                "width": 1024,
+                "height": 768
+            })
+        };
+        let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "descriptor-bound authority",
+            "model": mold_core::minimax_h3::REF2VA_COMFY,
+            "width": mold_core::minimax_h3::DEFAULT_WIDTH,
+            "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
+            "steps": 4,
+            "guidance": 0.0,
+            "seed": 7,
+            "batch_size": 1,
+            "output_format": "mp4",
+            "references": [descriptor("subject.png", 1), descriptor("style.png", 2)]
+        }))
+        .unwrap();
+        let authenticated = crate::auth::ApiKeyAuthenticated {
+            identity: "process-local".to_string(),
+            durable_identity: "restart-stable".to_string(),
+        };
+        assert!(claims_private_ingress(&request));
+        let captured = capture(&request, Some(&authenticated), "instance-a")
+            .unwrap()
+            .expect("a reviewed Ref2VA request captures private authority");
+        assert_eq!(
+            idempotency_subject_sha256(&request, Some(&authenticated), "instance-a").unwrap(),
+            Some(
+                crate::h3_private_bridge::capture_durable_h3_private_ingress(
+                    &request,
+                    Some(&authenticated),
+                    "instance-a",
+                )
+                .unwrap()
+                .unwrap()
+                .idempotency_subject_sha256()
+                .to_string()
+            )
+        );
+
+        let restored = restore(&request, Some(&captured.envelope), "instance-a")
+            .unwrap_or_else(|failure| panic!("{}", failure.message));
+        let grant = restored.h3_grant().expect("restored H3 grant");
+        grant.validate_bound_request(&request).unwrap();
+
+        let mut reordered = request.clone();
+        reordered.references.as_mut().unwrap().reverse();
+        assert!(
+            restore(&reordered, Some(&captured.envelope), "instance-a").is_err(),
+            "a reordered descriptor list is a different request"
+        );
+
+        let mut plain = request.clone();
+        plain.model = "flux-dev".to_string();
+        plain.references = None;
+        assert!(!claims_private_ingress(&plain));
+        assert!(capture(&plain, Some(&authenticated), "instance-a")
+            .unwrap()
+            .is_none());
+        assert!(matches!(
+            restore(&plain, None, "instance-a"),
+            Ok(RuntimeAuthority::None)
+        ));
+    }
 
     #[test]
     fn deferred_preparation_disposition_is_typed_by_recoverability() {

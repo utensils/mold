@@ -1599,10 +1599,13 @@ pub struct GenerateRequest {
 
 impl GenerateRequest {
     /// Whether durable admission must extract request-owned media or media
-    /// provenance before persisting the JSON request. Process-private ordered
-    /// references and local HDR/LoRA authority are classified separately.
+    /// provenance before persisting the JSON request. Ordered MiniMax H3
+    /// references count: their descriptors stay on the request while their
+    /// media is sealed beside every other source. Local HDR/LoRA authority
+    /// is classified separately.
     pub fn has_durable_media_inputs(&self) -> bool {
-        self.source_image.is_some()
+        self.references.is_some()
+            || self.source_image.is_some()
             || self.source_image_name.is_some()
             || self.id_image.is_some()
             || self.id_image_name.is_some()
@@ -8787,7 +8790,6 @@ pub struct DurableMediaCapabilities {
     pub encrypted_at_rest: bool,
     pub generate_request_media: bool,
     pub identity: bool,
-    pub h3_references: bool,
     pub private_h3: bool,
 }
 
@@ -8801,22 +8803,20 @@ impl DurableMediaCapabilities {
             encrypted_at_rest: true,
             generate_request_media: true,
             identity: true,
-            h3_references: false,
             private_h3: false,
         }
     }
 
     /// Queue-media V2 can add authenticated, owner/job/request-bound replay
     /// for private H3 admission when that adapter is compiled into the serving
-    /// binary. Ordered H3 references remain excluded until their staged
-    /// authority has the same restart-safe ownership contract.
+    /// binary. Ordered H3 references ride the same encrypted media set as
+    /// every other request media and need no separate bit.
     pub const fn v2(private_h3: bool) -> Self {
         Self {
             protocol_version: 2,
             encrypted_at_rest: true,
             generate_request_media: true,
             identity: true,
-            h3_references: false,
             private_h3,
         }
     }
@@ -8858,12 +8858,9 @@ pub struct QueueCapabilities {
 /// named headers, never in URLs, logs, or durable request metadata.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReferenceUploadCapabilities {
+    /// The request-bound upload protocol is offered exactly when API-key auth
+    /// is enabled; a host without it accepts validated inline references.
     pub available: bool,
-    /// Positive evidence that this host has API-key auth disabled and accepts
-    /// validated inline references. Absent/false remains fail-closed for
-    /// clients holding a key and older capability snapshots.
-    #[serde(default)]
-    pub authless_inline: bool,
     pub protocol_version: u32,
     pub requires_api_key: bool,
     pub session_path: String,
@@ -8872,6 +8869,10 @@ pub struct ReferenceUploadCapabilities {
     pub upload_handle_header: String,
     pub max_file_bytes: u64,
     pub max_session_bytes: u64,
+    /// Open sessions one API-key identity may hold at once. A durable batch
+    /// takes one lease per reference-bearing sibling BEFORE it POSTs, so a
+    /// client chunks such batches to this many siblings.
+    pub max_active_sessions: u32,
     pub session_ttl_ms: u64,
 }
 
@@ -9546,7 +9547,6 @@ mod device_types_tests {
         assert!(!caps.dispatch.observes_v2_decisions);
         assert!(caps.model_access.restrictions.is_empty());
         assert!(!caps.reference_uploads.available);
-        assert!(!caps.reference_uploads.authless_inline);
         assert_eq!(caps.reference_uploads.protocol_version, 0);
     }
 }
@@ -11159,7 +11159,6 @@ mod queue_plan_wire_tests {
                 "encrypted_at_rest": true,
                 "generate_request_media": true,
                 "identity": true,
-                "h3_references": false,
                 "private_h3": false,
             })
         );
@@ -11172,7 +11171,6 @@ mod queue_plan_wire_tests {
                     "encrypted_at_rest": true,
                     "generate_request_media": true,
                     "identity": true,
-                    "h3_references": false,
                     "private_h3": private_h3,
                 }),
                 "protocol v2 must advertise private H3 exactly as supplied by the build"

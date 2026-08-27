@@ -120,9 +120,6 @@ pub struct JournalAdmission<'a> {
     /// True when the job is a server-owned adaptive-batch child; those are
     /// owned by the batch transaction's own durable recovery.
     pub batch_child: bool,
-    /// True when the request carries reference-upload authority. Those bytes
-    /// are bearer secrets staged outside the DB and are never journaled.
-    pub carries_reference_authority: bool,
 }
 
 pub struct BatchJournalAdmission<'a> {
@@ -897,10 +894,8 @@ impl QueueJournal {
             let output_dir = child
                 .output_dir
                 .ok_or_else(|| "heterogeneous batches require gallery output".to_string())?;
-            if child.batch_child || child.carries_reference_authority {
-                return Err(
-                    "heterogeneous batches cannot carry temporary reference authority".to_string(),
-                );
+            if child.batch_child {
+                return Err("heterogeneous batches cannot carry batch children".to_string());
             }
             if carries_identity_photograph(child.request) {
                 return Err("heterogeneous batches cannot persist identity photographs".to_string());
@@ -982,19 +977,17 @@ impl QueueJournal {
         // to the writer — so it must refuse exactly what production never
         // presents in that shape. `mold.db` never holds a secret: a face
         // photograph is biometric data about a real person supplied for one
-        // render, an H3 request needs replay authority no plain row can
-        // reconstruct, and reference uploads are one-use bearer secrets. In
-        // production those never arrive here because `admit_batch` seals them
-        // into the encrypted media store first and serializes what is left;
-        // a test fixture that skipped the seal and wrote them verbatim would
-        // be the very hole the rule exists to close.
+        // render, and an H3 request needs replay authority no plain row can
+        // reconstruct. In production those never arrive here because
+        // `admit_batch` seals them into the encrypted media store first and
+        // serializes what is left; a test fixture that skipped the seal and
+        // wrote them verbatim would be the very hole the rule exists to close.
         // Exactly what must never be written down, and nothing more. An image
         // NAME without its bytes is ordinary metadata — the deleted writers
         // drew the line at the photograph itself, and widening it here to "any
         // media field" would make this fixture refuse requests production
         // journals happily.
         if admission.batch_child
-            || admission.carries_reference_authority
             || carries_identity_photograph(admission.request)
             || requires_h3_replay_authority(admission.request)
         {
@@ -2635,7 +2628,6 @@ mod tests {
             target_device_id: None,
             completion_payload: SseCompletionPayload::Full,
             batch_child: false,
-            carries_reference_authority: false,
         }
     }
 
@@ -3489,7 +3481,6 @@ mod tests {
             target_device_id: Some("cuda:stable-direct"),
             completion_payload: SseCompletionPayload::Full,
             batch_child: false,
-            carries_reference_authority: false,
         };
         let direct_ticket = journal.record_for_test(direct).expect("direct durable row");
 
@@ -3501,7 +3492,6 @@ mod tests {
             target_device_id: Some("cuda:stable-batch"),
             completion_payload: SseCompletionPayload::MetadataOnly,
             batch_child: false,
-            carries_reference_authority: false,
         };
         let (_, inserted) = journal
             .record_batch(BatchJournalAdmission {

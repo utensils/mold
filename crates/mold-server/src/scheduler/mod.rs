@@ -1959,13 +1959,9 @@ impl Coordinator {
                 h3_private_ingress_grant: pending.job.h3_private_ingress_grant.clone(),
                 // Ref2VA admission derives its prepared shapes from the staged
                 // media, so it needs the files before the frozen plan exists.
-                // The view is payload-free and the job keeps owning the set,
-                // its quota, and its staging directory across preparation.
-                h3_resolved_references: pending
-                    .job
-                    .resolved_references
-                    .as_ref()
-                    .map(crate::reference_uploads::ResolvedReferenceSet::admission_view),
+                // The view is minted inside the preparation task from that
+                // task's own hydration lease; nothing on the job carries it.
+                h3_resolved_references: None,
                 // The parent's frozen identity is grafted on immediately
                 // below. Default the remaining context so additive optional
                 // preparation inputs cannot leave this H3-only literal
@@ -2015,19 +2011,37 @@ impl Coordinator {
                 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 let mut request = request;
                 #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+                let mut context = context;
+                #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
                 let h3_hydration = if context.h3_private_ingress_grant.is_some() {
                     match deferred_media.as_ref() {
-                        Some(media) => match media.hydrate_into(&id, &mut request) {
-                            Ok(lease) => Some(lease),
-                            Err(error) => {
-                                let event = PreparationEvent::Failed {
-                                    work_id: id.clone(),
-                                    error: error.to_string(),
-                                };
-                                let _ = tx.send(event);
-                                return;
+                        Some(media) => {
+                            let hydrated =
+                                media.hydrate_into(&id, &mut request).and_then(|lease| {
+                                    // Ref2VA admission binds the staged
+                                    // references from THIS hydration; the
+                                    // view shares the lease's hold so the
+                                    // per-device tasks outlive the drop below.
+                                    let view = lease
+                                        .references(&request)?
+                                        .map(|references| references.admission_view());
+                                    Ok((lease, view))
+                                });
+                            match hydrated {
+                                Ok((lease, view)) => {
+                                    context.h3_resolved_references = view;
+                                    Some(lease)
+                                }
+                                Err(error) => {
+                                    let event = PreparationEvent::Failed {
+                                        work_id: id.clone(),
+                                        error: error.to_string(),
+                                    };
+                                    let _ = tx.send(event);
+                                    return;
+                                }
                             }
-                        },
+                        }
                         None => None,
                     }
                 } else {
@@ -6330,7 +6344,6 @@ fn gpu_job_from_generation(
         model: job.request.model.clone(),
         request: job.request,
         deferred_media: job.deferred_media,
-        resolved_references: job.resolved_references,
         completion_payload: job.completion_payload,
         progress_tx: job.progress_tx,
         result_tx: job.result_tx,
@@ -6367,7 +6380,6 @@ fn generation_and_prepared_from_gpu_job(
             durable_queue_rank: job.durable_queue_rank,
             request: job.request,
             deferred_media: job.deferred_media,
-            resolved_references: job.resolved_references,
             completion_payload: job.completion_payload,
             progress_tx: job.progress_tx,
             result_tx: job.result_tx,
@@ -8370,7 +8382,6 @@ mod tests {
                 durable_queue_rank: None,
                 request,
                 deferred_media: None,
-                resolved_references: None,
                 completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx,
@@ -8415,7 +8426,6 @@ mod tests {
                     target_device_id: None,
                     completion_payload: SseCompletionPayload::Full,
                     batch_child: false,
-                    carries_reference_authority: false,
                 });
         state
             .job_registry
@@ -8464,7 +8474,6 @@ mod tests {
                 target_device_id: None,
                 completion_payload: SseCompletionPayload::Full,
                 batch_child: false,
-                carries_reference_authority: false,
             })
             .unwrap();
         assert!(matches!(
@@ -8514,7 +8523,6 @@ mod tests {
                 target_device_id: None,
                 completion_payload: SseCompletionPayload::Full,
                 batch_child: false,
-                carries_reference_authority: false,
             })
             .unwrap();
         assert!(matches!(
@@ -8561,7 +8569,6 @@ mod tests {
                 target_device_id: None,
                 completion_payload: SseCompletionPayload::Full,
                 batch_child: false,
-                carries_reference_authority: false,
             })
             .unwrap();
         assert!(matches!(
@@ -15285,6 +15292,175 @@ mod tests {
             PreparationState::Preparing
         );
         release.notify_waiters();
+        coordinator.stop_preparations().await;
+    }
+
+    /// Records what a Ref2VA preparation was handed and proves the staged
+    /// files were readable and digest-verifiable while it ran.
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    struct ReferenceRecordingPreparer {
+        observed_references: Arc<AtomicUsize>,
+        verified_bindings: Arc<AtomicUsize>,
+    }
+
+    #[cfg(any(feature = "h3", feature = "h3-private-uat"))]
+    impl DependencyPreparer for ReferenceRecordingPreparer {
+        fn prepare(
+            &self,
+            _state: AppState,
+            _work_id: String,
+            request: crate::queue_media_runtime::ZeroizingGenerateRequest,
+            _progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+            context: crate::variant_dependencies::DependencyPreparationContext,
+        ) -> PreparationFuture {
+            let observed = self.observed_references.clone();
+            let verified = self.verified_bindings.clone();
+            Box::pin(async move {
+                let view = context
+                    .h3_resolved_references
+                    .ok_or_else(|| "Ref2VA preparation was handed no reference view".to_string())?;
+                observed.store(view.len(), std::sync::atomic::Ordering::SeqCst);
+                let bindings = view
+                    .inference_bindings(&request, None)
+                    .map_err(|error| format!("{error:#}"))?;
+                verified.store(bindings.len(), std::sync::atomic::Ordering::SeqCst);
+                Ok(PreparedGeneration::default())
+            })
+        }
+    }
+
+    /// Ref2VA dependency preparation reads the staged references from its
+    /// OWN hydration of the durable media set — nothing on the job carries a
+    /// reference set — and the view it is handed binds every file by digest.
+    #[cfg(all(unix, any(feature = "h3", feature = "h3-private-uat")))]
+    #[tokio::test]
+    async fn ref2va_preparation_binds_references_from_its_own_hydration() {
+        use sha2::{Digest as _, Sha256};
+
+        let home = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let files: [&[u8]; 2] = [b"subject-reference-bytes", b"style-reference-bytes"];
+        let paths = files
+            .iter()
+            .enumerate()
+            .map(|(index, bytes)| {
+                let path = staging.path().join(format!("reference-{index}.media"));
+                std::fs::write(&path, bytes).unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let references = files
+            .iter()
+            .enumerate()
+            .map(|(index, bytes)| {
+                serde_json::json!({
+                    "kind": "image",
+                    "media": { "authority": "descriptor" },
+                    "provenance": {
+                        "name": format!("reference-{}.png", index + 1),
+                        "sha256": format!("{:x}", Sha256::digest(bytes))
+                    },
+                    "mime_type": "image/png",
+                    "width": 1024,
+                    "height": 768
+                })
+            })
+            .collect::<Vec<_>>();
+        let request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "ordered references",
+            "model": mold_core::minimax_h3::REF2VA_COMFY,
+            "width": mold_core::minimax_h3::DEFAULT_WIDTH,
+            "height": mold_core::minimax_h3::DEFAULT_HEIGHT,
+            "steps": 4,
+            "guidance": 0.0,
+            "strength": 1.0,
+            "seed": 7,
+            "batch_size": 1,
+            "frames": mold_core::minimax_h3::REVIEWED_COMPACT_FRAMES,
+            "fps": mold_core::minimax_h3::FIXED_FPS,
+            "output_format": "mp4",
+            "references": references
+        }))
+        .unwrap();
+        let grant = crate::h3_private_bridge::capture_durable_h3_private_ingress(
+            &request,
+            None,
+            "scheduler-test-instance",
+        )
+        .expect("Ref2VA descriptor request is a reviewed partition")
+        .expect("the private boundary claims Ref2VA");
+        let staged =
+            crate::reference_uploads::StagedReferences::from_files_for_test(&request, paths);
+        let (deferred, request_json) = crate::queue_media_runtime::seal_request_for_test(
+            home.path(),
+            "ref2va",
+            request,
+            Some(&staged),
+        );
+        drop(staged);
+        drop(staging);
+
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(4);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 4);
+        state
+            .job_registry
+            .register("ref2va", mold_core::minimax_h3::REF2VA_COMFY);
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        queue
+            .submit(
+                GenerationJob {
+                    id: "ref2va".to_string(),
+                    durable_queue_rank: None,
+                    request: serde_json::from_str(&request_json).unwrap(),
+                    deferred_media: Some(deferred),
+                    completion_payload: SseCompletionPayload::Full,
+                    progress_tx: None,
+                    result_tx,
+                    output_dir: None,
+                    journal: None,
+                    h3_private_ingress_grant: Some(grant),
+                },
+                4,
+            )
+            .await
+            .unwrap();
+
+        let observed_references = Arc::new(AtomicUsize::new(0));
+        let verified_bindings = Arc::new(AtomicUsize::new(0));
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ReferenceRecordingPreparer {
+                observed_references: observed_references.clone(),
+                verified_bindings: verified_bindings.clone(),
+            }),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        coordinator.start_needed_preparations();
+        let event = tokio::time::timeout(Duration::from_secs(5), coordinator.preparation_rx.recv())
+            .await
+            .expect("Ref2VA preparation must complete")
+            .expect("preparation event");
+        match &event {
+            PreparationEvent::Ready { work_id, .. } => assert_eq!(work_id, "ref2va"),
+            PreparationEvent::Failed { error, .. } => {
+                panic!("Ref2VA preparation failed: {error}")
+            }
+        }
+        assert_eq!(
+            observed_references.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        assert_eq!(
+            verified_bindings.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
         coordinator.stop_preparations().await;
     }
 
